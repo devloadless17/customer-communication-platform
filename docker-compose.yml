@@ -1,0 +1,105 @@
+# Phase 1 dev/prod stack.
+#
+# Single internal network: only `app` publishes a port. Postgres, Redis and
+# Evolution are reachable only by name from inside Docker (e.g. http://evolution:8080).
+# That's deliberate — webhook traffic stays inside the network so the public
+# webhook route can verify the request didn't come from the open internet.
+
+networks:
+  ccp_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  evolution_instances:
+  evolution_store:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks: [ccp_net]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ccp}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Bound to 127.0.0.1 so the host's `npm run dev` can connect for migrations
+    # and Prisma Studio. 5433 (not 5432) to avoid colliding with a system
+    # postgres install — adjust DATABASE_URL accordingly.
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-ccp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [ccp_net]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  evolution:
+    # CLAUDE.md: pinned to evoapicloud/evolution-api (NOT atendai/...).
+    # Bump this tag deliberately — Evolution evolves quickly.
+    image: evoapicloud/evolution-api:v2.2.3
+    restart: unless-stopped
+    networks: [ccp_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/evolution
+      DATABASE_CONNECTION_CLIENT_NAME: evolution
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/6
+      WEBHOOK_GLOBAL_URL: http://app:3000/api/webhooks/evolution
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      LANGUAGE: en
+      DEL_INSTANCE: "false"
+      LOG_LEVEL: ${EVOLUTION_LOG_LEVEL:-WARN}
+    volumes:
+      - evolution_instances:/evolution/instances
+      - evolution_store:/evolution/store
+    # Not published — only `app` talks to it (http://evolution:8080).
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [ccp_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      EVOLUTION_BASE_URL: http://evolution:8080
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME}
+      EVOLUTION_WEBHOOK_SECRET: ${EVOLUTION_WEBHOOK_SECRET}
+    ports:
+      - "${APP_PORT:-3000}:3000"

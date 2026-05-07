@@ -1,0 +1,152 @@
+// Schema for the WhatsApp Multi-Agent Shared Inbox.
+//
+// Mirrors lib/types.ts exactly so the UI and the DB stay in lockstep.
+// Multi-tenancy is baked in: every domain row carries teamId.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  admin
+  agent
+}
+
+enum ConversationStatus {
+  open
+  pending
+  closed
+}
+
+enum MessageDirection {
+  in
+  out
+}
+
+enum MessageStatus {
+  sent
+  delivered
+  read
+  failed
+}
+
+enum ProviderName {
+  evolution
+  meta_cloud
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  users         User[]
+  contacts      Contact[]
+  conversations Conversation[]
+  messages      Message[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  teamId    String
+  role      Role     @default(agent)
+  name      String
+  email     String   @unique
+  avatarUrl String?
+  createdAt DateTime @default(now())
+
+  team           Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  authoredMsgs   Message[]      @relation("AuthoredMessages")
+  authoredNotes  InternalNote[]
+  assignedConvos Conversation[] @relation("AssignedConversations")
+
+  @@index([teamId])
+}
+
+model Contact {
+  id          String   @id @default(cuid())
+  teamId      String
+  phoneNumber String
+  name        String
+  avatarUrl   String?
+  createdAt   DateTime @default(now())
+
+  team          Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  // A phone number is unique within a team, but the same number can exist across tenants.
+  @@unique([teamId, phoneNumber])
+  @@index([teamId])
+}
+
+model Conversation {
+  id                 String             @id @default(cuid())
+  teamId             String
+  contactId          String
+  assignedUserId     String?
+  status             ConversationStatus @default(open)
+  unreadCount        Int                @default(0)
+  lastMessageAt      DateTime           @default(now())
+  lastMessagePreview String             @default("")
+  createdAt          DateTime           @default(now())
+
+  team         Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contact      Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser User?          @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  messages     Message[]
+  notes        InternalNote[]
+
+  @@index([teamId, status, lastMessageAt(sort: Desc)])
+  @@index([teamId, assignedUserId])
+}
+
+model Message {
+  id             String           @id @default(cuid())
+  teamId         String
+  conversationId String
+  // Provider-assigned id; UNIQUE across messages so duplicate webhooks dedupe via upsert.
+  externalId     String           @unique
+  // null on inbound — only outbound has an authoring agent.
+  senderUserId   String?
+  body           String
+  direction      MessageDirection
+  provider       ProviderName
+  status         MessageStatus    @default(sent)
+  // Original webhook payload kept verbatim for debugging.
+  rawPayload     Json
+  timestamp      DateTime         @default(now())
+  createdAt      DateTime         @default(now())
+
+  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, timestamp])
+  @@index([teamId])
+}
+
+model InternalNote {
+  id             String   @id @default(cuid())
+  conversationId String
+  authorUserId   String
+  body           String
+  timestamp      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author       User         @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, timestamp])
+}

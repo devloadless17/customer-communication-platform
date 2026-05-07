@@ -1,0 +1,165 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.18 0.005 270);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.005 270);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.005 270);
+
+  /* Brand: a refined emerald — nods to WhatsApp without copying it */
+  --primary: oklch(0.55 0.13 160);
+  --primary-foreground: oklch(0.99 0 0);
+
+  --secondary: oklch(0.97 0.005 270);
+  --secondary-foreground: oklch(0.22 0.005 270);
+
+  --muted: oklch(0.965 0.005 270);
+  --muted-foreground: oklch(0.52 0.012 270);
+
+  --accent: oklch(0.96 0.01 160);
+  --accent-foreground: oklch(0.22 0.005 270);
+
+  --destructive: oklch(0.62 0.21 25);
+  --destructive-foreground: oklch(0.99 0 0);
+
+  --border: oklch(0.92 0.005 270);
+  --input: oklch(0.93 0.005 270);
+  --ring: oklch(0.55 0.13 160);
+
+  /* Domain-specific tokens used by inbox components */
+  --inbound-bg: oklch(0.98 0.003 270);
+  --inbound-fg: oklch(0.20 0.005 270);
+  --outbound-bg: oklch(0.55 0.13 160);
+  --outbound-fg: oklch(0.99 0 0);
+  --note-bg: oklch(0.975 0.04 90);
+  --note-border: oklch(0.86 0.10 90);
+  --note-fg: oklch(0.32 0.07 70);
+
+  --radius: 0.625rem;
+
+  --sidebar: oklch(0.985 0.003 270);
+  --sidebar-foreground: oklch(0.22 0.005 270);
+  --sidebar-border: oklch(0.92 0.005 270);
+}
+
+.dark {
+  --background: oklch(0.16 0.008 270);
+  --foreground: oklch(0.96 0.005 270);
+
+  --card: oklch(0.19 0.008 270);
+  --card-foreground: oklch(0.96 0.005 270);
+
+  --popover: oklch(0.20 0.008 270);
+  --popover-foreground: oklch(0.96 0.005 270);
+
+  --primary: oklch(0.70 0.14 160);
+  --primary-foreground: oklch(0.16 0.008 270);
+
+  --secondary: oklch(0.24 0.008 270);
+  --secondary-foreground: oklch(0.96 0.005 270);
+
+  --muted: oklch(0.22 0.008 270);
+  --muted-foreground: oklch(0.66 0.012 270);
+
+  --accent: oklch(0.26 0.025 160);
+  --accent-foreground: oklch(0.96 0.005 270);
+
+  --destructive: oklch(0.62 0.21 25);
+  --destructive-foreground: oklch(0.99 0 0);
+
+  --border: oklch(0.27 0.008 270);
+  --input: oklch(0.28 0.008 270);
+  --ring: oklch(0.70 0.14 160);
+
+  --inbound-bg: oklch(0.23 0.008 270);
+  --inbound-fg: oklch(0.95 0.005 270);
+  --outbound-bg: oklch(0.55 0.13 160);
+  --outbound-fg: oklch(0.99 0 0);
+  --note-bg: oklch(0.27 0.04 80);
+  --note-border: oklch(0.40 0.07 80);
+  --note-fg: oklch(0.92 0.06 90);
+
+  --sidebar: oklch(0.18 0.008 270);
+  --sidebar-foreground: oklch(0.92 0.005 270);
+  --sidebar-border: oklch(0.26 0.008 270);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-inbound-bg: var(--inbound-bg);
+  --color-inbound-fg: var(--inbound-fg);
+  --color-outbound-bg: var(--outbound-bg);
+  --color-outbound-fg: var(--outbound-fg);
+  --color-note-bg: var(--note-bg);
+  --color-note-border: var(--note-border);
+  --color-note-fg: var(--note-fg);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SFMono-Regular", monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html, body {
+    @apply h-full;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 30%, transparent);
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 15%, transparent) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--foreground) 15%, transparent);
+    border-radius: 9999px;
+  }
+}
