@@ -10,6 +10,7 @@
  */
 
 import { Prisma, PrismaClient } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 import {
   fakeContacts,
@@ -22,6 +23,11 @@ import {
 
 const db = new PrismaClient();
 
+// Default password for every seeded user — change after first login. Hashing
+// once here (not per-user) is fine for dev and keeps `db:seed` instant.
+const DEV_PASSWORD = "loadless";
+const DEV_PASSWORD_HASH = bcrypt.hashSync(DEV_PASSWORD, 10);
+
 async function main() {
   console.log(`→ team ${fakeTeam.name}`);
   await db.team.upsert({
@@ -30,7 +36,7 @@ async function main() {
     update: { name: fakeTeam.name },
   });
 
-  console.log(`→ ${fakeUsers.length} users`);
+  console.log(`→ ${fakeUsers.length} users (default password: "${DEV_PASSWORD}")`);
   for (const u of fakeUsers) {
     await db.user.upsert({
       where: { id: u.id },
@@ -40,8 +46,18 @@ async function main() {
         role: u.role,
         name: u.name,
         email: u.email,
+        passwordHash: DEV_PASSWORD_HASH,
       },
-      update: { teamId: u.teamId, role: u.role, name: u.name, email: u.email },
+      update: {
+        teamId: u.teamId,
+        role: u.role,
+        name: u.name,
+        email: u.email,
+        // Reset password on every reseed so dev never gets locked out.
+        passwordHash: DEV_PASSWORD_HASH,
+        // Re-enable any previously deactivated seeded user.
+        deactivatedAt: null,
+      },
     });
   }
 

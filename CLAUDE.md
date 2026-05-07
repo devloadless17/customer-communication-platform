@@ -4,12 +4,11 @@
 A web platform where multiple internal agents collaborate on WhatsApp conversations through a shared inbox. Think Front, Intercom, or Missive but for WhatsApp. Core value is collaboration: assignments, attribution, internal notes, real-time updates. Target customer: SaaS for small/medium businesses. I have one pilot customer lined up.
 
 ## My situation
-- Solo developer likes modern designs like (shadcn and framermotion)
-- Comfortable with JavaScript/Node and Next.js
-- New to realtime systems and message queues
-- 4-week MVP timeline
-- Building Phase 1 with Evolution API + a burner WhatsApp number for self-testing
-- Phase 2 (post-MVP) will migrate the pilot customer to the official WhatsApp Cloud API
+- Solo developer who likes modern designs (shadcn + framer-motion).
+- Comfortable with JavaScript/Node and Next.js.
+- New to realtime systems and message queues.
+- 4-week MVP timeline.
+- Building on the **official Meta WhatsApp Cloud API**. Evolution / Baileys / unofficial bridges have been removed from this project on purpose — the ban risk for self-hosted bridges isn't acceptable for a SaaS.
 
 ## Stack (decided, don't suggest alternatives)
 - **Frontend:** Next.js (App Router)
@@ -17,18 +16,17 @@ A web platform where multiple internal agents collaborate on WhatsApp conversati
 - **Database:** PostgreSQL (via Prisma)
 - **Realtime:** Socket.io (rejected managed alternatives — I want to learn this)
 - **Auth:** NextAuth
-- **WhatsApp provider:** Evolution API (Phase 1) → Official Meta Cloud API (Phase 2)
+- **WhatsApp provider:** Meta WhatsApp Cloud API (only)
 - **Infra:** Docker Compose, single VPS for MVP
-- **Evolution image:** `evoapicloud/evolution-api` pinned to a specific version (NOT `atendai/...` — that's the old publisher, frozen at v2.2.x)
 
 ## Architecture
 
 ```
-Customer WhatsApp
+Customer's WhatsApp
     ↓
-Evolution API (Docker container, internal network only)
-    ↓ HTTPS webhook
-Next.js API route (/api/webhooks/evolution)
+Meta WhatsApp Cloud API
+    ↓ HTTPS webhook (X-Hub-Signature-256 verified)
+Next.js API route (/api/webhooks/meta)
     ↓
 Provider adapter → normalize → dedupe → save to Postgres
     ↓
@@ -37,26 +35,29 @@ Socket.io emit to subscribed clients
 Browser updates in realtime
 ```
 
-Browsers connect Socket.io to my app server. Evolution NEVER talks to browsers directly. All WhatsApp protocol details are hidden behind a `MessagingProvider` interface.
+Browsers connect Socket.io to my app server. Meta NEVER talks to browsers directly. WhatsApp protocol details are hidden behind a `MessagingProvider` interface so a future channel (SMS via Twilio, Instagram DM, etc.) can plug in without touching ingest or routes.
 
 ## Critical architectural rules (don't violate these)
 
-1. **Provider abstraction from day one.** Define a `MessagingProvider` interface. Implement `EvolutionProvider` first. Phase 2 will add `OfficialMetaProvider`. App code only ever talks to the interface, never directly to Evolution's API shape.
+1. **Provider abstraction, even with one provider.** Define a `MessagingProvider` interface. Implement `MetaProvider` only for now. App code only ever talks to the interface, never directly to Meta's API shape. New channels plug in here.
 
 2. **Multi-tenancy from day one.** Every table has a `team_id` column, defaulting to 1. I'm single-tenant for MVP but I will not pay for that migration later.
 
-3. **Deduplication is critical.** Evolution sends duplicate webhooks. Unique index on `external_id` in the messages table. Use `upsert`, not `create`.
+3. **Deduplication is critical.** Meta sometimes delivers the same `wamid` twice (at-least-once semantics) and retries on non-200. Unique index on `external_id` in the messages table. Use `upsert` / `findUnique` gate, not bare `create`.
 
-4. **Keep raw payloads.** Every message row has a `raw_payload` JSONB column with the original Evolution webhook body. Critical for debugging.
+4. **Keep raw payloads.** Every message row has a `raw_payload` JSONB column with the original Meta webhook body. Critical for debugging.
 
-5. **Webhook security.** Evolution → app traffic stays inside the Docker network (`http://app:3000` from the `evolution` container). The webhook route should verify the request came from inside the network, not from the public internet.
+5. **Webhook security.** Meta webhook authenticity is proven by HMAC-SHA256 of the raw body using the app secret (header `X-Hub-Signature-256`). Verify on every POST; reject malformed signatures with 403. The verify-token flow is only used at subscription setup.
 
-6. **Cloud API forward-compatibility.** Some Evolution features won't survive Phase 2 migration:
-   - 24-hour customer service window will apply
-   - Outbound to a fresh contact requires pre-approved templates
-   - Media goes through Meta media IDs, not direct URLs
-   - Typing indicators may go away
-   Flag any feature I ask for that uses Evolution-only behavior.
+6. **Per-team secrets when we go multi-tenant.** Today `META_*` secrets live in `process.env`. When customer #2 onboards, those move to nullable columns on the `Team` table — read by the provider via a `getProviderConfig(teamId)` helper. This is the migration alluded to in rule #2; flagging now so it's not a surprise.
+
+## Things to know about Meta Cloud API specifically
+
+- **No history sync.** From the moment you subscribe to webhooks, you receive new events. Anything that happened before that point is not retrievable. There is no "list past chats" endpoint.
+- **24-hour customer service window.** Outbound free-form messages only work to numbers that messaged you within the last 24h. Outside the window: pre-approved templates only. Plan UX around this from the start.
+- **Pre-approved templates.** Required for cold outbound (re-engagement, marketing, notifications, post-24h). Submitted via WhatsApp Manager, reviewed by Meta. Adding template send is its own work item, deferred.
+- **Test numbers vs real business numbers.** While the Meta app is unpublished, only numbers explicitly added as test recipients in the dashboard will receive your sends. Once published + verified, any number works.
+- **Onboarding.** No QR scan. Customers either (a) paste their `META_*` credentials into a settings page, or (b) we build WhatsApp Embedded Signup, which requires Meta Tech Provider review. (b) is the right answer for SaaS scale and is post-MVP.
 
 ## Database schema (initial)
 
@@ -67,19 +68,21 @@ Browsers connect Socket.io to my app server. Evolution NEVER talks to browsers d
 - `messages` — id, team_id, conversation_id, external_id (UNIQUE), sender_user_id (nullable for inbound), body, direction (in/out), provider, status (sent/delivered/read/failed), raw_payload (JSONB), timestamp
 - `internal_notes` — id, conversation_id, author_user_id, body, timestamp
 
+`provider` is currently a single-value enum (`meta_cloud`). Kept as an enum so adding a second channel is a non-destructive migration.
+
 ## Docker Compose layout
 
-Services on one internal network: `postgres`, `redis`, `evolution`, `app`. Only `app` publishes a port. Evolution is reachable from app at `http://evolution:8080`. App is reachable from Evolution at `http://app:3000/api/webhooks/evolution`. Postgres + Evolution + Redis are completely invisible to the public internet.
+Two services on one internal network: `postgres` and `app`. Only `app` publishes a port. Postgres is reachable from `app` at `postgres:5432` and from the host (for migrations / Prisma Studio) at `127.0.0.1:5433`. Meta is reached over the public internet, so no other local services are needed.
 
 ## Week-by-week MVP plan
 
 **Week 1 — Foundations**
-- Docker Compose: Postgres + Redis + Evolution + Next.js
+- Docker Compose: Postgres + Next.js
 - Next.js project with NextAuth, Prisma schema with team_id everywhere
-- Evolution running, instance created, QR scanned with burner number
-- Webhook endpoint: receive → normalize → dedupe → save (raw_payload kept)
-- `MessagingProvider` interface + `EvolutionProvider` implementation
-- Test full round trip: send from API, reply from phone, both rows in DB
+- Meta app set up, webhook verified, test recipient added
+- Webhook endpoint: receive → verify signature → normalize → dedupe → save (raw_payload kept)
+- `MessagingProvider` interface + `MetaProvider` implementation (parse + sendText)
+- Test full round trip: receive a Meta message, send a reply, both rows in DB
 
 **Week 2 — Inbox UI + Socket.io realtime**
 - Conversation list, message thread, reply box (Tailwind, simple and clean)
@@ -94,25 +97,25 @@ Services on one internal network: `postgres`, `redis`, `evolution`, `app`. Only 
 - Conversation status (open/pending/closed)
 - Team-wide unread counters (per-agent unread is harder, defer)
 - Contact search
-- Session status indicator (Connected/Disconnected) — Evolution sessions drop
+- 24h-window awareness in the reply box (greyed when expired, hint about templates)
 - Self-use, fix real bugs
 
 **Week 4 — Deploy + pilot**
 - Deploy to a VPS, single Socket.io instance (sticky sessions later)
 - Public HTTPS for the app (Caddy or Traefik reverse proxy)
 - Basic logging
-- Onboard pilot customer (still on Evolution, transparent it's beta)
+- Onboard pilot customer: either they hand us their `META_*` credentials, or we walk them through the Meta app setup. Embedded Signup is post-MVP.
 
 ## Explicitly deferred (don't build, don't suggest)
 
-Tags, labels, analytics, automations, AI replies, templates UI, bulk send, multi-channel, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, BullMQ, NestJS.
+Tags, labels, analytics, automations, AI replies, template send/manage UI, bulk send, multi-channel, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, BullMQ, NestJS, Embedded Signup, media (images/audio/video) send + receive.
 
 ## How I want you to work with me
 
-- **Match the stack above.** Don't suggest Pusher, Ably, Supabase Realtime, tRPC, GraphQL, or any rewrites.
+- **Match the stack above.** Don't suggest Pusher, Ably, Supabase Realtime, tRPC, GraphQL, Evolution / Baileys, or any rewrites.
 - **Code first, explanation second.** I'm a working developer. Show me the code, then a short note on what's non-obvious.
 - **Surface tradeoffs, don't hide them.** When you make a design choice, tell me what you rejected and why in 1-2 sentences.
-- **Flag Phase 2 risks.** If I ask for something that will break when migrating to Meta Cloud API, say so before writing the code.
+- **Flag Meta-specific gotchas.** If I ask for something that runs into the 24h window, requires a template, or requires a permission I don't have yet, say so before writing code.
 - **Ask before scaffolding huge things.** If a request implies generating 10+ files, propose a file list first and let me approve it.
 - **Prisma over raw SQL** for schema and queries. Migrations via `prisma migrate dev`.
 - **TypeScript everywhere.** Strict mode.
@@ -120,7 +123,7 @@ Tags, labels, analytics, automations, AI replies, templates UI, bulk send, multi
 
 ## What I'm working on right now
 
-[REPLACE THIS WITH YOUR CURRENT TASK — e.g., "Setting up the Docker Compose file and getting Evolution running locally" or "Building the webhook handler" or "Wiring up Socket.io in a Next.js custom server"]
+[REPLACE THIS WITH YOUR CURRENT TASK]
 
 ## My first ask
 

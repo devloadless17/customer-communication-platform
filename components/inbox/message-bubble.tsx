@@ -3,6 +3,7 @@
 import { Check, CheckCheck, AlertCircle } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatMessageTime, initials } from "@/lib/utils";
 import type { Message, User } from "@/lib/types";
 
@@ -10,11 +11,14 @@ export function MessageBubble({
   message,
   sender,
   contactName,
+  contactSeed,
 }: {
   message: Message;
   /** null on inbound — only outbound has an authoring agent. */
   sender: User | null;
   contactName: string;
+  /** Stable id to derive a consistent gradient color for the contact. */
+  contactSeed: string;
 }) {
   const isOut = message.direction === "out";
 
@@ -22,7 +26,12 @@ export function MessageBubble({
     <div className={cn("flex w-full gap-2", isOut ? "justify-end" : "justify-start")}>
       {!isOut && (
         <Avatar className="size-7 shrink-0 self-end">
-          <AvatarFallback className="text-[10px]">{initials(contactName)}</AvatarFallback>
+          <AvatarFallback
+            className="text-[10px] text-white"
+            style={{ backgroundImage: avatarGradient(contactSeed) }}
+          >
+            {initials(contactName)}
+          </AvatarFallback>
         </Avatar>
       )}
 

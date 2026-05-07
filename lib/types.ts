@@ -8,11 +8,11 @@
  * IDs are strings to match Prisma's cuid() defaults.
  */
 
-export type Role = "admin" | "agent";
+export type Role = "superAdmin" | "admin" | "manager" | "agent";
 export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";
-export type ProviderName = "evolution" | "meta_cloud";
+export type ProviderName = "meta_cloud";
 
 export interface Team {
   id: string;

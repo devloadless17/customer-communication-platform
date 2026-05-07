@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useTransition } from "react";
+import Link from "next/link";
 import {
   Inbox,
   AtSign,
@@ -8,13 +9,27 @@ import {
   CheckCircle2,
   Settings,
   MessageSquareText,
+  Users,
+  LogOut,
+  UserCircle2,
   type LucideIcon,
 } from "lucide-react";
 
 import { cn, initials } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { signOutAction } from "@/lib/actions/auth";
+import { canViewTeamSettings, roleLabel } from "@/lib/permissions";
+import { closeClientSocket } from "@/lib/socket-client";
 import type { ConversationWithRefs, Team, User } from "@/lib/types";
 
 import { SessionStatus } from "./session-status";
@@ -40,12 +55,16 @@ export function Sidebar({
   conversations,
   filter,
   onFilterChange,
+  connected,
+  onlineUserIds,
 }: {
   currentUser: User;
   team: Team;
   conversations: ConversationWithRefs[];
   filter: FilterId;
   onFilterChange: (f: FilterId) => void;
+  connected: boolean;
+  onlineUserIds: Set<string>;
 }) {
   const counts = useMemo(() => {
     const c = conversations.map((x) => x.conversation);
@@ -83,7 +102,7 @@ export function Sidebar({
       </div>
 
       <div className="px-3">
-        <SessionStatus connected />
+        <SessionStatus connected={connected} />
       </div>
 
       <nav className="mt-3 flex flex-col gap-0.5 px-2">
@@ -129,30 +148,34 @@ export function Sidebar({
         Teammates
       </div>
       <div className="flex flex-col gap-0.5 px-2">
-        {teammates.map((u, i) => (
-          <div
-            key={u.id}
-            className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground"
-          >
-            <div className="relative">
-              <Avatar className="size-5">
-                <AvatarFallback className="text-[9px]">{initials(u.name)}</AvatarFallback>
-              </Avatar>
-              <span
-                className={cn(
-                  "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar",
-                  i === 0 ? "bg-emerald-500" : "bg-muted-foreground/40",
-                )}
-              />
+        {teammates.map((u) => {
+          const online = onlineUserIds.has(u.id);
+          return (
+            <div
+              key={u.id}
+              className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground"
+            >
+              <div className="relative">
+                <Avatar className="size-5">
+                  <AvatarFallback className="text-[9px]">{initials(u.name)}</AvatarFallback>
+                </Avatar>
+                <span
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar transition-colors",
+                    online ? "bg-emerald-500" : "bg-muted-foreground/40",
+                  )}
+                  aria-label={online ? "Online" : "Offline"}
+                />
+              </div>
+              <span className="truncate">{u.name}</span>
+              {u.id === currentUser.id && (
+                <Badge variant="muted" className="ml-auto px-1.5 py-0 text-[10px]">
+                  you
+                </Badge>
+              )}
             </div>
-            <span className="truncate">{u.name}</span>
-            {u.id === currentUser.id && (
-              <Badge variant="muted" className="ml-auto px-1.5 py-0 text-[10px]">
-                you
-              </Badge>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="mt-auto flex items-center gap-2 border-t border-sidebar-border px-3 py-3">
@@ -163,18 +186,64 @@ export function Sidebar({
           <div className="truncate text-sm font-medium">{currentUser.name}</div>
           <div className="truncate text-[11px] text-muted-foreground">{currentUser.email}</div>
         </div>
-        <Tooltip>
-          <TooltipTrigger asChild>
+        <UserMenu currentUser={currentUser} />
+      </div>
+    </aside>
+  );
+}
+
+function UserMenu({ currentUser }: { currentUser: User }) {
+  const [pending, startTransition] = useTransition();
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
             <button
               type="button"
               className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="Open user menu"
             >
               <Settings className="size-4" />
             </button>
-          </TooltipTrigger>
-          <TooltipContent side="top">Settings</TooltipContent>
-        </Tooltip>
-      </div>
-    </aside>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="top">Settings</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" side="top" className="min-w-[180px]">
+        <DropdownMenuLabel>{roleLabel(currentUser.role)}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link href="/settings/account">
+            <UserCircle2 className="size-4 text-muted-foreground" />
+            Account
+          </Link>
+        </DropdownMenuItem>
+        {canViewTeamSettings(currentUser.role) && (
+          <DropdownMenuItem asChild>
+            <Link href="/settings/team">
+              <Users className="size-4 text-muted-foreground" />
+              Team
+            </Link>
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={(e) => {
+            e.preventDefault();
+            // Drop the socket FIRST. Auth.js's signOut redirect is a soft
+            // client-side navigation — the page doesn't unload and the
+            // socket would otherwise stay connected as the just-signed-out
+            // user, leaving their presence dot lit on every other client.
+            closeClientSocket();
+            startTransition(() => signOutAction());
+          }}
+          disabled={pending}
+        >
+          <LogOut className="size-4 text-muted-foreground" />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

@@ -17,7 +17,13 @@ datasource db {
 // ---------------------------------------------------------------------------
 
 enum Role {
+  // Platform-level. One per deployment for now (set via seed).
+  superAdmin
+  // Per-team owner: full team management.
   admin
+  // Conversation-level lead: same conversation powers as agent, plus
+  // read-only visibility into /settings/team. No user management.
+  manager
   agent
 }
 
@@ -40,7 +46,6 @@ enum MessageStatus {
 }
 
 enum ProviderName {
-  evolution
   meta_cloud
 }
 
@@ -60,13 +65,17 @@ model Team {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  teamId    String
-  role      Role     @default(agent)
-  name      String
-  email     String   @unique
-  avatarUrl String?
-  createdAt DateTime @default(now())
+  id             String    @id @default(cuid())
+  teamId         String
+  role           Role      @default(agent)
+  name           String
+  email          String    @unique
+  avatarUrl      String?
+  // Nullable so a future SSO/OAuth user can exist without a local password.
+  passwordHash   String?
+  // Soft-disable: keeps FK history intact (authored messages, assignments).
+  deactivatedAt  DateTime?
+  createdAt      DateTime  @default(now())
 
   team           Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
   authoredMsgs   Message[]      @relation("AuthoredMessages")

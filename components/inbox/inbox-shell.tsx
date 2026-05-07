@@ -1,9 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSelectedLayoutSegment } from "next/navigation";
 
 import type { ConversationWithRefs, Team, User } from "@/lib/types";
 import { useTeamEvents } from "@/hooks/use-team-events";
+import { useSocketStatus } from "@/hooks/use-socket-status";
+import { usePresence } from "@/hooks/use-presence";
 
 import { Sidebar, type FilterId } from "./sidebar";
 import { ConversationList } from "./conversation-list";
@@ -27,7 +30,32 @@ export function InboxShell({
 }) {
   const [filter, setFilter] = useState<FilterId>("all");
   const [search, setSearch] = useState("");
-  const conversations = useTeamEvents(team.id, initialConversations);
+
+  // The active thread comes from the route segment (/inbox/[conversationId]).
+  // Threading it into useTeamEvents lets us suppress the unread-bump for the
+  // conversation the user is literally reading.
+  const activeConversationId = useSelectedLayoutSegment();
+  const conversations = useTeamEvents(team.id, initialConversations, activeConversationId);
+
+  const { connected } = useSocketStatus();
+  const { onlineUserIds } = usePresence(team.id, currentUser.id);
+
+  // Tab title gets a leading "(N)" while there's unread, so the user notices
+  // a new message even when the window is unfocused. Excludes closed threads
+  // because they shouldn't pull attention.
+  const totalUnread = useMemo(() => {
+    return conversations.reduce(
+      (acc, c) =>
+        acc +
+        (c.conversation.status === "closed" ? 0 : c.conversation.unreadCount),
+      0,
+    );
+  }, [conversations]);
+
+  useEffect(() => {
+    const base = "Inbox · " + team.name;
+    document.title = totalUnread > 0 ? `(${totalUnread}) ${base}` : base;
+  }, [totalUnread, team.name]);
 
   return (
     <div className="flex h-svh w-full overflow-hidden bg-background text-foreground">
@@ -37,6 +65,8 @@ export function InboxShell({
         conversations={conversations}
         filter={filter}
         onFilterChange={setFilter}
+        connected={connected}
+        onlineUserIds={onlineUserIds}
       />
       <div className="flex min-w-0 flex-1">
         <ConversationList

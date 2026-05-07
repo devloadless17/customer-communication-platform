@@ -1,6 +1,7 @@
 "use client";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatListTime, initials } from "@/lib/utils";
 import type { Contact, Conversation, User } from "@/lib/types";
 
@@ -28,7 +29,12 @@ export function ConversationListItem({
         <span className="absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-r-full bg-primary" />
       )}
       <Avatar className="size-10">
-        <AvatarFallback className="text-xs">{initials(contact.name)}</AvatarFallback>
+        <AvatarFallback
+          className="text-xs text-white"
+          style={{ backgroundImage: avatarGradient(contact.id) }}
+        >
+          {initials(contact.name)}
+        </AvatarFallback>
       </Avatar>
 
       <div className="flex min-w-0 flex-1 flex-col">

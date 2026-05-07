@@ -10,6 +10,7 @@
 
 import type {
   ConversationStatus,
+  ConversationWithRefs,
   InternalNote,
   Message,
   MessageStatus,
@@ -21,7 +22,14 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface ServerToClientEvents {
-  /** A new message arrived on a conversation (inbound or outbound). */
+  /**
+   * A new message arrived on a conversation (inbound or outbound).
+   *
+   * `newConversation` is populated only when the message opened a brand-new
+   * thread (first contact, or first inbound after a closed thread). Clients
+   * that don't yet have the conversation in their list use it to splice the
+   * row in without a refetch.
+   */
   "message:new": (payload: {
     teamId: string;
     conversationId: string;
@@ -29,6 +37,7 @@ export interface ServerToClientEvents {
     preview: string;
     lastMessageAt: string;
     unreadDelta: number;
+    newConversation?: ConversationWithRefs;
   }) => void;
 
   /** A message's delivery status changed (sent → delivered → read, or failed). */
@@ -59,6 +68,37 @@ export interface ServerToClientEvents {
     conversationId: string;
     status: ConversationStatus;
   }) => void;
+
+  /**
+   * Conversation was read — team-wide unread counter resets to 0. Fires when
+   * a teammate opens the thread or explicitly marks it read. CLAUDE.md flags
+   * per-agent unread as deferred, so this is shared across the team.
+   */
+  "conversation:read": (payload: {
+    teamId: string;
+    conversationId: string;
+    readByUserId: string;
+  }) => void;
+
+  /**
+   * Snapshot of which teammates currently have a live socket. Broadcast to
+   * the team room whenever the set changes; also sent to a single socket on
+   * subscribe so it doesn't have to wait for the next change to populate.
+   */
+  "presence:update": (payload: {
+    teamId: string;
+    onlineUserIds: string[];
+  }) => void;
+
+  /**
+   * Snapshot of who's currently typing in a specific conversation. The
+   * server broadcasts this to the conversation room on every change; clients
+   * filter their own userId out of the list when rendering.
+   */
+  "typing:update": (payload: {
+    conversationId: string;
+    typingUserIds: string[];
+  }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,21 +106,35 @@ export interface ServerToClientEvents {
 // ---------------------------------------------------------------------------
 
 export interface ClientToServerEvents {
-  /** Join the team room — receives every team-wide update for the inbox list. */
+  /**
+   * Join the team room — receives every team-wide update for the inbox list.
+   *
+   * The server validates `teamId` against the authenticated handshake; a
+   * mismatched id is silently dropped. Identity itself comes from the JWT
+   * cookie at handshake time, not from any client payload.
+   */
   "subscribe:team": (payload: { teamId: string }) => void;
 
   /** Join a conversation room — receives message/note updates for that thread. */
   "subscribe:conversation": (payload: { conversationId: string }) => void;
   "unsubscribe:conversation": (payload: { conversationId: string }) => void;
+
+  /** Agent started typing in a conversation. Server fans out to that room. */
+  "typing:start": (payload: { conversationId: string }) => void;
+  /** Agent stopped typing — explicit, e.g. on send or on blur. */
+  "typing:stop": (payload: { conversationId: string }) => void;
 }
 
 // Inter-server events left empty until we add a Redis adapter (deferred per CLAUDE.md).
 export type InterServerEvents = Record<string, never>;
 
 export interface SocketData {
-  // Phase 2 will populate this from the NextAuth session on connection.
+  // Set during the handshake auth middleware, non-null afterwards.
   teamId?: string;
   userId?: string;
+  role?: import("@/lib/types").Role;
+  /** Conversations this socket is currently flagged as typing in. */
+  typingIn?: Set<string>;
 }
 
 /** Path Socket.io binds to. Kept here so client and server cannot drift. */

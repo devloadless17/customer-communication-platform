@@ -6,6 +6,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { avatarGradient } from "@/lib/avatar-color";
 import { formatPhone, initials } from "@/lib/utils";
 import type { ConversationStatus, ConversationWithRefs } from "@/lib/types";
 
@@ -23,7 +24,12 @@ export function ContactPanel({ data }: { data: ConversationWithRefs }) {
       <ScrollArea className="flex-1">
         <div className="flex flex-col items-center px-5 pt-6 pb-4">
           <Avatar className="size-16">
-            <AvatarFallback className="text-lg">{initials(contact.name)}</AvatarFallback>
+            <AvatarFallback
+              className="text-lg text-white"
+              style={{ backgroundImage: avatarGradient(contact.id) }}
+            >
+              {initials(contact.name)}
+            </AvatarFallback>
           </Avatar>
           <div className="mt-3 text-center">
             <div className="text-base font-semibold">{contact.name}</div>

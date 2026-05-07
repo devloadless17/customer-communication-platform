@@ -32,7 +32,26 @@ export function getClientSocket(): ClientSocket {
     autoConnect: true,
     reconnection: true,
     reconnectionDelay: 500,
+    // Same-origin: forwards the NextAuth session cookie so the server-side
+    // io.use() middleware can authenticate the handshake.
+    withCredentials: true,
   });
 
   return socket;
+}
+
+/**
+ * Tear the singleton down. Called on sign-out so:
+ *   1) the server fires a `disconnect` for this socket and removes the user
+ *      from the presence set (other tabs see the green dot drop immediately),
+ *   2) the now-signed-out tab can't keep receiving team events if Next does
+ *      a soft client-side nav to /login instead of a hard reload.
+ *
+ * `disconnect()` also opts out of Socket.io's auto-reconnect, which is what
+ * we want here.
+ */
+export function closeClientSocket(): void {
+  if (!socket) return;
+  socket.disconnect();
+  socket = null;
 }

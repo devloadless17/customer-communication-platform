@@ -15,7 +15,7 @@ export default async function ConversationPage({
   params: Promise<Params>;
 }) {
   const { conversationId } = await params;
-  const { teamId } = await getSession();
+  const { teamId, user } = await getSession();
 
   const [data, teamMembers] = await Promise.all([
     getConversationWithRefs(teamId, conversationId),
@@ -26,7 +26,7 @@ export default async function ConversationPage({
 
   return (
     <>
-      <MessageThread data={data} teamMembers={teamMembers} />
+      <MessageThread data={data} teamMembers={teamMembers} currentUser={user} />
       <ContactPanel data={data} />
     </>
   );

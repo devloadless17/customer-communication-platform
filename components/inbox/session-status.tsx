@@ -3,19 +3,17 @@
 import { cn } from "@/lib/utils";
 
 /**
- * Connection status of the WhatsApp session (Evolution instance). Real wiring
- * lands Week 3 — for now we accept a static prop so the chrome is right.
+ * Live websocket connection indicator — green pulse while the realtime
+ * channel is up, red dot when it has dropped. The label tells the agent
+ * whether what they're seeing is fresh.
  */
 export function SessionStatus({ connected }: { connected: boolean }) {
   return (
     <div className="flex items-center gap-2 rounded-md border border-sidebar-border bg-background/40 px-2.5 py-1.5">
       <span className="relative flex size-2">
-        <span
-          className={cn(
-            "absolute inline-flex h-full w-full rounded-full opacity-75",
-            connected ? "bg-emerald-500 animate-ping" : "bg-destructive",
-          )}
-        />
+        {connected && (
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
+        )}
         <span
           className={cn(
             "relative inline-flex size-2 rounded-full",
@@ -24,9 +22,8 @@ export function SessionStatus({ connected }: { connected: boolean }) {
         />
       </span>
       <span className="text-xs font-medium">
-        {connected ? "Session connected" : "Session disconnected"}
+        {connected ? "Realtime connected" : "Reconnecting…"}
       </span>
-      <span className="ml-auto text-[10px] font-mono text-muted-foreground">+44 79 11…</span>
     </div>
   );
 }

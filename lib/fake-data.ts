@@ -25,9 +25,9 @@ export const fakeTeam: Team = {
 };
 
 export const fakeUsers: User[] = [
-  { id: "u_me", teamId: TEAM_ID, role: "admin", name: "Ali Al-Ahmad", email: "ali@loadless.ai" },
-  { id: "u_sara", teamId: TEAM_ID, role: "agent", name: "Sara Khalil", email: "sara@loadless.ai" },
-  { id: "u_omar", teamId: TEAM_ID, role: "agent", name: "Omar Reyes", email: "omar@loadless.ai" },
+  { id: "u_me", teamId: TEAM_ID, role: "superAdmin", name: "Ali Al-Ahmad", email: "ali@loadless.ai" },
+  { id: "u_sara", teamId: TEAM_ID, role: "admin", name: "Sara Khalil", email: "sara@loadless.ai" },
+  { id: "u_omar", teamId: TEAM_ID, role: "manager", name: "Omar Reyes", email: "omar@loadless.ai" },
   { id: "u_lina", teamId: TEAM_ID, role: "agent", name: "Lina Becker", email: "lina@loadless.ai" },
 ];
 
@@ -113,11 +113,11 @@ function build(
     id: `${id}_m_${idx}`,
     teamId: TEAM_ID,
     conversationId: id,
-    externalId: `evo_${id}_${idx}`,
+    externalId: `fake_${id}_${idx}`,
     senderUserId: m.dir === "out" ? m.senderUserId : null,
     body: m.body,
     direction: m.dir,
-    provider: "evolution",
+    provider: "meta_cloud",
     status: m.dir === "out" ? m.status ?? "delivered" : "delivered",
     rawPayload: { fake: true },
     timestamp: ago(m.minutesAgo),
