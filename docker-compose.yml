@@ -10,6 +10,10 @@ networks:
 
 volumes:
   postgres_data:
+  # Persisted attachment storage. lib/media-storage.ts writes inbound +
+  # outbound media here keyed by team + wamid. Survives container restarts
+  # and `docker compose up --build`. Wipe with `docker volume rm`.
+  ccp_media:
 
 services:
   postgres:
@@ -52,5 +56,8 @@ services:
       META_PHONE_NUMBER_ID: ${META_PHONE_NUMBER_ID}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN}
       META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v21.0}
+      MEDIA_STORAGE_PATH: /var/lib/ccp/media
+    volumes:
+      - ccp_media:/var/lib/ccp/media
     ports:
       - "${APP_PORT:-3000}:3000"

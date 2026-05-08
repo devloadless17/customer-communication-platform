@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { ArrowLeft, Users, UserCircle2 } from "lucide-react";
+import { ArrowLeft, MessageSquare, Users, UserCircle2 } from "lucide-react";
 
 import { getSession } from "@/lib/current-user";
-import { canViewTeamSettings } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/permissions";
 
 /**
  * Settings shell. Server component — gates by session and surfaces nav.
@@ -34,9 +34,12 @@ export default async function SettingsLayout({
           <NavLink href="/settings/account" icon={<UserCircle2 className="size-4" />}>
             Account
           </NavLink>
-          {canViewTeamSettings(user.role) && (
-            <NavLink href="/settings/team" icon={<Users className="size-4" />}>
-              Team
+          <NavLink href="/settings/team" icon={<Users className="size-4" />}>
+            Team
+          </NavLink>
+          {canManageUsers(user.role) && (
+            <NavLink href="/settings/whatsapp" icon={<MessageSquare className="size-4" />}>
+              WhatsApp
             </NavLink>
           )}
         </nav>

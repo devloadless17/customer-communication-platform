@@ -8,21 +8,29 @@ import type { Role } from "@/lib/types";
  * Matrix:
  *   superAdmin  every action; only role that can grant/revoke superAdmin
  *   admin       full team management within their org; cannot touch superAdmins
- *   manager     read-only visibility into /settings/team; same conversation
- *               powers as agent
+ *   manager     same conversation powers as agent
  *   agent       reply, assign, mark read, change status, add notes
+ *
+ * Note: every signed-in user can view /settings/team — it's the team
+ * directory. Only `canManageUsers` controls who can edit it.
  */
 
 const SUPER_ADMIN: Role = "superAdmin";
 
-/** Anyone in this set sees the Settings → Team link and can open the page. */
-export function canViewTeamSettings(role: Role): boolean {
-  return role === "superAdmin" || role === "admin" || role === "manager";
-}
-
 /** Invite a new user, change roles, and deactivate. */
 export function canManageUsers(role: Role): boolean {
   return role === "superAdmin" || role === "admin";
+}
+
+/**
+ * Add / rename / delete team-wide contact field definitions. Manager is
+ * included alongside admin: defining a field is a workflow choice, not a
+ * security decision, and managers run the inbox day-to-day. Per-contact
+ * field VALUES are editable by anyone signed in (handled at the contact
+ * PATCH route, not here).
+ */
+export function canManageContactFields(role: Role): boolean {
+  return role === "superAdmin" || role === "admin" || role === "manager";
 }
 
 /** Only superAdmins can grant or revoke the superAdmin role. */

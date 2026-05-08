@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useSelectedLayoutSegment } from "next/navigation";
-import { Search, SlidersHorizontal } from "lucide-react";
+import { Loader2, Search, SlidersHorizontal } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { Input } from "@/components/ui/input";
@@ -18,12 +18,18 @@ export function ConversationList({
   filter,
   search,
   onSearchChange,
+  hasMore,
+  loadingMore,
+  onLoadMore,
 }: {
   currentUser: User;
   conversations: ConversationWithRefs[];
   filter: FilterId;
   search: string;
   onSearchChange: (s: string) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 }) {
   const selectedId = useSelectedLayoutSegment();
 
@@ -51,6 +57,42 @@ export function ConversationList({
     unassigned: "Unassigned",
     closed: "Closed",
   };
+
+  // Infinite-scroll sentinel: an empty div near the bottom of the list. When
+  // it enters the scroll container's viewport, fetch the next page. Held in
+  // a ref so we can install an IntersectionObserver against the actual
+  // scroll viewport (not the document) — the ScrollArea's internal viewport
+  // becomes the root once we find it.
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const onLoadMoreRef = useRef(onLoadMore);
+  useEffect(() => {
+    onLoadMoreRef.current = onLoadMore;
+  }, [onLoadMore]);
+
+  useEffect(() => {
+    if (!hasMore) return;
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    // Find the nearest ancestor that actually scrolls — the Radix ScrollArea
+    // viewport. Falls back to null (= window) which still works for normal
+    // overflow.
+    let root: Element | null = sentinel.parentElement;
+    while (root && root !== document.body) {
+      const overflowY = getComputedStyle(root).overflowY;
+      if (overflowY === "auto" || overflowY === "scroll") break;
+      root = root.parentElement;
+    }
+
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMoreRef.current();
+      },
+      { root, rootMargin: "200px" },
+    );
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [hasMore, conversations.length]);
 
   return (
     <div className="flex h-full w-[380px] shrink-0 flex-col bg-background">
@@ -111,6 +153,30 @@ export function ConversationList({
             </li>
           )}
         </ul>
+
+        {/* Sentinel: triggers loadMore when scrolled into view. Always
+            rendered (even when hasMore is false) so a brief race between
+            "load completes" and "observer fires once more" is harmless. */}
+        <div ref={sentinelRef} className="h-px" />
+
+        {hasMore && (
+          <div className="flex items-center justify-center px-3 py-4 text-[11px] text-muted-foreground">
+            {loadingMore ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Loader2 className="size-3 animate-spin" />
+                Loading more…
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="hover:text-foreground"
+                onClick={() => onLoadMore()}
+              >
+                Load older conversations
+              </button>
+            )}
+          </div>
+        )}
       </ScrollArea>
     </div>
   );

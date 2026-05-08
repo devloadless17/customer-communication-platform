@@ -14,8 +14,10 @@ import type {
   Conversation,
   ConversationStatus,
   ConversationWithRefs,
+  MediaKind,
   Message,
   ProviderName,
+  ReplySnapshot,
 } from "@/lib/types";
 
 /**
@@ -25,15 +27,19 @@ import type {
  *                    → bump conversation summary → emit `message:new`
  *
  * One entry point per route. Routes never touch the DB or Socket.io directly.
+ *
+ * `teamId` is resolved by the caller (the per-team webhook URL contains it,
+ * so the route trusts it). Status updates ignore teamId — they look up the
+ * existing message row by externalId, which already carries its own team.
  */
 
 export async function ingestEvents(
+  teamId: string,
   provider: ProviderName,
   events: NormalizedEvent[],
 ): Promise<void> {
   if (events.length === 0) return;
 
-  const teamId = await getDefaultTeamId();
   for (const evt of events) {
     if (evt.kind === "message") {
       await ingestInboundMessage(teamId, provider, evt);
@@ -71,6 +77,24 @@ async function ingestStatusUpdate(evt: NormalizedStatusUpdate): Promise<void> {
   });
 }
 
+/** Conversation-list preview text for media-only messages (no caption). */
+export function mediaPreview(kind: import("@/lib/types").MediaKind | undefined): string {
+  switch (kind) {
+    case "image":
+      return "📷 Photo";
+    case "video":
+      return "🎥 Video";
+    case "audio":
+      return "🎤 Voice message";
+    case "document":
+      return "📄 Document";
+    case "sticker":
+      return "🌟 Sticker";
+    default:
+      return "";
+  }
+}
+
 function statusRank(s: Message["status"]): number {
   switch (s) {
     case "failed":
@@ -96,6 +120,15 @@ async function ingestInboundMessage(
     select: { id: true },
   });
   if (existing) return;
+
+  // Resolve the quoted-reply target (if any). We only set the FK when the
+  // original lives in OUR DB — Meta sometimes references messages older than
+  // our subscription (no history sync, CLAUDE.md), in which case the reply
+  // arrives without a quote anchor and we just drop the link.
+  let replySnapshot: ReplySnapshot | null = null;
+  if (evt.replyToExternalId) {
+    replySnapshot = await loadReplySnapshotByExternalId(evt.replyToExternalId);
+  }
 
   const contact = await db.contact.upsert({
     where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
@@ -127,7 +160,7 @@ async function ingestInboundMessage(
     },
   }));
 
-  const preview = evt.body.slice(0, 200);
+  const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
 
   let createdId: string;
   try {
@@ -143,6 +176,18 @@ async function ingestInboundMessage(
         status: "delivered",
         rawPayload: evt.rawPayload as Prisma.InputJsonValue,
         timestamp: evt.timestamp,
+        ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
+        ...(evt.media && evt.media.localPath
+          ? {
+              mediaKind: evt.media.kind,
+              mediaPath: evt.media.localPath,
+              mediaMimeType: evt.media.mimeType,
+              mediaCaption: evt.body || null,
+              mediaFilename: evt.media.filename ?? null,
+              mediaSizeBytes: evt.media.sizeBytes ?? null,
+              mediaDurationMs: evt.media.durationMs ?? null,
+            }
+          : {}),
       },
     });
     createdId = created.id;
@@ -175,6 +220,22 @@ async function ingestInboundMessage(
     status: "delivered",
     rawPayload: evt.rawPayload,
     timestamp: evt.timestamp.toISOString(),
+    ...(replySnapshot
+      ? { replyToMessageId: replySnapshot.id, replyTo: replySnapshot }
+      : {}),
+    ...(evt.media && evt.media.localPath
+      ? {
+          media: {
+            kind: evt.media.kind,
+            url: `/api/media/${createdId}`,
+            mimeType: evt.media.mimeType,
+            sizeBytes: evt.media.sizeBytes ?? 0,
+            ...(evt.body ? { caption: evt.body } : {}),
+            ...(evt.media.filename ? { filename: evt.media.filename } : {}),
+            ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+          },
+        }
+      : {}),
   };
 
   // Build the ConversationWithRefs payload only when the convo is brand-new,
@@ -191,6 +252,9 @@ async function ingestInboundMessage(
         assignedUser: null,
         messages: [],
         notes: [],
+        // The webhook event we're processing IS an inbound, so the 24h
+        // window opens right now.
+        lastInboundAt: evt.timestamp.toISOString(),
       }
     : undefined;
 
@@ -240,6 +304,10 @@ function toDomainContact(c: {
   phoneNumber: string;
   name: string;
   avatarUrl: string | null;
+  email?: string | null;
+  location?: string | null;
+  customFields?: unknown;
+  source?: "inbound" | "manual";
 }): Contact {
   return {
     id: c.id,
@@ -247,17 +315,72 @@ function toDomainContact(c: {
     phoneNumber: c.phoneNumber,
     name: c.name,
     avatarUrl: c.avatarUrl ?? undefined,
+    email: c.email ?? undefined,
+    location: c.location ?? undefined,
+    customFields: normalizeCustomFields(c.customFields),
+    // Webhook-driven contacts default to 'inbound' on the schema; the row
+    // we read back may not always include it (legacy callers), so treat
+    // missing as inbound.
+    source: c.source ?? "inbound",
   };
 }
 
-/**
- * MVP single-tenant routing. Phase 2 will key off the provider's instance
- * identifier (Evolution `instance` / Meta `phone_number_id`) to pick a team.
- */
-async function getDefaultTeamId(): Promise<string> {
-  const team = await db.team.findFirst({ orderBy: { createdAt: "asc" }, select: { id: true } });
-  if (!team) {
-    throw new Error("No team in DB. Seed at least one team before accepting webhooks.");
+function normalizeCustomFields(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
   }
-  return team.id;
+  return out;
 }
+
+/**
+ * Build a ReplySnapshot from the original message (looked up by externalId or
+ * id). Used by ingest (inbound replies, externalId lookup) and the outbound
+ * routes (where the caller already has the local id).
+ */
+export async function loadReplySnapshotByExternalId(
+  externalId: string,
+): Promise<ReplySnapshot | null> {
+  const row = await db.message.findUnique({
+    where: { externalId },
+    select: replySnapshotSelect,
+  });
+  return row ? toReplySnapshot(row) : null;
+}
+
+export async function loadReplySnapshotById(
+  id: string,
+): Promise<ReplySnapshot | null> {
+  const row = await db.message.findUnique({
+    where: { id },
+    select: replySnapshotSelect,
+  });
+  return row ? toReplySnapshot(row) : null;
+}
+
+const replySnapshotSelect = {
+  id: true,
+  body: true,
+  direction: true,
+  mediaKind: true,
+  sender: { select: { name: true } },
+} as const;
+
+function toReplySnapshot(row: {
+  id: string;
+  body: string;
+  direction: string;
+  mediaKind: string | null;
+  sender: { name: string } | null;
+}): ReplySnapshot {
+  return {
+    id: row.id,
+    // Truncate so a giant pasted body doesn't bloat every reply emission.
+    body: row.body.slice(0, 200),
+    direction: row.direction as ReplySnapshot["direction"],
+    senderName: row.sender?.name ?? null,
+    ...(row.mediaKind ? { mediaKind: row.mediaKind as MediaKind } : {}),
+  };
+}
+

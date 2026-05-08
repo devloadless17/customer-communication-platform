@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 
 import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
-import { getProvider } from "@/lib/providers";
+import { getMetaProvider } from "@/lib/providers";
+import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import { emitToTeam } from "@/lib/socket-server";
 
 /**
@@ -57,11 +58,19 @@ export async function POST(
 
   // Fire-and-forget the provider ack so the customer's WhatsApp lights up
   // blue ticks. Errors are logged inside the provider, never bubbled.
-  if (latestInbound) {
-    const provider = getProvider(latestInbound.provider);
-    if (provider.markIncomingRead) {
-      void provider.markIncomingRead(latestInbound.externalId);
-    }
+  // We also swallow ProviderNotConfigured here — a team that hasn't connected
+  // WhatsApp yet can't have inbound messages anyway, and we don't want a
+  // stale row from a disconnected number to break the read flow.
+  if (latestInbound && latestInbound.provider === "meta_cloud") {
+    void (async () => {
+      try {
+        const config = await getMetaSendConfig(teamId);
+        await getMetaProvider().markIncomingRead?.(latestInbound.externalId, config);
+      } catch (err) {
+        if (err instanceof ProviderNotConfiguredError) return;
+        console.warn("[api/conversations/read] mark-read failed", err);
+      }
+    })();
   }
 
   return NextResponse.json({ ok: true });

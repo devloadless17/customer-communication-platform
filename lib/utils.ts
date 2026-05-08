@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from "clsx";
+import { parsePhoneNumberFromString } from "libphonenumber-js";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -51,17 +52,21 @@ export function formatDaySeparator(iso: string, now: Date = new Date()): string 
 }
 
 /**
- * Format a phone number for display: keeps the leading + and groups the rest
- * loosely. Don't rely on this for canonicalization — that's libphonenumber's job.
+ * Format a phone number for display in international form, e.g.
+ * "+961 71 505 894". Uses libphonenumber-js so the country-code split and
+ * national-number grouping match each country's conventions (a hand-rolled
+ * heuristic mis-grouped 3-digit codes like +961 as "+96 1...").
+ *
+ * Falls back to a "+digits" string if parsing fails — Meta's
+ * `display_phone_number` can arrive without a + or be otherwise malformed,
+ * and we'd rather show *something* than crash.
  */
 export function formatPhone(raw: string): string {
-  const trimmed = raw.replace(/[^\d+]/g, "");
-  if (!trimmed.startsWith("+")) return trimmed;
-  const digits = trimmed.slice(1);
-  if (digits.length <= 4) return trimmed;
-  // crude grouping: country (1-3) + rest in chunks of 3
-  const country = digits.slice(0, digits.length - 9 > 0 ? digits.length - 9 : 1);
-  const rest = digits.slice(country.length);
-  const grouped = rest.match(/.{1,3}/g)?.join(" ") ?? rest;
-  return `+${country} ${grouped}`.trim();
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+  const withPlus = trimmed.startsWith("+") ? trimmed : `+${trimmed.replace(/[^\d]/g, "")}`;
+  const parsed = parsePhoneNumberFromString(withPlus);
+  if (parsed) return parsed.formatInternational();
+  const digits = trimmed.replace(/\D/g, "");
+  return digits ? `+${digits}` : raw;
 }

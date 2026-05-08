@@ -3,7 +3,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { canManageUsers, canViewTeamSettings } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/permissions";
 import type { Role } from "@/lib/types";
 
 /**
@@ -41,23 +41,13 @@ export async function requireSession(): Promise<ApiSession | NextResponse> {
 
 /**
  * For routes that mutate users (invite, role change, deactivate). Allows
- * admin and superAdmin only. Manager is intentionally excluded — they have
- * read-only visibility into the team (see requireTeamView).
+ * admin and superAdmin only. Anyone signed in can view the team directory,
+ * so there's no read-side guard — see /settings/team/page.tsx.
  */
 export async function requireAdmin(): Promise<ApiSession | NextResponse> {
   const session = await requireSession();
   if (session instanceof NextResponse) return session;
   if (!canManageUsers(session.role)) {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
-  }
-  return session;
-}
-
-/** For viewing the team page (read-only allowed for managers). */
-export async function requireTeamView(): Promise<ApiSession | NextResponse> {
-  const session = await requireSession();
-  if (session instanceof NextResponse) return session;
-  if (!canViewTeamSettings(session.role)) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
   return session;

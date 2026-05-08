@@ -49,6 +49,16 @@ enum ProviderName {
   meta_cloud
 }
 
+// Why a contact exists in our DB.
+//   - inbound: created by a webhook ingest (a customer messaged us).
+//   - manual: created by an agent — through the New Contact dialog or a CSV
+//             import. Used to differentiate "people who reached out" vs
+//             "people we added on our end" in the contacts list.
+enum ContactSource {
+  inbound
+  manual
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -58,40 +68,70 @@ model Team {
   name      String
   createdAt DateTime @default(now())
 
-  users         User[]
-  contacts      Contact[]
-  conversations Conversation[]
-  messages      Message[]
+  // Per-team Meta WhatsApp Cloud API credentials. Nullable because freshly
+  // registered teams haven't connected their WhatsApp number yet — they paste
+  // these into /settings/whatsapp. CLAUDE.md rule #6.
+  //
+  // TODO(security): metaAccessToken + metaAppSecret are stored plaintext for
+  // MVP. Wrap with envelope encryption (one app key, per-team data key) before
+  // any production traffic that isn't your own pilot.
+  metaPhoneNumberId      String? @unique
+  metaDisplayPhoneNumber String?
+  metaWabaId             String?
+  metaAccessToken        String?
+  metaAppSecret          String?
+  metaVerifyToken        String?
+
+  users                   User[]
+  contacts                Contact[]
+  conversations           Conversation[]
+  messages                Message[]
+  invites                 Invite[]
+  contactFieldDefinitions ContactFieldDefinition[]
 }
 
 model User {
-  id             String    @id @default(cuid())
-  teamId         String
-  role           Role      @default(agent)
-  name           String
-  email          String    @unique
-  avatarUrl      String?
+  id            String    @id @default(cuid())
+  teamId        String
+  role          Role      @default(agent)
+  name          String
+  email         String    @unique
+  avatarUrl     String?
   // Nullable so a future SSO/OAuth user can exist without a local password.
-  passwordHash   String?
+  passwordHash  String?
   // Soft-disable: keeps FK history intact (authored messages, assignments).
-  deactivatedAt  DateTime?
-  createdAt      DateTime  @default(now())
+  deactivatedAt DateTime?
+  createdAt     DateTime  @default(now())
 
   team           Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
   authoredMsgs   Message[]      @relation("AuthoredMessages")
   authoredNotes  InternalNote[]
   assignedConvos Conversation[] @relation("AssignedConversations")
+  createdInvites Invite[]       @relation("InvitedBy")
 
   @@index([teamId])
 }
 
 model Contact {
-  id          String   @id @default(cuid())
-  teamId      String
-  phoneNumber String
-  name        String
-  avatarUrl   String?
-  createdAt   DateTime @default(now())
+  id           String   @id @default(cuid())
+  teamId       String
+  phoneNumber  String
+  name         String
+  avatarUrl    String?
+  // Optional profile fields surfaced in the right-rail contact panel.
+  email        String?
+  location     String?
+  // Bag of contact-level custom field values, keyed by field key.
+  // - Keys defined in ContactFieldDefinition are the team-wide schema (always
+  //   shown on every contact, even when blank).
+  // - Keys NOT in the team schema are per-contact extras (one-offs added on
+  //   a single contact). Both kinds are string-valued for now.
+  customFields Json          @default("{}")
+  // How this row got into the DB. Defaulted to inbound because the webhook
+  // ingest path uses the bare default; the manual create + CSV import paths
+  // explicitly set 'manual'.
+  source       ContactSource @default(inbound)
+  createdAt    DateTime      @default(now())
 
   team          Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversations Conversation[]
@@ -99,6 +139,31 @@ model Contact {
   // A phone number is unique within a team, but the same number can exist across tenants.
   @@unique([teamId, phoneNumber])
   @@index([teamId])
+  @@index([teamId, source])
+}
+
+// Team-wide contact field definitions: an admin/manager defines a key+label
+// once, and every contact in the team renders that field in the panel. The
+// value still lives in Contact.customFields[key] so we don't need a separate
+// values table for MVP. Renaming a field here is a metadata-only change;
+// deleting it strips the key from every contact's customFields in the same
+// transaction (see /api/team/contact-fields/[id] DELETE).
+model ContactFieldDefinition {
+  id        String   @id @default(cuid())
+  teamId    String
+  // Stable identifier used in Contact.customFields. Lowercased + underscored
+  // at create time; immutable once set so existing data keeps mapping cleanly.
+  key       String
+  label     String
+  // Sort order within the panel — lower first. Tracked so the UI can reorder
+  // later without us needing alphabetical-only sorting.
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, key])
+  @@index([teamId, order])
 }
 
 model Conversation {
@@ -130,6 +195,8 @@ model Message {
   externalId     String           @unique
   // null on inbound — only outbound has an authoring agent.
   senderUserId   String?
+  // For text-only messages this is the body. For media messages this holds
+  // the caption (or empty) so search keeps matching across both kinds.
   body           String
   direction      MessageDirection
   provider       ProviderName
@@ -139,12 +206,52 @@ model Message {
   timestamp      DateTime         @default(now())
   createdAt      DateTime         @default(now())
 
+  // Media fields. All nullable — text-only rows leave them null. `mediaKind`
+  // is the discriminator; if non-null, the file lives at `mediaPath` on disk.
+  mediaKind       String?
+  mediaPath       String?
+  mediaMimeType   String?
+  mediaCaption    String?
+  mediaFilename   String?
+  mediaSizeBytes  Int?
+  mediaDurationMs Int?
+
+  // Quoted reply: the row this message is replying to. Self-FK with SetNull
+  // so deleting the original (rare) doesn't take the reply with it. The
+  // snapshot the UI renders comes from JOINing this row at read time, not
+  // from a denormalized copy — we don't want stale quotes when bodies edit.
+  replyToMessageId String?
+  replyTo          Message?  @relation("MessageReply", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies          Message[] @relation("MessageReply")
+
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, timestamp])
   @@index([teamId])
+  @@index([replyToMessageId])
+}
+
+// Pending team invite. Admin POSTs to /api/invites; the link contains a
+// random token whose SHA-256 hash is stored here (never the raw token, same
+// reasoning as a password). Accepting consumes the row by stamping
+// acceptedAt — we don't delete so admins can audit who invited whom.
+model Invite {
+  id          String    @id @default(cuid())
+  teamId      String
+  email       String
+  role        Role      @default(agent)
+  tokenHash   String    @unique
+  createdById String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+
+  team      Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User @relation("InvitedBy", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([teamId, email])
 }
 
 model InternalNote {

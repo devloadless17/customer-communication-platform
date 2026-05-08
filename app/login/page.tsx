@@ -36,7 +36,10 @@ export default async function LoginPage({ searchParams }: PageProps) {
         </div>
 
         <p className="mt-4 text-center text-[11px] text-muted-foreground">
-          Forgot your password? Ask an admin to reset it for you.
+          New here?{" "}
+          <a href="/register" className="text-primary hover:underline">
+            Create a workspace
+          </a>
         </p>
       </div>
     </div>

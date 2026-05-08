@@ -28,12 +28,66 @@ export interface User {
   avatarUrl?: string;
 }
 
+/** How this contact got into the DB. See ContactSource enum on the schema. */
+export type ContactSource = "inbound" | "manual";
+
 export interface Contact {
   id: string;
   teamId: string;
   phoneNumber: string;
   name: string;
   avatarUrl?: string;
+  email?: string;
+  location?: string;
+  /** Bag of custom field values, keyed by field key. Always a string. */
+  customFields: Record<string, string>;
+  source: ContactSource;
+}
+
+/**
+ * Team-wide contact field definition. Every contact in the team renders one
+ * row per definition (even when blank); the value lives in
+ * Contact.customFields[key]. Per-contact one-off fields are keys on
+ * customFields that DON'T have a matching definition.
+ */
+export interface ContactFieldDefinition {
+  id: string;
+  teamId: string;
+  key: string;
+  label: string;
+  order: number;
+}
+
+export type MediaKind = "image" | "video" | "audio" | "document" | "sticker";
+
+export interface MediaAttachment {
+  kind: MediaKind;
+  /** Public URL the browser fetches (always /api/media/<messageId>). */
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** Optional caption shown alongside the media. */
+  caption?: string;
+  /** Original filename — only set for documents. */
+  filename?: string;
+  /** Audio + video only. */
+  durationMs?: number;
+}
+
+/**
+ * Snapshot of a quoted message — just enough to render the gray quote block
+ * inside a reply bubble. Resolved server-side via JOIN at read time, so
+ * editing the original (when we add edit) automatically refreshes the quote.
+ */
+export interface ReplySnapshot {
+  id: string;
+  /** Caption for media, body for text. Truncated server-side if huge. */
+  body: string;
+  direction: MessageDirection;
+  /** Authoring teammate's name on outbound; null on inbound. */
+  senderName: string | null;
+  /** When the original was a media message, what kind. */
+  mediaKind?: MediaKind;
 }
 
 export interface Message {
@@ -44,6 +98,7 @@ export interface Message {
   externalId: string;
   /** null on inbound — only outbound messages have an authoring agent. */
   senderUserId: string | null;
+  /** For media messages: the caption (or empty). For text: the message body. */
   body: string;
   direction: MessageDirection;
   provider: ProviderName;
@@ -51,6 +106,22 @@ export interface Message {
   /** Original webhook payload kept verbatim for debugging. */
   rawPayload: Record<string, unknown>;
   timestamp: string;
+  /** Set when the message carries an attachment; absent for text-only. */
+  media?: MediaAttachment;
+  /** When this message is a quoted reply, the id of the original. */
+  replyToMessageId?: string | null;
+  /** Snapshot used by the bubble to render the quote block inline. */
+  replyTo?: ReplySnapshot | null;
+  // ----- Optimistic UI (client-side only — never persisted by the server) -----
+  /**
+   * Round-tripped through the API + socket emit so the client can match an
+   * optimistic bubble against its real counterpart and swap silently.
+   */
+  clientTempId?: string;
+  /** True while the bubble is awaiting server confirmation. */
+  pending?: boolean;
+  /** True when the optimistic send hit a network / 4xx error. */
+  failed?: boolean;
 }
 
 export interface InternalNote {
@@ -83,6 +154,51 @@ export interface ConversationWithRefs {
   assignedUser: User | null;
   messages: Message[];
   notes: InternalNote[];
+  /**
+   * Latest inbound timestamp across ALL of this contact's conversations.
+   * Used to drive the 24h customer-service window in the reply box. Null
+   * when the contact has never messaged us — only templates can be sent
+   * in that case (Meta Cloud API constraint).
+   */
+  lastInboundAt: string | null;
+}
+
+/** Patch shape accepted by `PATCH /api/contacts/[id]`. All fields optional. */
+export interface ContactPatch {
+  name?: string;
+  phoneNumber?: string;
+  email?: string | null;
+  location?: string | null;
+  /** Partial merge: keys with `null` value are removed, strings overwrite. */
+  customFields?: Record<string, string | null>;
+}
+
+/**
+ * One row in the /contacts list. Carries the latest non-closed conversation
+ * (when one exists) so the row can show "Open chat" vs "No thread yet"
+ * without an N+1 round-trip.
+ */
+export interface ContactListItem {
+  contact: Contact;
+  /** Latest non-closed conversation for this contact, if any. */
+  activeConversationId: string | null;
+  /** Most recent message timestamp across all conversations — for sorting / "last seen". */
+  lastMessageAt: string | null;
+  /**
+   * Most recent INBOUND message timestamp across all conversations
+   * (including closed). Used to compute the 24h customer-service window —
+   * outbound messages don't reset that clock.
+   */
+  lastInboundAt: string | null;
+}
+
+/**
+ * Generic keyset-paginated page. `nextCursor` is opaque to the client —
+ * it just round-trips it to the next request. `null` means no more pages.
+ */
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
 }
 
 /**

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronDown,
@@ -9,6 +9,7 @@ import {
   CircleDashed,
   Archive,
   Check,
+  Loader2,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -29,6 +30,7 @@ import type {
   ConversationWithRefs,
   InternalNote,
   Message,
+  ReplySnapshot,
   User,
 } from "@/lib/types";
 import { useConversationEvents } from "@/hooks/use-conversation-events";
@@ -46,17 +48,77 @@ export function MessageThread({
   data: initialData,
   teamMembers,
   currentUser,
+  nextOlderCursor,
 }: {
   data: ConversationWithRefs;
   teamMembers: User[];
   currentUser: User;
+  nextOlderCursor: string | null;
 }) {
-  const data = useConversationEvents(initialData);
+  const {
+    data,
+    hasMoreOlder,
+    loadingOlder,
+    loadOlder,
+    addOptimistic,
+    markOptimisticFailed,
+    removeOptimistic,
+  } = useConversationEvents(initialData, nextOlderCursor);
   const { conversation, contact, assignedUser, messages, notes } = data;
 
   const memberById = useMemo(() => {
     return new Map(teamMembers.map((u) => [u.id, u]));
   }, [teamMembers]);
+
+  // The 24h window is driven by the server-provided lastInboundAt — it's
+  // contact-level and may predate the loaded message slice.
+  const { lastInboundAt } = data;
+
+  // -------------------------------------------------------------------------
+  // Reply target — the message the composer's next send will quote. Lives in
+  // the thread (not the composer) because clicks come from message bubbles.
+  // -------------------------------------------------------------------------
+  const [replyTarget, setReplyTarget] = useState<ReplySnapshot | null>(null);
+
+  // Re-snapshot when the user changes conversation — the previous reply
+  // target belongs to the old thread.
+  useEffect(() => {
+    setReplyTarget(null);
+  }, [conversation.id]);
+
+  const beginReply = useCallback(
+    (msg: Message) => {
+      const senderName =
+        msg.direction === "out"
+          ? msg.senderUserId
+            ? memberById.get(msg.senderUserId)?.name ?? null
+            : null
+          : null;
+      setReplyTarget({
+        id: msg.id,
+        body: msg.body,
+        direction: msg.direction,
+        senderName,
+        ...(msg.media ? { mediaKind: msg.media.kind } : {}),
+      });
+    },
+    [memberById],
+  );
+
+  const cancelReply = useCallback(() => setReplyTarget(null), []);
+
+  const jumpToOriginal = useCallback((originalId: string) => {
+    const el = document.querySelector<HTMLElement>(
+      `[data-message-id="${originalId}"]`,
+    );
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Subtle flash so the user's eye lands on the right bubble.
+    el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
+    setTimeout(() => {
+      el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2");
+    }, 1500);
+  }, []);
 
   const { typingUserIds, notifyTyping, stopTyping } = useTyping(
     conversation.id,
@@ -73,13 +135,100 @@ export function MessageThread({
     );
   }, [messages, notes]);
 
-  // Auto-scroll to the latest entry when the timeline grows. Re-runs only on
-  // length change so a status update inside the visible window doesn't yank
-  // the scroll position.
+  // ---------------------------------------------------------------------
+  // Scroll behavior
+  // ---------------------------------------------------------------------
+  // Three rules:
+  //   1) On first mount of a thread, jump straight to the bottom (newest).
+  //   2) On a NEW timeline entry, only auto-scroll if the user is already
+  //      near the bottom — otherwise they're reading history and we
+  //      shouldn't yank them.
+  //   3) When older messages are prepended, hold the visual position so the
+  //      content the user was looking at stays under their eyes.
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRootRef = useRef<HTMLElement | null>(null);
+  const topSentinelRef = useRef<HTMLDivElement>(null);
+
+  // Find the actual scrolling element (Radix ScrollArea viewport) once.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [timeline.length]);
+    const el = bottomRef.current?.parentElement;
+    if (!el) return;
+    let root: HTMLElement | null = el;
+    while (root && root !== document.body) {
+      const o = getComputedStyle(root).overflowY;
+      if (o === "auto" || o === "scroll") break;
+      root = root.parentElement;
+    }
+    scrollRootRef.current = root;
+  }, []);
+
+  function isNearBottom(slack = 120): boolean {
+    const el = scrollRootRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < slack;
+  }
+
+  // (1) jump to bottom on conversation change.
+  const conversationId = conversation.id;
+  useLayoutEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [conversationId]);
+
+  // (2) auto-scroll on growth — only when user is at the bottom AND the
+  // newest entry was appended (not prepended via loadOlder). Track the id of
+  // the most-recent entry; when it changes, scroll.
+  const lastEntryIdRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const last = timeline.at(-1);
+    const lastId = last ? `${last.kind}_${last.data.id}` : null;
+    if (lastId !== lastEntryIdRef.current) {
+      const wasAtBottom = isNearBottom();
+      lastEntryIdRef.current = lastId;
+      if (wasAtBottom) {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      }
+    }
+  }, [timeline]);
+
+  // (3) infinite scroll up. When the top sentinel comes into view, fetch the
+  // next older page and preserve the visual position by re-anchoring after
+  // DOM mutation.
+  const pendingPreserveRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  useEffect(() => {
+    if (!hasMoreOlder) return;
+    const sentinel = topSentinelRef.current;
+    const root = scrollRootRef.current;
+    if (!sentinel || !root) return;
+
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        if (loadingOlder) return;
+        // Snapshot scroll geometry; restore after the prepend by adding the
+        // delta in scrollHeight.
+        pendingPreserveRef.current = {
+          scrollHeight: root.scrollHeight,
+          scrollTop: root.scrollTop,
+        };
+        void loadOlder().then((added) => {
+          if (added === 0) pendingPreserveRef.current = null;
+        });
+      },
+      { root, rootMargin: "100px" },
+    );
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [hasMoreOlder, loadingOlder, loadOlder]);
+
+  // Scroll preservation runs synchronously after the prepend has rendered.
+  useLayoutEffect(() => {
+    const pending = pendingPreserveRef.current;
+    const root = scrollRootRef.current;
+    if (!pending || !root) return;
+    const delta = root.scrollHeight - pending.scrollHeight;
+    if (delta > 0) root.scrollTop = pending.scrollTop + delta;
+    pendingPreserveRef.current = null;
+  }, [messages.length]);
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-background">
@@ -96,6 +245,26 @@ export function MessageThread({
 
       <ScrollArea className="flex-1">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-6 py-6">
+          {/* Top sentinel — IntersectionObserver target for "load older". */}
+          <div ref={topSentinelRef} className="h-px" />
+          {hasMoreOlder && (
+            <div className="flex items-center justify-center py-2 text-[11px] text-muted-foreground">
+              {loadingOlder ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader2 className="size-3 animate-spin" />
+                  Loading older messages…
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="hover:text-foreground"
+                  onClick={() => void loadOlder()}
+                >
+                  Load older messages
+                </button>
+              )}
+            </div>
+          )}
           {timeline.map((entry, idx) => {
             const prev = timeline[idx - 1];
             const showDay =
@@ -118,6 +287,8 @@ export function MessageThread({
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18, ease: "easeOut" }}
+                  data-message-id={entry.kind === "message" ? entry.data.id : undefined}
+                  className="rounded-2xl transition-shadow"
                 >
                   {entry.kind === "message" ? (
                     <MessageBubble
@@ -129,6 +300,8 @@ export function MessageThread({
                       }
                       contactName={contact.name}
                       contactSeed={contact.id}
+                      onReply={beginReply}
+                      onJumpToOriginal={jumpToOriginal}
                     />
                   ) : (
                     <InternalNoteCard
@@ -151,8 +324,16 @@ export function MessageThread({
 
       <ReplyBox
         conversationId={conversation.id}
+        currentUser={currentUser}
+        contactName={contact.name}
+        lastInboundAt={lastInboundAt}
+        replyTarget={replyTarget}
+        onCancelReply={cancelReply}
         onTyping={notifyTyping}
         onStopTyping={stopTyping}
+        onOptimistic={addOptimistic}
+        onOptimisticFail={markOptimisticFailed}
+        onOptimisticRetry={removeOptimistic}
       />
     </section>
   );

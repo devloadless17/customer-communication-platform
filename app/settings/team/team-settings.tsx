@@ -2,13 +2,20 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, UserPlus, UserX, UserCheck, ShieldAlert } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Loader2,
+  ShieldAlert,
+  UserCheck,
+  UserPlus,
+  UserX,
+} from "lucide-react";
 
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { initials } from "@/lib/utils";
 import {
   assignableRoles,
   canManageUsers,
@@ -16,6 +23,7 @@ import {
   roleLabel,
 } from "@/lib/permissions";
 import type { Role } from "@/lib/types";
+import { initials } from "@/lib/utils";
 
 export interface TeamUserRow {
   id: string;
@@ -24,6 +32,12 @@ export interface TeamUserRow {
   role: Role;
   deactivated: boolean;
   createdAt: string;
+}
+
+interface InviteResult {
+  url: string;
+  expiresAt: string;
+  email: string;
 }
 
 export function TeamSettings({
@@ -38,30 +52,36 @@ export function TeamSettings({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [lastInvite, setLastInvite] = useState<InviteResult | null>(null);
 
   const refresh = () => router.refresh();
   const canManage = canManageUsers(currentUserRole);
   const inviteRoles = useMemo(() => assignableRoles(currentUserRole), [currentUserRole]);
 
-  async function inviteUser(form: FormData) {
+  async function createInvite(form: FormData) {
     setError(null);
     const body = {
-      name: form.get("name"),
       email: form.get("email"),
       role: form.get("role") || "agent",
-      password: form.get("password"),
     };
-    const res = await fetch("/api/users", {
+    const res = await fetch("/api/invites", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to invite user");
-      return false;
+    const data = (await res.json().catch(() => ({}))) as {
+      invite?: { url: string; expiresAt: string };
+      error?: string;
+    };
+    if (!res.ok || !data.invite) {
+      setError(data.error ?? "Failed to create invite");
+      return null;
     }
-    return true;
+    return {
+      url: data.invite.url,
+      expiresAt: data.invite.expiresAt,
+      email: String(body.email),
+    } satisfies InviteResult;
   }
 
   async function patchUser(id: string, body: { role?: Role; deactivated?: boolean }) {
@@ -83,7 +103,7 @@ export function TeamSettings({
         <h1 className="text-xl font-semibold tracking-tight">Team</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {canManage
-            ? "Invite users, change roles, and disable accounts. New users sign in with the password you set here — they can change it from their account page."
+            ? "Generate an invite link for each teammate. They set their own password when they accept."
             : "Read-only view. Only admins can invite users or change roles."}
         </p>
       </div>
@@ -103,12 +123,17 @@ export function TeamSettings({
           pending={pending}
           onSubmit={(form) =>
             startTransition(async () => {
-              const ok = await inviteUser(form);
-              if (ok) refresh();
+              const result = await createInvite(form);
+              if (result) {
+                setLastInvite(result);
+                refresh();
+              }
             })
           }
         />
       )}
+
+      {lastInvite && <InviteLinkCard invite={lastInvite} onClose={() => setLastInvite(null)} />}
 
       <div className="rounded-xl border border-border">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -154,11 +179,7 @@ function UserRow({
   pending: boolean;
   onPatch: (body: { role?: Role; deactivated?: boolean }) => void;
 }) {
-  // Can the actor mutate this row at all?
   const editable = canManageUsers(actorRole) && canModifyUser(actorRole, user.role);
-  // Roles available in the per-row select. We always include the user's
-  // CURRENT role so the dropdown shows what they are even if the actor
-  // can't normally assign it (e.g. an admin viewing a superAdmin).
   const options = useMemo(() => {
     const set = new Set<Role>(assignableRoles(actorRole));
     set.add(user.role);
@@ -268,10 +289,9 @@ function InviteCard({
     >
       <div className="mb-4 flex items-center gap-2">
         <UserPlus className="size-4 text-primary" />
-        <div className="text-sm font-medium">Invite a new user</div>
+        <div className="text-sm font-medium">Invite a teammate</div>
       </div>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_160px]">
-        <Input name="name" placeholder="Full name" required />
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px_140px]">
         <Input name="email" type="email" placeholder="email@company.com" required />
         <select
           name="role"
@@ -284,23 +304,71 @@ function InviteCard({
             </option>
           ))}
         </select>
-      </div>
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_140px]">
-        <Input
-          name="password"
-          type="text"
-          placeholder="Temporary password (8+ chars)"
-          minLength={8}
-          required
-        />
         <Button type="submit" disabled={pending}>
           {pending ? <Loader2 className="size-4 animate-spin" /> : <UserPlus className="size-4" />}
-          Invite
+          Generate link
         </Button>
       </div>
       <p className="mt-2 text-[11px] text-muted-foreground">
-        Share the password securely. The user can change it from their account page after sign-in.
+        Re-inviting the same email replaces the previous link. Links expire after 7 days.
       </p>
     </form>
+  );
+}
+
+function InviteLinkCard({
+  invite,
+  onClose,
+}: {
+  invite: InviteResult;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(invite.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Older browsers / non-https — user can copy manually from the input.
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-primary/30 bg-primary/5 p-5">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-foreground">Invite ready</div>
+          <div className="mt-0.5 text-[11px] text-muted-foreground">
+            Share this link with <span className="font-medium">{invite.email}</span>. It expires{" "}
+            {new Date(invite.expiresAt).toLocaleDateString()}.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          Dismiss
+        </button>
+      </div>
+      <div className="flex gap-2">
+        <Input readOnly value={invite.url} className="font-mono text-xs" />
+        <Button type="button" variant="outline" onClick={copy}>
+          {copied ? (
+            <>
+              <Check className="size-3.5" />
+              Copied
+            </>
+          ) : (
+            <>
+              <Copy className="size-3.5" />
+              Copy
+            </>
+          )}
+        </Button>
+      </div>
+    </div>
   );
 }

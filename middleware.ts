@@ -21,15 +21,23 @@ const { auth } = NextAuth(authConfig);
 export default auth((req) => {
   const { pathname, search } = req.nextUrl;
 
-  const isPublicPage = pathname === "/login";
+  const isPublicPage =
+    pathname === "/login" ||
+    pathname === "/register" ||
+    pathname.startsWith("/invite/");
   const isPublicApi =
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/webhooks") ||
-    pathname.startsWith("/api/socket");
+    pathname.startsWith("/api/socket") ||
+    // Server actions for registration / invite acceptance run as POSTs to
+    // these page routes; auth() returns null until the action signs the user
+    // in, so the request must be allowed through unauth'd.
+    pathname === "/register" ||
+    pathname.startsWith("/invite/");
 
   if (isPublicPage || isPublicApi) {
-    // Bonus: if a signed-in user hits /login, bounce them to the inbox.
-    if (isPublicPage && req.auth) {
+    // Bonus: if a signed-in user hits /login or /register, bounce them home.
+    if (req.auth && (pathname === "/login" || pathname === "/register")) {
       return NextResponse.redirect(new URL("/inbox", req.url));
     }
     return NextResponse.next();

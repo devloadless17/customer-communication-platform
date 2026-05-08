@@ -38,6 +38,11 @@ export interface ServerToClientEvents {
     lastMessageAt: string;
     unreadDelta: number;
     newConversation?: ConversationWithRefs;
+    /**
+     * Echoed from the originating client so it can swap its optimistic bubble
+     * for this real one without flicker. Absent for inbound messages.
+     */
+    clientTempId?: string;
   }) => void;
 
   /** A message's delivery status changed (sent → delivered → read, or failed). */

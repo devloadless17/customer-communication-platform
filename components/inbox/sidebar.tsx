@@ -7,6 +7,7 @@ import {
   AtSign,
   UserPlus,
   CheckCircle2,
+  ContactRound,
   Settings,
   MessageSquareText,
   Users,
@@ -28,7 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { signOutAction } from "@/lib/actions/auth";
-import { canViewTeamSettings, roleLabel } from "@/lib/permissions";
+import { roleLabel } from "@/lib/permissions";
 import { closeClientSocket } from "@/lib/socket-client";
 import type { ConversationWithRefs, Team, User } from "@/lib/types";
 
@@ -52,6 +53,7 @@ const FILTERS: FilterDef[] = [
 export function Sidebar({
   currentUser,
   team,
+  teammates,
   conversations,
   filter,
   onFilterChange,
@@ -60,6 +62,7 @@ export function Sidebar({
 }: {
   currentUser: User;
   team: Team;
+  teammates: User[];
   conversations: ConversationWithRefs[];
   filter: FilterId;
   onFilterChange: (f: FilterId) => void;
@@ -76,18 +79,13 @@ export function Sidebar({
     } satisfies Record<FilterId, number>;
   }, [conversations, currentUser.id]);
 
-  const teammates = useMemo(() => {
-    const seen = new Set<string>();
-    const list: User[] = [currentUser];
-    seen.add(currentUser.id);
-    for (const { assignedUser } of conversations) {
-      if (assignedUser && !seen.has(assignedUser.id)) {
-        list.push(assignedUser);
-        seen.add(assignedUser.id);
-      }
-    }
-    return list;
-  }, [conversations, currentUser]);
+  // Pin current user first; alphabetical otherwise. Server already sorted by
+  // name, this just keeps "you" at the top so it's findable.
+  const orderedTeammates = useMemo(() => {
+    const me = teammates.find((u) => u.id === currentUser.id);
+    const others = teammates.filter((u) => u.id !== currentUser.id);
+    return me ? [me, ...others] : [currentUser, ...others];
+  }, [teammates, currentUser]);
 
   return (
     <aside className="flex h-full w-[240px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
@@ -144,11 +142,21 @@ export function Sidebar({
         })}
       </nav>
 
+      <nav className="mt-3 flex flex-col gap-0.5 px-2">
+        <Link
+          href="/contacts"
+          className="group flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <ContactRound className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
+          <span className="flex-1 text-left">Contacts</span>
+        </Link>
+      </nav>
+
       <div className="mt-6 px-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         Teammates
       </div>
       <div className="flex flex-col gap-0.5 px-2">
-        {teammates.map((u) => {
+        {orderedTeammates.map((u) => {
           const online = onlineUserIds.has(u.id);
           return (
             <div
@@ -219,14 +227,12 @@ function UserMenu({ currentUser }: { currentUser: User }) {
             Account
           </Link>
         </DropdownMenuItem>
-        {canViewTeamSettings(currentUser.role) && (
-          <DropdownMenuItem asChild>
-            <Link href="/settings/team">
-              <Users className="size-4 text-muted-foreground" />
-              Team
-            </Link>
-          </DropdownMenuItem>
-        )}
+        <DropdownMenuItem asChild>
+          <Link href="/settings/team">
+            <Users className="size-4 text-muted-foreground" />
+            Team
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={(e) => {

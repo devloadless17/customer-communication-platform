@@ -20,12 +20,16 @@ import { DevTools } from "./dev-tools";
 export function InboxShell({
   currentUser,
   team,
+  teammates,
   conversations: initialConversations,
+  nextConversationCursor,
   children,
 }: {
   currentUser: User;
   team: Team;
+  teammates: User[];
   conversations: ConversationWithRefs[];
+  nextConversationCursor: string | null;
   children: React.ReactNode;
 }) {
   const [filter, setFilter] = useState<FilterId>("all");
@@ -35,7 +39,12 @@ export function InboxShell({
   // Threading it into useTeamEvents lets us suppress the unread-bump for the
   // conversation the user is literally reading.
   const activeConversationId = useSelectedLayoutSegment();
-  const conversations = useTeamEvents(team.id, initialConversations, activeConversationId);
+  const { conversations, hasMore, loadingMore, loadMore } = useTeamEvents(
+    team.id,
+    initialConversations,
+    nextConversationCursor,
+    activeConversationId,
+  );
 
   const { connected } = useSocketStatus();
   const { onlineUserIds } = usePresence(team.id, currentUser.id);
@@ -62,6 +71,7 @@ export function InboxShell({
       <Sidebar
         currentUser={currentUser}
         team={team}
+        teammates={teammates}
         conversations={conversations}
         filter={filter}
         onFilterChange={setFilter}
@@ -75,6 +85,9 @@ export function InboxShell({
           filter={filter}
           search={search}
           onSearchChange={setSearch}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
+          onLoadMore={loadMore}
         />
         <main className="flex min-w-0 flex-1 border-l border-border bg-background">
           {children}

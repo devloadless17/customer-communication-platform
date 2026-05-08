@@ -1,8 +1,5 @@
-import { notFound } from "next/navigation";
-
 import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
-import { canViewTeamSettings } from "@/lib/permissions";
 import type { Role } from "@/lib/types";
 
 import { TeamSettings, type TeamUserRow } from "./team-settings";
@@ -11,7 +8,6 @@ export const metadata = { title: "Team · Settings" };
 
 export default async function TeamSettingsPage() {
   const { user, teamId } = await getSession();
-  if (!canViewTeamSettings(user.role)) notFound();
 
   const rows = await db.user.findMany({
     where: { teamId },

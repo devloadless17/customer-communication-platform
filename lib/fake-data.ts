@@ -56,16 +56,16 @@ function ago(minutes: number): string {
 // ---------------------------------------------------------------------------
 
 export const fakeContacts: Contact[] = [
-  { id: "c_amelia", teamId: TEAM_ID, phoneNumber: "+447911123456", name: "Amelia Carter" },
-  { id: "c_jamal", teamId: TEAM_ID, phoneNumber: "+201001234567", name: "Jamal El-Sayed" },
-  { id: "c_sven", teamId: TEAM_ID, phoneNumber: "+4915112345678", name: "Sven Rodriguez" },
-  { id: "c_priya", teamId: TEAM_ID, phoneNumber: "+919876543210", name: "Priya Nair" },
-  { id: "c_unknown", teamId: TEAM_ID, phoneNumber: "+13105550199", name: "+1 310 555 0199" },
-  { id: "c_marco", teamId: TEAM_ID, phoneNumber: "+393331234567", name: "Marco Bianchi" },
-  { id: "c_yuki", teamId: TEAM_ID, phoneNumber: "+819012345678", name: "Yuki Tanaka" },
-  { id: "c_brigitte", teamId: TEAM_ID, phoneNumber: "+33612345678", name: "Brigitte Laurent" },
-  { id: "c_kwame", teamId: TEAM_ID, phoneNumber: "+233244123456", name: "Kwame Osei" },
-  { id: "c_olivia", teamId: TEAM_ID, phoneNumber: "+61412345678", name: "Olivia Ng" },
+  { id: "c_amelia", teamId: TEAM_ID, phoneNumber: "+447911123456", name: "Amelia Carter", customFields: {}, source: "inbound" },
+  { id: "c_jamal", teamId: TEAM_ID, phoneNumber: "+201001234567", name: "Jamal El-Sayed", customFields: {}, source: "inbound" },
+  { id: "c_sven", teamId: TEAM_ID, phoneNumber: "+4915112345678", name: "Sven Rodriguez", customFields: {}, source: "inbound" },
+  { id: "c_priya", teamId: TEAM_ID, phoneNumber: "+919876543210", name: "Priya Nair", customFields: {}, source: "inbound" },
+  { id: "c_unknown", teamId: TEAM_ID, phoneNumber: "+13105550199", name: "+1 310 555 0199", customFields: {}, source: "inbound" },
+  { id: "c_marco", teamId: TEAM_ID, phoneNumber: "+393331234567", name: "Marco Bianchi", customFields: {}, source: "inbound" },
+  { id: "c_yuki", teamId: TEAM_ID, phoneNumber: "+819012345678", name: "Yuki Tanaka", customFields: {}, source: "inbound" },
+  { id: "c_brigitte", teamId: TEAM_ID, phoneNumber: "+33612345678", name: "Brigitte Laurent", customFields: {}, source: "inbound" },
+  { id: "c_kwame", teamId: TEAM_ID, phoneNumber: "+233244123456", name: "Kwame Osei", customFields: {}, source: "inbound" },
+  { id: "c_olivia", teamId: TEAM_ID, phoneNumber: "+61412345678", name: "Olivia Ng", customFields: {}, source: "inbound" },
 ];
 
 const contactById = new Map(fakeContacts.map((c) => [c.id, c]));
@@ -274,6 +274,14 @@ export const fakeNotes: InternalNote[] = built.flatMap((b) => b.notes);
 
 const builtById = new Map(built.map((b) => [b.conversation.id, b]));
 
+function lastInboundOf(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.direction === "in") return m.timestamp;
+  }
+  return null;
+}
+
 export function getConversationWithRefs(id: string): ConversationWithRefs | null {
   const b = builtById.get(id);
   if (!b) return null;
@@ -283,6 +291,7 @@ export function getConversationWithRefs(id: string): ConversationWithRefs | null
     assignedUser: getUser(b.conversation.assignedUserId),
     messages: b.messages,
     notes: b.notes,
+    lastInboundAt: lastInboundOf(b.messages),
   };
 }
 
@@ -294,6 +303,7 @@ export function listConversations(): ConversationWithRefs[] {
       assignedUser: getUser(b.conversation.assignedUserId),
       messages: b.messages,
       notes: b.notes,
+      lastInboundAt: lastInboundOf(b.messages),
     }))
     .sort(
       (a, b) =>

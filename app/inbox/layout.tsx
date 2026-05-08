@@ -2,24 +2,44 @@ import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
 import { listConversations } from "@/lib/queries";
 import { InboxShell } from "@/components/inbox/inbox-shell";
-import type { Team } from "@/lib/types";
+import type { Team, User } from "@/lib/types";
 
 /**
  * Server-rendered inbox layout. Fetches the current session, the team,
- * and all conversations once per navigation; passes them to the shell
- * for client-side state (filter/search) and child rendering.
- *
- * Slice 2 will layer Socket.io on top so this initial fetch becomes the
- * hydration point and live events keep it fresh.
+ * the team roster, and all conversations once per navigation; passes them
+ * to the shell for client-side state (filter/search) and child rendering.
  */
 export default async function InboxLayout({ children }: { children: React.ReactNode }) {
   const { user, teamId } = await getSession();
   const teamRow = await db.team.findUniqueOrThrow({ where: { id: teamId } });
   const team: Team = { id: teamRow.id, name: teamRow.name };
-  const conversations = await listConversations(teamId);
+
+  const [conversationsPage, memberRows] = await Promise.all([
+    listConversations(teamId),
+    db.user.findMany({
+      where: { teamId, deactivatedAt: null },
+      orderBy: { name: "asc" },
+      select: { id: true, teamId: true, role: true, name: true, email: true, avatarUrl: true },
+    }),
+  ]);
+
+  const teammates: User[] = memberRows.map((u) => ({
+    id: u.id,
+    teamId: u.teamId,
+    role: u.role,
+    name: u.name,
+    email: u.email,
+    avatarUrl: u.avatarUrl ?? undefined,
+  }));
 
   return (
-    <InboxShell currentUser={user} team={team} conversations={conversations}>
+    <InboxShell
+      currentUser={user}
+      team={team}
+      teammates={teammates}
+      conversations={conversationsPage.items}
+      nextConversationCursor={conversationsPage.nextCursor}
+    >
       {children}
     </InboxShell>
   );

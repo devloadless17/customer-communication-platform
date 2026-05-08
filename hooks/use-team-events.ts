@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
-import type { ConversationWithRefs } from "@/lib/types";
+import type { ConversationWithRefs, CursorPage } from "@/lib/types";
+
+export interface TeamEventsState {
+  conversations: ConversationWithRefs[];
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMore: () => void;
+}
 
 /**
  * Holds the list of conversations and folds in incremental Socket.io events
@@ -12,25 +19,57 @@ import type { ConversationWithRefs } from "@/lib/types";
  * Server-rendered initial state seeds the list — events from the team room
  * mutate that state in place.
  *
+ * Pagination: the server hands us page 1 (30 most recent) plus a cursor.
+ * `loadMore()` fetches the next page and appends it. New conversations from
+ * `message:new` are spliced at the TOP and never affect the cursor — keyset
+ * pagination, not offset.
+ *
  * `activeConversationId` is the thread the user is currently viewing. We use
- * it to skip the unread bump on inbound messages for that thread, so the
- * badge never flashes on a conversation you're literally reading. The thread
- * itself also POSTs mark-read, but that's a round-trip — this is the
- * zero-latency path.
+ * it to skip the unread bump on inbound messages for that thread.
  */
 export function useTeamEvents(
   teamId: string,
   initialConversations: ConversationWithRefs[],
+  initialNextCursor: string | null,
   activeConversationId: string | null = null,
-): ConversationWithRefs[] {
+): TeamEventsState {
   const [conversations, setConversations] =
     useState<ConversationWithRefs[]>(initialConversations);
+  const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Re-seed when the server hands us a different initial list (e.g. after
   // navigation to /inbox from another route).
   useEffect(() => {
     setConversations(initialConversations);
-  }, [initialConversations]);
+    setNextCursor(initialNextCursor);
+  }, [initialConversations, initialNextCursor]);
+
+  // loadMore is stable across renders — useCallback so the component can put
+  // it in an effect dep array without re-running on every paint.
+  const cursorRef = useRef(nextCursor);
+  useEffect(() => {
+    cursorRef.current = nextCursor;
+  }, [nextCursor]);
+
+  const loadMore = useCallback(() => {
+    const cursor = cursorRef.current;
+    if (!cursor) return;
+    setLoadingMore(true);
+    fetch(`/api/conversations?cursor=${encodeURIComponent(cursor)}`)
+      .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
+      .then((page) => {
+        if (!page) return;
+        setConversations((prev) => {
+          // Dedupe in case a realtime event already prepended one of these.
+          const seen = new Set(prev.map((c) => c.conversation.id));
+          const fresh = page.items.filter((c) => !seen.has(c.conversation.id));
+          return [...prev, ...fresh];
+        });
+        setNextCursor(page.nextCursor);
+      })
+      .finally(() => setLoadingMore(false));
+  }, []);
 
   // Mirror activeConversationId into a ref so the message:new handler reads
   // the latest value without re-subscribing on every navigation.
@@ -76,6 +115,11 @@ export function useTeamEvents(
             lastMessagePreview: preview,
             unreadCount: nextUnread,
           },
+          // Inbound messages reset the 24h customer-service window. The
+          // conversation list uses this for its window chip; outbound
+          // messages don't move the clock.
+          lastInboundAt:
+            message.direction === "in" ? lastMessageAt : existing.lastInboundAt,
         };
         // Re-sort by recency so the touched conversation jumps to the top.
         const next = [...prev];
@@ -144,5 +188,5 @@ export function useTeamEvents(
     };
   }, [teamId]);
 
-  return conversations;
+  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore };
 }
