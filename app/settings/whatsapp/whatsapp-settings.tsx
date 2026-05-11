@@ -53,6 +53,8 @@ export function WhatsappSettings({
       accessToken: form.get("accessToken"),
       appSecret: form.get("appSecret"),
       verifyToken: form.get("verifyToken") || undefined,
+      // Pass through even when empty so the server can clear a stale id.
+      wabaId: form.get("wabaId") ?? "",
     };
     const res = await fetch("/api/team/whatsapp", {
       method: "POST",
@@ -281,6 +283,13 @@ function ManualForm({
           required
           mono
           defaultValue={current.appSecret ?? ""}
+        />
+        <Field
+          name="wabaId"
+          label="WhatsApp Business Account ID (optional — needed for templates)"
+          placeholder="e.g. 102290016451234"
+          mono
+          defaultValue={current.wabaId ?? ""}
         />
         <Field
           name="verifyToken"

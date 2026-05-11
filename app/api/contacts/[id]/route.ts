@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
+import { deleteMedia } from "@/lib/media-storage";
+import { emitToTeam } from "@/lib/socket-server";
 import type { Contact } from "@/lib/types";
 
 /**
@@ -155,6 +157,77 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     console.error("[api/contacts/PATCH] failed", err);
     return NextResponse.json({ error: "update failed" }, { status: 500 });
   }
+}
+
+/**
+ * Delete a contact and everything that hangs off it. Schema cascades handle
+ * the row deletes (Conversation, Message, InternalNote, BroadcastRecipient,
+ * Tag join rows), but the message media files on disk are NOT covered by
+ * the FK cascade — we collect them first and best-effort unlink after the
+ * DB commits.
+ *
+ * Best-effort: a failed file unlink does NOT roll back the DB, since the
+ * caller wants the contact gone from their inbox even if disk cleanup hits
+ * a transient error. The orphaned bytes will be picked up by a future GC
+ * pass (not yet implemented — TODO when storage starts to matter).
+ */
+export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
+  const { id: contactId } = await ctx.params;
+
+  // Ownership check + media-path gather in a single round-trip. The
+  // `Conversation -> Message` chain is the only source of disk-backed
+  // artifacts attached to a contact.
+  const contact = await db.contact.findFirst({
+    where: { id: contactId, teamId },
+    select: {
+      id: true,
+      conversations: {
+        select: {
+          id: true,
+          messages: {
+            where: { mediaPath: { not: null } },
+            select: { mediaPath: true },
+          },
+        },
+      },
+    },
+  });
+
+  if (!contact) {
+    return NextResponse.json({ error: "contact not found" }, { status: 404 });
+  }
+
+  const mediaPaths = contact.conversations
+    .flatMap((c) => c.messages)
+    .map((m) => m.mediaPath)
+    .filter((p): p is string => Boolean(p));
+  // Snapshot conversation ids before the delete so we can fan out the
+  // socket events afterwards.
+  const conversationIds = contact.conversations.map((c) => c.id);
+
+  await db.contact.delete({ where: { id: contactId } });
+
+  // Best-effort disk cleanup. We log + swallow individual failures so one
+  // bad path doesn't strand the rest. Sequential rather than Promise.all to
+  // keep error logs tidy at low scale.
+  for (const p of mediaPaths) {
+    try {
+      await deleteMedia(p);
+    } catch (err) {
+      console.warn(`[api/contacts DELETE] media cleanup failed for ${p}`, err);
+    }
+  }
+
+  // Splice the rows out of every connected client's view.
+  for (const cid of conversationIds) {
+    emitToTeam(teamId, "conversation:deleted", { teamId, conversationId: cid });
+  }
+  emitToTeam(teamId, "contact:deleted", { teamId, contactId });
+
+  return NextResponse.json({ ok: true });
 }
 
 const INVALID = Symbol("invalid");

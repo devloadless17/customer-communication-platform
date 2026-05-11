@@ -42,6 +42,12 @@ export interface Contact {
   /** Bag of custom field values, keyed by field key. Always a string. */
   customFields: Record<string, string>;
   source: ContactSource;
+  /**
+   * Tags currently applied to this contact. Empty array when the contact has
+   * none. Tags themselves are listed in `/api/team/tags`; the strings here
+   * are just the tag ids — the UI joins against the catalog.
+   */
+  tagIds?: string[];
 }
 
 /**
@@ -58,7 +64,60 @@ export interface ContactFieldDefinition {
   order: number;
 }
 
+/**
+ * Named color slot for a Tag. Maps to a safelist of Tailwind classes in
+ * `lib/tag-colors.ts` — adding a new value here also needs an entry there
+ * or the chip falls back to the slate variant.
+ */
+export type TagColor =
+  | "slate"
+  | "rose"
+  | "amber"
+  | "emerald"
+  | "sky"
+  | "violet"
+  | "pink"
+  | "lime"
+  | "orange";
+
+export const TAG_COLORS: TagColor[] = [
+  "slate",
+  "rose",
+  "amber",
+  "emerald",
+  "sky",
+  "violet",
+  "pink",
+  "lime",
+  "orange",
+];
+
+export interface Tag {
+  id: string;
+  teamId: string;
+  name: string;
+  color: TagColor;
+}
+
 export type MediaKind = "image" | "video" | "audio" | "document" | "sticker";
+
+/**
+ * DTO returned by `/api/team/whatsapp/templates` for the picker UI. Lives
+ * here (not next to the route) so client components can import the type
+ * without a moduleresolution edge case pulling server-only deps along.
+ */
+export interface TemplateDto {
+  id: string;
+  externalId: string | null;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  bodyText: string;
+  // Loose typing — the picker narrows to TemplateComponent[] internally.
+  components: unknown[];
+  syncedAt: string;
+}
 
 export interface MediaAttachment {
   kind: MediaKind;

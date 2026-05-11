@@ -1,15 +1,24 @@
 "use client";
 
-import { StickyNote } from "lucide-react";
+import { StickyNote, Trash2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { formatMessageTime, initials } from "@/lib/utils";
 import type { InternalNote, User } from "@/lib/types";
 
-export function InternalNote({ note, author }: { note: InternalNote; author: User }) {
+export function InternalNote({
+  note,
+  author,
+  onDelete,
+}: {
+  note: InternalNote;
+  author: User;
+  /** Optional hover-action: pass to expose a delete button on the note. */
+  onDelete?: (noteId: string) => void;
+}) {
   return (
-    <div className="my-1 flex w-full justify-center">
-      <div className="w-full max-w-2xl rounded-lg border border-note-border bg-note-bg px-3.5 py-2.5 text-note-fg">
+    <div className="group my-1 flex w-full justify-center">
+      <div className="relative w-full max-w-2xl rounded-lg border border-note-border bg-note-bg px-3.5 py-2.5 text-note-fg">
         <div className="mb-1 flex items-center gap-2">
           <StickyNote className="size-3.5" />
           <span className="text-[11px] font-semibold uppercase tracking-wider">Internal note</span>
@@ -23,6 +32,17 @@ export function InternalNote({ note, author }: { note: InternalNote; author: Use
           </span>
         </div>
         <p className="text-sm leading-relaxed">{note.body}</p>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={() => onDelete(note.id)}
+            title="Delete this note"
+            className="absolute right-2 top-2 inline-flex size-6 cursor-pointer items-center justify-center rounded text-note-fg/60 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
+            aria-label="Delete note"
+          >
+            <Trash2 className="size-3" />
+          </button>
+        )}
       </div>
     </div>
   );

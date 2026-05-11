@@ -12,6 +12,8 @@
     "db:reset": "prisma migrate reset",
     "db:seed": "prisma db seed",
     "db:seed:long": "tsx scripts/seed-long-thread.ts",
+    "db:seed:closed": "tsx scripts/seed-closed-window-chats.ts",
+    "db:fix:phones": "tsx scripts/fix-phone-duplicates.ts",
     "db:studio": "prisma studio",
     "postinstall": "prisma generate"
   },

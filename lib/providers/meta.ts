@@ -6,9 +6,14 @@ import type {
   NormalizedInboundMessage,
   NormalizedMediaRef,
   NormalizedStatusUpdate,
+  ProviderTemplate,
   SendMediaArgs,
+  SendTemplateArgs,
   SendTextArgs,
   SendTextResult,
+  TemplateCategory,
+  TemplateComponent,
+  TemplateStatus,
   UploadMediaArgs,
   UploadMediaResult,
 } from "@/lib/providers/types";
@@ -141,7 +146,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
         for (const m of value.messages ?? []) {
           const externalId = m.id;
-          const phone = m.from;
+          // Meta's wa_id is digits-only by spec, but we strip non-digits
+          // defensively. The DB stores digits-only too (lib/phone.ts) so the
+          // contact lookup will hit on the inbound's first reply.
+          const phone = m.from ? m.from.replace(/\D/g, "") : undefined;
           if (!externalId || !phone) continue;
 
           const tsSecs = m.timestamp ? Number(m.timestamp) : NaN;
@@ -417,6 +425,124 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
     return { externalId, timestamp: new Date() };
   },
+
+  // -------------------------------------------------------------------------
+  // Templates: list approved templates + send a parameterized one.
+  //
+  // Meta's templates live at the WhatsApp Business Account level — not the
+  // phone number. That's why fetchTemplates requires wabaId in config; if it
+  // hasn't been pasted yet we throw a typed error so the route can render a
+  // helpful "add your WABA id in settings" message instead of a 500.
+  // -------------------------------------------------------------------------
+
+  async fetchTemplates(config: MetaSendConfig): Promise<ProviderTemplate[]> {
+    if (!config.wabaId) {
+      throw new MissingWabaIdError();
+    }
+
+    // Page through the catalog. Meta's default page size is 25; we crank it
+    // up because most teams have <100 templates total and one round-trip is
+    // strictly better than three.
+    const url = new URL(
+      `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
+    );
+    url.searchParams.set("fields", "name,language,status,category,components,id");
+    url.searchParams.set("limit", "200");
+
+    const results: ProviderTemplate[] = [];
+    let next: string | null = url.toString();
+    // Hard cap on follow-up pages: if a team has > 1000 templates something's
+    // wrong upstream, and pagination loops are the easy way to hang a server.
+    let pages = 0;
+
+    while (next && pages < 5) {
+      pages += 1;
+      const res = await fetch(next, {
+        headers: { authorization: `Bearer ${config.accessToken}` },
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new MetaSendError(
+          `meta fetchTemplates failed: ${res.status} ${text}`,
+          res.status,
+          text,
+        );
+      }
+      const json = (await res.json()) as {
+        data?: Array<MetaTemplateRow>;
+        paging?: { next?: string };
+      };
+      for (const row of json.data ?? []) {
+        const t = normalizeMetaTemplate(row);
+        if (t) results.push(t);
+      }
+      next = json.paging?.next ?? null;
+    }
+
+    return results;
+  },
+
+  async sendTemplate(
+    args: SendTemplateArgs,
+    config: MetaSendConfig,
+  ): Promise<SendTextResult> {
+    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+
+    // Build the `components` array Meta expects. Each parameterized component
+    // becomes one entry with `type` ("header" | "body" | "button") and a
+    // `parameters` array of `{ type: "text", text }`. Empty arrays are omitted
+    // entirely — sending an empty `parameters` triggers Meta error 132000.
+    const components: Array<Record<string, unknown>> = [];
+    if (args.variables.header && args.variables.header.length > 0) {
+      components.push({
+        type: "header",
+        parameters: [{ type: "text", text: args.variables.header }],
+      });
+    }
+    if (args.variables.body.length > 0) {
+      components.push({
+        type: "body",
+        parameters: args.variables.body.map((text) => ({ type: "text", text })),
+      });
+    }
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: args.to,
+        type: "template",
+        template: {
+          name: args.name,
+          language: { code: args.language },
+          ...(components.length > 0 ? { components } : {}),
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new MetaSendError(
+        `meta sendTemplate failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+
+    const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+    const externalId = json.messages?.[0]?.id;
+    if (!externalId) {
+      throw new Error(
+        `meta sendTemplate response missing message id: ${JSON.stringify(json)}`,
+      );
+    }
+    return { externalId, timestamp: new Date() };
+  },
 };
 
 export class MetaSendError extends Error {
@@ -428,4 +554,112 @@ export class MetaSendError extends Error {
     this.httpStatus = httpStatus;
     this.body = body;
   }
+}
+
+/**
+ * Thrown by fetchTemplates when the team hasn't pasted a WABA id yet. The
+ * templates route catches this and returns a 409 + actionable message
+ * pointing the admin at /settings/whatsapp.
+ */
+export class MissingWabaIdError extends Error {
+  constructor() {
+    super("WhatsApp Business Account id is not configured for this team");
+    this.name = "MissingWabaIdError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Template helpers — keep wire-shape parsing local to this file so the
+// provider interface stays Meta-agnostic.
+// ---------------------------------------------------------------------------
+
+interface MetaTemplateRow {
+  id?: string;
+  name?: string;
+  language?: string;
+  status?: string;
+  category?: string;
+  components?: TemplateComponent[];
+}
+
+function normalizeMetaTemplate(row: MetaTemplateRow): ProviderTemplate | null {
+  if (!row.name || !row.language) return null;
+  const status = mapTemplateStatus(row.status);
+  const category = mapTemplateCategory(row.category);
+  if (!status || !category) return null;
+  const components = Array.isArray(row.components) ? row.components : [];
+  const body = components.find((c) => c.type === "BODY");
+  return {
+    name: row.name,
+    language: row.language,
+    status,
+    category,
+    bodyText: body?.text ?? "",
+    components,
+    ...(row.id ? { externalId: row.id } : {}),
+  };
+}
+
+function mapTemplateStatus(s: string | undefined): TemplateStatus | null {
+  switch ((s ?? "").toUpperCase()) {
+    case "APPROVED":
+      return "approved";
+    case "PENDING":
+    case "IN_APPEAL":
+    case "PENDING_DELETION":
+      return "pending";
+    case "REJECTED":
+      return "rejected";
+    case "PAUSED":
+      return "paused";
+    case "DISABLED":
+    case "DELETED":
+      return "disabled";
+    default:
+      return null;
+  }
+}
+
+function mapTemplateCategory(c: string | undefined): TemplateCategory | null {
+  switch ((c ?? "").toUpperCase()) {
+    case "MARKETING":
+      return "marketing";
+    case "UTILITY":
+    case "TRANSACTIONAL":
+      return "utility";
+    case "AUTHENTICATION":
+      return "authentication";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Counts the highest `{{n}}` placeholder in a template body. Used by the UI
+ * picker and the send route to figure out how many variables an agent needs
+ * to fill in. Doesn't care about gaps — `"Hi {{1}}, see {{3}}"` returns 3,
+ * matching Meta's own rule (you must supply 1..N consecutively).
+ */
+export function countTemplatePlaceholders(text: string): number {
+  let max = 0;
+  const re = /\{\{(\d+)\}\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * Renders a preview string by replacing `{{n}}` with the provided values.
+ * Missing positions are left as `{{n}}` so the agent can spot which one
+ * they forgot before sending.
+ */
+export function renderTemplateBody(text: string, vars: string[]): string {
+  return text.replace(/\{\{(\d+)\}\}/g, (_match, idxStr) => {
+    const idx = Number(idxStr) - 1;
+    const v = vars[idx];
+    return v && v.length > 0 ? v : `{{${idxStr}}}`;
+  });
 }

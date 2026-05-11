@@ -29,6 +29,7 @@ interface Body {
   accessToken?: unknown;
   appSecret?: unknown;
   verifyToken?: unknown;
+  wabaId?: unknown;
 }
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
@@ -48,6 +49,10 @@ export async function POST(req: Request) {
   const accessToken = strField(raw.accessToken);
   const appSecret = strField(raw.appSecret);
   const providedVerifyToken = strField(raw.verifyToken);
+  // Optional at first connect — admin can paste it later when they want
+  // template features. Empty string means "clear it" so an admin can drop a
+  // wrong id without disconnecting the whole integration.
+  const wabaIdInput = raw.wabaId === undefined ? undefined : strField(raw.wabaId);
 
   if (!phoneNumberId || !accessToken || !appSecret) {
     return NextResponse.json(
@@ -98,8 +103,13 @@ export async function POST(req: Request) {
         metaAppSecret: appSecret,
         metaVerifyToken: verifyToken,
         metaDisplayPhoneNumber: displayNumber ?? null,
-        // metaWabaId is intentionally not set — fetched separately when
-        // template management lands.
+        // wabaId is supplied by the admin (from WhatsApp Manager) so we can
+        // hit `/{waba-id}/message_templates`. Passing the field at all means
+        // "update" — explicit empty string clears it; undefined leaves the
+        // current value intact.
+        ...(wabaIdInput === undefined
+          ? {}
+          : { metaWabaId: wabaIdInput || null }),
       },
     });
   } catch (err) {

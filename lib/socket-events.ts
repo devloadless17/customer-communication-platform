@@ -60,6 +60,13 @@ export interface ServerToClientEvents {
     note: InternalNote;
   }) => void;
 
+  /** A teammate deleted an internal note — splice it out of the thread. */
+  "note:deleted": (payload: {
+    teamId: string;
+    conversationId: string;
+    noteId: string;
+  }) => void;
+
   /** Assignment was changed (or cleared). */
   "conversation:assigned": (payload: {
     teamId: string;
@@ -72,6 +79,26 @@ export interface ServerToClientEvents {
     teamId: string;
     conversationId: string;
     status: ConversationStatus;
+  }) => void;
+
+  /**
+   * Conversation was hard-deleted by an agent. Every client splices it out
+   * of its list; an open detail view should bounce back to /inbox.
+   */
+  "conversation:deleted": (payload: {
+    teamId: string;
+    conversationId: string;
+  }) => void;
+
+  /**
+   * Contact was hard-deleted. All its conversations went with it via FK
+   * cascade — fire one event per affected conversation so existing
+   * conversation:deleted listeners drop them. Plus this one for the
+   * contacts page itself.
+   */
+  "contact:deleted": (payload: {
+    teamId: string;
+    contactId: string;
   }) => void;
 
   /**
@@ -103,6 +130,30 @@ export interface ServerToClientEvents {
   "typing:update": (payload: {
     conversationId: string;
     typingUserIds: string[];
+  }) => void;
+
+  /**
+   * Broadcast lifecycle: `queued` → `running` → `completed` | `failed`. Fired
+   * by the broadcast runner so the detail page can update without polling
+   * (polling is still in place as a fallback for clients off the socket).
+   */
+  "broadcast:status": (payload: {
+    teamId: string;
+    broadcastId: string;
+    status: "queued" | "running" | "completed" | "failed";
+    error?: string;
+  }) => void;
+
+  /**
+   * Per-send progress tick. Fired once per recipient send (success or fail)
+   * so the detail page can advance the progress bar in real time.
+   */
+  "broadcast:progress": (payload: {
+    teamId: string;
+    broadcastId: string;
+    sentCount: number;
+    failedCount: number;
+    totalCount: number;
   }) => void;
 }
 

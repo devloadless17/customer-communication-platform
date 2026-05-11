@@ -8,6 +8,11 @@ import {
   prettifyKey,
   uniquePerContactKey,
 } from "@/components/contacts/field-controls";
+import {
+  CountryCodePicker,
+  DEFAULT_COUNTRY_ISO,
+  findCountry,
+} from "@/components/contacts/country-code-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type {
@@ -48,6 +53,10 @@ export function NewContactDialog({
   onTeamWideFieldAdded: (def: ContactFieldDefinition) => void;
 }) {
   const [name, setName] = useState("");
+  // Phone is split into dial-code + local digits so the user doesn't have to
+  // remember country prefixes. Default to Lebanon — the pilot customer's
+  // market. The API still gets a single digits-only string at submit time.
+  const [countryIso, setCountryIso] = useState<string>(DEFAULT_COUNTRY_ISO);
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [location, setLocation] = useState("");
@@ -71,17 +80,26 @@ export function NewContactDialog({
 
   async function submit() {
     setError(null);
-    if (!phone.trim()) {
+    const localDigits = phone.replace(/\D/g, "");
+    if (!localDigits) {
       setError("Phone number is required");
       return;
     }
+    const country = findCountry(countryIso);
+    if (!country) {
+      setError("Please pick a country");
+      return;
+    }
+    // Concatenate dial code + local. Server normalises to digits-only and
+    // validates the 8-15 digit length (lib/phone.ts).
+    const fullNumber = `+${country.dial}${localDigits}`;
     setSubmitting(true);
     try {
       const res = await fetch("/api/contacts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          phoneNumber: phone,
+          phoneNumber: fullNumber,
           name: name || undefined,
           email: email || undefined,
           location: location || undefined,
@@ -155,14 +173,22 @@ export function NewContactDialog({
           className="space-y-3 p-4"
         >
           <Field label="Phone number" required>
-            <Input
-              ref={phoneRef}
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="+1 555 555 0100"
-              required
-              className="font-mono"
-            />
+            <div className="flex items-stretch gap-2">
+              <CountryCodePicker
+                value={countryIso}
+                onChange={setCountryIso}
+                disabled={submitting}
+              />
+              <Input
+                ref={phoneRef}
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="70 921 116"
+                inputMode="tel"
+                required
+                className="flex-1 font-mono"
+              />
+            </div>
           </Field>
           <Field label="Name">
             <Input
@@ -284,7 +310,10 @@ export function NewContactDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={submitting || !phone.trim()}>
+            <Button
+              type="submit"
+              disabled={submitting || phone.replace(/\D/g, "").length === 0}
+            >
               {submitting && <Loader2 className="size-3.5 animate-spin" />}
               Create contact
             </Button>

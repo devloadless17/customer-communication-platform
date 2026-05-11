@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
 import type { ConversationWithRefs, CursorPage, Message } from "@/lib/types";
@@ -41,6 +42,7 @@ export function useConversationEvents(
   initial: ConversationWithRefs,
   initialNextOlderCursor: string | null,
 ): ConversationEventsState {
+  const router = useRouter();
   const [data, setData] = useState<ConversationWithRefs>(initial);
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextOlderCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -222,12 +224,31 @@ export function useConversationEvents(
       );
     };
 
+    const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      setData((prev) => ({
+        ...prev,
+        notes: prev.notes.filter((n) => n.id !== payload.noteId),
+      }));
+    };
+
+    // The conversation we're viewing was deleted (by us, by a teammate, or as
+    // a side-effect of a contact delete). Bounce back to the inbox before the
+    // server-rendered detail page errors out on a missing row. router.replace
+    // (not push) keeps the back button useful.
+    const onConversationDeleted: Parameters<typeof socket.on<"conversation:deleted">>[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      router.replace("/inbox");
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("message:status", onMessageStatus);
     socket.on("note:new", onNoteNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
     socket.on("conversation:read", onRead);
+    socket.on("note:deleted", onNoteDeleted);
+    socket.on("conversation:deleted", onConversationDeleted);
 
     return () => {
       socket.emit("unsubscribe:conversation", { conversationId });
@@ -237,8 +258,10 @@ export function useConversationEvents(
       socket.off("conversation:assigned", onAssigned);
       socket.off("conversation:status", onStatus);
       socket.off("conversation:read", onRead);
+      socket.off("note:deleted", onNoteDeleted);
+      socket.off("conversation:deleted", onConversationDeleted);
     };
-  }, [conversationId, markRead]);
+  }, [conversationId, markRead, router]);
 
   // -------------------------------------------------------------------------
   // Optimistic helpers — exposed to ReplyBox so a click-to-send paints the

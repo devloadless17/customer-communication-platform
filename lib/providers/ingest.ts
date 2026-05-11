@@ -130,6 +130,14 @@ async function ingestInboundMessage(
     replySnapshot = await loadReplySnapshotByExternalId(evt.replyToExternalId);
   }
 
+  // Name policy: set on CREATE, sticky after.
+  //
+  // We used to refresh the name from Meta's wa profile on every inbound, but
+  // that clobbered names an agent had typed in manually ("Ahmad" got
+  // overwritten by the customer's WhatsApp display name "احمد م." or
+  // similar). The right semantic for a CRM-style inbox is: the agent owns
+  // the contact name; if Meta sends a profile name on first contact we use
+  // it as a sensible default, but subsequent profile changes don't override.
   const contact = await db.contact.upsert({
     where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
     create: {
@@ -138,8 +146,8 @@ async function ingestInboundMessage(
       name: evt.contactName ?? evt.contactPhone,
     },
     update: {
-      // Refresh display name only when we previously had nothing useful.
-      ...(evt.contactName ? { name: evt.contactName } : {}),
+      // Intentionally empty: do NOT touch the name. The agent's manually
+      // entered name (or the first-contact profile name) stays put.
     },
   });
 

@@ -175,16 +175,24 @@ export function useTeamEvents(
       );
     };
 
+    const onConversationDeleted: Parameters<typeof socket.on<"conversation:deleted">>[1] = ({
+      conversationId,
+    }) => {
+      setConversations((prev) => prev.filter((c) => c.conversation.id !== conversationId));
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
     socket.on("conversation:read", onRead);
+    socket.on("conversation:deleted", onConversationDeleted);
 
     return () => {
       socket.off("message:new", onMessageNew);
       socket.off("conversation:assigned", onAssigned);
       socket.off("conversation:status", onStatus);
       socket.off("conversation:read", onRead);
+      socket.off("conversation:deleted", onConversationDeleted);
     };
   }, [teamId]);
 

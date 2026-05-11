@@ -17,6 +17,13 @@ export interface MetaSendConfig {
   phoneNumberId: string;
   accessToken: string;
   graphVersion: string;
+  /**
+   * WhatsApp Business Account id. Required by the template catalog endpoint
+   * (`/{wabaId}/message_templates`) but NOT required for sending text/media/
+   * templates — those go through the phone-number-id. Optional here so the
+   * send routes can ignore it; the templates sync route enforces presence.
+   */
+  wabaId?: string;
 }
 
 export interface MetaWebhookConfig {
@@ -47,7 +54,11 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
 export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
   const team = await db.team.findUnique({
     where: { id: teamId },
-    select: { metaPhoneNumberId: true, metaAccessToken: true },
+    select: {
+      metaPhoneNumberId: true,
+      metaAccessToken: true,
+      metaWabaId: true,
+    },
   });
   if (!team) throw new ProviderNotConfiguredError(teamId, ["team-not-found"]);
   const missing: string[] = [];
@@ -58,6 +69,7 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
     phoneNumberId: team.metaPhoneNumberId!,
     accessToken: team.metaAccessToken!,
     graphVersion: DEFAULT_GRAPH_VERSION,
+    ...(team.metaWabaId ? { wabaId: team.metaWabaId } : {}),
   };
 }
 

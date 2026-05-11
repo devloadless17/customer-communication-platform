@@ -8,8 +8,10 @@ import {
   UserPlus,
   CheckCircle2,
   ContactRound,
+  Megaphone,
   Settings,
   MessageSquareText,
+  ShieldCheck,
   Users,
   LogOut,
   UserCircle2,
@@ -150,6 +152,22 @@ export function Sidebar({
           <ContactRound className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
           <span className="flex-1 text-left">Contacts</span>
         </Link>
+        <Link
+          href="/broadcasts"
+          className="group flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <Megaphone className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
+          <span className="flex-1 text-left">Broadcasts</span>
+        </Link>
+        {currentUser.role === "superAdmin" && (
+          <Link
+            href="/admin"
+            className="group mt-1 flex h-8 items-center gap-2.5 rounded-md border border-dashed border-amber-500/30 px-2.5 text-sm text-amber-700/80 transition-colors hover:bg-amber-500/10 hover:text-foreground dark:text-amber-300/80"
+          >
+            <ShieldCheck className="size-4 shrink-0 text-amber-500" />
+            <span className="flex-1 text-left">Platform admin</span>
+          </Link>
+        )}
       </nav>
 
       <div className="mt-6 px-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">

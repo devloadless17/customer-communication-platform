@@ -49,6 +49,43 @@ enum ProviderName {
   meta_cloud
 }
 
+// Mirrors Meta's template review states. We cache every status so admins can
+// see "pending" rows and understand why a template they just submitted isn't
+// sendable yet — only `approved` rows are actually allowed through to send.
+enum TemplateStatus {
+  approved
+  pending
+  rejected
+  paused
+  disabled
+}
+
+enum TemplateCategory {
+  marketing
+  utility
+  authentication
+}
+
+// Lifecycle of a template broadcast.
+//   queued    — created but the runner hasn't started yet (rare; created+started
+//               are usually back-to-back inside the same POST).
+//   running   — runner is iterating recipients.
+//   completed — runner finished. `failedCount > 0` is possible (per-recipient
+//               failures don't fail the whole job).
+//   failed    — runner errored fatally (e.g. config disappeared mid-flight).
+enum BroadcastStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+enum BroadcastRecipientStatus {
+  queued
+  sent
+  failed
+}
+
 // Why a contact exists in our DB.
 //   - inbound: created by a webhook ingest (a customer messaged us).
 //   - manual: created by an agent — through the New Contact dialog or a CSV
@@ -88,6 +125,10 @@ model Team {
   messages                Message[]
   invites                 Invite[]
   contactFieldDefinitions ContactFieldDefinition[]
+  messageTemplates        MessageTemplate[]
+  broadcasts              Broadcast[]
+  tags                    Tag[]
+  audienceGroups          AudienceGroup[]
 }
 
 model User {
@@ -103,11 +144,13 @@ model User {
   deactivatedAt DateTime?
   createdAt     DateTime  @default(now())
 
-  team           Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  authoredMsgs   Message[]      @relation("AuthoredMessages")
-  authoredNotes  InternalNote[]
-  assignedConvos Conversation[] @relation("AssignedConversations")
-  createdInvites Invite[]       @relation("InvitedBy")
+  team              Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  authoredMsgs      Message[]       @relation("AuthoredMessages")
+  authoredNotes     InternalNote[]
+  assignedConvos    Conversation[]  @relation("AssignedConversations")
+  createdInvites    Invite[]        @relation("InvitedBy")
+  createdBroadcasts Broadcast[]     @relation("CreatedBroadcasts")
+  createdAudienceGroups AudienceGroup[] @relation("CreatedAudienceGroups")
 
   @@index([teamId])
 }
@@ -133,8 +176,15 @@ model Contact {
   source       ContactSource @default(inbound)
   createdAt    DateTime      @default(now())
 
-  team          Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  conversations Conversation[]
+  team               Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversations      Conversation[]
+  broadcastRecipients BroadcastRecipient[]
+  // Many-to-many: an agent tags a contact with one or more labels for
+  // segmentation. Implicit join table — Prisma manages the link rows.
+  tags               Tag[]
+  // M2M with saved audience groups via manual membership. Dynamic membership
+  // (by tag) doesn't materialize here — it's resolved at send time.
+  audienceGroups     AudienceGroup[] @relation("AudienceGroupContacts")
 
   // A phone number is unique within a team, but the same number can exist across tenants.
   @@unique([teamId, phoneNumber])
@@ -252,6 +302,173 @@ model Invite {
   createdBy User @relation("InvitedBy", fields: [createdById], references: [id], onDelete: Cascade)
 
   @@index([teamId, email])
+}
+
+// Cached snapshot of a WhatsApp message template registered on the team's
+// WABA. We sync from Meta on demand (admin clicks "Refresh templates" in the
+// settings page, or the picker opens with a stale-than-5-min cache) and store
+// the full component tree as JSON so the picker can render the same preview
+// the customer will see — header (text/media), body with {{n}} placeholders,
+// footer, and buttons.
+//
+// `externalId` is Meta's template id; we keep `(teamId, name, language)` as
+// the natural key since the same template can have multiple language variants
+// under a single name. Updating a template in WhatsApp Manager bumps Meta's
+// id — the sync upserts by the natural key so the cached row tracks the
+// latest version.
+model MessageTemplate {
+  id          String           @id @default(cuid())
+  teamId      String
+  externalId  String?
+  name        String
+  language    String
+  category    TemplateCategory
+  status      TemplateStatus
+  // Body text with `{{1}}, {{2}}, …` placeholders. Denormalized from components
+  // for cheap previews / search; the canonical source is `components`.
+  bodyText    String           @default("")
+  // Full components array as Meta returned it. Schema:
+  //   [{ type: "HEADER" | "BODY" | "FOOTER" | "BUTTONS", format?, text?, buttons? }]
+  components  Json
+  syncedAt    DateTime         @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, name, language])
+  @@index([teamId, status])
+}
+
+// Free-form label applied to contacts for segmentation ("VIP", "Ramadan
+// buyers", "Women clients", …). Many-to-many with Contact — a contact can
+// carry any number of tags, a tag is reused across many contacts.
+//
+// `color` is a named slot ("slate", "rose", "amber", …) NOT a hex, so the UI
+// can map to a safelist of Tailwind classes without dynamic class strings.
+model Tag {
+  id        String   @id @default(cuid())
+  teamId    String
+  name      String
+  color     String   @default("slate")
+  createdAt DateTime @default(now())
+
+  team     Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contacts Contact[]
+  // M2M with audience groups built off a tag-based filter. A group with tags
+  // = "ramadan, women" includes the union of contacts carrying any of them.
+  audienceGroups AudienceGroup[] @relation("AudienceGroupTags")
+
+  @@unique([teamId, name])
+  @@index([teamId])
+}
+
+// Saved audience for broadcasts. Hybrid composition:
+//   - `tags`     → dynamic: every contact with ANY of these tags is in the
+//                  group at resolution time.
+//   - `contacts` → manual: these specific contacts are always in the group,
+//                  even if their tags change later.
+// Members at send time = union of both. Empty `tags` + empty `contacts` is
+// a valid but empty group (the broadcast wizard will reject it).
+//
+// Inspired by Front / Intercom segments. Static (snapshot-at-send) — when
+// the agent triggers a broadcast that targets a group, the runner resolves
+// the current member set ONCE and writes it into BroadcastRecipient. New
+// contacts that match the criteria afterwards don't join the in-flight job.
+model AudienceGroup {
+  id          String   @id @default(cuid())
+  teamId      String
+  name        String
+  description String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User      @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: Cascade)
+  tags      Tag[]     @relation("AudienceGroupTags")
+  contacts  Contact[] @relation("AudienceGroupContacts")
+
+  @@unique([teamId, name])
+  @@index([teamId])
+}
+
+// A batch template send to many recipients in one go. Inspired by Front /
+// Intercom broadcasts. Variables are SAME-FOR-ALL in v1 — per-recipient
+// personalization (CSV upload) is a later add-on.
+//
+// `template*` fields are SNAPSHOTTED at creation, not foreign keys. If the
+// admin re-syncs templates from Meta and the template gets renamed or its
+// body changes mid-broadcast, this row keeps the version that was actually
+// sent. We do keep `templateId` for ergonomic linkage in the UI.
+model Broadcast {
+  id                String          @id @default(cuid())
+  teamId            String
+  createdById       String
+  status            BroadcastStatus @default(queued)
+  // Snapshot of the template at send time.
+  templateId        String
+  templateName      String
+  templateLanguage  String
+  // The values the agent filled into {{1}}, {{2}}, … (and optional header).
+  // Schema: { body: string[], header?: string }
+  variables         Json
+  // Audience picker mode the agent chose at creation.
+  //   "all"       — every team contact at the moment of creation.
+  //   "selected"  — the recipient list was hand-picked.
+  //   "by_tag"    — `audienceTagIds` were resolved to the recipient list at
+  //                 the moment of creation (snapshot). A contact re-tagged
+  //                 later does NOT get added to an in-flight broadcast.
+  audienceMode      String
+  // Tag ids the agent originally selected (mode = by_tag). Kept for the
+  // detail page so the audit trail can show "Sent to VIP, Ramadan buyers"
+  // even after the tag is renamed.
+  audienceTagIds    String[]        @default([])
+  // Group used when mode = "group". Held as a soft reference (just the id +
+  // a denormalized name) — no FK because we never want to cascade-delete a
+  // broadcast's audit trail when the group gets removed.
+  audienceGroupId   String?
+  audienceGroupName String?
+  // Counters live on the parent for cheap progress reads — derived from
+  // BroadcastRecipient.status, kept in sync by the runner.
+  totalCount        Int             @default(0)
+  sentCount         Int             @default(0)
+  failedCount       Int             @default(0)
+  // Free-form last-error captured if the whole runner crashed (not per-
+  // recipient errors, those live on the BroadcastRecipient row).
+  lastError         String?
+  createdAt         DateTime        @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  team       Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy  User                 @relation("CreatedBroadcasts", fields: [createdById], references: [id], onDelete: Cascade)
+  recipients BroadcastRecipient[]
+
+  @@index([teamId, createdAt(sort: Desc)])
+  @@index([teamId, status])
+}
+
+model BroadcastRecipient {
+  id             String                   @id @default(cuid())
+  broadcastId    String
+  contactId      String
+  // Set after the runner picks/creates a conversation for this recipient so
+  // the message lands in the existing thread (matches the inbox rules).
+  conversationId String?
+  status         BroadcastRecipientStatus @default(queued)
+  // Meta wamid of the sent message — links back to the Message row.
+  externalId     String?
+  // Per-recipient error body, kept compact for the UI table.
+  errorMessage   String?
+  sentAt         DateTime?
+
+  broadcast Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  // Each contact appears at most once per broadcast — dedupe in the audience
+  // picker, but enforce here too so the runner can re-run idempotently.
+  @@unique([broadcastId, contactId])
+  @@index([broadcastId, status])
+  @@index([contactId])
 }
 
 model InternalNote {

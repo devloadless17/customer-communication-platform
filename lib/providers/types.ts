@@ -115,6 +115,83 @@ export interface FetchedMedia {
   filename?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Templates — required to send outbound outside the 24h customer-service
+// window (free-form messages get rejected by Meta with error 131047). The
+// provider abstraction owns both the fetch (sync from Meta) and the send.
+// ---------------------------------------------------------------------------
+
+export type TemplateStatus =
+  | "approved"
+  | "pending"
+  | "rejected"
+  | "paused"
+  | "disabled";
+export type TemplateCategory = "marketing" | "utility" | "authentication";
+
+/**
+ * One component of a template definition as returned by Meta's
+ * `/{waba-id}/message_templates` endpoint. We keep the shape close to wire
+ * format so the UI preview and the send-time parameter builder share a single
+ * source of truth.
+ */
+export interface TemplateComponent {
+  type: "HEADER" | "BODY" | "FOOTER" | "BUTTONS";
+  format?: "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | "LOCATION";
+  text?: string;
+  example?: {
+    header_text?: string[];
+    body_text?: string[][];
+    header_handle?: string[];
+  };
+  buttons?: Array<{
+    type: "QUICK_REPLY" | "URL" | "PHONE_NUMBER" | "COPY_CODE";
+    text: string;
+    url?: string;
+    phone_number?: string;
+    example?: string[];
+  }>;
+}
+
+/**
+ * Snapshot of a template the provider knows about. `bodyText` is denormalized
+ * for cheap previews; `components` is the canonical source used at send time
+ * to derive the parameter shape.
+ */
+export interface ProviderTemplate {
+  externalId?: string;
+  name: string;
+  language: string;
+  category: TemplateCategory;
+  status: TemplateStatus;
+  bodyText: string;
+  components: TemplateComponent[];
+}
+
+/**
+ * One parameter substitution for a template send. The provider builds the
+ * wire payload from this — for Meta that means a `parameters` array of
+ * `{ type: "text", text: <value> }` entries.
+ *
+ * Header parameters are positional too — Meta requires header values in their
+ * own `header` component entry, separate from body. Buttons with URL/COPY_CODE
+ * substitutions also have their own component entries; we don't support those
+ * yet (TODO: dynamic button URLs).
+ */
+export interface TemplateVariableSet {
+  /** Body `{{1}}, {{2}}, …` values in order. Empty array when body has no vars. */
+  body: string[];
+  /** Header `{{1}}` value when the header is TEXT with a placeholder. */
+  header?: string;
+}
+
+export interface SendTemplateArgs {
+  to: string;
+  name: string;
+  language: string;
+  variables: TemplateVariableSet;
+}
+
 /**
  * Per-team config the provider needs at send/read time. Generic so each
  * provider declares its own shape; today only Meta exists. The ingest /
@@ -133,6 +210,18 @@ export interface MessagingProvider<SendConfig = unknown> {
   /** Outbound media — caller uploads first, then sends with the returned id. */
   uploadMedia?(args: UploadMediaArgs, config: SendConfig): Promise<UploadMediaResult>;
   sendMedia?(args: SendMediaArgs, config: SendConfig): Promise<SendTextResult>;
+  /**
+   * Outbound template — the only legal send shape outside the 24h customer-
+   * service window. Caller is responsible for picking a template the team
+   * actually has approved on its WABA; provider only validates wire format.
+   */
+  sendTemplate?(args: SendTemplateArgs, config: SendConfig): Promise<SendTextResult>;
+  /**
+   * Pull the team's approved templates from the provider. Used to refresh
+   * the local cache the picker reads. Optional — providers without a
+   * template catalog (or that don't expose one) leave this off.
+   */
+  fetchTemplates?(config: SendConfig): Promise<ProviderTemplate[]>;
   /** Inbound media: download a file by provider-side id. */
   fetchMedia?(externalMediaId: string, config: SendConfig): Promise<FetchedMedia>;
   /**

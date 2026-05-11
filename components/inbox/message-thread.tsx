@@ -10,7 +10,9 @@ import {
   Archive,
   Check,
   Loader2,
+  Trash2,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -120,6 +122,14 @@ export function MessageThread({
     }, 1500);
   }, []);
 
+  const deleteNote = useCallback(async (noteId: string) => {
+    if (!confirm("Delete this internal note?")) return;
+    const res = await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
+    if (!res.ok) {
+      alert("Failed to delete note");
+    }
+  }, []);
+
   const { typingUserIds, notifyTyping, stopTyping } = useTyping(
     conversation.id,
     currentUser.id,
@@ -193,6 +203,16 @@ export function MessageThread({
   // (3) infinite scroll up. When the top sentinel comes into view, fetch the
   // next older page and preserve the visual position by re-anchoring after
   // DOM mutation.
+  //
+  // IMPORTANT: do NOT add `loadingOlder` to the dep array. When that flag
+  // toggles, the effect would tear down the observer and create a new one —
+  // and IntersectionObserver synchronously fires its callback once for each
+  // observed target's current state when observe() is called. With the 100px
+  // rootMargin the sentinel often re-qualifies as "intersecting" right after
+  // the prepend, which would cascade into back-to-back page fetches and pull
+  // the entire history at once. `loadOlder` already self-guards against
+  // overlapping calls via inFlightOlder, so we only need this effect to
+  // re-run when the conversation or hasMoreOlder changes.
   const pendingPreserveRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   useEffect(() => {
     if (!hasMoreOlder) return;
@@ -203,7 +223,6 @@ export function MessageThread({
     const obs = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
-        if (loadingOlder) return;
         // Snapshot scroll geometry; restore after the prepend by adding the
         // delta in scrollHeight.
         pendingPreserveRef.current = {
@@ -218,7 +237,7 @@ export function MessageThread({
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
-  }, [hasMoreOlder, loadingOlder, loadOlder]);
+  }, [hasMoreOlder, loadOlder]);
 
   // Scroll preservation runs synchronously after the prepend has rendered.
   useLayoutEffect(() => {
@@ -307,6 +326,7 @@ export function MessageThread({
                     <InternalNoteCard
                       note={entry.data}
                       author={memberById.get(entry.data.authorUserId) ?? unknownAuthor(entry.data.authorUserId)}
+                      onDelete={deleteNote}
                     />
                   )}
                 </motion.div>
@@ -460,11 +480,80 @@ function ThreadHeader({
           teamMembers={teamMembers}
         />
         <StatusDropdown conversationId={conversationId} current={status} />
-        <Button variant="ghost" size="icon" className="size-8">
-          <MoreHorizontal className="size-4" />
-        </Button>
+        <ConversationMenu
+          conversationId={conversationId}
+          contactName={contactName}
+        />
       </div>
     </header>
+  );
+}
+
+function ConversationMenu({
+  conversationId,
+  contactName,
+}: {
+  conversationId: string;
+  contactName: string;
+}) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+
+  async function deleteConversation() {
+    if (
+      !confirm(
+        `Delete this chat with "${contactName}"? Removes all messages and notes from this thread. The contact stays. Can't be undone.`,
+      )
+    ) {
+      return;
+    }
+    setPending(true);
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        alert("Failed to delete chat");
+        return;
+      }
+      router.push("/inbox");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          aria-label="Conversation actions"
+          disabled={pending}
+        >
+          {pending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <MoreHorizontal className="size-4" />
+          )}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuLabel>Chat actions</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={(e) => {
+            e.preventDefault();
+            void deleteConversation();
+          }}
+          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+        >
+          <Trash2 className="size-3.5" />
+          Delete chat
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

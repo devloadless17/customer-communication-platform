@@ -1,25 +1,22 @@
 /**
- * E.164-ish phone normalization. We don't pull in libphonenumber for MVP —
- * Meta itself doesn't validate against a country DB at the API layer; it
- * accepts a leading-`+`-then-digits string and routes by it. We mirror that:
+ * Phone normalization for storage. Returns a digits-only string (no `+`,
+ * no spaces, no formatting) that matches Meta's wa_id wire format exactly.
  *
- *  - Strip everything except digits and the leading `+`
- *  - Require a leading `+` followed by 8-15 digits (E.164's max is 15)
+ * Why digits-only and not `+`-prefixed E.164:
+ *   - Meta's webhook delivers `from` / `wa_id` as digits only ("96170921116")
+ *   - Meta's send endpoint accepts both formats
+ *   - Storing digits-only keeps manual-create, CSV import, and webhook ingest
+ *     in lockstep — otherwise the same contact gets created twice (a manual
+ *     "+96170921116" and an inbound "96170921116") and replies open a new
+ *     chat instead of landing in the original thread.
  *
- * If the user types without `+`, we add it — friendlier than rejecting
- * "+1 555 555 0100" vs "1 555 555 0100" inputs that mean the same thing.
+ * Validation: 8-15 digits (E.164's range). Anything else returns null.
  *
- * Returns null on values that can't possibly be a phone number.
+ * The function name keeps "E164" for historical reasons; the canonical form
+ * we store IS E.164 minus the cosmetic `+`.
  */
 export function normalizePhoneE164(raw: string): string | null {
-  const stripped = raw.replace(/[^\d+]/g, "");
-  if (!stripped) return null;
-  // Drop any `+` past the first character — pasted strings sometimes carry
-  // a stray ++ from copy-paste or formatting.
-  const withPlus = stripped.startsWith("+")
-    ? "+" + stripped.slice(1).replace(/\+/g, "")
-    : "+" + stripped.replace(/\+/g, "");
-  const digits = withPlus.slice(1);
+  const digits = raw.replace(/\D/g, "");
   if (digits.length < 8 || digits.length > 15) return null;
-  return withPlus;
+  return digits;
 }

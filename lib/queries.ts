@@ -296,7 +296,7 @@ export async function getConversationWithRefs(
   const row = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
     include: {
-      contact: true,
+      contact: { include: { tags: { select: { id: true } } } },
       assignedUser: true,
       // +1 to detect "more older exists" without a count query.
       messages: {
@@ -331,7 +331,10 @@ export async function getConversationWithRefs(
   return {
     data: {
       conversation: mapConversation(row),
-      contact: mapContact(row.contact),
+      contact: {
+        ...mapContact(row.contact),
+        tagIds: row.contact.tags.map((t) => t.id),
+      },
       assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
       messages: messagesAsc.map(mapMessage),
       notes: row.notes.map(mapNote),
@@ -591,6 +594,21 @@ export async function listContacts(
         })
       : null;
 
+  // Fetch tag links for this page in one go. We don't need the tag rows
+  // themselves here — the UI passes the catalog separately — so this is a
+  // single GROUP BY on the implicit join table. Empty page → no query.
+  const tagIdsByContact = new Map<string, string[]>();
+  if (sliced.length > 0) {
+    const ids = sliced.map((r) => r.id);
+    const links = await db.contact.findMany({
+      where: { teamId, id: { in: ids } },
+      select: { id: true, tags: { select: { id: true } } },
+    });
+    for (const c of links) {
+      tagIdsByContact.set(c.id, c.tags.map((t) => t.id));
+    }
+  }
+
   const items: ContactListItem[] = sliced.map((r) => ({
     contact: {
       id: r.id,
@@ -602,6 +620,7 @@ export async function listContacts(
       location: r.location ?? undefined,
       customFields: normalizeCustomFields(r.customFields),
       source: r.source,
+      tagIds: tagIdsByContact.get(r.id) ?? [],
     },
     activeConversationId: r.activeConversationId,
     lastMessageAt: r.lastMessageAt ? r.lastMessageAt.toISOString() : null,
@@ -650,5 +669,291 @@ export async function listContactFieldDefinitions(
     key: r.key,
     label: r.label,
     order: r.order,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// superAdmin: cross-team browsing. These queries are the ONLY ones that
+// legitimately ignore the team scope — all callers must be gated through
+// requireSuperAdmin in auth-helpers.
+// ---------------------------------------------------------------------------
+
+export interface SuperAdminTeamRow {
+  id: string;
+  name: string;
+  createdAt: string;
+  whatsappConnected: boolean;
+  whatsappDisplayNumber: string | null;
+  userCount: number;
+  contactCount: number;
+  conversationCount: number;
+  messageCount: number;
+  broadcastCount: number;
+}
+
+/**
+ * Every team on the platform with aggregate counts. Built from one query
+ * per aggregate — fine at low team-count (single-VPS pilot). At >100 teams
+ * we'd swap to a single SQL query with LATERAL joins; not worth it yet.
+ */
+export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> {
+  const teams = await db.team.findMany({
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      metaPhoneNumberId: true,
+      metaDisplayPhoneNumber: true,
+      _count: {
+        select: {
+          users: true,
+          contacts: true,
+          conversations: true,
+          messages: true,
+          broadcasts: true,
+        },
+      },
+    },
+  });
+  return teams.map((t) => ({
+    id: t.id,
+    name: t.name,
+    createdAt: t.createdAt.toISOString(),
+    whatsappConnected: Boolean(t.metaPhoneNumberId),
+    whatsappDisplayNumber: t.metaDisplayPhoneNumber ?? null,
+    userCount: t._count.users,
+    contactCount: t._count.contacts,
+    conversationCount: t._count.conversations,
+    messageCount: t._count.messages,
+    broadcastCount: t._count.broadcasts,
+  }));
+}
+
+export interface SuperAdminTeamDetail {
+  team: SuperAdminTeamRow;
+  members: Array<{
+    id: string;
+    name: string;
+    email: string;
+    role: import("@/lib/types").Role;
+    deactivatedAt: string | null;
+    createdAt: string;
+  }>;
+}
+
+export async function getTeamDetailForSuperAdmin(
+  teamId: string,
+): Promise<SuperAdminTeamDetail | null> {
+  const team = await db.team.findUnique({
+    where: { id: teamId },
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      metaPhoneNumberId: true,
+      metaDisplayPhoneNumber: true,
+      _count: {
+        select: {
+          users: true,
+          contacts: true,
+          conversations: true,
+          messages: true,
+          broadcasts: true,
+        },
+      },
+    },
+  });
+  if (!team) return null;
+
+  // Members only. Conversations are intentionally NOT fetched here —
+  // superAdmin's visibility ends at aggregate counts + the member roster,
+  // never at message bodies or contact names. Customer chats stay private
+  // to each team.
+  const members = await db.user.findMany({
+    where: { teamId },
+    orderBy: [{ role: "asc" }, { name: "asc" }],
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      deactivatedAt: true,
+      createdAt: true,
+    },
+  });
+
+  return {
+    team: {
+      id: team.id,
+      name: team.name,
+      createdAt: team.createdAt.toISOString(),
+      whatsappConnected: Boolean(team.metaPhoneNumberId),
+      whatsappDisplayNumber: team.metaDisplayPhoneNumber ?? null,
+      userCount: team._count.users,
+      contactCount: team._count.contacts,
+      conversationCount: team._count.conversations,
+      messageCount: team._count.messages,
+      broadcastCount: team._count.broadcasts,
+    },
+    members: members.map((m) => ({
+      id: m.id,
+      name: m.name,
+      email: m.email,
+      role: m.role,
+      deactivatedAt: m.deactivatedAt?.toISOString() ?? null,
+      createdAt: m.createdAt.toISOString(),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Audience groups: saved named lists of contacts. Hybrid composition —
+// manual contact ids PLUS any contact carrying one of the group's tags.
+// The resolver below is the single source of truth for "who's in this
+// group right now"; both the audience-groups API and the broadcast runner
+// call it.
+// ---------------------------------------------------------------------------
+
+export interface AudienceGroupDto {
+  id: string;
+  teamId: string;
+  name: string;
+  description: string | null;
+  tagIds: string[];
+  contactIds: string[];
+  /** Computed member count at read time. */
+  memberCount: number;
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listAudienceGroups(teamId: string): Promise<AudienceGroupDto[]> {
+  const rows = await db.audienceGroup.findMany({
+    where: { teamId },
+    orderBy: { createdAt: "desc" },
+    include: {
+      createdBy: { select: { name: true } },
+      tags: { select: { id: true } },
+      contacts: { select: { id: true } },
+    },
+  });
+  // Resolve member counts in parallel — one query per group. Acceptable at
+  // pilot scale (groups are dozens, not thousands). Switch to a single SQL
+  // aggregate when this matters.
+  const counts = await Promise.all(
+    rows.map((g) =>
+      resolveAudienceGroupMemberCount(teamId, {
+        tagIds: g.tags.map((t) => t.id),
+        manualContactIds: g.contacts.map((c) => c.id),
+      }),
+    ),
+  );
+  return rows.map((g, i) => ({
+    id: g.id,
+    teamId: g.teamId,
+    name: g.name,
+    description: g.description,
+    tagIds: g.tags.map((t) => t.id),
+    contactIds: g.contacts.map((c) => c.id),
+    memberCount: counts[i] ?? 0,
+    createdById: g.createdById,
+    createdByName: g.createdBy.name,
+    createdAt: g.createdAt.toISOString(),
+    updatedAt: g.updatedAt.toISOString(),
+  }));
+}
+
+export async function getAudienceGroup(
+  teamId: string,
+  id: string,
+): Promise<AudienceGroupDto | null> {
+  const g = await db.audienceGroup.findFirst({
+    where: { id, teamId },
+    include: {
+      createdBy: { select: { name: true } },
+      tags: { select: { id: true } },
+      contacts: { select: { id: true } },
+    },
+  });
+  if (!g) return null;
+  const memberCount = await resolveAudienceGroupMemberCount(teamId, {
+    tagIds: g.tags.map((t) => t.id),
+    manualContactIds: g.contacts.map((c) => c.id),
+  });
+  return {
+    id: g.id,
+    teamId: g.teamId,
+    name: g.name,
+    description: g.description,
+    tagIds: g.tags.map((t) => t.id),
+    contactIds: g.contacts.map((c) => c.id),
+    memberCount,
+    createdById: g.createdById,
+    createdByName: g.createdBy.name,
+    createdAt: g.createdAt.toISOString(),
+    updatedAt: g.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * Resolve the actual contact-id set for a group. Used by the broadcast
+ * runner when expanding a group audience into BroadcastRecipient rows.
+ * UNION of manual + tag-matched, deduped server-side.
+ */
+export async function resolveAudienceGroupMembers(
+  teamId: string,
+  { tagIds, manualContactIds }: { tagIds: string[]; manualContactIds: string[] },
+): Promise<string[]> {
+  const where: import("@prisma/client").Prisma.ContactWhereInput =
+    tagIds.length > 0
+      ? {
+          teamId,
+          OR: [
+            { id: { in: manualContactIds } },
+            { tags: { some: { id: { in: tagIds } } } },
+          ],
+        }
+      : { teamId, id: { in: manualContactIds } };
+
+  if (tagIds.length === 0 && manualContactIds.length === 0) return [];
+
+  const rows = await db.contact.findMany({
+    where,
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+async function resolveAudienceGroupMemberCount(
+  teamId: string,
+  args: { tagIds: string[]; manualContactIds: string[] },
+): Promise<number> {
+  if (args.tagIds.length === 0 && args.manualContactIds.length === 0) return 0;
+  const where: import("@prisma/client").Prisma.ContactWhereInput =
+    args.tagIds.length > 0
+      ? {
+          teamId,
+          OR: [
+            { id: { in: args.manualContactIds } },
+            { tags: { some: { id: { in: args.tagIds } } } },
+          ],
+        }
+      : { teamId, id: { in: args.manualContactIds } };
+  return db.contact.count({ where });
+}
+
+export async function listTags(teamId: string): Promise<import("@/lib/types").Tag[]> {
+  const rows = await db.tag.findMany({
+    where: { teamId },
+    orderBy: [{ name: "asc" }],
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    teamId: r.teamId,
+    name: r.name,
+    color: r.color as import("@/lib/types").TagColor,
   }));
 }

@@ -98,8 +98,11 @@ export function MessageBubble({
       {/* Reply action sits next to the bubble; visible only on hover so it
           doesn't clutter the timeline. Order swaps so it's always on the
           opposite side of the avatar. */}
-      {canReply && isOut && (
-        <ReplyAction onClick={() => onReply!(message)} />
+      {isOut && (
+        <BubbleActions
+          canReply={canReply}
+          onReply={onReply ? () => onReply(message) : undefined}
+        />
       )}
 
       <div
@@ -147,25 +150,39 @@ export function MessageBubble({
         <BubbleMeta message={message} sender={sender} isOut={isOut} />
       </div>
 
-      {canReply && !isOut && (
-        <ReplyAction onClick={() => onReply!(message)} />
+      {!isOut && (
+        <BubbleActions
+          canReply={canReply}
+          onReply={onReply ? () => onReply(message) : undefined}
+        />
       )}
     </div>
   );
 }
 
-function ReplyAction({ onClick }: { onClick: () => void }) {
+function BubbleActions({
+  canReply,
+  onReply,
+}: {
+  canReply: boolean;
+  onReply?: () => void;
+}) {
+  if (!canReply) return null;
   return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon"
-      onClick={onClick}
-      title="Reply to this message"
-      className="size-7 self-center text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus:opacity-100"
-    >
-      <CornerUpLeft className="size-3.5" />
-    </Button>
+    <div className="flex items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      {canReply && onReply && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={onReply}
+          title="Reply to this message"
+          className="size-7 text-muted-foreground hover:text-foreground"
+        >
+          <CornerUpLeft className="size-3.5" />
+        </Button>
+      )}
+    </div>
   );
 }
 

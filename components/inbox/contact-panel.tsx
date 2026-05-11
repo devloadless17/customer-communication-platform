@@ -18,6 +18,8 @@ import {
   prettifyKey,
   uniquePerContactKey,
 } from "@/components/contacts/field-controls";
+import { TagChip, TagAddButton } from "@/components/tags/tag-chip";
+import { TagMultiPicker } from "@/components/tags/tag-multi-picker";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -29,6 +31,7 @@ import type {
   ContactFieldDefinition,
   ConversationStatus,
   ConversationWithRefs,
+  Tag,
 } from "@/lib/types";
 
 const STATUS_LABEL: Record<ConversationStatus, string> = {
@@ -42,9 +45,16 @@ interface PanelProps {
   fieldDefinitions: ContactFieldDefinition[];
   /** Whether the current user can add/rename/delete team-wide field definitions. */
   canManageFields: boolean;
+  /** Team-wide tag catalog. Used by the tag picker for select/create. */
+  tagCatalog: Tag[];
 }
 
-export function ContactPanel({ data, fieldDefinitions, canManageFields }: PanelProps) {
+export function ContactPanel({
+  data,
+  fieldDefinitions,
+  canManageFields,
+  tagCatalog,
+}: PanelProps) {
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
 
@@ -60,6 +70,13 @@ export function ContactPanel({ data, fieldDefinitions, canManageFields }: PanelP
   const [customFields, setCustomFields] = useState<Record<string, string>>(
     contact.customFields ?? {},
   );
+  const [tagIds, setTagIds] = useState<string[]>(contact.tagIds ?? []);
+  // Local mirror of the team catalog so newly-created tags appear immediately
+  // without waiting for a router.refresh round-trip.
+  const [tags, setTags] = useState<Tag[]>(tagCatalog);
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [tagSaveError, setTagSaveError] = useState<string | null>(null);
+  const tagBoxRef = useRef<HTMLDivElement>(null);
 
   // Re-sync when navigating to a different conversation. Without this the
   // panel would render the previous contact's edits against the new contact.
@@ -68,13 +85,35 @@ export function ContactPanel({ data, fieldDefinitions, canManageFields }: PanelP
     setEmail(contact.email ?? "");
     setLocation(contact.location ?? "");
     setCustomFields(contact.customFields ?? {});
+    setTagIds(contact.tagIds ?? []);
+    setTagPickerOpen(false);
+    setTagSaveError(null);
   }, [
     contact.id,
     contact.name,
     contact.email,
     contact.location,
     contact.customFields,
+    contact.tagIds,
   ]);
+
+  // Keep our local tag catalog in sync with the server-fetched one (changes
+  // when the user navigates between conversations or another agent creates a
+  // tag and router.refresh fires).
+  useEffect(() => {
+    setTags(tagCatalog);
+  }, [tagCatalog]);
+
+  // Close the picker when the user clicks outside.
+  useEffect(() => {
+    if (!tagPickerOpen) return;
+    function handler(e: MouseEvent) {
+      if (!tagBoxRef.current) return;
+      if (!tagBoxRef.current.contains(e.target as Node)) setTagPickerOpen(false);
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [tagPickerOpen]);
 
   const [saving, startSaving] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +143,31 @@ export function ContactPanel({ data, fieldDefinitions, canManageFields }: PanelP
     startSaving(() => router.refresh());
     return true;
   }
+
+  // PUT replaces the whole set (server semantics), so we hand it the full
+  // next array. Optimistic: paint locally first, rollback on error.
+  async function persistTagIds(nextIds: string[]) {
+    const prevIds = tagIds;
+    setTagIds(nextIds);
+    setTagSaveError(null);
+    const res = await fetch(`/api/contacts/${contact.id}/tags`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tagIds: nextIds }),
+    });
+    if (!res.ok) {
+      setTagIds(prevIds);
+      setTagSaveError("Failed to save tags");
+      return;
+    }
+    startSaving(() => router.refresh());
+  }
+
+  // Resolve ids to full tag objects in catalog (alphabetical) order. Ids
+  // pointing at deleted tags are silently dropped — the server already
+  // filtered cross-team ids, but a tag could have been deleted between the
+  // initial render and now.
+  const appliedTags = tags.filter((t) => tagIds.includes(t.id));
 
   // Team-wide field rows: always rendered, even when blank, so the team
   // schema is visible. Per-contact extras are keys present in customFields
@@ -298,6 +362,40 @@ export function ContactPanel({ data, fieldDefinitions, canManageFields }: PanelP
 
         <Separator />
 
+        <Section title="Tags">
+          <div ref={tagBoxRef} className="relative flex flex-wrap items-center gap-1.5">
+            {appliedTags.map((t) => (
+              <TagChip
+                key={t.id}
+                tag={t}
+                size="sm"
+                onRemove={() => void persistTagIds(tagIds.filter((id) => id !== t.id))}
+              />
+            ))}
+            <TagAddButton size="sm" onClick={() => setTagPickerOpen((v) => !v)} />
+            {tagPickerOpen && (
+              <div className="absolute left-0 top-full z-20 mt-1">
+                <TagMultiPicker
+                  tags={tags}
+                  selectedIds={tagIds}
+                  onSelectedChange={(next) => void persistTagIds(next)}
+                  onCreated={(tag) => {
+                    setTags((prev) =>
+                      [...prev, tag].sort((a, b) => a.name.localeCompare(b.name)),
+                    );
+                    void persistTagIds([...tagIds, tag.id]);
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          {tagSaveError && (
+            <div className="mt-2 text-[10px] text-destructive">{tagSaveError}</div>
+          )}
+        </Section>
+
+        <Separator />
+
         <Section title="Conversation">
           <ReadOnlyRow
             icon={FileText}
@@ -310,6 +408,7 @@ export function ContactPanel({ data, fieldDefinitions, canManageFields }: PanelP
             value={STATUS_LABEL[conversation.status]}
           />
         </Section>
+
       </ScrollArea>
     </aside>
   );

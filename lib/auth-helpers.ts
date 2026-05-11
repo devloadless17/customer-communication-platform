@@ -52,3 +52,18 @@ export async function requireAdmin(): Promise<ApiSession | NextResponse> {
   }
   return session;
 }
+
+/**
+ * superAdmin gate — used by the cross-team admin section. superAdmin is a
+ * platform-level role (one or two per deployment) that can browse every
+ * org's basic data. Per CLAUDE.md the platform stays multi-tenant; this
+ * helper is the ONE place that legitimately steps outside team boundaries.
+ */
+export async function requireSuperAdmin(): Promise<ApiSession | NextResponse> {
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  if (session.role !== "superAdmin") {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+  return session;
+}

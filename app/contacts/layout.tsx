@@ -1,65 +1,41 @@
-import Link from "next/link";
-import { ArrowLeft, Inbox, ContactRound } from "lucide-react";
-
 import { getSession } from "@/lib/current-user";
+import { listTeamMembers } from "@/lib/queries";
+import { db } from "@/lib/db";
+
+import { WorkspaceSidebar } from "@/components/layouts/workspace-sidebar";
 
 /**
- * Contacts shell. Mirrors the settings layout — left rail with a "back to
- * inbox" link plus contact-related nav. Today there's just one entry but
- * the structure is here for /contacts/segments, /contacts/imports, etc.
+ * Sidebar shell for /contacts. Server component — gates the session and
+ * seeds the sidebar with team + teammates so the nav looks the same
+ * everywhere in the app.
  */
 export default async function ContactsLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  await getSession();
+  const { user, teamId } = await getSession();
+
+  const [team, teammates] = await Promise.all([
+    db.team.findUnique({
+      where: { id: teamId },
+      select: { id: true, name: true },
+    }),
+    listTeamMembers(teamId),
+  ]);
+
+  if (!team) {
+    throw new Error("team not found");
+  }
 
   return (
-    <div className="grid min-h-svh grid-cols-[220px_1fr] bg-background text-foreground">
-      <aside className="flex flex-col border-r border-border bg-sidebar text-sidebar-foreground">
-        <div className="px-4 pt-5 pb-3">
-          <Link
-            href="/inbox"
-            className="inline-flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="size-3.5" />
-            Back to inbox
-          </Link>
-        </div>
-        <div className="px-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Contacts
-        </div>
-        <nav className="flex flex-col gap-0.5 px-2">
-          <NavLink href="/contacts" icon={<ContactRound className="size-4" />}>
-            All contacts
-          </NavLink>
-          <NavLink href="/inbox" icon={<Inbox className="size-4" />}>
-            Inbox
-          </NavLink>
-        </nav>
-      </aside>
-      <main className="overflow-y-auto">{children}</main>
+    <div className="flex min-h-svh bg-background text-foreground">
+      <WorkspaceSidebar
+        currentUser={user}
+        team={{ id: team.id, name: team.name }}
+        teammates={teammates}
+      />
+      <main className="flex-1 overflow-y-auto">{children}</main>
     </div>
-  );
-}
-
-function NavLink({
-  href,
-  icon,
-  children,
-}: {
-  href: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-    >
-      {icon}
-      <span>{children}</span>
-    </Link>
   );
 }

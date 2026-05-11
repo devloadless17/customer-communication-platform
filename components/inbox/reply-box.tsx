@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CornerUpLeft,
   FileText,
@@ -10,6 +10,7 @@ import {
   Paperclip,
   Send,
   Smile,
+  Sparkles,
   StickyNote,
   Video,
   X,
@@ -19,10 +20,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import type { MediaKind, Message, ReplySnapshot, User } from "@/lib/types";
+import type { MediaKind, Message, ReplySnapshot, TemplateDto, User } from "@/lib/types";
 import { computeWindowStatus } from "@/lib/window";
 
 import { WindowBadgeFromStatus } from "./window-badge";
+import { TemplatePicker } from "./template-picker";
 
 type Mode = "reply" | "note";
 
@@ -111,11 +113,129 @@ export function ReplyBox({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isNote = mode === "note";
-  // When the WhatsApp window is closed, only Notes are allowed in this box.
-  // Templates are the eventual escape hatch but they're routed through a
-  // separate flow (Phase C) — for now we just disable + nudge.
+  // When the WhatsApp window is closed, only Notes + Templates are allowed.
+  // Free-form text and media both require the 24h customer-service window
+  // to be open — Meta would reject them with error 131047 otherwise.
   const canSend =
     (attachment !== null || value.trim().length > 0) && (isNote || !windowClosed);
+
+  // -------------------------------------------------------------------------
+  // Template picker state
+  // -------------------------------------------------------------------------
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [templates, setTemplates] = useState<TemplateDto[]>([]);
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesSyncing, setTemplatesSyncing] = useState(false);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [wabaMissing, setWabaMissing] = useState(false);
+
+  const syncTemplatesRef = useRef<() => Promise<void>>(async () => {});
+
+  const loadTemplates = useCallback(async () => {
+    setTemplatesLoading(true);
+    setTemplatesError(null);
+    try {
+      const res = await fetch("/api/team/whatsapp/templates");
+      if (!res.ok) throw new Error(await safeReadError(res));
+      const data = (await res.json()) as {
+        templates?: TemplateDto[];
+        hasWabaId?: boolean;
+      };
+      const list = data.templates ?? [];
+      setTemplates(list);
+      const hasWaba = Boolean(data.hasWabaId);
+      setWabaMissing(!hasWaba);
+      setTemplatesLoaded(true);
+      // First-open kicker: if the cache is empty but the WABA id IS set,
+      // pull from Meta immediately so the agent doesn't have to find the
+      // Refresh button to see anything. Subsequent opens hit the cache.
+      if (hasWaba && list.length === 0) {
+        void syncTemplatesRef.current();
+      }
+    } catch (err) {
+      setTemplatesError(err instanceof Error ? err.message : "Failed to load");
+    } finally {
+      setTemplatesLoading(false);
+    }
+  }, []);
+
+  const syncTemplates = useCallback(async () => {
+    setTemplatesSyncing(true);
+    setTemplatesError(null);
+    try {
+      const res = await fetch("/api/team/whatsapp/templates", { method: "POST" });
+      const data = (await res.json()) as {
+        templates?: TemplateDto[];
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok) {
+        // 409 with "waba id missing" → flag the picker so it renders the
+        // setup nudge instead of a generic error.
+        if (res.status === 409 && data.error === "waba id missing") {
+          setWabaMissing(true);
+          return;
+        }
+        throw new Error(
+          [data.error, data.detail].filter(Boolean).join(": ") ||
+            `HTTP ${res.status}`,
+        );
+      }
+      setTemplates(data.templates ?? []);
+      setWabaMissing(false);
+    } catch (err) {
+      setTemplatesError(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setTemplatesSyncing(false);
+    }
+  }, []);
+  // Keep the ref pointing at the latest sync function so the loader effect
+  // can invoke it without depending on a forward declaration.
+  useEffect(() => {
+    syncTemplatesRef.current = syncTemplates;
+  }, [syncTemplates]);
+
+  // Lazy-load on first open. Re-using cached list keeps subsequent opens
+  // instant; the explicit Refresh button is the agent's hook for "pull
+  // again from Meta".
+  useEffect(() => {
+    if (pickerOpen && !templatesLoaded) {
+      void loadTemplates();
+    }
+  }, [pickerOpen, templatesLoaded, loadTemplates]);
+
+  const sendTemplate = useCallback(
+    async (args: {
+      template: TemplateDto;
+      variables: { body: string[]; header?: string };
+    }) => {
+      const clientTempId = newClientTempId();
+      try {
+        const res = await fetch("/api/messages/template", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            conversationId,
+            templateId: args.template.id,
+            variables: args.variables,
+            clientTempId,
+          }),
+        });
+        if (!res.ok) {
+          const msg = await safeReadError(res);
+          return { ok: false as const, error: msg };
+        }
+        return { ok: true as const };
+      } catch (err) {
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : "Send failed",
+        };
+      }
+    },
+    [conversationId],
+  );
 
   // Build / tear down the local preview URL when a file is picked.
   useEffect(() => {
@@ -275,7 +395,7 @@ export function ReplyBox({
   };
 
   return (
-    <div className="border-t border-border bg-background">
+    <div className="relative border-t border-border bg-background">
       <div className="mx-auto w-full max-w-3xl px-4 pt-3 pb-4">
         <div className="mb-2 flex items-center gap-2">
           <div className="inline-flex rounded-md border border-border bg-muted/40 p-0.5">
@@ -284,6 +404,17 @@ export function ReplyBox({
           </div>
           {!isNote && (
             <WindowBadgeFromStatus status={windowStatus} size="sm" />
+          )}
+          {!isNote && windowClosed && (
+            <Button
+              type="button"
+              size="sm"
+              className="ml-auto h-7 gap-1.5 text-xs"
+              onClick={() => setPickerOpen(true)}
+            >
+              <Sparkles className="size-3.5" />
+              Send template
+            </Button>
           )}
         </div>
 
@@ -399,6 +530,21 @@ export function ReplyBox({
             >
               <Paperclip className="size-4" />
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-muted-foreground"
+              type="button"
+              disabled={isNote}
+              title={
+                isNote
+                  ? "Templates can only be sent in Reply mode"
+                  : "Send a pre-approved template"
+              }
+              onClick={() => setPickerOpen(true)}
+            >
+              <Sparkles className="size-4" />
+            </Button>
             <Button variant="ghost" size="icon" className="size-7 text-muted-foreground" type="button" disabled>
               <Smile className="size-4" />
             </Button>
@@ -441,6 +587,18 @@ export function ReplyBox({
           </p>
         )}
       </div>
+
+      <TemplatePicker
+        open={pickerOpen}
+        templates={templates}
+        loading={templatesLoading && !templatesLoaded}
+        error={templatesError}
+        syncing={templatesSyncing}
+        wabaMissing={wabaMissing}
+        onClose={() => setPickerOpen(false)}
+        onRefresh={syncTemplates}
+        onSend={sendTemplate}
+      />
     </div>
   );
 }
