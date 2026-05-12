@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -8,47 +8,55 @@ import {
   ArrowLeft,
   Loader2,
   Save,
-  Search,
   Send,
   Tag as TagIcon,
   Trash2,
   Users,
   UserPlus,
-  X,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { TagChip } from "@/components/tags/tag-chip";
-import { cn, formatPhone, initials } from "@/lib/utils";
-import type { Contact, Tag } from "@/lib/types";
+import { ContactMultiSelectField } from "@/components/contacts/contact-multi-select-field";
+import { TagFilterControl } from "@/components/contacts/contact-browser";
+import { RecipientsPreviewDialog } from "@/components/broadcasts/recipients-preview-dialog";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
+import type { ContactFieldDefinition, Tag } from "@/lib/types";
 import type { AudienceGroupDto } from "@/lib/queries";
 
 /**
  * Reusable form for creating or editing an audience group.
  *
- * One page, two halves:
+ * One page:
  *   - Top: name, optional description.
- *   - Middle: TAG section (every contact carrying ANY selected tag joins).
- *   - Bottom: MANUAL section (chip input — hand-picked contacts always in).
+ *   - TAG section (every contact carrying ANY selected tag joins).
+ *   - MANUAL section (chip input — hand-picked contacts always in).
  *
- * Members at send time = union of both. The form shows a live count
- * (recomputed in-memory against the contacts list) so the agent can sanity-
- * check before saving.
+ * Members at send time = union of both. The live count is resolved
+ * server-side (`/api/contacts/count`) — the form never loads the team contact
+ * list, so it scales to large teams.
  */
 
 export interface GroupFormProps {
   /** When set, the form starts in "edit" mode pre-filled from this dto. */
   initial?: AudienceGroupDto;
-  contacts: Contact[];
   tags: Tag[];
+  fieldDefinitions?: ContactFieldDefinition[];
+  /** Server-provided labels for the group's existing manual contacts. */
+  initialContactLabels?: ContactLabel[];
 }
 
-export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
+export function GroupForm({
+  initial,
+  tags,
+  fieldDefinitions = [],
+  initialContactLabels = [],
+}: GroupFormProps) {
   const router = useRouter();
+  const { confirm, confirmDialog } = useConfirm();
 
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
@@ -59,37 +67,61 @@ export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
-  const contactById = useMemo(
-    () => new Map(contacts.map((c) => [c.id, c] as const)),
-    [contacts],
-  );
-  const tagById = useMemo(
-    () => new Map(tags.map((t) => [t.id, t] as const)),
-    [tags],
-  );
+  const tagById = useMemo(() => new Map(tags.map((t) => [t.id, t] as const)), [tags]);
 
-  // Resolved live member count — same union logic the server uses.
-  const memberPreview = useMemo(() => {
-    const tagSet = new Set(tagIds);
-    const manualSet = new Set(manualContactIds);
-    const matched = new Set<string>(manualContactIds);
-    if (tagSet.size > 0) {
-      for (const c of contacts) {
-        if (matched.has(c.id)) continue;
-        if ((c.tagIds ?? []).some((id) => tagSet.has(id))) {
-          matched.add(c.id);
-        }
-      }
+  // Live member count — same union the server uses, fetched server-side and
+  // debounced so it doesn't fire on every keystroke of the picker.
+  const [memberTotal, setMemberTotal] = useState(initial?.memberCount ?? 0);
+  const [countLoading, setCountLoading] = useState(false);
+  const tagKey = tagIds.join(",");
+  const manualKey = manualContactIds.join(",");
+  useEffect(() => {
+    if (tagIds.length === 0 && manualContactIds.length === 0) {
+      setMemberTotal(0);
+      setCountLoading(false);
+      return;
     }
-    return {
-      total: matched.size,
-      manualCount: manualSet.size,
-      taggedOnlyCount: matched.size - manualSet.size,
+    let cancelled = false;
+    setCountLoading(true);
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await fetch("/api/contacts/count", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tagIds, contactIds: manualContactIds }),
+        });
+        const data = (await res.json()) as { count?: number };
+        if (!cancelled) setMemberTotal(data.count ?? 0);
+      } catch {
+        if (!cancelled) setMemberTotal(0);
+      } finally {
+        if (!cancelled) setCountLoading(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
     };
-  }, [contacts, tagIds, manualContactIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tagKey, manualKey]);
 
-  async function submit() {
+  const manualCount = manualContactIds.length;
+  const taggedOnlyCount = Math.max(0, memberTotal - manualCount);
+
+  // Unsaved-changes guard for the "Send broadcast" shortcut — that link jumps
+  // to the broadcast wizard which reads the *saved* group, so edits made here
+  // but not saved would be silently ignored.
+  const dirty = initial
+    ? name.trim() !== initial.name ||
+      (description.trim() || "") !== (initial.description ?? "") ||
+      [...tagIds].sort().join(",") !== [...(initial.tagIds ?? [])].sort().join(",") ||
+      [...manualContactIds].sort().join(",") !==
+        [...(initial.contactIds ?? [])].sort().join(",")
+    : false;
+
+  async function submit(redirectTo = "/broadcasts/groups") {
     setError(null);
     if (!name.trim()) {
       setError("Group name is required");
@@ -120,27 +152,44 @@ export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
           detail?: string;
         };
         setError(
-          [data.error, data.detail].filter(Boolean).join(": ") ||
-            `HTTP ${res.status}`,
+          [data.error, data.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
         );
         return;
       }
-      router.push("/broadcasts/groups");
+      router.push(redirectTo);
       router.refresh();
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function deleteGroup() {
-    if (!initial) return;
-    if (
-      !confirm(
-        `Delete group "${initial.name}"? Past broadcasts that used it stay in your history. Can't be undone.`,
-      )
-    ) {
+  async function goToBroadcast() {
+    if (!initial || submitting || deleting) return;
+    const target = `/broadcasts/new?groupId=${initial.id}`;
+    if (dirty) {
+      const ok = await confirm({
+        title: "Unsaved changes",
+        description:
+          "You have unsaved changes to this group. Save them before starting the broadcast?",
+        confirmLabel: "Save & continue",
+        cancelLabel: "Stay here",
+      });
+      if (ok) void submit(target);
       return;
     }
+    router.push(target);
+  }
+
+  async function deleteGroup() {
+    if (!initial) return;
+    const ok = await confirm({
+      title: `Delete group "${initial.name}"?`,
+      description:
+        "Past broadcasts that used it stay in your history. This can't be undone.",
+      confirmLabel: "Delete group",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch(`/api/team/audience-groups/${initial.id}`, {
@@ -207,28 +256,24 @@ export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
         </div>
       </section>
 
-      <TagSection
-        tags={tags}
-        selectedTagIds={tagIds}
-        onChange={setTagIds}
-      />
+      <TagSection tags={tags} selectedTagIds={tagIds} onChange={setTagIds} />
 
       <ManualContactsSection
-        contacts={contacts}
+        tags={tags}
+        fieldDefinitions={fieldDefinitions}
+        initialContactLabels={initialContactLabels}
         selectedIds={manualContactIds}
         onChange={setManualContactIds}
       />
 
       <PreviewCard
-        total={memberPreview.total}
-        manualCount={memberPreview.manualCount}
-        taggedCount={memberPreview.taggedOnlyCount}
-        sampleManual={manualContactIds
-          .slice(0, 5)
-          .map((id) => contactById.get(id))
-          .filter((c): c is Contact => Boolean(c))}
+        total={memberTotal}
+        manualCount={manualCount}
+        taggedCount={taggedOnlyCount}
+        loading={countLoading}
+        onPreview={memberTotal > 0 ? () => setPreviewOpen(true) : undefined}
         sampleTags={tagIds
-          .slice(0, 5)
+          .slice(0, 6)
           .map((id) => tagById.get(id))
           .filter((t): t is Tag => Boolean(t))}
       />
@@ -258,14 +303,21 @@ export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
                 )}
                 Delete group
               </Button>
-              <Link
-                href={`/broadcasts/new?groupId=${initial.id}`}
-                className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md border border-input bg-background px-3 text-sm hover:bg-accent"
-                title="Start a broadcast with this group as the audience"
+              <button
+                type="button"
+                onClick={goToBroadcast}
+                disabled={submitting || deleting}
+                className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md border border-input bg-background px-3 text-sm hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+                title={
+                  dirty
+                    ? "You have unsaved changes — you'll be asked to save them first"
+                    : "Start a broadcast with this group as the audience"
+                }
               >
                 <Send className="size-3.5" />
                 Send broadcast
-              </Link>
+                {dirty && <span className="ml-1 text-[10px] text-amber-600 dark:text-amber-400">• unsaved</span>}
+              </button>
             </>
           )}
           <div className="ml-auto flex items-center gap-2">
@@ -277,7 +329,7 @@ export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
             </Link>
             <Button
               type="button"
-              onClick={submit}
+              onClick={() => submit()}
               disabled={submitting || !name.trim()}
               className="gap-1.5"
             >
@@ -291,6 +343,15 @@ export function GroupForm({ initial, contacts, tags }: GroupFormProps) {
           </div>
         </div>
       </div>
+
+      <RecipientsPreviewDialog
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        payload={{ tagIds, contactIds: manualContactIds }}
+        title="Group members"
+        subtitle={`${manualCount} hand-picked · the rest matched by ${tagIds.length} tag${tagIds.length === 1 ? "" : "s"}`}
+      />
+      {confirmDialog}
     </div>
   );
 }
@@ -304,13 +365,6 @@ function TagSection({
   selectedTagIds: string[];
   onChange: (next: string[]) => void;
 }) {
-  function toggle(id: string) {
-    onChange(
-      selectedTagIds.includes(id)
-        ? selectedTagIds.filter((x) => x !== id)
-        : [...selectedTagIds, id],
-    );
-  }
   return (
     <section className="rounded-xl border border-border bg-card">
       <header className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-3">
@@ -335,17 +389,13 @@ function TagSection({
             No tags yet. Tag some contacts on the Contacts page first.
           </div>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {tags.map((t) => (
-              <TagChip
-                key={t.id}
-                tag={t}
-                size="md"
-                onClick={() => toggle(t.id)}
-                selected={selectedTagIds.includes(t.id)}
-              />
-            ))}
-          </div>
+          <TagFilterControl
+            tags={tags}
+            selectedTagIds={selectedTagIds}
+            onChange={onChange}
+            label=""
+            emptyTriggerLabel="Search & add tags"
+          />
         )}
       </div>
     </section>
@@ -353,63 +403,18 @@ function TagSection({
 }
 
 function ManualContactsSection({
-  contacts,
+  tags,
+  fieldDefinitions,
+  initialContactLabels,
   selectedIds,
   onChange,
 }: {
-  contacts: Contact[];
+  tags: Tag[];
+  fieldDefinitions: ContactFieldDefinition[];
+  initialContactLabels: ContactLabel[];
   selectedIds: string[];
   onChange: (next: string[]) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function handler(e: MouseEvent) {
-      if (!containerRef.current) return;
-      if (!containerRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  const byId = useMemo(
-    () => new Map(contacts.map((c) => [c.id, c] as const)),
-    [contacts],
-  );
-  const selected = useMemo(
-    () => selectedIds.map((id) => byId.get(id)).filter((c): c is Contact => Boolean(c)),
-    [selectedIds, byId],
-  );
-  const suggestions = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const picked = new Set(selectedIds);
-    return contacts
-      .filter((c) => !picked.has(c.id))
-      .filter((c) => {
-        if (q.length === 0) return true;
-        return (
-          c.name.toLowerCase().includes(q) ||
-          c.phoneNumber.toLowerCase().includes(q) ||
-          (c.email ?? "").toLowerCase().includes(q)
-        );
-      })
-      .slice(0, 50);
-  }, [contacts, selectedIds, query]);
-
-  function add(id: string) {
-    if (selectedIds.includes(id)) return;
-    onChange([...selectedIds, id]);
-    setQuery("");
-    inputRef.current?.focus();
-  }
-  function remove(id: string) {
-    onChange(selectedIds.filter((x) => x !== id));
-  }
-
   return (
     <section className="rounded-xl border border-border bg-card">
       <header className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-3">
@@ -425,113 +430,20 @@ function ManualContactsSection({
           </div>
         </div>
         <span className="text-[11px] text-muted-foreground">
-          {selected.length} selected
+          {selectedIds.length} selected
         </span>
       </header>
-      <div ref={containerRef} className="relative px-4 py-3">
-        <div
-          className={cn(
-            "flex min-h-[44px] flex-wrap items-center gap-1.5 rounded-xl border border-input bg-background px-2 py-1.5 shadow-xs transition-colors",
-            open && "ring-2 ring-ring",
-          )}
-          onClick={() => {
-            inputRef.current?.focus();
-            setOpen(true);
-          }}
-        >
-          {selected.length === 0 && (
-            <Search className="ml-1 size-3.5 shrink-0 text-muted-foreground" />
-          )}
-          <AnimatePresence initial={false}>
-            {selected.map((c) => (
-              <motion.span
-                key={c.id}
-                initial={{ opacity: 0, scale: 0.92 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.92 }}
-                transition={{ duration: 0.12 }}
-                className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 py-0.5 pl-0.5 pr-1.5 text-xs"
-              >
-                <Avatar className="size-5">
-                  <AvatarFallback className="text-[9px]">{initials(c.name)}</AvatarFallback>
-                </Avatar>
-                <span className="font-medium">{c.name}</span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    remove(c.id);
-                  }}
-                  className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                  aria-label={`Remove ${c.name}`}
-                >
-                  <X className="size-3" />
-                </button>
-              </motion.span>
-            ))}
-          </AnimatePresence>
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setOpen(true);
-            }}
-            onFocus={() => setOpen(true)}
-            onKeyDown={(e) => {
-              if (e.key === "Backspace" && query.length === 0 && selectedIds.length > 0) {
-                e.preventDefault();
-                const lastId = selectedIds[selectedIds.length - 1];
-                if (lastId) remove(lastId);
-              }
-            }}
-            placeholder={
-              selected.length === 0 ? "Search by name, phone, or email…" : "Add another…"
-            }
-            className="min-w-[140px] flex-1 border-0 bg-transparent px-1 py-1 text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
-        <AnimatePresence>
-          {open && (
-            <motion.div
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.12 }}
-              className="absolute left-4 right-4 z-20 mt-1 max-h-72 overflow-y-auto rounded-xl border border-border bg-popover shadow-xl"
-            >
-              {suggestions.length === 0 ? (
-                <div className="px-4 py-3 text-[12px] text-muted-foreground">
-                  {query.trim().length > 0
-                    ? `No contacts match "${query}".`
-                    : "No more contacts to add."}
-                </div>
-              ) : (
-                <ul className="divide-y divide-border">
-                  {suggestions.map((c) => (
-                    <li key={c.id}>
-                      <button
-                        type="button"
-                        onClick={() => add(c.id)}
-                        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-accent/60"
-                      >
-                        <Avatar className="size-7">
-                          <AvatarFallback className="text-[10px]">{initials(c.name)}</AvatarFallback>
-                        </Avatar>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium">{c.name}</div>
-                          <div className="truncate text-[11px] text-muted-foreground">
-                            {formatPhone(c.phoneNumber)}
-                          </div>
-                        </div>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
+      <div className="px-4 py-3">
+        <ContactMultiSelectField
+          tags={tags}
+          fieldDefinitions={fieldDefinitions}
+          initialLabels={initialContactLabels}
+          selectedIds={selectedIds}
+          onChange={onChange}
+          dialogTitle="Add contacts to this group"
+          dialogDescription="Filter by name, number, tag, or any field — same view as the Contacts page."
+          confirmLabel="Use these contacts"
+        />
       </div>
     </section>
   );
@@ -541,43 +453,51 @@ function PreviewCard({
   total,
   manualCount,
   taggedCount,
-  sampleManual,
+  loading,
+  onPreview,
   sampleTags,
 }: {
   total: number;
   manualCount: number;
   taggedCount: number;
-  sampleManual: Contact[];
+  loading: boolean;
+  onPreview?: () => void;
   sampleTags: Tag[];
 }) {
   return (
     <section className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3">
       <div className="flex items-center gap-2 text-sm">
         <Users className="size-4 text-emerald-700 dark:text-emerald-300" />
-        <span className="font-medium text-emerald-700 dark:text-emerald-300">
-          {total === 0
-            ? "No members yet"
-            : `${total} member${total === 1 ? "" : "s"} right now`}
+        <span className="flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-300">
+          {loading ? (
+            <>
+              <Loader2 className="size-3.5 animate-spin" />
+              Counting members…
+            </>
+          ) : total === 0 ? (
+            "No members yet"
+          ) : (
+            `${total} member${total === 1 ? "" : "s"} right now`
+          )}
         </span>
+        {onPreview && (
+          <button
+            type="button"
+            onClick={onPreview}
+            className="ml-auto inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-background/60 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-background dark:text-emerald-300"
+          >
+            <Users className="size-3" />
+            Preview members
+          </button>
+        )}
       </div>
       <div className="mt-1 text-[11px] text-muted-foreground">
-        {manualCount} hand-picked · {taggedCount} via tag membership · live count, recomputed at send time
+        {manualCount} hand-picked · {taggedCount} via tag membership · resolved at send time
       </div>
-      {(sampleTags.length > 0 || sampleManual.length > 0) && (
+      {sampleTags.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {sampleTags.map((t) => (
             <TagChip key={t.id} tag={t} size="xs" />
-          ))}
-          {sampleManual.map((c) => (
-            <span
-              key={c.id}
-              className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-0.5 text-[11px]"
-            >
-              <Avatar className="size-3.5">
-                <AvatarFallback className="text-[8px]">{initials(c.name)}</AvatarFallback>
-              </Avatar>
-              {c.name}
-            </span>
           ))}
         </div>
       )}

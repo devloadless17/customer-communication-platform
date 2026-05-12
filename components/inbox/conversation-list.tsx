@@ -9,6 +9,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
 import type { ConversationWithRefs, User } from "@/lib/types";
 import { ConversationListItem } from "./conversation-list-item";
@@ -34,6 +35,7 @@ export function ConversationList({
   onLoadMore: () => void;
 }) {
   const selectedId = useSelectedLayoutSegment();
+  const { confirm, alert, confirmDialog } = useConfirm();
   // "selection mode": clicking a row toggles its checkbox instead of opening
   // the chat. Toggled by the toolbar button or auto-engaged when the agent
   // checks the first row. Esc / Clear exits.
@@ -58,13 +60,14 @@ export function ConversationList({
   async function bulkDelete() {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    if (
-      !confirm(
-        `Delete ${ids.length} chat${ids.length === 1 ? "" : "s"}? Removes all messages and notes from these threads. Contacts stay. Can't be undone.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Delete ${ids.length} chat${ids.length === 1 ? "" : "s"}?`,
+      description:
+        "Removes all messages and notes from these threads. The contacts stay. This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       const res = await fetch("/api/conversations/bulk", {
@@ -73,7 +76,7 @@ export function ConversationList({
         body: JSON.stringify({ conversationIds: ids }),
       });
       if (!res.ok) {
-        alert("Failed to delete chats");
+        await alert("Couldn't delete chats", "Please try again.");
         return;
       }
       // Server emits conversation:deleted per id; the list state will
@@ -319,6 +322,7 @@ export function ConversationList({
           </motion.div>
         )}
       </AnimatePresence>
+      {confirmDialog}
     </div>
   );
 }

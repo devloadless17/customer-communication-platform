@@ -2,8 +2,29 @@ import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
 
 import { authConfig } from "@/lib/auth.config";
+import { rateLimit } from "@/lib/rate-limit";
 
 const { auth } = NextAuth(authConfig);
+
+/**
+ * Unauthenticated POSTs worth throttling against credential stuffing / signup
+ * abuse: a per-IP allowance over a 10-minute fixed window. GETs are never
+ * limited — NextAuth polls `/api/auth/session` constantly. The client IP is
+ * read from `X-Forwarded-For`, which Caddy/Traefik (the planned reverse
+ * proxy) set by default; behind a proxy that doesn't, all callers collapse to
+ * one bucket, so the limits are kept generous.
+ */
+const RATE_LIMITED_POSTS: Record<string, number> = {
+  "/api/auth/callback/credentials": 20, // login attempts
+  "/register": 8, // account creation
+};
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+
+function clientIp(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0]!.trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
 
 /**
  * Route gate. Anything matched by `config.matcher` runs through here.
@@ -20,6 +41,17 @@ const { auth } = NextAuth(authConfig);
  */
 export default auth((req) => {
   const { pathname, search } = req.nextUrl;
+
+  if (req.method === "POST" && pathname in RATE_LIMITED_POSTS) {
+    const limit = RATE_LIMITED_POSTS[pathname]!;
+    const { ok, retryAfter } = rateLimit(`${pathname}:${clientIp(req)}`, limit, RATE_WINDOW_MS);
+    if (!ok) {
+      return NextResponse.json(
+        { error: "too many requests, slow down" },
+        { status: 429, headers: { "retry-after": String(retryAfter) } },
+      );
+    }
+  }
 
   const isPublicPage =
     pathname === "/login" ||

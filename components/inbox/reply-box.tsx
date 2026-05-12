@@ -615,7 +615,7 @@ function ReplyTargetPill({
   const senderLabel =
     reply.direction === "out"
       ? reply.senderName
-        ? `@${reply.senderName.split(" ")[0]}`
+        ? `@${reply.senderName}`
         : "yourself"
       : contactName;
   const bodyLabel = reply.body || replyMediaLabel(reply.mediaKind) || "Message";

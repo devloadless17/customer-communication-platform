@@ -9,11 +9,20 @@ import {
   CornerUpLeft,
   Download,
   FileText,
+  Forward,
+  ListChecks,
+  MoreHorizontal,
   X,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatMessageTime, initials } from "@/lib/utils";
 import type {
@@ -23,14 +32,7 @@ import type {
   User,
 } from "@/lib/types";
 
-export function MessageBubble({
-  message,
-  sender,
-  contactName,
-  contactSeed,
-  onReply,
-  onJumpToOriginal,
-}: {
+interface MessageBubbleProps {
   message: Message;
   /** null on inbound — only outbound has an authoring agent. */
   sender: User | null;
@@ -41,13 +43,87 @@ export function MessageBubble({
   onReply?: (message: Message) => void;
   /** Scroll to the quoted original (no-op when the original is unknown). */
   onJumpToOriginal?: (originalId: string) => void;
-}) {
+  /** Queue this message for forwarding (opens the contact picker). */
+  onForward?: (message: Message) => void;
+  /** Enter multi-select mode with this message pre-checked. */
+  onStartSelect?: (message: Message) => void;
+  // ----- multi-select mode (driven by the thread) -----
+  selecting?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (messageId: string) => void;
+}
+
+/**
+ * One row in the message timeline.
+ *
+ * Normal mode: a chat bubble with hover actions (quick reply + a ⋯ menu with
+ * Forward / Select messages).
+ *
+ * Selection mode: the whole row becomes a checkbox toggle; the bubble is
+ * rendered read-only. Pending/failed rows can't be forwarded (no real wamid
+ * yet) so they show disabled and aren't selectable.
+ */
+export function MessageBubble(props: MessageBubbleProps) {
+  const { message, selecting, selected, onToggleSelect } = props;
+
+  if (selecting) {
+    const selectable = !message.pending && !message.failed;
+    const toggle = () => {
+      if (selectable) onToggleSelect?.(message.id);
+    };
+    return (
+      <div
+        role={selectable ? "button" : undefined}
+        aria-pressed={selectable ? Boolean(selected) : undefined}
+        aria-disabled={selectable ? undefined : true}
+        tabIndex={selectable ? 0 : -1}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (selectable && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-xl px-2 py-1 transition-colors",
+          selectable
+            ? "cursor-pointer hover:bg-accent/40"
+            : "cursor-not-allowed opacity-50",
+          selected && "bg-primary/10 ring-1 ring-primary/30",
+        )}
+      >
+        <SelectCheckbox checked={Boolean(selected)} disabled={!selectable} />
+        {/* Read-only while selecting — swallow clicks/hover on the bubble. */}
+        <div className="pointer-events-none min-w-0 flex-1">
+          <BubbleContent {...props} />
+        </div>
+      </div>
+    );
+  }
+
+  return <BubbleContent {...props} />;
+}
+
+function BubbleContent({
+  message,
+  sender,
+  contactName,
+  contactSeed,
+  onReply,
+  onJumpToOriginal,
+  onForward,
+  onStartSelect,
+}: MessageBubbleProps) {
   const isOut = message.direction === "out";
   const media = message.media;
   const reply = message.replyTo ?? null;
-  // Don't offer Reply on optimistic rows — the wamid isn't real yet, so Meta
-  // would reject `context.message_id` if the user clicked through fast.
-  const canReply = Boolean(onReply) && !message.pending && !message.failed;
+  // Don't offer Reply/Forward/Select on optimistic rows — the wamid isn't real
+  // yet, so Meta would reject `context.message_id`, and there's nothing to
+  // forward until the send lands.
+  const live = !message.pending && !message.failed;
+  const canReply = Boolean(onReply) && live;
+  const canForward = Boolean(onForward) && live;
+  const canSelect = Boolean(onStartSelect) && live;
 
   // Stickers stand alone — no bubble chrome, just the image. Rendered
   // outside the standard bubble path because the visual treatment differs.
@@ -100,8 +176,13 @@ export function MessageBubble({
           opposite side of the avatar. */}
       {isOut && (
         <BubbleActions
+          message={message}
           canReply={canReply}
-          onReply={onReply ? () => onReply(message) : undefined}
+          canForward={canForward}
+          canSelect={canSelect}
+          onReply={onReply}
+          onForward={onForward}
+          onStartSelect={onStartSelect}
         />
       )}
 
@@ -152,8 +233,13 @@ export function MessageBubble({
 
       {!isOut && (
         <BubbleActions
+          message={message}
           canReply={canReply}
-          onReply={onReply ? () => onReply(message) : undefined}
+          canForward={canForward}
+          canSelect={canSelect}
+          onReply={onReply}
+          onForward={onForward}
+          onStartSelect={onStartSelect}
         />
       )}
     </div>
@@ -161,13 +247,24 @@ export function MessageBubble({
 }
 
 function BubbleActions({
+  message,
   canReply,
+  canForward,
+  canSelect,
   onReply,
+  onForward,
+  onStartSelect,
 }: {
+  message: Message;
   canReply: boolean;
-  onReply?: () => void;
+  canForward: boolean;
+  canSelect: boolean;
+  onReply?: (message: Message) => void;
+  onForward?: (message: Message) => void;
+  onStartSelect?: (message: Message) => void;
 }) {
-  if (!canReply) return null;
+  const hasMenu = (canForward && Boolean(onForward)) || (canSelect && Boolean(onStartSelect));
+  if (!(canReply && onReply) && !hasMenu) return null;
   return (
     <div className="flex items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
       {canReply && onReply && (
@@ -175,14 +272,69 @@ function BubbleActions({
           type="button"
           variant="ghost"
           size="icon"
-          onClick={onReply}
+          onClick={() => onReply(message)}
           title="Reply to this message"
+          aria-label="Reply to this message"
           className="size-7 text-muted-foreground hover:text-foreground"
         >
           <CornerUpLeft className="size-3.5" />
         </Button>
       )}
+      {hasMenu && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              title="More actions"
+              aria-label="More actions"
+              className="size-7 text-muted-foreground hover:text-foreground"
+            >
+              <MoreHorizontal className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            {canForward && onForward && (
+              <DropdownMenuItem onSelect={() => onForward(message)}>
+                <Forward className="size-3.5" />
+                Forward
+              </DropdownMenuItem>
+            )}
+            {canSelect && onStartSelect && (
+              <DropdownMenuItem onSelect={() => onStartSelect(message)}>
+                <ListChecks className="size-3.5" />
+                Select messages
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </div>
+  );
+}
+
+function SelectCheckbox({
+  checked,
+  disabled,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "flex size-5 shrink-0 items-center justify-center rounded-full border transition-colors",
+        disabled
+          ? "border-muted-foreground/30"
+          : checked
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-muted-foreground/50",
+      )}
+    >
+      {checked && <Check className="size-3" />}
+    </span>
   );
 }
 
@@ -200,7 +352,7 @@ function QuotedReply({
   const senderLabel =
     reply.direction === "out"
       ? reply.senderName
-        ? `@${reply.senderName.split(" ")[0]}`
+        ? `@${reply.senderName}`
         : "You"
       : contactName;
   const bodyLabel = reply.body || mediaLabel(reply.mediaKind) || "Message";
@@ -272,7 +424,7 @@ function BubbleMeta({
       {isOut && sender && (
         <>
           <span className="opacity-50">·</span>
-          <span>via @{sender.name.split(" ")[0]?.toLowerCase()}</span>
+          <span>via @{sender.name}</span>
         </>
       )}
       {isOut && <StatusTicks message={message} />}

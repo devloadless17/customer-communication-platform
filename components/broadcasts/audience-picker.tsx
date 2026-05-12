@@ -1,29 +1,30 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, FolderHeart, Search, Tag as TagIcon, Users, X, UserPlus } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ChevronRight, FolderHeart, Loader2, Search, Tag as TagIcon, Users, UserPlus } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
-import { cn, initials, formatPhone } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { TagChip } from "@/components/tags/tag-chip";
-import type { Contact, Tag } from "@/lib/types";
+import { ContactMultiSelectField } from "@/components/contacts/contact-multi-select-field";
+import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
+import type { ContactFieldDefinition, Tag } from "@/lib/types";
 import type { AudienceGroupDto } from "@/lib/queries";
 
 /**
- * Two-mode audience picker for the broadcast wizard.
+ * Audience picker for the broadcast wizard. Four modes:
  *
- *   "all"      — every contact in the team becomes a recipient at send time.
- *                The server expands the audience server-side so the snapshot
- *                is consistent even if contacts get added mid-flight.
- *   "selected" — agent builds a list of specific contacts. The chip input is
- *                a search-as-you-type field; suggestions appear in a dropdown
- *                below; clicking adds a chip; X removes one.
+ *   "all"      — every contact in the team. Expanded server-side at send time.
+ *   "by_tag"   — contacts carrying ANY of the chosen tags. The recipient
+ *                count is resolved server-side (the parent owns the fetch).
+ *   "group"    — a saved audience group.
+ *   "selected" — a hand-picked list, via the shared contact picker dialog.
  *
- * The picker is fully presentational. The parent owns the selected ids and
- * is responsible for resolving them to contact rows.
+ * Fully presentational: the parent owns the selected ids/tags and supplies
+ * any server-resolved counts. No team-wide contact list is ever loaded here
+ * — it doesn't scale.
  */
 
 export type AudienceMode = "all" | "selected" | "by_tag" | "group";
@@ -36,36 +37,33 @@ export interface AudienceState {
 }
 
 export function AudiencePicker({
-  contacts,
   tags,
+  fieldDefinitions = [],
   groups,
   totalContactCount,
+  taggedRecipientCount,
+  taggedRecipientLoading = false,
+  initialContactLabels = [],
   value,
   onChange,
 }: {
-  /** All contacts the agent can pick from. Already loaded by the page. */
-  contacts: Contact[];
-  /** All team tags available for by-tag mode. */
+  /** All team tags — used both for by-tag mode and for filtering in the picker. */
   tags: Tag[];
+  /** Custom-field defs — used for the "filter by field" pills in the picker. */
+  fieldDefinitions?: ContactFieldDefinition[];
   /** All saved audience groups for "from group" mode. */
   groups: AudienceGroupDto[];
-  /** Same as contacts.length on first render — kept separate so the "All
-   *  contacts" hint can stay accurate while the list is filtered. */
+  /** Total contacts in the team — the "All contacts" recipient count. */
   totalContactCount: number;
+  /** Server-resolved count of contacts matching `value.selectedTagIds`. */
+  taggedRecipientCount: number;
+  /** True while the parent is (re)fetching `taggedRecipientCount`. */
+  taggedRecipientLoading?: boolean;
+  /** Seed labels for any preselected contact ids (avoids a chip-label flash). */
+  initialContactLabels?: ContactLabel[];
   value: AudienceState;
   onChange: (next: AudienceState) => void;
 }) {
-  // For by_tag mode: count contacts that have at least one of the selected
-  // tags. Computed client-side from the in-memory list so the agent sees a
-  // live count as they pick tags. Server re-validates at send time.
-  const taggedCount = useMemo(() => {
-    if (value.selectedTagIds.length === 0) return 0;
-    const tagSet = new Set(value.selectedTagIds);
-    return contacts.filter((c) =>
-      (c.tagIds ?? []).some((id) => tagSet.has(id)),
-    ).length;
-  }, [contacts, value.selectedTagIds]);
-
   return (
     <div className="flex flex-col gap-4">
       <ModeToggle value={value.mode} onChange={(mode) => onChange({ ...value, mode })} />
@@ -93,7 +91,8 @@ export function AudiencePicker({
               tags={tags}
               selectedTagIds={value.selectedTagIds}
               onChange={(selectedTagIds) => onChange({ ...value, selectedTagIds })}
-              recipientCount={taggedCount}
+              recipientCount={taggedRecipientCount}
+              recipientLoading={taggedRecipientLoading}
             />
           </motion.div>
         ) : value.mode === "group" ? (
@@ -119,7 +118,9 @@ export function AudiencePicker({
             transition={{ duration: 0.15 }}
           >
             <SelectedContactsInput
-              contacts={contacts}
+              tags={tags}
+              fieldDefinitions={fieldDefinitions}
+              initialContactLabels={initialContactLabels}
               selectedIds={value.selectedIds}
               onChange={(selectedIds) => onChange({ ...value, selectedIds })}
             />
@@ -193,11 +194,13 @@ function TagAudienceSelector({
   selectedTagIds,
   onChange,
   recipientCount,
+  recipientLoading,
 }: {
   tags: Tag[];
   selectedTagIds: string[];
   onChange: (next: string[]) => void;
   recipientCount: number;
+  recipientLoading: boolean;
 }) {
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
@@ -254,10 +257,17 @@ function TagAudienceSelector({
       <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3">
         <div className="flex items-center gap-2 text-sm">
           <TagIcon className="size-4 text-sky-700 dark:text-sky-300" />
-          <span className="font-medium text-sky-700 dark:text-sky-300">
-            {selectedTagIds.length === 0
-              ? "Pick at least one tag"
-              : `Broadcast to ${recipientCount} contact${recipientCount === 1 ? "" : "s"}`}
+          <span className="flex items-center gap-1.5 font-medium text-sky-700 dark:text-sky-300">
+            {selectedTagIds.length === 0 ? (
+              "Pick at least one tag"
+            ) : recipientLoading ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" />
+                Counting recipients…
+              </>
+            ) : (
+              `Broadcast to ${recipientCount} contact${recipientCount === 1 ? "" : "s"}`
+            )}
           </span>
         </div>
         <p className="mt-1 text-[11px] text-muted-foreground">
@@ -401,186 +411,35 @@ function AllContactsCard({ count }: { count: number }) {
 }
 
 function SelectedContactsInput({
-  contacts,
+  tags,
+  fieldDefinitions,
+  initialContactLabels,
   selectedIds,
   onChange,
 }: {
-  contacts: Contact[];
+  tags: Tag[];
+  fieldDefinitions: ContactFieldDefinition[];
+  initialContactLabels: ContactLabel[];
   selectedIds: string[];
   onChange: (next: string[]) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const byId = useMemo(
-    () => new Map(contacts.map((c) => [c.id, c] as const)),
-    [contacts],
-  );
-  const selected = useMemo(
-    () => selectedIds.map((id) => byId.get(id)).filter((x): x is Contact => Boolean(x)),
-    [selectedIds, byId],
-  );
-
-  // Hide the dropdown when clicking outside the chip container.
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (!containerRef.current) return;
-      if (!containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const suggestions = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const picked = new Set(selectedIds);
-    return contacts
-      .filter((c) => !picked.has(c.id))
-      .filter((c) => {
-        if (q.length === 0) return true;
-        return (
-          c.name.toLowerCase().includes(q) ||
-          c.phoneNumber.toLowerCase().includes(q) ||
-          (c.email ?? "").toLowerCase().includes(q)
-        );
-      })
-      .slice(0, 50);
-  }, [contacts, selectedIds, query]);
-
-  function addContact(id: string) {
-    if (selectedIds.includes(id)) return;
-    onChange([...selectedIds, id]);
-    setQuery("");
-    inputRef.current?.focus();
-  }
-  function removeContact(id: string) {
-    onChange(selectedIds.filter((x) => x !== id));
-    inputRef.current?.focus();
-  }
-
   return (
-    <div ref={containerRef} className="relative">
-      <div
-        className={cn(
-          "flex min-h-[44px] flex-wrap items-center gap-1.5 rounded-xl border border-input bg-background px-2 py-1.5 shadow-xs transition-colors",
-          open && "ring-2 ring-ring",
-        )}
-        onClick={() => {
-          inputRef.current?.focus();
-          setOpen(true);
-        }}
-      >
-        {selected.length === 0 && (
-          <Search className="ml-1 size-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <AnimatePresence initial={false}>
-          {selected.map((c) => (
-            <motion.span
-              key={c.id}
-              initial={{ opacity: 0, scale: 0.92 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.92 }}
-              transition={{ duration: 0.12 }}
-              className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 py-0.5 pl-0.5 pr-1.5 text-xs text-foreground"
-            >
-              <Avatar className="size-5">
-                <AvatarFallback className="text-[9px]">{initials(c.name)}</AvatarFallback>
-              </Avatar>
-              <span className="font-medium">{c.name}</span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeContact(c.id);
-                }}
-                className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                aria-label={`Remove ${c.name}`}
-              >
-                <X className="size-3" />
-              </button>
-            </motion.span>
-          ))}
-        </AnimatePresence>
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={(e) => {
-            if (e.key === "Backspace" && query.length === 0 && selectedIds.length > 0) {
-              e.preventDefault();
-              const lastId = selectedIds[selectedIds.length - 1];
-              if (lastId) removeContact(lastId);
-            }
-          }}
-          placeholder={selected.length === 0 ? "Search by name, phone, or email…" : "Add another…"}
-          className="min-w-[140px] flex-1 border-0 bg-transparent px-1 py-1 text-sm outline-none placeholder:text-muted-foreground"
-        />
-      </div>
-
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.12 }}
-            className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-xl border border-border bg-popover shadow-xl"
-          >
-            {suggestions.length === 0 ? (
-              <div className="px-4 py-3 text-[12px] text-muted-foreground">
-                {query.trim().length > 0
-                  ? `No contacts match "${query}".`
-                  : "No more contacts to add."}
-              </div>
-            ) : (
-              <ul className="divide-y divide-border">
-                {suggestions.map((c) => (
-                  <li key={c.id}>
-                    <button
-                      type="button"
-                      onClick={() => addContact(c.id)}
-                      className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-accent/60 focus:bg-accent/60 focus:outline-none"
-                    >
-                      <Avatar className="size-7">
-                        <AvatarFallback className="text-[10px]">{initials(c.name)}</AvatarFallback>
-                      </Avatar>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium">{c.name}</div>
-                        <div className="truncate text-[11px] text-muted-foreground">
-                          {formatPhone(c.phoneNumber)}
-                        </div>
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
-        <span>
-          {selected.length} recipient{selected.length === 1 ? "" : "s"} selected
-        </span>
-        {selected.length > 0 && (
-          <button
-            type="button"
-            onClick={() => onChange([])}
-            className="text-muted-foreground hover:text-foreground hover:underline"
-          >
-            Clear all
-          </button>
-        )}
-      </div>
+    <div className="flex flex-col gap-2">
+      <ContactMultiSelectField
+        tags={tags}
+        fieldDefinitions={fieldDefinitions}
+        initialLabels={initialContactLabels}
+        selectedIds={selectedIds}
+        onChange={onChange}
+        dialogTitle="Pick broadcast recipients"
+        dialogDescription="Filter by name, number, tag, or any field — same view as the Contacts page."
+        confirmLabel="Use these recipients"
+        emptyHint="No recipients picked yet — click below to choose."
+      />
+      <p className="text-[11px] text-muted-foreground">
+        {selectedIds.length} recipient{selectedIds.length === 1 ? "" : "s"} selected ·
+        snapshot is taken when you send.
+      </p>
     </div>
   );
 }

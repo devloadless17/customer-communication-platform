@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { formatPhone } from "@/lib/utils";
 
@@ -40,6 +41,7 @@ export function WhatsappSettings({
   canManage: boolean;
 }) {
   const router = useRouter();
+  const { confirm, confirmDialog } = useConfirm();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(!current.connected);
@@ -77,9 +79,14 @@ export function WhatsappSettings({
   }
 
   async function disconnect() {
-    if (!confirm("Disconnect WhatsApp? Your conversations will stay, but no new messages will flow until you reconnect.")) {
-      return;
-    }
+    const ok = await confirm({
+      title: "Disconnect WhatsApp?",
+      description:
+        "Your conversations will stay, but no new messages will flow until you reconnect.",
+      confirmLabel: "Disconnect",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetch("/api/team/whatsapp", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
@@ -177,6 +184,7 @@ export function WhatsappSettings({
           Only admins can change the WhatsApp connection.
         </p>
       )}
+      {confirmDialog}
     </div>
   );
 }

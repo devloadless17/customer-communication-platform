@@ -14,7 +14,34 @@ import { createServer } from "node:http";
 import { parse } from "node:url";
 import next from "next";
 
+import { db } from "./lib/db";
 import { initSocketServer } from "./lib/socket-server";
+
+/**
+ * Broadcasts run in-process via `setImmediate` (see lib/broadcast-runner.ts),
+ * so a restart mid-send leaves rows stuck at `running` forever — the progress
+ * UI would lie indefinitely. On boot, mark any such orphan as `failed`. The
+ * per-recipient rows already carry their own status, so a future "resume"
+ * could re-enqueue the `queued` ones; for now, fail-fast so the dashboard is
+ * honest.
+ */
+async function reconcileInterruptedBroadcasts(): Promise<void> {
+  try {
+    const { count } = await db.broadcast.updateMany({
+      where: { status: "running" },
+      data: {
+        status: "failed",
+        completedAt: new Date(),
+        lastError: "interrupted by a server restart",
+      },
+    });
+    if (count > 0) {
+      console.warn(`[server] marked ${count} interrupted broadcast(s) as failed on boot`);
+    }
+  } catch (err) {
+    console.error("[server] broadcast reconciliation failed", err);
+  }
+}
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = process.env.HOSTNAME ?? "localhost";
@@ -34,6 +61,8 @@ void app.prepare().then(() => {
   });
 
   initSocketServer(httpServer);
+
+  void reconcileInterruptedBroadcasts();
 
   httpServer
     .once("error", (err) => {

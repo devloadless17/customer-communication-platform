@@ -21,11 +21,13 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import type { Contact, Tag, TemplateDto } from "@/lib/types";
+import type { ContactFieldDefinition, Tag, TemplateDto } from "@/lib/types";
+import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
 import type { TemplateComponent } from "@/lib/providers/types";
 import type { AudienceGroupDto } from "@/lib/queries";
 
 import { AudiencePicker, type AudienceState } from "@/components/broadcasts/audience-picker";
+import { RecipientsPreviewDialog } from "@/components/broadcasts/recipients-preview-dialog";
 
 /**
  * New broadcast wizard.
@@ -45,16 +47,20 @@ type Step = "audience" | "template" | "variables" | "review";
 const STEP_ORDER: Step[] = ["audience", "template", "variables", "review"];
 
 export function NewBroadcastForm({
-  contacts,
+  totalContactCount,
+  initialContactLabels,
   tags,
+  fieldDefinitions,
   groups,
   hasWabaId,
   preselectedContactIds,
   preselectedTagIds,
   preselectedGroupId,
 }: {
-  contacts: Contact[];
+  totalContactCount: number;
+  initialContactLabels: ContactLabel[];
   tags: Tag[];
+  fieldDefinitions: ContactFieldDefinition[];
   groups: AudienceGroupDto[];
   hasWabaId: boolean;
   preselectedContactIds: string[];
@@ -108,6 +114,43 @@ export function NewBroadcastForm({
   const [headerVar, setHeaderVar] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Live "by tag" recipient count, resolved server-side — the team contact
+  // list is no longer loaded into the browser. Debounced; only fetched while
+  // tag mode is active.
+  const [taggedCount, setTaggedCount] = useState(0);
+  const [taggedCountLoading, setTaggedCountLoading] = useState(false);
+  const tagKey = audience.selectedTagIds.join(",");
+  useEffect(() => {
+    if (audience.mode !== "by_tag" || audience.selectedTagIds.length === 0) {
+      setTaggedCount(0);
+      setTaggedCountLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setTaggedCountLoading(true);
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await fetch("/api/contacts/count", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tagIds: audience.selectedTagIds }),
+        });
+        const data = (await res.json()) as { count?: number };
+        if (!cancelled) setTaggedCount(data.count ?? 0);
+      } catch {
+        if (!cancelled) setTaggedCount(0);
+      } finally {
+        if (!cancelled) setTaggedCountLoading(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audience.mode, tagKey]);
 
   // -------------------------------------------------------------------------
   // Template fetch + sync
@@ -198,18 +241,43 @@ export function NewBroadcastForm({
   // selected tag ids. Same set the server will compute at create time, so
   // the agent gets a faithful preview.
   const audienceCount = useMemo(() => {
-    if (audience.mode === "all") return contacts.length;
+    if (audience.mode === "all") return totalContactCount;
     if (audience.mode === "selected") return audience.selectedIds.length;
     if (audience.mode === "group") {
       const g = groups.find((x) => x.id === audience.selectedGroupId);
       return g?.memberCount ?? 0;
     }
-    const set = new Set(audience.selectedTagIds);
-    if (set.size === 0) return 0;
-    return contacts.filter((c) => (c.tagIds ?? []).some((id) => set.has(id))).length;
-  }, [audience, contacts, groups]);
+    return taggedCount;
+  }, [audience, groups, totalContactCount, taggedCount]);
 
   const audienceDone = audienceCount > 0;
+
+  // What "Preview recipients" resolves against. Null for "all" (no point) and
+  // for an as-yet-empty selection. Group mode reuses the group dto's snapshot
+  // of tag + manual membership.
+  const selectedGroup =
+    audience.mode === "group"
+      ? groups.find((g) => g.id === audience.selectedGroupId) ?? null
+      : null;
+  const previewPayload: { tagIds: string[]; contactIds: string[] } | null = (() => {
+    if (audience.mode === "selected" && audience.selectedIds.length > 0) {
+      return { tagIds: [], contactIds: audience.selectedIds };
+    }
+    if (audience.mode === "by_tag" && audience.selectedTagIds.length > 0) {
+      return { tagIds: audience.selectedTagIds, contactIds: [] };
+    }
+    if (audience.mode === "group" && selectedGroup) {
+      return { tagIds: selectedGroup.tagIds, contactIds: selectedGroup.contactIds };
+    }
+    return null;
+  })();
+  const previewSubtitle =
+    audience.mode === "by_tag"
+      ? `${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"} · contacts carrying any of them`
+      : audience.mode === "group"
+        ? `Saved group: ${selectedGroup?.name ?? "—"}`
+        : `${audience.selectedIds.length} hand-picked contact${audience.selectedIds.length === 1 ? "" : "s"}`;
+
   const templateDone = selectedTemplate !== null;
   const variablesDone =
     templateDone &&
@@ -293,7 +361,7 @@ export function NewBroadcastForm({
         summary={
           audienceDone
             ? audience.mode === "all"
-              ? `All ${contacts.length} contact${contacts.length === 1 ? "" : "s"}`
+              ? `All ${totalContactCount} contact${totalContactCount === 1 ? "" : "s"}`
               : audience.mode === "by_tag"
                 ? `${audienceCount} via ${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"}`
                 : audience.mode === "group"
@@ -304,10 +372,13 @@ export function NewBroadcastForm({
         done={audienceDone}
       >
         <AudiencePicker
-          contacts={contacts}
           tags={tags}
+          fieldDefinitions={fieldDefinitions}
           groups={groups}
-          totalContactCount={contacts.length}
+          totalContactCount={totalContactCount}
+          taggedRecipientCount={taggedCount}
+          taggedRecipientLoading={taggedCountLoading}
+          initialContactLabels={initialContactLabels}
           value={audience}
           onChange={setAudience}
         />
@@ -406,7 +477,7 @@ export function NewBroadcastForm({
           </div>
         )}
         <div className="flex items-center justify-between gap-3">
-          <div className="text-[12px] text-muted-foreground">
+          <div className="flex items-center gap-3 text-[12px] text-muted-foreground">
             {readyToSend ? (
               <span className="inline-flex items-center gap-1.5">
                 <Send className="size-3.5" />
@@ -417,9 +488,17 @@ export function NewBroadcastForm({
                 recipient{audienceCount === 1 ? "" : "s"}.
               </span>
             ) : (
-              <span>
-                Complete every step to enable sending.
-              </span>
+              <span>Complete every step to enable sending.</span>
+            )}
+            {previewPayload && audienceCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setPreviewOpen(true)}
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground hover:bg-accent"
+              >
+                <Users className="size-3.5" />
+                Preview recipients
+              </button>
             )}
           </div>
           <Button
@@ -437,6 +516,14 @@ export function NewBroadcastForm({
           </Button>
         </div>
       </div>
+
+      <RecipientsPreviewDialog
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        payload={previewPayload}
+        title="Broadcast recipients"
+        subtitle={previewSubtitle}
+      />
     </div>
   );
 }

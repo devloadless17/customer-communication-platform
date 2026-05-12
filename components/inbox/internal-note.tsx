@@ -18,29 +18,31 @@ export function InternalNote({
 }) {
   return (
     <div className="group my-1 flex w-full justify-center">
-      <div className="relative w-full max-w-2xl rounded-lg border border-note-border bg-note-bg px-3.5 py-2.5 text-note-fg">
-        <div className="mb-1 flex items-center gap-2">
-          <StickyNote className="size-3.5" />
-          <span className="text-[11px] font-semibold uppercase tracking-wider">Internal note</span>
-          <span className="ml-auto flex items-center gap-1.5 text-[11px] opacity-80">
-            <Avatar className="size-4">
-              <AvatarFallback className="text-[8px]">{initials(author.name)}</AvatarFallback>
-            </Avatar>
-            <span>{author.name}</span>
-            <span className="opacity-60">·</span>
-            <span suppressHydrationWarning>{formatMessageTime(note.timestamp)}</span>
-          </span>
+      <div className="flex w-full max-w-2xl items-start gap-1.5">
+        <div className="min-w-0 flex-1 rounded-lg border border-note-border bg-note-bg px-3.5 py-2.5 text-note-fg">
+          <div className="mb-1 flex items-center gap-2">
+            <StickyNote className="size-3.5" />
+            <span className="text-[11px] font-semibold uppercase tracking-wider">Internal note</span>
+            <span className="ml-auto flex items-center gap-1.5 text-[11px] opacity-80">
+              <Avatar className="size-4">
+                <AvatarFallback className="text-[8px]">{initials(author.name)}</AvatarFallback>
+              </Avatar>
+              <span>{author.name}</span>
+              <span className="opacity-60">·</span>
+              <span suppressHydrationWarning>{formatMessageTime(note.timestamp)}</span>
+            </span>
+          </div>
+          <p className="text-sm leading-relaxed">{note.body}</p>
         </div>
-        <p className="text-sm leading-relaxed">{note.body}</p>
         {onDelete && (
           <button
             type="button"
             onClick={() => onDelete(note.id)}
             title="Delete this note"
-            className="absolute right-2 top-2 inline-flex size-6 cursor-pointer items-center justify-center rounded text-note-fg/60 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
+            className="mt-0.5 inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
             aria-label="Delete note"
           >
-            <Trash2 className="size-3" />
+            <Trash2 className="size-3.5" />
           </button>
         )}
       </div>

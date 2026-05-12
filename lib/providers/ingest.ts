@@ -226,7 +226,8 @@ async function ingestInboundMessage(
     direction: "in",
     provider,
     status: "delivered",
-    rawPayload: evt.rawPayload,
+    // raw_payload stays in the DB row (created above) but is deliberately
+    // left off the socket payload — no client needs the verbatim Meta body.
     timestamp: evt.timestamp.toISOString(),
     ...(replySnapshot
       ? { replyToMessageId: replySnapshot.id, replyTo: replySnapshot }

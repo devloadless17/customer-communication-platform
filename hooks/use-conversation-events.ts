@@ -13,6 +13,13 @@ export interface ConversationEventsState {
   /** Returns the count of messages newly prepended (for scroll preservation). */
   loadOlder: () => Promise<number>;
   /**
+   * Bumps every time older messages are actually prepended (not on appends,
+   * status changes, or empty pages). The thread keys its scroll-anchor
+   * restoration on this so an unrelated re-render — an inbound message landing
+   * mid-fetch, an optimistic send — can't consume the wrong snapshot.
+   */
+  olderLoadedTick: number;
+  /**
    * Append an optimistic outbound message. Caller passes a fully-formed
    * Message with `clientTempId` set + `pending: true`. When the matching
    * `message:new` arrives via socket, we swap it in place.
@@ -46,6 +53,7 @@ export function useConversationEvents(
   const [data, setData] = useState<ConversationWithRefs>(initial);
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextOlderCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderLoadedTick, setOlderLoadedTick] = useState(0);
 
   useEffect(() => {
     setData(initial);
@@ -82,6 +90,9 @@ export function useConversationEvents(
         return { ...prev, messages: [...fresh, ...prev.messages] };
       });
       setOlderCursor(page.nextCursor);
+      // Batched with the prepend above — the thread's scroll-restore layout
+      // effect watches this so it fires on exactly this render.
+      if (added > 0) setOlderLoadedTick((t) => t + 1);
       return added;
     } finally {
       inFlightOlder.current = false;
@@ -303,6 +314,7 @@ export function useConversationEvents(
     hasMoreOlder: olderCursor !== null,
     loadingOlder,
     loadOlder,
+    olderLoadedTick,
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,

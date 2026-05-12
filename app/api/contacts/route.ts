@@ -34,12 +34,22 @@ export async function GET(req: Request) {
   const sourceParam = url.searchParams.get("source");
   const source =
     sourceParam === "inbound" || sourceParam === "manual" ? sourceParam : undefined;
+  // ?tagIds=a,b,c — keep contacts carrying ANY of them.
+  const tagIdsParam = url.searchParams.get("tagIds");
+  const tagIds = tagIdsParam
+    ? tagIdsParam.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+    : undefined;
+  // ?window=open|closed — 24h customer-service window state.
+  const windowParam = url.searchParams.get("window");
+  const window = windowParam === "open" || windowParam === "closed" ? windowParam : undefined;
 
   const page = await listContacts(session.teamId, {
     search,
     cursor,
     fieldFilter: fieldKey && fieldValue ? { key: fieldKey, value: fieldValue } : undefined,
     source,
+    tagIds,
+    window,
   });
 
   return NextResponse.json(page);

@@ -37,28 +37,22 @@ import type {
   ContactFieldDefinition,
   ContactListItem,
   ContactSource,
-  CursorPage,
   Tag,
 } from "@/lib/types";
+import { ContactFilterBar, useContactList } from "@/components/contacts/contact-browser";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 import { ImportContactsDialog } from "./import-dialog";
 import { NewContactDialog } from "./new-contact-dialog";
 import { EditContactDialog } from "./edit-contact-dialog";
 
-type SourceFilter = "all" | ContactSource;
-
-interface FieldFilter {
-  key: string;
-  value: string;
-}
-
 /**
  * Contacts directory.
  *
- * Server seeds the first page; client takes over for search, filter, and
- * pagination. The list refetches whenever search/filter changes (debounced
- * 250ms) — the dataset is small enough today that we don't need to be
- * cleverer than this.
+ * Search / filter / pagination all live in the shared `useContactList` hook
+ * (the same one the contact-picker dialog uses), so this component only owns
+ * the page-specific bits: bulk-action selection, the create/import/edit
+ * dialogs, and the team tag + field catalogs.
  */
 export function ContactsClient({
   initialItems,
@@ -74,8 +68,9 @@ export function ContactsClient({
   canManageFields: boolean;
 }) {
   const router = useRouter();
-  const [items, setItems] = useState<ContactListItem[]>(initialItems);
-  const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
+  const { confirm, confirmDialog } = useConfirm();
+  const list = useContactList({ initialItems, initialNextCursor });
+  const { items, setItems, setError } = list;
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
   const [fieldDefinitions, setFieldDefinitions] =
@@ -88,12 +83,6 @@ export function ContactsClient({
   // Selection state for bulk actions. Set<string> keeps add/remove O(1) and
   // makes "select all on this page" a simple union.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  const [search, setSearch] = useState("");
-  const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
   // Contact id currently being edited — null = dialog closed. Storing the id
@@ -122,46 +111,9 @@ export function ContactsClient({
     );
   }
 
-  // Refetch on search/filter change. Debounce server hits so typing doesn't
-  // flood the API; abort in-flight on the next change so a slow page-1 can't
-  // overwrite a faster page-2.
-  const reqId = useRef(0);
-  useEffect(() => {
-    const my = ++reqId.current;
-    setLoading(true);
-    setError(null);
-    const t = window.setTimeout(async () => {
-      try {
-        const page = await fetchPage({ search, fieldFilter, sourceFilter, cursor: null });
-        if (reqId.current !== my) return;
-        setItems(page.items);
-        setNextCursor(page.nextCursor);
-      } catch {
-        if (reqId.current === my) setError("Couldn't load contacts");
-      } finally {
-        if (reqId.current === my) setLoading(false);
-      }
-    }, 250);
-    return () => window.clearTimeout(t);
-  }, [search, fieldFilter, sourceFilter]);
-
-  async function loadMore() {
-    if (!nextCursor || loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const page = await fetchPage({ search, fieldFilter, sourceFilter, cursor: nextCursor });
-      setItems((prev) => [...prev, ...page.items]);
-      setNextCursor(page.nextCursor);
-    } catch {
-      setError("Couldn't load more");
-    } finally {
-      setLoadingMore(false);
-    }
-  }
-
   // The search is broad enough — also matches inside customFields JSON — that
   // we don't need a "no results" hint per filter dimension. Just empty state.
-  const showEmpty = !loading && items.length === 0;
+  const showEmpty = !list.loading && items.length === 0;
 
   return (
     <div className="mx-auto max-w-5xl px-8 py-8">
@@ -192,63 +144,31 @@ export function ContactsClient({
         </div>
       </header>
 
-      <div className="mb-3 flex items-center gap-1.5 text-xs">
-        <span className="text-muted-foreground">Show:</span>
-        <SourceChip
-          active={sourceFilter === "all"}
-          onClick={() => setSourceFilter("all")}
-          label="All"
-        />
-        <SourceChip
-          active={sourceFilter === "inbound"}
-          onClick={() => setSourceFilter("inbound")}
-          label="Messaged me"
-        />
-        <SourceChip
-          active={sourceFilter === "manual"}
-          onClick={() => setSourceFilter("manual")}
-          label="Added by me"
-        />
-      </div>
-
-      <div className="mb-3 flex items-center gap-2">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, phone, email, or any field…"
-            className="pl-8"
-          />
-          {search && (
-            <button
-              type="button"
-              onClick={() => setSearch("")}
-              aria-label="Clear search"
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              <X className="size-3" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {fieldDefinitions.length > 0 && (
-        <FieldFilterRow
+      <div className="mb-3">
+        <ContactFilterBar
+          search={list.search}
+          onSearchChange={list.setSearch}
+          sourceFilter={list.sourceFilter}
+          onSourceChange={list.setSourceFilter}
+          windowFilter={list.windowFilter}
+          onWindowChange={list.setWindowFilter}
+          fieldFilter={list.fieldFilter}
+          onFieldChange={list.setFieldFilter}
           fieldDefinitions={fieldDefinitions}
-          value={fieldFilter}
-          onChange={setFieldFilter}
+          tags={tags}
+          selectedTagIds={list.tagIds}
+          onTagsChange={list.setTagIds}
         />
-      )}
+      </div>
 
-      {error && (
+      {list.error && (
         <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
+          {list.error}
         </div>
       )}
 
       <div className="rounded-lg border border-border bg-card">
-        {loading && items.length === 0 ? (
+        {list.loading && items.length === 0 ? (
           <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
             Loading…
@@ -256,7 +176,10 @@ export function ContactsClient({
         ) : showEmpty ? (
           <div className="px-6 py-16 text-center">
             <p className="text-sm text-muted-foreground">
-              {search || fieldFilter
+              {list.search ||
+              list.fieldFilter ||
+              list.windowFilter !== "any" ||
+              list.tagIds.length > 0
                 ? "No contacts match your filters."
                 : "No contacts yet. Click \"New contact\" to add one."}
             </p>
@@ -297,10 +220,10 @@ export function ContactsClient({
             </ul>
           </>
         )}
-        {nextCursor && (
+        {list.nextCursor && (
           <div className="border-t border-border p-3 text-center">
-            <Button variant="ghost" size="sm" onClick={loadMore} disabled={loadingMore}>
-              {loadingMore ? (
+            <Button variant="ghost" size="sm" onClick={list.loadMore} disabled={list.loadingMore}>
+              {list.loadingMore ? (
                 <>
                   <Loader2 className="size-3.5 animate-spin" />
                   Loading…
@@ -395,13 +318,14 @@ export function ContactsClient({
         onDelete={async () => {
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
-          if (
-            !confirm(
-              `Delete ${ids.length} contact${ids.length === 1 ? "" : "s"}? This also removes their conversations, messages, and notes. Can't be undone.`,
-            )
-          ) {
-            return;
-          }
+          const ok = await confirm({
+            title: `Delete ${ids.length} contact${ids.length === 1 ? "" : "s"}?`,
+            description:
+              "This also removes their conversations, messages, and notes. This can't be undone.",
+            confirmLabel: "Delete",
+            destructive: true,
+          });
+          if (!ok) return;
           const res = await fetch("/api/contacts/bulk", {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -475,6 +399,7 @@ export function ContactsClient({
           }}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }
@@ -1011,114 +936,6 @@ function BulkTagMenu({
   );
 }
 
-function FieldFilterRow({
-  fieldDefinitions,
-  value,
-  onChange,
-}: {
-  fieldDefinitions: ContactFieldDefinition[];
-  value: FieldFilter | null;
-  onChange: (next: FieldFilter | null) => void;
-}) {
-  const [openKey, setOpenKey] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-
-  function startEditing(key: string) {
-    setOpenKey(key);
-    setDraft(value?.key === key ? value.value : "");
-  }
-
-  function commit() {
-    if (!openKey) return;
-    const trimmed = draft.trim();
-    if (!trimmed) {
-      onChange(null);
-    } else {
-      onChange({ key: openKey, value: trimmed });
-    }
-    setOpenKey(null);
-  }
-
-  return (
-    <div className="mb-3 flex flex-wrap items-center gap-1.5 text-xs">
-      <span className="text-muted-foreground">Filter:</span>
-      {fieldDefinitions.map((def) => {
-        const active = value?.key === def.key;
-        if (openKey === def.key) {
-          return (
-            <div key={def.id} className="flex items-center gap-1">
-              <Input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onBlur={commit}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    commit();
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    setOpenKey(null);
-                  }
-                }}
-                placeholder={`${def.label} contains…`}
-                autoFocus
-                className="h-7 w-44 text-xs"
-              />
-            </div>
-          );
-        }
-        return (
-          <button
-            key={def.id}
-            type="button"
-            onClick={() => startEditing(def.key)}
-            className={`flex items-center gap-1 rounded-full border px-2 py-0.5 transition ${
-              active
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border text-muted-foreground hover:bg-accent"
-            }`}
-          >
-            <span>{def.label}</span>
-            {active && <span className="font-medium text-foreground">: {value?.value}</span>}
-            {active && (
-              <X
-                className="size-3"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChange(null);
-                }}
-              />
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Fetcher
-// ---------------------------------------------------------------------------
-
-async function fetchPage(opts: {
-  search: string;
-  fieldFilter: FieldFilter | null;
-  sourceFilter: SourceFilter;
-  cursor: string | null;
-}): Promise<CursorPage<ContactListItem>> {
-  const params = new URLSearchParams();
-  if (opts.search.trim()) params.set("search", opts.search.trim());
-  if (opts.fieldFilter) {
-    params.set("fieldKey", opts.fieldFilter.key);
-    params.set("fieldValue", opts.fieldFilter.value);
-  }
-  if (opts.sourceFilter !== "all") params.set("source", opts.sourceFilter);
-  if (opts.cursor) params.set("cursor", opts.cursor);
-  const res = await fetch(`/api/contacts?${params.toString()}`);
-  if (!res.ok) throw new Error("fetch failed");
-  return (await res.json()) as CursorPage<ContactListItem>;
-}
-
 function SourceBadge({ source }: { source: ContactSource }) {
   if (source === "manual") {
     return (
@@ -1134,26 +951,3 @@ function SourceBadge({ source }: { source: ContactSource }) {
   );
 }
 
-function SourceChip({
-  active,
-  onClick,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-full border px-2 py-0.5 transition ${
-        active
-          ? "border-primary bg-primary/10 text-foreground"
-          : "border-border text-muted-foreground hover:bg-accent"
-      }`}
-    >
-      {label}
-    </button>
-  );
-}

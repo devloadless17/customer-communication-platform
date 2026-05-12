@@ -34,6 +34,30 @@ import type { MediaKind, MessageStatus } from "@/lib/types";
  * no env vars. CLAUDE.md rule #6.
  */
 
+/**
+ * `fetch` with a hard timeout. Every Meta Graph / CDN call goes through here
+ * so a hung upstream can't stall the request that triggered it — most
+ * importantly the webhook handler, which downloads inbound media synchronously
+ * before it returns 200 to Meta. Without this, one slow CDN response makes
+ * Meta time the webhook out and retry the whole batch.
+ */
+const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS ?? 20_000);
+
+async function metaFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), META_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: ac.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`meta request timed out after ${META_FETCH_TIMEOUT_MS}ms: ${input}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface MetaEnvelope {
   object?: string;
   entry?: MetaEntry[];
@@ -229,7 +253,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
   async sendText(args: SendTextArgs, config: MetaSendConfig): Promise<SendTextResult> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    const res = await fetch(url, {
+    const res = await metaFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -276,7 +300,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // every earlier inbound from that conversation as read on the customer's
     // device, so one call per agent-view is enough.
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
-    const res = await fetch(url, {
+    const res = await metaFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -307,7 +331,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Step 1: GET /{media-id} → { url, mime_type, ... }. The signed URL is
     // valid for ~5 minutes — we MUST hit it immediately. Don't store it.
     const metaUrl = `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(externalMediaId)}`;
-    const metaRes = await fetch(metaUrl, {
+    const metaRes = await metaFetch(metaUrl, {
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!metaRes.ok) {
@@ -325,7 +349,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     // Step 2: download the binary. Meta's CDN ALSO requires the bearer token
     // — undocumented gotcha, requests without it 401.
-    const binRes = await fetch(meta.url, {
+    const binRes = await metaFetch(meta.url, {
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!binRes.ok) {
@@ -359,7 +383,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     new Uint8Array(ab).set(args.bytes);
     fd.append("file", new Blob([ab], { type: args.mimeType }), args.filename);
 
-    const res = await fetch(url, {
+    const res = await metaFetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${config.accessToken}` },
       body: fd,
@@ -391,7 +415,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       sub.filename = args.filename;
     }
 
-    const res = await fetch(url, {
+    const res = await metaFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -457,7 +481,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     while (next && pages < 5) {
       pages += 1;
-      const res = await fetch(next, {
+      const res = await metaFetch(next, {
         headers: { authorization: `Bearer ${config.accessToken}` },
       });
       if (!res.ok) {
@@ -506,7 +530,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       });
     }
 
-    const res = await fetch(url, {
+    const res = await metaFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",

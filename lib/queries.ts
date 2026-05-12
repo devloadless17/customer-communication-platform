@@ -141,7 +141,12 @@ function mapConversation(c: PrismaConversation): Conversation {
   };
 }
 
-type PrismaMessageWithReply = PrismaMessage & {
+// Read paths never need `raw_payload` — it's the verbatim Meta webhook body,
+// kept in the DB for debugging only (CLAUDE.md rule #4). Pulling it would
+// drag a full JSONB blob per row through Postgres → Node → the browser on
+// every thread open, so we `omit` it from every message read and the domain
+// type doesn't carry it.
+type PrismaMessageWithReply = Omit<PrismaMessage, "rawPayload"> & {
   replyTo?: ReplyToRow | null;
 };
 
@@ -156,7 +161,6 @@ function mapMessage(m: PrismaMessageWithReply): Message {
     direction: m.direction as MessageDirection,
     provider: m.provider as ProviderName,
     status: m.status as MessageStatus,
-    rawPayload: (m.rawPayload as Record<string, unknown>) ?? {},
     timestamp: m.timestamp.toISOString(),
     ...(m.replyToMessageId
       ? {
@@ -302,6 +306,7 @@ export async function getConversationWithRefs(
       messages: {
         orderBy: [{ timestamp: "desc" }, { id: "desc" }],
         take: limit + 1,
+        omit: { rawPayload: true },
         include: { replyTo: REPLY_TO_INCLUDE },
       },
       notes: { orderBy: { timestamp: "asc" } },
@@ -366,6 +371,7 @@ export async function listOlderMessages(
   if (!owns) return { items: [], nextCursor: null };
 
   const rows = await db.message.findMany({
+    omit: { rawPayload: true },
     include: { replyTo: REPLY_TO_INCLUDE },
     where: {
       conversationId,
@@ -465,6 +471,11 @@ export interface ListContactsOpts {
   fieldFilter?: { key: string; value: string };
   /** Filter by how the contact got into the DB. */
   source?: "inbound" | "manual";
+  /** Keep only contacts carrying ANY of these tag ids (union, like audience groups). */
+  tagIds?: string[];
+  /** Filter by 24h customer-service window: "open" = messaged us in the last
+   *  24h; "closed" = no inbound, or last inbound > 24h ago. */
+  window?: "open" | "closed";
   cursor?: string | null;
   take?: number;
 }
@@ -490,6 +501,23 @@ export async function listContacts(
   const search = opts.search?.trim() ?? "";
   const fieldFilter = opts.fieldFilter;
   const source = opts.source;
+  const windowFilter = opts.window;
+  const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
+
+  // Tag filter: resolve "has ANY of these tags" to a concrete id set up front
+  // (Prisma's typed M2M is clearer than guessing the implicit join table name
+  // in the raw query below). No matches → short-circuit to an empty page.
+  let tagFilteredIds: string[] | null = null;
+  if (tagIds.length > 0) {
+    const matches = await db.contact.findMany({
+      where: { teamId, tags: { some: { id: { in: tagIds } } } },
+      select: { id: true },
+    });
+    tagFilteredIds = matches.map((m) => m.id);
+    if (tagFilteredIds.length === 0) {
+      return { items: [], nextCursor: null };
+    }
+  }
 
   // Pull contacts with one aggregate join: latest message timestamp + the
   // latest non-closed conversation id. We do this in a single SQL query
@@ -568,6 +596,18 @@ export async function listContacts(
           : Prisma.empty
       }
       ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
+      ${
+        windowFilter === "open"
+          ? Prisma.sql`AND inbound."timestamp" >= now() - interval '24 hours'`
+          : windowFilter === "closed"
+            ? Prisma.sql`AND (inbound."timestamp" IS NULL OR inbound."timestamp" < now() - interval '24 hours')`
+            : Prisma.empty
+      }
+      ${
+        tagFilteredIds
+          ? Prisma.sql`AND c.id IN (${Prisma.join(tagFilteredIds)})`
+          : Prisma.empty
+      }
       ${
         cursor
           ? Prisma.sql`AND (
@@ -931,18 +971,92 @@ async function resolveAudienceGroupMemberCount(
   teamId: string,
   args: { tagIds: string[]; manualContactIds: string[] },
 ): Promise<number> {
-  if (args.tagIds.length === 0 && args.manualContactIds.length === 0) return 0;
+  return countAudienceContacts(teamId, {
+    tagIds: args.tagIds,
+    contactIds: args.manualContactIds,
+  });
+}
+
+/**
+ * Count of contacts that carry ANY of `tagIds` OR appear in `contactIds` —
+ * the audience-group union semantics. Powers the live recipient-count badges
+ * in the broadcast wizard and the group form WITHOUT shipping the whole
+ * contact list to the browser (the old approach was a client-side filter over
+ * every contact, which falls apart past a few thousand).
+ */
+export async function countAudienceContacts(
+  teamId: string,
+  { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
+): Promise<number> {
+  const tags = tagIds.filter((s) => s.length > 0);
+  const ids = contactIds.filter((s) => s.length > 0);
+  if (tags.length === 0 && ids.length === 0) return 0;
   const where: import("@prisma/client").Prisma.ContactWhereInput =
-    args.tagIds.length > 0
+    tags.length > 0 && ids.length > 0
       ? {
           teamId,
-          OR: [
-            { id: { in: args.manualContactIds } },
-            { tags: { some: { id: { in: args.tagIds } } } },
-          ],
+          OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
-      : { teamId, id: { in: args.manualContactIds } };
+      : tags.length > 0
+        ? { teamId, tags: { some: { id: { in: tags } } } }
+        : { teamId, id: { in: ids } };
   return db.contact.count({ where });
+}
+
+/** Total number of contacts in a team. */
+export async function countContacts(teamId: string): Promise<number> {
+  return db.contact.count({ where: { teamId } });
+}
+
+/**
+ * Light id → display-label lookup for rendering selection chips. Team-scoped
+ * and capped so a hostile caller can't ask us to hydrate the whole table.
+ * Returns only the fields a chip needs — never the full Contact row.
+ */
+export async function lookupContacts(
+  teamId: string,
+  ids: string[],
+): Promise<Array<{ id: string; name: string; phoneNumber: string }>> {
+  const clean = Array.from(
+    new Set(ids.map((s) => s.trim()).filter((s) => s.length > 0)),
+  ).slice(0, 1000);
+  if (clean.length === 0) return [];
+  return db.contact.findMany({
+    where: { teamId, id: { in: clean } },
+    select: { id: true, name: true, phoneNumber: true },
+  });
+}
+
+/**
+ * Recipients preview for a broadcast audience: total count + a capped sample
+ * of `{id, name, phoneNumber}`, using the same UNION-of-tags-and-ids semantics
+ * as {@link countAudienceContacts}. Lets the wizard show "who am I sending to"
+ * without shipping the whole contact list.
+ */
+export async function previewAudienceContacts(
+  teamId: string,
+  { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
+  sampleLimit = 200,
+): Promise<{ total: number; sample: Array<{ id: string; name: string; phoneNumber: string }> }> {
+  const tags = tagIds.filter((s) => s.length > 0);
+  const ids = contactIds.filter((s) => s.length > 0);
+  if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };
+  const where: import("@prisma/client").Prisma.ContactWhereInput =
+    tags.length > 0 && ids.length > 0
+      ? { teamId, OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }] }
+      : tags.length > 0
+        ? { teamId, tags: { some: { id: { in: tags } } } }
+        : { teamId, id: { in: ids } };
+  const [total, sample] = await Promise.all([
+    db.contact.count({ where }),
+    db.contact.findMany({
+      where,
+      select: { id: true, name: true, phoneNumber: true },
+      orderBy: [{ name: "asc" }],
+      take: Math.max(1, Math.min(sampleLimit, 500)),
+    }),
+  ]);
+  return { total, sample };
 }
 
 export async function listTags(teamId: string): Promise<import("@/lib/types").Tag[]> {

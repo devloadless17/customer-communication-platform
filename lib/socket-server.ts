@@ -58,6 +58,15 @@ export function initSocketServer(http: HttpServer): IO {
       credentials: true,
     },
     transports: ["websocket", "polling"],
+    // Replay events a client missed during a brief drop (tab sleep, wifi
+    // blip, phone lock) instead of leaving its inbox silently stale until the
+    // next manual refetch. Safe on a single instance — when we scale out this
+    // needs the Redis adapter to work, which is already the planned trigger
+    // for adding Redis at all.
+    connectionStateRecovery: {
+      maxDisconnectionDuration: 2 * 60 * 1000,
+      skipMiddlewares: false,
+    },
   });
 
   // -------------------------------------------------------------------------

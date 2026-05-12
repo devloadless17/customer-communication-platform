@@ -1,11 +1,11 @@
 import Link from "next/link";
-import { ChevronRight, Plus, Users } from "lucide-react";
+import { Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { TagChip } from "@/components/tags/tag-chip";
 import { getSession } from "@/lib/current-user";
 import { listAudienceGroups, listTags } from "@/lib/queries";
-import { formatListTime } from "@/lib/utils";
+
+import { GroupRow } from "./group-row";
 
 export const metadata = { title: "Audience groups" };
 export const dynamic = "force-dynamic";
@@ -68,73 +68,16 @@ export default async function AudienceGroupsPage() {
               </tr>
             </thead>
             <tbody>
-              {groups.map((g) => {
-                const sampleTags = g.tagIds
-                  .slice(0, 4)
-                  .map((id) => tagById.get(id))
-                  .filter((t): t is NonNullable<typeof t> => Boolean(t));
-                const extraTagCount = Math.max(0, g.tagIds.length - sampleTags.length);
-                return (
-                  <tr
-                    key={g.id}
-                    className="border-b border-border last:border-b-0 hover:bg-accent/30"
-                  >
-                    <td className="px-4 py-3">
-                      <Link
-                        href={`/broadcasts/groups/${g.id}`}
-                        className="font-medium text-foreground hover:text-primary"
-                      >
-                        {g.name}
-                      </Link>
-                      {g.description && (
-                        <div className="line-clamp-1 text-[11px] text-muted-foreground">
-                          {g.description}
-                        </div>
-                      )}
-                      <div className="text-[10px] text-muted-foreground">
-                        by {g.createdByName}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap items-center gap-1">
-                        {sampleTags.map((t) => (
-                          <TagChip key={t.id} tag={t} size="xs" />
-                        ))}
-                        {extraTagCount > 0 && (
-                          <span className="text-[10px] text-muted-foreground">
-                            +{extraTagCount} tag{extraTagCount === 1 ? "" : "s"}
-                          </span>
-                        )}
-                        {g.contactIds.length > 0 && (
-                          <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
-                            +{g.contactIds.length} manual
-                          </span>
-                        )}
-                        {sampleTags.length === 0 && g.contactIds.length === 0 && (
-                          <span className="text-[11px] italic text-muted-foreground">
-                            Empty
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums font-medium">
-                      {g.memberCount}
-                    </td>
-                    <td className="px-4 py-3 text-[12px] text-muted-foreground">
-                      {formatListTime(g.updatedAt)}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <Link
-                        href={`/broadcasts/groups/${g.id}`}
-                        className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-                        aria-label="Open group"
-                      >
-                        <ChevronRight className="size-4" />
-                      </Link>
-                    </td>
-                  </tr>
-                );
-              })}
+              {groups.map((g) => (
+                <GroupRow
+                  key={g.id}
+                  group={g}
+                  sampleTags={g.tagIds
+                    .slice(0, 4)
+                    .map((id) => tagById.get(id))
+                    .filter((t): t is NonNullable<typeof t> => Boolean(t))}
+                />
+              ))}
             </tbody>
           </table>
         </div>

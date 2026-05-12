@@ -2,8 +2,13 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
-import { listAudienceGroups, listTags } from "@/lib/queries";
-import type { Contact } from "@/lib/types";
+import {
+  countContacts,
+  listAudienceGroups,
+  listContactFieldDefinitions,
+  listTags,
+  lookupContacts,
+} from "@/lib/queries";
 
 import { NewBroadcastForm } from "./new-broadcast-form";
 
@@ -23,54 +28,6 @@ export default async function NewBroadcastPage({
   }>;
 }) {
   const { teamId } = await getSession();
-
-  // Pre-load the contact list + tags + saved groups so the wizard renders
-  // fully on first paint. With the typical pilot size (low hundreds) this
-  // is cheaper than two separate XHRs from the client.
-  const [team, contacts, tags, groups] = await Promise.all([
-    db.team.findUnique({
-      where: { id: teamId },
-      select: { metaPhoneNumberId: true, metaWabaId: true },
-    }),
-    db.contact.findMany({
-      where: { teamId },
-      orderBy: { name: "asc" },
-      select: {
-        id: true,
-        teamId: true,
-        phoneNumber: true,
-        name: true,
-        email: true,
-        location: true,
-        avatarUrl: true,
-        customFields: true,
-        source: true,
-        tags: { select: { id: true } },
-      },
-    }),
-    listTags(teamId),
-    listAudienceGroups(teamId),
-  ]);
-
-  // Pre-flight: if WhatsApp isn't even connected, bounce to the settings
-  // page so the user knows what to fix.
-  if (!team?.metaPhoneNumberId) {
-    redirect("/settings/whatsapp?from=broadcasts");
-  }
-
-  const contactsClient: Contact[] = contacts.map((c) => ({
-    id: c.id,
-    teamId: c.teamId,
-    phoneNumber: c.phoneNumber,
-    name: c.name,
-    avatarUrl: c.avatarUrl ?? undefined,
-    email: c.email ?? undefined,
-    location: c.location ?? undefined,
-    customFields: normalizeCustomFields(c.customFields),
-    source: c.source as Contact["source"],
-    tagIds: c.tags.map((t) => t.id),
-  }));
-
   const sp = await searchParams;
   const preselectedContactIds = normalizeIds(sp.contactIds);
   const preselectedTagIds = normalizeIds(sp.tagIds);
@@ -79,10 +36,35 @@ export default async function NewBroadcastPage({
       ? sp.groupId.trim()
       : null;
 
+  // The wizard never loads the whole contact list — it works off ids and
+  // resolves counts / chip labels server-side. So all we fetch here is the
+  // team total, the small tag/group/field catalogs, and the labels for any
+  // contacts that were deep-linked in.
+  const [team, totalContactCount, tags, groups, fieldDefinitions, contactLabels] =
+    await Promise.all([
+      db.team.findUnique({
+        where: { id: teamId },
+        select: { metaPhoneNumberId: true, metaWabaId: true },
+      }),
+      countContacts(teamId),
+      listTags(teamId),
+      listAudienceGroups(teamId),
+      listContactFieldDefinitions(teamId),
+      lookupContacts(teamId, preselectedContactIds),
+    ]);
+
+  // Pre-flight: if WhatsApp isn't even connected, bounce to the settings
+  // page so the user knows what to fix.
+  if (!team?.metaPhoneNumberId) {
+    redirect("/settings/whatsapp?from=broadcasts");
+  }
+
   return (
     <NewBroadcastForm
-      contacts={contactsClient}
+      totalContactCount={totalContactCount}
+      initialContactLabels={contactLabels}
       tags={tags}
+      fieldDefinitions={fieldDefinitions}
       groups={groups}
       hasWabaId={Boolean(team.metaWabaId)}
       preselectedContactIds={preselectedContactIds}
@@ -97,13 +79,4 @@ function normalizeIds(raw: string | string[] | undefined): string[] {
   // ?ids=a,b,c (string) OR ?ids=a&ids=b (array) — accept both.
   const arr = Array.isArray(raw) ? raw : raw.split(",");
   return Array.from(new Set(arr.map((s) => s.trim()).filter((s) => s.length > 0)));
-}
-
-function normalizeCustomFields(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
 }

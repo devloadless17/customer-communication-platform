@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 
 import { requireAdmin } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
+import { invalidateProviderConfig } from "@/lib/providers/config";
 
 /**
  * Admin-only: connect / update the team's WhatsApp Cloud API credentials.
@@ -127,6 +128,10 @@ export async function POST(req: Request) {
     throw err;
   }
 
+  // Bust the in-process credential cache so the next webhook / send picks up
+  // the new values immediately instead of waiting out the TTL.
+  invalidateProviderConfig(session.teamId);
+
   return NextResponse.json({
     ok: true,
     config: {
@@ -157,6 +162,7 @@ export async function DELETE() {
       metaWabaId: null,
     },
   });
+  invalidateProviderConfig(session.teamId);
   return NextResponse.json({ ok: true });
 }
 

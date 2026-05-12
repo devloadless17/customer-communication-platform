@@ -9,14 +9,17 @@ import {
   CircleDashed,
   Archive,
   Check,
+  Forward,
   Loader2,
   Trash2,
+  X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,10 +40,12 @@ import type {
 } from "@/lib/types";
 import { useConversationEvents } from "@/hooks/use-conversation-events";
 import { useTyping } from "@/hooks/use-typing";
+import { useMessageSelection } from "@/hooks/use-message-selection";
 
 import { MessageBubble } from "./message-bubble";
 import { InternalNote as InternalNoteCard } from "./internal-note";
 import { ReplyBox } from "./reply-box";
+import { ForwardDialog } from "./forward-dialog";
 
 type TimelineEntry =
   | { kind: "message"; data: Message }
@@ -62,11 +67,13 @@ export function MessageThread({
     hasMoreOlder,
     loadingOlder,
     loadOlder,
+    olderLoadedTick,
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
   } = useConversationEvents(initialData, nextOlderCursor);
   const { conversation, contact, assignedUser, messages, notes } = data;
+  const { confirm, alert, confirmDialog } = useConfirm();
 
   const memberById = useMemo(() => {
     return new Map(teamMembers.map((u) => [u.id, u]));
@@ -82,11 +89,46 @@ export function MessageThread({
   // -------------------------------------------------------------------------
   const [replyTarget, setReplyTarget] = useState<ReplySnapshot | null>(null);
 
+  // -------------------------------------------------------------------------
+  // Multi-select + forward. `selection` flips the thread into checkbox mode;
+  // `forwardIds` is the (frozen) set of message ids handed to the picker.
+  // -------------------------------------------------------------------------
+  const selection = useMessageSelection();
+  const [forwardOpen, setForwardOpen] = useState(false);
+  const [forwardIds, setForwardIds] = useState<string[]>([]);
+
   // Re-snapshot when the user changes conversation — the previous reply
-  // target belongs to the old thread.
+  // target / selection belongs to the old thread.
   useEffect(() => {
     setReplyTarget(null);
-  }, [conversation.id]);
+    selection.clear();
+  }, [conversation.id, selection.clear]);
+
+  // Esc leaves selection mode.
+  useEffect(() => {
+    if (!selection.selecting) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") selection.clear();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selection.selecting, selection.clear]);
+
+  const forwardOne = useCallback((msg: Message) => {
+    setForwardIds([msg.id]);
+    setForwardOpen(true);
+  }, []);
+
+  const forwardSelection = useCallback(() => {
+    if (selection.count === 0) return;
+    setForwardIds([...selection.selectedIds]);
+    setForwardOpen(true);
+  }, [selection.count, selection.selectedIds]);
+
+  const startSelect = useCallback(
+    (msg: Message) => selection.start(msg.id),
+    [selection.start],
+  );
 
   const beginReply = useCallback(
     (msg: Message) => {
@@ -122,13 +164,21 @@ export function MessageThread({
     }, 1500);
   }, []);
 
-  const deleteNote = useCallback(async (noteId: string) => {
-    if (!confirm("Delete this internal note?")) return;
-    const res = await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
-    if (!res.ok) {
-      alert("Failed to delete note");
-    }
-  }, []);
+  const deleteNote = useCallback(
+    async (noteId: string) => {
+      const ok = await confirm({
+        title: "Delete this internal note?",
+        confirmLabel: "Delete",
+        destructive: true,
+      });
+      if (!ok) return;
+      const res = await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
+      if (!res.ok) {
+        await alert("Couldn't delete note", "Please try again.");
+      }
+    },
+    [confirm, alert],
+  );
 
   const { typingUserIds, notifyTyping, stopTyping } = useTyping(
     conversation.id,
@@ -156,20 +206,20 @@ export function MessageThread({
   //   3) When older messages are prepended, hold the visual position so the
   //      content the user was looking at stays under their eyes.
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollRootRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
 
-  // Find the actual scrolling element (Radix ScrollArea viewport) once.
-  useEffect(() => {
-    const el = bottomRef.current?.parentElement;
-    if (!el) return;
-    let root: HTMLElement | null = el;
-    while (root && root !== document.body) {
-      const o = getComputedStyle(root).overflowY;
-      if (o === "auto" || o === "scroll") break;
-      root = root.parentElement;
-    }
-    scrollRootRef.current = root;
+  // The actual scrolling element is Radix's ScrollArea viewport. Grab it by
+  // its data attribute (scoped to this thread's ScrollArea) — walking up by
+  // computed `overflow` is unreliable because the viewport's overflow is
+  // `hidden` until content overflows.
+  useLayoutEffect(() => {
+    scrollRootRef.current =
+      scrollAreaRef.current?.querySelector<HTMLElement>(
+        "[data-radix-scroll-area-viewport]",
+      ) ?? null;
   }, []);
 
   function isNearBottom(slack = 120): boolean {
@@ -200,20 +250,28 @@ export function MessageThread({
     }
   }, [timeline]);
 
-  // (3) infinite scroll up. When the top sentinel comes into view, fetch the
-  // next older page and preserve the visual position by re-anchoring after
-  // DOM mutation.
+  // (3) infinite scroll up with a fixed visual anchor.
   //
-  // IMPORTANT: do NOT add `loadingOlder` to the dep array. When that flag
-  // toggles, the effect would tear down the observer and create a new one —
-  // and IntersectionObserver synchronously fires its callback once for each
-  // observed target's current state when observe() is called. With the 100px
-  // rootMargin the sentinel often re-qualifies as "intersecting" right after
-  // the prepend, which would cascade into back-to-back page fetches and pull
-  // the entire history at once. `loadOlder` already self-guards against
-  // overlapping calls via inFlightOlder, so we only need this effect to
-  // re-run when the conversation or hasMoreOlder changes.
-  const pendingPreserveRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  // When the top sentinel nears the viewport we fetch the next older page.
+  // Prepending those messages would normally shove everything down; instead we
+  // pin the *distance from the bottom* of the scroll content, which prepended
+  // content above the fold doesn't change — so the messages under the user's
+  // eyes stay exactly where they are. They can keep scrolling up; each page
+  // loads the same way.
+  //
+  // Why distance-from-bottom (not a scrollHeight delta): it's immune to other
+  // re-renders racing the fetch (an inbound message landing, an optimistic
+  // send) and it self-corrects as media in the just-loaded region decodes and
+  // reflows — we re-apply it for a short settle window, bailing the instant
+  // the user scrolls.
+  //
+  // Serialization: `loadingOlderRef` makes the observer single-flight, so even
+  // though it can fire repeatedly (rootMargin, re-observe after a prepend) we
+  // walk back one page at a time instead of yanking the whole history. Don't
+  // put `loadingOlder` (the state) in the dep array — recreating the observer
+  // re-fires it for the current intersection and breaks the serialization.
+  const restoreRef = useRef<{ distanceFromBottom: number } | null>(null);
+  const loadingOlderRef = useRef(false);
   useEffect(() => {
     if (!hasMoreOlder) return;
     const sentinel = topSentinelRef.current;
@@ -222,32 +280,62 @@ export function MessageThread({
 
     const obs = new IntersectionObserver(
       (entries) => {
+        if (loadingOlderRef.current) return;
         if (!entries.some((e) => e.isIntersecting)) return;
-        // Snapshot scroll geometry; restore after the prepend by adding the
-        // delta in scrollHeight.
-        pendingPreserveRef.current = {
-          scrollHeight: root.scrollHeight,
-          scrollTop: root.scrollTop,
+        loadingOlderRef.current = true;
+        restoreRef.current = {
+          distanceFromBottom: root.scrollHeight - root.scrollTop,
         };
         void loadOlder().then((added) => {
-          if (added === 0) pendingPreserveRef.current = null;
+          if (added === 0) {
+            // Nothing prepended → the restore effect won't run; release here.
+            restoreRef.current = null;
+            loadingOlderRef.current = false;
+          }
         });
       },
-      { root, rootMargin: "100px" },
+      { root, rootMargin: "200px" },
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
   }, [hasMoreOlder, loadOlder]);
 
-  // Scroll preservation runs synchronously after the prepend has rendered.
+  // Restore the anchor right after a prepend renders — synchronously (before
+  // paint, so there's no flash), then again through a short settle window for
+  // media that reflows after decode. Keyed on `olderLoadedTick` so it runs on
+  // exactly the prepend render and never consumes a stale snapshot.
   useLayoutEffect(() => {
-    const pending = pendingPreserveRef.current;
+    const pending = restoreRef.current;
     const root = scrollRootRef.current;
     if (!pending || !root) return;
-    const delta = root.scrollHeight - pending.scrollHeight;
-    if (delta > 0) root.scrollTop = pending.scrollTop + delta;
-    pendingPreserveRef.current = null;
-  }, [messages.length]);
+
+    const apply = () => {
+      root.scrollTop = root.scrollHeight - pending.distanceFromBottom;
+    };
+    apply();
+    restoreRef.current = null;
+    loadingOlderRef.current = false;
+
+    // Settle window: keep the anchor pinned while images/videos in the new
+    // region load and change height. Stop the moment the user takes over.
+    let done = false;
+    const stop = () => {
+      if (done) return;
+      done = true;
+      ro.disconnect();
+      root.removeEventListener("wheel", stop);
+      root.removeEventListener("touchmove", stop);
+      window.clearTimeout(timer);
+    };
+    const ro = new ResizeObserver(() => {
+      if (!done) apply();
+    });
+    if (contentRef.current) ro.observe(contentRef.current);
+    root.addEventListener("wheel", stop, { passive: true });
+    root.addEventListener("touchmove", stop, { passive: true });
+    const timer = window.setTimeout(stop, 1200);
+    return stop;
+  }, [olderLoadedTick]);
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-background">
@@ -262,8 +350,14 @@ export function MessageThread({
         teamMembers={teamMembers}
       />
 
-      <ScrollArea className="flex-1">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-6 py-6">
+      <ScrollArea ref={scrollAreaRef} className="flex-1">
+        <div
+          ref={contentRef}
+          // overflow-anchor:none — we manage scroll position ourselves on
+          // prepend (see effect 3); the browser's own anchoring would fight it.
+          style={{ overflowAnchor: "none" }}
+          className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-6 py-6"
+        >
           {/* Top sentinel — IntersectionObserver target for "load older". */}
           <div ref={topSentinelRef} className="h-px" />
           {hasMoreOlder && (
@@ -321,6 +415,11 @@ export function MessageThread({
                       contactSeed={contact.id}
                       onReply={beginReply}
                       onJumpToOriginal={jumpToOriginal}
+                      onForward={forwardOne}
+                      onStartSelect={startSelect}
+                      selecting={selection.selecting}
+                      selected={selection.isSelected(entry.data.id)}
+                      onToggleSelect={selection.toggle}
                     />
                   ) : (
                     <InternalNoteCard
@@ -337,25 +436,88 @@ export function MessageThread({
         </div>
       </ScrollArea>
 
-      <TypingIndicator
-        typingUserIds={typingUserIds}
-        memberById={memberById}
-      />
+      {selection.selecting ? (
+        <SelectionBar
+          count={selection.count}
+          onForward={forwardSelection}
+          onCancel={selection.clear}
+        />
+      ) : (
+        <>
+          <TypingIndicator
+            typingUserIds={typingUserIds}
+            memberById={memberById}
+          />
+          <ReplyBox
+            conversationId={conversation.id}
+            currentUser={currentUser}
+            contactName={contact.name}
+            lastInboundAt={lastInboundAt}
+            replyTarget={replyTarget}
+            onCancelReply={cancelReply}
+            onTyping={notifyTyping}
+            onStopTyping={stopTyping}
+            onOptimistic={addOptimistic}
+            onOptimisticFail={markOptimisticFailed}
+            onOptimisticRetry={removeOptimistic}
+          />
+        </>
+      )}
 
-      <ReplyBox
-        conversationId={conversation.id}
-        currentUser={currentUser}
-        contactName={contact.name}
-        lastInboundAt={lastInboundAt}
-        replyTarget={replyTarget}
-        onCancelReply={cancelReply}
-        onTyping={notifyTyping}
-        onStopTyping={stopTyping}
-        onOptimistic={addOptimistic}
-        onOptimisticFail={markOptimisticFailed}
-        onOptimisticRetry={removeOptimistic}
+      <ForwardDialog
+        open={forwardOpen}
+        messageIds={forwardIds}
+        onClose={() => setForwardOpen(false)}
+        onDone={(summary) => {
+          setForwardOpen(false);
+          selection.clear();
+          void alert(summary);
+        }}
       />
+      {confirmDialog}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Selection bar — replaces the composer while the thread is in multi-select
+// mode. Mirrors the ReplyBox footer chrome so the swap doesn't jump.
+// ---------------------------------------------------------------------------
+
+function SelectionBar({
+  count,
+  onForward,
+  onCancel,
+}: {
+  count: number;
+  onForward: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="border-t border-border bg-background">
+      <div className="mx-auto flex w-full max-w-3xl items-center gap-3 px-4 py-3">
+        <span className="text-sm text-muted-foreground">
+          <span className="font-medium text-foreground tabular-nums">{count}</span>{" "}
+          {count === 1 ? "message" : "messages"} selected
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={onCancel} className="gap-1.5">
+            <X className="size-3.5" />
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={onForward}
+            disabled={count === 0}
+            title={count === 0 ? "Tick at least one message first" : undefined}
+            className="gap-1.5"
+          >
+            <Forward className="size-3.5" />
+            Forward
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -497,23 +659,25 @@ function ConversationMenu({
   contactName: string;
 }) {
   const router = useRouter();
+  const { confirm, alert, confirmDialog } = useConfirm();
   const [pending, setPending] = useState(false);
 
   async function deleteConversation() {
-    if (
-      !confirm(
-        `Delete this chat with "${contactName}"? Removes all messages and notes from this thread. The contact stays. Can't be undone.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Delete this chat with "${contactName}"?`,
+      description:
+        "Removes all messages and notes from this thread. The contact stays. This can't be undone.",
+      confirmLabel: "Delete chat",
+      destructive: true,
+    });
+    if (!ok) return;
     setPending(true);
     try {
       const res = await fetch(`/api/conversations/${conversationId}`, {
         method: "DELETE",
       });
       if (!res.ok) {
-        alert("Failed to delete chat");
+        await alert("Couldn't delete chat", "Please try again.");
         return;
       }
       router.push("/inbox");
@@ -523,6 +687,7 @@ function ConversationMenu({
   }
 
   return (
+    <>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
@@ -554,6 +719,8 @@ function ConversationMenu({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+    {confirmDialog}
+    </>
   );
 }
 

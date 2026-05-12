@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Trash2 } from "lucide-react";
 
+import { useConfirm } from "@/components/ui/confirm-dialog";
+
 /**
  * Per-row delete button for the broadcasts list. Server-component page
  * keeps the table render; this client island handles the confirm + DELETE.
@@ -22,19 +24,21 @@ export function BroadcastDeleteButton({
   status: string;
 }) {
   const router = useRouter();
+  const { confirm, confirmDialog } = useConfirm();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const disabled = status === "running" || status === "queued" || pending;
 
   async function run() {
-    if (
-      !confirm(
-        `Delete the broadcast for "${templateName}"? The audit row and per-recipient delivery status will be removed. The messages it sent stay in your inbox history.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Delete the broadcast for "${templateName}"?`,
+      description:
+        "The audit row and per-recipient delivery status will be removed. The messages it sent stay in your inbox history.",
+      confirmLabel: "Delete broadcast",
+      destructive: true,
+    });
+    if (!ok) return;
     setError(null);
     setPending(true);
     try {
@@ -67,6 +71,7 @@ export function BroadcastDeleteButton({
         {pending ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
       </button>
       {error && <span className="mt-1 text-[10px] text-destructive">{error}</span>}
+      {confirmDialog}
     </div>
   );
 }

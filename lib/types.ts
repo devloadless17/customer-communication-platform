@@ -119,6 +119,18 @@ export interface TemplateDto {
   syncedAt: string;
 }
 
+/** Per-recipient outcome of a forward, returned by `/api/messages/forward`. */
+export interface ForwardResult {
+  contactId: string;
+  contactName: string;
+  /** True when every queued message reached this contact. */
+  ok: boolean;
+  sent: number;
+  failed: number;
+  /** First failure reason (e.g. closed 24h window); only when `failed > 0`. */
+  error?: string;
+}
+
 export interface MediaAttachment {
   kind: MediaKind;
   /** Public URL the browser fetches (always /api/media/<messageId>). */
@@ -162,8 +174,14 @@ export interface Message {
   direction: MessageDirection;
   provider: ProviderName;
   status: MessageStatus;
-  /** Original webhook payload kept verbatim for debugging. */
-  rawPayload: Record<string, unknown>;
+  /**
+   * Original webhook payload, kept verbatim in the DB for debugging
+   * (CLAUDE.md rule #4). NOT hydrated on read paths — the column is `omit`ed
+   * from every message query so a full JSONB blob per row never travels
+   * Postgres → Node → browser. Optional here; only present on the write-side
+   * objects that just inserted the row.
+   */
+  rawPayload?: Record<string, unknown>;
   timestamp: string;
   /** Set when the message carries an attachment; absent for text-only. */
   media?: MediaAttachment;
