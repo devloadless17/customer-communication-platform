@@ -1037,7 +1037,15 @@ export async function previewAudienceContacts(
   teamId: string,
   { tagIds = [], contactIds = [] }: { tagIds?: string[]; contactIds?: string[] },
   sampleLimit = 200,
-): Promise<{ total: number; sample: Array<{ id: string; name: string; phoneNumber: string }> }> {
+): Promise<{
+  total: number;
+  sample: Array<{
+    id: string;
+    name: string;
+    phoneNumber: string;
+    tags: import("@/lib/types").Tag[];
+  }>;
+}> {
   const tags = tagIds.filter((s) => s.length > 0);
   const ids = contactIds.filter((s) => s.length > 0);
   if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };
@@ -1051,12 +1059,30 @@ export async function previewAudienceContacts(
     db.contact.count({ where }),
     db.contact.findMany({
       where,
-      select: { id: true, name: true, phoneNumber: true },
+      select: {
+        id: true,
+        name: true,
+        phoneNumber: true,
+        tags: { orderBy: { name: "asc" } },
+      },
       orderBy: [{ name: "asc" }],
       take: Math.max(1, Math.min(sampleLimit, 500)),
     }),
   ]);
-  return { total, sample };
+  return {
+    total,
+    sample: sample.map((c) => ({
+      id: c.id,
+      name: c.name,
+      phoneNumber: c.phoneNumber,
+      tags: c.tags.map((t) => ({
+        id: t.id,
+        teamId: t.teamId,
+        name: t.name,
+        color: t.color as import("@/lib/types").TagColor,
+      })),
+    })),
+  };
 }
 
 export async function listTags(teamId: string): Promise<import("@/lib/types").Tag[]> {

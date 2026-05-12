@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronDown,
@@ -67,7 +68,6 @@ export function MessageThread({
     hasMoreOlder,
     loadingOlder,
     loadOlder,
-    olderLoadedTick,
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
@@ -195,6 +195,17 @@ export function MessageThread({
     );
   }, [messages, notes]);
 
+  // Entrance animation is reserved for genuinely new tail entries (a fresh
+  // send/receive). The initial load and prepended older pages mount without
+  // animation — a bubble sliding in near the top of the viewport during a
+  // load-older would read as a jitter, and that's exactly what we don't want.
+  const mountedRef = useRef(false);
+  const seenKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    mountedRef.current = true;
+    seenKeysRef.current = new Set(timeline.map((e) => `${e.kind}_${e.data.id}`));
+  });
+
   // ---------------------------------------------------------------------
   // Scroll behavior
   // ---------------------------------------------------------------------
@@ -203,8 +214,9 @@ export function MessageThread({
   //   2) On a NEW timeline entry, only auto-scroll if the user is already
   //      near the bottom — otherwise they're reading history and we
   //      shouldn't yank them.
-  //   3) When older messages are prepended, hold the visual position so the
-  //      content the user was looking at stays under their eyes.
+  //   3) When older messages are prepended, the view doesn't move at all —
+  //      the prepend is committed via flushSync between a scrollHeight read
+  //      and a scrollTop write, so the browser never paints the shifted state.
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const scrollRootRef = useRef<HTMLElement | null>(null);
@@ -250,28 +262,27 @@ export function MessageThread({
     }
   }, [timeline]);
 
-  // (3) infinite scroll up with a fixed visual anchor.
+  // (3) infinite scroll up — load the next older page when the top sentinel
+  // nears the viewport, keeping the view perfectly still.
   //
-  // When the top sentinel nears the viewport we fetch the next older page.
-  // Prepending those messages would normally shove everything down; instead we
-  // pin the *distance from the bottom* of the scroll content, which prepended
-  // content above the fold doesn't change — so the messages under the user's
-  // eyes stay exactly where they are. They can keep scrolling up; each page
-  // loads the same way.
+  // The prepend is committed inside `flushSync`, bracketed by a `scrollHeight`
+  // read just before and a `scrollTop` write just after — all in one tick, so
+  // the browser never paints the shifted state. Net effect: zero flicker, the
+  // messages under the user's cursor don't move a pixel, and they can keep
+  // scrolling up at will. A short ResizeObserver settle window then re-pins
+  // the same anchor as images/videos in the new region decode and reflow; it
+  // bails the instant the user scrolls.
   //
-  // Why distance-from-bottom (not a scrollHeight delta): it's immune to other
-  // re-renders racing the fetch (an inbound message landing, an optimistic
-  // send) and it self-corrects as media in the just-loaded region decodes and
-  // reflows — we re-apply it for a short settle window, bailing the instant
-  // the user scrolls.
-  //
-  // Serialization: `loadingOlderRef` makes the observer single-flight, so even
-  // though it can fire repeatedly (rootMargin, re-observe after a prepend) we
-  // walk back one page at a time instead of yanking the whole history. Don't
-  // put `loadingOlder` (the state) in the dep array — recreating the observer
-  // re-fires it for the current intersection and breaks the serialization.
-  const restoreRef = useRef<{ distanceFromBottom: number } | null>(null);
+  // `loadingOlderRef` makes the observer single-flight: it can fire repeatedly
+  // (rootMargin, re-observe after a prepend), but only one fetch runs at a
+  // time, so we walk back one page per scroll instead of yanking the whole
+  // history. Don't put `loadingOlder` (the state) in the dep array —
+  // recreating the observer re-fires it for the current intersection.
   const loadingOlderRef = useRef(false);
+  const settleStopRef = useRef<(() => void) | null>(null);
+  // Tear down an in-flight settle window if the thread unmounts.
+  useEffect(() => () => settleStopRef.current?.(), []);
+
   useEffect(() => {
     if (!hasMoreOlder) return;
     const sentinel = topSentinelRef.current;
@@ -283,62 +294,51 @@ export function MessageThread({
         if (loadingOlderRef.current) return;
         if (!entries.some((e) => e.isIntersecting)) return;
         loadingOlderRef.current = true;
-        restoreRef.current = {
-          distanceFromBottom: root.scrollHeight - root.scrollTop,
-        };
-        void loadOlder().then((added) => {
-          if (added === 0) {
-            // Nothing prepended → the restore effect won't run; release here.
-            restoreRef.current = null;
-            loadingOlderRef.current = false;
-          }
+
+        void loadOlder((run) => {
+          // distance from the bottom of the scroll content — unchanged by a
+          // prepend above the fold, so re-deriving scrollTop from it after the
+          // commit keeps everything visually fixed.
+          const distanceFromBottom = root.scrollHeight - root.scrollTop;
+          flushSync(run);
+          const pin = () => {
+            root.scrollTop = root.scrollHeight - distanceFromBottom;
+          };
+          pin();
+
+          // Settle window: re-pin while just-loaded media reflows; stop on the
+          // first user scroll, or after a short timeout.
+          settleStopRef.current?.();
+          let done = false;
+          const stop = () => {
+            if (done) return;
+            done = true;
+            ro.disconnect();
+            root.removeEventListener("wheel", stop);
+            root.removeEventListener("touchmove", stop);
+            window.clearTimeout(timer);
+            if (settleStopRef.current === stop) settleStopRef.current = null;
+          };
+          const ro = new ResizeObserver(() => {
+            if (!done) pin();
+          });
+          if (contentRef.current) ro.observe(contentRef.current);
+          root.addEventListener("wheel", stop, { passive: true });
+          root.addEventListener("touchmove", stop, { passive: true });
+          const timer = window.setTimeout(stop, 1000);
+          settleStopRef.current = stop;
+        }).finally(() => {
+          loadingOlderRef.current = false;
         });
       },
-      { root, rootMargin: "200px" },
+      { root, rootMargin: "300px" },
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
   }, [hasMoreOlder, loadOlder]);
 
-  // Restore the anchor right after a prepend renders — synchronously (before
-  // paint, so there's no flash), then again through a short settle window for
-  // media that reflows after decode. Keyed on `olderLoadedTick` so it runs on
-  // exactly the prepend render and never consumes a stale snapshot.
-  useLayoutEffect(() => {
-    const pending = restoreRef.current;
-    const root = scrollRootRef.current;
-    if (!pending || !root) return;
-
-    const apply = () => {
-      root.scrollTop = root.scrollHeight - pending.distanceFromBottom;
-    };
-    apply();
-    restoreRef.current = null;
-    loadingOlderRef.current = false;
-
-    // Settle window: keep the anchor pinned while images/videos in the new
-    // region load and change height. Stop the moment the user takes over.
-    let done = false;
-    const stop = () => {
-      if (done) return;
-      done = true;
-      ro.disconnect();
-      root.removeEventListener("wheel", stop);
-      root.removeEventListener("touchmove", stop);
-      window.clearTimeout(timer);
-    };
-    const ro = new ResizeObserver(() => {
-      if (!done) apply();
-    });
-    if (contentRef.current) ro.observe(contentRef.current);
-    root.addEventListener("wheel", stop, { passive: true });
-    root.addEventListener("touchmove", stop, { passive: true });
-    const timer = window.setTimeout(stop, 1200);
-    return stop;
-  }, [olderLoadedTick]);
-
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-background">
+    <section className="relative flex min-w-0 flex-1 flex-col bg-background">
       <ThreadHeader
         conversationId={conversation.id}
         contactId={contact.id}
@@ -358,35 +358,24 @@ export function MessageThread({
           style={{ overflowAnchor: "none" }}
           className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-6 py-6"
         >
-          {/* Top sentinel — IntersectionObserver target for "load older". */}
+          {/* Top sentinel — IntersectionObserver target for "load older".
+              The loading indicator is rendered OUTSIDE the scroll content (a
+              floating pill below) so triggering a load never changes layout. */}
           <div ref={topSentinelRef} className="h-px" />
-          {hasMoreOlder && (
-            <div className="flex items-center justify-center py-2 text-[11px] text-muted-foreground">
-              {loadingOlder ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <Loader2 className="size-3 animate-spin" />
-                  Loading older messages…
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  className="hover:text-foreground"
-                  onClick={() => void loadOlder()}
-                >
-                  Load older messages
-                </button>
-              )}
-            </div>
-          )}
           {timeline.map((entry, idx) => {
             const prev = timeline[idx - 1];
             const showDay =
               !prev ||
               formatDaySeparator(entry.data.timestamp) !==
                 formatDaySeparator(prev.data.timestamp);
+            const entryKey = `${entry.kind}_${entry.data.id}`;
+            const animateIn =
+              mountedRef.current &&
+              idx === timeline.length - 1 &&
+              !seenKeysRef.current.has(entryKey);
 
             return (
-              <div key={`${entry.kind}_${entry.data.id}`} className="contents">
+              <div key={entryKey} className="contents">
                 {showDay && (
                   <div className="my-3 flex items-center gap-3">
                     <div className="h-px flex-1 bg-border" />
@@ -397,7 +386,7 @@ export function MessageThread({
                   </div>
                 )}
                 <motion.div
-                  initial={{ opacity: 0, y: 4 }}
+                  initial={animateIn ? { opacity: 0, y: 4 } : false}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18, ease: "easeOut" }}
                   data-message-id={entry.kind === "message" ? entry.data.id : undefined}
@@ -435,6 +424,25 @@ export function MessageThread({
           <div ref={bottomRef} />
         </div>
       </ScrollArea>
+
+      {/* Older-messages spinner — floats over the top of the thread, never in
+          the scroll flow, so loading a page doesn't nudge the view at all. */}
+      <div className="pointer-events-none absolute inset-x-0 top-[60px] z-10 flex justify-center pt-2">
+        <AnimatePresence>
+          {loadingOlder && (
+            <motion.span
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.15 }}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-[11px] text-muted-foreground shadow-sm"
+            >
+              <Loader2 className="size-3 animate-spin" />
+              Loading older messages…
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </div>
 
       {selection.selecting ? (
         <SelectionBar

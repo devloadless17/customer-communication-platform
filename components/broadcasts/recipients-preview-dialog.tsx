@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 import { Loader2, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { TagChip } from "@/components/tags/tag-chip";
 import { formatPhone, initials } from "@/lib/utils";
+import type { Tag } from "@/lib/types";
 
 interface PreviewResult {
   total: number;
-  sample: Array<{ id: string; name: string; phoneNumber: string }>;
+  sample: Array<{ id: string; name: string; phoneNumber: string; tags: Tag[] }>;
 }
 
 /**
@@ -129,7 +131,7 @@ export function RecipientsPreviewDialog({
             <>
               <ul className="divide-y divide-border">
                 {data.sample.map((c) => (
-                  <li key={c.id} className="flex items-center gap-3 px-4 py-2.5">
+                  <li key={c.id} className="flex items-start gap-3 px-4 py-2.5">
                     <Avatar className="size-7 shrink-0">
                       <AvatarFallback className="text-[10px]">
                         {initials(c.name || c.phoneNumber)}
@@ -142,6 +144,13 @@ export function RecipientsPreviewDialog({
                       <div className="truncate font-mono text-[11px] text-muted-foreground">
                         {formatPhone(c.phoneNumber)}
                       </div>
+                      {c.tags.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {c.tags.map((t) => (
+                            <TagChip key={t.id} tag={t} size="xs" />
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </li>
                 ))}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
@@ -10,15 +11,18 @@ export interface ConversationEventsState {
   data: ConversationWithRefs;
   hasMoreOlder: boolean;
   loadingOlder: boolean;
-  /** Returns the count of messages newly prepended (for scroll preservation). */
-  loadOlder: () => Promise<number>;
   /**
-   * Bumps every time older messages are actually prepended (not on appends,
-   * status changes, or empty pages). The thread keys its scroll-anchor
-   * restoration on this so an unrelated re-render — an inbound message landing
-   * mid-fetch, an optimistic send — can't consume the wrong snapshot.
+   * Fetch and prepend the next older page. Returns the number of messages
+   * prepended (0 if there was nothing more, the page was a no-op, or a fetch
+   * was already in flight).
+   *
+   * `commit` wraps the DOM mutation: it's called with a `run` function that
+   * applies the prepend, and is expected to invoke it synchronously (default:
+   * `flushSync`). The thread passes a wrapper that brackets `run` with a
+   * scroll-position measurement and restore so the prepend is invisible — the
+   * messages under the user's eyes don't shift by a single pixel.
    */
-  olderLoadedTick: number;
+  loadOlder: (commit?: (run: () => void) => void) => Promise<number>;
   /**
    * Append an optimistic outbound message. Caller passes a fully-formed
    * Message with `clientTempId` set + `pending: true`. When the matching
@@ -53,7 +57,6 @@ export function useConversationEvents(
   const [data, setData] = useState<ConversationWithRefs>(initial);
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextOlderCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [olderLoadedTick, setOlderLoadedTick] = useState(0);
 
   useEffect(() => {
     setData(initial);
@@ -69,36 +72,40 @@ export function useConversationEvents(
   }, [olderCursor]);
 
   const inFlightOlder = useRef(false);
-  const loadOlder = useCallback(async (): Promise<number> => {
-    const cursor = cursorRef.current;
-    if (!cursor || inFlightOlder.current) return 0;
-    inFlightOlder.current = true;
-    setLoadingOlder(true);
-    try {
-      const res = await fetch(
-        `/api/conversations/${conversationId}/messages?before=${encodeURIComponent(cursor)}`,
-      );
-      if (!res.ok) return 0;
-      const page = (await res.json()) as CursorPage<Message>;
-      let added = 0;
-      setData((prev) => {
-        const have = new Set(prev.messages.map((m) => m.id));
-        const fresh = page.items.filter((m) => !have.has(m.id));
-        added = fresh.length;
-        if (added === 0) return prev;
-        // Server returns oldest-first; prepend in order.
-        return { ...prev, messages: [...fresh, ...prev.messages] };
-      });
-      setOlderCursor(page.nextCursor);
-      // Batched with the prepend above — the thread's scroll-restore layout
-      // effect watches this so it fires on exactly this render.
-      if (added > 0) setOlderLoadedTick((t) => t + 1);
-      return added;
-    } finally {
-      inFlightOlder.current = false;
-      setLoadingOlder(false);
-    }
-  }, [conversationId]);
+  const loadOlder = useCallback(
+    async (commit: (run: () => void) => void = flushSync): Promise<number> => {
+      const cursor = cursorRef.current;
+      if (!cursor || inFlightOlder.current) return 0;
+      inFlightOlder.current = true;
+      setLoadingOlder(true);
+      try {
+        const res = await fetch(
+          `/api/conversations/${conversationId}/messages?before=${encodeURIComponent(cursor)}`,
+        );
+        if (!res.ok) return 0;
+        const page = (await res.json()) as CursorPage<Message>;
+        let added = 0;
+        // The caller's `commit` runs `run` synchronously (flushSync), so by
+        // the time it returns the DOM reflects the prepend and `added` is set.
+        commit(() => {
+          setData((prev) => {
+            const have = new Set(prev.messages.map((m) => m.id));
+            const fresh = page.items.filter((m) => !have.has(m.id));
+            added = fresh.length;
+            if (added === 0) return prev;
+            // Server returns oldest-first; prepend in order.
+            return { ...prev, messages: [...fresh, ...prev.messages] };
+          });
+          setOlderCursor(page.nextCursor);
+        });
+        return added;
+      } finally {
+        inFlightOlder.current = false;
+        setLoadingOlder(false);
+      }
+    },
+    [conversationId],
+  );
 
   // Throttled mark-read: a burst of inbound messages must not fan out into a
   // burst of HTTP calls. While one is in flight we just remember to fire one
@@ -314,7 +321,6 @@ export function useConversationEvents(
     hasMoreOlder: olderCursor !== null,
     loadingOlder,
     loadOlder,
-    olderLoadedTick,
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
