@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -25,9 +25,17 @@ import type { ContactFieldDefinition, Tag, TemplateDto } from "@/lib/types";
 import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
 import type { TemplateComponent } from "@/lib/providers/types";
 import type { AudienceGroupDto } from "@/lib/queries";
+import {
+  findUnknownTokens,
+  resolveFieldTokens,
+  SAMPLE_CONTACT,
+} from "@/lib/field-tokens";
+import { parseVariableBindings, type VariableBinding } from "@/lib/template-bindings";
 
 import { AudiencePicker, type AudienceState } from "@/components/broadcasts/audience-picker";
 import { RecipientsPreviewDialog } from "@/components/broadcasts/recipients-preview-dialog";
+import { FieldTokenPicker } from "@/components/templates/field-token-picker";
+import { TokenHighlightInput } from "@/components/templates/token-highlight";
 
 /**
  * New broadcast wizard.
@@ -231,11 +239,22 @@ export function NewBroadcastForm({
       ? countPlaceholders(headerComp.text)
       : 0;
 
-  // Reset variable arrays whenever the chosen template changes.
+  // Reset variable arrays whenever the chosen template changes. When the
+  // template carries bindings, prefill each input with the matching token so
+  // the agent sees the personalization upfront and can override.
   useEffect(() => {
-    setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
-    setHeaderVar("");
-  }, [selectedTemplateId, bodyVarCount]);
+    if (!selectedTemplate) {
+      setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
+      setHeaderVar("");
+      return;
+    }
+    const bindings = parseVariableBindings(selectedTemplate.variableBindings as never);
+    setBodyVars(
+      Array.from({ length: bodyVarCount }, (_, i) => tokenForBinding(bindings.body[i])),
+    );
+    setHeaderVar(headerVarCount > 0 ? tokenForBinding(bindings.header) : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTemplateId, bodyVarCount, headerVarCount]);
 
   // Live-count for the "By tag" mode — contacts whose tagIds overlap the
   // selected tag ids. Same set the server will compute at create time, so
@@ -428,11 +447,17 @@ export function NewBroadcastForm({
             </div>
           ) : (
             <div className="flex flex-col gap-3">
+              <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                Type a value or insert a{" "}
+                <code className="rounded bg-muted px-1 text-[10.5px]">$var.contact.field</code>{" "}
+                token to fill each variable per recipient.
+              </p>
               {headerVarCount > 0 && (
                 <VarField
                   label="Header {{1}}"
                   value={headerVar}
                   onChange={setHeaderVar}
+                  fieldDefinitions={fieldDefinitions}
                 />
               )}
               {bodyVars.map((v, i) => (
@@ -447,6 +472,7 @@ export function NewBroadcastForm({
                       return copy;
                     });
                   }}
+                  fieldDefinitions={fieldDefinitions}
                 />
               ))}
             </div>
@@ -459,9 +485,9 @@ export function NewBroadcastForm({
             </div>
             <PreviewBubble
               headerComp={headerComp}
-              headerValue={headerVar}
+              headerValue={resolveFieldTokens(headerVar, SAMPLE_CONTACT)}
               bodyText={selectedTemplate.bodyText}
-              bodyVars={bodyVars}
+              bodyVars={bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT))}
               footerComp={footerComp}
               buttonsComp={buttonsComp}
             />
@@ -728,22 +754,108 @@ function VarField({
   label,
   value,
   onChange,
+  fieldDefinitions,
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
+  fieldDefinitions: ContactFieldDefinition[];
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Splice the token at the current cursor position. Falls back to appending
+  // when the input isn't focused — same pattern the body editor on the
+  // create-template form uses.
+  const insertToken = useCallback(
+    (token: string) => {
+      const el = inputRef.current;
+      if (!el || el.selectionStart === null) {
+        onChange(value + token);
+        return;
+      }
+      const start = el.selectionStart;
+      const end = el.selectionEnd ?? start;
+      onChange(value.slice(0, start) + token + value.slice(end));
+      requestAnimationFrame(() => {
+        el.focus();
+        const pos = start + token.length;
+        el.setSelectionRange(pos, pos);
+      });
+    },
+    [value, onChange],
+  );
+
+  const unknown = useMemo(
+    () => findUnknownTokens(value, fieldDefinitions),
+    [value, fieldDefinitions],
+  );
+  const preview = useMemo(
+    () => resolveFieldTokens(value, SAMPLE_CONTACT),
+    [value],
+  );
+  const hasToken = /\$var\.contact\./.test(value);
+
   return (
     <label className="flex flex-col gap-1">
       <span className="font-mono text-[11px] font-medium text-foreground">{label}</span>
-      <Input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Same value sent to every recipient"
-        className="h-9 text-sm"
-      />
+      <div className="flex items-center gap-1.5">
+        <TokenHighlightInput
+          ref={inputRef}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Type a value or insert $var.contact.name"
+          fieldDefinitions={fieldDefinitions}
+        />
+        <FieldTokenPicker
+          fieldDefinitions={fieldDefinitions}
+          onInsert={insertToken}
+          hint="Tokens are replaced with each recipient's contact data at send time."
+        />
+      </div>
+      {hasToken && (
+        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+          <span className="font-medium">Sample:</span>
+          <span className="truncate font-mono text-foreground">
+            {preview || <span className="text-muted-foreground italic">(empty)</span>}
+          </span>
+        </div>
+      )}
+      {unknown.length > 0 && (
+        <div className="mt-0.5 text-[10.5px] text-amber-600 dark:text-amber-400">
+          Unknown field{unknown.length === 1 ? "" : "s"}:{" "}
+          {unknown.map((u) => `$var.contact.${u}`).join(", ")} — these will resolve to empty for every recipient.
+        </div>
+      )}
     </label>
   );
+}
+
+/**
+ * Pick the natural token for a template binding so a newly-selected template
+ * with bindings shows a fully wired-up form on first paint.
+ *
+ *   binding.source = contact_field.name   → "$var.contact.name"
+ *   binding.source = contact_field.phoneNumber → "$var.contact.phone"
+ *   binding.source = contact_custom_field.X  → "$var.contact.X"
+ *   binding.source = manual / no binding → ""
+ *
+ * The phone-number alias is the one quirk: our schema field is camelCase
+ * `phoneNumber` but the token reads better as `$var.contact.phone`.
+ */
+function tokenForBinding(binding: VariableBinding | undefined): string {
+  if (!binding) return "";
+  if (binding.source.kind === "manual") {
+    return binding.defaultValue ?? "";
+  }
+  if (binding.source.kind === "contact_field") {
+    const f = binding.source.field;
+    const token = f === "phoneNumber" ? "phone" : f;
+    return `$var.contact.${token}`;
+  }
+  if (binding.source.kind === "contact_custom_field") {
+    return `$var.contact.${binding.source.key}`;
+  }
+  return "";
 }
 
 function PreviewBubble({

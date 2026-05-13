@@ -110,6 +110,37 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 
 Tags, labels, analytics, automations, AI replies, template send/manage UI, bulk send, multi-channel, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, BullMQ, NestJS, Embedded Signup, media (images/audio/video) send + receive.
 
+## Operations & deployment notes (don't forget)
+
+### Node heap — already set
+`package.json` runs both `dev` and `start` with `NODE_OPTIONS=--max-old-space-size=4096`. This is intentional — Node 24 on this WSL2 setup defaults to a ~2GB heap which OOMs `tsx watch` during heavy edit sessions. **Don't strip this flag** thinking it's leftover dev tooling — production needs it too because the broadcast runner + Socket.io fanout occasionally need headroom.
+
+### Before pilot launch (must-do)
+1. **systemd unit** on the VPS, NOT pm2. Single VPS, no clustering, systemd is already there. Set `Restart=on-failure`, `RestartSec=3`, and pass through `NODE_OPTIONS=--max-old-space-size=4096`. If anything kills the process — OOM, panic, manual bump — it's back in 3s.
+2. **Caddy or Traefik reverse proxy** in front for HTTPS. Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
+3. **VPS sizing**: ≥4GB RAM for the app, +2GB for Postgres, +headroom. 8GB total is the floor.
+
+### Dev-environment OOM (`tsx watch` chewing memory)
+Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `tsx watch` + Next.js dev mode accumulate bundler/AST state across hot-reloads. Fix order:
+1. `rm -rf .next` (the dev cache bloats past 500MB after heavy days)
+2. Restart `npm run dev`
+3. Re-bump heap to 6GB if even 4GB isn't enough during a particularly heavy session
+4. As a habit, restart dev once an hour during heavy work
+
+This is a `tsx watch` artifact, NOT a memory leak in our code. Don't chase phantom leaks in app code based on the dev-mode OOM alone.
+
+### Skip until forced to revisit (with trigger conditions)
+- **pm2** — only if we move beyond a single VPS or want clustered Node workers.
+- **Datadog / New Relic** — only when `process.memoryUsage()` logging stops being enough.
+- **Redis pub/sub for Socket.io** — only when a second app instance shows up.
+- **Cache eviction on `lib/providers/config.ts`** — only past ~5 tenants (current `Map` is grow-only by design).
+- **Move broadcast runner to a separate worker / BullMQ** — only when a single broadcast crosses ~10k recipients OR a broadcast crashes the app mid-flight.
+
+### Scaling cliffs to anticipate (don't pre-build)
+- **50-200 tenants**: in-process credential cache + grow-only Maps start to leak. Fix when seen.
+- **10k+ recipient broadcasts**: in-process loop holds too much state. Move to a worker.
+- **Multi-region or HA**: requires Redis Socket.io adapter, sticky sessions, shared media storage. Not pilot scope.
+
 ## How I want you to work with me
 
 - **Match the stack above.** Don't suggest Pusher, Ably, Supabase Realtime, tRPC, GraphQL, Evolution / Baileys, or any rewrites.

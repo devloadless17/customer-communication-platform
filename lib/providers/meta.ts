@@ -1,5 +1,8 @@
 import type { MetaSendConfig } from "@/lib/providers/config";
 import type {
+  CreateTemplateArgs,
+  CreateTemplateResult,
+  DeleteTemplateArgs,
   FetchedMedia,
   MessagingProvider,
   NormalizedEvent,
@@ -14,6 +17,8 @@ import type {
   TemplateCategory,
   TemplateComponent,
   TemplateStatus,
+  UploadHeaderMediaArgs,
+  UploadHeaderMediaResult,
   UploadMediaArgs,
   UploadMediaResult,
 } from "@/lib/providers/types";
@@ -506,6 +511,138 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     return results;
   },
 
+  async createTemplate(
+    args: CreateTemplateArgs,
+    config: MetaSendConfig,
+  ): Promise<CreateTemplateResult> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+
+    const url = `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        name: args.name,
+        language: args.language,
+        category: args.category.toUpperCase(),
+        components: args.components,
+      }),
+    });
+
+    if (!res.ok) {
+      // Meta's create endpoint is the noisiest one in the API — it rejects
+      // for missing examples, duplicate names, policy issues, and per-
+      // component validation failures. Surfacing the body verbatim is the
+      // only way the UI can show useful error messages.
+      const text = await res.text();
+      throw new MetaSendError(
+        `meta createTemplate failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+
+    const json = (await res.json()) as { id?: string; status?: string };
+    if (!json.id) {
+      throw new Error(`meta createTemplate response missing id: ${JSON.stringify(json)}`);
+    }
+    const status = mapTemplateStatus(json.status) ?? "pending";
+    return { externalId: json.id, status };
+  },
+
+  async deleteTemplate(args: DeleteTemplateArgs, config: MetaSendConfig): Promise<void> {
+    if (!config.wabaId) throw new MissingWabaIdError();
+
+    // Without `hsm_id`, Meta deletes ALL language variants under `name`.
+    // We pass it when we have it so deleting one language leaves the others.
+    const url = new URL(
+      `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.wabaId)}/message_templates`,
+    );
+    url.searchParams.set("name", args.name);
+    if (args.externalId) url.searchParams.set("hsm_id", args.externalId);
+
+    const res = await metaFetch(url, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      // A 404 from Meta means the template is already gone — treat as success
+      // so a stale local row that we're cleaning up doesn't keep failing.
+      if (res.status === 404) return;
+      throw new MetaSendError(
+        `meta deleteTemplate failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+  },
+
+  async uploadHeaderMedia(
+    args: UploadHeaderMediaArgs,
+    config: MetaSendConfig,
+  ): Promise<UploadHeaderMediaResult> {
+    if (!config.appId) {
+      throw new MissingAppIdError();
+    }
+
+    // Step 1: create a resumable upload session. Endpoint is app-scoped, not
+    // WABA-scoped — different from the per-message media upload.
+    const startUrl = new URL(
+      `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(config.appId)}/uploads`,
+    );
+    startUrl.searchParams.set("file_length", String(args.bytes.byteLength));
+    startUrl.searchParams.set("file_type", args.mimeType);
+    startUrl.searchParams.set("file_name", args.filename);
+    startUrl.searchParams.set("access_token", config.accessToken);
+
+    const startRes = await metaFetch(startUrl, { method: "POST" });
+    if (!startRes.ok) {
+      const text = await startRes.text();
+      throw new MetaSendError(
+        `meta upload session failed: ${startRes.status} ${text}`,
+        startRes.status,
+        text,
+      );
+    }
+    const startJson = (await startRes.json()) as { id?: string };
+    const sessionId = startJson.id;
+    if (!sessionId) {
+      throw new Error(`meta upload session missing id: ${JSON.stringify(startJson)}`);
+    }
+
+    // Step 2: POST the bytes to the session. The Authorization header uses
+    // `OAuth <token>` (not Bearer) for this endpoint — undocumented for a
+    // long time, called out only in the resumable-upload guide.
+    const uploadUrl = `https://graph.facebook.com/${config.graphVersion}/${sessionId}`;
+    const ab = new ArrayBuffer(args.bytes.byteLength);
+    new Uint8Array(ab).set(args.bytes);
+    const uploadRes = await metaFetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        authorization: `OAuth ${config.accessToken}`,
+        file_offset: "0",
+      },
+      body: ab,
+    });
+    if (!uploadRes.ok) {
+      const text = await uploadRes.text();
+      throw new MetaSendError(
+        `meta upload bytes failed: ${uploadRes.status} ${text}`,
+        uploadRes.status,
+        text,
+      );
+    }
+    const uploadJson = (await uploadRes.json()) as { h?: string };
+    if (!uploadJson.h) {
+      throw new Error(`meta upload missing handle: ${JSON.stringify(uploadJson)}`);
+    }
+    return { headerHandle: uploadJson.h };
+  },
+
   async sendTemplate(
     args: SendTemplateArgs,
     config: MetaSendConfig,
@@ -589,6 +726,18 @@ export class MissingWabaIdError extends Error {
   constructor() {
     super("WhatsApp Business Account id is not configured for this team");
     this.name = "MissingWabaIdError";
+  }
+}
+
+/**
+ * Thrown by `uploadHeaderMedia` when the team hasn't pasted a Meta App ID
+ * yet. The /templates create route catches this and asks the admin to add it
+ * in /settings/whatsapp — same pattern as MissingWabaIdError.
+ */
+export class MissingAppIdError extends Error {
+  constructor() {
+    super("Meta App ID is not configured for this team");
+    this.name = "MissingAppIdError";
   }
 }
 

@@ -35,6 +35,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  // See app/api/messages/route.ts for why we stamp at receive time, not at
+  // Meta-completion time — keeps row order aligned with the user's send
+  // sequence even when text/media calls return out of order.
+  const receivedAt = new Date();
   const session = await requireSession();
   if (session instanceof NextResponse) return session;
 
@@ -175,7 +179,7 @@ export async function POST(req: Request) {
       provider: "meta_cloud",
       status: "sent",
       rawPayload: { sentVia: "api/messages/media", mediaId } as Prisma.InputJsonValue,
-      timestamp: send.timestamp,
+      timestamp: receivedAt,
       mediaKind: kind,
       mediaPath: saved.path,
       mediaMimeType: mimeType,
@@ -215,7 +219,7 @@ export async function POST(req: Request) {
     provider: "meta_cloud",
     status: "sent",
     rawPayload: { sentVia: "api/messages/media", mediaId },
-    timestamp: send.timestamp.toISOString(),
+    timestamp: receivedAt.toISOString(),
     media,
     ...(replyToMessageId
       ? { replyToMessageId, replyTo: replySnapshot ?? null }

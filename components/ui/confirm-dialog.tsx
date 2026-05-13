@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, HelpCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -43,13 +43,47 @@ export function ConfirmDialog({
   options: ConfirmOptions | null;
   onResolve: (value: boolean) => void;
 }) {
+  const titleId = useId();
+  const descId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Restore focus to whatever was focused before the dialog opened — caller
+  // shouldn't have to remember to do this.
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return;
+    lastFocusedRef.current = document.activeElement as HTMLElement | null;
+
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onResolve(false);
+      if (e.key === "Escape") {
+        onResolve(false);
+        return;
+      }
+      // Trap Tab inside the dialog so keyboard users don't escape into the
+      // page underneath. Cycles between the first and last focusable element.
+      if (e.key === "Tab" && dialogRef.current) {
+        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0]!;
+        const last = focusables[focusables.length - 1]!;
+        const active = document.activeElement;
+        if (e.shiftKey && active === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      // Return focus to the trigger when the dialog closes.
+      lastFocusedRef.current?.focus?.();
+    };
   }, [open, onResolve]);
 
   if (!open || !options) return null;
@@ -64,9 +98,11 @@ export function ConfirmDialog({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
-      aria-label={title}
+      aria-labelledby={titleId}
+      aria-describedby={description ? descId : undefined}
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
       onClick={(e) => {
         if (e.target === e.currentTarget) onResolve(false);
@@ -84,9 +120,11 @@ export function ConfirmDialog({
             {destructive ? <AlertTriangle className="size-4" /> : <HelpCircle className="size-4" />}
           </div>
           <div className="min-w-0 flex-1">
-            <h2 className="text-base font-semibold">{title}</h2>
+            <h2 id={titleId} className="text-base font-semibold">{title}</h2>
             {description && (
-              <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{description}</p>
+              <p id={descId} className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                {description}
+              </p>
             )}
           </div>
         </div>
@@ -126,7 +164,14 @@ export function useConfirm() {
   const confirm = useCallback(
     (options: ConfirmOptions) =>
       new Promise<boolean>((resolve) => {
-        setState({ open: true, options, resolve });
+        // If a previous dialog is still pending (caller hasn't awaited yet,
+        // or another caller raced in), resolve it as cancelled so the awaiter
+        // doesn't hang forever. Without this, the older promise is silently
+        // orphaned.
+        setState((prev) => {
+          prev.resolve?.(false);
+          return { open: true, options, resolve };
+        });
       }),
     [],
   );
@@ -135,10 +180,14 @@ export function useConfirm() {
   const alert = useCallback(
     (title: string, description?: string) =>
       new Promise<void>((resolve) => {
-        setState({
-          open: true,
-          options: { title, description, mode: "alert" },
-          resolve: () => resolve(),
+        setState((prev) => {
+          // Same orphaned-promise guard as `confirm` above.
+          prev.resolve?.(false);
+          return {
+            open: true,
+            options: { title, description, mode: "alert" },
+            resolve: () => resolve(),
+          };
         });
       }),
     [],

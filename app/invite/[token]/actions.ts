@@ -6,7 +6,7 @@ import { AuthError } from "next-auth";
 import { signIn } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { hashInviteToken } from "@/lib/invite-token";
-import { hashPassword } from "@/lib/password";
+import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/password";
 
 /**
  * Accept an invite. The token in the URL is hashed and looked up; we verify
@@ -33,8 +33,13 @@ export async function acceptInviteAction(
 
   if (!token) return { error: "Invite token missing." };
   if (!name) return { error: "Your name is required." };
-  if (password.length < 8) {
-    return { error: "Password must be at least 8 characters." };
+
+  const policyError = validatePasswordStructure(password);
+  if (policyError) return { error: policyError };
+  if (await isPasswordBreached(password)) {
+    return {
+      error: "That password has appeared in known data breaches. Please choose another.",
+    };
   }
 
   const tokenHash = hashInviteToken(token);

@@ -10,11 +10,13 @@ import { Input } from "@/components/ui/input";
 import { WindowBadge } from "@/components/inbox/window-badge";
 import { TagChip } from "@/components/tags/tag-chip";
 import { avatarGradient } from "@/lib/avatar-color";
+import { tagColorClasses } from "@/lib/tag-colors";
 import { cn, formatPhone, initials } from "@/lib/utils";
 import type {
   ContactFieldDefinition,
   ContactListItem,
   ContactSource,
+  ContactStage,
   CursorPage,
   Tag,
 } from "@/lib/types";
@@ -48,6 +50,11 @@ import type {
 export type SourceFilter = "all" | ContactSource;
 /** 24h customer-service window filter. "any" = no filter. */
 export type WindowFilter = "any" | "open" | "closed";
+/**
+ * Lifecycle stage filter. `"any"` = no filter, `"none"` = contacts with no
+ * stage (orphaned after a stage delete), otherwise the stage id.
+ */
+export type StageFilter = "any" | "none" | string;
 
 export interface FieldFilter {
   key: string;
@@ -61,6 +68,8 @@ export interface ContactListFilters {
   windowFilter: WindowFilter;
   /** Keep contacts carrying ANY of these tag ids. Empty = no tag filter. */
   tagIds: string[];
+  /** Lifecycle stage filter. "any" disables the filter. */
+  stageFilter: StageFilter;
 }
 
 export async function fetchContactsPage(
@@ -76,6 +85,7 @@ export async function fetchContactsPage(
   if (filters.sourceFilter !== "all") params.set("source", filters.sourceFilter);
   if (filters.windowFilter !== "any") params.set("window", filters.windowFilter);
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
+  if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
   if (cursor) params.set("cursor", cursor);
   const res = await fetch(`/api/contacts?${params.toString()}`);
   if (!res.ok) throw new Error("fetch failed");
@@ -102,6 +112,8 @@ export interface UseContactListResult {
   setWindowFilter: (v: WindowFilter) => void;
   tagIds: string[];
   setTagIds: (v: string[]) => void;
+  stageFilter: StageFilter;
+  setStageFilter: (v: StageFilter) => void;
   loading: boolean;
   loadingMore: boolean;
   error: string | null;
@@ -112,6 +124,7 @@ export interface UseContactListResult {
 export function useContactList(opts?: {
   initialItems?: ContactListItem[];
   initialNextCursor?: string | null;
+  initialStageFilter?: StageFilter;
 }): UseContactListResult {
   const [items, setItems] = useState<ContactListItem[]>(opts?.initialItems ?? []);
   const [nextCursor, setNextCursor] = useState<string | null>(
@@ -122,6 +135,9 @@ export function useContactList(opts?: {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("any");
   const [tagIds, setTagIds] = useState<string[]>([]);
+  const [stageFilter, setStageFilter] = useState<StageFilter>(
+    opts?.initialStageFilter ?? "any",
+  );
   const [loading, setLoading] = useState(opts?.initialItems === undefined);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -132,15 +148,26 @@ export function useContactList(opts?: {
 
   // Debounce server hits so typing doesn't flood the API; bump reqId on every
   // change so a slow page-1 can't overwrite a faster later request.
+  //
+  // Skip the very first run when the caller seeded us with `initialItems` —
+  // those came from the server-rendered page and are already current. Without
+  // this, the Contacts page does a redundant fetch on mount that flashes a
+  // loading state for no reason.
   const reqId = useRef(0);
+  const hasSeed = opts?.initialItems !== undefined;
+  const skipFirstFetch = useRef(hasSeed);
   useEffect(() => {
+    if (skipFirstFetch.current) {
+      skipFirstFetch.current = false;
+      return;
+    }
     const my = ++reqId.current;
     setLoading(true);
     setError(null);
     const t = window.setTimeout(async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, windowFilter, tagIds },
+          { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
           null,
         );
         if (reqId.current !== my) return;
@@ -154,7 +181,7 @@ export function useContactList(opts?: {
     }, 250);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey]);
+  }, [search, fieldFilter, sourceFilter, windowFilter, tagKey, stageFilter]);
 
   function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -162,7 +189,7 @@ export function useContactList(opts?: {
     void (async () => {
       try {
         const page = await fetchContactsPage(
-          { search, fieldFilter, sourceFilter, windowFilter, tagIds },
+          { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
           nextCursor,
         );
         setItems((prev) => [...prev, ...page.items]);
@@ -189,6 +216,8 @@ export function useContactList(opts?: {
     setWindowFilter,
     tagIds,
     setTagIds,
+    stageFilter,
+    setStageFilter,
     loading,
     loadingMore,
     error,
@@ -214,6 +243,9 @@ export function ContactFilterBar({
   tags = [],
   selectedTagIds = [],
   onTagsChange,
+  stages = [],
+  stageFilter = "any",
+  onStageFilterChange,
   searchPlaceholder = "Search name, phone, email, or any field…",
 }: {
   search: string;
@@ -228,6 +260,9 @@ export function ContactFilterBar({
   tags?: Tag[];
   selectedTagIds?: string[];
   onTagsChange?: (next: string[]) => void;
+  stages?: ContactStage[];
+  stageFilter?: StageFilter;
+  onStageFilterChange?: (next: StageFilter) => void;
   searchPlaceholder?: string;
 }) {
   return (
@@ -293,6 +328,14 @@ export function ContactFilterBar({
         />
       )}
 
+      {onStageFilterChange && stages.length > 0 && (
+        <StageFilterControl
+          stages={stages}
+          value={stageFilter}
+          onChange={onStageFilterChange}
+        />
+      )}
+
       {fieldDefinitions.length > 0 && (
         <FieldFilterRow
           fieldDefinitions={fieldDefinitions}
@@ -300,6 +343,58 @@ export function ContactFilterBar({
           onChange={onFieldChange}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * Compact chip-row for the stage filter. Mirrors the source/window-filter
+ * chip pattern — one chip per stage plus an "Any" and "No stage" option.
+ * Stages cap at ~30 per team so a flat row is fine; if the list outgrows
+ * the viewport the row wraps onto a new line via flex-wrap.
+ */
+function StageFilterControl({
+  stages,
+  value,
+  onChange,
+}: {
+  stages: ContactStage[];
+  value: StageFilter;
+  onChange: (next: StageFilter) => void;
+}) {
+  const sorted = useMemo(
+    () => [...stages].sort((a, b) => a.position - b.position),
+    [stages],
+  );
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+      <span className="text-muted-foreground">Stage:</span>
+      <Chip active={value === "any"} onClick={() => onChange("any")} label="Any" />
+      {sorted.map((s) => {
+        const colors = tagColorClasses(s.color);
+        const active = value === s.id;
+        return (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => onChange(s.id)}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition",
+              active
+                ? cn("border-transparent", colors.chip)
+                : "border-border text-muted-foreground hover:bg-accent",
+            )}
+          >
+            <span className={cn("size-1.5 shrink-0 rounded-full", colors.solid)} />
+            <span>{s.name}</span>
+          </button>
+        );
+      })}
+      <Chip
+        active={value === "none"}
+        onClick={() => onChange("none")}
+        label="No stage"
+      />
     </div>
   );
 }
@@ -557,6 +652,7 @@ export function ContactBrowser({
   onSelectedChange,
   fieldDefinitions = [],
   tags = [],
+  stages = [],
   initialItems,
   initialNextCursor,
   onItemsLoaded,
@@ -567,6 +663,7 @@ export function ContactBrowser({
   onSelectedChange: (next: Set<string>) => void;
   fieldDefinitions?: ContactFieldDefinition[];
   tags?: Tag[];
+  stages?: ContactStage[];
   initialItems?: ContactListItem[];
   initialNextCursor?: string | null;
   /** Fires whenever the visible page changes — lets a parent cache id→label
@@ -578,6 +675,10 @@ export function ContactBrowser({
   const list = useContactList({ initialItems, initialNextCursor });
   const { items } = list;
   const tagById = useMemo(() => new Map(tags.map((t) => [t.id, t] as const)), [tags]);
+  const stageById = useMemo(
+    () => new Map(stages.map((s) => [s.id, s] as const)),
+    [stages],
+  );
 
   useEffect(() => {
     if (items.length > 0) onItemsLoaded?.(items);
@@ -622,6 +723,9 @@ export function ContactBrowser({
         tags={tags}
         selectedTagIds={list.tagIds}
         onTagsChange={list.setTagIds}
+        stages={stages}
+        stageFilter={list.stageFilter}
+        onStageFilterChange={list.setStageFilter}
       />
 
       {list.error && (
@@ -672,6 +776,7 @@ export function ContactBrowser({
                   item={item}
                   fieldDefinitions={fieldDefinitions}
                   tagById={tagById}
+                  stageById={stageById}
                   selected={selectedIds.has(item.contact.id)}
                   onSelectChange={(next) => toggle(item.contact.id, next)}
                 />
@@ -707,12 +812,14 @@ function BrowserRow({
   item,
   fieldDefinitions,
   tagById,
+  stageById,
   selected,
   onSelectChange,
 }: {
   item: ContactListItem;
   fieldDefinitions: ContactFieldDefinition[];
   tagById: Map<string, Tag>;
+  stageById: Map<string, ContactStage>;
   selected: boolean;
   onSelectChange: (next: boolean) => void;
 }) {
@@ -723,6 +830,7 @@ function BrowserRow({
   const contactTags = (contact.tagIds ?? [])
     .map((id) => tagById.get(id))
     .filter((t): t is Tag => Boolean(t));
+  const stage = contact.stageId ? stageById.get(contact.stageId) ?? null : null;
   const label = contact.name || formatPhone(contact.phoneNumber);
 
   return (
@@ -775,6 +883,23 @@ function BrowserRow({
             </div>
           )}
         </div>
+        {stage && (
+          <span
+            className={cn(
+              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] sm:inline-flex",
+              tagColorClasses(stage.color).chip,
+            )}
+            title={`Stage: ${stage.name}`}
+          >
+            <span
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                tagColorClasses(stage.color).solid,
+              )}
+            />
+            {stage.name}
+          </span>
+        )}
         <WindowBadge lastInboundAt={lastInboundAt} size="xs" className="hidden shrink-0 sm:inline-flex" />
       </label>
     </li>

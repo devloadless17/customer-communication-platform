@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { dispatch } from "@/lib/automations/dispatcher";
 import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket-server";
@@ -23,7 +24,7 @@ export async function POST(
   req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { teamId } = await getSession();
+  const { user, teamId } = await getSession();
   const { id: conversationId } = await ctx.params;
 
   let raw: Body;
@@ -43,11 +44,12 @@ export async function POST(
 
   const conversation = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
-    select: { id: true },
+    include: { contact: true },
   });
   if (!conversation) {
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
   }
+  const previousStatus = conversation.status as ConversationStatus;
 
   await db.conversation.update({
     where: { id: conversationId },
@@ -60,5 +62,38 @@ export async function POST(
     status,
   });
 
+  // Fire automations. No-op for self-transitions (e.g. clicking "Open" while
+  // already open) so workflows don't trigger on UI re-renders.
+  if (previousStatus !== status) {
+    await dispatch(teamId, "conversation_status_changed", {
+      conversation: {
+        id: conversation.id,
+        status,
+        assignedUserId: conversation.assignedUserId,
+        unreadCount: conversation.unreadCount,
+        lastMessageAt: conversation.lastMessageAt.toISOString(),
+      },
+      contact: {
+        id: conversation.contact.id,
+        phoneNumber: conversation.contact.phoneNumber,
+        name: conversation.contact.name,
+        email: conversation.contact.email ?? null,
+        customFields: customFieldsFromJson(conversation.contact.customFields),
+      },
+      previousStatus,
+      newStatus: status,
+      changedByUserId: user.id,
+    });
+  }
+
   return NextResponse.json({ ok: true });
+}
+
+function customFieldsFromJson(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
 }

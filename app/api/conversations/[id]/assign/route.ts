@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { dispatch } from "@/lib/automations/dispatcher";
 import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket-server";
@@ -47,11 +48,12 @@ export async function POST(
 
   const conversation = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
-    select: { id: true },
+    select: { id: true, assignedUserId: true },
   });
   if (!conversation) {
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
   }
+  const previousAssignedUserId = conversation.assignedUserId;
 
   if (assignedUserId !== null) {
     const member = await db.user.findFirst({
@@ -69,7 +71,7 @@ export async function POST(
   const updated = await db.conversation.update({
     where: { id: conversationId },
     data: { assignedUserId },
-    include: { assignedUser: true },
+    include: { assignedUser: true, contact: true },
   });
 
   const assignedUser: User | null = updated.assignedUser
@@ -89,5 +91,39 @@ export async function POST(
     assignedUser,
   });
 
+  // Fire automations. Only emit on an actual change — pointless to retrigger
+  // workflows when the same agent is reassigned to themselves.
+  if (previousAssignedUserId !== assignedUserId) {
+    await dispatch(teamId, "conversation_assigned", {
+      conversation: {
+        id: updated.id,
+        status: updated.status,
+        assignedUserId: updated.assignedUserId,
+        unreadCount: updated.unreadCount,
+        lastMessageAt: updated.lastMessageAt.toISOString(),
+      },
+      contact: {
+        id: updated.contact.id,
+        phoneNumber: updated.contact.phoneNumber,
+        name: updated.contact.name,
+        email: updated.contact.email ?? null,
+        customFields: customFieldsFromJson(updated.contact.customFields),
+      },
+      assignedUser: assignedUser
+        ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
+        : null,
+      previousAssignedUserId,
+    });
+  }
+
   return NextResponse.json({ ok: true });
+}
+
+function customFieldsFromJson(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
 }

@@ -1,12 +1,28 @@
 import Link from "next/link";
-import { ArrowLeft, MessageSquare, Users, UserCircle2 } from "lucide-react";
+import {
+  ArrowLeft,
+  KeyRound,
+  Layers,
+  MessageSquare,
+  Sparkles,
+  Users,
+  UserCircle2,
+} from "lucide-react";
 
 import { getSession } from "@/lib/current-user";
-import { canManageUsers } from "@/lib/permissions";
+import { canManageStages, canManageUsers } from "@/lib/permissions";
 
 /**
  * Settings shell. Server component — gates by session and surfaces nav.
- * The team-management link only shows for admins.
+ *
+ * Nav is grouped into two sections so it stays scannable as more
+ * chatting-related settings get added:
+ *   - "Chat" → things that shape how agents reply / route customers
+ *     (snippets, stages today; templates / automations later).
+ *   - "Workspace" → identity + plumbing (account, team, WhatsApp creds,
+ *     API keys). Admin-only links auto-hide.
+ *
+ * Admin-only links auto-hide; everyone sees Account, Team, Snippets, Stages.
  */
 export default async function SettingsLayout({
   children,
@@ -27,10 +43,19 @@ export default async function SettingsLayout({
             Back to inbox
           </Link>
         </div>
-        <div className="px-4 pb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Settings
-        </div>
-        <nav className="flex flex-col gap-0.5 px-2">
+
+        <NavGroup label="Chat">
+          <NavLink href="/settings/snippets" icon={<Sparkles className="size-4" />}>
+            Snippets
+          </NavLink>
+          {canManageStages(user.role) && (
+            <NavLink href="/settings/stages" icon={<Layers className="size-4" />}>
+              Stages
+            </NavLink>
+          )}
+        </NavGroup>
+
+        <NavGroup label="Workspace">
           <NavLink href="/settings/account" icon={<UserCircle2 className="size-4" />}>
             Account
           </NavLink>
@@ -42,11 +67,33 @@ export default async function SettingsLayout({
               WhatsApp
             </NavLink>
           )}
-        </nav>
+          {canManageUsers(user.role) && (
+            <NavLink href="/settings/api-keys" icon={<KeyRound className="size-4" />}>
+              API keys
+            </NavLink>
+          )}
+        </NavGroup>
       </aside>
       <main className="overflow-y-auto">
         <div className="mx-auto max-w-3xl px-8 py-10">{children}</div>
       </main>
+    </div>
+  );
+}
+
+function NavGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mt-2">
+      <div className="px-4 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <nav className="flex flex-col gap-0.5 px-2">{children}</nav>
     </div>
   );
 }

@@ -80,7 +80,36 @@ export function useTeamEvents(
 
   useEffect(() => {
     const socket = getClientSocket();
-    socket.emit("subscribe:team", { teamId });
+
+    // Re-(sub)subscribe + resync the head on every connect — the first one
+    // covers the initial subscription, every subsequent one covers a
+    // reconnect after a drop longer than Socket.io's connectionStateRecovery
+    // window (or a full server restart). Without this, the inbox list goes
+    // silently stale on any non-trivial drop until the user reloads.
+    const firstConnectRef = { value: true };
+    const onConnect = () => {
+      socket.emit("subscribe:team", { teamId });
+      if (firstConnectRef.value) {
+        firstConnectRef.value = false;
+        return; // initial — server-seeded data is already current
+      }
+      // Reconnect: refetch page 1 and merge in. Items in the refetched page
+      // overwrite the equivalent in state; older items not in the refetch
+      // (loaded via loadMore) are kept below in their current order.
+      void fetch(`/api/conversations`)
+        .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
+        .then((page) => {
+          if (!page) return;
+          setConversations((prev) => {
+            const freshIds = new Set(page.items.map((c) => c.conversation.id));
+            const tail = prev.filter((c) => !freshIds.has(c.conversation.id));
+            return [...page.items, ...tail];
+          });
+        })
+        .catch((err) => console.warn("[use-team-events] resync failed", err));
+    };
+    socket.on("connect", onConnect);
+    if (socket.connected) onConnect();
 
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = ({
       conversationId,
@@ -188,6 +217,7 @@ export function useTeamEvents(
     socket.on("conversation:deleted", onConversationDeleted);
 
     return () => {
+      socket.off("connect", onConnect);
       socket.off("message:new", onMessageNew);
       socket.off("conversation:assigned", onAssigned);
       socket.off("conversation:status", onStatus);

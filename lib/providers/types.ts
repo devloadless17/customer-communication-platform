@@ -192,6 +192,53 @@ export interface SendTemplateArgs {
   variables: TemplateVariableSet;
 }
 
+// ---------------------------------------------------------------------------
+// Template creation (POST to Meta's /message_templates).
+//
+// We send Meta's full component tree — same shape we cache on read. The
+// provider doesn't validate semantics (Meta does, and rejects with detailed
+// errors); it only assembles the wire payload. Media headers reference an
+// `example.header_handle` returned by the resumable upload endpoint.
+// ---------------------------------------------------------------------------
+
+export interface CreateTemplateArgs {
+  name: string;
+  language: string;
+  category: TemplateCategory;
+  components: TemplateComponent[];
+}
+
+export interface CreateTemplateResult {
+  /** Meta's template id (string of digits). */
+  externalId: string;
+  /** Initial review state — almost always `pending`. */
+  status: TemplateStatus;
+}
+
+export interface DeleteTemplateArgs {
+  name: string;
+  /** Meta's id, optional but recommended — deletes a single language variant
+   *  when set, otherwise deletes every language under `name`. */
+  externalId?: string;
+}
+
+/**
+ * One step of Meta's resumable upload flow for media template headers. The
+ * caller does both legs: create the upload session, then PUT the bytes. We
+ * model only the result the second leg returns — a `header_handle` that gets
+ * embedded in `example.header_handle` on a HEADER component.
+ */
+export interface UploadHeaderMediaArgs {
+  bytes: Uint8Array;
+  mimeType: string;
+  filename: string;
+}
+
+export interface UploadHeaderMediaResult {
+  /** Opaque handle to embed in TemplateComponent.example.header_handle. */
+  headerHandle: string;
+}
+
 /**
  * Per-team config the provider needs at send/read time. Generic so each
  * provider declares its own shape; today only Meta exists. The ingest /
@@ -222,6 +269,21 @@ export interface MessagingProvider<SendConfig = unknown> {
    * template catalog (or that don't expose one) leave this off.
    */
   fetchTemplates?(config: SendConfig): Promise<ProviderTemplate[]>;
+  /**
+   * Submit a new template for review. Returns the provider id + the initial
+   * review status (almost always "pending"). Approval is async and surfaces
+   * via a later `fetchTemplates` sync.
+   */
+  createTemplate?(args: CreateTemplateArgs, config: SendConfig): Promise<CreateTemplateResult>;
+  /** Remove a template from the provider catalog. */
+  deleteTemplate?(args: DeleteTemplateArgs, config: SendConfig): Promise<void>;
+  /**
+   * Upload a media file (image/video/document) for use as a template header.
+   * Returns an opaque handle to embed in `example.header_handle`. Distinct
+   * from `uploadMedia` (which produces a per-message media id) — Meta uses a
+   * separate resumable upload endpoint scoped to the app id for templates.
+   */
+  uploadHeaderMedia?(args: UploadHeaderMediaArgs, config: SendConfig): Promise<UploadHeaderMediaResult>;
   /** Inbound media: download a file by provider-side id. */
   fetchMedia?(externalMediaId: string, config: SendConfig): Promise<FetchedMedia>;
   /**

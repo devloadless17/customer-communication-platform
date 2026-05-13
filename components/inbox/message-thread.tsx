@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ChevronDown,
@@ -12,6 +11,7 @@ import {
   Check,
   Forward,
   Loader2,
+  Search as SearchIcon,
   Trash2,
   X,
 } from "lucide-react";
@@ -32,6 +32,7 @@ import {
 import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatDaySeparator, formatPhone, initials } from "@/lib/utils";
 import type {
+  ContactStage,
   ConversationStatus,
   ConversationWithRefs,
   InternalNote,
@@ -42,11 +43,14 @@ import type {
 import { useConversationEvents } from "@/hooks/use-conversation-events";
 import { useTyping } from "@/hooks/use-typing";
 import { useMessageSelection } from "@/hooks/use-message-selection";
+import { useChatScroll } from "@/hooks/use-chat-scroll";
+import { ContactStageStepper } from "@/components/contacts/contact-stage-picker";
 
 import { MessageBubble } from "./message-bubble";
 import { InternalNote as InternalNoteCard } from "./internal-note";
 import { ReplyBox } from "./reply-box";
 import { ForwardDialog } from "./forward-dialog";
+import { MessageSearch, type SearchHit } from "./message-search";
 
 type TimelineEntry =
   | { kind: "message"; data: Message }
@@ -57,11 +61,17 @@ export function MessageThread({
   teamMembers,
   currentUser,
   nextOlderCursor,
+  stageCatalog,
+  canManageStages,
 }: {
   data: ConversationWithRefs;
   teamMembers: User[];
   currentUser: User;
   nextOlderCursor: string | null;
+  /** Team-wide stage catalog — drives the header stepper. */
+  stageCatalog: ContactStage[];
+  /** Whether the current user can edit the team's stage catalog. */
+  canManageStages: boolean;
 }) {
   const {
     data,
@@ -71,6 +81,7 @@ export function MessageThread({
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    replaceWithContext,
   } = useConversationEvents(initialData, nextOlderCursor);
   const { conversation, contact, assignedUser, messages, notes } = data;
   const { confirm, alert, confirmDialog } = useConfirm();
@@ -82,6 +93,45 @@ export function MessageThread({
   // The 24h window is driven by the server-provided lastInboundAt — it's
   // contact-level and may predate the loaded message slice.
   const { lastInboundAt } = data;
+  const router = useRouter();
+
+  // -------------------------------------------------------------------------
+  // Stage mirror. The header stepper reads from local state so arrow clicks
+  // feel instant; the PATCH below pushes the change to the server and a
+  // router.refresh() pulls the canonical contact row back through the page
+  // server component on success. Initialised from props and reset whenever
+  // the user switches to a different contact (the conversation route is
+  // already a fresh render in that case, so initialData drives it).
+  // -------------------------------------------------------------------------
+  const [stageId, setStageId] = useState<string | null>(contact.stageId ?? null);
+  useEffect(() => {
+    setStageId(contact.stageId ?? null);
+  }, [contact.id, contact.stageId]);
+
+  const persistStageId = useCallback(
+    async (next: string) => {
+      const prev = stageId;
+      setStageId(next);
+      const res = await fetch(`/api/contacts/${contact.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stageId: next }),
+      });
+      if (!res.ok) {
+        // Roll back the optimistic update so the chip reflects truth.
+        setStageId(prev);
+        await alert(
+          "Couldn't change stage",
+          await readError(res),
+        );
+        return;
+      }
+      // Pull the fresh contact row through the server component so the
+      // right rail / contacts list also see the new stage on next navigation.
+      router.refresh();
+    },
+    [alert, contact.id, router, stageId],
+  );
 
   // -------------------------------------------------------------------------
   // Reply target — the message the composer's next send will quote. Lives in
@@ -151,18 +201,185 @@ export function MessageThread({
 
   const cancelReply = useCallback(() => setReplyTarget(null), []);
 
+  // Failed-bubble recovery: dismiss drops it; retry drops it AND pre-loads
+  // the body back into the composer so the user can fix + resend.
+  const [composerPrefill, setComposerPrefill] = useState<{ body: string; nonce: string } | null>(null);
+  const dismissFailed = useCallback(
+    (msg: Message) => {
+      if (msg.clientTempId) removeOptimistic(msg.clientTempId);
+    },
+    [removeOptimistic],
+  );
+  const retryFailed = useCallback(
+    (msg: Message) => {
+      if (msg.clientTempId) removeOptimistic(msg.clientTempId);
+      setComposerPrefill({
+        body: msg.body,
+        nonce: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      });
+    },
+    [removeOptimistic],
+  );
+
   const jumpToOriginal = useCallback((originalId: string) => {
     const el = document.querySelector<HTMLElement>(
       `[data-message-id="${originalId}"]`,
     );
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
-    // Subtle flash so the user's eye lands on the right bubble.
+    // Subtle blue flash for reply-jumps. Search-match jumps use a
+    // PERSISTENT amber ring on the bubble itself (see MessageBubble's
+    // `isActiveSearchMatch`), since the user is actively navigating
+    // through matches and the ring needs to stay until they move on.
     el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
     setTimeout(() => {
       el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2");
     }, 1500);
   }, []);
+
+  // -------------------------------------------------------------------------
+  // In-thread search — WhatsApp-style. The slim search bar lives just below
+  // the thread header; matches are highlighted IN PLACE inside the existing
+  // bubbles (via `searchQuery` + `isActiveSearchMatch` props), and the
+  // active match is scrolled into view as the user navigates ↑/↓.
+  //
+  // State here:
+  //   - `searchOpen`     — bar visible?
+  //   - `searchQuery`    — current input (used for highlighting)
+  //   - `matches`        — server-returned hits, DESC by timestamp
+  //   - `activeMatchIdx` — 0-based cursor inside `matches`
+  //   - `pendingJumpId`  — set after we swap in a context window so the
+  //                        scroll-to-active-match defers until the new
+  //                        bubbles are in the DOM
+  // -------------------------------------------------------------------------
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [matches, setMatches] = useState<SearchHit[]>([]);
+  const [activeMatchIdx, setActiveMatchIdx] = useState(0);
+  const [pendingJumpId, setPendingJumpId] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const openSearch = useCallback(() => {
+    setSearchOpen(true);
+    setSearchError(null);
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setMatches([]);
+    setActiveMatchIdx(0);
+    setPendingJumpId(null);
+    setSearchError(null);
+  }, []);
+
+  // Cmd/Ctrl+F inside the thread opens the in-conversation search. Browsers'
+  // native find-in-page won't load anything from the DB, so a chat with
+  // 10k older messages would just match the visible slice — much worse UX
+  // than our DB-backed search.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const isFind = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f";
+      if (isFind) {
+        e.preventDefault();
+        openSearch();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openSearch]);
+
+  // Close the search bar when the user switches to a different conversation
+  // — the matches belong to the old thread and would be misleading otherwise.
+  useEffect(() => {
+    if (searchOpen) closeSearch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation.id]);
+
+  const messagesById = useMemo(() => {
+    return new Set(data.messages.map((m) => m.id));
+  }, [data.messages]);
+
+  // Stable callback shapes for MessageSearch — without these, the search
+  // bar's effect would re-fire on every render and refetch the query.
+  const handleMatchesChange = useCallback((next: SearchHit[]) => {
+    setMatches(next);
+    setActiveMatchIdx(0);
+  }, []);
+  const handleQueryChange = useCallback((q: string) => setSearchQuery(q), []);
+
+  const activeMatch = matches[activeMatchIdx] ?? null;
+  const activeMatchId = activeMatch?.id ?? null;
+  const matchedIds = useMemo(
+    () => new Set(matches.map((m) => m.id)),
+    [matches],
+  );
+
+  // Whenever the active match changes, scroll its bubble into view. If the
+  // bubble isn't in the loaded slice, fetch a context window first — the
+  // pendingJumpId watcher below then picks up the scroll once the bubbles
+  // render.
+  useEffect(() => {
+    if (!activeMatchId) return;
+    if (messagesById.has(activeMatchId)) {
+      // Fast path: defer one frame so any concurrent state updates have
+      // committed before we measure scrollIntoView.
+      const id = window.requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-message-id="${activeMatchId}"]`,
+        );
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+      return () => window.cancelAnimationFrame(id);
+    }
+
+    // Slow path: load a context window centered on the match and remember
+    // to scroll once it renders.
+    let cancelled = false;
+    setSearchError(null);
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/conversations/${conversation.id}/messages/context?messageId=${encodeURIComponent(activeMatchId)}`,
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          setSearchError("Couldn't load that message");
+          return;
+        }
+        const ctx = (await res.json()) as {
+          messages: import("@/lib/types").Message[];
+          nextOlderCursor: string | null;
+        };
+        if (cancelled) return;
+        replaceWithContext({
+          messages: ctx.messages,
+          nextOlderCursor: ctx.nextOlderCursor,
+        });
+        setPendingJumpId(activeMatchId);
+      } catch {
+        if (!cancelled) setSearchError("Network error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMatchId, messagesById, conversation.id, replaceWithContext]);
+
+  // Once the context window has rendered, scroll to the message we were
+  // waiting on. Two-frame deferral so React + Framer Motion both commit.
+  useEffect(() => {
+    if (!pendingJumpId) return;
+    if (!messagesById.has(pendingJumpId)) return;
+    const id = window.requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-message-id="${pendingJumpId}"]`,
+      );
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      setPendingJumpId(null);
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [pendingJumpId, messagesById]);
 
   const deleteNote = useCallback(
     async (noteId: string) => {
@@ -185,15 +402,41 @@ export function MessageThread({
     currentUser.id,
   );
 
+  // Notes come back from the server unpaginated (typically <10 per thread),
+  // but messages are loaded 50-at-a-time. Without this filter, a note older
+  // than the oldest loaded message would stick to the very top of the
+  // timeline — orphaned from its conversational context — until the user
+  // scrolls up and the corresponding older messages get prepended in. Hide
+  // those notes until their neighborhood is in view.
+  //
+  // Sort: chronological by timestamp, BUT pending optimistic sends are
+  // forced to the tail. The user just sent them — they're "the newest" by
+  // intent, even if their client-clock timestamp is fractionally behind a
+  // server-stamped message that landed in the same tick. Without this,
+  // server clock skew (~tens of ms ahead of the client) is enough to slot
+  // the just-sent bubble *above* the last confirmed message and break the
+  // "you just sent → you see it at the bottom" guarantee.
   const timeline = useMemo<TimelineEntry[]>(() => {
+    const oldestMessageTs = messages[0]?.timestamp;
+    const visibleNotes =
+      hasMoreOlder && oldestMessageTs
+        ? notes.filter((n) => n.timestamp >= oldestMessageTs)
+        : notes;
+    const isPending = (e: TimelineEntry) =>
+      e.kind === "message" && e.data.pending === true;
     return [
       ...messages.map((m): TimelineEntry => ({ kind: "message", data: m })),
-      ...notes.map((n): TimelineEntry => ({ kind: "note", data: n })),
-    ].sort(
-      (a, b) =>
-        new Date(a.data.timestamp).getTime() - new Date(b.data.timestamp).getTime(),
-    );
-  }, [messages, notes]);
+      ...visibleNotes.map((n): TimelineEntry => ({ kind: "note", data: n })),
+    ].sort((a, b) => {
+      const ap = isPending(a);
+      const bp = isPending(b);
+      if (ap !== bp) return ap ? 1 : -1;
+      return (
+        new Date(a.data.timestamp).getTime() -
+        new Date(b.data.timestamp).getTime()
+      );
+    });
+  }, [messages, notes, hasMoreOlder]);
 
   // Entrance animation is reserved for genuinely new tail entries (a fresh
   // send/receive). The initial load and prepended older pages mount without
@@ -207,135 +450,40 @@ export function MessageThread({
   });
 
   // ---------------------------------------------------------------------
-  // Scroll behavior
+  // Scroll behavior — see `useChatScroll`. All the messy bits (viewport
+  // resolution, scroll listener, ResizeObserver for stick-to-bottom,
+  // load-older anchor preservation, settle window) live in the hook so this
+  // component stays a renderer.
   // ---------------------------------------------------------------------
-  // Three rules:
-  //   1) On first mount of a thread, jump straight to the bottom (newest).
-  //   2) On a NEW timeline entry, only auto-scroll if the user is already
-  //      near the bottom — otherwise they're reading history and we
-  //      shouldn't yank them.
-  //   3) When older messages are prepended, the view doesn't move at all —
-  //      the prepend is committed via flushSync between a scrollHeight read
-  //      and a scrollTop write, so the browser never paints the shifted state.
-  const bottomRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const scrollRootRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
 
-  // The actual scrolling element is Radix's ScrollArea viewport. Grab it by
-  // its data attribute (scoped to this thread's ScrollArea) — walking up by
-  // computed `overflow` is unreliable because the viewport's overflow is
-  // `hidden` until content overflows.
+  const lastEntry = timeline.at(-1);
+  const lastEntryKey = lastEntry ? `${lastEntry.kind}_${lastEntry.data.id}` : null;
+  const isOwnSend =
+    lastEntry?.kind === "message" && lastEntry.data.pending === true;
+
+  useChatScroll({
+    scrollAreaRef,
+    contentRef,
+    topSentinelRef,
+    conversationId: conversation.id,
+    lastEntryKey,
+    isOwnSend,
+    hasMoreOlder,
+    loadOlder,
+  });
+
+  // Hide the scroll area until useChatScroll has positioned it at the bottom.
+  // Without this gate, the SSR HTML paints at scrollTop=0 — the user sees the
+  // OLDEST loaded message for a frame before hydration snaps to the bottom.
+  // This effect runs in commit phase AFTER useChatScroll's layout effects, so
+  // by the time we reveal, the snap has happened.
+  const [scrollReady, setScrollReady] = useState(false);
   useLayoutEffect(() => {
-    scrollRootRef.current =
-      scrollAreaRef.current?.querySelector<HTMLElement>(
-        "[data-radix-scroll-area-viewport]",
-      ) ?? null;
+    setScrollReady(true);
   }, []);
-
-  function isNearBottom(slack = 120): boolean {
-    const el = scrollRootRef.current;
-    if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight < slack;
-  }
-
-  // (1) jump to bottom on conversation change.
-  const conversationId = conversation.id;
-  useLayoutEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [conversationId]);
-
-  // (2) auto-scroll on growth — only when user is at the bottom AND the
-  // newest entry was appended (not prepended via loadOlder). Track the id of
-  // the most-recent entry; when it changes, scroll.
-  const lastEntryIdRef = useRef<string | null>(null);
-  useLayoutEffect(() => {
-    const last = timeline.at(-1);
-    const lastId = last ? `${last.kind}_${last.data.id}` : null;
-    if (lastId !== lastEntryIdRef.current) {
-      const wasAtBottom = isNearBottom();
-      lastEntryIdRef.current = lastId;
-      if (wasAtBottom) {
-        bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-      }
-    }
-  }, [timeline]);
-
-  // (3) infinite scroll up — load the next older page when the top sentinel
-  // nears the viewport, keeping the view perfectly still.
-  //
-  // The prepend is committed inside `flushSync`, bracketed by a `scrollHeight`
-  // read just before and a `scrollTop` write just after — all in one tick, so
-  // the browser never paints the shifted state. Net effect: zero flicker, the
-  // messages under the user's cursor don't move a pixel, and they can keep
-  // scrolling up at will. A short ResizeObserver settle window then re-pins
-  // the same anchor as images/videos in the new region decode and reflow; it
-  // bails the instant the user scrolls.
-  //
-  // `loadingOlderRef` makes the observer single-flight: it can fire repeatedly
-  // (rootMargin, re-observe after a prepend), but only one fetch runs at a
-  // time, so we walk back one page per scroll instead of yanking the whole
-  // history. Don't put `loadingOlder` (the state) in the dep array —
-  // recreating the observer re-fires it for the current intersection.
-  const loadingOlderRef = useRef(false);
-  const settleStopRef = useRef<(() => void) | null>(null);
-  // Tear down an in-flight settle window if the thread unmounts.
-  useEffect(() => () => settleStopRef.current?.(), []);
-
-  useEffect(() => {
-    if (!hasMoreOlder) return;
-    const sentinel = topSentinelRef.current;
-    const root = scrollRootRef.current;
-    if (!sentinel || !root) return;
-
-    const obs = new IntersectionObserver(
-      (entries) => {
-        if (loadingOlderRef.current) return;
-        if (!entries.some((e) => e.isIntersecting)) return;
-        loadingOlderRef.current = true;
-
-        void loadOlder((run) => {
-          // distance from the bottom of the scroll content — unchanged by a
-          // prepend above the fold, so re-deriving scrollTop from it after the
-          // commit keeps everything visually fixed.
-          const distanceFromBottom = root.scrollHeight - root.scrollTop;
-          flushSync(run);
-          const pin = () => {
-            root.scrollTop = root.scrollHeight - distanceFromBottom;
-          };
-          pin();
-
-          // Settle window: re-pin while just-loaded media reflows; stop on the
-          // first user scroll, or after a short timeout.
-          settleStopRef.current?.();
-          let done = false;
-          const stop = () => {
-            if (done) return;
-            done = true;
-            ro.disconnect();
-            root.removeEventListener("wheel", stop);
-            root.removeEventListener("touchmove", stop);
-            window.clearTimeout(timer);
-            if (settleStopRef.current === stop) settleStopRef.current = null;
-          };
-          const ro = new ResizeObserver(() => {
-            if (!done) pin();
-          });
-          if (contentRef.current) ro.observe(contentRef.current);
-          root.addEventListener("wheel", stop, { passive: true });
-          root.addEventListener("touchmove", stop, { passive: true });
-          const timer = window.setTimeout(stop, 1000);
-          settleStopRef.current = stop;
-        }).finally(() => {
-          loadingOlderRef.current = false;
-        });
-      },
-      { root, rootMargin: "300px" },
-    );
-    obs.observe(sentinel);
-    return () => obs.disconnect();
-  }, [hasMoreOlder, loadOlder]);
 
   return (
     <section className="relative flex min-w-0 flex-1 flex-col bg-background">
@@ -348,13 +496,49 @@ export function MessageThread({
         assignedUserId={assignedUser?.id ?? null}
         assignedUserName={assignedUser?.name ?? null}
         teamMembers={teamMembers}
+        onAlert={alert}
+        onOpenSearch={openSearch}
+        stageCatalog={stageCatalog}
+        currentStageId={stageId}
+        onStageChange={persistStageId}
+        canManageStages={canManageStages}
       />
 
-      <ScrollArea ref={scrollAreaRef} className="flex-1">
+      {searchOpen && (
+        <MessageSearch
+          conversationId={conversation.id}
+          onClose={closeSearch}
+          onQueryChange={handleQueryChange}
+          onMatchesChange={handleMatchesChange}
+          onActiveIndexChange={setActiveMatchIdx}
+          activeIndex={activeMatchIdx}
+          totalMatches={matches.length}
+        />
+      )}
+      {searchError && (
+        <div className="pointer-events-none flex justify-center bg-background pt-1">
+          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 text-[11px] text-destructive shadow-sm">
+            {searchError}
+            <button
+              type="button"
+              onClick={() => setSearchError(null)}
+              aria-label="Dismiss"
+              className="rounded p-0.5 hover:bg-destructive/10"
+            >
+              <X className="size-3" />
+            </button>
+          </span>
+        </div>
+      )}
+
+      <ScrollArea
+        ref={scrollAreaRef}
+        className={cn("flex-1", !scrollReady && "invisible")}
+      >
         <div
           ref={contentRef}
-          // overflow-anchor:none — we manage scroll position ourselves on
-          // prepend (see effect 3); the browser's own anchoring would fight it.
+          // overflow-anchor:none — useChatScroll manages scroll position
+          // explicitly; the browser's own anchoring would fight it.
           style={{ overflowAnchor: "none" }}
           className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-6 py-6"
         >
@@ -368,11 +552,27 @@ export function MessageThread({
               !prev ||
               formatDaySeparator(entry.data.timestamp) !==
                 formatDaySeparator(prev.data.timestamp);
-            const entryKey = `${entry.kind}_${entry.data.id}`;
+            // For outbound messages we key on clientTempId when present so
+            // the React node survives the optimistic→confirmed swap (server
+            // assigns a fresh id, but the bubble is conceptually the same
+            // bubble — no unmount, no re-animation flash).
+            const entryKey =
+              entry.kind === "message" && entry.data.clientTempId
+                ? `message_t_${entry.data.clientTempId}`
+                : `${entry.kind}_${entry.data.id}`;
+            // Skip the entrance animation when this user sent the entry
+            // themselves. The user already knows the message is coming —
+            // animating it in feels like network latency. Inbound and
+            // teammate sends still animate (the motion draws attention).
+            const isOwnEntry =
+              entry.kind === "message"
+                ? entry.data.senderUserId === currentUser.id
+                : entry.data.authorUserId === currentUser.id;
             const animateIn =
               mountedRef.current &&
               idx === timeline.length - 1 &&
-              !seenKeysRef.current.has(entryKey);
+              !seenKeysRef.current.has(entryKey) &&
+              !isOwnEntry;
 
             return (
               <div key={entryKey} className="contents">
@@ -388,7 +588,7 @@ export function MessageThread({
                 <motion.div
                   initial={animateIn ? { opacity: 0, y: 4 } : false}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  transition={{ duration: 0.14, ease: "easeOut" }}
                   data-message-id={entry.kind === "message" ? entry.data.id : undefined}
                   className="rounded-2xl transition-shadow"
                 >
@@ -406,9 +606,19 @@ export function MessageThread({
                       onJumpToOriginal={jumpToOriginal}
                       onForward={forwardOne}
                       onStartSelect={startSelect}
+                      onDismissFailed={dismissFailed}
+                      onRetryFailed={retryFailed}
                       selecting={selection.selecting}
                       selected={selection.isSelected(entry.data.id)}
                       onToggleSelect={selection.toggle}
+                      searchQuery={
+                        searchOpen && matchedIds.has(entry.data.id)
+                          ? searchQuery
+                          : undefined
+                      }
+                      isActiveSearchMatch={
+                        searchOpen && entry.data.id === activeMatchId
+                      }
                     />
                   ) : (
                     <InternalNoteCard
@@ -421,7 +631,6 @@ export function MessageThread({
               </div>
             );
           })}
-          <div ref={bottomRef} />
         </div>
       </ScrollArea>
 
@@ -459,7 +668,7 @@ export function MessageThread({
           <ReplyBox
             conversationId={conversation.id}
             currentUser={currentUser}
-            contactName={contact.name}
+            contact={contact}
             lastInboundAt={lastInboundAt}
             replyTarget={replyTarget}
             onCancelReply={cancelReply}
@@ -468,6 +677,7 @@ export function MessageThread({
             onOptimistic={addOptimistic}
             onOptimisticFail={markOptimisticFailed}
             onOptimisticRetry={removeOptimistic}
+            prefill={composerPrefill}
           />
         </>
       )}
@@ -537,6 +747,18 @@ function unknownAuthor(id: string): User {
     name: "Unknown",
     email: "",
   };
+}
+
+/** Best-effort extract a human-readable message from a 4xx/5xx response. */
+async function readError(res: Response): Promise<string> {
+  try {
+    const json = (await res.json()) as { error?: string; detail?: string };
+    if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
+    if (json.error) return json.error;
+  } catch {
+    // not JSON — fall through
+  }
+  return `Server returned HTTP ${res.status}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +837,12 @@ function ThreadHeader({
   assignedUserId,
   assignedUserName,
   teamMembers,
+  onAlert,
+  onOpenSearch,
+  stageCatalog,
+  currentStageId,
+  onStageChange,
+  canManageStages,
 }: {
   conversationId: string;
   contactId: string;
@@ -624,6 +852,14 @@ function ThreadHeader({
   assignedUserId: string | null;
   assignedUserName: string | null;
   teamMembers: User[];
+  /** Surface server errors via the app's modal alert. */
+  onAlert: (title: string, description?: string) => Promise<void>;
+  /** Open the in-conversation search overlay. */
+  onOpenSearch: () => void;
+  stageCatalog: ContactStage[];
+  currentStageId: string | null;
+  onStageChange: (stageId: string) => Promise<void>;
+  canManageStages: boolean;
 }) {
   return (
     <header className="flex h-[60px] shrink-0 items-center gap-3 border-b border-border px-4">
@@ -642,14 +878,38 @@ function ThreadHeader({
         <div className="font-mono text-[11px] text-muted-foreground">{formatPhone(phone)}</div>
       </div>
 
+      <div className="ml-3 hidden shrink-0 md:flex">
+        <ContactStageStepper
+          stages={stageCatalog}
+          currentStageId={currentStageId}
+          onChange={onStageChange}
+          canManage={canManageStages}
+        />
+      </div>
+
       <div className="ml-auto flex items-center gap-1.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onOpenSearch}
+          aria-label="Search this conversation"
+          title="Search this conversation (⌘F)"
+          className="size-8 text-muted-foreground hover:text-foreground"
+        >
+          <SearchIcon className="size-4" />
+        </Button>
         <AssignmentDropdown
           conversationId={conversationId}
           currentId={assignedUserId}
           currentName={assignedUserName}
           teamMembers={teamMembers}
+          onAlert={onAlert}
         />
-        <StatusDropdown conversationId={conversationId} current={status} />
+        <StatusDropdown
+          conversationId={conversationId}
+          current={status}
+          onAlert={onAlert}
+        />
         <ConversationMenu
           conversationId={conversationId}
           contactName={contactName}
@@ -737,11 +997,13 @@ function AssignmentDropdown({
   currentId,
   currentName,
   teamMembers,
+  onAlert,
 }: {
   conversationId: string;
   currentId: string | null;
   currentName: string | null;
   teamMembers: User[];
+  onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
 
@@ -749,11 +1011,21 @@ function AssignmentDropdown({
     if (assignedUserId === currentId || pending) return;
     setPending(true);
     try {
-      await fetch(`/api/conversations/${conversationId}/assign`, {
+      const res = await fetch(`/api/conversations/${conversationId}/assign`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ assignedUserId }),
       });
+      if (!res.ok) {
+        // The optimistic UI nothing — without surfacing this the user thinks
+        // the click worked until they notice the dropdown didn't change.
+        await onAlert("Couldn't update assignment", await readError(res));
+      }
+    } catch (err) {
+      await onAlert(
+        "Couldn't update assignment",
+        err instanceof Error ? err.message : "Network error",
+      );
     } finally {
       setPending(false);
     }
@@ -805,9 +1077,11 @@ function AssignmentDropdown({
 function StatusDropdown({
   conversationId,
   current,
+  onAlert,
 }: {
   conversationId: string;
   current: ConversationStatus;
+  onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
 
@@ -825,11 +1099,19 @@ function StatusDropdown({
     if (status === current || pending) return;
     setPending(true);
     try {
-      await fetch(`/api/conversations/${conversationId}/status`, {
+      const res = await fetch(`/api/conversations/${conversationId}/status`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ status }),
       });
+      if (!res.ok) {
+        await onAlert("Couldn't change status", await readError(res));
+      }
+    } catch (err) {
+      await onAlert(
+        "Couldn't change status",
+        err instanceof Error ? err.message : "Network error",
+      );
     } finally {
       setPending(false);
     }

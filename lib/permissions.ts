@@ -33,6 +33,16 @@ export function canManageContactFields(role: Role): boolean {
   return role === "superAdmin" || role === "admin" || role === "manager";
 }
 
+/**
+ * Add / rename / recolor / reorder / delete customer-lifecycle stages.
+ * Same shape as contact-field management: a workflow knob managers turn
+ * day-to-day, not a security decision. MOVING a contact between existing
+ * stages is open to anyone signed in (handled at the contact PATCH route).
+ */
+export function canManageStages(role: Role): boolean {
+  return role === "superAdmin" || role === "admin" || role === "manager";
+}
+
 /** Only superAdmins can grant or revoke the superAdmin role. */
 export function canGrantSuperAdmin(role: Role): boolean {
   return role === SUPER_ADMIN;

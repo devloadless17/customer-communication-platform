@@ -190,7 +190,9 @@ export async function POST(req: Request) {
         data: {
           teamId,
           contactId: contact.id,
-          status: "open",
+          // New chats land in `pending` — matches the webhook ingest +
+          // broadcast runner so every fresh thread starts in triage.
+          status: "pending",
           lastMessagePreview: "",
         },
       }));

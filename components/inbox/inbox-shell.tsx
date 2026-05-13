@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSelectedLayoutSegment } from "next/navigation";
 
-import type { ConversationWithRefs, Team, User } from "@/lib/types";
+import type { ConversationWithRefs, SnippetItem, Team, User } from "@/lib/types";
 import { useTeamEvents } from "@/hooks/use-team-events";
 import { useSocketStatus } from "@/hooks/use-socket-status";
 import { usePresence } from "@/hooks/use-presence";
@@ -11,6 +11,7 @@ import { usePresence } from "@/hooks/use-presence";
 import { Sidebar, type FilterId } from "./sidebar";
 import { ConversationList } from "./conversation-list";
 import { DevTools } from "./dev-tools";
+import { SnippetsProvider } from "./snippets-context";
 
 /**
  * Holds inbox-shell client state (filter + search) and live conversation
@@ -23,6 +24,7 @@ export function InboxShell({
   teammates,
   conversations: initialConversations,
   nextConversationCursor,
+  snippets,
   children,
 }: {
   currentUser: User;
@@ -30,6 +32,7 @@ export function InboxShell({
   teammates: User[];
   conversations: ConversationWithRefs[];
   nextConversationCursor: string | null;
+  snippets: SnippetItem[];
   children: React.ReactNode;
 }) {
   const [filter, setFilter] = useState<FilterId>("all");
@@ -67,33 +70,35 @@ export function InboxShell({
   }, [totalUnread, team.name]);
 
   return (
-    <div className="flex h-svh w-full overflow-hidden bg-background text-foreground">
-      <Sidebar
-        currentUser={currentUser}
-        team={team}
-        teammates={teammates}
-        conversations={conversations}
-        filter={filter}
-        onFilterChange={setFilter}
-        connected={connected}
-        onlineUserIds={onlineUserIds}
-      />
-      <div className="flex min-w-0 flex-1">
-        <ConversationList
+    <SnippetsProvider snippets={snippets}>
+      <div className="flex h-svh w-full overflow-hidden bg-background text-foreground">
+        <Sidebar
           currentUser={currentUser}
+          team={team}
+          teammates={teammates}
           conversations={conversations}
           filter={filter}
-          search={search}
-          onSearchChange={setSearch}
-          hasMore={hasMore}
-          loadingMore={loadingMore}
-          onLoadMore={loadMore}
+          onFilterChange={setFilter}
+          connected={connected}
+          onlineUserIds={onlineUserIds}
         />
-        <main className="flex min-w-0 flex-1 border-l border-border bg-background">
-          {children}
-        </main>
+        <div className="flex min-w-0 flex-1">
+          <ConversationList
+            currentUser={currentUser}
+            conversations={conversations}
+            filter={filter}
+            search={search}
+            onSearchChange={setSearch}
+            hasMore={hasMore}
+            loadingMore={loadingMore}
+            onLoadMore={loadMore}
+          />
+          <main className="flex min-w-0 flex-1 border-l border-border bg-background">
+            {children}
+          </main>
+        </div>
+        <DevTools conversations={conversations} currentUser={currentUser} />
       </div>
-      <DevTools conversations={conversations} currentUser={currentUser} />
-    </div>
+    </SnippetsProvider>
   );
 }

@@ -96,6 +96,41 @@ enum ContactSource {
   manual
 }
 
+// Domain events automations can subscribe to. Adding a new value here is
+// half the work — the dispatcher (lib/automations/dispatcher.ts) needs the
+// matching call site, and the conditions evaluator
+// (lib/automations/conditions.ts) needs to know which fields the payload
+// carries for filtering.
+enum AutomationTriggerEvent {
+  message_received
+  conversation_assigned
+  conversation_status_changed
+}
+
+// What an automation does when its conditions match. `webhook` is the only
+// shipped action; future internal actions (auto-assign, auto-reply, add
+// tag, …) plug in as additional enum values + handlers under
+// lib/automations/actions/.
+enum AutomationActionType {
+  webhook
+}
+
+// Lifecycle of a single automation execution.
+//   queued    — enqueued in BullMQ, not yet picked up by a worker
+//   running   — worker accepted the job, action is in flight
+//   success   — action returned 2xx (webhook) / completed cleanly
+//   failed    — action failed after exhausting retries
+//   skipped   — automation matched the event but conditions evaluated false
+//               (recorded only when explicitly traced — most condition misses
+//               short-circuit before a run row is created)
+enum AutomationRunStatus {
+  queued
+  running
+  success
+  failed
+  skipped
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -118,6 +153,11 @@ model Team {
   metaAccessToken        String?
   metaAppSecret          String?
   metaVerifyToken        String?
+  // Meta App ID — required by the resumable upload endpoint when creating a
+  // template with a media header (image/video/document). The endpoint is
+  // `/{appId}/uploads`, not WABA-scoped. Nullable like the other Meta fields
+  // so a team without media-header templates can ignore it.
+  metaAppId              String?
 
   users                   User[]
   contacts                Contact[]
@@ -125,10 +165,15 @@ model Team {
   messages                Message[]
   invites                 Invite[]
   contactFieldDefinitions ContactFieldDefinition[]
+  contactStages           ContactStage[]
   messageTemplates        MessageTemplate[]
   broadcasts              Broadcast[]
   tags                    Tag[]
   audienceGroups          AudienceGroup[]
+  automations             Automation[]
+  automationRuns          AutomationRun[]
+  apiKeys                 TeamApiKey[]
+  snippets                Snippet[]
 }
 
 model User {
@@ -151,8 +196,40 @@ model User {
   createdInvites    Invite[]        @relation("InvitedBy")
   createdBroadcasts Broadcast[]     @relation("CreatedBroadcasts")
   createdAudienceGroups AudienceGroup[] @relation("CreatedAudienceGroups")
+  createdSnippets   Snippet[]       @relation("CreatedSnippets")
 
   @@index([teamId])
+}
+
+// Saved canned response. Agents trigger one in the reply box by typing
+// `/<name>` — the picker filters by prefix, then the chosen snippet's body
+// replaces the trigger text with `$var.contact.*` tokens already resolved
+// against the active conversation's contact.
+//
+// Team-wide for v1: anyone can create / use / edit. Per-user (private)
+// snippets are a later add-on; we'd add a nullable `ownerUserId` field then.
+model Snippet {
+  id          String   @id @default(cuid())
+  teamId      String
+  // Lowercase, digits, underscores. Becomes the slash trigger:
+  //   name = "welcome_new_user" → `/welcome_new_user` in the reply box.
+  // Unique per-team so two snippets can't fight for the same trigger.
+  name        String
+  // Friendly title shown in the picker ("Welcome new customer"). Searchable.
+  label       String
+  // The text inserted into the reply. May contain `$var.contact.<field>`
+  // tokens which the picker resolves at insertion time against the active
+  // conversation's contact.
+  body        String
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  team      Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User @relation("CreatedSnippets", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, name])
+  @@index([teamId, label])
 }
 
 model Contact {
@@ -170,6 +247,12 @@ model Contact {
   // - Keys NOT in the team schema are per-contact extras (one-offs added on
   //   a single contact). Both kinds are string-valued for now.
   customFields Json          @default("{}")
+  // Customer-lifecycle stage. Per-team configurable list (managed in
+  // /settings/stages). Defaulted to the team's `isDefault` stage at create
+  // time — see ensureDefaultStage in lib/queries.ts. SetNull on delete so
+  // removing a stage doesn't take its contacts with it; the bulk-move flow
+  // in /api/team/stages/[id] DELETE empties this manually first.
+  stageId      String?
   // How this row got into the DB. Defaulted to inbound because the webhook
   // ingest path uses the bare default; the manual create + CSV import paths
   // explicitly set 'manual'.
@@ -177,6 +260,7 @@ model Contact {
   createdAt    DateTime      @default(now())
 
   team               Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  stage              ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
   conversations      Conversation[]
   broadcastRecipients BroadcastRecipient[]
   // Many-to-many: an agent tags a contact with one or more labels for
@@ -190,6 +274,39 @@ model Contact {
   @@unique([teamId, phoneNumber])
   @@index([teamId])
   @@index([teamId, source])
+  @@index([teamId, stageId])
+}
+
+// Customer-lifecycle stage. A team configures an ordered list ("New",
+// "Qualified", "Customer", "Churned", …) and each Contact sits in exactly one
+// at a time. Used for grouping in the contacts list and for stage-targeted
+// broadcasts later. Per-team — names + colors are not platform-global.
+//
+// `isDefault` is the stage new contacts land in (manual creates, webhook
+// ingest, CSV import all consult it). At-most-one-default-per-team is
+// enforced in app code in the same transaction as the toggle; no partial
+// unique index because Prisma doesn't model those.
+//
+// `color` mirrors the Tag color slot system (lib/tag-colors.ts) so the same
+// safelist of Tailwind classes covers both surfaces.
+model ContactStage {
+  id        String   @id @default(cuid())
+  teamId    String
+  name      String
+  color     String   @default("slate")
+  // Sort order in the stages list — lower first. New stages get the next
+  // available slot at create time; reorder is a bulk PATCH.
+  position  Int      @default(0)
+  // Exactly one row per team should carry isDefault = true. Enforced in app
+  // code (see /api/team/stages POST + PATCH).
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  team     Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contacts Contact[]
+
+  @@unique([teamId, name])
+  @@index([teamId, position])
 }
 
 // Team-wide contact field definitions: an admin/manager defines a key+label
@@ -221,7 +338,11 @@ model Conversation {
   teamId             String
   contactId          String
   assignedUserId     String?
-  status             ConversationStatus @default(open)
+  // New chats land in `pending` so they sit in the triage column until an
+  // agent claims them (→ open) or closes them out. The webhook ingest, the
+  // broadcast runner, and the message-forward path all rely on this
+  // default; existing conversations are untouched by the migration.
+  status             ConversationStatus @default(pending)
   unreadCount        Int                @default(0)
   lastMessageAt      DateTime           @default(now())
   lastMessagePreview String             @default("")
@@ -330,6 +451,23 @@ model MessageTemplate {
   // Full components array as Meta returned it. Schema:
   //   [{ type: "HEADER" | "BODY" | "FOOTER" | "BUTTONS", format?, text?, buttons? }]
   components  Json
+  // Per-variable metadata layered on top of Meta's positional `{{n}}` model:
+  // human-readable label + source (manual / contact field / custom field) +
+  // optional fallback value used at send time when the contact's field is
+  // empty. Owned by our app — Meta never sees this. Shape:
+  //   { body: VariableBinding[], header?: VariableBinding }
+  //   VariableBinding = {
+  //     label: string,
+  //     source:
+  //       | { kind: "manual" }
+  //       | { kind: "contact_field", field: "name"|"phoneNumber"|"email"|"location" }
+  //       | { kind: "contact_custom_field", key: string },
+  //     defaultValue?: string,
+  //   }
+  // Empty `{}` for templates synced from Meta before bindings existed — the
+  // runner treats a missing binding the same as `manual`, so old broadcasts
+  // keep working.
+  variableBindings Json    @default("{}")
   syncedAt    DateTime         @default(now())
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -482,4 +620,115 @@ model InternalNote {
   author       User         @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
 
   @@index([conversationId, timestamp])
+}
+
+// ---------------------------------------------------------------------------
+// Automations
+// ---------------------------------------------------------------------------
+//
+// Respond.io-style workflow triggers. Admins build rules in /automations:
+//   "When <trigger> [+ conditions], do <action>."
+// Today the only shipped action is a webhook (primary use case: n8n with an
+// AI/RAG agent). Future internal actions plug in as new AutomationActionType
+// values + handlers under lib/automations/actions/.
+//
+// Dispatch path: a domain event (message received, conversation assigned,
+// status changed) calls `dispatch(teamId, event, payload)`. The dispatcher
+// loads enabled rows for this team+trigger, evaluates `conditions`, and
+// enqueues a BullMQ job per match. The worker creates an AutomationRun row
+// before invoking the action so partial failures are always auditable.
+
+model Automation {
+  id          String                 @id @default(cuid())
+  teamId      String
+  name        String
+  enabled     Boolean                @default(true)
+  trigger     AutomationTriggerEvent
+
+  // List of AND'd condition rows: `[{ field, op, value }, ...]`. An empty
+  // array means "fire on every trigger event". Field+op pairs are validated
+  // against the trigger by lib/automations/conditions.ts — e.g.
+  // body_contains only makes sense on message_received.
+  //
+  // Shape:
+  //   [{
+  //     field: "body" | "body_lower" | "status_from" | "status_to" |
+  //            "assigned_user_id" | "contact_phone" | "contact_name",
+  //     op:    "equals" | "not_equals" | "contains" | "not_contains" |
+  //            "starts_with" | "ends_with" | "regex" | "is_null" | "is_not_null",
+  //     value: string  // ignored for is_null / is_not_null
+  //   }]
+  conditions  Json                   @default("[]")
+
+  actionType  AutomationActionType   @default(webhook)
+  // Action-specific config. For `webhook`:
+  //   { url: string, bearerToken?: string, customHeaders?: { [k]: string },
+  //     timeoutMs?: number }
+  // Validated on write by the management API route.
+  actionConfig Json
+
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  team        Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runs        AutomationRun[]
+
+  // Hot path: the dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true`.
+  @@index([teamId, trigger, enabled])
+}
+
+model AutomationRun {
+  id              String                 @id @default(cuid())
+  automationId    String
+  // Denormalized so the team-scoped runs feed doesn't have to JOIN through
+  // Automation just to filter — and so a deleted automation still leaves
+  // auditable history on the team. (Cascade is on automationId; if the rule
+  // is deleted, its runs go too. That's intentional: per-rule debugging.)
+  teamId          String
+  status          AutomationRunStatus    @default(queued)
+  trigger         AutomationTriggerEvent
+
+  // Snapshot of the payload that was (or would have been) sent to the
+  // action. Keeping the body verbatim makes "why did this fire?" debugging
+  // possible without rehydrating the source event from Postgres.
+  eventPayload    Json
+
+  attempts        Int                    @default(0)
+  responseStatus  Int?
+  // Response body, truncated to ~2KB by the action runner — we don't want
+  // a verbose n8n error page to bloat the DB.
+  responseBody    String?
+  errorMessage    String?
+
+  startedAt       DateTime               @default(now())
+  finishedAt      DateTime?
+
+  automation      Automation             @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  team            Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([automationId, startedAt(sort: Desc)])
+  @@index([teamId, startedAt(sort: Desc)])
+}
+
+// API key for the external (n8n-facing) endpoints under /api/external/v1.
+// n8n authenticates with `Authorization: Bearer <key>`. We store SHA-256 of
+// the plaintext only — `tokenPrefix` (first 8 chars) is shown in the UI so
+// admins can tell two keys apart without exposing the secret.
+//
+// Plaintext is shown EXACTLY ONCE at creation time. Lost keys are rotated,
+// not recovered.
+model TeamApiKey {
+  id          String    @id @default(cuid())
+  teamId      String
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  createdById String
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  team        Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, revokedAt])
 }

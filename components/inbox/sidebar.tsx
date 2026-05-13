@@ -159,6 +159,13 @@ export function Sidebar({
           <Megaphone className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
           <span className="flex-1 text-left">Broadcasts</span>
         </Link>
+        <Link
+          href="/settings"
+          className="group flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <Settings className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
+          <span className="flex-1 text-left">Settings</span>
+        </Link>
         {currentUser.role === "superAdmin" && (
           <Link
             href="/admin"

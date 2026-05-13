@@ -33,6 +33,7 @@ interface Body {
   email?: unknown;
   location?: unknown;
   customFields?: unknown;
+  stageId?: unknown;
 }
 
 const MAX_TEXT = 500;
@@ -67,6 +68,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     name?: string;
     email?: string | null;
     location?: string | null;
+    stageId?: string | null;
   } = {};
 
   if (raw.name !== undefined) {
@@ -113,6 +115,29 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     );
   }
 
+  if (raw.stageId !== undefined) {
+    if (raw.stageId === null) {
+      update.stageId = null;
+    } else if (typeof raw.stageId === "string" && raw.stageId.length > 0) {
+      // Confirm the stage belongs to this team. Without this scope check
+      // an agent could park their contact in another tenant's stage by id
+      // guessing — harmless cosmetically but bad for our boundary story.
+      const ok = await db.contactStage.findFirst({
+        where: { id: raw.stageId, teamId },
+        select: { id: true },
+      });
+      if (!ok) {
+        return NextResponse.json({ error: "stage not found" }, { status: 400 });
+      }
+      update.stageId = raw.stageId;
+    } else {
+      return NextResponse.json(
+        { error: "stageId must be a string or null" },
+        { status: 400 },
+      );
+    }
+  }
+
   try {
     const updated = await db.$transaction(async (tx) => {
       const existing = await tx.contact.findFirst({
@@ -151,6 +176,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       location: updated.location ?? undefined,
       customFields: normalizeStringMap(updated.customFields),
       source: updated.source,
+      stageId: updated.stageId,
     };
     return NextResponse.json({ contact });
   } catch (err) {

@@ -1,12 +1,14 @@
 import "server-only";
 
 import { Prisma } from "@prisma/client";
+import { unstable_cache } from "next/cache";
 
 import { db } from "@/lib/db";
 import type {
   Contact,
   ContactFieldDefinition,
   ContactListItem,
+  ContactStage,
   Conversation,
   ConversationStatus,
   ConversationWithRefs,
@@ -20,6 +22,7 @@ import type {
   ProviderName,
   ReplySnapshot,
   Role,
+  TagColor,
   User,
 } from "@/lib/types";
 
@@ -109,6 +112,7 @@ function mapContact(c: PrismaContact): Contact {
     location: c.location ?? undefined,
     customFields: normalizeCustomFields(c.customFields),
     source: c.source,
+    stageId: c.stageId,
   };
 }
 
@@ -456,11 +460,24 @@ function base64urlDecode(input: string): string {
   return Buffer.from(input.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64").toString("utf8");
 }
 
-/** All teammates — used by the assignment dropdown and sidebar list. */
-export async function listTeamMembers(teamId: string): Promise<User[]> {
-  const rows = await db.user.findMany({ where: { teamId }, orderBy: { name: "asc" } });
-  return rows.map(mapUser);
-}
+/**
+ * All teammates — used by the assignment dropdown and sidebar list.
+ *
+ * Cached because every conversation switch refetches this for the message
+ * thread and contact panel, but the underlying row set only changes when an
+ * admin invites/removes someone (minutes-to-days apart, not seconds).
+ * 60s revalidation keeps the dropdown reasonably fresh without a per-switch
+ * round-trip. `revalidateTag(`team:${teamId}:members`)` from the invite /
+ * remove flows will eventually be needed for instant propagation.
+ */
+export const listTeamMembers = unstable_cache(
+  async (teamId: string): Promise<User[]> => {
+    const rows = await db.user.findMany({ where: { teamId }, orderBy: { name: "asc" } });
+    return rows.map(mapUser);
+  },
+  ["listTeamMembers"],
+  { revalidate: 60, tags: ["team-members"] },
+);
 
 export const CONTACTS_PAGE = 50;
 
@@ -476,6 +493,9 @@ export interface ListContactsOpts {
   /** Filter by 24h customer-service window: "open" = messaged us in the last
    *  24h; "closed" = no inbound, or last inbound > 24h ago. */
   window?: "open" | "closed";
+  /** Filter to contacts currently parked in this stage. `"none"` matches
+   *  contacts with no stage at all (orphaned after a stage delete). */
+  stageId?: string | "none";
   cursor?: string | null;
   take?: number;
 }
@@ -502,6 +522,7 @@ export async function listContacts(
   const fieldFilter = opts.fieldFilter;
   const source = opts.source;
   const windowFilter = opts.window;
+  const stageFilter = opts.stageId;
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
 
   // Tag filter: resolve "has ANY of these tags" to a concrete id set up front
@@ -537,6 +558,7 @@ export async function listContacts(
       location: string | null;
       customFields: unknown;
       source: "inbound" | "manual";
+      stageId: string | null;
       createdAt: Date;
       lastMessageAt: Date | null;
       activeConversationId: string | null;
@@ -553,6 +575,7 @@ export async function listContacts(
       c.location,
       c."customFields",
       c.source,
+      c."stageId",
       c."createdAt",
       conv."lastMessageAt"          AS "lastMessageAt",
       conv.id                       AS "activeConversationId",
@@ -609,6 +632,13 @@ export async function listContacts(
           : Prisma.empty
       }
       ${
+        stageFilter === "none"
+          ? Prisma.sql`AND c."stageId" IS NULL`
+          : stageFilter
+            ? Prisma.sql`AND c."stageId" = ${stageFilter}`
+            : Prisma.empty
+      }
+      ${
         cursor
           ? Prisma.sql`AND (
               COALESCE(conv."lastMessageAt", c."createdAt") < ${cursor.sortAt}
@@ -660,6 +690,7 @@ export async function listContacts(
       location: r.location ?? undefined,
       customFields: normalizeCustomFields(r.customFields),
       source: r.source,
+      stageId: r.stageId,
       tagIds: tagIdsByContact.get(r.id) ?? [],
     },
     activeConversationId: r.activeConversationId,
@@ -695,22 +726,27 @@ function parseContactCursor(raw: string | null): ContactCursor | null {
 /**
  * Team-wide contact field definitions. Returned in render order so the panel
  * can iterate without re-sorting.
+ *
+ * Cached: see the rationale on `listTeamMembers`. Field schemas change rarely
+ * (an admin editing the contact form), so the 60s revalidation is fine.
  */
-export async function listContactFieldDefinitions(
-  teamId: string,
-): Promise<ContactFieldDefinition[]> {
-  const rows = await db.contactFieldDefinition.findMany({
-    where: { teamId },
-    orderBy: [{ order: "asc" }, { createdAt: "asc" }],
-  });
-  return rows.map((r) => ({
-    id: r.id,
-    teamId: r.teamId,
-    key: r.key,
-    label: r.label,
-    order: r.order,
-  }));
-}
+export const listContactFieldDefinitions = unstable_cache(
+  async (teamId: string): Promise<ContactFieldDefinition[]> => {
+    const rows = await db.contactFieldDefinition.findMany({
+      where: { teamId },
+      orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      teamId: r.teamId,
+      key: r.key,
+      label: r.label,
+      order: r.order,
+    }));
+  },
+  ["listContactFieldDefinitions"],
+  { revalidate: 60, tags: ["contact-field-definitions"] },
+);
 
 // ---------------------------------------------------------------------------
 // superAdmin: cross-team browsing. These queries are the ONLY ones that
@@ -1085,15 +1121,321 @@ export async function previewAudienceContacts(
   };
 }
 
-export async function listTags(teamId: string): Promise<import("@/lib/types").Tag[]> {
-  const rows = await db.tag.findMany({
-    where: { teamId },
-    orderBy: [{ name: "asc" }],
+/**
+ * Cached: same rationale as `listTeamMembers`. Tag catalog rarely changes —
+ * admin creates a tag and that's it. 60s revalidation.
+ */
+export const listTags = unstable_cache(
+  async (teamId: string): Promise<import("@/lib/types").Tag[]> => {
+    const rows = await db.tag.findMany({
+      where: { teamId },
+      orderBy: [{ name: "asc" }],
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      teamId: r.teamId,
+      name: r.name,
+      color: r.color as import("@/lib/types").TagColor,
+    }));
+  },
+  ["listTags"],
+  { revalidate: 60, tags: ["tags"] },
+);
+
+/**
+ * Team-wide snippet catalog used by the reply composer's slash menu.
+ *
+ * Belongs at the team scope, not per-chat: snippets are usable from every
+ * conversation, so fetching them per chat-switch (as ReplyBox used to do)
+ * was the wrong shape. The inbox layout hydrates the catalog into a Client
+ * Context at session start; this query is the source.
+ *
+ * Returns only what the slash menu needs — id/name/label/body. The full
+ * record (createdBy, updatedAt) stays inside the settings route's own
+ * fetch where it's needed for the editor list.
+ */
+export const listSnippets = unstable_cache(
+  async (teamId: string): Promise<import("@/lib/types").SnippetItem[]> => {
+    const rows = await db.snippet.findMany({
+      where: { teamId },
+      orderBy: [{ label: "asc" }],
+      select: { id: true, name: true, label: true, body: true },
+    });
+    return rows;
+  },
+  ["listSnippets"],
+  { revalidate: 60, tags: ["snippets"] },
+);
+
+// ---------------------------------------------------------------------------
+// In-conversation message search. ILIKE against `body` + `mediaCaption`,
+// scoped to the conversation + team. Index on (conversationId, timestamp)
+// already exists; the WHERE clause uses it for the order-by tail, and the
+// ILIKE expression is the residual filter.
+//
+// We deliberately avoid Postgres full-text search for v1 — it would require
+// a tsvector column + GIN index migration, and customers' chats are small
+// enough (thousands of rows per conversation, max) that an indexed
+// (conversationId, timestamp) scan with an ILIKE filter is well under 100ms.
+// If we ever see a chat with >100k messages, swap this to FTS.
+// ---------------------------------------------------------------------------
+
+export interface MessageSearchHit {
+  id: string;
+  body: string;
+  direction: MessageDirection;
+  timestamp: string;
+  /** Authoring teammate's name on outbound, null on inbound. */
+  senderName: string | null;
+  /** mediaCaption when this is a media message, undefined otherwise. */
+  mediaCaption?: string;
+  /** "image" | "video" | … — kept compact so the picker can iconify. */
+  mediaKind?: MediaKind;
+}
+
+export interface MessageSearchPage {
+  items: MessageSearchHit[];
+  nextCursor: string | null;
+  totalMatched: number;
+}
+
+/**
+ * Page of search hits for `query` inside `conversationId`, newest-first.
+ * Cursor is the same keyset shape as the older-messages pager so the two
+ * can share the codec.
+ */
+export async function searchConversationMessages(
+  teamId: string,
+  conversationId: string,
+  opts: { query: string; take?: number; cursor?: string | null },
+): Promise<MessageSearchPage> {
+  const take = clampTake(opts.take, 25);
+  const cursor = parseMessageCursor(opts.cursor ?? null);
+  const query = opts.query.trim();
+  if (query.length === 0) {
+    return { items: [], nextCursor: null, totalMatched: 0 };
+  }
+
+  // Scope check: prevent enumeration of another tenant's conversation
+  // by id-guessing.
+  const owns = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    select: { id: true },
   });
-  return rows.map((r) => ({
+  if (!owns) return { items: [], nextCursor: null, totalMatched: 0 };
+
+  // Match against either the body OR the media caption. mediaCaption is a
+  // dedicated column rather than re-using body, so OR is the right shape.
+  const matchWhere = {
+    conversationId,
+    OR: [
+      { body: { contains: query, mode: "insensitive" as const } },
+      { mediaCaption: { contains: query, mode: "insensitive" as const } },
+    ],
+  };
+
+  const totalMatched = await db.message.count({ where: matchWhere });
+
+  const rows = await db.message.findMany({
+    where: cursor
+      ? {
+          ...matchWhere,
+          AND: [
+            {
+              OR: [
+                { timestamp: { lt: cursor.timestamp } },
+                { timestamp: cursor.timestamp, id: { lt: cursor.id } },
+              ],
+            },
+          ],
+        }
+      : matchWhere,
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: take + 1,
+    select: {
+      id: true,
+      body: true,
+      direction: true,
+      timestamp: true,
+      mediaCaption: true,
+      mediaKind: true,
+      sender: { select: { name: true } },
+    },
+  });
+
+  const hasMore = rows.length > take;
+  const sliced = hasMore ? rows.slice(0, take) : rows;
+  const last = sliced.at(-1);
+  const nextCursor =
+    hasMore && last
+      ? encodeMessageCursor({ timestamp: last.timestamp, id: last.id })
+      : null;
+
+  const items: MessageSearchHit[] = sliced.map((r) => ({
     id: r.id,
-    teamId: r.teamId,
-    name: r.name,
-    color: r.color as import("@/lib/types").TagColor,
+    body: r.body,
+    direction: r.direction as MessageDirection,
+    timestamp: r.timestamp.toISOString(),
+    senderName: r.sender?.name ?? null,
+    ...(r.mediaCaption ? { mediaCaption: r.mediaCaption } : {}),
+    ...(r.mediaKind ? { mediaKind: r.mediaKind as MediaKind } : {}),
   }));
+
+  return { items, nextCursor, totalMatched };
+}
+
+/**
+ * Load a window of messages CENTERED on a target so the inbox can jump to
+ * a search hit that lives outside the currently-loaded slice without
+ * paginating through every older page.
+ *
+ * Returns chronological (oldest-first) plus a `nextOlderCursor` so the
+ * thread can continue paginating upward from the new top. Limits are
+ * generous (default 25/25) because this is a rare action — the user just
+ * clicked a search result — but capped by clampTake.
+ */
+export async function loadMessageContextWindow(
+  teamId: string,
+  conversationId: string,
+  opts: { targetMessageId: string; before?: number; after?: number },
+): Promise<{
+  messages: Message[];
+  /** True when there are still older messages before this window — drives
+   *  the thread's "load older" gate. */
+  hasMoreOlder: boolean;
+  nextOlderCursor: string | null;
+} | null> {
+  const before = clampTake(opts.before, 25);
+  const after = clampTake(opts.after, 25);
+
+  const target = await db.message.findFirst({
+    where: { id: opts.targetMessageId, conversationId, teamId },
+    select: { id: true, timestamp: true },
+  });
+  if (!target) return null;
+
+  const [olderRows, anchorAndNewer] = await Promise.all([
+    db.message.findMany({
+      omit: { rawPayload: true },
+      include: { replyTo: REPLY_TO_INCLUDE },
+      where: {
+        conversationId,
+        OR: [
+          { timestamp: { lt: target.timestamp } },
+          { timestamp: target.timestamp, id: { lt: target.id } },
+        ],
+      },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: before + 1, // +1 to detect "more older exists"
+    }),
+    db.message.findMany({
+      omit: { rawPayload: true },
+      include: { replyTo: REPLY_TO_INCLUDE },
+      where: {
+        conversationId,
+        OR: [
+          { timestamp: { gt: target.timestamp } },
+          { timestamp: target.timestamp, id: { gte: target.id } },
+        ],
+      },
+      orderBy: [{ timestamp: "asc" }, { id: "asc" }],
+      take: after + 1, // +1 so the target itself counts toward the slice
+    }),
+  ]);
+
+  const hasMoreOlder = olderRows.length > before;
+  const olderDesc = hasMoreOlder ? olderRows.slice(0, before) : olderRows;
+  const olderAsc = [...olderDesc].reverse();
+  const messages = [...olderAsc, ...anchorAndNewer].map(mapMessage);
+
+  const oldest = olderAsc[0];
+  const nextOlderCursor =
+    hasMoreOlder && oldest
+      ? encodeMessageCursor({ timestamp: oldest.timestamp, id: oldest.id })
+      : null;
+
+  return { messages, hasMoreOlder, nextOlderCursor };
+}
+
+// ---------------------------------------------------------------------------
+// Customer-lifecycle stages. The catalog is per-team and changes rarely
+// (admin edits it occasionally), so the same caching shape as Tags applies.
+// `revalidateTag("contact-stages")` is fired from the management routes so
+// edits propagate without waiting on the 60s clock.
+// ---------------------------------------------------------------------------
+
+export const listContactStages = unstable_cache(
+  async (teamId: string): Promise<ContactStage[]> => {
+    const rows = await db.contactStage.findMany({
+      where: { teamId },
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      teamId: r.teamId,
+      name: r.name,
+      color: r.color as TagColor,
+      position: r.position,
+      isDefault: r.isDefault,
+    }));
+  },
+  ["listContactStages"],
+  { revalidate: 60, tags: ["contact-stages"] },
+);
+
+/**
+ * Resolve the team's default stage id, creating one on demand. The migration
+ * seeds one default per existing team; this helper covers teams created
+ * AFTER the migration (registration flow) and the rare case where an admin
+ * deleted every stage. Returns the id we should assign new contacts to —
+ * always a real ContactStage row owned by this team.
+ *
+ * Why a side-effecting "ensure" instead of just relying on the migration's
+ * seed: the registration route (app/register/actions.ts) creates a Team
+ * without going through the migration, so a brand-new tenant would have
+ * zero stages. Better to lazily create than to scatter `db.contactStage`
+ * writes through every team-creation site.
+ */
+export async function ensureDefaultStage(teamId: string): Promise<string> {
+  const existingDefault = await db.contactStage.findFirst({
+    where: { teamId, isDefault: true },
+    select: { id: true },
+  });
+  if (existingDefault) return existingDefault.id;
+
+  // No default — promote the lowest-position stage if any exist, otherwise
+  // create one from scratch. Done in a transaction so two concurrent calls
+  // can't both create a duplicate.
+  return db.$transaction(async (tx) => {
+    const reread = await tx.contactStage.findFirst({
+      where: { teamId, isDefault: true },
+      select: { id: true },
+    });
+    if (reread) return reread.id;
+
+    const anyStage = await tx.contactStage.findFirst({
+      where: { teamId },
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+      select: { id: true },
+    });
+    if (anyStage) {
+      await tx.contactStage.update({
+        where: { id: anyStage.id },
+        data: { isDefault: true },
+      });
+      return anyStage.id;
+    }
+
+    const created = await tx.contactStage.create({
+      data: {
+        teamId,
+        name: "Stage 1",
+        color: "slate",
+        position: 0,
+        isDefault: true,
+      },
+      select: { id: true },
+    });
+    return created.id;
+  });
 }

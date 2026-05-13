@@ -24,6 +24,11 @@ export interface MetaSendConfig {
    * send routes can ignore it; the templates sync route enforces presence.
    */
   wabaId?: string;
+  /**
+   * Meta App ID — required only by the resumable upload endpoint used when
+   * creating a template with a media header. Optional everywhere else.
+   */
+  appId?: string;
 }
 
 export interface MetaWebhookConfig {
@@ -77,6 +82,7 @@ async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
       metaPhoneNumberId: true,
       metaAccessToken: true,
       metaWabaId: true,
+      metaAppId: true,
     },
   });
   if (!team) throw new ProviderNotConfiguredError(teamId, ["team-not-found"]);
@@ -89,6 +95,7 @@ async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
     accessToken: team.metaAccessToken!,
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(team.metaWabaId ? { wabaId: team.metaWabaId } : {}),
+    ...(team.metaAppId ? { appId: team.metaAppId } : {}),
   };
 }
 

@@ -157,6 +157,7 @@ function toDto(row: {
   status: string;
   bodyText: string;
   components: Prisma.JsonValue;
+  variableBindings: Prisma.JsonValue;
   syncedAt: Date;
 }): TemplateDto {
   return {
@@ -170,6 +171,7 @@ function toDto(row: {
     components: Array.isArray(row.components)
       ? (row.components as unknown as TemplateComponent[])
       : [],
+    variableBindings: row.variableBindings ?? {},
     syncedAt: row.syncedAt.toISOString(),
   };
 }

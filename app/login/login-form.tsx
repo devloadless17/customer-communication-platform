@@ -47,6 +47,19 @@ export function LoginForm({ next }: { next: string }) {
         />
       </div>
 
+      <label
+        htmlFor="remember"
+        className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground select-none"
+      >
+        <input
+          id="remember"
+          name="remember"
+          type="checkbox"
+          className="size-3.5 cursor-pointer rounded border-input accent-primary"
+        />
+        Keep me signed in for 14 days
+      </label>
+
       {state.error && (
         <div
           role="alert"

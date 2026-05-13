@@ -163,6 +163,7 @@ export function ContactPanel({
     startSaving(() => router.refresh());
   }
 
+
   // Resolve ids to full tag objects in catalog (alphabetical) order. Ids
   // pointing at deleted tags are silently dropped — the server already
   // filtered cross-team ids, but a tag could have been deleted between the

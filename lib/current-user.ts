@@ -1,9 +1,10 @@
 import "server-only";
 
+import { cache } from "react";
 import { redirect } from "next/navigation";
 
+import { loadActiveUser } from "@/lib/active-user";
 import { auth } from "@/lib/auth";
-import { db } from "@/lib/db";
 import type { User } from "@/lib/types";
 
 /**
@@ -15,8 +16,10 @@ import type { User } from "@/lib/types";
  * defense-in-depth: if middleware is ever bypassed, server components
  * still bounce.
  *
- * The shape (`{ user, teamId }`) is unchanged from the Phase 0 stub so
- * existing callers don't need refactoring.
+ * Wrapped in `React.cache` so layouts + pages + child server components in
+ * the same render share one auth() call and one DB hit, instead of each
+ * paying the round-trip. Per-request memoization — cache resets between
+ * navigations.
  */
 
 export interface Session {
@@ -24,7 +27,7 @@ export interface Session {
   teamId: string;
 }
 
-export async function getSession(): Promise<Session> {
+export const getSession = cache(async (): Promise<Session> => {
   const session = await auth();
   if (!session?.user?.id) {
     redirect("/login");
@@ -33,8 +36,8 @@ export async function getSession(): Promise<Session> {
   // Hydrate from the DB so we always have current name/avatar/role and to
   // catch users that were deactivated in another tab. JWT sessions cache
   // attributes for the token's lifetime; the DB is the source of truth.
-  const row = await db.user.findUnique({ where: { id: session.user.id } });
-  if (!row || row.deactivatedAt) {
+  const row = await loadActiveUser(session.user.id);
+  if (!row) {
     redirect("/login");
   }
 
@@ -49,4 +52,4 @@ export async function getSession(): Promise<Session> {
     },
     teamId: row.teamId,
   };
-}
+});

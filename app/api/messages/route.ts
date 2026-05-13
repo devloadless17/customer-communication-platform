@@ -32,6 +32,13 @@ interface Body {
 }
 
 export async function POST(req: Request) {
+  // Stamp the message's logical send time at request arrival, not at the
+  // moment Meta's API returns. Meta's response time varies wildly between
+  // text and media sends; if a media call happens to complete faster than a
+  // text call the user just fired, the row order on the server (and on every
+  // client after reload) ends up reversed. Receive-time stamping reflects
+  // the user's actual send sequence.
+  const receivedAt = new Date();
   const { user, teamId } = await getSession();
 
   let raw: Body;
@@ -52,38 +59,63 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "conversationId and body required" }, { status: 400 });
   }
 
-  const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
-    include: { contact: true },
-  });
+  // ── Phase A — parallel pre-flight reads. The conversation row, the reply
+  // target row, and the provider config are independent; running them
+  // sequentially was costing ~2x round-trip-time for no reason. The
+  // findFirst on conversation now `select`s only what Meta needs (just the
+  // contact phone) instead of pulling the full contact row.
+  const [conversation, replyToRow, config] = await Promise.all([
+    db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: { id: true, contact: { select: { phoneNumber: true } } },
+    }),
+    replyToMessageIdRaw
+      ? db.message.findFirst({
+          where: { id: replyToMessageIdRaw, conversationId, teamId },
+          select: { id: true, externalId: true },
+        })
+      : Promise.resolve(null),
+    getMetaSendConfig(teamId).catch(
+      (err: unknown) => {
+        if (err instanceof ProviderNotConfiguredError) return err;
+        throw err;
+      },
+    ),
+  ]);
+
   if (!conversation) {
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
   }
+  if (config instanceof ProviderNotConfiguredError) {
+    return NextResponse.json(
+      { error: "whatsapp not connected", detail: config.message },
+      { status: 409 },
+    );
+  }
 
-  // Resolve the reply target: confirm it lives in this conversation (so an
-  // attacker can't quote across teams) and fetch the wamid Meta needs in the
-  // outbound `context.message_id`. A pending optimistic id (clientTempId)
-  // would not exist in DB — `replyToRow` is null, we simply don't quote.
+  // Resolve the reply target. confirm it lives in this conversation (so an
+  // attacker can't quote across teams). A pending optimistic id won't be in
+  // DB — `replyToRow` is null and we simply don't quote.
   let replyToMessageId: string | null = null;
   let replyToExternalId: string | undefined;
-  if (replyToMessageIdRaw) {
-    const replyToRow = await db.message.findFirst({
-      where: { id: replyToMessageIdRaw, conversationId, teamId },
-      select: { id: true, externalId: true },
-    });
-    if (replyToRow) {
-      replyToMessageId = replyToRow.id;
-      // Skip the wamid for any externalId we generated (e.g. legacy/dev seeds);
-      // Meta would 4xx on an unknown id and we'd surface that to the agent.
-      if (!replyToRow.externalId.startsWith("tmp_")) {
-        replyToExternalId = replyToRow.externalId;
-      }
+  if (replyToRow) {
+    replyToMessageId = replyToRow.id;
+    // Skip the wamid for any externalId we generated (legacy/dev seeds);
+    // Meta would 4xx on an unknown id.
+    if (!replyToRow.externalId.startsWith("tmp_")) {
+      replyToExternalId = replyToRow.externalId;
     }
   }
 
+  // ── Phase B — Meta send. This is the irreducible 200–800ms HTTP hop and
+  // dominates the entire request. While it's in flight we kick off the
+  // reply-snapshot prefetch in parallel so it's effectively free.
+  const replySnapshotPromise = replyToMessageId
+    ? loadReplySnapshotById(replyToMessageId)
+    : Promise.resolve(null);
+
   let send;
   try {
-    const config = await getMetaSendConfig(teamId);
     send = await getMetaProvider().sendText(
       {
         to: conversation.contact.phoneNumber,
@@ -93,12 +125,6 @@ export async function POST(req: Request) {
       config,
     );
   } catch (err) {
-    if (err instanceof ProviderNotConfiguredError) {
-      return NextResponse.json(
-        { error: "whatsapp not connected", detail: err.message },
-        { status: 409 },
-      );
-    }
     if (err instanceof MetaSendError) {
       // Pass Meta's error code/body through verbatim — the agent needs it.
       return NextResponse.json(
@@ -113,36 +139,29 @@ export async function POST(req: Request) {
     );
   }
 
-  const created = await db.message.create({
-    data: {
-      teamId,
-      conversationId,
-      externalId: send.externalId,
-      senderUserId: user.id,
-      body,
-      direction: "out",
-      provider: "meta_cloud",
-      status: "sent",
-      rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
-      timestamp: send.timestamp,
-      ...(replyToMessageId ? { replyToMessageId } : {}),
-    },
-  });
+  // ── Phase C — DB write + snapshot finalize, in parallel. message.create
+  // gets us the id we need for the emit; the snapshot lookup is already
+  // mostly done from its head start above.
+  const [created, replySnapshot] = await Promise.all([
+    db.message.create({
+      data: {
+        teamId,
+        conversationId,
+        externalId: send.externalId,
+        senderUserId: user.id,
+        body,
+        direction: "out",
+        provider: "meta_cloud",
+        status: "sent",
+        rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
+        timestamp: receivedAt,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
+      },
+    }),
+    replySnapshotPromise,
+  ]);
 
   const preview = body.slice(0, 200);
-  await db.conversation.update({
-    where: { id: conversationId },
-    data: {
-      lastMessageAt: send.timestamp,
-      lastMessagePreview: preview,
-      // Outbound doesn't bump unread.
-    },
-  });
-
-  const replySnapshot = replyToMessageId
-    ? await loadReplySnapshotById(replyToMessageId)
-    : null;
-
   const message: Message = {
     id: created.id,
     teamId,
@@ -154,12 +173,16 @@ export async function POST(req: Request) {
     provider: "meta_cloud",
     status: "sent",
     rawPayload: { sentVia: "api/messages" },
-    timestamp: send.timestamp.toISOString(),
+    timestamp: receivedAt.toISOString(),
     ...(replyToMessageId
       ? { replyToMessageId, replyTo: replySnapshot ?? null }
       : {}),
   };
 
+  // ── Phase D — emit the socket event NOW. This is what unfreezes the
+  // sender's optimistic bubble and lights up every other open client. Every
+  // millisecond we shave off the path between here and Meta's response is
+  // shaved off the "clock → check" transition the sender perceives.
   emitToTeam(teamId, "message:new", {
     teamId,
     conversationId,
@@ -169,6 +192,23 @@ export async function POST(req: Request) {
     unreadDelta: 0,
     ...(clientTempId ? { clientTempId } : {}),
   });
+
+  // ── Phase E — deferred: bump the conversation's lastMessageAt/preview
+  // for the next cold load. Live clients already have it from the socket
+  // event above, so this is just hydration cache and must not block the
+  // response. A long-lived custom Node server (not serverless) means
+  // fire-and-forget is safe here.
+  void db.conversation
+    .update({
+      where: { id: conversationId },
+      data: {
+        lastMessageAt: send.timestamp,
+        lastMessagePreview: preview,
+      },
+    })
+    .catch((err) =>
+      console.error("[api/messages] deferred conversation.update failed", err),
+    );
 
   return NextResponse.json({ ok: true, messageId: created.id });
 }

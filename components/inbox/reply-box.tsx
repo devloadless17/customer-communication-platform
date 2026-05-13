@@ -20,11 +20,14 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import type { MediaKind, Message, ReplySnapshot, TemplateDto, User } from "@/lib/types";
+import type { Contact, MediaKind, Message, ReplySnapshot, SnippetItem, TemplateDto, User } from "@/lib/types";
 import { computeWindowStatus } from "@/lib/window";
+import { resolveFieldTokens } from "@/lib/field-tokens";
 
 import { WindowBadgeFromStatus } from "./window-badge";
 import { TemplatePicker } from "./template-picker";
+import { SnippetPopup } from "./snippet-popup";
+import { useSnippets } from "./snippets-context";
 
 type Mode = "reply" | "note";
 
@@ -59,7 +62,7 @@ function kindFromMimeClient(mime: string): MediaKind {
 export function ReplyBox({
   conversationId,
   currentUser,
-  contactName,
+  contact,
   lastInboundAt,
   replyTarget,
   onCancelReply,
@@ -68,11 +71,15 @@ export function ReplyBox({
   onOptimistic,
   onOptimisticFail,
   onOptimisticRetry,
+  prefill,
 }: {
   conversationId: string;
   currentUser: User;
-  /** Used to label inbound messages in the "replying to" pill. */
-  contactName: string;
+  /**
+   * The conversation's contact. Drives the "replying to" pill, and resolves
+   * `$var.contact.*` tokens when an agent inserts a snippet (`/<name>`).
+   */
+  contact: Contact;
   /**
    * Most recent inbound timestamp for this contact. Drives the 24h window
    * status — when null or > 24h ago, free-form replies are blocked (Meta
@@ -93,6 +100,12 @@ export function ReplyBox({
   onOptimisticFail?: (clientTempId: string) => void;
   /** Drop the failed bubble — used here after restoring the input. */
   onOptimisticRetry?: (clientTempId: string) => void;
+  /**
+   * Pre-load the composer with text — currently used for "Retry" on a failed
+   * bubble. The `nonce` distinguishes back-to-back retries of the same body
+   * so the effect re-fires.
+   */
+  prefill?: { body: string; nonce: string } | null;
 }) {
   // Tick once a minute so the "8h left" countdown advances without a refresh.
   // The window itself flips state at the same cadence.
@@ -111,6 +124,61 @@ export function ReplyBox({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // -------------------------------------------------------------------------
+  // Slash-trigger snippet state.
+  //
+  // `slashRange` is non-null whenever the cursor is at the end of a `/word`
+  // run on the current word (preceded by whitespace, line start, or the
+  // beginning of the buffer). When set, we render <SnippetPopup> above the
+  // textarea and pass `slashRange.query` for filtering. Inserting splices
+  // the snippet body (with tokens resolved against the live contact) into
+  // the value at [start, end].
+  // -------------------------------------------------------------------------
+  // Snippets are team-wide and identical for every chat — they live in a
+  // session-scoped Client Context populated server-side by the inbox layout
+  // (see snippets-context.tsx). No client fetch, no per-chat refetch.
+  const snippets = useSnippets();
+  const [slashRange, setSlashRange] = useState<{ start: number; end: number; query: string } | null>(null);
+
+  // Recompute slash range whenever value, cursor, or mode changes. We DON'T
+  // show the popup in note mode for v1 — keeps the surface tight; revisit
+  // later if internal notes want canned text too.
+  const updateSlashRange = useCallback(() => {
+    if (mode !== "reply" || windowClosed) {
+      setSlashRange(null);
+      return;
+    }
+    const el = ref.current;
+    if (!el) return;
+    const text = el.value;
+    const caret = el.selectionStart ?? text.length;
+    const range = detectSlashQuery(text, caret);
+    setSlashRange(range);
+  }, [mode, windowClosed]);
+
+  // Map the chosen snippet to "splice resolved body into the textarea".
+  const onSelectSnippet = useCallback(
+    (s: SnippetItem) => {
+      if (!slashRange) return;
+      const resolved = resolveFieldTokens(s.body, contact);
+      const before = value.slice(0, slashRange.start);
+      const after = value.slice(slashRange.end);
+      const next = before + resolved + after;
+      setValue(next);
+      setSlashRange(null);
+      // Restore the caret right after the inserted text so the agent can
+      // keep typing without hunting.
+      requestAnimationFrame(() => {
+        const el = ref.current;
+        if (!el) return;
+        const pos = before.length + resolved.length;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      });
+    },
+    [slashRange, value, contact],
+  );
 
   const isNote = mode === "note";
   // When the WhatsApp window is closed, only Notes + Templates are allowed.
@@ -266,6 +334,18 @@ export function ReplyBox({
   useEffect(() => {
     if (replyTarget) ref.current?.focus();
   }, [replyTarget]);
+
+  // Pre-load text from a "Retry" click on a failed bubble. Each retry has a
+  // unique nonce so back-to-back retries of the same body still fire. Also
+  // flips back to Reply mode if the user happens to be writing a note.
+  useEffect(() => {
+    if (!prefill) return;
+    setMode("reply");
+    setValue(prefill.body);
+    setError(null);
+    ref.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill?.nonce]);
 
   const submit = () => {
     if (!canSend) return;
@@ -436,7 +516,7 @@ export function ReplyBox({
               >
                 <ReplyTargetPill
                   reply={replyTarget}
-                  contactName={contactName}
+                  contactName={contact.name}
                   onCancel={() => onCancelReply?.()}
                 />
               </motion.div>
@@ -461,6 +541,14 @@ export function ReplyBox({
             )}
           </AnimatePresence>
 
+          {slashRange !== null && (
+            <SnippetPopup
+              snippets={snippets}
+              query={slashRange.query}
+              onSelect={onSelectSnippet}
+              onClose={() => setSlashRange(null)}
+            />
+          )}
           <Textarea
             ref={ref}
             value={value}
@@ -471,8 +559,18 @@ export function ReplyBox({
               } else if (e.target.value.length === 0) {
                 onStopTyping?.();
               }
+              // Re-detect the slash query on every keystroke. Defer so the
+              // textarea's value/selection settles first.
+              requestAnimationFrame(updateSlashRange);
             }}
-            onBlur={() => onStopTyping?.()}
+            onSelect={updateSlashRange}
+            onClick={updateSlashRange}
+            onBlur={() => {
+              onStopTyping?.();
+              // Close the popup on blur. The popup itself preventDefaults
+              // on mousedown so clicking an entry doesn't blur first.
+              setSlashRange(null);
+            }}
             disabled={!isNote && windowClosed}
             placeholder={
               isNote
@@ -488,6 +586,17 @@ export function ReplyBox({
               !isNote && windowClosed && "cursor-not-allowed opacity-60",
             )}
             onKeyDown={(e) => {
+              // Snippet picker has first dibs on Enter / Tab / Arrows / Esc
+              // when it's open. Its global keydown listener calls
+              // preventDefault on those keys, but React's synthetic event
+              // pipeline still delivers Enter to this handler — so we have
+              // to explicitly skip when the popup owns the keypress.
+              if (
+                slashRange &&
+                (e.key === "Enter" || e.key === "Tab" || e.key === "ArrowUp" || e.key === "ArrowDown")
+              ) {
+                return;
+              }
               // Enter sends, Shift+Enter inserts a newline. Skip when an IME
               // composition is active (e.g. Chinese/Japanese input) — Enter
               // there confirms a candidate, not the message.
@@ -754,4 +863,36 @@ function ToggleButton({
       <span className="relative">{label}</span>
     </button>
   );
+}
+
+/**
+ * Inspect the textarea contents around the cursor and figure out whether
+ * the user is in the middle of typing a `/<word>` snippet trigger.
+ *
+ * Rules:
+ *   - The slash must sit at the start of the text or follow whitespace /
+ *     newline / tab. We don't treat slashes inside other tokens (e.g.
+ *     URLs, file paths) as triggers — too noisy.
+ *   - Only `[a-z0-9_]` after the slash. The first character that isn't
+ *     one of those (space, punctuation, etc.) closes the popup. The
+ *     query is normalized to lowercase so case-insensitive lookups work.
+ *
+ * Returns the `[start, end]` range to splice when the user picks a snippet
+ * — `start` points at the `/`, `end` is the cursor.
+ */
+function detectSlashQuery(
+  text: string,
+  cursor: number,
+): { start: number; end: number; query: string } | null {
+  // Walk backwards from the cursor until we hit whitespace or a boundary.
+  let i = cursor;
+  while (i > 0) {
+    const c = text[i - 1];
+    if (c === " " || c === "\n" || c === "\t") break;
+    i -= 1;
+  }
+  if (text[i] !== "/") return null;
+  const q = text.slice(i + 1, cursor);
+  if (!/^[a-z0-9_]*$/i.test(q)) return null;
+  return { start: i, end: cursor, query: q.toLowerCase() };
 }

@@ -32,7 +32,7 @@ export function InternalNote({
               <span suppressHydrationWarning>{formatMessageTime(note.timestamp)}</span>
             </span>
           </div>
-          <p className="text-sm leading-relaxed">{note.body}</p>
+          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{note.body}</p>
         </div>
         {onDelete && (
           <button

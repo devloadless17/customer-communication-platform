@@ -31,6 +31,7 @@ interface Body {
   appSecret?: unknown;
   verifyToken?: unknown;
   wabaId?: unknown;
+  appId?: unknown;
 }
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
@@ -54,6 +55,9 @@ export async function POST(req: Request) {
   // template features. Empty string means "clear it" so an admin can drop a
   // wrong id without disconnecting the whole integration.
   const wabaIdInput = raw.wabaId === undefined ? undefined : strField(raw.wabaId);
+  // Same optional-update semantics as wabaId. Needed only for the template
+  // media-header upload endpoint (resumable upload is app-scoped on Meta).
+  const appIdInput = raw.appId === undefined ? undefined : strField(raw.appId);
 
   if (!phoneNumberId || !accessToken || !appSecret) {
     return NextResponse.json(
@@ -111,6 +115,9 @@ export async function POST(req: Request) {
         ...(wabaIdInput === undefined
           ? {}
           : { metaWabaId: wabaIdInput || null }),
+        ...(appIdInput === undefined
+          ? {}
+          : { metaAppId: appIdInput || null }),
       },
     });
   } catch (err) {
@@ -160,6 +167,7 @@ export async function DELETE() {
       metaVerifyToken: null,
       metaDisplayPhoneNumber: null,
       metaWabaId: null,
+      metaAppId: null,
     },
   });
   invalidateProviderConfig(session.teamId);

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   ContactRound,
+  FileText,
   Inbox,
   LogOut,
   type LucideIcon,
@@ -14,6 +15,7 @@ import {
   ShieldCheck,
   UserCircle2,
   Users,
+  Zap,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -51,6 +53,8 @@ const NAV: NavItem[] = [
   { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/contacts", label: "Contacts", icon: ContactRound },
   { href: "/broadcasts", label: "Broadcasts", icon: Megaphone },
+  { href: "/templates", label: "Templates", icon: FileText },
+  { href: "/automations", label: "Automations", icon: Zap },
 ];
 
 export function WorkspaceSidebar({

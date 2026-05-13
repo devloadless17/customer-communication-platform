@@ -3,6 +3,13 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { ensureDefaultStage } from "@/lib/queries";
+import { dispatch } from "@/lib/automations/dispatcher";
+import type {
+  AutomationContactSnapshot,
+  AutomationConversationSnapshot,
+  AutomationMessageSnapshot,
+} from "@/lib/automations/events";
 import type {
   NormalizedEvent,
   NormalizedInboundMessage,
@@ -138,16 +145,26 @@ async function ingestInboundMessage(
   // similar). The right semantic for a CRM-style inbox is: the agent owns
   // the contact name; if Meta sends a profile name on first contact we use
   // it as a sensible default, but subsequent profile changes don't override.
+  // Resolved on every inbound — the helper short-circuits to a cheap
+  // findFirst when a default already exists, so the cost is one indexed
+  // lookup. We pass it as the `create` stageId so brand-new contacts land
+  // in the team's default; existing rows pass through `update` (empty) and
+  // keep whatever stage they're already in.
+  const defaultStageId = await ensureDefaultStage(teamId);
+
   const contact = await db.contact.upsert({
     where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
     create: {
       teamId,
       phoneNumber: evt.contactPhone,
       name: evt.contactName ?? evt.contactPhone,
+      stageId: defaultStageId,
     },
     update: {
-      // Intentionally empty: do NOT touch the name. The agent's manually
-      // entered name (or the first-contact profile name) stays put.
+      // Intentionally empty: do NOT touch the name OR the stage. The agent's
+      // manually entered name (or the first-contact profile name) stays put,
+      // and a contact who progressed past the default stage isn't pulled
+      // back to it just because they sent another message.
     },
   });
 
@@ -162,7 +179,11 @@ async function ingestInboundMessage(
     data: {
       teamId,
       contactId: contact.id,
-      status: "open",
+      // New chats land in `pending` so they sit in the triage column until
+      // an agent claims them (→ open) or closes them out. Re-using an
+      // existing non-closed conversation keeps that conversation's current
+      // status (the `openConvo` branch above).
+      status: "pending",
       lastMessageAt: evt.timestamp,
       lastMessagePreview: "",
     },
@@ -276,6 +297,131 @@ async function ingestInboundMessage(
     unreadDelta: 1,
     ...(newConversation ? { newConversation } : {}),
   });
+
+  // Fire automations. Awaited but the dispatcher is fast (one indexed query
+  // + sync condition eval + enqueue); actual webhook delivery happens in the
+  // BullMQ worker so a slow n8n endpoint can't delay Meta's 200 here. Dispatch
+  // never throws — failures are logged and swallowed.
+  await dispatch(teamId, "message_received", {
+    message: toAutomationMessage({
+      id: createdId,
+      conversationId: conversation.id,
+      externalId: evt.externalId,
+      senderUserId: null,
+      body: evt.body,
+      direction: "in",
+      mediaKind: evt.media?.kind ?? null,
+      mediaCaption: evt.media && evt.body ? evt.body : null,
+      timestamp: evt.timestamp,
+    }),
+    conversation: toAutomationConversation({
+      ...conversation,
+      lastMessageAt: evt.timestamp,
+      unreadCount: (conversation.unreadCount ?? 0) + 1,
+    }),
+    contact: toAutomationContact(contact),
+    recentMessages: await loadRecentForAutomation(conversation.id, createdId),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Automation payload mappers — kept local. Each maps a DB-shaped object to
+// the trimmed snapshot the automations subsystem consumes. Three mappers, no
+// hidden behavior — fine to copy here vs. building a shared utility.
+// ---------------------------------------------------------------------------
+
+function toAutomationMessage(m: {
+  id: string;
+  conversationId: string;
+  externalId: string;
+  direction: "in" | "out";
+  body: string;
+  mediaKind: import("@/lib/types").MediaKind | null;
+  mediaCaption: string | null;
+  timestamp: Date;
+  senderUserId: string | null;
+}): AutomationMessageSnapshot {
+  return {
+    id: m.id,
+    conversationId: m.conversationId,
+    externalId: m.externalId,
+    direction: m.direction,
+    body: m.body,
+    mediaKind: m.mediaKind,
+    mediaCaption: m.mediaCaption,
+    timestamp: m.timestamp.toISOString(),
+    senderUserId: m.senderUserId,
+  };
+}
+
+function toAutomationConversation(c: {
+  id: string;
+  status: string;
+  assignedUserId: string | null;
+  unreadCount: number;
+  lastMessageAt: Date;
+}): AutomationConversationSnapshot {
+  return {
+    id: c.id,
+    status: c.status as AutomationConversationSnapshot["status"],
+    assignedUserId: c.assignedUserId,
+    unreadCount: c.unreadCount,
+    lastMessageAt: c.lastMessageAt.toISOString(),
+  };
+}
+
+function toAutomationContact(c: {
+  id: string;
+  phoneNumber: string;
+  name: string;
+  email?: string | null;
+  customFields?: unknown;
+}): AutomationContactSnapshot {
+  return {
+    id: c.id,
+    phoneNumber: c.phoneNumber,
+    name: c.name,
+    email: c.email ?? null,
+    customFields: normalizeCustomFields(c.customFields),
+  };
+}
+
+/** Pull the most recent N messages on the conversation, excluding the trigger
+ *  message itself. Surfaced in MessageReceivedPayload.recentMessages so a
+ *  downstream AI flow has short-term context without a callback. */
+async function loadRecentForAutomation(
+  conversationId: string,
+  excludeMessageId: string,
+): Promise<AutomationMessageSnapshot[]> {
+  const rows = await db.message.findMany({
+    where: { conversationId, NOT: { id: excludeMessageId } },
+    orderBy: { timestamp: "desc" },
+    take: 10,
+    select: {
+      id: true,
+      conversationId: true,
+      externalId: true,
+      direction: true,
+      body: true,
+      mediaKind: true,
+      mediaCaption: true,
+      timestamp: true,
+      senderUserId: true,
+    },
+  });
+  return rows
+    .map((r) => toAutomationMessage({
+      id: r.id,
+      conversationId: r.conversationId,
+      externalId: r.externalId,
+      direction: r.direction as "in" | "out",
+      body: r.body,
+      mediaKind: r.mediaKind as import("@/lib/types").MediaKind | null,
+      mediaCaption: r.mediaCaption,
+      timestamp: r.timestamp,
+      senderUserId: r.senderUserId,
+    }))
+    .reverse(); // newest last
 }
 
 // ---------------------------------------------------------------------------

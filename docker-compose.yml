@@ -1,8 +1,8 @@
 # Dev/prod stack.
 #
-# Single internal network. Only `app` publishes a port to the host; Postgres
-# is reachable from the host on 127.0.0.1:5433 for Prisma Studio + migrations,
-# and from `app` on the docker network as `postgres:5432`.
+# Internal network. Only `app` publishes a port to the host; Postgres + Redis
+# are reachable from the host on 127.0.0.1 for migrations / dev tooling, and
+# from `app` over the docker network.
 
 networks:
   ccp_net:
@@ -10,6 +10,7 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:
   # Persisted attachment storage. lib/media-storage.ts writes inbound +
   # outbound media here keyed by team + wamid. Survives container restarts
   # and `docker compose up --build`. Wipe with `docker volume rm`.
@@ -37,6 +38,27 @@ services:
       timeout: 5s
       retries: 10
 
+  # BullMQ broker. Backs the automations queue (lib/automations/queue.ts) — a
+  # webhook to n8n that's slow or down doesn't block the Meta-webhook return,
+  # and a process restart doesn't drop in-flight runs.
+  # AOF on so a crash mid-run doesn't lose enqueued jobs. The Socket.io
+  # adapter is still single-instance — Redis is for BullMQ only.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [ccp_net]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    # 6380 (not 6379) to avoid colliding with a system redis install.
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   app:
     build:
       context: .
@@ -46,9 +68,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
+      REDIS_URL: redis://redis:6379
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN}
@@ -57,6 +82,8 @@ services:
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN}
       META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v21.0}
       MEDIA_STORAGE_PATH: /var/lib/ccp/media
+      AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
     volumes:
       - ccp_media:/var/lib/ccp/media
     ports:

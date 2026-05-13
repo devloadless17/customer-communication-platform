@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { normalizePhoneE164 } from "@/lib/phone";
-import { listContacts } from "@/lib/queries";
+import { ensureDefaultStage, listContacts } from "@/lib/queries";
 import type { Contact } from "@/lib/types";
 
 /**
@@ -42,6 +42,15 @@ export async function GET(req: Request) {
   // ?window=open|closed — 24h customer-service window state.
   const windowParam = url.searchParams.get("window");
   const window = windowParam === "open" || windowParam === "closed" ? windowParam : undefined;
+  // ?stageId=<cuid|none> — filter to a specific stage, or to contacts that
+  // have no stage at all (the literal string "none").
+  const stageParam = url.searchParams.get("stageId");
+  const stageId =
+    stageParam === "none"
+      ? "none"
+      : stageParam && stageParam.length > 0
+        ? stageParam
+        : undefined;
 
   const page = await listContacts(session.teamId, {
     search,
@@ -50,6 +59,7 @@ export async function GET(req: Request) {
     source,
     tagIds,
     window,
+    stageId,
   });
 
   return NextResponse.json(page);
@@ -99,6 +109,12 @@ export async function POST(req: Request) {
   const customFields = parseCreateCustomFields(raw.customFields);
   if (customFields instanceof NextResponse) return customFields;
 
+  // Every contact lands in the team's default stage on create. Lazy-init
+  // covers teams that signed up before the stages migration AND teams whose
+  // admin deleted the seeded default — we never want to skip stage
+  // assignment silently.
+  const stageId = await ensureDefaultStage(session.teamId);
+
   try {
     const created = await db.contact.create({
       data: {
@@ -108,6 +124,7 @@ export async function POST(req: Request) {
         email: email ?? undefined,
         location: location ?? undefined,
         customFields,
+        stageId,
         // Manually-created contacts are tagged so the contacts list can show
         // a "Added by you" badge and filter them apart from inbound contacts.
         source: "manual",
@@ -124,6 +141,7 @@ export async function POST(req: Request) {
       location: created.location ?? undefined,
       customFields: normalizeStringMap(created.customFields),
       source: created.source,
+      stageId: created.stageId,
     };
     return NextResponse.json({ contact }, { status: 201 });
   } catch (err) {

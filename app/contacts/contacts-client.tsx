@@ -37,9 +37,15 @@ import type {
   ContactFieldDefinition,
   ContactListItem,
   ContactSource,
+  ContactStage,
   Tag,
 } from "@/lib/types";
-import { ContactFilterBar, useContactList } from "@/components/contacts/contact-browser";
+import {
+  ContactFilterBar,
+  useContactList,
+  type StageFilter,
+} from "@/components/contacts/contact-browser";
+import { ContactStagePicker } from "@/components/contacts/contact-stage-picker";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
 import { ImportContactsDialog } from "./import-dialog";
@@ -59,27 +65,48 @@ export function ContactsClient({
   initialNextCursor,
   fieldDefinitions: initialFieldDefinitions,
   initialTags,
+  initialStages,
+  initialStageFilter,
   canManageFields,
+  canManageStages,
 }: {
   initialItems: ContactListItem[];
   initialNextCursor: string | null;
   fieldDefinitions: ContactFieldDefinition[];
   initialTags: Tag[];
+  initialStages: ContactStage[];
+  initialStageFilter: StageFilter;
   canManageFields: boolean;
+  canManageStages: boolean;
 }) {
   const router = useRouter();
   const { confirm, confirmDialog } = useConfirm();
-  const list = useContactList({ initialItems, initialNextCursor });
+  const list = useContactList({
+    initialItems,
+    initialNextCursor,
+    initialStageFilter,
+  });
   const { items, setItems, setError } = list;
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
   const [fieldDefinitions, setFieldDefinitions] =
     useState<ContactFieldDefinition[]>(initialFieldDefinitions);
   const [tags, setTags] = useState<Tag[]>(initialTags);
+  const [stages] = useState<ContactStage[]>(initialStages);
   const tagById = useMemo(
     () => new Map(tags.map((t) => [t.id, t] as const)),
     [tags],
   );
+
+  function patchContactStage(contactId: string, stageId: string | null) {
+    setItems((prev) =>
+      prev.map((row) =>
+        row.contact.id === contactId
+          ? { ...row, contact: { ...row.contact, stageId } }
+          : row,
+      ),
+    );
+  }
   // Selection state for bulk actions. Set<string> keeps add/remove O(1) and
   // makes "select all on this page" a simple union.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -158,6 +185,9 @@ export function ContactsClient({
           tags={tags}
           selectedTagIds={list.tagIds}
           onTagsChange={list.setTagIds}
+          stages={stages}
+          stageFilter={list.stageFilter}
+          onStageFilterChange={list.setStageFilter}
         />
       </div>
 
@@ -199,6 +229,8 @@ export function ContactsClient({
                   fieldDefinitions={fieldDefinitions}
                   tagCatalog={tags}
                   tagById={tagById}
+                  stageCatalog={stages}
+                  canManageStages={canManageStages}
                   selected={selectedIds.has(item.contact.id)}
                   onSelectChange={(next) => {
                     setSelectedIds((prev) => {
@@ -214,6 +246,7 @@ export function ContactsClient({
                       prev.some((x) => x.id === t.id) ? prev : [...prev, t].sort((a, b) => a.name.localeCompare(b.name)),
                     );
                   }}
+                  onStageChanged={(stageId) => patchContactStage(item.contact.id, stageId)}
                   onEdit={() => setEditingId(item.contact.id)}
                 />
               ))}
@@ -413,20 +446,26 @@ function ContactRow({
   fieldDefinitions,
   tagCatalog,
   tagById,
+  stageCatalog,
+  canManageStages,
   selected,
   onSelectChange,
   onTagsChanged,
   onTagCreated,
+  onStageChanged,
   onEdit,
 }: {
   item: ContactListItem;
   fieldDefinitions: ContactFieldDefinition[];
   tagCatalog: Tag[];
   tagById: Map<string, Tag>;
+  stageCatalog: ContactStage[];
+  canManageStages: boolean;
   selected: boolean;
   onSelectChange: (next: boolean) => void;
   onTagsChanged: (tagIds: string[]) => void;
   onTagCreated: (tag: Tag) => void;
+  onStageChanged: (stageId: string | null) => void;
   onEdit: () => void;
 }) {
   const { contact, activeConversationId, lastMessageAt, lastInboundAt } = item;
@@ -469,6 +508,19 @@ function ContactRow({
     } catch (err) {
       onTagsChanged(prevIds);
       setTagSaveError(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function persistStage(nextStageId: string) {
+    const prev = contact.stageId ?? null;
+    onStageChanged(nextStageId);
+    const res = await fetch(`/api/contacts/${contact.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stageId: nextStageId }),
+    });
+    if (!res.ok) {
+      onStageChanged(prev);
     }
   }
 
@@ -553,6 +605,15 @@ function ContactRow({
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+        <div className="hidden md:inline-flex">
+          <ContactStagePicker
+            stages={stageCatalog}
+            currentStageId={contact.stageId}
+            onChange={persistStage}
+            canManage={canManageStages}
+            size="xs"
+          />
+        </div>
         <WindowBadge lastInboundAt={lastInboundAt} size="xs" className="hidden md:inline-flex" />
         {lastMessageAt && (
           <span className="hidden tabular-nums lg:inline">

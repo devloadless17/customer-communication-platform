@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import { hashPassword, verifyPassword } from "@/lib/password";
+import {
+  hashPassword,
+  isPasswordBreached,
+  validatePasswordStructure,
+  verifyPassword,
+} from "@/lib/password";
 
 /**
  * Self-service password change. Requires the current password to prevent a
@@ -33,11 +38,9 @@ export async function POST(req: Request) {
   const currentPassword = typeof raw.currentPassword === "string" ? raw.currentPassword : "";
   const newPassword = typeof raw.newPassword === "string" ? raw.newPassword : "";
 
-  if (newPassword.length < 8) {
-    return NextResponse.json(
-      { error: "new password must be at least 8 characters" },
-      { status: 400 },
-    );
+  const policyError = validatePasswordStructure(newPassword);
+  if (policyError) {
+    return NextResponse.json({ error: policyError }, { status: 400 });
   }
 
   const user = await db.user.findUnique({ where: { id: session.userId } });
@@ -45,9 +48,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "no password set" }, { status: 400 });
   }
 
+  // Verify the CURRENT password before any expensive checks — keeps a stolen
+  // session cookie from spamming HIBP queries with arbitrary candidates.
   const ok = await verifyPassword(currentPassword, user.passwordHash);
   if (!ok) {
     return NextResponse.json({ error: "current password is incorrect" }, { status: 400 });
+  }
+
+  if (await isPasswordBreached(newPassword)) {
+    return NextResponse.json(
+      { error: "that password has appeared in known data breaches. Please choose another." },
+      { status: 400 },
+    );
   }
 
   const newHash = await hashPassword(newPassword);

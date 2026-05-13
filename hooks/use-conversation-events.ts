@@ -33,6 +33,20 @@ export interface ConversationEventsState {
   markOptimisticFailed: (clientTempId: string) => void;
   /** Drop a failed optimistic bubble (e.g. on retry or dismiss). */
   removeOptimistic: (clientTempId: string) => void;
+  /**
+   * Replace the current message slice with a windowed context around a
+   * target (search-jump). Called by MessageSearch after fetching
+   * /messages/context — lets the UI jump to a hit that lives outside the
+   * loaded slice without paginating through every older page.
+   *
+   * `nextOlderCursor` becomes the new "load older" anchor; setting it null
+   * disables further upward pagination if the window already reaches the
+   * start of the conversation.
+   */
+  replaceWithContext: (input: {
+    messages: Message[];
+    nextOlderCursor: string | null;
+  }) => void;
 }
 
 /**
@@ -58,10 +72,16 @@ export function useConversationEvents(
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextOlderCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  useEffect(() => {
+  // Render-time prop sync. Using useEffect for this leaves a paint cycle where
+  // MessageThread renders the OLD conversation's messages under the NEW URL —
+  // visible as a flash when switching chats. React processes state updates
+  // dispatched during render in the same commit, so the swap is atomic.
+  const [trackedId, setTrackedId] = useState(initial.conversation.id);
+  if (trackedId !== initial.conversation.id) {
+    setTrackedId(initial.conversation.id);
     setData(initial);
     setOlderCursor(initialNextOlderCursor);
-  }, [initial, initialNextOlderCursor]);
+  }
 
   const conversationId = initial.conversation.id;
 
@@ -133,13 +153,28 @@ export function useConversationEvents(
 
   // Mark read when the thread becomes visible (and again whenever the
   // conversationId changes — i.e. the user navigated to a different thread).
+  // Skip when the server already says unreadCount is zero so we don't fan
+  // out a needless POST + team-wide `conversation:read` broadcast on every
+  // navigation.
+  const initialUnread = initial.conversation.unreadCount;
   useEffect(() => {
-    void markRead();
-  }, [markRead]);
+    if (initialUnread > 0) void markRead();
+  }, [markRead, initialUnread]);
 
   useEffect(() => {
     const socket = getClientSocket();
-    socket.emit("subscribe:conversation", { conversationId });
+
+    // Re-(sub)subscribe on every connect — the first one covers the initial
+    // subscription, every subsequent one covers a reconnect after a drop
+    // longer than Socket.io's connectionStateRecovery window. Without this,
+    // events for this thread silently stop arriving until the user reloads.
+    // Note: messages that landed during the drop are NOT backfilled here —
+    // navigating away and back re-fetches them via the server component.
+    const onConnect = () => {
+      socket.emit("subscribe:conversation", { conversationId });
+    };
+    socket.on("connect", onConnect);
+    if (socket.connected) onConnect();
 
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
@@ -157,8 +192,11 @@ export function useConversationEvents(
               m.clientTempId === tempId && m.pending
                 ? // Swap the optimistic row with the server's authoritative
                   // copy so the bubble's id, externalId, status, and media URL
-                  // line up with reality.
-                  payload.message
+                  // line up with reality. Preserve clientTempId on the
+                  // confirmed row so the React key stays stable across the
+                  // swap — otherwise the DOM node unmounts and the entrance
+                  // animation re-fires, producing a brief flicker.
+                  { ...payload.message, clientTempId: tempId }
                 : m,
             )
           : prev.messages;
@@ -270,6 +308,7 @@ export function useConversationEvents(
 
     return () => {
       socket.emit("unsubscribe:conversation", { conversationId });
+      socket.off("connect", onConnect);
       socket.off("message:new", onMessageNew);
       socket.off("message:status", onMessageStatus);
       socket.off("note:new", onNoteNew);
@@ -316,6 +355,14 @@ export function useConversationEvents(
     }));
   }, []);
 
+  const replaceWithContext = useCallback(
+    (input: { messages: Message[]; nextOlderCursor: string | null }) => {
+      setData((prev) => ({ ...prev, messages: input.messages }));
+      setOlderCursor(input.nextOlderCursor);
+    },
+    [],
+  );
+
   return {
     data,
     hasMoreOlder: olderCursor !== null,
@@ -324,5 +371,6 @@ export function useConversationEvents(
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    replaceWithContext,
   };
 }

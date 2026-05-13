@@ -4,10 +4,11 @@ import { getSession } from "@/lib/current-user";
 import {
   getConversationWithRefs,
   listContactFieldDefinitions,
+  listContactStages,
   listTags,
   listTeamMembers,
 } from "@/lib/queries";
-import { canManageContactFields } from "@/lib/permissions";
+import { canManageContactFields, canManageStages } from "@/lib/permissions";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactPanel } from "@/components/inbox/contact-panel";
 
@@ -23,11 +24,12 @@ export default async function ConversationPage({
   const { conversationId } = await params;
   const { teamId, user } = await getSession();
 
-  const [page, teamMembers, fieldDefinitions, tags] = await Promise.all([
+  const [page, teamMembers, fieldDefinitions, tags, stages] = await Promise.all([
     getConversationWithRefs(teamId, conversationId),
     listTeamMembers(teamId),
     listContactFieldDefinitions(teamId),
     listTags(teamId),
+    listContactStages(teamId),
   ]);
 
   // Conversation may be missing because it was deleted (by this user, a
@@ -44,6 +46,8 @@ export default async function ConversationPage({
         teamMembers={teamMembers}
         currentUser={user}
         nextOlderCursor={page.nextOlderCursor}
+        stageCatalog={stages}
+        canManageStages={canManageStages(user.role)}
       />
       <ContactPanel
         data={page.data}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -31,6 +31,7 @@ import type {
   ReplySnapshot,
   User,
 } from "@/lib/types";
+import { highlightQuery } from "./message-search";
 
 interface MessageBubbleProps {
   message: Message;
@@ -47,10 +48,22 @@ interface MessageBubbleProps {
   onForward?: (message: Message) => void;
   /** Enter multi-select mode with this message pre-checked. */
   onStartSelect?: (message: Message) => void;
+  /** Drop a failed optimistic bubble from the thread. */
+  onDismissFailed?: (message: Message) => void;
+  /** Drop the failed bubble + put its body back in the composer to retry. */
+  onRetryFailed?: (message: Message) => void;
   // ----- multi-select mode (driven by the thread) -----
   selecting?: boolean;
   selected?: boolean;
   onToggleSelect?: (messageId: string) => void;
+  // ----- search highlighting (driven by the thread) -----
+  /** Active query — every occurrence inside the body gets a yellow `<mark>`.
+   *  Empty/undefined disables highlighting. */
+  searchQuery?: string;
+  /** True when this bubble is the currently-selected search match. Renders
+   *  a persistent yellow ring around the bubble so the user can find it
+   *  visually after scrollIntoView lands. */
+  isActiveSearchMatch?: boolean;
 }
 
 /**
@@ -113,6 +126,10 @@ function BubbleContent({
   onJumpToOriginal,
   onForward,
   onStartSelect,
+  onDismissFailed,
+  onRetryFailed,
+  searchQuery,
+  isActiveSearchMatch,
 }: MessageBubbleProps) {
   const isOut = message.direction === "out";
   const media = message.media;
@@ -194,15 +211,25 @@ function BubbleContent({
       >
         <div
           className={cn(
-            "overflow-hidden rounded-2xl text-sm leading-relaxed shadow-xs ring-1 transition-colors",
+            "overflow-hidden rounded-2xl text-sm leading-relaxed shadow-xs ring-1 transition-[box-shadow,background-color]",
             // Reduce horizontal padding when the leading element is a media
             // block — they look better edge-to-edge inside the bubble.
             media || reply ? "p-1" : "px-3.5 py-2",
-            // Optimistic bubble: subtle dim so the user reads it as "in flight".
-            message.pending && "opacity-70",
+            // Failed bubble: red ring so the eye snaps to it. Pending no
+            // longer dims — the clock icon in the meta row conveys "in
+            // flight" without making the bubble look unfinished, so a fast
+            // send feels instant rather than slightly-loading.
+            message.failed && "opacity-80 ring-destructive/60",
             isOut
               ? "rounded-br-sm bg-outbound-bg text-outbound-fg ring-transparent"
               : "rounded-bl-sm bg-inbound-bg text-inbound-fg ring-border",
+            // Active search match — a soft neutral ring that stays for as
+            // long as the bubble is the selected match. Uses the
+            // foreground color at low opacity so it adapts to light/dark
+            // mode (a subtle dark wash in light, a subtle light wash in
+            // dark) without competing with the bubble's own color.
+            isActiveSearchMatch &&
+              "ring-2 ring-foreground/30 ring-offset-2 ring-offset-background",
           )}
         >
           {reply && (
@@ -210,6 +237,7 @@ function BubbleContent({
               reply={reply}
               isOut={isOut}
               contactName={contactName}
+              searchQuery={searchQuery}
               onClick={
                 onJumpToOriginal ? () => onJumpToOriginal(reply.id) : undefined
               }
@@ -223,12 +251,24 @@ function BubbleContent({
                 media || reply ? "px-2.5 pb-1.5 pt-2" : "",
               )}
             >
-              {message.body}
+              {searchQuery && searchQuery.trim().length > 0
+                ? highlightQuery(message.body, searchQuery)
+                : message.body}
             </p>
           )}
         </div>
 
         <BubbleMeta message={message} sender={sender} isOut={isOut} />
+        {message.failed && (
+          <FailedRecovery
+            // Media retries would need the original File object back; we don't
+            // keep one once the bubble is in the timeline. Text retries always
+            // work — fall back to dismiss-only for media bubbles.
+            canRetry={!message.media && Boolean(onRetryFailed)}
+            onRetry={onRetryFailed ? () => onRetryFailed(message) : undefined}
+            onDismiss={onDismissFailed ? () => onDismissFailed(message) : undefined}
+          />
+        )}
       </div>
 
       {!isOut && (
@@ -314,6 +354,47 @@ function BubbleActions({
   );
 }
 
+function FailedRecovery({
+  canRetry,
+  onRetry,
+  onDismiss,
+}: {
+  canRetry: boolean;
+  onRetry?: () => void;
+  onDismiss?: () => void;
+}) {
+  return (
+    <div className="mt-1 flex items-center gap-2 text-[10px] text-destructive">
+      <AlertCircle className="size-3" />
+      <span>Send failed</span>
+      {canRetry && onRetry && (
+        <>
+          <span className="text-muted-foreground/50">·</span>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="font-medium hover:underline"
+          >
+            Retry
+          </button>
+        </>
+      )}
+      {onDismiss && (
+        <>
+          <span className="text-muted-foreground/50">·</span>
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="text-muted-foreground hover:text-foreground hover:underline"
+          >
+            Dismiss
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SelectCheckbox({
   checked,
   disabled,
@@ -342,11 +423,13 @@ function QuotedReply({
   reply,
   isOut,
   contactName,
+  searchQuery,
   onClick,
 }: {
   reply: ReplySnapshot;
   isOut: boolean;
   contactName: string;
+  searchQuery?: string;
   onClick?: () => void;
 }) {
   const senderLabel =
@@ -355,7 +438,11 @@ function QuotedReply({
         ? `@${reply.senderName}`
         : "You"
       : contactName;
-  const bodyLabel = reply.body || mediaLabel(reply.mediaKind) || "Message";
+  const rawBody = reply.body || mediaLabel(reply.mediaKind) || "Message";
+  const bodyLabel =
+    searchQuery && searchQuery.trim().length > 0
+      ? highlightQuery(rawBody, searchQuery)
+      : rawBody;
 
   return (
     <button
@@ -539,11 +626,29 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
 }
 
 function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    lastFocusedRef.current = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      lastFocusedRef.current?.focus?.();
+    };
+  }, [onClose]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
       onClick={onClose}
       role="dialog"
+      aria-modal="true"
+      aria-label="Image preview"
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
@@ -553,6 +658,7 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       />
       <button
+        ref={closeBtnRef}
         type="button"
         onClick={onClose}
         className="absolute right-4 top-4 flex size-9 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"

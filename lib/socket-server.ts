@@ -6,6 +6,7 @@ import type { Server as HttpServer } from "node:http";
 import { Server as IOServer } from "socket.io";
 import { getToken } from "next-auth/jwt";
 
+import { db } from "@/lib/db";
 import {
   SOCKET_PATH,
   type ClientToServerEvents,
@@ -121,7 +122,23 @@ export function initSocketServer(http: HttpServer): IO {
       socket.emit("presence:update", { teamId, onlineUserIds: snapshotPresence(teamId) });
     });
 
-    socket.on("subscribe:conversation", ({ conversationId }) => {
+    socket.on("subscribe:conversation", async ({ conversationId }) => {
+      // Multi-tenancy guardrail: verify the conversation belongs to the
+      // socket's team before joining its room. Without this, an authenticated
+      // user from team A could subscribe to a conversation in team B and
+      // receive every event broadcast there. Today only typing flows through
+      // conversation rooms (message/note events go via emitToTeam), but this
+      // is the door anything cross-tenant would slip through.
+      try {
+        const owns = await db.conversation.findFirst({
+          where: { id: conversationId, teamId },
+          select: { id: true },
+        });
+        if (!owns) return; // silently drop — don't tell pokers what's missing
+      } catch (err) {
+        console.error("[socket] subscribe:conversation lookup failed", err);
+        return;
+      }
       socket.join(conversationRoom(conversationId));
       socket.emit("typing:update", {
         conversationId,

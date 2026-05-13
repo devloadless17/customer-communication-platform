@@ -1,0 +1,274 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  Search as SearchIcon,
+  X,
+} from "lucide-react";
+
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
+import type { MediaKind, MessageDirection } from "@/lib/types";
+
+/**
+ * WhatsApp-style in-thread message search.
+ *
+ * Renders as a slim bar beneath the thread header — NOT a results dropdown.
+ * Matches are highlighted IN PLACE inside the existing chat bubbles (text
+ * highlight via `<mark>`, the currently-active match gets a yellow ring).
+ * ↑/↓ navigates between matches; the parent thread fetches a context window
+ * when the active match is off-slice so the scroll-to lands on a real DOM
+ * node.
+ *
+ * Owns:
+ *   - the search input
+ *   - the debounced fetch against /messages/search
+ *   - emitting matches + active-index changes up to the thread
+ *
+ * Does NOT own:
+ *   - the scroll-to-match behavior (the thread does that with refs)
+ *   - the highlight rendering (MessageBubble does that with `searchQuery`)
+ */
+
+export interface SearchHit {
+  id: string;
+  body: string;
+  direction: MessageDirection;
+  timestamp: string;
+  senderName: string | null;
+  mediaCaption?: string;
+  mediaKind?: MediaKind;
+}
+
+interface SearchPage {
+  items: SearchHit[];
+  nextCursor: string | null;
+  totalMatched: number;
+}
+
+export function MessageSearch({
+  conversationId,
+  onMatchesChange,
+  onQueryChange,
+  onActiveIndexChange,
+  activeIndex,
+  totalMatches,
+  onClose,
+}: {
+  conversationId: string;
+  /** Fires when the result set changes — either a fresh query or a cleared
+   *  query (then `matches` is empty). The thread snapshots this and uses
+   *  it to drive highlighting + navigation. */
+  onMatchesChange: (matches: SearchHit[]) => void;
+  /** Fires on every keystroke so the thread can highlight the text. */
+  onQueryChange: (query: string) => void;
+  /** Parent owns the cursor so navigation state survives keyboard repeats. */
+  onActiveIndexChange: (next: number) => void;
+  activeIndex: number;
+  totalMatches: number;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const reqId = useRef(0);
+
+  // Autofocus on mount. Esc closes — handled here so the input has focus
+  // priority and a single keypress dismisses the bar.
+  useEffect(() => {
+    inputRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Debounced fetch. reqId guards out-of-order responses so a slow page-1
+  // can't stomp a fresher request.
+  useEffect(() => {
+    onQueryChange(query);
+    const trimmed = query.trim();
+    if (trimmed.length === 0) {
+      onMatchesChange([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    const my = ++reqId.current;
+    setLoading(true);
+    setError(null);
+    const t = window.setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/conversations/${conversationId}/messages/search?q=${encodeURIComponent(trimmed)}&take=100`,
+        );
+        if (reqId.current !== my) return;
+        if (!res.ok) {
+          setError("Search failed");
+          onMatchesChange([]);
+          return;
+        }
+        const data = (await res.json()) as SearchPage;
+        if (reqId.current !== my) return;
+        onMatchesChange(data.items);
+      } catch {
+        if (reqId.current === my) {
+          setError("Network error");
+          onMatchesChange([]);
+        }
+      } finally {
+        if (reqId.current === my) setLoading(false);
+      }
+    }, 200);
+    return () => window.clearTimeout(t);
+    // onQueryChange + onMatchesChange are stable callbacks; the linter
+    // can't tell, so we omit them from the deps to avoid a refetch loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, conversationId]);
+
+  const trimmed = query.trim();
+  const hasQuery = trimmed.length > 0;
+  // 1-based for display ("3 / 17"); 0-based internally.
+  const human = totalMatches > 0 ? activeIndex + 1 : 0;
+  const canNav = totalMatches > 1;
+
+  function nav(direction: -1 | 1) {
+    if (!canNav) return;
+    // Wrap around like WhatsApp — pressing past the end loops back.
+    const next = (activeIndex + direction + totalMatches) % totalMatches;
+    onActiveIndexChange(next);
+  }
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background/95 px-3 py-2 backdrop-blur">
+      <div className="relative flex-1">
+        <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              // Shift+Enter goes to the previous (newer) match, plain
+              // Enter goes to the next (older). Matches WhatsApp where
+              // Enter steps "down through history."
+              nav(e.shiftKey ? -1 : 1);
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              nav(1); // older
+            } else if (e.key === "ArrowDown") {
+              e.preventDefault();
+              nav(-1); // newer
+            }
+          }}
+          placeholder="Search messages…"
+          className="h-8 pl-8 pr-9 text-sm"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <X className="size-3" />
+          </button>
+        )}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums">
+        {loading ? (
+          <span className="inline-flex items-center gap-1 text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" />
+            Searching…
+          </span>
+        ) : error ? (
+          <span className="text-destructive">{error}</span>
+        ) : hasQuery ? (
+          <span
+            className={cn(
+              "text-muted-foreground",
+              totalMatches === 0 && "text-destructive",
+            )}
+          >
+            {totalMatches === 0
+              ? "No matches"
+              : `${human} of ${totalMatches}`}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="flex shrink-0 items-center">
+        <button
+          type="button"
+          onClick={() => nav(1)}
+          disabled={!canNav}
+          aria-label="Older match"
+          title="Older match (↑ or Enter)"
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+        >
+          <ChevronUp className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => nav(-1)}
+          disabled={!canNav}
+          aria-label="Newer match"
+          title="Newer match (↓ or Shift+Enter)"
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+        >
+          <ChevronDown className="size-3.5" />
+        </button>
+      </div>
+
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Close search"
+        className="ml-1 inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <X className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Used by MessageBubble to highlight matched substrings inside a body.
+ * Escapes regex metacharacters so a hostile query like `[ab]` matches the
+ * literal four-character string, not a character class.
+ *
+ * Exported here so MessageBubble can call it without re-implementing.
+ */
+export function highlightQuery(text: string, query: string): React.ReactNode {
+  if (!query.trim()) return text;
+  const escaped = query.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(${escaped})`, "ig");
+  const parts = text.split(re);
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <mark
+        key={i}
+        // Soft translucent-white wash. `text-inherit` keeps the bubble's
+        // own foreground color (white on outbound, dark on inbound), so the
+        // highlight reads as "subtle fog over this text" rather than a
+        // loud color swap. Backdrop-blur smooths the edge against any
+        // bubble background.
+        className="rounded-[3px] bg-white/25 px-0.5 text-inherit backdrop-blur-[1px]"
+      >
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
+}

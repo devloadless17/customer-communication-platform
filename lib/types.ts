@@ -48,6 +48,13 @@ export interface Contact {
    * are just the tag ids — the UI joins against the catalog.
    */
   tagIds?: string[];
+  /**
+   * Customer-lifecycle stage this contact is currently in. Resolved against
+   * the team's ContactStage catalog (/api/team/stages). Null when the
+   * contact pre-dates the stages feature AND the team's default stage was
+   * later deleted; the UI renders an "Unassigned" pill in that case.
+   */
+  stageId?: string | null;
 }
 
 /**
@@ -62,6 +69,24 @@ export interface ContactFieldDefinition {
   key: string;
   label: string;
   order: number;
+}
+
+/**
+ * Customer-lifecycle stage. Mirrors the ContactStage Prisma model. Per-team
+ * configurable — the catalog comes from /api/team/stages.
+ *
+ * `color` reuses the TagColor named slots (lib/tag-colors.ts) so chips share
+ * one Tailwind safelist; runtime falls back to `slate` if a row was created
+ * with an unknown slot.
+ */
+export interface ContactStage {
+  id: string;
+  teamId: string;
+  name: string;
+  color: TagColor;
+  position: number;
+  /** True for the stage new contacts land in. At most one per team. */
+  isDefault: boolean;
 }
 
 /**
@@ -116,6 +141,12 @@ export interface TemplateDto {
   bodyText: string;
   // Loose typing — the picker narrows to TemplateComponent[] internally.
   components: unknown[];
+  /**
+   * Per-variable metadata (label + source + defaultValue). See
+   * `lib/template-bindings.ts` for the shape. Empty `{}` for templates that
+   * haven't had bindings configured yet.
+   */
+  variableBindings: unknown;
   syncedAt: string;
 }
 
@@ -201,6 +232,18 @@ export interface Message {
   failed?: boolean;
 }
 
+/**
+ * Snippet shape consumed by the reply composer's slash menu. The settings
+ * editor uses a richer DTO (with `createdBy`/`updatedAt`) defined alongside
+ * that page; this one is the minimum the inbox runtime needs.
+ */
+export interface SnippetItem {
+  id: string;
+  name: string;
+  label: string;
+  body: string;
+}
+
 export interface InternalNote {
   id: string;
   conversationId: string;
@@ -248,6 +291,8 @@ export interface ContactPatch {
   location?: string | null;
   /** Partial merge: keys with `null` value are removed, strings overwrite. */
   customFields?: Record<string, string | null>;
+  /** Move the contact to this stage. `null` clears the stage. */
+  stageId?: string | null;
 }
 
 /**

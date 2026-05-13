@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/auth-helpers";
 import { parseCsv } from "@/lib/csv";
 import { db } from "@/lib/db";
 import { normalizePhoneE164 } from "@/lib/phone";
+import { ensureDefaultStage } from "@/lib/queries";
 
 /**
  * Import contacts from a CSV.
@@ -217,6 +218,11 @@ export async function POST(req: Request) {
   // implicitly because it's not in `created` numbers.
   let created = 0;
   if (toCreate.length > 0) {
+    // Land all imported rows in the team's default stage. One lookup
+    // amortized over the whole batch — much cheaper than calling it
+    // per-row, and the result is identical because every row goes to the
+    // same destination.
+    const defaultStageId = await ensureDefaultStage(teamId);
     const result = await db.contact.createMany({
       data: toCreate.map((p) => ({
         teamId,
@@ -225,6 +231,7 @@ export async function POST(req: Request) {
         email: p.email ?? undefined,
         location: p.location ?? undefined,
         customFields: p.customFields,
+        stageId: defaultStageId,
         source: "manual",
       })),
       skipDuplicates: true,

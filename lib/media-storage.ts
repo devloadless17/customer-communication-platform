@@ -119,7 +119,12 @@ export async function saveMedia(
 ): Promise<SavedMedia> {
   const teamDir = path.join(STORAGE_ROOT, safeId(teamId));
   await mkdir(teamDir, { recursive: true });
-  const ext = extFromMime(mimeType);
+  // Sanitize the extension too — `mimeType` comes from a user-supplied header
+  // (or a webhook payload), and `extFromMime`'s fallback echoes part of it.
+  // Without this, a mime like `x/..` would yield ext `..` and a path like
+  // `team_1/abc...`; not a traversal out of teamDir, but sloppy and a magnet
+  // for future bugs.
+  const ext = safeId(extFromMime(mimeType));
   const filePath = path.join(teamDir, `${safeId(key)}.${ext}`);
   await writeFile(filePath, bytes);
   const s = await stat(filePath);

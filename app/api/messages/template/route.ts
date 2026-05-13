@@ -48,6 +48,10 @@ interface Variables {
 }
 
 export async function POST(req: Request) {
+  // See app/api/messages/route.ts — receive-time stamping keeps row order
+  // aligned with the user's send sequence across mixed text/media/template
+  // sends regardless of Meta-API latency variation.
+  const receivedAt = new Date();
   const { user, teamId } = await getSession();
 
   let raw: Body;
@@ -205,7 +209,7 @@ export async function POST(req: Request) {
           ...(variables.header ? { header: variables.header } : {}),
         },
       } as Prisma.InputJsonValue,
-      timestamp: send.timestamp,
+      timestamp: receivedAt,
     },
   });
 
@@ -232,7 +236,7 @@ export async function POST(req: Request) {
       templateId: template.id,
       templateName: template.name,
     },
-    timestamp: send.timestamp.toISOString(),
+    timestamp: receivedAt.toISOString(),
   };
 
   emitToTeam(teamId, "message:new", {

@@ -21,6 +21,7 @@ export default async function WhatsappSettingsPage() {
       metaPhoneNumberId: true,
       metaDisplayPhoneNumber: true,
       metaWabaId: true,
+      metaAppId: true,
       metaVerifyToken: true,
       // Tradeoff: shipping the access token + app secret to the browser so
       // the "Update credentials" form can pre-fill them. Acceptable for a
@@ -36,6 +37,7 @@ export default async function WhatsappSettingsPage() {
     phoneNumberId: team?.metaPhoneNumberId ?? null,
     displayNumber: team?.metaDisplayPhoneNumber ?? null,
     wabaId: team?.metaWabaId ?? null,
+    appId: team?.metaAppId ?? null,
     verifyToken: team?.metaVerifyToken ?? null,
     accessToken: team?.metaAccessToken ?? null,
     appSecret: team?.metaAppSecret ?? null,

@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useSelectedLayoutSegment } from "next/navigation";
-import { CheckSquare, Loader2, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { useLinkStatus } from "next/link";
+import { useRouter, useSelectedLayoutSegment } from "next/navigation";
+import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,12 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
-import type { ConversationWithRefs, User } from "@/lib/types";
+import type {
+  Contact,
+  Conversation,
+  ConversationWithRefs,
+  User,
+} from "@/lib/types";
 import { ConversationListItem } from "./conversation-list-item";
 import type { FilterId } from "./sidebar";
 
@@ -35,6 +41,7 @@ export function ConversationList({
   onLoadMore: () => void;
 }) {
   const selectedId = useSelectedLayoutSegment();
+  const router = useRouter();
   const { confirm, alert, confirmDialog } = useConfirm();
   // "selection mode": clicking a row toggles its checkbox instead of opening
   // the chat. Toggled by the toolbar button or auto-engaged when the agent
@@ -170,17 +177,13 @@ export function ConversationList({
                 ? "bg-primary/10 text-primary"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
-            aria-label="Toggle selection mode"
+            aria-label={selectionMode ? "Exit selection mode" : "Select multiple"}
           >
             <CheckSquare className="size-4" />
           </button>
-          <button
-            type="button"
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-            aria-label="Sort and filter"
-          >
-            <SlidersHorizontal className="size-4" />
-          </button>
+          {/* Sort & filter — not yet implemented. Removed until it does
+              something; the current Filter chips below already cover most use
+              cases (All / Mine / Unassigned). */}
         </div>
       </header>
 
@@ -212,36 +215,44 @@ export function ConversationList({
                   className="relative"
                 >
                   {selectionMode ? (
-                    <button
-                      type="button"
-                      onClick={() => toggle(conversation.id)}
+                    // <label> wrapping the checkbox is the canonical way to
+                    // make the whole row a toggle target — valid HTML, native
+                    // keyboard support, no `onClick`+`stopPropagation` dance.
+                    <label
                       className={cn(
-                        "block w-full cursor-pointer text-left",
-                        checked && "bg-primary/5 rounded-md",
+                        "flex w-full cursor-pointer items-center gap-2 pl-2",
+                        checked && "rounded-md bg-primary/5",
                       )}
                     >
-                      <div className="flex items-center gap-2 pl-2">
-                        <input
-                          type="checkbox"
-                          className="size-4 cursor-pointer accent-primary"
-                          checked={checked}
-                          onChange={() => toggle(conversation.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          aria-label={`Select ${contact.name}`}
+                      <input
+                        type="checkbox"
+                        className="size-4 cursor-pointer accent-primary"
+                        checked={checked}
+                        onChange={() => toggle(conversation.id)}
+                        aria-label={`Select ${contact.name}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <ConversationListItem
+                          conversation={conversation}
+                          contact={contact}
+                          assignedUser={assignedUser}
+                          active={false}
                         />
-                        <div className="min-w-0 flex-1">
-                          <ConversationListItem
-                            conversation={conversation}
-                            contact={contact}
-                            assignedUser={assignedUser}
-                            active={false}
-                          />
-                        </div>
                       </div>
-                    </button>
+                    </label>
                   ) : (
-                    <Link href={`/inbox/${conversation.id}`} prefetch={false}>
-                      <ConversationListItem
+                    <Link
+                      href={`/inbox/${conversation.id}`}
+                      // Warm the route on hover: by the time the user clicks
+                      // (~150ms after pointer-enter on average) the RSC
+                      // payload is usually already in the router cache, so
+                      // the click triggers a near-instant swap instead of a
+                      // round-trip. router.prefetch is safe to call
+                      // repeatedly — Next.js de-dupes internally.
+                      onMouseEnter={() => router.prefetch(`/inbox/${conversation.id}`)}
+                      onFocus={() => router.prefetch(`/inbox/${conversation.id}`)}
+                    >
+                      <ConversationListItemWithPending
                         conversation={conversation}
                         contact={contact}
                         assignedUser={assignedUser}
@@ -324,5 +335,33 @@ export function ConversationList({
       </AnimatePresence>
       {confirmDialog}
     </div>
+  );
+}
+
+/**
+ * Wraps ConversationListItem with `useLinkStatus` so a click flips the row
+ * into an "active-pending" state instantly — before the new RSC payload lands.
+ * That single visual ack is what makes the inbox feel snappy: even on a slow
+ * connection the user sees the selection register the moment they tap.
+ */
+function ConversationListItemWithPending({
+  conversation,
+  contact,
+  assignedUser,
+  active,
+}: {
+  conversation: Conversation;
+  contact: Contact;
+  assignedUser: User | null;
+  active: boolean;
+}) {
+  const { pending } = useLinkStatus();
+  return (
+    <ConversationListItem
+      conversation={conversation}
+      contact={contact}
+      assignedUser={assignedUser}
+      active={active || pending}
+    />
   );
 }

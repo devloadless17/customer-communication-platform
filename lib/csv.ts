@@ -9,14 +9,24 @@ import Papa from "papaparse";
  * to ship to the client and we don't need every option.
  */
 
-/** Quote-and-escape a single cell per RFC 4180. */
+// Cells that begin with one of these characters are interpreted as a formula
+// by Excel / Google Sheets / LibreOffice when the file is opened. Contact
+// names and custom fields can come from inbound WhatsApp messages or CSV
+// import — i.e. attacker-controlled — so a payload like `=HYPERLINK(...)` /
+// `=cmd|...` would fire on the operator's machine. Defuse by prefixing a
+// single quote, which the spreadsheet apps treat as "this cell is literal
+// text". OWASP calls this "CSV/Formula Injection".
+const FORMULA_TRIGGERS = /^[=+\-@\t\r]/;
+
+/** Quote-and-escape a single cell per RFC 4180, with formula-injection defuse. */
 function escapeCell(value: string): string {
+  const safe = FORMULA_TRIGGERS.test(value) ? `'${value}` : value;
   // Wrap in quotes if it contains a delimiter, quote, or newline. Always
   // safer to over-quote than under-quote.
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+  if (/[",\r\n]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return value;
+  return safe;
 }
 
 /**

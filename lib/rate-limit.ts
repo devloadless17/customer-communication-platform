@@ -37,6 +37,12 @@ export interface RateLimitResult {
  * same key. The window is fixed (resets `windowMs` after the first hit), not
  * sliding — good enough to blunt credential stuffing without the bookkeeping
  * of a token bucket.
+ *
+ * Counts EVERY call, so it's right for things like "max N requests per
+ * IP". For "max N FAILED attempts on this account" use the lockout pair
+ * (`isLockedOut` + `recordFailure` + `clearFailures`) instead — those only
+ * count failures, so a legit user with the wrong password once doesn't lock
+ * themselves out by retrying successfully.
  */
 export function rateLimit(key: string, limit: number, windowMs: number): RateLimitResult {
   const now = Date.now();
@@ -53,4 +59,36 @@ export function rateLimit(key: string, limit: number, windowMs: number): RateLim
     return { ok: false, retryAfter: Math.ceil((existing.resetAt - now) / 1000) };
   }
   return { ok: true, retryAfter: 0 };
+}
+
+/**
+ * Account-level lockout. Used by the Credentials authorize() to block further
+ * password tries after N failures on the same email — defends against
+ * distributed credential stuffing (many IPs, one account) that the IP-based
+ * limiter in middleware can't catch.
+ *
+ * Pattern:
+ *   if (isLockedOut(key, 5)) return null;
+ *   const ok = await verifyPassword(...);
+ *   if (!ok) { recordFailure(key, 15 * 60_000); return null; }
+ *   clearFailures(key);
+ */
+export function isLockedOut(key: string, limit: number): boolean {
+  const bucket = buckets.get(key);
+  if (!bucket || bucket.resetAt <= Date.now()) return false;
+  return bucket.count >= limit;
+}
+
+export function recordFailure(key: string, windowMs: number): void {
+  const now = Date.now();
+  const existing = buckets.get(key);
+  if (!existing || existing.resetAt <= now) {
+    buckets.set(key, { count: 1, resetAt: now + windowMs });
+    return;
+  }
+  existing.count += 1;
+}
+
+export function clearFailures(key: string): void {
+  buckets.delete(key);
 }

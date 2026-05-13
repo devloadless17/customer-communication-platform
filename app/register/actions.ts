@@ -5,7 +5,7 @@ import { AuthError } from "next-auth";
 
 import { signIn } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { hashPassword } from "@/lib/password";
+import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/password";
 
 /**
  * Org self-signup. Creates a brand-new Team + admin User in one transaction
@@ -34,8 +34,13 @@ export async function registerAction(
   if (!orgName) return { error: "Organization name is required." };
   if (!name) return { error: "Your name is required." };
   if (!EMAIL_RE.test(email)) return { error: "Enter a valid email." };
-  if (password.length < 8) {
-    return { error: "Password must be at least 8 characters." };
+
+  const policyError = validatePasswordStructure(password);
+  if (policyError) return { error: policyError };
+  if (await isPasswordBreached(password)) {
+    return {
+      error: "That password has appeared in known data breaches. Please choose another.",
+    };
   }
 
   const passwordHash = await hashPassword(password);

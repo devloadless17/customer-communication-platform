@@ -9,12 +9,12 @@ import { cn } from "@/lib/utils";
 import type { ConversationWithRefs, User } from "@/lib/types";
 
 /**
- * Floating dev panel — only renders in development. Fires fake events into
- * the dev emitter API so we can poke the realtime layer without Evolution
- * being paired.
+ * Floating dev panel — fires fake events into the dev emitter API so we can
+ * poke the realtime layer without going through Meta.
  *
- * NEVER ship this to production: the panel is gated by NODE_ENV at build
- * time AND the API route returns 404 in production.
+ * Three layers of defence (mirroring the route): NODE_ENV, the
+ * `ENABLE_DEV_TOOLS=1` opt-in env on the server, and a session check on the
+ * route itself. Dev-only gating goes BELOW the hooks (Rules of Hooks).
  */
 export function DevTools({
   conversations,
@@ -23,11 +23,11 @@ export function DevTools({
   conversations: ConversationWithRefs[];
   currentUser: User;
 }) {
-  if (process.env.NODE_ENV === "production") return null;
-
   const [open, setOpen] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  if (process.env.NODE_ENV === "production") return null;
 
   const target =
     conversations.find((c) => c.conversation.id === selectedId) ??
@@ -142,7 +142,6 @@ export function DevTools({
                       {
                         kind: "add-fake-note",
                         conversationId: target.conversation.id,
-                        authorUserId: currentUser.id,
                         body: "Note from dev tools — pretend a teammate added this.",
                       },
                       "note",
@@ -156,7 +155,7 @@ export function DevTools({
             )}
 
             <footer className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
-              Dev only — route 404s in production.
+              Dev only · set ENABLE_DEV_TOOLS=1 to enable the route.
             </footer>
           </motion.div>
         )}

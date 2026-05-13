@@ -22,6 +22,7 @@ export interface WhatsappCurrent {
   phoneNumberId: string | null;
   displayNumber: string | null;
   wabaId: string | null;
+  appId: string | null;
   verifyToken: string | null;
   // Pre-fills the update form so admins can see what's stored and edit
   // selectively. Only ever rendered to admins viewing their own team.
@@ -57,6 +58,7 @@ export function WhatsappSettings({
       verifyToken: form.get("verifyToken") || undefined,
       // Pass through even when empty so the server can clear a stale id.
       wabaId: form.get("wabaId") ?? "",
+      appId: form.get("appId") ?? "",
     };
     const res = await fetch("/api/team/whatsapp", {
       method: "POST",
@@ -225,6 +227,12 @@ function ConnectionStatus({ current }: { current: WhatsappCurrent }) {
             <dd className="font-mono">{current.wabaId}</dd>
           </>
         )}
+        {current.appId && (
+          <>
+            <dt>App id</dt>
+            <dd className="font-mono">{current.appId}</dd>
+          </>
+        )}
       </dl>
     </div>
   );
@@ -298,6 +306,13 @@ function ManualForm({
           placeholder="e.g. 102290016451234"
           mono
           defaultValue={current.wabaId ?? ""}
+        />
+        <Field
+          name="appId"
+          label="Meta App ID (optional — needed to upload media template headers)"
+          placeholder="e.g. 1234567890123456"
+          mono
+          defaultValue={current.appId ?? ""}
         />
         <Field
           name="verifyToken"

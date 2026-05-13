@@ -19,13 +19,21 @@ export async function loginAction(
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const next = String(formData.get("next") ?? "/inbox") || "/inbox";
+  // Native <input type="checkbox"> only submits when checked, so absence = false.
+  const remember = formData.get("remember") != null;
 
   if (!email || !password) {
     return { error: "Email and password are required." };
   }
 
   try {
-    await signIn("credentials", { email, password, redirectTo: safeNext(next) });
+    await signIn("credentials", {
+      email,
+      password,
+      // Stringified so it survives the URL-encoded form transport to authorize().
+      remember: remember ? "true" : "false",
+      redirectTo: safeNext(next),
+    });
     return { error: null };
   } catch (err) {
     // NEXT_REDIRECT is how server actions perform navigation — re-throw it.

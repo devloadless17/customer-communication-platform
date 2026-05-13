@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket-server";
 import type {
@@ -12,9 +13,14 @@ import type {
 
 /**
  * Dev-only event firehose. Used by the floating DevTools widget to simulate
- * inbound messages, status changes, etc. without needing Evolution paired.
+ * inbound messages, status changes, etc. without going through Meta.
  *
- * 404s in production. NEVER expose this on a deployed instance.
+ * Three layers of defence so a single misconfiguration doesn't expose this:
+ *   1) `NODE_ENV !== "production"` — refuses prod builds outright.
+ *   2) `ENABLE_DEV_TOOLS=1` — opt-in env flag; defaults off even in dev.
+ *   3) `requireSession()` + every lookup scoped to `teamId` — even with the
+ *      flag on, an unauthenticated caller can't touch anything, and a
+ *      logged-in user can't reach into another team.
  */
 
 interface FakeInboundMessageBody {
@@ -32,7 +38,6 @@ interface AddNoteBody {
   kind: "add-fake-note";
   conversationId: string;
   body: string;
-  authorUserId: string;
 }
 
 interface ToggleStatusBody {
@@ -54,24 +59,38 @@ type Body =
   | ToggleStatusBody
   | AssignBody;
 
+function devToolsEnabled(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.ENABLE_DEV_TOOLS === "1";
+}
+
 export async function POST(req: Request) {
-  if (process.env.NODE_ENV === "production") {
+  if (!devToolsEnabled()) {
     return new NextResponse("Not Found", { status: 404 });
   }
 
-  const body = (await req.json()) as Body;
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId, userId } = session;
+
+  let body: Body;
+  try {
+    body = (await req.json()) as Body;
+  } catch {
+    return NextResponse.json({ error: "invalid json" }, { status: 400 });
+  }
 
   switch (body.kind) {
     case "fake-inbound-message":
-      return handleFakeInbound(body);
+      return handleFakeInbound(body, teamId);
     case "mark-last-read":
-      return handleMarkLastRead(body);
+      return handleMarkLastRead(body, teamId);
     case "add-fake-note":
-      return handleAddNote(body);
+      return handleAddNote(body, teamId, userId);
     case "toggle-status":
-      return handleToggleStatus(body);
+      return handleToggleStatus(body, teamId);
     case "assign":
-      return handleAssign(body);
+      return handleAssign(body, teamId);
     default: {
       const _exhaustive: never = body;
       void _exhaustive;
@@ -80,19 +99,25 @@ export async function POST(req: Request) {
   }
 }
 
+async function loadOwnedConversation(conversationId: string, teamId: string) {
+  return db.conversation.findFirst({ where: { id: conversationId, teamId } });
+}
+
 // ---------------------------------------------------------------------------
 
-async function handleFakeInbound({ conversationId, body }: FakeInboundMessageBody) {
-  const convo = await db.conversation.findUniqueOrThrow({
-    where: { id: conversationId },
-  });
+async function handleFakeInbound(
+  { conversationId, body }: FakeInboundMessageBody,
+  teamId: string,
+) {
+  const convo = await loadOwnedConversation(conversationId, teamId);
+  if (!convo) return NextResponse.json({ error: "conversation not found" }, { status: 404 });
 
   const externalId = `fake_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date();
 
   const created = await db.message.create({
     data: {
-      teamId: convo.teamId,
+      teamId,
       conversationId,
       externalId,
       direction: "in",
@@ -130,8 +155,8 @@ async function handleFakeInbound({ conversationId, body }: FakeInboundMessageBod
   // Emit to the team room only. Subscribers in conversation rooms also see
   // it (same socket is in both rooms) and filter by conversationId. Single
   // emit avoids double-fire for clients in both rooms.
-  emitToTeam(convo.teamId, "message:new", {
-    teamId: convo.teamId,
+  emitToTeam(teamId, "message:new", {
+    teamId,
     conversationId,
     message,
     preview: body,
@@ -142,9 +167,12 @@ async function handleFakeInbound({ conversationId, body }: FakeInboundMessageBod
   return NextResponse.json({ ok: true, messageId: created.id });
 }
 
-async function handleMarkLastRead({ conversationId }: MarkLastReadBody) {
+async function handleMarkLastRead({ conversationId }: MarkLastReadBody, teamId: string) {
+  const convo = await loadOwnedConversation(conversationId, teamId);
+  if (!convo) return NextResponse.json({ error: "conversation not found" }, { status: 404 });
+
   const lastOutbound = await db.message.findFirst({
-    where: { conversationId, direction: "out" },
+    where: { conversationId, teamId, direction: "out" },
     orderBy: { timestamp: "desc" },
   });
   if (!lastOutbound) {
@@ -162,8 +190,8 @@ async function handleMarkLastRead({ conversationId }: MarkLastReadBody) {
     data: { status: next },
   });
 
-  emitToTeam(lastOutbound.teamId, "message:status", {
-    teamId: lastOutbound.teamId,
+  emitToTeam(teamId, "message:status", {
+    teamId,
     conversationId,
     messageId: lastOutbound.id,
     status: next,
@@ -172,12 +200,17 @@ async function handleMarkLastRead({ conversationId }: MarkLastReadBody) {
   return NextResponse.json({ ok: true, status: next });
 }
 
-async function handleAddNote({ conversationId, body, authorUserId }: AddNoteBody) {
+async function handleAddNote(
+  { conversationId, body }: AddNoteBody,
+  teamId: string,
+  userId: string,
+) {
+  const convo = await loadOwnedConversation(conversationId, teamId);
+  if (!convo) return NextResponse.json({ error: "conversation not found" }, { status: 404 });
+
   const created = await db.internalNote.create({
-    data: { conversationId, authorUserId, body },
-  });
-  const convo = await db.conversation.findUniqueOrThrow({
-    where: { id: conversationId },
+    // Always attribute to the calling user — the request body has no say in this.
+    data: { conversationId, authorUserId: userId, body },
   });
 
   const note: InternalNote = {
@@ -188,8 +221,8 @@ async function handleAddNote({ conversationId, body, authorUserId }: AddNoteBody
     timestamp: created.timestamp.toISOString(),
   };
 
-  emitToTeam(convo.teamId, "note:new", {
-    teamId: convo.teamId,
+  emitToTeam(teamId, "note:new", {
+    teamId,
     conversationId,
     note,
   });
@@ -197,14 +230,20 @@ async function handleAddNote({ conversationId, body, authorUserId }: AddNoteBody
   return NextResponse.json({ ok: true, noteId: created.id });
 }
 
-async function handleToggleStatus({ conversationId, status }: ToggleStatusBody) {
-  const updated = await db.conversation.update({
+async function handleToggleStatus(
+  { conversationId, status }: ToggleStatusBody,
+  teamId: string,
+) {
+  const convo = await loadOwnedConversation(conversationId, teamId);
+  if (!convo) return NextResponse.json({ error: "conversation not found" }, { status: 404 });
+
+  await db.conversation.update({
     where: { id: conversationId },
     data: { status },
   });
 
-  emitToTeam(updated.teamId, "conversation:status", {
-    teamId: updated.teamId,
+  emitToTeam(teamId, "conversation:status", {
+    teamId,
     conversationId,
     status,
   });
@@ -212,7 +251,22 @@ async function handleToggleStatus({ conversationId, status }: ToggleStatusBody) 
   return NextResponse.json({ ok: true });
 }
 
-async function handleAssign({ conversationId, assignedUserId }: AssignBody) {
+async function handleAssign(
+  { conversationId, assignedUserId }: AssignBody,
+  teamId: string,
+) {
+  const convo = await loadOwnedConversation(conversationId, teamId);
+  if (!convo) return NextResponse.json({ error: "conversation not found" }, { status: 404 });
+
+  // Don't let a dev-tools call assign across teams either.
+  if (assignedUserId) {
+    const assignee = await db.user.findFirst({
+      where: { id: assignedUserId, teamId },
+      select: { id: true },
+    });
+    if (!assignee) return NextResponse.json({ error: "assignee not in team" }, { status: 400 });
+  }
+
   const updated = await db.conversation.update({
     where: { id: conversationId },
     data: { assignedUserId },
@@ -230,8 +284,8 @@ async function handleAssign({ conversationId, assignedUserId }: AssignBody) {
       }
     : null;
 
-  emitToTeam(updated.teamId, "conversation:assigned", {
-    teamId: updated.teamId,
+  emitToTeam(teamId, "conversation:assigned", {
+    teamId,
     conversationId,
     assignedUser,
   });
