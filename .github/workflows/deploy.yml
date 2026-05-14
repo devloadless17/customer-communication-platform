@@ -109,15 +109,16 @@ jobs:
           cp docker-compose.yml _deploy/docker-compose.yml
           cp deploy/ccp.service _deploy/ccp.service
           ls -la _deploy/
+          tar -czf ccp-deploy.tar.gz -C _deploy .
+          ls -la ccp-deploy.tar.gz
 
       - uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "_deploy/.env,_deploy/Caddyfile,_deploy/docker-compose.yml,_deploy/ccp.service"
-          target: /tmp/ccp-deploy
-          strip_components: 1
+          source: "ccp-deploy.tar.gz"
+          target: /tmp/
           overwrite: true
 
       - uses: appleboy/ssh-action@v1.0.3
@@ -131,10 +132,14 @@ jobs:
           envs: DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
-            mv /tmp/ccp-deploy/docker-compose.yml /root/docker-compose.yml
+            rm -rf /tmp/ccp-deploy
+            mkdir -p /tmp/ccp-deploy
+            tar -xzf /tmp/ccp-deploy.tar.gz -C /tmp/ccp-deploy
             mv /tmp/ccp-deploy/.env              /root/.env
+            mv /tmp/ccp-deploy/docker-compose.yml /root/docker-compose.yml
             mv /tmp/ccp-deploy/Caddyfile         /etc/caddy/Caddyfile
             mv /tmp/ccp-deploy/ccp.service       /etc/systemd/system/ccp.service
+            rm -f /tmp/ccp-deploy.tar.gz
             rmdir /tmp/ccp-deploy || true
             chmod 600 /root/.env
             echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
