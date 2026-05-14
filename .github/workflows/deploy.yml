@@ -42,13 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # GitHub Environments scope deploy approvals + secrets. Optional: in
-    # Settings → Environments → production you can require a reviewer
-    # before this job runs.
-    environment:
-      name: production
-      url: https://${{ secrets.APP_DOMAIN }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
