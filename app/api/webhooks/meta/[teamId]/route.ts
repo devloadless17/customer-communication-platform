@@ -61,6 +61,7 @@ export async function POST(
 
   const config = await getMetaWebhookConfig(teamId);
   if (!config) {
+    console.log(`[meta-webhook ${teamId}] no config for team`);
     return new NextResponse("forbidden", { status: 403 });
   }
 
@@ -68,7 +69,11 @@ export async function POST(
   // re-serializes and would invalidate the HMAC.
   const rawBody = await req.text();
   const sigHeader = req.headers.get("x-hub-signature-256");
-  if (!verifySignature(rawBody, sigHeader, config.appSecret)) {
+  const sigOk = verifySignature(rawBody, sigHeader, config.appSecret);
+  console.log(
+    `[meta-webhook ${teamId}] POST received len=${rawBody.length} sigOk=${sigOk}`,
+  );
+  if (!sigOk) {
     return new NextResponse("forbidden", { status: 403 });
   }
 
@@ -79,7 +84,25 @@ export async function POST(
     return NextResponse.json({ ok: true, dropped: "malformed" });
   }
 
+  // TEMP DEBUG — dump payload structure (top-level keys + change field names)
+  // so we can see what Meta is actually sending. Remove once inbound works.
+  try {
+    const p = payload as { object?: string; entry?: Array<{ changes?: Array<{ field?: string; value?: Record<string, unknown> }> }> };
+    const fields = p.entry?.flatMap((e) => e.changes?.map((c) => c.field) ?? []) ?? [];
+    const valueKeys = p.entry?.flatMap((e) =>
+      e.changes?.map((c) => `${c.field}:[${Object.keys(c.value ?? {}).join(",")}]`) ?? [],
+    ) ?? [];
+    console.log(
+      `[meta-webhook ${teamId}] payload object=${p.object} fields=${JSON.stringify(fields)} valueKeys=${JSON.stringify(valueKeys)}`,
+    );
+  } catch (err) {
+    console.log(`[meta-webhook ${teamId}] payload debug threw`, err);
+  }
+
   const events = metaProvider.parseWebhook(payload);
+  console.log(
+    `[meta-webhook ${teamId}] parseWebhook → ${events.length} event(s): ${JSON.stringify(events.map((e) => ({ kind: e.kind, ext: e.externalId })))}`,
+  );
   if (events.length === 0) {
     return NextResponse.json({ ok: true, ingested: 0 });
   }
