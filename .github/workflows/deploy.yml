@@ -212,6 +212,16 @@ jobs:
             echo "▸ validate Caddy config before reloading"
             caddy validate --config /etc/caddy/Caddyfile
 
+            echo "▸ ensure Caddy log directory exists with correct ownership"
+            # Caddy runs as the unprivileged `caddy` user. /var/log/caddy/ is
+            # supposed to be created by the apt package + systemd's
+            # LogsDirectory=caddy directive, but on fresh / re-provisioned
+            # boxes it can be missing or root-owned. Re-asserting it here is
+            # idempotent and prevents "permission denied" on the access log.
+            mkdir -p /var/log/caddy
+            chown -R caddy:caddy /var/log/caddy
+            chmod 755 /var/log/caddy
+
             echo "▸ restart app via systemd"
             systemctl restart ccp
 
