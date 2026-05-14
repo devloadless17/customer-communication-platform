@@ -9,12 +9,14 @@
 #   1) Install dependencies from package-lock.json (reproducible).
 #   2) `prisma generate` — proves the schema is internally consistent.
 #   3) `npm run typecheck` — strict TS.
-#   4) `npm run lint` — Next ESLint (no warnings turn into errors locally; CI is
-#      strictly informational on warn-level rules).
-#   5) `npm run build` — full Next production build. Catches anything that only
+#   4) `npm run build` — full Next production build. Catches anything that only
 #      surfaces in prod mode (force-dynamic misconfig, missing env shape, etc).
 #
 # What it deliberately does NOT do (yet):
+#   - No `next lint` — ESLint isn't configured in this project, and `next lint`
+#     prompts interactively when no config exists, which hangs / fails CI. If
+#     we want a lint gate, install eslint + the Next plugin, add eslint.config.js,
+#     then re-add the step. Until then `typecheck` + `build` are the gate.
 #   - No tests — CLAUDE.md says "Don't write tests yet unless I ask." When a
 #     test suite lands, add a `test` job here parallel to `build`.
 #   - No real Postgres/Redis services — prisma generate + next build are
@@ -78,12 +80,6 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
-
-      - name: Lint
-        # `next lint` exit code is non-zero on errors only (warnings pass).
-        # Promote a warning to an error in eslint config if you want it to
-        # block merges.
-        run: npm run lint
 
       - name: Build
         run: npm run build
