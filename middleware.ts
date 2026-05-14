@@ -99,6 +99,18 @@ export default auth((req) => {
     pathname === "/register" ||
     pathname.startsWith("/invite/");
 
+  // ?invalid=1 marker: a server component (lib/auth/current-user.ts) decided
+  // this user's JWT can't be honored — e.g. the user row is gone, deactivated,
+  // or the JWT shape is stale — and redirected here to break out. We clear
+  // cookies and let the login page render even if req.auth still looks valid;
+  // otherwise the "signed-in → bounce to /inbox" path below would loop the
+  // user right back into the same rejection.
+  if (pathname === "/login" && req.nextUrl.searchParams.has("invalid")) {
+    const res = NextResponse.next();
+    clearAuthCookies(res);
+    return res;
+  }
+
   if (isPublicPage || isPublicApi) {
     // Bonus: if a signed-in user hits /login or /register, bounce them home.
     if (req.auth && (pathname === "/login" || pathname === "/register")) {
@@ -119,20 +131,30 @@ export default auth((req) => {
     // from an old session-shape that the middleware reads but the server
     // component rejects) can otherwise drive an infinite redirect loop —
     // middleware sees "looks valid", page bounces, repeat.
-    const isProd = process.env.NODE_ENV === "production";
-    const names = isProd
-      ? ["__Secure-authjs.session-token", "__Secure-authjs.callback-url", "__Host-authjs.csrf-token"]
-      : ["authjs.session-token", "authjs.callback-url", "authjs.csrf-token"];
-    // Use the descriptor form so the Set-Cookie deletion replays Secure +
-    // Path=/. __Host- / __Secure- prefixed cookies are silently NOT deleted
-    // by Chrome unless the deletion Set-Cookie itself satisfies the prefix
-    // rules (Secure required, Path=/, no Domain).
-    for (const n of names) res.cookies.delete({ name: n, path: "/", secure: isProd });
+    clearAuthCookies(res);
     return res;
   }
 
   return NextResponse.next();
 });
+
+/**
+ * Strip every auth cookie from the outgoing response. Used both on the
+ * unauthenticated redirect path and on the ?invalid=1 bail-out, so a stale
+ * cookie can't survive either route.
+ *
+ * Use the descriptor form so the Set-Cookie deletion replays Secure +
+ * Path=/. __Host- / __Secure- prefixed cookies are silently NOT deleted
+ * by Chrome unless the deletion Set-Cookie itself satisfies the prefix
+ * rules (Secure required, Path=/, no Domain).
+ */
+function clearAuthCookies(res: NextResponse): void {
+  const isProd = process.env.NODE_ENV === "production";
+  const names = isProd
+    ? ["__Secure-authjs.session-token", "__Secure-authjs.callback-url", "__Host-authjs.csrf-token"]
+    : ["authjs.session-token", "authjs.callback-url", "authjs.csrf-token"];
+  for (const n of names) res.cookies.delete({ name: n, path: "/", secure: isProd });
+}
 
 export const config = {
   // Match everything except Next internals and static assets. The handler

@@ -38,7 +38,17 @@ export async function requireSession(): Promise<ApiSession | NextResponse> {
   // (Pages already do this via lib/auth/current-user.ts → getSession.)
   const user = await loadActiveUser(session.user.id);
   if (!user) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    // JWT is valid but the underlying user is gone/deactivated. Clear the
+    // session cookie on the way out so the next page navigation hits the
+    // unauth'd path cleanly instead of looping through getSession's
+    // ?invalid=1 redirect. Symmetric with middleware.ts's clearAuthCookies.
+    const res = NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    const isProd = process.env.NODE_ENV === "production";
+    const names = isProd
+      ? ["__Secure-authjs.session-token", "__Secure-authjs.callback-url", "__Host-authjs.csrf-token"]
+      : ["authjs.session-token", "authjs.callback-url", "authjs.csrf-token"];
+    for (const n of names) res.cookies.delete({ name: n, path: "/", secure: isProd });
+    return res;
   }
 
   return {

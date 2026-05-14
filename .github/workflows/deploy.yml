@@ -108,13 +108,14 @@ jobs:
           grep -q '__DOMAIN__\|__ADMIN_EMAIL__' _deploy/Caddyfile && { echo "✗ unrendered placeholders"; exit 1; } || true
           cp docker-compose.yml _deploy/docker-compose.yml
           cp deploy/ccp.service _deploy/ccp.service
+          ls -la _deploy/
 
       - uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "_deploy/*"
+          source: "_deploy/.env,_deploy/Caddyfile,_deploy/docker-compose.yml,_deploy/ccp.service"
           target: /tmp/ccp-deploy
           strip_components: 1
           overwrite: true

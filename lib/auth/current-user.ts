@@ -29,16 +29,24 @@ export interface Session {
 
 export const getSession = cache(async (): Promise<Session> => {
   const session = await auth();
+  // The ?invalid=1 marker tells middleware to clear the session cookie when
+  // it serves /login — otherwise middleware sees the still-valid-looking JWT
+  // and bounces back here, producing an infinite redirect that only resolves
+  // when the user manually clears cookies. This branch covers JWTs that
+  // decode but lack a usable user.id (malformed / schema-mismatched cookies).
   if (!session?.user?.id) {
-    redirect("/login");
+    redirect("/login?invalid=1");
   }
 
   // Hydrate from the DB so we always have current name/avatar/role and to
   // catch users that were deactivated in another tab. JWT sessions cache
   // attributes for the token's lifetime; the DB is the source of truth.
+  // Same ?invalid=1 marker: the JWT is still cryptographically valid here
+  // (middleware let us through), but the underlying user is gone or
+  // deactivated. Without the marker, middleware would just bounce us back.
   const row = await loadActiveUser(session.user.id);
   if (!row) {
-    redirect("/login");
+    redirect("/login?invalid=1");
   }
 
   return {
