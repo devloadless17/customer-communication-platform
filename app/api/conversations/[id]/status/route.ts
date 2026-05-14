@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
+import { requireSession } from "@/lib/auth-helpers";
 import { dispatch } from "@/lib/automations/dispatcher";
-import { getSession } from "@/lib/current-user";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket-server";
 import type { ConversationStatus } from "@/lib/types";
@@ -24,7 +24,9 @@ export async function POST(
   req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
   const { id: conversationId } = await ctx.params;
 
   let raw: Body;
@@ -82,7 +84,7 @@ export async function POST(
       },
       previousStatus,
       newStatus: status,
-      changedByUserId: user.id,
+      changedByUserId: userId,
     });
   }
 

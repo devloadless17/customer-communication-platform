@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { TAG_COLORS, type Tag, type TagColor } from "@/lib/types";
 
@@ -19,7 +19,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const rows = await db.tag.findMany({
     where: { teamId },
     orderBy: { name: "asc" },
@@ -34,7 +36,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
 
   let raw: { name?: unknown; color?: unknown };
   try {

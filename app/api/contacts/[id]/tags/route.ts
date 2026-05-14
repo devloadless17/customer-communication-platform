@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 
 /**
@@ -20,7 +20,9 @@ export async function PUT(
   req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const { id } = await ctx.params;
 
   let raw: { tagIds?: unknown };

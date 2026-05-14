@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -39,7 +39,9 @@ export async function POST(req: Request) {
   // client after reload) ends up reversed. Receive-time stamping reflects
   // the user's actual send sequence.
   const receivedAt = new Date();
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
 
   let raw: Body;
   try {
@@ -148,7 +150,7 @@ export async function POST(req: Request) {
         teamId,
         conversationId,
         externalId: send.externalId,
-        senderUserId: user.id,
+        senderUserId: userId,
         body,
         direction: "out",
         provider: "meta_cloud",
@@ -167,7 +169,7 @@ export async function POST(req: Request) {
     teamId,
     conversationId,
     externalId: send.externalId,
-    senderUserId: user.id,
+    senderUserId: userId,
     body,
     direction: "out",
     provider: "meta_cloud",

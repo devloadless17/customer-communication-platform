@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import { deleteMedia } from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
 import { emitToTeam } from "@/lib/socket-server";
 
 /**
@@ -10,8 +10,8 @@ import { emitToTeam } from "@/lib/socket-server";
  *
  *   POST body: { conversationIds: string[] }
  *
- * Schema cascades wipe the message + note rows; we gather media paths first
- * and best-effort unlink them after the commit. The contact rows stay —
+ * Schema cascades wipe the message + note rows; we gather blob keys first
+ * and best-effort delete them after the commit. The contact rows stay —
  * deleting a conversation deletes the THREAD, not the person.
  */
 
@@ -19,7 +19,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
 
   let raw: { conversationIds?: unknown };
   try {
@@ -40,8 +42,8 @@ export async function POST(req: Request) {
     select: {
       id: true,
       messages: {
-        where: { mediaPath: { not: null } },
-        select: { mediaPath: true },
+        where: { mediaKey: { not: null } },
+        select: { mediaKey: true },
       },
     },
   });
@@ -53,21 +55,17 @@ export async function POST(req: Request) {
   }
 
   const ownedIds = owned.map((c) => c.id);
-  const mediaPaths = owned
+  const mediaKeys = owned
     .flatMap((c) => c.messages)
-    .map((m) => m.mediaPath)
-    .filter((p): p is string => Boolean(p));
+    .map((m) => m.mediaKey)
+    .filter((k): k is string => Boolean(k));
 
   await db.conversation.deleteMany({
     where: { teamId, id: { in: ownedIds } },
   });
 
-  for (const p of mediaPaths) {
-    try {
-      await deleteMedia(p);
-    } catch (err) {
-      console.warn(`[api/conversations/bulk] media cleanup failed for ${p}`, err);
-    }
+  if (mediaKeys.length > 0) {
+    await blobStorage.delete(mediaKeys);
   }
 
   for (const cid of ownedIds) {

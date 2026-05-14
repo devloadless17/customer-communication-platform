@@ -31,14 +31,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
-        // Declared for completeness; the value flows from signIn() into
-        // `raw.remember` regardless of whether it appears here.
-        remember: { label: "Remember me", type: "text" },
       },
       async authorize(raw) {
         const email = typeof raw?.email === "string" ? raw.email.trim().toLowerCase() : "";
         const password = typeof raw?.password === "string" ? raw.password : "";
-        const remember = raw?.remember === "true" || raw?.remember === true;
         if (!email || !password) return null;
 
         // Account-level lockout. The middleware's IP limit catches one attacker
@@ -80,9 +76,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           name: user.name,
           email: user.email,
           image: user.avatarUrl ?? null,
-          // Picked up by the jwt callback in auth.config.ts — chooses the
-          // 8h vs 14d session lifetime.
-          remember,
         };
       },
     }),

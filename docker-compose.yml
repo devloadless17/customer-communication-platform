@@ -11,14 +11,13 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  # Persisted attachment storage. lib/media-storage.ts writes inbound +
-  # outbound media here keyed by team + wamid. Survives container restarts
-  # and `docker compose up --build`. Wipe with `docker volume rm`.
-  ccp_media:
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # Pinned to a specific minor for reproducible builds. Bump on a planned
+    # cadence (review CVE notes, then update tag + redeploy) instead of
+    # silently inheriting patch updates on every `docker compose pull`.
+    image: postgres:16.6-alpine
     restart: unless-stopped
     networks: [ccp_net]
     environment:
@@ -44,7 +43,8 @@ services:
   # AOF on so a crash mid-run doesn't lose enqueued jobs. The Socket.io
   # adapter is still single-instance — Redis is for BullMQ only.
   redis:
-    image: redis:7-alpine
+    # Pinned for the same reason as postgres above.
+    image: redis:7.4-alpine
     restart: unless-stopped
     networks: [ccp_net]
     command: ["redis-server", "--appendonly", "yes"]
@@ -75,16 +75,19 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
       REDIS_URL: redis://redis:6379
       NEXTAUTH_URL: ${NEXTAUTH_URL}
+      # Auth.js v5 reads AUTH_SECRET first, falls back to NEXTAUTH_SECRET.
+      # Pass both — Edge middleware uses one path, the Node handler the other,
+      # and Socket.io's handshake re-verifies the same JWT.
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      AUTH_SECRET: ${AUTH_SECRET:-${NEXTAUTH_SECRET}}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN}
       META_APP_SECRET: ${META_APP_SECRET}
       META_PHONE_NUMBER_ID: ${META_PHONE_NUMBER_ID}
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN}
       META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v21.0}
-      MEDIA_STORAGE_PATH: /var/lib/ccp/media
+      # Blob storage runs entirely on UploadThing — no on-disk volume.
+      UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
       AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
-    volumes:
-      - ccp_media:/var/lib/ccp/media
     ports:
       - "${APP_PORT:-3000}:3000"

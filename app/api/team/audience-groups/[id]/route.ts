@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { getAudienceGroup } from "@/lib/queries";
 
@@ -28,7 +28,9 @@ export async function GET(
   _req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const { id } = await ctx.params;
   const group = await getAudienceGroup(teamId, id);
   if (!group) return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -39,7 +41,9 @@ export async function PATCH(
   req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const { id } = await ctx.params;
 
   let raw: PatchBody;
@@ -136,7 +140,9 @@ export async function DELETE(
   _req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const { id } = await ctx.params;
 
   const existing = await db.audienceGroup.findFirst({ where: { id, teamId } });

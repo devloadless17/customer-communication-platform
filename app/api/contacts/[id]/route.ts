@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import { deleteMedia } from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
 import { emitToTeam } from "@/lib/socket-server";
 import type { Contact } from "@/lib/types";
 
@@ -203,9 +203,9 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string 
   const { teamId } = session;
   const { id: contactId } = await ctx.params;
 
-  // Ownership check + media-path gather in a single round-trip. The
-  // `Conversation -> Message` chain is the only source of disk-backed
-  // artifacts attached to a contact.
+  // Ownership check + blob-key gather in a single round-trip. The
+  // `Conversation -> Message` chain is the only source of media artifacts
+  // attached to a contact.
   const contact = await db.contact.findFirst({
     where: { id: contactId, teamId },
     select: {
@@ -214,8 +214,8 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string 
         select: {
           id: true,
           messages: {
-            where: { mediaPath: { not: null } },
-            select: { mediaPath: true },
+            where: { mediaKey: { not: null } },
+            select: { mediaKey: true },
           },
         },
       },
@@ -226,25 +226,21 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string 
     return NextResponse.json({ error: "contact not found" }, { status: 404 });
   }
 
-  const mediaPaths = contact.conversations
+  const mediaKeys = contact.conversations
     .flatMap((c) => c.messages)
-    .map((m) => m.mediaPath)
-    .filter((p): p is string => Boolean(p));
+    .map((m) => m.mediaKey)
+    .filter((k): k is string => Boolean(k));
   // Snapshot conversation ids before the delete so we can fan out the
   // socket events afterwards.
   const conversationIds = contact.conversations.map((c) => c.id);
 
   await db.contact.delete({ where: { id: contactId } });
 
-  // Best-effort disk cleanup. We log + swallow individual failures so one
-  // bad path doesn't strand the rest. Sequential rather than Promise.all to
-  // keep error logs tidy at low scale.
-  for (const p of mediaPaths) {
-    try {
-      await deleteMedia(p);
-    } catch (err) {
-      console.warn(`[api/contacts DELETE] media cleanup failed for ${p}`, err);
-    }
+  // Batched best-effort delete on the blob provider — idempotent and never
+  // throws. The contact is already gone from the DB; a transient provider
+  // failure here would just leak storage, not orphan rows.
+  if (mediaKeys.length > 0) {
+    await blobStorage.delete(mediaKeys);
   }
 
   // Splice the rows out of every connected client's view.

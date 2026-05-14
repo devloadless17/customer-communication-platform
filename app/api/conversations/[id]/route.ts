@@ -2,13 +2,13 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import { deleteMedia } from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
 import { emitToTeam } from "@/lib/socket-server";
 
 /**
  * Delete a single conversation. Schema cascades take care of Message +
- * InternalNote rows; we collect any disk-backed media first and best-effort
- * unlink after the commit (same pattern as contact delete).
+ * InternalNote rows; we collect any blob-stored media keys first and
+ * best-effort delete after the commit (same pattern as contact delete).
  *
  * Meta-side note: this only removes the thread from OUR inbox. Outbound
  * messages stay delivered on the customer's WhatsApp — there's no
@@ -29,8 +29,8 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string 
     select: {
       id: true,
       messages: {
-        where: { mediaPath: { not: null } },
-        select: { mediaPath: true },
+        where: { mediaKey: { not: null } },
+        select: { mediaKey: true },
       },
     },
   });
@@ -38,18 +38,16 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string 
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
   }
 
-  const mediaPaths = conversation.messages
-    .map((m) => m.mediaPath)
-    .filter((p): p is string => Boolean(p));
+  const mediaKeys = conversation.messages
+    .map((m) => m.mediaKey)
+    .filter((k): k is string => Boolean(k));
 
   await db.conversation.delete({ where: { id: conversationId } });
 
-  for (const p of mediaPaths) {
-    try {
-      await deleteMedia(p);
-    } catch (err) {
-      console.warn(`[api/conversations DELETE] media cleanup failed for ${p}`, err);
-    }
+  // Batched delete — UploadThing accepts an array; saves a round trip per
+  // file. blobStorage.delete is idempotent and swallows individual errors.
+  if (mediaKeys.length > 0) {
+    await blobStorage.delete(mediaKeys);
   }
 
   // Tell every connected agent the thread is gone so their inbox list

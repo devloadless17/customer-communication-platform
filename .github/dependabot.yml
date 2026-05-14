@@ -1,0 +1,66 @@
+# Automated dependency updates.
+#
+# Weekly PRs land on `dev` (not `main`) so they go through CI + your review
+# before reaching production. Security updates (npm audit advisories) are
+# raised immediately, not on the weekly schedule.
+
+version: 2
+updates:
+  # ---- npm ------------------------------------------------------------------
+  - package-ecosystem: npm
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Beirut
+    open-pull-requests-limit: 5
+    # Squash deps into one PR per group to keep noise low. Security advisories
+    # still come as standalone PRs (dependabot ignores grouping for those).
+    groups:
+      types:
+        patterns: ["@types/*"]
+      next-stack:
+        patterns: ["next", "react", "react-dom", "@radix-ui/*", "framer-motion", "tailwindcss", "@tailwindcss/*"]
+      prisma:
+        patterns: ["prisma", "@prisma/*"]
+      auth-and-realtime:
+        patterns: ["next-auth", "socket.io", "socket.io-client", "bullmq", "ioredis"]
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps"
+      include: scope
+
+  # ---- GitHub Actions -------------------------------------------------------
+  # Catches things like actions/checkout@v4 → v5 transitions so workflow
+  # actions don't silently lag on security patches.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Beirut
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "ci(deps)"
+
+  # ---- Docker base images ---------------------------------------------------
+  # Picks up `node:22-alpine` updates in the Dockerfile. Postgres/Redis in
+  # docker-compose.yml are pinned to specific minor versions and reviewed
+  # manually per deploy/README.md "Bumping image versions".
+  - package-ecosystem: docker
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Beirut
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: "docker"

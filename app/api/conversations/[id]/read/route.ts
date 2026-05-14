@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -23,7 +23,9 @@ export async function POST(
   _req: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
   const { id: conversationId } = await ctx.params;
 
   const conversation = await db.conversation.findFirst({
@@ -52,7 +54,7 @@ export async function POST(
     emitToTeam(teamId, "conversation:read", {
       teamId,
       conversationId,
-      readByUserId: user.id,
+      readByUserId: userId,
     });
   }
 

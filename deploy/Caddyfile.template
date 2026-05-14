@@ -1,0 +1,83 @@
+# Caddy reverse proxy — TEMPLATE.
+#
+# This file is NOT installed directly. The deploy workflow
+# (.github/workflows/deploy.yml) renders it on every deploy:
+#
+#   __DOMAIN__       → ${{ secrets.APP_DOMAIN }}
+#   __ADMIN_EMAIL__  → ${{ secrets.ADMIN_EMAIL }}
+#
+# The rendered result is scp'd to /etc/caddy/Caddyfile on the VPS and
+# `systemctl reload caddy` is run. Editing /etc/caddy/Caddyfile directly on
+# the VPS works for a single deploy but the next deploy will overwrite it —
+# changes belong in this template, committed to git.
+
+{
+	# ACME contact email. Let's Encrypt mails this address on renewal failure
+	# and ~30 days before expiry. Use a real inbox — these are the warnings
+	# you want before the cert silently expires.
+	email __ADMIN_EMAIL__
+}
+
+__DOMAIN__ {
+	# Auto-HTTPS — Caddy provisions and renews via Let's Encrypt with no
+	# config. HTTP requests get a 308 redirect to HTTPS automatically.
+
+	# Reverse proxy to the Next.js + Socket.io app.
+	reverse_proxy 127.0.0.1:3000 {
+		# WebSocket upgrades for Socket.io. Caddy passes them through by
+		# default; this block makes the intent explicit and adds the
+		# headers the upstream needs to see the original client.
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+
+		# Socket.io heartbeats — keep the upstream connection alive long
+		# enough for the 25s default ping interval + jitter.
+		transport http {
+			read_buffer 64KB
+			write_buffer 64KB
+			# Long-lived connections (websocket + SSE) shouldn't hit
+			# the default 5-min idle cap.
+			read_timeout 5m
+			write_timeout 5m
+		}
+
+		# Probe the app's /api/health every 10s so Caddy can return a clean
+		# 502 immediately during the ~3s restart window instead of holding
+		# the request until upstream times out.
+		health_uri /api/health
+		health_interval 10s
+		health_timeout 3s
+		health_status 200
+	}
+
+	# Compression for HTML / JSON / JS. Static assets are already content-
+	# encoded by Next; this is for API responses + HTML.
+	encode zstd gzip
+
+	# Hardening headers complement the ones next.config.ts sets — Caddy
+	# overrides anything the app emits, so keep these aligned with
+	# next.config.ts's `headers()`.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# Caddy adds Server: Caddy by default. Strip it — no point telling
+		# every attacker which version of the proxy is running.
+		-Server
+	}
+
+	# Access logs to a dedicated file. Rotate via systemd-tmpfiles or logrotate
+	# in production. JSON is the format I find easiest to grep + ingest later.
+	log {
+		output file /var/log/caddy/ccp-access.log {
+			roll_size 100MiB
+			roll_keep 5
+			roll_keep_for 720h
+		}
+		format json
+	}
+}

@@ -206,10 +206,11 @@ async function ingestInboundMessage(
         rawPayload: evt.rawPayload as Prisma.InputJsonValue,
         timestamp: evt.timestamp,
         ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
-        ...(evt.media && evt.media.localPath
+        ...(evt.media && evt.media.storageKey && evt.media.storageUrl
           ? {
               mediaKind: evt.media.kind,
-              mediaPath: evt.media.localPath,
+              mediaKey: evt.media.storageKey,
+              mediaUrl: evt.media.storageUrl,
               mediaMimeType: evt.media.mimeType,
               mediaCaption: evt.body || null,
               mediaFilename: evt.media.filename ?? null,
@@ -253,10 +254,12 @@ async function ingestInboundMessage(
     ...(replySnapshot
       ? { replyToMessageId: replySnapshot.id, replyTo: replySnapshot }
       : {}),
-    ...(evt.media && evt.media.localPath
+    ...(evt.media && evt.media.storageKey && evt.media.storageUrl
       ? {
           media: {
             kind: evt.media.kind,
+            // Still served through our route so the team-ownership check
+            // runs before the 302 to the CDN.
             url: `/api/media/${createdId}`,
             mimeType: evt.media.mimeType,
             sizeBytes: evt.media.sizeBytes ?? 0,

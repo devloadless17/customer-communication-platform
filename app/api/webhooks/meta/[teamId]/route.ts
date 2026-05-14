@@ -2,7 +2,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
-import { MEDIA_SIZE_CAPS, saveMedia } from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
+import { db } from "@/lib/db";
+import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
 import { ingestEvents } from "@/lib/providers/ingest";
 import { metaProvider } from "@/lib/providers/meta";
@@ -102,7 +104,7 @@ async function downloadInboundMedia(
   events: NormalizedEvent[],
 ): Promise<void> {
   const mediaEvents = events.filter(
-    (e) => e.kind === "message" && e.media && !e.media.localPath,
+    (e) => e.kind === "message" && e.media && !e.media.storageKey,
   );
   if (mediaEvents.length === 0) return;
 
@@ -120,6 +122,14 @@ async function downloadInboundMedia(
     return;
   }
 
+  // Team name is only used to build a human-readable filename in the blob
+  // provider's dashboard — we read it once per webhook batch instead of
+  // per-event.
+  const team = await db.team.findUnique({
+    where: { id: teamId },
+    select: { name: true },
+  });
+
   await Promise.all(
     mediaEvents.map(async (evt) => {
       if (evt.kind !== "message" || !evt.media) return;
@@ -136,13 +146,25 @@ async function downloadInboundMedia(
           delete evt.media; // ingest the message as text-only with empty body
           return;
         }
-        const saved = await saveMedia(
-          teamId,
-          evt.externalId,
-          fetched.mimeType,
-          fetched.bytes,
-        );
-        evt.media.localPath = saved.path;
+        const saved = await blobStorage.upload({
+          bytes: fetched.bytes,
+          mimeType: fetched.mimeType,
+          kind: evt.media.kind,
+          context: {
+            teamId,
+            teamSlug: team?.name,
+            direction: "in",
+            contactPhone: evt.contactPhone,
+            contactName: evt.contactName ?? undefined,
+            // conversationId isn't known yet — ingest find-or-creates it. The
+            // filename still has enough scoping (team + phone + wamid) to be
+            // useful in the dashboard.
+            externalId: evt.externalId,
+            originalFilename: evt.media.filename ?? null,
+          },
+        });
+        evt.media.storageKey = saved.key;
+        evt.media.storageUrl = saved.url;
         evt.media.sizeBytes = saved.sizeBytes;
         // Meta's metadata sometimes refines the mime type vs what was on the
         // webhook (e.g. image/jpeg vs image/jpg). Trust the metadata call.

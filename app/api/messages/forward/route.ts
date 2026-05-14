@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import { readMedia, saveMedia } from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
 import { getConversationWithRefs } from "@/lib/queries";
 import { mediaPreview } from "@/lib/providers/ingest";
 import { metaProvider, MetaSendError } from "@/lib/providers/meta";
@@ -143,9 +143,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "no such contacts" }, { status: 404 });
   }
 
-  // Read each source message's media bytes at most once even when forwarding
-  // to several contacts. `null` is cached too — a missing/unreadable file
-  // shouldn't be retried per recipient.
+  // Fetch each source message's media bytes from the blob provider at most
+  // once even when forwarding to several contacts. `null` is cached too — a
+  // missing/unreadable file shouldn't be retried per recipient.
   type MediaBytes = {
     bytes: Uint8Array;
     mime: string;
@@ -158,12 +158,16 @@ export async function POST(req: Request) {
   ): Promise<MediaBytes | null> {
     if (mediaCache.has(m.id)) return mediaCache.get(m.id)!;
     let entry: MediaBytes | null = null;
-    if (m.mediaPath && m.mediaKind) {
+    // Prefer mediaUrl (the CDN URL — single hop). Falls back to mediaKey if
+    // the row predates the URL column. Either path goes through the same
+    // provider, so swapping S3 later doesn't touch this call site.
+    const handle = m.mediaUrl ?? m.mediaKey;
+    if (handle && m.mediaKind) {
       try {
-        const buf = await readMedia(m.mediaPath);
+        const fetched = await blobStorage.fetch(handle);
         entry = {
-          bytes: new Uint8Array(buf),
-          mime: m.mediaMimeType ?? "application/octet-stream",
+          bytes: fetched.bytes,
+          mime: m.mediaMimeType ?? fetched.mimeType,
           filename: m.mediaFilename ?? null,
           kind: m.mediaKind as MediaKind,
         };
@@ -174,6 +178,11 @@ export async function POST(req: Request) {
     mediaCache.set(m.id, entry);
     return entry;
   }
+
+  const teamRow = await db.team.findUnique({
+    where: { id: teamId },
+    select: { name: true },
+  });
 
   const results: ForwardResult[] = [];
 
@@ -255,12 +264,21 @@ export async function POST(req: Request) {
             sendConfig,
           );
 
-          const saved = await saveMedia(
-            teamId,
-            send.externalId,
-            mb.mime,
-            mb.bytes,
-          );
+          const saved = await blobStorage.upload({
+            bytes: mb.bytes,
+            mimeType: mb.mime,
+            kind: mb.kind,
+            context: {
+              teamId,
+              teamSlug: teamRow?.name,
+              direction: "out",
+              contactPhone: contact.phoneNumber,
+              contactName: contact.name,
+              conversationId: conversation.id,
+              externalId: send.externalId,
+              originalFilename: filename,
+            },
+          });
           const previewBody = (withCaption || mediaPreview(mb.kind)).slice(
             0,
             200,
@@ -283,7 +301,8 @@ export async function POST(req: Request) {
               } as Prisma.InputJsonValue,
               timestamp: send.timestamp,
               mediaKind: mb.kind,
-              mediaPath: saved.path,
+              mediaKey: saved.key,
+              mediaUrl: saved.url,
               mediaMimeType: mb.mime,
               mediaCaption: withCaption ?? null,
               mediaFilename: mb.kind === "document" ? filename : null,

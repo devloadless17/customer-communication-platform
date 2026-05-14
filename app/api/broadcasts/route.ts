@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { startBroadcast } from "@/lib/broadcast-runner";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
@@ -41,7 +41,9 @@ interface AudiencePayload {
 }
 
 export async function POST(req: Request) {
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
 
   let raw: Body;
   try {
@@ -197,7 +199,7 @@ export async function POST(req: Request) {
   const broadcast = await db.broadcast.create({
     data: {
       teamId,
-      createdById: user.id,
+      createdById: userId,
       status: "queued",
       templateId: template.id,
       templateName: template.name,
@@ -227,7 +229,9 @@ export async function POST(req: Request) {
 }
 
 export async function GET() {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const rows = await db.broadcast.findMany({
     where: { teamId },
     orderBy: { createdAt: "desc" },

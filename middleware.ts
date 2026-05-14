@@ -60,6 +60,7 @@ function clientIp(req: Request & { ip?: string }): string {
  *   - /api/auth/*            — NextAuth's own endpoints
  *   - /api/webhooks/*        — Meta posts here unauthenticated; verified by HMAC
  *   - /api/socket            — Socket.io handshake (separately authenticated)
+ *   - /api/health            — Caddy / systemd liveness probes; no privileged data
  *
  * Everything else requires a session. Unauthenticated requests to a page get
  * redirected to /login?next=<path>; API requests get a JSON 401 so client
@@ -87,6 +88,7 @@ export default auth((req) => {
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/webhooks") ||
     pathname.startsWith("/api/socket") ||
+    pathname === "/api/health" ||
     // External API uses bearer-token auth (TeamApiKey), not session cookies —
     // bypass the cookie gate so n8n / partner integrations can reach it. The
     // route handler does its own authentication via lib/external-auth.ts.
@@ -111,7 +113,22 @@ export default auth((req) => {
     }
     const url = new URL("/login", req.url);
     url.searchParams.set("next", pathname + search);
-    return NextResponse.redirect(url);
+    const res = NextResponse.redirect(url);
+    // Defensive: clear any auth cookies on the way to /login. A stale or
+    // unverifiable session cookie (e.g. from an AUTH_SECRET rotation, or
+    // from an old session-shape that the middleware reads but the server
+    // component rejects) can otherwise drive an infinite redirect loop —
+    // middleware sees "looks valid", page bounces, repeat.
+    const isProd = process.env.NODE_ENV === "production";
+    const names = isProd
+      ? ["__Secure-authjs.session-token", "__Secure-authjs.callback-url", "__Host-authjs.csrf-token"]
+      : ["authjs.session-token", "authjs.callback-url", "authjs.csrf-token"];
+    // Use the descriptor form so the Set-Cookie deletion replays Secure +
+    // Path=/. __Host- / __Secure- prefixed cookies are silently NOT deleted
+    // by Chrome unless the deletion Set-Cookie itself satisfies the prefix
+    // rules (Secure required, Path=/, no Domain).
+    for (const n of names) res.cookies.delete({ name: n, path: "/", secure: isProd });
+    return res;
   }
 
   return NextResponse.next();

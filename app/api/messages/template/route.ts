@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -52,7 +52,9 @@ export async function POST(req: Request) {
   // aligned with the user's send sequence across mixed text/media/template
   // sends regardless of Meta-API latency variation.
   const receivedAt = new Date();
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
 
   let raw: Body;
   try {
@@ -194,7 +196,7 @@ export async function POST(req: Request) {
       teamId,
       conversationId,
       externalId: send.externalId,
-      senderUserId: user.id,
+      senderUserId: userId,
       body: renderedBody,
       direction: "out",
       provider: "meta_cloud",
@@ -226,7 +228,7 @@ export async function POST(req: Request) {
     teamId,
     conversationId,
     externalId: send.externalId,
-    senderUserId: user.id,
+    senderUserId: userId,
     body: renderedBody,
     direction: "out",
     provider: "meta_cloud",

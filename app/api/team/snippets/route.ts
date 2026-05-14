@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 
 /**
@@ -26,7 +26,9 @@ interface Body {
 }
 
 export async function GET() {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const rows = await db.snippet.findMany({
     where: { teamId },
     orderBy: [{ label: "asc" }],
@@ -46,7 +48,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
 
   let raw: Body;
   try {
@@ -83,7 +87,7 @@ export async function POST(req: Request) {
 
   try {
     const created = await db.snippet.create({
-      data: { teamId, name, label, body, createdById: user.id },
+      data: { teamId, name, label, body, createdById: userId },
     });
     // Invalidate the inbox-layout's cached snippet list so the next
     // navigation hydrates the new row immediately.

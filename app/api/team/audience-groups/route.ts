@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { getAudienceGroup, listAudienceGroups } from "@/lib/queries";
 
@@ -19,7 +19,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   const groups = await listAudienceGroups(teamId);
   return NextResponse.json({ groups });
 }
@@ -32,7 +34,9 @@ interface CreateBody {
 }
 
 export async function POST(req: Request) {
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
 
   let raw: CreateBody;
   try {
@@ -72,7 +76,7 @@ export async function POST(req: Request) {
     const created = await db.audienceGroup.create({
       data: {
         teamId,
-        createdById: user.id,
+        createdById: userId,
         name,
         description,
         tags: { connect: validTagIds.map((id) => ({ id })) },

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import { deleteMedia } from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
 import { emitToTeam } from "@/lib/socket-server";
 
 /**
@@ -28,7 +28,9 @@ interface Body {
 }
 
 export async function POST(req: Request) {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
 
   let raw: Body;
   try {
@@ -63,32 +65,28 @@ export async function POST(req: Request) {
   }
 
   if (action === "delete") {
-    // Gather media paths + affected conversation ids BEFORE the cascade
-    // delete so we can clean up disk and fan out socket events.
+    // Gather blob keys + affected conversation ids BEFORE the cascade delete
+    // so we can clean up the provider and fan out socket events.
     const conversationsWithMedia = await db.conversation.findMany({
       where: { teamId, contactId: { in: ownedIds } },
       select: {
         id: true,
         messages: {
-          where: { mediaPath: { not: null } },
-          select: { mediaPath: true },
+          where: { mediaKey: { not: null } },
+          select: { mediaKey: true },
         },
       },
     });
-    const mediaPaths = conversationsWithMedia
+    const mediaKeys = conversationsWithMedia
       .flatMap((c) => c.messages)
-      .map((m) => m.mediaPath)
-      .filter((p): p is string => Boolean(p));
+      .map((m) => m.mediaKey)
+      .filter((k): k is string => Boolean(k));
     const conversationIds = conversationsWithMedia.map((c) => c.id);
 
     await db.contact.deleteMany({ where: { teamId, id: { in: ownedIds } } });
 
-    for (const p of mediaPaths) {
-      try {
-        await deleteMedia(p);
-      } catch (err) {
-        console.warn(`[api/contacts/bulk] media cleanup failed for ${p}`, err);
-      }
+    if (mediaKeys.length > 0) {
+      await blobStorage.delete(mediaKeys);
     }
 
     for (const cid of conversationIds) {
@@ -117,8 +115,11 @@ export async function POST(req: Request) {
     // is fine.
     const op = action === "tag-add" ? "connect" : "disconnect";
     for (const id of ownedIds) {
+      // ownedIds is already team-filtered by the findMany above, but pin the
+      // teamId on the update too — defense-in-depth so a future refactor of
+      // ownedIds can't silently turn this into a cross-tenant write.
       await db.contact.update({
-        where: { id },
+        where: { id, teamId },
         data: { tags: { [op]: { id: tagId } } },
       });
     }

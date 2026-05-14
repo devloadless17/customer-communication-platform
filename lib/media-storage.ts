@@ -1,29 +1,18 @@
 import "server-only";
 
-import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
-
 import type { MediaKind } from "@/lib/types";
 
 /**
- * On-disk media storage. One directory per team, one file per message.
+ * Mime-type helpers + per-kind size caps. The actual byte storage lives behind
+ * `lib/blob-storage/` (UploadThing today, swappable later). This module
+ * intentionally has no filesystem access.
  *
- *   <STORAGE_ROOT>/<teamId>/<key>.<ext>
- *
- * `key` is typically the message externalId (wamid for Meta) — unique per
- * message and stable across re-ingest. We only ever serve files through
- * /api/media/<messageId> so the on-disk path never escapes the server.
- *
- * STORAGE_ROOT is `./storage` by default — make sure docker-compose mounts
- * this as a named volume so media survives container restarts.
+ * Caps mirror Meta's documented per-type limits. Outbound uploads hit these
+ * BEFORE we touch Meta so a 100MB payload doesn't waste a round trip.
+ * Inbound is trusted but we cap defensively too — anything over the cap is
+ * dropped at the webhook before being sent to the blob provider.
  */
 
-const STORAGE_ROOT = process.env.MEDIA_STORAGE_PATH ?? path.resolve("./storage");
-
-// Hard caps mirror Meta's documented per-type limits. Outbound uploads hit
-// these on our side BEFORE we touch Meta so a 100MB payload doesn't waste a
-// round trip. Inbound is trusted but we cap defensively too.
 export const MEDIA_SIZE_CAPS: Record<MediaKind, number> = {
   image: 5 * 1024 * 1024,
   video: 16 * 1024 * 1024,
@@ -46,11 +35,6 @@ export function kindFromMime(mime: string): MediaKind {
     if (lower === prefix || lower.startsWith(prefix)) return kind;
   }
   return "document";
-}
-
-/** Filesystem-safe id sanitiser. */
-function safeId(s: string): string {
-  return s.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
 /** Pick a reasonable extension from a mime type. */
@@ -102,55 +86,5 @@ export function extFromMime(mime: string): string {
       if (slash > -1 && slash < m.length - 1) return m.slice(slash + 1).slice(0, 8);
       return "bin";
     }
-  }
-}
-
-export interface SavedMedia {
-  /** Absolute path on disk. */
-  path: string;
-  sizeBytes: number;
-}
-
-export async function saveMedia(
-  teamId: string,
-  key: string,
-  mimeType: string,
-  bytes: Uint8Array,
-): Promise<SavedMedia> {
-  const teamDir = path.join(STORAGE_ROOT, safeId(teamId));
-  await mkdir(teamDir, { recursive: true });
-  // Sanitize the extension too — `mimeType` comes from a user-supplied header
-  // (or a webhook payload), and `extFromMime`'s fallback echoes part of it.
-  // Without this, a mime like `x/..` would yield ext `..` and a path like
-  // `team_1/abc...`; not a traversal out of teamDir, but sloppy and a magnet
-  // for future bugs.
-  const ext = safeId(extFromMime(mimeType));
-  const filePath = path.join(teamDir, `${safeId(key)}.${ext}`);
-  await writeFile(filePath, bytes);
-  const s = await stat(filePath);
-  return { path: filePath, sizeBytes: s.size };
-}
-
-export async function readMedia(absolutePath: string): Promise<Buffer> {
-  // Path-traversal defence: refuse anything that isn't inside STORAGE_ROOT.
-  // STORAGE_ROOT is what we control; the message row stores the path we wrote
-  // ourselves, but a defective row (or future column-injection bug) shouldn't
-  // grant arbitrary file reads.
-  const resolved = path.resolve(absolutePath);
-  const root = path.resolve(STORAGE_ROOT);
-  if (!resolved.startsWith(root + path.sep)) {
-    throw new Error("media path outside storage root");
-  }
-  if (!existsSync(resolved)) {
-    throw new Error("media file missing");
-  }
-  return readFile(resolved);
-}
-
-export async function deleteMedia(absolutePath: string): Promise<void> {
-  try {
-    await unlink(absolutePath);
-  } catch {
-    // already gone — fine
   }
 }

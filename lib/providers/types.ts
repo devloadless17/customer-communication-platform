@@ -11,10 +11,11 @@ import type { MediaKind, MessageStatus, ProviderName } from "@/lib/types";
 /**
  * Reference to a media attachment as it exists on the provider side. The
  * webhook route resolves these by calling `provider.fetchMedia` with the
- * team's send config, then writes the bytes to disk before ingest.
+ * team's send config, then hands the bytes to `lib/blob-storage/` which
+ * returns the blob key + public URL the ingest pipeline persists.
  *
- * `localPath` + `sizeBytes` are filled in by the webhook route after the
- * download — parsers leave them undefined and ingest requires them.
+ * `storageKey` + `storageUrl` + `sizeBytes` are filled in by the webhook
+ * route after the upload — parsers leave them undefined; ingest requires them.
  */
 export interface NormalizedMediaRef {
   kind: MediaKind;
@@ -25,8 +26,10 @@ export interface NormalizedMediaRef {
   filename?: string;
   /** Audio + video duration if the provider includes it. */
   durationMs?: number;
-  /** Filled in after the webhook route saves the bytes to disk. */
-  localPath?: string;
+  /** Blob-storage provider key — used later for delete. */
+  storageKey?: string;
+  /** Public CDN URL the browser fetches via /api/media/[id]. */
+  storageUrl?: string;
   sizeBytes?: number;
 }
 

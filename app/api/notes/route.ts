@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket-server";
 import type { InternalNote } from "@/lib/types";
@@ -21,7 +21,9 @@ interface Body {
 }
 
 export async function POST(req: Request) {
-  const { user, teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { userId, teamId } = session;
 
   let raw: Body;
   try {
@@ -47,7 +49,7 @@ export async function POST(req: Request) {
   const created = await db.internalNote.create({
     data: {
       conversationId,
-      authorUserId: user.id,
+      authorUserId: userId,
       body,
     },
   });

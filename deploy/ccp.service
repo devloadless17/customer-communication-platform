@@ -1,0 +1,70 @@
+# systemd unit for the WhatsApp Multi-Agent Shared Inbox.
+#
+# CLAUDE.md "before pilot launch" item #1: systemd, NOT pm2. Single-VPS MVP —
+# systemd is already there, the unit is simpler than a pm2 ecosystem file,
+# and OOM / panic / manual bumps all get the same `Restart=on-failure` path.
+#
+# Install:
+#   1. Copy this file to /etc/systemd/system/ccp.service
+#   2. Edit User=, WorkingDirectory=, and EnvironmentFile= for your VPS
+#   3. systemctl daemon-reload
+#   4. systemctl enable --now ccp
+#   5. journalctl -u ccp -f      # follow logs
+#
+# This unit drives `docker compose up` (no detach) so systemd owns the
+# foreground process and tracks its real lifetime. `docker compose down` on
+# stop ensures the postgres/redis sidecars come down cleanly with the app.
+
+[Unit]
+Description=WhatsApp Multi-Agent Shared Inbox (ccp)
+Documentation=file:///opt/ccp/CLAUDE.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Runs as root by operator choice (solo pilot). Trade-off: a leaked
+# VPS_SSH_KEY or container escape lands as root instead of an unprivileged
+# `ccp` user. The deploy key in /root/.ssh/authorized_keys is restricted
+# to a single command (see deploy/README.md → "GitHub Actions deploy") to
+# bound that blast radius without a separate service user.
+WorkingDirectory=/opt/ccp
+
+# .env lives outside the working tree so a `git pull` can't accidentally
+# overwrite production secrets. The Compose file reads it via env substitution.
+EnvironmentFile=/etc/ccp.env
+
+# Node heap — kept consistent with package.json (CLAUDE.md notes the broadcast
+# runner + Socket.io fanout occasionally need the headroom in prod too).
+Environment=NODE_OPTIONS=--max-old-space-size=4096
+
+ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull
+ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up
+ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml down
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+# If anything kills the process — OOM, panic, manual bump — bring it back
+# in 3s. CLAUDE.md spec.
+Restart=on-failure
+RestartSec=3
+
+# A burst of crashes shouldn't loop forever — 5 restarts inside 60s kills
+# the unit so an operator notices instead of the loop quietly continuing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Hardening. We don't need filesystem write access beyond the working dir
+# and the docker socket.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+# Buffer logs through journald — `journalctl -u ccp` shows everything.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ccp
+
+[Install]
+WantedBy=multi-user.target

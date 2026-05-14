@@ -1,0 +1,89 @@
+# Continuous Integration — gates merges into main and dev.
+#
+# Runs on:
+#   - every push to main / dev (catches things that slipped through PR review)
+#   - every PR targeting main / dev (the actual merge gate; set this as a
+#     required check in Settings → Branches → branch protection rule)
+#
+# What it does:
+#   1) Install dependencies from package-lock.json (reproducible).
+#   2) `prisma generate` — proves the schema is internally consistent.
+#   3) `npm run typecheck` — strict TS.
+#   4) `npm run lint` — Next ESLint (no warnings turn into errors locally; CI is
+#      strictly informational on warn-level rules).
+#   5) `npm run build` — full Next production build. Catches anything that only
+#      surfaces in prod mode (force-dynamic misconfig, missing env shape, etc).
+#
+# What it deliberately does NOT do (yet):
+#   - No tests — CLAUDE.md says "Don't write tests yet unless I ask." When a
+#     test suite lands, add a `test` job here parallel to `build`.
+#   - No real Postgres/Redis services — prisma generate + next build are
+#     lazy w.r.t. connections. If a future build step ever ACTUALLY connects
+#     (e.g. static generation against the DB), spin up service containers
+#     here and point DATABASE_URL at them.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+# A new push to the same branch cancels the in-flight CI run. Saves minutes
+# on rapid-fire pushes; the final commit's CI is the one we care about.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Typecheck + lint + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Build-only env. PrismaClient + IORedis construction is lazy — they
+    # don't reach out to a real DB/broker — so a placeholder URL satisfies
+    # the constructors without making the build flaky on transient outages.
+    # validateEnv() in lib/env.ts is only called from server.ts at runtime,
+    # so CI never trips its fail-fast path.
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/ci?schema=public
+      REDIS_URL: redis://localhost:6379
+      NEXTAUTH_SECRET: ci-only-placeholder-not-a-real-secret-please
+      AUTH_SECRET: ci-only-placeholder-not-a-real-secret-please
+      NEXTAUTH_URL: http://localhost:3000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Match the Dockerfile (node:22-alpine). Drifting the CI Node
+          # version from prod Node is a recipe for "works in CI, breaks on
+          # the VPS" surprises.
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        # `npm ci` is strict-mode `npm install` — fails fast if package-lock
+        # is out of sync. Skips the prisma generate postinstall hook here
+        # because we run it as an explicit step below for clearer failures.
+        run: npm ci --ignore-scripts
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        # `next lint` exit code is non-zero on errors only (warnings pass).
+        # Promote a warning to an error in eslint config if you want it to
+        # block merges.
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

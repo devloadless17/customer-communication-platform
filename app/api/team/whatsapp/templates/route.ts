@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { getSession } from "@/lib/current-user";
+import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -24,7 +24,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
   // Two queries in parallel: the catalog rows + a quick check on whether the
   // team has a WABA id configured. The picker uses `hasWabaId` to decide
   // between the "go set up your WABA" nudge and the "click refresh / no
@@ -52,7 +54,9 @@ export async function GET() {
  * (upsert by `(teamId, name, language)`).
  */
 export async function POST() {
-  const { teamId } = await getSession();
+  const session = await requireSession();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
 
   let config;
   try {

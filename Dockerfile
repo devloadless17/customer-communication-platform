@@ -43,6 +43,17 @@ COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 USER nextjs
 EXPOSE 3000
 
+# Container-level liveness probe. `node --eval` keeps the image lean — no
+# wget/curl install. Hits /api/health which checks Postgres + Redis. Docker
+# marks the container "unhealthy" after consecutive failures; docker-compose
+# `depends_on: service_healthy` blocks dependents until it goes green.
+#
+# 30s start period gives Prisma migrate + Next prepare time to finish on
+# first boot. After that the 10s/3s/3-retry cadence is tight enough to spot
+# a hung worker within 30s.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+  CMD node --eval "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
 # Migrations run on container start so a fresh deploy auto-applies any new
 # schema changes. Single-node MVP — revisit when we scale out in Phase 2.
 CMD ["sh", "-c", "npx prisma migrate deploy && npx tsx server.ts"]

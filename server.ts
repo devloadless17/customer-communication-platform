@@ -19,9 +19,15 @@ import { parse } from "node:url";
 import next from "next";
 
 import { db } from "./lib/db";
+import { validateEnv } from "./lib/env";
 import { initSocketServer } from "./lib/socket-server";
 import { startAutomationWorker, stopAutomationWorker } from "./lib/automations/worker";
 import { closeAutomationQueue } from "./lib/automations/queue";
+
+// Fail-fast on missing required env vars BEFORE Next prepares the build
+// graph or Prisma opens a pool. systemd restarts on exit(1), so a missing
+// secret produces a clean log + exit instead of a half-booted process.
+validateEnv();
 
 /**
  * Broadcasts run in-process via `setImmediate` (see lib/broadcast-runner.ts),

@@ -3,11 +3,8 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth-helpers";
 import { db } from "@/lib/db";
-import {
-  MEDIA_SIZE_CAPS,
-  kindFromMime,
-  saveMedia,
-} from "@/lib/media-storage";
+import { blobStorage } from "@/lib/blob-storage";
+import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
 import { getMetaSendConfig } from "@/lib/providers/config";
 import { metaProvider } from "@/lib/providers/meta";
 import { MetaSendError } from "@/lib/providers/meta";
@@ -26,8 +23,9 @@ import type { MediaAttachment, Message } from "@/lib/types";
  *   2) Validate size + classify into a MediaKind from the mime type
  *   3) Upload bytes to Meta /media → mediaId
  *   4) POST /messages with the mediaId
- *   5) Save bytes to disk so the bubble can render them locally without
- *      asking Meta for the same media id again
+ *   5) Upload the same bytes to our blob provider (UploadThing today) so the
+ *      bubble can render the file without asking Meta for it again — Meta's
+ *      mediaId is single-use anyway.
  *   6) Insert message row + bump conversation + emit message:new
  */
 
@@ -161,9 +159,29 @@ export async function POST(req: Request) {
     throw err;
   }
 
-  // 3) Persist the bytes locally so we can render the bubble without going
-  // back to Meta. Saved keyed on the wamid Meta returned.
-  const saved = await saveMedia(session.teamId, send.externalId, mimeType, bytes);
+  // 3) Persist the bytes in our blob provider so we can render the bubble
+  //    without going back to Meta. Keyed by the wamid Meta returned. The
+  //    filename context lets us scan the UploadThing dashboard and tell who
+  //    sent what to whom.
+  const teamRow = await db.team.findUnique({
+    where: { id: session.teamId },
+    select: { name: true },
+  });
+  const saved = await blobStorage.upload({
+    bytes,
+    mimeType,
+    kind,
+    context: {
+      teamId: session.teamId,
+      teamSlug: teamRow?.name,
+      direction: "out",
+      contactPhone: conversation.contact.phoneNumber,
+      contactName: conversation.contact.name,
+      conversationId,
+      externalId: send.externalId,
+      originalFilename: filename,
+    },
+  });
 
   // 4) DB row + conversation summary.
   const previewBody = (caption || mediaPreview(kind)).slice(0, 200);
@@ -181,7 +199,8 @@ export async function POST(req: Request) {
       rawPayload: { sentVia: "api/messages/media", mediaId } as Prisma.InputJsonValue,
       timestamp: receivedAt,
       mediaKind: kind,
-      mediaPath: saved.path,
+      mediaKey: saved.key,
+      mediaUrl: saved.url,
       mediaMimeType: mimeType,
       mediaCaption: caption || null,
       mediaFilename: kind === "document" ? filename : null,
