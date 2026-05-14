@@ -56,4 +56,8 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
 
 # Migrations run on container start so a fresh deploy auto-applies any new
 # schema changes. Single-node MVP — revisit when we scale out in Phase 2.
-CMD ["sh", "-c", "npx prisma migrate deploy && npx tsx server.ts"]
+#
+# bootstrap-admin runs between migrate + server: idempotent upsert of the
+# superAdmin user from SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD env vars.
+# No-op locally where those vars aren't set. See prisma/bootstrap-admin.ts.
+CMD ["sh", "-c", "npx prisma migrate deploy && npx tsx prisma/bootstrap-admin.ts && npx tsx server.ts"]

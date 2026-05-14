@@ -100,6 +100,8 @@ jobs:
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
+          SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -110,6 +112,7 @@ jobs:
                      POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD \
                      APP_DOMAIN ADMIN_EMAIL \
                      NEXTAUTH_SECRET UPLOADTHING_TOKEN \
+                     SUPER_ADMIN_EMAIL SUPER_ADMIN_PASSWORD \
                      VPS_HOST VPS_USER VPS_SSH_KEY HEALTHCHECK_URL; do
             if [ -z "${!var:-}" ]; then
               echo "✗ secret $var is missing or empty"
@@ -126,6 +129,9 @@ jobs:
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
+          SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
+          SUPER_ADMIN_NAME: ${{ secrets.SUPER_ADMIN_NAME }}
           APP_IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
           set -euo pipefail
@@ -155,6 +161,13 @@ jobs:
           AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0
+
+          # --- Bootstrap superAdmin (read by prisma/bootstrap-admin.ts on
+          #     container start). Rotating the password here + redeploying
+          #     rotates the live password.
+          SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL}
+          SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD}
+          SUPER_ADMIN_NAME=${SUPER_ADMIN_NAME}
           EOF
           chmod 644 .env
 

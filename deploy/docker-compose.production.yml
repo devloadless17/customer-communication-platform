@@ -87,5 +87,11 @@ services:
       UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
       AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      # Read by prisma/bootstrap-admin.ts on container start (between
+      # migrate deploy and server boot). Source of truth for the superAdmin
+      # login — rotate by changing the GitHub Secret and redeploying.
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-}
     ports:
       - "${APP_PORT:-3000}:3000"

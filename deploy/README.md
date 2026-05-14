@@ -121,9 +121,19 @@ POSTGRES_USER         app
 POSTGRES_PASSWORD     (openssl rand -hex 32)
 NEXTAUTH_SECRET       (openssl rand -base64 32)
 UPLOADTHING_TOKEN     (from UploadThing dashboard)
+
+SUPER_ADMIN_EMAIL     you@loadless.ai
+SUPER_ADMIN_PASSWORD  (strong password — bcrypt-hashed at container start)
+SUPER_ADMIN_NAME      (optional — display name, defaults to email's local part)
 ```
 
-13 total.
+15 required + 1 optional. The `SUPER_ADMIN_*` secrets are the source of
+truth for the platform-root login. `prisma/bootstrap-admin.ts` runs on
+every container start (between `prisma migrate deploy` and the server)
+and upserts that user with the hashed password. **Rotating the password
+in GitHub Secrets and redeploying rotates the live password** — predictable
+but it also means changing the password from inside the UI will be reset
+on the next deploy. Acceptable trade-off for declarative secrets.
 
 ### One-shot to set them all (after you have the values)
 
@@ -152,6 +162,11 @@ gh secret set NEXTAUTH_SECRET   --repo "$REPO" --body "$(openssl rand -base64 32
 
 # Blob storage
 gh secret set UPLOADTHING_TOKEN --repo "$REPO" --body "<your-uploadthing-token>"
+
+# SuperAdmin bootstrap (auto-upserted by prisma/bootstrap-admin.ts on every deploy)
+gh secret set SUPER_ADMIN_EMAIL    --repo "$REPO" --body "you@loadless.ai"
+gh secret set SUPER_ADMIN_PASSWORD --repo "$REPO" --body "$(openssl rand -base64 24)"
+gh secret set SUPER_ADMIN_NAME     --repo "$REPO" --body "Your Name"   # optional
 
 # Clean up the GHCR pull token if you set it for the previous iteration —
 # no longer used now that we pull from Docker Hub.
