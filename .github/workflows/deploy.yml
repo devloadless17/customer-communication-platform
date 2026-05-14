@@ -79,7 +79,6 @@ jobs:
           SUPER_ADMIN_NAME: ${{ secrets.SUPER_ADMIN_NAME }}
         run: |
           set -euo pipefail
-          umask 077
           mkdir -p _deploy
           cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
