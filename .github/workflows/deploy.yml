@@ -23,11 +23,20 @@
 
 name: Deploy
 
+# Fires AFTER the CI workflow completes successfully on main. The previous
+# shape (push: branches: [main]) made CI and Deploy race in parallel — a
+# broken build on main would still trigger an SSH attempt and burn cycles.
+# `workflow_run` gates on the CI run conclusion so deploy only attempts a
+# VPS restart if typecheck + build went green first.
+#
+# Manual re-runs (workflow_dispatch) bypass the gate, which is what you
+# want for "redeploy after rotating a secret" — code didn't change, no
+# point re-running CI.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
-  # Manual re-run from the Actions tab — useful for redeploying after
-  # rotating a secret without an empty commit.
   workflow_dispatch:
 
 # Serialize deploys: never run two restarts at once, and don't cancel one
@@ -41,6 +50,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Skip if CI didn't pass. workflow_run fires on ANY conclusion (success,
+    # failure, cancelled) — we only proceed on success. workflow_dispatch
+    # runs always (no triggering workflow to check).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout
