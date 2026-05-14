@@ -20,7 +20,7 @@ import next from "next";
 
 import { db } from "./lib/db";
 import { validateEnv } from "./lib/env";
-import { initSocketServer } from "./lib/socket-server";
+import { initSocketServer } from "./lib/socket/server";
 import { startAutomationWorker, stopAutomationWorker } from "./lib/automations/worker";
 import { closeAutomationQueue } from "./lib/automations/queue";
 

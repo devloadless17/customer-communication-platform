@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import {
   getAudienceGroup,
   listContactFieldDefinitions,

@@ -3,12 +3,12 @@ import "server-only";
 import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
-import { hashToken, looksLikeApiKey } from "@/lib/api-key";
+import { hashToken, looksLikeApiKey } from "@/lib/auth/api-key";
 
 /**
  * Bearer-token auth for /api/external/v1.
  *
- * Pattern mirrors lib/auth-helpers.ts: callers do
+ * Pattern mirrors lib/auth/helpers.ts: callers do
  *
  *   const auth = await authenticateApiKey(req);
  *   if (auth instanceof NextResponse) return auth;

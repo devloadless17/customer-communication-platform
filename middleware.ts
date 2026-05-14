@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
 
-import { authConfig } from "@/lib/auth.config";
+import { authConfig } from "@/lib/auth/config";
 import { rateLimit } from "@/lib/rate-limit";
 
 const { auth } = NextAuth(authConfig);
@@ -91,7 +91,7 @@ export default auth((req) => {
     pathname === "/api/health" ||
     // External API uses bearer-token auth (TeamApiKey), not session cookies —
     // bypass the cookie gate so n8n / partner integrations can reach it. The
-    // route handler does its own authentication via lib/external-auth.ts.
+    // route handler does its own authentication via lib/auth/external.ts.
     pathname.startsWith("/api/external/") ||
     // Server actions for registration / invite acceptance run as POSTs to
     // these page routes; auth() returns null until the action signs the user

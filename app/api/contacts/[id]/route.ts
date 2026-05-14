@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type { Contact } from "@/lib/types";
 
 /**

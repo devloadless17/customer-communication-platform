@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 
-import { getClientSocket } from "@/lib/socket-client";
+import { getClientSocket } from "@/lib/socket/client";
 import type { ConversationWithRefs, CursorPage, Message } from "@/lib/types";
 
 export interface ConversationEventsState {

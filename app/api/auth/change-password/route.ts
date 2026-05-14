@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import {
   hashPassword,
   isPasswordBreached,
   validatePasswordStructure,
   verifyPassword,
-} from "@/lib/password";
+} from "@/lib/auth/password";
 
 /**
  * Self-service password change. Requires the current password to prevent a

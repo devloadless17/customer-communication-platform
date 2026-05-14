@@ -3,10 +3,10 @@
 **Pattern: build in CI, pull from Docker Hub on the VPS.** The VPS holds no
 source code — only config files.
 
-Every deploy:
+Every deploy is one workflow (`.github/workflows/deploy.yml`):
 
-1. CI runs (typecheck + Next build).
-2. On CI success, `.github/workflows/deploy.yml`:
+1. `typecheck` job — `npm ci`, `prisma generate`, `tsc --noEmit`. Runs on every push and PR.
+2. `deploy` job — runs only on push to `main` (or manual `workflow_dispatch`). Needs typecheck to pass.
    - builds the Docker image
    - tags it `${DOCKER_USERNAME}/customer-communication-platform:sha-<commit>` and `:latest`
    - pushes to Docker Hub
@@ -35,9 +35,9 @@ Every deploy:
 That's it. Four files.
 
 ```
-/root/docker-compose.yml      ← shipped verbatim from deploy/docker-compose.production.yml
-/root/.env                    ← rendered by CI from GitHub Secrets
-/etc/caddy/Caddyfile          ← rendered by CI from deploy/Caddyfile.template
+/root/docker-compose.yml      ← shipped verbatim from ./docker-compose.yml
+/root/.env                    ← rendered by the workflow from GitHub Secrets
+/etc/caddy/Caddyfile          ← rendered from deploy/Caddyfile.template
 /etc/systemd/system/ccp.service  ← copied from deploy/ccp.service
 ```
 
@@ -55,8 +55,9 @@ These live under `/var/lib/docker/volumes/`. Wipe them with
 
 | Branch | Purpose | Trigger |
 |---|---|---|
-| `main` | Production. Tracks `central.loadless.site` exactly. | Push → CI → Deploy |
-| `dev` | Integration. PRs target here. | Push → CI only |
+| `main` | Production. Tracks `central.loadless.site` exactly. | PR → typecheck. Merge → typecheck + deploy. |
+
+(Once you add a `dev` branch, extend the workflow's `push:` + `pull_request:` branch list.)
 
 ---
 
@@ -178,7 +179,7 @@ gh secret delete GHCR_PULL_TOKEN --repo "$REPO" 2>/dev/null || true
 Repo Settings → Branches → Add rule for `main`:
 
 - ✅ Require a pull request before merging
-- ✅ Require status checks to pass (select CI)
+- ✅ Require status checks to pass (select `typecheck` from the Deploy workflow)
 - ✅ Require branches to be up to date
 - ✅ Do not allow bypassing
 
@@ -187,11 +188,11 @@ Repo Settings → Branches → Add rule for `main`:
 # Day-to-day deploys
 
 ```bash
-git checkout dev
+git checkout -b feat/whatever
 # … work …
-git push origin dev                      # CI checks only
-# Open PR dev → main on GitHub, merge it.
-# CI runs, then Deploy fires automatically.
+git push -u origin feat/whatever         # typecheck runs on the PR
+# Open PR → main on GitHub, merge it.
+# Merge triggers the same workflow: typecheck + deploy.
 ```
 
 Manual redeploy: GitHub → Actions → **Deploy** → **Run workflow** → main.
@@ -232,20 +233,17 @@ Docker for the app.
 npm run prod:local                       # docker compose up --build
 ```
 
-Uses the LOCAL `docker-compose.yml` (which has `build: .`) — building the
-same Dockerfile that CI builds in prod. Same Postgres 16.6, same Redis 7.4,
-same env shape.
-
-The compose file at `deploy/docker-compose.production.yml` is intentionally
-different — it has `image: ${DOCKER_USERNAME}/…` and gets shipped to the
-VPS. Locally we build; in prod we pull.
+Uses the single `docker-compose.yml` (which has both `image:` and `build:`).
+Locally, `--build` builds the image with the tag `local/customer-communication-platform:latest`
+and runs it. In production, the workflow ships the same file to `/root/docker-compose.yml`
+and the VPS pulls the prebuilt image instead of building.
 
 | | Local (`prod:local`) | Production |
 |---|---|---|
-| Compose file | `./docker-compose.yml` (build:) | `/root/docker-compose.yml` (image:) |
+| Compose file | `./docker-compose.yml` (run with `--build`) | `/root/docker-compose.yml` (shipped from this same file) |
 | Image source | Built from your working tree | Pulled from Docker Hub |
 | Reverse proxy | None — hit `http://localhost:3000` | Caddy with HTTPS |
-| Secrets file | `.env` in repo (gitignored) | `/root/.env` (CI-rendered) |
+| Secrets file | `.env` in repo (gitignored) | `/root/.env` (workflow-rendered) |
 
 If `prod:local` works but the VPS deploy fails, the diff is in one of
 those four rows.
@@ -267,12 +265,11 @@ Database migrations do NOT auto-revert — fix forward.
 
 # Bumping image versions for Postgres / Redis
 
-`deploy/docker-compose.production.yml` pins both. To bump:
+`docker-compose.yml` pins both. To bump:
 
-1. Edit the `image:` line in `deploy/docker-compose.production.yml`.
-2. Mirror in `docker-compose.yml` (the local dev one).
-3. `npm run prod:local` — verify nothing broke.
-4. PR `dev` → `main`, merge.
+1. Edit the `image:` line for `postgres` or `redis` in `docker-compose.yml`.
+2. `npm run prod:local` — verify nothing broke.
+3. Open a PR to `main`, merge.
 
 # Security note: root deploy
 

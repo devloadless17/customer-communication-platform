@@ -5,7 +5,7 @@ import { AuthError } from "next-auth";
 
 import { signIn } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/password";
+import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/auth/password";
 
 /**
  * Org self-signup. Creates a brand-new Team + admin User in one transaction

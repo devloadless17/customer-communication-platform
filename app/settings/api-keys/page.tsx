@@ -1,8 +1,8 @@
 import { redirect } from "next/navigation";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
-import { canManageUsers } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/auth/permissions";
 
 import { ApiKeysManager } from "@/components/settings/api-keys-manager";
 

@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
-import { getSession } from "@/lib/current-user";
-import { canManageStages } from "@/lib/permissions";
+import { getSession } from "@/lib/auth/current-user";
+import { canManageStages } from "@/lib/auth/permissions";
 import { listContactStages } from "@/lib/queries";
 import { db } from "@/lib/db";
 

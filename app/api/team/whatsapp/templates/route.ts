@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";

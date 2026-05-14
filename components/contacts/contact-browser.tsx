@@ -3,15 +3,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Loader2, Plus, Search, X } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { WindowBadge } from "@/components/inbox/window-badge";
 import { TagChip } from "@/components/tags/tag-chip";
-import { avatarGradient } from "@/lib/avatar-color";
-import { tagColorClasses } from "@/lib/tag-colors";
-import { cn, formatPhone, initials } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type {
   ContactFieldDefinition,
   ContactListItem,
@@ -20,6 +15,13 @@ import type {
   CursorPage,
   Tag,
 } from "@/lib/types";
+
+import { BrowserRow } from "./contact-browser/browser-row";
+import { Chip } from "./contact-browser/chip";
+import { FieldFilterRow, type FieldFilter } from "./contact-browser/field-filter-row";
+import { StageFilterControl, type StageFilter } from "./contact-browser/stage-filter-control";
+
+export type { FieldFilter, StageFilter };
 
 /**
  * The one and only contact-browsing surface.
@@ -50,16 +52,6 @@ import type {
 export type SourceFilter = "all" | ContactSource;
 /** 24h customer-service window filter. "any" = no filter. */
 export type WindowFilter = "any" | "open" | "closed";
-/**
- * Lifecycle stage filter. `"any"` = no filter, `"none"` = contacts with no
- * stage (orphaned after a stage delete), otherwise the stage id.
- */
-export type StageFilter = "any" | "none" | string;
-
-export interface FieldFilter {
-  key: string;
-  value: string;
-}
 
 export interface ContactListFilters {
   search: string;
@@ -348,83 +340,6 @@ export function ContactFilterBar({
 }
 
 /**
- * Compact chip-row for the stage filter. Mirrors the source/window-filter
- * chip pattern — one chip per stage plus an "Any" and "No stage" option.
- * Stages cap at ~30 per team so a flat row is fine; if the list outgrows
- * the viewport the row wraps onto a new line via flex-wrap.
- */
-function StageFilterControl({
-  stages,
-  value,
-  onChange,
-}: {
-  stages: ContactStage[];
-  value: StageFilter;
-  onChange: (next: StageFilter) => void;
-}) {
-  const sorted = useMemo(
-    () => [...stages].sort((a, b) => a.position - b.position),
-    [stages],
-  );
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-      <span className="text-muted-foreground">Stage:</span>
-      <Chip active={value === "any"} onClick={() => onChange("any")} label="Any" />
-      {sorted.map((s) => {
-        const colors = tagColorClasses(s.color);
-        const active = value === s.id;
-        return (
-          <button
-            key={s.id}
-            type="button"
-            onClick={() => onChange(s.id)}
-            className={cn(
-              "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition",
-              active
-                ? cn("border-transparent", colors.chip)
-                : "border-border text-muted-foreground hover:bg-accent",
-            )}
-          >
-            <span className={cn("size-1.5 shrink-0 rounded-full", colors.solid)} />
-            <span>{s.name}</span>
-          </button>
-        );
-      })}
-      <Chip
-        active={value === "none"}
-        onClick={() => onChange("none")}
-        label="No stage"
-      />
-    </div>
-  );
-}
-
-function Chip({
-  active,
-  onClick,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "rounded-full border px-2 py-0.5 transition",
-        active
-          ? "border-primary bg-primary/10 text-foreground"
-          : "border-border text-muted-foreground hover:bg-accent",
-      )}
-    >
-      {label}
-    </button>
-  );
-}
-
-/**
  * Search-as-you-type tag selector: shows the chosen tag chips inline plus an
  * "Add tag" button that opens a small popover. Pick from the available tags;
  * picked ones become removable chips. No tag creation here — that lives where
@@ -558,87 +473,6 @@ export function TagFilterControl({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function FieldFilterRow({
-  fieldDefinitions,
-  value,
-  onChange,
-}: {
-  fieldDefinitions: ContactFieldDefinition[];
-  value: FieldFilter | null;
-  onChange: (next: FieldFilter | null) => void;
-}) {
-  const [openKey, setOpenKey] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-
-  function startEditing(key: string) {
-    setOpenKey(key);
-    setDraft(value?.key === key ? value.value : "");
-  }
-
-  function commit() {
-    if (!openKey) return;
-    const trimmed = draft.trim();
-    onChange(trimmed ? { key: openKey, value: trimmed } : null);
-    setOpenKey(null);
-  }
-
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-      <span className="text-muted-foreground">Filter:</span>
-      {fieldDefinitions.map((def) => {
-        const active = value?.key === def.key;
-        if (openKey === def.key) {
-          return (
-            <Input
-              key={def.id}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onBlur={commit}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  commit();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  setOpenKey(null);
-                }
-              }}
-              placeholder={`${def.label} contains…`}
-              autoFocus
-              className="h-7 w-44 text-xs"
-            />
-          );
-        }
-        return (
-          <button
-            key={def.id}
-            type="button"
-            onClick={() => startEditing(def.key)}
-            className={cn(
-              "flex items-center gap-1 rounded-full border px-2 py-0.5 transition",
-              active
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border text-muted-foreground hover:bg-accent",
-            )}
-          >
-            <span>{def.label}</span>
-            {active && <span className="font-medium text-foreground">: {value?.value}</span>}
-            {active && (
-              <X
-                className="size-3"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChange(null);
-                }}
-              />
-            )}
-          </button>
-        );
-      })}
     </div>
   );
 }
@@ -805,103 +639,5 @@ export function ContactBrowser({
         )}
       </div>
     </div>
-  );
-}
-
-function BrowserRow({
-  item,
-  fieldDefinitions,
-  tagById,
-  stageById,
-  selected,
-  onSelectChange,
-}: {
-  item: ContactListItem;
-  fieldDefinitions: ContactFieldDefinition[];
-  tagById: Map<string, Tag>;
-  stageById: Map<string, ContactStage>;
-  selected: boolean;
-  onSelectChange: (next: boolean) => void;
-}) {
-  const { contact, lastInboundAt } = item;
-  const filledFields = fieldDefinitions
-    .map((def) => ({ def, value: contact.customFields[def.key] }))
-    .filter((f): f is { def: ContactFieldDefinition; value: string } => Boolean(f.value));
-  const contactTags = (contact.tagIds ?? [])
-    .map((id) => tagById.get(id))
-    .filter((t): t is Tag => Boolean(t));
-  const stage = contact.stageId ? stageById.get(contact.stageId) ?? null : null;
-  const label = contact.name || formatPhone(contact.phoneNumber);
-
-  return (
-    <li>
-      <label
-        className={cn(
-          "flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/40",
-          selected && "bg-primary/5 hover:bg-primary/5",
-        )}
-      >
-        <input
-          type="checkbox"
-          className="size-4 shrink-0 cursor-pointer accent-primary"
-          checked={selected}
-          onChange={(e) => onSelectChange(e.target.checked)}
-          aria-label={`Select ${label}`}
-        />
-        <Avatar className="size-8 shrink-0">
-          <AvatarFallback
-            className="text-xs text-white"
-            style={{ backgroundImage: avatarGradient(contact.id) }}
-          >
-            {initials(contact.name || contact.phoneNumber)}
-          </AvatarFallback>
-        </Avatar>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">{label}</span>
-            <span className="font-mono text-[11px] text-muted-foreground">
-              {formatPhone(contact.phoneNumber)}
-            </span>
-          </div>
-          {(contact.email || contact.location || filledFields.length > 0) && (
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-              {contact.email && <span className="truncate">{contact.email}</span>}
-              {contact.location && <span className="truncate">{contact.location}</span>}
-              {filledFields.map(({ def, value }) => (
-                <Badge key={def.id} variant="muted" className="text-[10px]">
-                  <span className="opacity-60">{def.label}:</span>
-                  <span className="ml-1">{value}</span>
-                </Badge>
-              ))}
-            </div>
-          )}
-          {contactTags.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {contactTags.map((t) => (
-                <TagChip key={t.id} tag={t} size="xs" />
-              ))}
-            </div>
-          )}
-        </div>
-        {stage && (
-          <span
-            className={cn(
-              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] sm:inline-flex",
-              tagColorClasses(stage.color).chip,
-            )}
-            title={`Stage: ${stage.name}`}
-          >
-            <span
-              className={cn(
-                "size-1.5 shrink-0 rounded-full",
-                tagColorClasses(stage.color).solid,
-              )}
-            />
-            {stage.name}
-          </span>
-        )}
-        <WindowBadge lastInboundAt={lastInboundAt} size="xs" className="hidden shrink-0 sm:inline-flex" />
-      </label>
-    </li>
   );
 }

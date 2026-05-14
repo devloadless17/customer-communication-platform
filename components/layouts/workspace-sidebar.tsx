@@ -28,9 +28,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { signOutAction } from "@/lib/actions/auth";
-import { roleLabel } from "@/lib/permissions";
-import { closeClientSocket } from "@/lib/socket-client";
+import { signOutAction } from "@/lib/auth/actions";
+import { roleLabel } from "@/lib/auth/permissions";
+import { closeClientSocket } from "@/lib/socket/client";
 import { cn, initials } from "@/lib/utils";
 import type { Team, User } from "@/lib/types";
 

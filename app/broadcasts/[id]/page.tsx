@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
 
 import { BroadcastDetail, type BroadcastDetailDto } from "./broadcast-detail";

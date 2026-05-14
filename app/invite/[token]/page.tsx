@@ -1,8 +1,8 @@
 import { MessageSquareText } from "lucide-react";
 
 import { db } from "@/lib/db";
-import { hashInviteToken } from "@/lib/invite-token";
-import { roleLabel } from "@/lib/permissions";
+import { hashInviteToken } from "@/lib/auth/invite-token";
+import { roleLabel } from "@/lib/auth/permissions";
 
 import { AcceptForm } from "./accept-form";
 

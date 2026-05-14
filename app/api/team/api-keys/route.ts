@@ -2,9 +2,9 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
-import { generateApiKey } from "@/lib/api-key";
+import { generateApiKey } from "@/lib/auth/api-key";
 
 /**
  * Team API key management.

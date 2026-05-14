@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
 import { listContactFieldDefinitions } from "@/lib/queries";
 import type { TemplateDto } from "@/lib/types";

@@ -4,10 +4,10 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 
 import { db } from "@/lib/db";
-import { verifyPassword } from "@/lib/password";
+import { verifyPassword } from "@/lib/auth/password";
 import { clearFailures, isLockedOut, recordFailure } from "@/lib/rate-limit";
 
-import { authConfig } from "./auth.config";
+import { authConfig } from "./config";
 
 /**
  * Full NextAuth config — Node runtime only. Adds the Credentials provider that
@@ -15,7 +15,7 @@ import { authConfig } from "./auth.config";
  *
  * Anything outside middleware imports `auth`/`signIn`/`signOut` from here.
  * The shared edge-safe pieces (callbacks, pages, session strategy) live in
- * lib/auth.config.ts.
+ * lib/auth/config.ts.
  */
 
 /** Lock an account after this many failed password attempts within the window. */

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { parseCsv } from "@/lib/csv";
 import { db } from "@/lib/db";
 import { normalizePhoneE164 } from "@/lib/phone";

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { ArrowLeft, Building2, ShieldCheck } from "lucide-react";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 
 /**
  * Super-admin shell. Gates access at the layout level so every page under

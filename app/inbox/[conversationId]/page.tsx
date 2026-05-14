@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import {
   getConversationWithRefs,
   listContactFieldDefinitions,
@@ -8,7 +8,7 @@ import {
   listTags,
   listTeamMembers,
 } from "@/lib/queries";
-import { canManageContactFields, canManageStages } from "@/lib/permissions";
+import { canManageContactFields, canManageStages } from "@/lib/auth/permissions";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactPanel } from "@/components/inbox/contact-panel";
 

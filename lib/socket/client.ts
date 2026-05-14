@@ -6,7 +6,7 @@ import {
   SOCKET_PATH,
   type ClientToServerEvents,
   type ServerToClientEvents,
-} from "@/lib/socket-events";
+} from "@/lib/socket/events";
 
 export type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 

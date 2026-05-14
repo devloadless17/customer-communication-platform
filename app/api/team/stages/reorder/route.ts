@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
-import { canManageStages } from "@/lib/permissions";
+import { canManageStages } from "@/lib/auth/permissions";
 
 /**
  * Bulk-reorder the team's stage catalog.

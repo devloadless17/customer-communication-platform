@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { TAG_COLORS, type TagColor } from "@/lib/types";
 

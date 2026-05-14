@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { listAudienceGroups, listTags } from "@/lib/queries";
 
 import { GroupRow } from "./group-row";

@@ -2,9 +2,9 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { authenticateApiKey } from "@/lib/external-auth";
+import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 
 /**
  * POST /api/external/v1/conversations/[id]/notes

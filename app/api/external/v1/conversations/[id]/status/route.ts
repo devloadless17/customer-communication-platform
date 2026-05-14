@@ -3,9 +3,9 @@ import "server-only";
 import { NextResponse } from "next/server";
 
 import { dispatch } from "@/lib/automations/dispatcher";
-import { authenticateApiKey } from "@/lib/external-auth";
+import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type { ConversationStatus } from "@/lib/types";
 
 /**

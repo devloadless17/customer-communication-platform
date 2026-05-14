@@ -2,9 +2,9 @@
 #
 # Drives `docker compose up` against /root/docker-compose.yml — the only
 # config file on the VPS (along with /root/.env). The image itself is pulled
-# from GHCR by the deploy workflow before this unit ever restarts; systemd's
-# job is just to keep the containers alive across reboots and restart them
-# on demand.
+# from Docker Hub by the deploy workflow before this unit ever restarts;
+# systemd's job is just to keep the containers alive across reboots and
+# restart them on demand.
 #
 # Install:
 #   1. Copied automatically by .github/workflows/deploy.yml on every push to main.

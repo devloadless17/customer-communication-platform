@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
@@ -11,7 +11,7 @@ import {
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@/lib/providers/types";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type { Message } from "@/lib/types";
 
 /**

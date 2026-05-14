@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
-import { assignableRoles, canModifyUser } from "@/lib/permissions";
+import { assignableRoles, canModifyUser } from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
 
 /**

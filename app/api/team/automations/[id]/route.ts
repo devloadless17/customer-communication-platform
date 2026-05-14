@@ -3,7 +3,7 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { parseWebhookConfig, ActionConfigError } from "@/lib/automations/actions/webhook";
 import { validateConditions } from "@/lib/automations/conditions";

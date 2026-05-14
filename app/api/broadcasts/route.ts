@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { startBroadcast } from "@/lib/broadcast-runner";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";

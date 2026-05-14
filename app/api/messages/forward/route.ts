@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
 import { getConversationWithRefs } from "@/lib/queries";
@@ -11,7 +11,7 @@ import {
   getMetaSendConfig,
   ProviderNotConfiguredError,
 } from "@/lib/providers/config";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type {
   ConversationWithRefs,
   ForwardResult,

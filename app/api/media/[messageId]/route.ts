@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 

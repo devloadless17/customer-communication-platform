@@ -1,5 +1,5 @@
 // Note: no `server-only` import — server.ts loads this on boot, outside the
-// Next bundler context. Same convention as lib/socket-server.ts.
+// Next bundler context. Same convention as lib/socket/server.ts.
 
 import { Worker, type Job } from "bullmq";
 

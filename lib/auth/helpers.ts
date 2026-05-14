@@ -2,9 +2,9 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { loadActiveUser } from "@/lib/active-user";
+import { loadActiveUser } from "@/lib/auth/active-user";
 import { auth } from "@/lib/auth";
-import { canManageUsers } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
 
 /**
@@ -35,7 +35,7 @@ export async function requireSession(): Promise<ApiSession | NextResponse> {
   // Re-check the DB so an admin who just deactivated a user can't be served
   // for the remaining lifetime of that user's JWT. Cheap and important —
   // without this, deactivation is up to 14 days late for API routes.
-  // (Pages already do this via lib/current-user.ts → getSession.)
+  // (Pages already do this via lib/auth/current-user.ts → getSession.)
   const user = await loadActiveUser(session.user.id);
   if (!user) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

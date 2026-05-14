@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 
 /**

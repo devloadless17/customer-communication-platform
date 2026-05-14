@@ -10,8 +10,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { getSession } from "@/lib/current-user";
-import { canManageStages, canManageUsers } from "@/lib/permissions";
+import { getSession } from "@/lib/auth/current-user";
+import { canManageStages, canManageUsers } from "@/lib/auth/permissions";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";

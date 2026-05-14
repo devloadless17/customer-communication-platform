@@ -13,7 +13,7 @@ import {
   type InterServerEvents,
   type ServerToClientEvents,
   type SocketData,
-} from "@/lib/socket-events";
+} from "@/lib/socket/events";
 import type { Role } from "@/lib/types";
 
 export type IO = IOServer<

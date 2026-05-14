@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { lookupContacts } from "@/lib/queries";
 
 /**

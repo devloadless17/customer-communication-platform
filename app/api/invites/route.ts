@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
-import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/lib/invite-token";
-import { assignableRoles } from "@/lib/permissions";
+import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/lib/auth/invite-token";
+import { assignableRoles } from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
 
 /**

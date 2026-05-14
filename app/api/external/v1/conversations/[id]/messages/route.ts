@@ -3,13 +3,13 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { authenticateApiKey } from "@/lib/external-auth";
+import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
 import { toExternalMessage } from "@/lib/external-shapes";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import { MetaSendError } from "@/lib/providers/meta";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type { Message } from "@/lib/types";
 import { computeWindowStatus } from "@/lib/window";
 

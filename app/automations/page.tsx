@@ -2,9 +2,9 @@ import Link from "next/link";
 import { Plus, Webhook, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
-import { canManageUsers } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/auth/permissions";
 import { formatListTime } from "@/lib/utils";
 
 import { AutomationToggle } from "./automation-toggle";

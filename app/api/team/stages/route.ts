@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
-import { canManageStages } from "@/lib/permissions";
+import { canManageStages } from "@/lib/auth/permissions";
 import { TAG_COLORS, type ContactStage, type TagColor } from "@/lib/types";
 
 /**

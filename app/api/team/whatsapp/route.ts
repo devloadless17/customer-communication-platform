@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 

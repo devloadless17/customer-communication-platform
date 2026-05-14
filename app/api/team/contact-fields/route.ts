@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
-import { canManageContactFields } from "@/lib/permissions";
+import { canManageContactFields } from "@/lib/auth/permissions";
 import type { ContactFieldDefinition } from "@/lib/types";
 
 /**

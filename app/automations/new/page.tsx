@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
-import { getSession } from "@/lib/current-user";
-import { canManageUsers } from "@/lib/permissions";
+import { getSession } from "@/lib/auth/current-user";
+import { canManageUsers } from "@/lib/auth/permissions";
 
 import { AutomationForm } from "@/components/automations/automation-form";
 

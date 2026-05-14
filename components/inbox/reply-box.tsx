@@ -2,9 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  CornerUpLeft,
-  FileText,
-  ImageIcon,
   MessageSquare,
   Mic,
   Paperclip,
@@ -12,15 +9,21 @@ import {
   Smile,
   Sparkles,
   StickyNote,
-  Video,
-  X,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import type { Contact, MediaKind, Message, ReplySnapshot, SnippetItem, TemplateDto, User } from "@/lib/types";
+import type {
+  Contact,
+  MediaKind,
+  Message,
+  ReplySnapshot,
+  SnippetItem,
+  TemplateDto,
+  User,
+} from "@/lib/types";
 import { computeWindowStatus } from "@/lib/window";
 import { resolveFieldTokens } from "@/lib/field-tokens";
 
@@ -29,25 +32,17 @@ import { TemplatePicker } from "./template-picker";
 import { SnippetPopup } from "./snippet-popup";
 import { useSnippets } from "./snippets-context";
 
+import { AttachmentPreview } from "./reply-box/attachment-preview";
+import { ReplyTargetPill } from "./reply-box/reply-target-pill";
+import { ToggleButton } from "./reply-box/toggle-button";
+import {
+  detectSlashQuery,
+  kindFromMimeClient,
+  newClientTempId,
+  safeReadError,
+} from "./reply-box/utils";
+
 type Mode = "reply" | "note";
-
-// Cheap unique id; doesn't need crypto-strength because it's only matched
-// against ourselves within a few seconds.
-function newClientTempId(): string {
-  return `tmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
-}
-
-// Inline kind detection — lib/media-storage.ts is server-only and we need
-// the kind on the client to render the optimistic bubble. The server makes
-// the authoritative decision; this is just a best-guess for paint.
-function kindFromMimeClient(mime: string): MediaKind {
-  const lower = (mime || "").toLowerCase();
-  if (lower === "image/webp") return "sticker";
-  if (lower.startsWith("image/")) return "image";
-  if (lower.startsWith("video/")) return "video";
-  if (lower.startsWith("audio/")) return "audio";
-  return "document";
-}
 
 /**
  * Reply composer with Reply/Note toggle and media attachments.
@@ -710,189 +705,4 @@ export function ReplyBox({
       />
     </div>
   );
-}
-
-function ReplyTargetPill({
-  reply,
-  contactName,
-  onCancel,
-}: {
-  reply: ReplySnapshot;
-  contactName: string;
-  onCancel: () => void;
-}) {
-  const senderLabel =
-    reply.direction === "out"
-      ? reply.senderName
-        ? `@${reply.senderName}`
-        : "yourself"
-      : contactName;
-  const bodyLabel = reply.body || replyMediaLabel(reply.mediaKind) || "Message";
-
-  return (
-    <div className="flex items-stretch gap-2 px-3 py-2">
-      <CornerUpLeft className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] text-muted-foreground">
-          Replying to <span className="font-medium text-foreground">{senderLabel}</span>
-        </div>
-        <div className="truncate text-[12px] text-muted-foreground">{bodyLabel}</div>
-      </div>
-      <button
-        type="button"
-        onClick={onCancel}
-        className="self-start rounded p-1 text-muted-foreground hover:text-foreground"
-        title="Cancel reply"
-      >
-        <X className="size-3.5" />
-      </button>
-    </div>
-  );
-}
-
-function replyMediaLabel(kind: ReplySnapshot["mediaKind"]): string {
-  switch (kind) {
-    case "image":
-      return "📷 Photo";
-    case "video":
-      return "🎥 Video";
-    case "audio":
-      return "🎤 Voice message";
-    case "document":
-      return "📄 Document";
-    case "sticker":
-      return "🌟 Sticker";
-    default:
-      return "";
-  }
-}
-
-function AttachmentPreview({
-  file,
-  previewUrl,
-  onRemove,
-}: {
-  file: File;
-  previewUrl: string | null;
-  onRemove: () => void;
-}) {
-  const Icon = iconForFile(file);
-  return (
-    <div className="flex items-center gap-3 px-3 py-2">
-      {previewUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={previewUrl}
-          alt={file.name}
-          className="size-12 shrink-0 rounded-md object-cover"
-        />
-      ) : (
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-md bg-muted">
-          <Icon className="size-5 text-muted-foreground" />
-        </div>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-xs font-medium">{file.name}</div>
-        <div className="text-[11px] text-muted-foreground">{formatBytes(file.size)}</div>
-      </div>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="size-7 text-muted-foreground"
-        onClick={onRemove}
-        title="Remove attachment"
-      >
-        <X className="size-3.5" />
-      </Button>
-    </div>
-  );
-}
-
-function iconForFile(file: File): typeof FileText {
-  if (file.type.startsWith("image/")) return ImageIcon;
-  if (file.type.startsWith("video/")) return Video;
-  if (file.type.startsWith("audio/")) return Mic;
-  return FileText;
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-async function safeReadError(res: Response): Promise<string> {
-  try {
-    const json = (await res.json()) as { error?: string; detail?: string };
-    if (json.detail) return `${json.error ?? "error"}: ${json.detail}`;
-    return json.error ?? `HTTP ${res.status}`;
-  } catch {
-    return `HTTP ${res.status}`;
-  }
-}
-
-function ToggleButton({
-  active,
-  onClick,
-  icon: Icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: typeof MessageSquare;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "relative inline-flex h-7 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition-colors",
-        active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {active && (
-        <motion.span
-          layoutId="reply-toggle-pill"
-          className="absolute inset-0 rounded bg-card shadow-xs ring-1 ring-border"
-          transition={{ type: "spring", duration: 0.25, bounce: 0.18 }}
-        />
-      )}
-      <Icon className="relative size-3.5" />
-      <span className="relative">{label}</span>
-    </button>
-  );
-}
-
-/**
- * Inspect the textarea contents around the cursor and figure out whether
- * the user is in the middle of typing a `/<word>` snippet trigger.
- *
- * Rules:
- *   - The slash must sit at the start of the text or follow whitespace /
- *     newline / tab. We don't treat slashes inside other tokens (e.g.
- *     URLs, file paths) as triggers — too noisy.
- *   - Only `[a-z0-9_]` after the slash. The first character that isn't
- *     one of those (space, punctuation, etc.) closes the popup. The
- *     query is normalized to lowercase so case-insensitive lookups work.
- *
- * Returns the `[start, end]` range to splice when the user picks a snippet
- * — `start` points at the `/`, `end` is the cursor.
- */
-function detectSlashQuery(
-  text: string,
-  cursor: number,
-): { start: number; end: number; query: string } | null {
-  // Walk backwards from the cursor until we hit whitespace or a boundary.
-  let i = cursor;
-  while (i > 0) {
-    const c = text[i - 1];
-    if (c === " " || c === "\n" || c === "\t") break;
-    i -= 1;
-  }
-  if (text[i] !== "/") return null;
-  const q = text.slice(i + 1, cursor);
-  if (!/^[a-z0-9_]*$/i.test(q)) return null;
-  return { start: i, end: cursor, query: q.toLowerCase() };
 }

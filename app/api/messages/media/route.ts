@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
 import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
@@ -9,7 +9,7 @@ import { getMetaSendConfig } from "@/lib/providers/config";
 import { metaProvider } from "@/lib/providers/meta";
 import { MetaSendError } from "@/lib/providers/meta";
 import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type { MediaAttachment, Message } from "@/lib/types";
 
 /**

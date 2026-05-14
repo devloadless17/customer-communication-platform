@@ -102,7 +102,7 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 
 **Week 4 — Deploy + pilot**
 - Deploy to a VPS, single Socket.io instance (sticky sessions later)
-- Public HTTPS for the app (Caddy or Traefik reverse proxy)
+- Public HTTPS for the app (Caddy reverse proxy — chosen over nginx/Traefik for auto-HTTPS and zero-config WebSocket upgrade for Socket.io)
 - Basic logging
 - Onboard pilot customer: either they hand us their `META_*` credentials, or we walk them through the Meta app setup. Embedded Signup is post-MVP.
 
@@ -117,7 +117,7 @@ Tags, labels, analytics, automations, AI replies, template send/manage UI, bulk 
 
 ### Before pilot launch (must-do)
 1. **systemd unit** on the VPS, NOT pm2. Single VPS, no clustering, systemd is already there. Set `Restart=on-failure`, `RestartSec=3`, and pass through `NODE_OPTIONS=--max-old-space-size=4096`. If anything kills the process — OOM, panic, manual bump — it's back in 3s.
-2. **Caddy or Traefik reverse proxy** in front for HTTPS. Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
+2. **Caddy reverse proxy** in front for HTTPS (not nginx — Caddy handles Let's Encrypt automatically and forwards WebSocket upgrade headers by default, which Socket.io needs). Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
 3. **VPS sizing**: ≥4GB RAM for the app, +2GB for Postgres, +headroom. 8GB total is the floor.
 
 ### Dev-environment OOM (`tsx watch` chewing memory)

@@ -1,8 +1,8 @@
 import { headers } from "next/headers";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
-import { canManageUsers } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/auth/permissions";
 
 import { WhatsappSettings, type WhatsappCurrent } from "./whatsapp-settings";
 

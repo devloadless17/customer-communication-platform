@@ -21,7 +21,7 @@ import {
   canManageUsers,
   canModifyUser,
   roleLabel,
-} from "@/lib/permissions";
+} from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
 import { initials } from "@/lib/utils";
 

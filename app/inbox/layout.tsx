@@ -1,4 +1,4 @@
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
 import { listConversations, listSnippets } from "@/lib/queries";
 import { InboxShell } from "@/components/inbox/inbox-shell";

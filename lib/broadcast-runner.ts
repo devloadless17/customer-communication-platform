@@ -10,7 +10,7 @@ import {
   MetaSendError,
   renderTemplateBody,
 } from "@/lib/providers/meta";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import {
   parseVariableBindings,
   resolveBinding,

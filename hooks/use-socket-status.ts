@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { getClientSocket } from "@/lib/socket-client";
+import { getClientSocket } from "@/lib/socket/client";
 
 /**
  * Reactive view of the websocket's connection state. Lights up the green dot

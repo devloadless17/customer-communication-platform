@@ -1,5 +1,5 @@
-import { getSession } from "@/lib/current-user";
-import { canManageContactFields, canManageStages } from "@/lib/permissions";
+import { getSession } from "@/lib/auth/current-user";
+import { canManageContactFields, canManageStages } from "@/lib/auth/permissions";
 import {
   listContactFieldDefinitions,
   listContactStages,

@@ -2,7 +2,7 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { authenticateApiKey } from "@/lib/external-auth";
+import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
 import { toExternalConversation } from "@/lib/external-shapes";
 

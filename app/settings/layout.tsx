@@ -9,8 +9,8 @@ import {
   UserCircle2,
 } from "lucide-react";
 
-import { getSession } from "@/lib/current-user";
-import { canManageStages, canManageUsers } from "@/lib/permissions";
+import { getSession } from "@/lib/auth/current-user";
+import { canManageStages, canManageUsers } from "@/lib/auth/permissions";
 
 /**
  * Settings shell. Server component — gates by session and surfaces nav.

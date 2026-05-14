@@ -1,98 +1,72 @@
-# Deploy to production on push to main.
-#
-# Pattern: build-and-push to Docker Hub, pull on VPS. The VPS holds NO
-# source code — only:
-#   /root/docker-compose.yml
-#   /root/.env
-#   /etc/caddy/Caddyfile
-#   /etc/systemd/system/ccp.service
-# All four are written by this workflow on every deploy (idempotent
-# provisioning), so the VPS is effectively stateless config-wise. The
-# only state that survives across deploys is the Docker volumes
-# (postgres_data, redis_data).
-#
-# Flow:
-#   1) CI workflow runs (typecheck + Next build sanity check).
-#   2) On CI success → this workflow fires:
-#       a) docker build → tag with :sha-<commit> and :latest → push to Docker Hub
-#       b) SSH to VPS:
-#          - render /root/.env from GitHub Secrets
-#          - scp docker-compose.yml, .env, rendered Caddyfile, ccp.service
-#          - install systemd unit, docker login docker.io, pull image, restart
-#       c) poll https://<domain>/api/health from this runner
-
+# PR → typecheck only. Push to main → typecheck + build/push image + roll out to VPS.
 name: Deploy
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-production
-  cancel-in-progress: false
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Single source of truth for the image name. Match the basename of the
-  # compose file's `image:` line.
   APP_IMAGE_NAME: customer-communication-platform
 
 jobs:
-  build-and-push:
-    name: Build + push image to Docker Hub
+  typecheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 5
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/ci?schema=public
+      REDIS_URL: redis://localhost:6379
+      NEXTAUTH_SECRET: ci-placeholder
+      AUTH_SECRET: ci-placeholder
+      NEXTAUTH_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx prisma generate
+      - run: npm run typecheck
 
-    outputs:
-      image_tag: ${{ steps.tag.outputs.image_tag }}
-
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute image tag
-        id: tag
-        run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+      - id: tag
+        run: echo "tag=sha-$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build + push
-        # BuildKit cache via GitHub Actions — cold build ~3 min, warm ~30s.
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
             ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    name: Roll out to VPS
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: build-and-push
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify required secrets are present
-        # Fail fast — saves a 2-min trip to the VPS to discover a missing secret.
+      - name: Stage deploy artifacts
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          APP_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
           POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
           POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
@@ -102,104 +76,40 @@ jobs:
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
           SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
           SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
-        run: |
-          set -euo pipefail
-          for var in DOCKER_USERNAME DOCKER_PASSWORD \
-                     POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD \
-                     APP_DOMAIN ADMIN_EMAIL \
-                     NEXTAUTH_SECRET UPLOADTHING_TOKEN \
-                     SUPER_ADMIN_EMAIL SUPER_ADMIN_PASSWORD \
-                     VPS_HOST VPS_USER VPS_SSH_KEY HEALTHCHECK_URL; do
-            if [ -z "${!var:-}" ]; then
-              echo "✗ secret $var is missing or empty"
-              exit 1
-            fi
-          done
-
-      - name: Render .env (becomes /root/.env on the VPS)
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
-          NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
-          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
-          SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
-          SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
           SUPER_ADMIN_NAME: ${{ secrets.SUPER_ADMIN_NAME }}
-          APP_IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
           set -euo pipefail
           umask 077
-          cat > .env <<EOF
-          # Generated by .github/workflows/deploy.yml — DO NOT EDIT BY HAND.
-          # Next deploy will overwrite this file from GitHub Secrets.
-
-          # --- Compose interpolation (image ref + postgres container) -----------
+          mkdir -p _deploy
+          cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
           APP_IMAGE_NAME=${APP_IMAGE_NAME}
           APP_IMAGE_TAG=${APP_IMAGE_TAG}
           POSTGRES_DB=${POSTGRES_DB}
           POSTGRES_USER=${POSTGRES_USER}
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-
-          # --- App runtime ------------------------------------------------------
           NODE_ENV=production
           APP_PORT=3000
-
           NEXTAUTH_URL=https://${APP_DOMAIN}
           APP_PUBLIC_URL=https://${APP_DOMAIN}
           NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
           AUTH_SECRET=${NEXTAUTH_SECRET}
           AUTH_TRUST_HOST=true
-
           AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0
-
-          # --- Bootstrap superAdmin (read by prisma/bootstrap-admin.ts on
-          #     container start). Rotating the password here + redeploying
-          #     rotates the live password.
           SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL}
           SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD}
           SUPER_ADMIN_NAME=${SUPER_ADMIN_NAME}
           EOF
-          chmod 644 .env
-
-      - name: Render Caddyfile
-        env:
-          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
-          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
-        run: |
-          set -euo pipefail
           sed -e "s|__DOMAIN__|${APP_DOMAIN}|g" \
               -e "s|__ADMIN_EMAIL__|${ADMIN_EMAIL}|g" \
-              deploy/Caddyfile.template > Caddyfile
-          if grep -q '__DOMAIN__\|__ADMIN_EMAIL__' Caddyfile; then
-            echo "✗ Caddyfile still has unrendered placeholders"
-            exit 1
-          fi
-
-      - name: Stage deploy artifacts for scp
-        # appleboy/scp-action's `source:` is a comma-separated list and the
-        # `target:` is a single directory. To get everything to one tidy
-        # staging spot on the VPS, we pre-arrange files in the runner workspace.
-        run: |
-          set -euo pipefail
-          mkdir -p _deploy
-          cp deploy/docker-compose.production.yml _deploy/docker-compose.yml
-          cp .env _deploy/.env
-          cp Caddyfile _deploy/Caddyfile
+              deploy/Caddyfile.template > _deploy/Caddyfile
+          grep -q '__DOMAIN__\|__ADMIN_EMAIL__' _deploy/Caddyfile && { echo "✗ unrendered placeholders"; exit 1; } || true
+          cp docker-compose.yml _deploy/docker-compose.yml
           cp deploy/ccp.service _deploy/ccp.service
-          ls -la _deploy/
 
-      - name: scp staged files to /tmp/ccp-deploy on the VPS
-        uses: appleboy/scp-action@v0.1.7
+      - uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -209,8 +119,7 @@ jobs:
           strip_components: 1
           overwrite: true
 
-      - name: Install + pull + restart
-        uses: appleboy/ssh-action@v1.0.3
+      - uses: appleboy/ssh-action@v1.0.3
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
@@ -221,68 +130,28 @@ jobs:
           envs: DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
-
-            echo "▸ legacy cleanup — /opt/ccp from the old build-on-VPS pattern"
-            rm -rf /opt/ccp
-
-            echo "▸ move staged files into place"
             mv /tmp/ccp-deploy/docker-compose.yml /root/docker-compose.yml
             mv /tmp/ccp-deploy/.env              /root/.env
             mv /tmp/ccp-deploy/Caddyfile         /etc/caddy/Caddyfile
             mv /tmp/ccp-deploy/ccp.service       /etc/systemd/system/ccp.service
             rmdir /tmp/ccp-deploy || true
             chmod 600 /root/.env
-
-            echo "▸ login to Docker Hub for the pull"
             echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-
-            echo "▸ pull new app image (old container still serving)"
             docker compose -f /root/docker-compose.yml --env-file /root/.env pull app
-
-            echo "▸ ensure Caddy log directory exists with correct ownership"
-            mkdir -p /var/log/caddy
-            chown -R caddy:caddy /var/log/caddy
-            chmod 755 /var/log/caddy
-
-            echo "▸ validate Caddy config before reloading"
+            mkdir -p /var/log/caddy && chown -R caddy:caddy /var/log/caddy
             caddy validate --config /etc/caddy/Caddyfile
-
-            echo "▸ daemon-reload + restart app via systemd"
             systemctl daemon-reload
-            systemctl enable ccp
+            systemctl enable --now ccp
             systemctl restart ccp
+            systemctl reload-or-restart caddy
 
-            echo "▸ ensure Caddy is enabled, then start or reload"
-            systemctl enable caddy
-            if ! systemctl reload-or-restart caddy; then
-              echo "✗ Caddy failed to start/reload:"
-              systemctl status caddy --no-pager --lines=20 || true
-              journalctl -u caddy -n 80 --no-pager || true
-              ss -tlnp | grep -E ':(80|443)\s' || true
-              exit 1
-            fi
-
-            echo "▸ remote work done"
-
-      - name: Wait for health endpoint
+      - name: Wait for health
         env:
           HEALTH_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
-          set -euo pipefail
-          for i in $(seq 1 24); do
-            if curl -fsS -m 5 "$HEALTH_URL" > /tmp/health.json; then
-              echo "✓ live"
-              cat /tmp/health.json
-              exit 0
-            fi
-            echo "($i/24) waiting for $HEALTH_URL ..."
-            sleep 5
+          for i in $(seq 1 30); do
+            if curl -fsS -m 3 "$HEALTH_URL" > /dev/null; then echo "✓ live"; exit 0; fi
+            sleep 2
           done
-          echo "✗ health check never passed within 2 min"
-          echo "▸ debug:"
-          echo "    ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} 'journalctl -u ccp -n 100 --no-pager'"
+          echo "✗ health never green in 60s"
           exit 1
-
-      - name: Cleanup runner artifacts
-        if: always()
-        run: rm -rf _deploy .env Caddyfile

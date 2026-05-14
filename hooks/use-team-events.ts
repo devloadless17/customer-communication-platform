@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getClientSocket } from "@/lib/socket-client";
+import { getClientSocket } from "@/lib/socket/client";
 import type { ConversationWithRefs, CursorPage } from "@/lib/types";
 
 export interface TeamEventsState {

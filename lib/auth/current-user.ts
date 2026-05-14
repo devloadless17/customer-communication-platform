@@ -3,7 +3,7 @@ import "server-only";
 import { cache } from "react";
 import { redirect } from "next/navigation";
 
-import { loadActiveUser } from "@/lib/active-user";
+import { loadActiveUser } from "@/lib/auth/active-user";
 import { auth } from "@/lib/auth";
 import type { User } from "@/lib/types";
 

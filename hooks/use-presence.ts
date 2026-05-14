@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { getClientSocket } from "@/lib/socket-client";
+import { getClientSocket } from "@/lib/socket/client";
 
 /**
  * Realtime online-teammate set for a team.

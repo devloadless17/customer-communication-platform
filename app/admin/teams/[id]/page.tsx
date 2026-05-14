@@ -10,7 +10,7 @@ import {
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { getTeamDetailForSuperAdmin } from "@/lib/queries";
-import { roleLabel } from "@/lib/permissions";
+import { roleLabel } from "@/lib/auth/permissions";
 import { formatListTime, formatPhone, initials } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 

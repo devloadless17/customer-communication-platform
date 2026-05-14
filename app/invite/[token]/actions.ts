@@ -5,8 +5,8 @@ import { AuthError } from "next-auth";
 
 import { signIn } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { hashInviteToken } from "@/lib/invite-token";
-import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/password";
+import { hashInviteToken } from "@/lib/auth/invite-token";
+import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/auth/password";
 
 /**
  * Accept an invite. The token in the URL is hashed and looked up; we verify

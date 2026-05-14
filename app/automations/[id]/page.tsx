@@ -1,8 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 
-import { getSession } from "@/lib/current-user";
+import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
-import { canManageUsers } from "@/lib/permissions";
+import { canManageUsers } from "@/lib/auth/permissions";
 
 import { AutomationForm } from "@/components/automations/automation-form";
 import { RunsTable } from "@/components/automations/runs-table";

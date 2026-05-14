@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { requireSession } from "@/lib/auth-helpers";
+import { requireSession } from "@/lib/auth/helpers";
 import { dispatch } from "@/lib/automations/dispatcher";
 import { db } from "@/lib/db";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type { User } from "@/lib/types";
 
 /**

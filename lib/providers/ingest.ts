@@ -15,7 +15,7 @@ import type {
   NormalizedInboundMessage,
   NormalizedStatusUpdate,
 } from "@/lib/providers/types";
-import { emitToTeam } from "@/lib/socket-server";
+import { emitToTeam } from "@/lib/socket/server";
 import type {
   Contact,
   Conversation,
