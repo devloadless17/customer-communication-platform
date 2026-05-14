@@ -8,7 +8,7 @@ import { db } from "@/lib/db";
 import { parseWebhookConfig, ActionConfigError } from "@/lib/automations/actions/webhook";
 import { validateConditions } from "@/lib/automations/conditions";
 
-import { redactActionConfig } from "../route";
+import { redactActionConfig } from "../_shared";
 
 /**
  *   GET    /api/team/automations/[id]   → fetch one
