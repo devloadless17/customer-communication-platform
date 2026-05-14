@@ -67,14 +67,12 @@ __DOMAIN__ {
 		-Server
 	}
 
-	# Access logs to a dedicated file. Rotate via systemd-tmpfiles or logrotate
-	# in production. JSON is the format I find easiest to grep + ingest later.
+	# Access logs to stdout → systemd-journald (captured automatically because
+	# Caddy is a systemd unit). View with `journalctl -u caddy -f`. Journald
+	# handles rotation. Avoids the permission-denied class of bug from
+	# writing into /var/log/caddy/ from inside Caddy's systemd sandbox.
 	log {
-		output file /var/log/caddy/ccp-access.log {
-			roll_size 100MiB
-			roll_keep 5
-			roll_keep_for 720h
-		}
+		output stdout
 		format json
 	}
 }
