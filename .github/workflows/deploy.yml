@@ -43,9 +43,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - id: tag
-        run: echo "tag=sha-$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -57,16 +54,13 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest
+          tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Stage deploy artifacts
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          APP_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
           POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
           POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
@@ -74,16 +68,12 @@ jobs:
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
-          SUPER_ADMIN_EMAIL: ${{ secrets.SUPER_ADMIN_EMAIL }}
-          SUPER_ADMIN_PASSWORD: ${{ secrets.SUPER_ADMIN_PASSWORD }}
-          SUPER_ADMIN_NAME: ${{ secrets.SUPER_ADMIN_NAME }}
         run: |
           set -euo pipefail
           mkdir -p _deploy
           cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
           APP_IMAGE_NAME=${APP_IMAGE_NAME}
-          APP_IMAGE_TAG=${APP_IMAGE_TAG}
           POSTGRES_DB=${POSTGRES_DB}
           POSTGRES_USER=${POSTGRES_USER}
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -97,9 +87,6 @@ jobs:
           AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0
-          SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL}
-          SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD}
-          SUPER_ADMIN_NAME=${SUPER_ADMIN_NAME}
           EOF
           sed -e "s|__DOMAIN__|${APP_DOMAIN}|g" \
               -e "s|__ADMIN_EMAIL__|${ADMIN_EMAIL}|g" \
@@ -134,21 +121,25 @@ jobs:
             rm -rf /tmp/ccp-deploy
             mkdir -p /tmp/ccp-deploy
             tar -xzf /tmp/ccp-deploy.tar.gz -C /tmp/ccp-deploy
-            mv /tmp/ccp-deploy/.env              /root/.env
-            mv /tmp/ccp-deploy/docker-compose.yml /root/docker-compose.yml
-            mv /tmp/ccp-deploy/Caddyfile         /etc/caddy/Caddyfile
-            mv /tmp/ccp-deploy/ccp.service       /etc/systemd/system/ccp.service
+            # deploy-owned app config
+            mv /tmp/ccp-deploy/.env              /opt/ccp/.env
+            mv /tmp/ccp-deploy/docker-compose.yml /opt/ccp/docker-compose.yml
+            chmod 600 /opt/ccp/.env
+            # root-owned system config
+            sudo mv /tmp/ccp-deploy/Caddyfile    /etc/caddy/Caddyfile
+            sudo mv /tmp/ccp-deploy/ccp.service  /etc/systemd/system/ccp.service
             rm -f /tmp/ccp-deploy.tar.gz
             rmdir /tmp/ccp-deploy || true
-            chmod 600 /root/.env
+            # deploy is in `docker` group, so no sudo needed for docker
             echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-            docker compose -f /root/docker-compose.yml --env-file /root/.env pull app
-            mkdir -p /var/log/caddy && chown -R caddy:caddy /var/log/caddy
-            caddy validate --config /etc/caddy/Caddyfile
-            systemctl daemon-reload
-            systemctl enable --now ccp
-            systemctl restart ccp
-            systemctl reload-or-restart caddy
+            docker compose -f /opt/ccp/docker-compose.yml --env-file /opt/ccp/.env pull app
+            sudo mkdir -p /var/log/caddy
+            sudo chown -R caddy:caddy /var/log/caddy
+            sudo caddy validate --config /etc/caddy/Caddyfile
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now ccp
+            sudo systemctl restart ccp
+            sudo systemctl reload-or-restart caddy
 
       - name: Wait for health
         env:

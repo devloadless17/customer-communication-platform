@@ -1,61 +1,33 @@
-# systemd unit for the WhatsApp Multi-Agent Shared Inbox.
-#
-# Drives `docker compose up` against /root/docker-compose.yml — the only
-# config file on the VPS (along with /root/.env). The image itself is pulled
-# from Docker Hub by the deploy workflow before this unit ever restarts;
-# systemd's job is just to keep the containers alive across reboots and
-# restart them on demand.
-#
-# Install:
-#   1. Copied automatically by .github/workflows/deploy.yml on every push to main.
-#   2. To inspect: systemctl cat ccp
-#   3. To follow logs: journalctl -u ccp -f
-
 [Unit]
 Description=WhatsApp Multi-Agent Shared Inbox (ccp)
-Documentation=https://github.com/devloadless17/customer-communication-platform
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
 
 [Service]
 Type=simple
-# Runs as root by operator choice (solo pilot). Trade-off documented in
-# deploy/README.md → Security note: root deploy.
-WorkingDirectory=/root
-
-# .env lives next to the compose file (read by docker compose for variable
-# substitution). Both are written by the deploy workflow from GitHub Secrets
-# on every deploy — they're idempotent, not part of host state.
-EnvironmentFile=/root/.env
-
-# Node heap — keeps the broadcast runner + Socket.io fanout from hitting
-# the default ~2GB heap during heavy load. Consistent with package.json.
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/ccp
+EnvironmentFile=/opt/ccp/.env
+# Keeps broadcast runner + Socket.io fanout from hitting the default ~2GB heap.
 Environment=NODE_OPTIONS=--max-old-space-size=4096
 
-# Refresh upstream images (postgres / redis security patches) before
-# starting. The app image is already on disk from the deploy workflow's
-# `docker compose pull` step — no rebuild here.
-ExecStartPre=/usr/bin/docker compose -f /root/docker-compose.yml pull --quiet
-ExecStart=/usr/bin/docker compose -f /root/docker-compose.yml up
-ExecStop=/usr/bin/docker compose -f /root/docker-compose.yml down
+ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull --quiet
+ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up
+ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml down
 TimeoutStartSec=180
 TimeoutStopSec=60
 
-# Anything that kills the process — OOM, panic, manual bump — gets us back
-# in 3 seconds. CLAUDE.md spec.
 Restart=on-failure
 RestartSec=3
-
-# A burst of crashes shouldn't loop forever — 5 restarts inside 60s kills
-# the unit so an operator notices instead of the loop continuing silently.
+# 5 restarts inside 60s → unit gives up so an operator notices.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Hardening
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=false
+ProtectHome=read-only
 PrivateTmp=true
 
 StandardOutput=journal

@@ -32,14 +32,18 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
 
 ## What lives on the VPS
 
-That's it. Four files.
+Four files, split between the `deploy` user's app dir and system locations.
 
 ```
-/root/docker-compose.yml      ← shipped verbatim from ./docker-compose.yml
-/root/.env                    ← rendered by the workflow from GitHub Secrets
-/etc/caddy/Caddyfile          ← rendered from deploy/Caddyfile.template
-/etc/systemd/system/ccp.service  ← copied from deploy/ccp.service
+/opt/ccp/docker-compose.yml   ← owned by deploy, shipped from ./docker-compose.yml
+/opt/ccp/.env                 ← owned by deploy (mode 600), rendered from GitHub Secrets
+/etc/caddy/Caddyfile          ← owned by root, rendered from deploy/Caddyfile.template
+/etc/systemd/system/ccp.service  ← owned by root, copied from deploy/ccp.service
 ```
+
+The systemd unit runs as `User=deploy` so its `docker compose` calls share
+the deploy user's `docker login` credentials. The two `/etc/...` files are
+written by the workflow via `sudo`.
 
 State that survives across deploys (Docker volumes):
 
@@ -65,11 +69,48 @@ These live under `/var/lib/docker/volumes/`. Wipe them with
 
 You only do this once. Future deploys are fully automated.
 
-## 1. Install docker + caddy + ufw on the VPS (done already)
+## 1. Install docker + caddy + ufw on the VPS
 
 ```bash
 apt-get install -y docker.io docker-compose-plugin caddy ufw
 ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw enable
+```
+
+## 1b. Create the `deploy` user + prerequisites
+
+The workflow SSHes as `deploy`, not `root`. The deploy user needs three
+things: docker-group membership, passwordless sudo (for the `sudo mv` /
+`sudo systemctl` calls in the workflow), and an `/opt/ccp` directory it
+owns. Run as root once on a fresh VPS:
+
+```bash
+adduser --disabled-password --gecos "" deploy
+usermod -aG docker deploy
+mkdir -p /home/deploy/.ssh
+cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys
+chown -R deploy:deploy /home/deploy/.ssh
+chmod 700 /home/deploy/.ssh
+chmod 600 /home/deploy/.ssh/authorized_keys
+
+# Passwordless sudo so the workflow's `sudo mv` / `sudo systemctl` work
+# without TTY. Pragmatic for solo MVP — restrict via command allowlist
+# later if you add collaborators with deploy-user SSH access.
+echo "deploy ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/deploy
+chmod 440 /etc/sudoers.d/deploy
+visudo -c   # sanity-check syntax
+
+# App directory the workflow writes into
+mkdir -p /opt/ccp
+chown deploy:deploy /opt/ccp
+chmod 750 /opt/ccp
+```
+
+Verify before continuing:
+
+```bash
+sudo -u deploy docker ps           # should not say "permission denied"
+sudo -u deploy sudo -n true        # should exit 0 (NOPASSWD works)
+sudo -u deploy ls -ld /opt/ccp     # should be deploy:deploy 750
 ```
 
 ## 2. Create a Docker Hub access token
@@ -88,12 +129,13 @@ independently of your account password).
 This token is what you'll put in the `DOCKER_PASSWORD` secret. Your
 Docker Hub username goes in `DOCKER_USERNAME`.
 
-## 3. SSH key for GitHub Actions (already done earlier in this project)
+## 3. SSH key for GitHub Actions
 
 ```bash
 # On your dev machine
 ssh-keygen -t ed25519 -f ~/.ssh/ccp_deploy_v2 -N "" -C "gha-deploy-ccp"
-# Public key already in /root/.ssh/authorized_keys on the VPS.
+# Public key goes into /home/deploy/.ssh/authorized_keys on the VPS
+# (copied from /root/.ssh/authorized_keys by step 1b).
 # Private key goes into GitHub Secret VPS_SSH_KEY.
 ```
 
@@ -107,7 +149,7 @@ Should show all of:
 
 ```
 VPS_HOST           central.loadless.site (or 187.77.180.44)
-VPS_USER           root
+VPS_USER           deploy
 VPS_SSH_KEY         (private OpenSSH key, full contents incl. BEGIN/END)
 HEALTHCHECK_URL       https://central.loadless.site/api/health
 
@@ -122,19 +164,11 @@ POSTGRES_USER         app
 POSTGRES_PASSWORD     (openssl rand -hex 32)
 NEXTAUTH_SECRET       (openssl rand -base64 32)
 UPLOADTHING_TOKEN     (from UploadThing dashboard)
-
-SUPER_ADMIN_EMAIL     you@loadless.ai
-SUPER_ADMIN_PASSWORD  (strong password — bcrypt-hashed at container start)
-SUPER_ADMIN_NAME      (optional — display name, defaults to email's local part)
 ```
 
-15 required + 1 optional. The `SUPER_ADMIN_*` secrets are the source of
-truth for the platform-root login. `prisma/bootstrap-admin.ts` runs on
-every container start (between `prisma migrate deploy` and the server)
-and upserts that user with the hashed password. **Rotating the password
-in GitHub Secrets and redeploying rotates the live password** — predictable
-but it also means changing the password from inside the UI will be reset
-on the next deploy. Acceptable trade-off for declarative secrets.
+12 secrets. The superAdmin login is **not** in GitHub Secrets — it's seeded
+manually by running `prisma/seed-superadmin.ts` once after the first deploy.
+See "First-time superAdmin seed" below.
 
 ### One-shot to set them all (after you have the values)
 
@@ -143,7 +177,7 @@ REPO=devloadless17/customer-communication-platform
 
 # Server / SSH
 gh secret set VPS_HOST       --repo "$REPO" --body "central.loadless.site"
-gh secret set VPS_USER       --repo "$REPO" --body "root"
+gh secret set VPS_USER       --repo "$REPO" --body "deploy"
 gh secret set VPS_SSH_KEY     --repo "$REPO" < ~/.ssh/ccp_deploy_v2
 gh secret set HEALTHCHECK_URL   --repo "$REPO" --body "https://central.loadless.site/api/health"
 
@@ -163,16 +197,22 @@ gh secret set NEXTAUTH_SECRET   --repo "$REPO" --body "$(openssl rand -base64 32
 
 # Blob storage
 gh secret set UPLOADTHING_TOKEN --repo "$REPO" --body "<your-uploadthing-token>"
-
-# SuperAdmin bootstrap (auto-upserted by prisma/bootstrap-admin.ts on every deploy)
-gh secret set SUPER_ADMIN_EMAIL    --repo "$REPO" --body "you@loadless.ai"
-gh secret set SUPER_ADMIN_PASSWORD --repo "$REPO" --body "$(openssl rand -base64 24)"
-gh secret set SUPER_ADMIN_NAME     --repo "$REPO" --body "Your Name"   # optional
-
-# Clean up the GHCR pull token if you set it for the previous iteration —
-# no longer used now that we pull from Docker Hub.
-gh secret delete GHCR_PULL_TOKEN --repo "$REPO" 2>/dev/null || true
 ```
+
+## First-time superAdmin seed
+
+The superAdmin is **not** bootstrapped automatically — run it once after
+the first deploy on a fresh DB:
+
+```bash
+ssh deploy@central.loadless.site
+docker exec -it $(docker ps -q --filter "name=app") npm run db:seed:superadmin
+```
+
+Credentials are hardcoded in `prisma/seed-superadmin.ts` (currently
+`ali@loadless.ai` / `loadless`). Change them in the UI after first login.
+Re-running the seed is idempotent (upsert) — won't break anything but will
+reset the password back to what's in the file.
 
 ## 5. Branch protection on main
 
@@ -200,12 +240,12 @@ Manual redeploy: GitHub → Actions → **Deploy** → **Run workflow** → main
 Emergency manual deploy if GHA is down:
 
 ```bash
-ssh root@central.loadless.site
+ssh deploy@central.loadless.site
 docker login -u <docker-username>             # interactive password prompt
-docker compose -f /root/docker-compose.yml --env-file /root/.env pull app
-systemctl restart ccp
-systemctl reload caddy
-journalctl -u ccp -f
+docker compose -f /opt/ccp/docker-compose.yml --env-file /opt/ccp/.env pull app
+sudo systemctl restart ccp
+sudo systemctl reload caddy
+sudo journalctl -u ccp -f
 ```
 
 ---
@@ -235,15 +275,15 @@ npm run prod:local                       # docker compose up --build
 
 Uses the single `docker-compose.yml` (which has both `image:` and `build:`).
 Locally, `--build` builds the image with the tag `local/customer-communication-platform:latest`
-and runs it. In production, the workflow ships the same file to `/root/docker-compose.yml`
+and runs it. In production, the workflow ships the same file to `/opt/ccp/docker-compose.yml`
 and the VPS pulls the prebuilt image instead of building.
 
 | | Local (`prod:local`) | Production |
 |---|---|---|
-| Compose file | `./docker-compose.yml` (run with `--build`) | `/root/docker-compose.yml` (shipped from this same file) |
+| Compose file | `./docker-compose.yml` (run with `--build`) | `/opt/ccp/docker-compose.yml` (shipped from this same file) |
 | Image source | Built from your working tree | Pulled from Docker Hub |
 | Reverse proxy | None — hit `http://localhost:3000` | Caddy with HTTPS |
-| Secrets file | `.env` in repo (gitignored) | `/root/.env` (workflow-rendered) |
+| Secrets file | `.env` in repo (gitignored) | `/opt/ccp/.env` (workflow-rendered) |
 
 If `prod:local` works but the VPS deploy fails, the diff is in one of
 those four rows.
@@ -253,13 +293,13 @@ those four rows.
 # Rolling back
 
 `git revert` the offending commit on `main` and push — the deploy workflow
-rebuilds + redeploys.
+rebuilds + redeploys. ~3 min round-trip.
 
-For a faster rollback to a previously-known-good image (no rebuild required):
-SSH in and edit `APP_IMAGE_TAG` in `/root/.env` to the older SHA, then
-`docker compose pull && systemctl restart ccp`. List previous images at
-https://hub.docker.com/r/<your-username>/customer-communication-platform/tags
-(or via `docker search`).
+The image is tagged `:latest` only (no per-commit SHA tags), so the only
+fast rollback is `git revert`. If you ever need a hot rollback without
+waiting for CI: SSH in and `docker pull <user>/customer-communication-platform@<digest>`
+using a digest from `docker images --digests` history (limited to images
+still on disk).
 
 Database migrations do NOT auto-revert — fix forward.
 
@@ -271,12 +311,22 @@ Database migrations do NOT auto-revert — fix forward.
 2. `npm run prod:local` — verify nothing broke.
 3. Open a PR to `main`, merge.
 
-# Security note: root deploy
+# Security note: deploy user + sudo
 
-You opted to run as `root` on the VPS rather than create a dedicated `ccp`
-user. Trade-off: a leaked `VPS_SSH_KEY` is full VPS compromise instead of
-"can only restart the app service". Accept now for solo pilot ease; revisit
-when you have collaborators or real customer data.
+The workflow SSHes as `deploy`, which is in the `docker` group and has
+passwordless sudo (`NOPASSWD: ALL` in `/etc/sudoers.d/deploy`). The
+systemd unit runs as `deploy` too. Trade-off: a leaked `VPS_SSH_KEY`
+still gets full root via the NOPASSWD sudo — the real protection here
+is the SSH key, not the sudo restriction.
+
+If you ever add collaborators with deploy-user access, replace
+`NOPASSWD: ALL` with an allowlist:
+
+```
+deploy ALL=(root) NOPASSWD: /usr/bin/mv, /usr/bin/mkdir, /usr/bin/chown, /usr/bin/caddy, /usr/bin/systemctl
+```
+
+The workflow only needs those five binaries with sudo.
 
 # Things to set up later (with trigger conditions)
 

@@ -11,7 +11,7 @@
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset",
     "db:seed": "prisma db seed",
-    "db:bootstrap-admin": "tsx prisma/bootstrap-admin.ts",
+    "db:seed:superadmin": "tsx prisma/seed-superadmin.ts",
     "db:seed:long": "tsx scripts/seed-long-thread.ts",
     "db:seed:closed": "tsx scripts/seed-closed-window-chats.ts",
     "db:fix:phones": "tsx scripts/fix-phone-duplicates.ts",

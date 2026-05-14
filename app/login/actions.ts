@@ -1,17 +1,11 @@
 "use server";
 
-import { AuthError } from "next-auth";
-
 import { signIn } from "@/lib/auth";
 
 export interface LoginState {
   error: string | null;
 }
 
-/**
- * Login server action. Returns a typed error string on failure so the form
- * can render it; on success NextAuth throws a redirect (hence the rethrow).
- */
 export async function loginAction(
   _prev: LoginState,
   formData: FormData,
@@ -32,17 +26,17 @@ export async function loginAction(
     });
     return { error: null };
   } catch (err) {
-    // NEXT_REDIRECT is how server actions perform navigation — re-throw it.
+    // Success path: signIn throws NEXT_REDIRECT — re-throw so Next can navigate.
     if (isRedirectError(err)) throw err;
-    if (err instanceof AuthError) {
-      return { error: "Invalid email or password." };
-    }
-    throw err;
+    // Anything else (wrong credentials, DB hiccup) → log server-side, show
+    // a generic message. We deliberately do not `instanceof AuthError`:
+    // bundle/module duplication in production breaks the prototype chain
+    // and lets the error leak out as "unexpected response."
+    console.error("[login] sign in failed:", err);
+    return { error: "Invalid email or password." };
   }
 }
 
-// Only allow same-origin relative paths as a redirect target. Anything else
-// (a full URL, a `//evil.com` protocol-relative) collapses to /inbox.
 function safeNext(next: string): string {
   if (!next.startsWith("/") || next.startsWith("//")) return "/inbox";
   return next;

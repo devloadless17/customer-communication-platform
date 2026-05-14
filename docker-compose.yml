@@ -41,8 +41,8 @@ services:
       retries: 10
 
   app:
-    # Prod pulls by tag; `docker compose up --build` builds locally with the same tag.
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:${APP_IMAGE_TAG:-latest}
+    # Prod pulls :latest; `docker compose up --build` builds locally with the same tag.
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest
     build:
       context: .
     restart: unless-stopped
@@ -63,8 +63,5 @@ services:
       UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
       AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
-      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-}
-      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-}
     ports:
       - "${APP_PORT:-3000}:3000"

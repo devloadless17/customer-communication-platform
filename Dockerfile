@@ -24,5 +24,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
   CMD node --eval "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
-# Order matters: schema first, then idempotent superAdmin upsert, then server.
-CMD ["sh", "-c", "npx prisma migrate deploy && npx tsx prisma/bootstrap-admin.ts && npx tsx server.ts"]
+CMD ["sh", "-c", "npx prisma migrate deploy && npx tsx server.ts"]
