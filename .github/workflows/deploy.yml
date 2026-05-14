@@ -220,7 +220,29 @@ jobs:
             # downtime, keeps existing connections), start when stopped.
             # `systemctl reload caddy` alone fails on a stopped service.
             systemctl enable caddy
-            systemctl reload-or-restart caddy
+            if ! systemctl reload-or-restart caddy; then
+              echo ""
+              echo "════════════════════════════════════════════════════════════════"
+              echo "✗ Caddy failed to start/reload. Diagnostics below:"
+              echo "════════════════════════════════════════════════════════════════"
+              echo ""
+              echo "▸ systemctl status caddy:"
+              systemctl status caddy --no-pager --lines=20 || true
+              echo ""
+              echo "▸ journalctl -u caddy -n 80 (last 80 lines):"
+              journalctl -u caddy -n 80 --no-pager || true
+              echo ""
+              echo "▸ what's listening on :80 and :443:"
+              ss -tlnp | grep -E ':(80|443)\s' || echo "(nothing — or ss not available)"
+              echo ""
+              echo "▸ Caddyfile (rendered, /etc/caddy/Caddyfile):"
+              cat /etc/caddy/Caddyfile || true
+              echo ""
+              echo "▸ caddy binary capabilities (must include cap_net_bind_service):"
+              getcap "$(command -v caddy)" 2>/dev/null || echo "(no caps set)"
+              echo "════════════════════════════════════════════════════════════════"
+              exit 1
+            fi
 
             echo "▸ remote work done"
           REMOTE
