@@ -215,8 +215,12 @@ jobs:
             echo "▸ restart app via systemd"
             systemctl restart ccp
 
-            echo "▸ reload Caddy (zero-downtime — keeps existing connections)"
-            systemctl reload caddy
+            echo "▸ ensure Caddy is enabled, then start or reload"
+            # `reload-or-restart` handles both: reload when running (zero
+            # downtime, keeps existing connections), start when stopped.
+            # `systemctl reload caddy` alone fails on a stopped service.
+            systemctl enable caddy
+            systemctl reload-or-restart caddy
 
             echo "▸ remote work done"
           REMOTE

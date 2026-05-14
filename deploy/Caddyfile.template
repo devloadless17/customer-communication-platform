@@ -22,15 +22,12 @@ __DOMAIN__ {
 	# Auto-HTTPS — Caddy provisions and renews via Let's Encrypt with no
 	# config. HTTP requests get a 308 redirect to HTTPS automatically.
 
-	# Reverse proxy to the Next.js + Socket.io app.
+	# Reverse proxy to the Next.js + Socket.io app. Caddy auto-forwards
+	# X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host already;
+	# only X-Real-IP needs to be set explicitly since it's a non-standard
+	# convention some upstreams prefer to read.
 	reverse_proxy 127.0.0.1:3000 {
-		# WebSocket upgrades for Socket.io. Caddy passes them through by
-		# default; this block makes the intent explicit and adds the
-		# headers the upstream needs to see the original client.
 		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-Host {host}
 
 		# Socket.io heartbeats — keep the upstream connection alive long
 		# enough for the 25s default ping interval + jitter.
