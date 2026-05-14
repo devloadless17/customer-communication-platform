@@ -1,67 +1,63 @@
 # systemd unit for the WhatsApp Multi-Agent Shared Inbox.
 #
-# CLAUDE.md "before pilot launch" item #1: systemd, NOT pm2. Single-VPS MVP —
-# systemd is already there, the unit is simpler than a pm2 ecosystem file,
-# and OOM / panic / manual bumps all get the same `Restart=on-failure` path.
+# Drives `docker compose up` against /root/docker-compose.yml — the only
+# config file on the VPS (along with /root/.env). The image itself is pulled
+# from GHCR by the deploy workflow before this unit ever restarts; systemd's
+# job is just to keep the containers alive across reboots and restart them
+# on demand.
 #
 # Install:
-#   1. Copy this file to /etc/systemd/system/ccp.service
-#   2. Edit User=, WorkingDirectory=, and EnvironmentFile= for your VPS
-#   3. systemctl daemon-reload
-#   4. systemctl enable --now ccp
-#   5. journalctl -u ccp -f      # follow logs
-#
-# This unit drives `docker compose up` (no detach) so systemd owns the
-# foreground process and tracks its real lifetime. `docker compose down` on
-# stop ensures the postgres/redis sidecars come down cleanly with the app.
+#   1. Copied automatically by .github/workflows/deploy.yml on every push to main.
+#   2. To inspect: systemctl cat ccp
+#   3. To follow logs: journalctl -u ccp -f
 
 [Unit]
 Description=WhatsApp Multi-Agent Shared Inbox (ccp)
-Documentation=file:///opt/ccp/CLAUDE.md
+Documentation=https://github.com/devloadless17/customer-communication-platform
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
 
 [Service]
 Type=simple
-# Runs as root by operator choice (solo pilot). Trade-off: a leaked
-# VPS_SSH_KEY or container escape lands as root instead of an unprivileged
-# `ccp` user. The deploy key in /root/.ssh/authorized_keys is restricted
-# to a single command (see deploy/README.md → "GitHub Actions deploy") to
-# bound that blast radius without a separate service user.
-WorkingDirectory=/opt/ccp
+# Runs as root by operator choice (solo pilot). Trade-off documented in
+# deploy/README.md → Security note: root deploy.
+WorkingDirectory=/root
 
-# .env lives outside the working tree so a `git pull` can't accidentally
-# overwrite production secrets. The Compose file reads it via env substitution.
-EnvironmentFile=/etc/ccp.env
+# .env lives next to the compose file (read by docker compose for variable
+# substitution). Both are written by the deploy workflow from GitHub Secrets
+# on every deploy — they're idempotent, not part of host state.
+EnvironmentFile=/root/.env
 
-# Node heap — kept consistent with package.json (CLAUDE.md notes the broadcast
-# runner + Socket.io fanout occasionally need the headroom in prod too).
+# Node heap — keeps the broadcast runner + Socket.io fanout from hitting
+# the default ~2GB heap during heavy load. Consistent with package.json.
 Environment=NODE_OPTIONS=--max-old-space-size=4096
 
-ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull
-ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up
-ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml down
+# Refresh upstream images (postgres / redis security patches) before
+# starting. The app image is already on disk from the deploy workflow's
+# `docker compose pull` step — no rebuild here.
+ExecStartPre=/usr/bin/docker compose -f /root/docker-compose.yml pull --quiet
+ExecStart=/usr/bin/docker compose -f /root/docker-compose.yml up
+ExecStop=/usr/bin/docker compose -f /root/docker-compose.yml down
 TimeoutStartSec=180
 TimeoutStopSec=60
 
-# If anything kills the process — OOM, panic, manual bump — bring it back
-# in 3s. CLAUDE.md spec.
+# Anything that kills the process — OOM, panic, manual bump — gets us back
+# in 3 seconds. CLAUDE.md spec.
 Restart=on-failure
 RestartSec=3
 
 # A burst of crashes shouldn't loop forever — 5 restarts inside 60s kills
-# the unit so an operator notices instead of the loop quietly continuing.
+# the unit so an operator notices instead of the loop continuing silently.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
-# Hardening. We don't need filesystem write access beyond the working dir
-# and the docker socket.
+# Hardening
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=true
+ProtectHome=false
 PrivateTmp=true
-# Buffer logs through journald — `journalctl -u ccp` shows everything.
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ccp

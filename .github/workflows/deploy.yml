@@ -1,37 +1,28 @@
 # Deploy to production on push to main.
 #
-# This workflow is BOTH the first-time provisioner AND the recurring deploy
-# script — every step is idempotent, so the VPS converges to the same state
-# regardless of where it starts. The only thing the operator does by hand is:
+# Pattern: build-and-push to Docker Hub, pull on VPS. The VPS holds NO
+# source code — only:
+#   /root/docker-compose.yml
+#   /root/.env
+#   /etc/caddy/Caddyfile
+#   /etc/systemd/system/ccp.service
+# All four are written by this workflow on every deploy (idempotent
+# provisioning), so the VPS is effectively stateless config-wise. The
+# only state that survives across deploys is the Docker volumes
+# (postgres_data, redis_data).
 #
-#   1) install docker + caddy + ufw (one shell session, done already)
-#   2) paste the GHA public SSH key into /root/.ssh/authorized_keys
-#   3) add the secrets listed in deploy/README.md to the repo
-#
-# After that, every push to main:
-#   • rsyncs the repo to /opt/ccp/ (atomic-ish: new files arrive then --delete
-#     removes orphans)
-#   • renders /etc/ccp.env from GitHub Secrets — overwritten every deploy so
-#     the live env file always matches what GitHub thinks should be there
-#   • renders /etc/caddy/Caddyfile from deploy/Caddyfile.template
-#   • installs/refreshes /etc/systemd/system/ccp.service
-#   • builds the new app image (old containers still serving)
-#   • restarts the ccp service + reloads Caddy
-#   • polls https://<domain>/api/health from this runner — exercises DNS +
-#     Caddy + cert + app end-to-end. Fails the workflow if it doesn't go
-#     green within 2 min.
+# Flow:
+#   1) CI workflow runs (typecheck + Next build sanity check).
+#   2) On CI success → this workflow fires:
+#       a) docker build → tag with :sha-<commit> and :latest → push to Docker Hub
+#       b) SSH to VPS:
+#          - render /root/.env from GitHub Secrets
+#          - scp docker-compose.yml, .env, rendered Caddyfile, ccp.service
+#          - install systemd unit, docker login docker.io, pull image, restart
+#       c) poll https://<domain>/api/health from this runner
 
 name: Deploy
 
-# Fires AFTER the CI workflow completes successfully on main. The previous
-# shape (push: branches: [main]) made CI and Deploy race in parallel — a
-# broken build on main would still trigger an SSH attempt and burn cycles.
-# `workflow_run` gates on the CI run conclusion so deploy only attempts a
-# VPS restart if typecheck + build went green first.
-#
-# Manual re-runs (workflow_dispatch) bypass the gate, which is what you
-# want for "redeploy after rotating a secret" — code didn't change, no
-# point re-running CI.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -39,237 +30,230 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Serialize deploys: never run two restarts at once, and don't cancel one
-# mid-flight (cancellation could leave /opt/ccp half-synced or the service
-# half-restarted).
 concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+env:
+  # Single source of truth for the image name. Match the basename of the
+  # compose file's `image:` line.
+  APP_IMAGE_NAME: customer-communication-platform
+
 jobs:
-  deploy:
+  build-and-push:
+    name: Build + push image to Docker Hub
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Skip if CI didn't pass. workflow_run fires on ANY conclusion (success,
-    # failure, cancelled) — we only proceed on success. workflow_dispatch
-    # runs always (no triggering workflow to check).
+    timeout-minutes: 20
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
 
-      - name: Configure SSH
-        # Private key on disk, host key pinned via ssh-keyscan so first connect
-        # doesn't prompt for trust. Cleanup in a separate always() step at the
-        # end so a key file doesn't linger if a middle step fails.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build + push
+        # BuildKit cache via GitHub Actions — cold build ~3 min, warm ~30s.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Roll out to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-and-push
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify required secrets are present
+        # Fail fast — saves a 2-min trip to the VPS to discover a missing secret.
         env:
-          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          SSH_HOST: ${{ secrets.VPS_HOST }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          chmod 600 ~/.ssh/known_hosts
+          for var in DOCKER_USERNAME DOCKER_PASSWORD \
+                     POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD \
+                     APP_DOMAIN ADMIN_EMAIL \
+                     NEXTAUTH_SECRET UPLOADTHING_TOKEN \
+                     VPS_HOST VPS_USER VPS_SSH_KEY HEALTHCHECK_URL; do
+            if [ -z "${!var:-}" ]; then
+              echo "✗ secret $var is missing or empty"
+              exit 1
+            fi
+          done
 
-      - name: Render production .env
-        # Built on the runner, never committed, scp'd over in a later step.
-        # `umask 077` and `chmod 600` keep the file off other runner
-        # processes' eyes (though GitHub-hosted runners are ephemeral
-        # single-tenant — this is defense in depth).
-        #
-        # Each required secret is checked up front. A missing secret used to
-        # render as an empty string and surface much later (e.g. Caddy
-        # complaining about a missing `email` argument after a 60s build).
-        # Failing here is fast and the error message points at the cause.
+      - name: Render .env (becomes /root/.env on the VPS)
         env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
           POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          APP_IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
           set -euo pipefail
-          for var in POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD APP_DOMAIN \
-                     NEXTAUTH_SECRET UPLOADTHING_TOKEN; do
-            if [ -z "${!var:-}" ]; then
-              echo "✗ secret $var is missing or empty — set it in repo Settings → Secrets and variables → Actions"
-              exit 1
-            fi
-          done
           umask 077
-          cat > ccp.env <<EOF
+          cat > .env <<EOF
           # Generated by .github/workflows/deploy.yml — DO NOT EDIT BY HAND.
-          # The next deploy will overwrite this file from GitHub Secrets.
+          # Next deploy will overwrite this file from GitHub Secrets.
 
-          NODE_ENV=production
-          APP_PORT=3000
-
+          # --- Compose interpolation (image ref + postgres container) -----------
+          DOCKER_USERNAME=${DOCKER_USERNAME}
+          APP_IMAGE_NAME=${APP_IMAGE_NAME}
+          APP_IMAGE_TAG=${APP_IMAGE_TAG}
           POSTGRES_DB=${POSTGRES_DB}
           POSTGRES_USER=${POSTGRES_USER}
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-          DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public&connection_limit=30&pool_timeout=10
+
+          # --- App runtime ------------------------------------------------------
+          NODE_ENV=production
+          APP_PORT=3000
 
           NEXTAUTH_URL=https://${APP_DOMAIN}
           APP_PUBLIC_URL=https://${APP_DOMAIN}
           NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
           AUTH_SECRET=${NEXTAUTH_SECRET}
-          # Auth.js v5 refuses to trust X-Forwarded-Host from a reverse proxy
-          # unless this is set (it auto-detects on Vercel but we're on a VPS
-          # with Caddy in front). Without it, middleware and server-component
-          # auth disagree on whether the user is signed in → /inbox ⇄ /login
-          # redirect loop, surfacing as ERR_TOO_MANY_REDIRECTS.
           AUTH_TRUST_HOST=true
 
-          REDIS_URL=redis://redis:6379
           AUTOMATION_WORKER_CONCURRENCY=5
-
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
-
           META_GRAPH_VERSION=v25.0
           EOF
-          chmod 600 ccp.env
+          chmod 644 .env
 
       - name: Render Caddyfile
-        # Inline sed substitution — domain and email aren't secrets in the
-        # cryptographic sense, but they're per-deploy config that belongs
-        # in GitHub vars/secrets not in the committed template.
         env:
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
         run: |
           set -euo pipefail
-          for var in APP_DOMAIN ADMIN_EMAIL; do
-            if [ -z "${!var:-}" ]; then
-              echo "✗ secret $var is missing or empty — Caddyfile would render with a hole and Caddy validation will reject it"
-              exit 1
-            fi
-          done
           sed -e "s|__DOMAIN__|${APP_DOMAIN}|g" \
               -e "s|__ADMIN_EMAIL__|${ADMIN_EMAIL}|g" \
-              deploy/Caddyfile.template > Caddyfile.rendered
-          # Sanity-check no placeholders survived
-          if grep -q '__DOMAIN__\|__ADMIN_EMAIL__' Caddyfile.rendered; then
-            echo "✗ Caddyfile still contains unrendered placeholders"
+              deploy/Caddyfile.template > Caddyfile
+          if grep -q '__DOMAIN__\|__ADMIN_EMAIL__' Caddyfile; then
+            echo "✗ Caddyfile still has unrendered placeholders"
             exit 1
           fi
 
-      - name: Sync code to /opt/ccp
-        # --delete keeps /opt/ccp matching the repo exactly (orphans get
-        # removed). The excludes save bandwidth + avoid clobbering anything
-        # the VPS owns (the .env was never in the repo anyway — paranoia).
-        env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
+      - name: Stage deploy artifacts for scp
+        # appleboy/scp-action's `source:` is a comma-separated list and the
+        # `target:` is a single directory. To get everything to one tidy
+        # staging spot on the VPS, we pre-arrange files in the runner workspace.
         run: |
           set -euo pipefail
-          # Make sure the destination exists. mkdir -p is idempotent.
-          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" 'mkdir -p /opt/ccp'
-          rsync -az --delete \
-            --exclude='.git' \
-            --exclude='node_modules' \
-            --exclude='.next' \
-            --exclude='.env' \
-            --exclude='.env.local' \
-            --exclude='storage' \
-            --exclude='ccp.env' \
-            --exclude='Caddyfile.rendered' \
-            -e "ssh -i ~/.ssh/deploy_key" \
-            ./ "$SSH_USER@$SSH_HOST:/opt/ccp/"
+          mkdir -p _deploy
+          cp deploy/docker-compose.production.yml _deploy/docker-compose.yml
+          cp .env _deploy/.env
+          cp Caddyfile _deploy/Caddyfile
+          cp deploy/ccp.service _deploy/ccp.service
+          ls -la _deploy/
 
-      - name: Ship rendered config files
-        env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-        # Two scp's because they land in different paths and the second
-        # needs a directory that's owned by caddy on some setups. Both are
-        # idempotent overwrites.
-        run: |
-          set -euo pipefail
-          scp -i ~/.ssh/deploy_key ccp.env "$SSH_USER@$SSH_HOST:/etc/ccp.env"
-          scp -i ~/.ssh/deploy_key Caddyfile.rendered "$SSH_USER@$SSH_HOST:/etc/caddy/Caddyfile"
+      - name: scp staged files to /tmp/ccp-deploy on the VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "_deploy/*"
+          target: /tmp/ccp-deploy
+          strip_components: 1
+          overwrite: true
 
-      - name: Install systemd unit + build + restart
+      - name: Install + pull + restart
+        uses: appleboy/ssh-action@v1.0.3
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-        # All steps idempotent so this run works as both first-time install
-        # and recurring deploy. `set -e` bails before restart if the build
-        # blows up — we don't restart a broken image into prod.
-        run: |
-          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=10 "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE'
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DOCKER_USERNAME,DOCKER_PASSWORD
+          script: |
             set -euo pipefail
 
-            echo "▸ lock down /etc/ccp.env perms"
-            chmod 600 /etc/ccp.env
+            echo "▸ legacy cleanup — /opt/ccp from the old build-on-VPS pattern"
+            rm -rf /opt/ccp
 
-            echo "▸ install/refresh systemd unit"
-            cp /opt/ccp/deploy/ccp.service /etc/systemd/system/ccp.service
-            systemctl daemon-reload
-            systemctl enable ccp
+            echo "▸ move staged files into place"
+            mv /tmp/ccp-deploy/docker-compose.yml /root/docker-compose.yml
+            mv /tmp/ccp-deploy/.env              /root/.env
+            mv /tmp/ccp-deploy/Caddyfile         /etc/caddy/Caddyfile
+            mv /tmp/ccp-deploy/ccp.service       /etc/systemd/system/ccp.service
+            rmdir /tmp/ccp-deploy || true
+            chmod 600 /root/.env
 
-            echo "▸ build new app image (old containers keep serving)"
-            docker compose --env-file /etc/ccp.env -f /opt/ccp/docker-compose.yml build --pull app
+            echo "▸ login to Docker Hub for the pull"
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
 
-            echo "▸ validate Caddy config before reloading"
-            caddy validate --config /etc/caddy/Caddyfile
+            echo "▸ pull new app image (old container still serving)"
+            docker compose -f /root/docker-compose.yml --env-file /root/.env pull app
 
             echo "▸ ensure Caddy log directory exists with correct ownership"
-            # Caddy runs as the unprivileged `caddy` user. /var/log/caddy/ is
-            # supposed to be created by the apt package + systemd's
-            # LogsDirectory=caddy directive, but on fresh / re-provisioned
-            # boxes it can be missing or root-owned. Re-asserting it here is
-            # idempotent and prevents "permission denied" on the access log.
             mkdir -p /var/log/caddy
             chown -R caddy:caddy /var/log/caddy
             chmod 755 /var/log/caddy
 
-            echo "▸ restart app via systemd"
+            echo "▸ validate Caddy config before reloading"
+            caddy validate --config /etc/caddy/Caddyfile
+
+            echo "▸ daemon-reload + restart app via systemd"
+            systemctl daemon-reload
+            systemctl enable ccp
             systemctl restart ccp
 
             echo "▸ ensure Caddy is enabled, then start or reload"
-            # `reload-or-restart` handles both: reload when running (zero
-            # downtime, keeps existing connections), start when stopped.
-            # `systemctl reload caddy` alone fails on a stopped service.
             systemctl enable caddy
             if ! systemctl reload-or-restart caddy; then
-              echo ""
-              echo "════════════════════════════════════════════════════════════════"
-              echo "✗ Caddy failed to start/reload. Diagnostics below:"
-              echo "════════════════════════════════════════════════════════════════"
-              echo ""
-              echo "▸ systemctl status caddy:"
+              echo "✗ Caddy failed to start/reload:"
               systemctl status caddy --no-pager --lines=20 || true
-              echo ""
-              echo "▸ journalctl -u caddy -n 80 (last 80 lines):"
               journalctl -u caddy -n 80 --no-pager || true
-              echo ""
-              echo "▸ what's listening on :80 and :443:"
-              ss -tlnp | grep -E ':(80|443)\s' || echo "(nothing — or ss not available)"
-              echo ""
-              echo "▸ Caddyfile (rendered, /etc/caddy/Caddyfile):"
-              cat /etc/caddy/Caddyfile || true
-              echo ""
-              echo "▸ caddy binary capabilities (must include cap_net_bind_service):"
-              getcap "$(command -v caddy)" 2>/dev/null || echo "(no caps set)"
-              echo "════════════════════════════════════════════════════════════════"
+              ss -tlnp | grep -E ':(80|443)\s' || true
               exit 1
             fi
 
             echo "▸ remote work done"
-          REMOTE
 
       - name: Wait for health endpoint
         env:
           HEALTH_URL: ${{ secrets.HEALTHCHECK_URL }}
-        # Polls the public URL — exercises DNS + Caddy + cert + app at
-        # once. 5s × 24 = 2 min cap. The first deploy can take longer
-        # because Let's Encrypt provisions the cert on Caddy's first
-        # request — bump this if that ever wedges things.
         run: |
           set -euo pipefail
           for i in $(seq 1 24); do
@@ -282,16 +266,10 @@ jobs:
             sleep 5
           done
           echo "✗ health check never passed within 2 min"
-          echo "▸ debug on the VPS:"
-          echo "    ssh root@${{ secrets.VPS_HOST }}"
-          echo "    journalctl -u ccp -n 100 --no-pager"
-          echo "    journalctl -u caddy -n 50 --no-pager"
+          echo "▸ debug:"
+          echo "    ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} 'journalctl -u ccp -n 100 --no-pager'"
           exit 1
 
       - name: Cleanup runner artifacts
-        # always() — wipe secrets-bearing files even if a previous step
-        # failed. GitHub-hosted runners are ephemeral, but this keeps the
-        # blast radius tight if anything inspects the workspace.
         if: always()
-        run: |
-          rm -f ~/.ssh/deploy_key ccp.env Caddyfile.rendered
+        run: rm -rf _deploy .env Caddyfile
