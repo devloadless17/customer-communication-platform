@@ -23,6 +23,7 @@ import { validateEnv } from "./lib/env";
 import { initSocketServer } from "./lib/socket/server";
 import { startAutomationWorker, stopAutomationWorker } from "./lib/automations/worker";
 import { closeAutomationQueue } from "./lib/automations/queue";
+import { startInboundMediaSweeper, stopInboundMediaSweeper } from "./lib/sweepers/inbound-media";
 
 // Fail-fast on missing required env vars BEFORE Next prepares the build
 // graph or Prisma opens a pool. systemd restarts on exit(1), so a missing
@@ -117,6 +118,12 @@ void app.prepare().then(async () => {
     console.error("[server] failed to start automation worker:", err);
   }
 
+  // Periodic GC for inbound media rows whose phase-2 download was lost to
+  // a process restart. Cheap (one indexed query every 5 min); only meaningful
+  // when something interrupted a webhook's detached download promise. See
+  // lib/sweepers/inbound-media.ts for the why and the policy.
+  startInboundMediaSweeper();
+
   // Lightweight memory-usage heartbeat. CLAUDE.md's ops notes call this the
   // floor before adopting an APM — journald keeps the rolling history and
   // a single line every 60s is invisible noise but invaluable when the
@@ -136,6 +143,7 @@ void app.prepare().then(async () => {
   const shutdown = async (signal: string) => {
     console.log(`[server] received ${signal}, shutting down...`);
     try {
+      stopInboundMediaSweeper();
       await stopAutomationWorker();
       await closeAutomationQueue();
     } catch (err) {

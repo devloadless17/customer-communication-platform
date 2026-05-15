@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { ImageIcon, FileText as FileTextIcon, Video, ExternalLink, Phone, Reply } from "lucide-react";
 
 import type { TemplateComponent } from "@/lib/providers/types";
@@ -88,17 +89,10 @@ function HeaderBlock({
   // going to land in the customer's WhatsApp.
   const fmt = header.format ?? "TEXT";
   if (mediaUrl && fmt === "IMAGE") {
-    return (
-      <div className="bg-muted/40">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={mediaUrl} alt="Header preview" className="h-44 w-full object-cover" />
-      </div>
-    );
+    return <HeaderImage url={mediaUrl} />;
   }
   if (mediaUrl && fmt === "VIDEO") {
-    return (
-      <video src={mediaUrl} className="h-44 w-full bg-black object-cover" controls />
-    );
+    return <HeaderVideo url={mediaUrl} />;
   }
   const Icon =
     fmt === "IMAGE" ? ImageIcon : fmt === "VIDEO" ? Video : FileTextIcon;
@@ -107,6 +101,67 @@ function HeaderBlock({
       <Icon className="size-5" />
       <span>{fmt} header</span>
     </div>
+  );
+}
+
+// HeaderImage / HeaderVideo: dedicated components so each has its own
+// `errored` state. Same SSR-error-recovery pattern as the inbox MediaBlock —
+// `complete && naturalWidth === 0` catches loads that finished before React
+// attached its onError listener.
+function HeaderImage({ url }: { url: string }) {
+  const ref = useRef<HTMLImageElement>(null);
+  const [errored, setErrored] = useState(false);
+  useEffect(() => {
+    const img = ref.current;
+    if (!img || errored) return;
+    if (img.complete && img.naturalWidth === 0) setErrored(true);
+  }, [errored, url]);
+  if (errored) {
+    return (
+      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/[0.06] text-[12px] text-muted-foreground">
+        <ImageIcon className="size-5" />
+        <span>Image unavailable</span>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-muted/40">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        ref={ref}
+        src={url}
+        alt="Header preview"
+        onError={() => setErrored(true)}
+        className="h-44 w-full object-cover"
+      />
+    </div>
+  );
+}
+
+function HeaderVideo({ url }: { url: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [errored, setErrored] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || errored) return;
+    if (el.error || el.networkState === 3) setErrored(true);
+  }, [errored, url]);
+  if (errored) {
+    return (
+      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/[0.06] text-[12px] text-muted-foreground">
+        <Video className="size-5" />
+        <span>Video unavailable</span>
+      </div>
+    );
+  }
+  return (
+    <video
+      ref={ref}
+      src={url}
+      controls
+      onError={() => setErrored(true)}
+      className="h-44 w-full bg-black object-cover"
+    />
   );
 }
 

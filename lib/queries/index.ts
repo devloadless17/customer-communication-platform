@@ -9,6 +9,7 @@ export {
   MESSAGES_PAGE,
   getConversationWithRefs,
   listConversations,
+  listNewerMessages,
   listOlderMessages,
 } from "./conversations";
 

@@ -176,74 +176,100 @@ async function downloadInboundMedia(
     select: { name: true },
   });
 
-  await Promise.all(
-    todo.map(async (evt) => {
-      if (!evt.media) return;
-      const row = rowByExtId.get(evt.externalId);
-      if (!row) return;
-      try {
-        const fetched = await getMetaProvider().fetchMedia!(
-          evt.media.externalMediaId,
-          sendConfig,
-        );
-        const cap = MEDIA_SIZE_CAPS[evt.media.kind];
-        if (fetched.bytes.length > cap) {
-          console.warn(
-            `[meta-webhook ${teamId}] dropping ${evt.media.kind} over cap (${fetched.bytes.length} > ${cap})`,
-          );
-          await clearMediaOnRow(teamId, row.id, row.conversationId);
-          return;
-        }
-        const saved = await blobStorage.upload({
-          bytes: fetched.bytes,
-          mimeType: fetched.mimeType,
-          kind: evt.media.kind,
-          context: {
-            teamId,
-            teamSlug: team?.name,
-            direction: "in",
-            contactPhone: evt.contactPhone,
-            contactName: evt.contactName ?? undefined,
-            externalId: evt.externalId,
-            originalFilename: evt.media.filename ?? null,
-          },
-        });
-
-        // Meta's metadata sometimes refines the mime type vs what was on the
-        // webhook (e.g. image/jpeg vs image/jpg). Trust the metadata call.
-        await db.message.update({
-          where: { id: row.id },
-          data: {
-            mediaKey: saved.key,
-            mediaUrl: saved.url,
-            mediaSizeBytes: saved.sizeBytes,
-            mediaMimeType: fetched.mimeType,
-          },
-        });
-
-        emitToTeam(teamId, "message:media:ready", {
-          teamId,
-          conversationId: row.conversationId,
-          messageId: row.id,
-          media: {
-            kind: evt.media.kind,
-            url: `/api/media/${row.id}`,
-            mimeType: fetched.mimeType,
-            sizeBytes: saved.sizeBytes,
-            ...(evt.body ? { caption: evt.body } : {}),
-            ...(evt.media.filename ? { filename: evt.media.filename } : {}),
-            ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
-          },
-        });
-      } catch (err) {
-        console.error(
-          `[meta-webhook ${teamId}] media download failed for ${evt.externalId}`,
-          err,
+  // Concurrency cap. A 20-image webhook batch fans out 20 parallel Meta
+  // CDN fetches + 20 UploadThing uploads — both peg the heap (each fetch
+  // buffers the binary in RAM) and risk 429s on UploadThing. 4 in-flight
+  // is enough to overlap network latency without piling up.
+  await runWithConcurrency(todo, 4, async (evt) => {
+    if (!evt.media) return;
+    const row = rowByExtId.get(evt.externalId);
+    if (!row) return;
+    try {
+      const fetched = await getMetaProvider().fetchMedia!(
+        evt.media.externalMediaId,
+        sendConfig,
+      );
+      const cap = MEDIA_SIZE_CAPS[evt.media.kind];
+      if (fetched.bytes.length > cap) {
+        console.warn(
+          `[meta-webhook ${teamId}] dropping ${evt.media.kind} over cap (${fetched.bytes.length} > ${cap})`,
         );
         await clearMediaOnRow(teamId, row.id, row.conversationId);
+        return;
       }
-    }),
-  );
+      const saved = await blobStorage.upload({
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+        kind: evt.media.kind,
+        context: {
+          teamId,
+          teamSlug: team?.name,
+          direction: "in",
+          contactPhone: evt.contactPhone,
+          contactName: evt.contactName ?? undefined,
+          externalId: evt.externalId,
+          originalFilename: evt.media.filename ?? null,
+        },
+      });
+
+      // Meta's metadata sometimes refines the mime type vs what was on the
+      // webhook (e.g. image/jpeg vs image/jpg). Trust the metadata call.
+      await db.message.update({
+        where: { id: row.id },
+        data: {
+          mediaKey: saved.key,
+          mediaUrl: saved.url,
+          mediaSizeBytes: saved.sizeBytes,
+          mediaMimeType: fetched.mimeType,
+        },
+      });
+
+      emitToTeam(teamId, "message:media:ready", {
+        teamId,
+        conversationId: row.conversationId,
+        messageId: row.id,
+        media: {
+          kind: evt.media.kind,
+          url: `/api/media/${row.id}`,
+          mimeType: fetched.mimeType,
+          sizeBytes: saved.sizeBytes,
+          ...(evt.body ? { caption: evt.body } : {}),
+          ...(evt.media.filename ? { filename: evt.media.filename } : {}),
+          ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+        },
+      });
+    } catch (err) {
+      console.error(
+        `[meta-webhook ${teamId}] media download failed for ${evt.externalId}`,
+        err,
+      );
+      await clearMediaOnRow(teamId, row.id, row.conversationId);
+    }
+  });
+}
+
+/**
+ * Tiny dependency-free p-limit. Walks `items` and runs at most `concurrency`
+ * `worker(item)` invocations in parallel. Resolves once all are done.
+ * Rejections are swallowed at the worker level (caller wraps each item in
+ * try/catch) so one bad item never blocks the rest.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const queue = [...items];
+  const lanes = Math.min(concurrency, queue.length);
+  const runners = Array.from({ length: lanes }, async () => {
+    while (queue.length > 0) {
+      const next = queue.shift();
+      if (next === undefined) return;
+      await worker(next);
+    }
+  });
+  await Promise.all(runners);
 }
 
 /**

@@ -257,3 +257,42 @@ export async function listOlderMessages(
 
   return { items: itemsAsc.map(mapMessage), nextCursor };
 }
+
+/**
+ * Page of messages strictly NEWER than the given ISO timestamp, chronological
+ * (oldest-first). Closes the SSR → socket-subscribe gap: any webhook that
+ * landed between server render and the client's `subscribe:conversation` was
+ * emitted into an empty room, so on (re)connect the client asks for the
+ * delta and dedupes by externalId on the way in.
+ *
+ * No cursor — the delta is bounded by how long the tab was hydrating or
+ * disconnected. We cap at MESSAGES_PAGE; on the rare case it's hit, the
+ * client should treat it as "too far behind" and force a thread re-fetch.
+ */
+export async function listNewerMessages(
+  teamId: string,
+  conversationId: string,
+  opts: { after: string; take?: number },
+): Promise<{ items: Message[] }> {
+  const afterDate = new Date(opts.after);
+  if (Number.isNaN(afterDate.getTime())) return { items: [] };
+
+  // Same tenant gate as listOlderMessages — silent empty page so we don't
+  // leak which conversation IDs exist in other teams.
+  const owns = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    select: { id: true },
+  });
+  if (!owns) return { items: [] };
+
+  const take = clampTake(opts.take, MESSAGES_PAGE);
+  const rows = await db.message.findMany({
+    omit: { rawPayload: true },
+    include: { replyTo: REPLY_TO_INCLUDE },
+    where: { conversationId, timestamp: { gt: afterDate } },
+    orderBy: [{ timestamp: "asc" }, { id: "asc" }],
+    take,
+  });
+
+  return { items: rows.map(mapMessage) };
+}

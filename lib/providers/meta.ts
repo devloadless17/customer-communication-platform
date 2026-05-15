@@ -47,20 +47,57 @@ import type { MediaKind, MessageStatus } from "@/lib/types";
  * Meta time the webhook out and retry the whole batch.
  */
 const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS ?? 20_000);
+const META_FETCH_MAX_ATTEMPTS = 2; // 1 retry on transient 5xx
 
 async function metaFetch(input: string | URL, init?: RequestInit): Promise<Response> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), META_FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(input, { ...init, signal: ac.signal });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error(`meta request timed out after ${META_FETCH_TIMEOUT_MS}ms: ${input}`);
+  // Retry policy: transient 5xx + network errors get one quick retry. We
+  // intentionally do NOT retry 4xx — those are policy errors (24h-window
+  // closed, template missing, bad auth) where retrying just hides the real
+  // problem. Without this, a Meta 503 blip surfaces as a "send failed"
+  // bubble the agent has to manually click Retry on. With a single 500ms
+  // retry, the vast majority of Meta's transient blips never reach the UI.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < META_FETCH_MAX_ATTEMPTS; attempt++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), META_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(input, { ...init, signal: ac.signal });
+      // 5xx is transient by Meta convention. Retry once with backoff. The
+      // request body is whatever the caller passed in `init.body` — fetch
+      // re-uses it on retry without re-streaming concerns because all our
+      // bodies are buffered (JSON or FormData built from in-memory bytes).
+      if (res.status >= 500 && res.status < 600 && attempt < META_FETCH_MAX_ATTEMPTS - 1) {
+        // Drain so the connection can be reused by the keepalive pool.
+        await res.text().catch(() => {});
+        await sleep(500 + Math.random() * 250);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // Timeouts surface as a typed error after the last attempt; mid-loop
+        // we treat them as retryable network blips.
+        lastErr = new Error(
+          `meta request timed out after ${META_FETCH_TIMEOUT_MS}ms: ${input}`,
+        );
+      } else {
+        lastErr = err;
+      }
+      if (attempt < META_FETCH_MAX_ATTEMPTS - 1) {
+        await sleep(500 + Math.random() * 250);
+        continue;
+      }
+      throw lastErr;
+    } finally {
+      clearTimeout(timer);
     }
-    throw err;
-  } finally {
-    clearTimeout(timer);
   }
+  // Unreachable — loop returns or throws above.
+  throw lastErr ?? new Error("metaFetch: no attempts ran");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 interface MetaEnvelope {
@@ -415,12 +452,20 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Meta requires the type field — using the mime type works. The wire
     // format of the file part is what Meta dispatches the right validators on.
     fd.append("type", args.mimeType);
-    // Same ArrayBufferLike vs ArrayBuffer dance as the media route — copy
-    // into a plain ArrayBuffer so the Blob constructor's BlobPart typing is
-    // satisfied across Node/TS versions.
-    const ab = new ArrayBuffer(args.bytes.byteLength);
-    new Uint8Array(ab).set(args.bytes);
-    fd.append("file", new Blob([ab], { type: args.mimeType }), args.filename);
+    // Hand the Uint8Array straight to Blob. Node 20+'s undici-backed Blob
+    // accepts Uint8Array as a BlobPart at runtime — the prior `new
+    // ArrayBuffer(len) + .set(bytes)` dance doubled peak RAM (one copy of
+    // the bytes + the ArrayBuffer + the Blob internal). For a 100MB
+    // document upload that doubled-copy was a measurable OOM risk on the
+    // 4GB heap. The cast is needed because TS's BlobPart type narrows to
+    // `Uint8Array<ArrayBuffer>` (excluding SharedArrayBuffer); our bytes
+    // always come from `file.arrayBuffer()` or `fetch().arrayBuffer()`,
+    // both of which return ArrayBuffer-backed Uint8Arrays.
+    fd.append(
+      "file",
+      new Blob([args.bytes as Uint8Array<ArrayBuffer>], { type: args.mimeType }),
+      args.filename,
+    );
 
     const res = await metaFetch(url, {
       method: "POST",

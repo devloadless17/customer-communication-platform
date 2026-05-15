@@ -68,8 +68,30 @@ export function initSocketServer(http: HttpServer): IO {
     // for adding Redis at all.
     connectionStateRecovery: {
       maxDisconnectionDuration: 2 * 60 * 1000,
-      skipMiddlewares: false,
+      // `true` (was `false`) — skipping middlewares on a recovered session
+      // means we do NOT re-run the Better Auth getSession + user lookup on
+      // every brief reconnect. The session that's being resumed was already
+      // auth-validated; re-validating it for every wifi blip turned a single
+      // user's reload-storm into N DB roundtrips and contributed to the
+      // production hang on hard-reload-with-many-images. On full re-handshake
+      // (cookie expired, deactivation, etc.) the middleware DOES run.
+      skipMiddlewares: true,
     },
+    // Socket payloads are tiny (typing/presence events ~tens of bytes, the
+    // largest is `message:new` with a ~2 KB body cap). Defaulting to 1 MB
+    // means one malicious or buggy client can pin a full megabyte of RAM
+    // per frame; 64 KB is generous for the real surface and shrinks the
+    // DoS window. PingTimeout/Interval tuned slightly tighter than defaults
+    // so a dead browser tab is reaped within ~25s instead of ~45s, freeing
+    // up presence + room memberships sooner.
+    maxHttpBufferSize: 64 * 1024,
+    pingTimeout: 20_000,
+    pingInterval: 25_000,
+    // Turn off compression: our messages are JSON and almost never large
+    // enough to benefit, and perMessageDeflate adds CPU + per-socket
+    // memory state (zlib stream). Single-instance + small payloads → off
+    // is strictly better.
+    perMessageDeflate: false,
   });
 
   // -------------------------------------------------------------------------
@@ -126,6 +148,14 @@ export function initSocketServer(http: HttpServer): IO {
     const teamId = socket.data.teamId!;
     const userId = socket.data.userId!;
 
+    // Auto-join the team room on connect. Previously a client only joined
+    // by explicitly emitting `subscribe:team`, which meant any code path
+    // that forgot the emit (or any connection that closed before the emit
+    // landed during reload-storm thrash) silently received zero team-wide
+    // events. The room is per-team anyway — there's no reason a socket
+    // authenticated for team T shouldn't be in team T's room.
+    socket.join(teamRoom(teamId));
+
     addPresence(teamId, userId, socket.id);
     // Snapshot to this socket so its dot lights up immediately.
     socket.emit("presence:update", { teamId, onlineUserIds: snapshotPresence(teamId) });
@@ -138,6 +168,9 @@ export function initSocketServer(http: HttpServer): IO {
     socket.on("subscribe:team", ({ teamId: requestedTeamId }) => {
       // Multi-tenancy guardrail: agents can only subscribe to their own team.
       // CLAUDE.md rule 2 — multi-tenancy from day one.
+      // Now mostly a no-op (auto-join handles the common case) but kept for
+      // backwards compat with clients that explicitly emit it, and as a
+      // signal to send the user a fresh presence snapshot on demand.
       if (requestedTeamId !== teamId) return;
       socket.join(teamRoom(teamId));
       socket.emit("presence:update", { teamId, onlineUserIds: snapshotPresence(teamId) });
@@ -227,13 +260,53 @@ export function initSocketServer(http: HttpServer): IO {
   return io;
 }
 
+/**
+ * Hard-throwing accessor — use only in code paths that genuinely cannot
+ * proceed without the IO server (e.g. the custom server startup script).
+ * For request handlers / webhooks, prefer `getIOOrNull` so a webhook firing
+ * during boot doesn't 500 (which makes Meta retry the entire batch).
+ */
 export function getIO(): IO {
-  if (!state.io) {
+  const io = getIOOrNull();
+  if (!io) {
     throw new Error(
       "Socket.io server not initialized. Start the app via the custom server (`npm run dev`), not `next dev`.",
     );
   }
-  return state.io;
+  return io;
+}
+
+export function getIOOrNull(): IO | null {
+  return state.io ?? null;
+}
+
+/**
+ * Hard-disconnect every live socket for a given user across the whole IO
+ * server. Used by the deactivation flow — without this, a deactivated user
+ * keeps receiving live team events on their already-open tabs until they
+ * happen to reload. The handshake gate only guards new connections.
+ *
+ * Returns the number of sockets disconnected, mainly for logging.
+ */
+export function disconnectUserSockets(userId: string): number {
+  const io = getIOOrNull();
+  if (!io) return 0;
+  let count = 0;
+  // The presence map tracks one socketId set per (team, user). Walk every
+  // team — typical case is one team per user but multi-team accounts are a
+  // future plan, and the cost is negligible (Map iteration over a tiny set).
+  for (const teamMap of state.presence!.values()) {
+    const sockets = teamMap.get(userId);
+    if (!sockets) continue;
+    for (const socketId of sockets) {
+      const sock = io.sockets.sockets.get(socketId);
+      if (sock) {
+        sock.disconnect(true);
+        count++;
+      }
+    }
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +382,17 @@ export function emitToTeam<E extends keyof ServerToClientEvents>(
   event: E,
   ...args: Parameters<ServerToClientEvents[E]>
 ) {
-  getIO().to(teamRoom(teamId)).emit(event, ...args);
+  const io = getIOOrNull();
+  if (!io) {
+    // Webhook arrived before the custom server finished bootstrapping the
+    // IO singleton. Don't throw — that would 500 and trigger a Meta retry
+    // storm for an event we already persisted to the DB. Live clients
+    // missed it for a few hundred ms; their next reconnect-backfill
+    // (use-conversation-events) picks it up.
+    console.warn(`[socket] emitToTeam("${event}") dropped — IO not initialized yet`);
+    return;
+  }
+  io.to(teamRoom(teamId)).emit(event, ...args);
 }
 
 export function emitToConversation<E extends keyof ServerToClientEvents>(
@@ -317,7 +400,12 @@ export function emitToConversation<E extends keyof ServerToClientEvents>(
   event: E,
   ...args: Parameters<ServerToClientEvents[E]>
 ) {
-  getIO().to(conversationRoom(conversationId)).emit(event, ...args);
+  const io = getIOOrNull();
+  if (!io) {
+    console.warn(`[socket] emitToConversation("${event}") dropped — IO not initialized yet`);
+    return;
+  }
+  io.to(conversationRoom(conversationId)).emit(event, ...args);
 }
 
 /**

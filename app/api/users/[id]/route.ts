@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { assignableRoles, canModifyUser } from "@/lib/auth/permissions";
-import { emitCatalogChange } from "@/lib/socket/server";
+import { disconnectUserSockets, emitCatalogChange } from "@/lib/socket/server";
 import type { Role } from "@/lib/types";
 
 /**
@@ -139,8 +139,17 @@ export async function PATCH(
   // but their open Socket.io connections and any fresh socket inside the
   // cache window would continue to pass. Belt-and-braces with the new
   // handshake-time deactivation check in lib/socket/server.ts.
+  //
+  // Also hard-disconnect every live socket the user has open right now —
+  // the handshake gate only catches NEW connections; an already-connected
+  // socket would keep receiving live team events until the user happened
+  // to reload.
   if (data.deactivatedAt) {
     await db.session.deleteMany({ where: { userId: id } });
+    const dropped = disconnectUserSockets(id);
+    if (dropped > 0) {
+      console.info(`[users.deactivate] dropped ${dropped} live socket(s) for user=${id}`);
+    }
   }
 
   // Roster mutation — fan out so other admins viewing the team page and
@@ -217,6 +226,13 @@ export async function DELETE(
   }
 
   await db.user.delete({ where: { id } });
+  // Same reasoning as PATCH-deactivate: kick the user's live sockets so
+  // they don't keep receiving team events between this delete and their
+  // next reload (when the catalog-change forces it).
+  const dropped = disconnectUserSockets(id);
+  if (dropped > 0) {
+    console.info(`[users.delete] dropped ${dropped} live socket(s) for user=${id}`);
+  }
   emitCatalogChange(session.teamId, "members");
   return NextResponse.json({ ok: true });
 }

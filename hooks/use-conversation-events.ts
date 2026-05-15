@@ -7,6 +7,37 @@ import { useRouter } from "next/navigation";
 import { getClientSocket } from "@/lib/socket/client";
 import type { ConversationWithRefs, CursorPage, Message } from "@/lib/types";
 
+/**
+ * Canonical sort for a conversation's message slice. Server-confirmed rows
+ * sort by `timestamp` ascending (the server's authoritative clock — same key
+ * both sides of the conversation use). Optimistic / failed rows sort to the
+ * very end so that an in-flight send always anchors at the bottom and a real
+ * inbound that lands during the upload slots in chronologically — matching
+ * what the customer sees on their phone (WhatsApp / iMessage / Slack all use
+ * server-ack time as the canonical key for the same reason).
+ *
+ * Tiebreaker on `id` to keep the sort stable when two server messages share
+ * a millisecond (rare; happens on a tight broadcast loop).
+ */
+function sortByTimestamp(messages: Message[]): Message[] {
+  const next = [...messages];
+  next.sort((a, b) => {
+    const ka = sortKey(a);
+    const kb = sortKey(b);
+    if (ka !== kb) return ka - kb;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  return next;
+}
+
+function sortKey(m: Message): number {
+  // Pending OR failed — both represent "not yet acknowledged by the server",
+  // both anchor at the bottom so the user reads the optimistic / failed
+  // bubble as "this is the message I tried to send right now."
+  if (m.pending || m.failed) return Number.POSITIVE_INFINITY;
+  return new Date(m.timestamp).getTime();
+}
+
 export interface ConversationEventsState {
   data: ConversationWithRefs;
   hasMoreOlder: boolean;
@@ -91,6 +122,22 @@ export function useConversationEvents(
     cursorRef.current = olderCursor;
   }, [olderCursor]);
 
+  // Mirror of `data` in a ref so the socket-connect callback can read the
+  // current message slice without re-running the effect on every render
+  // (which would unsubscribe + resubscribe + re-fire the backfill on each
+  // mutation — chatty and racy).
+  const dataRef = useRef(data);
+  useEffect(() => {
+    dataRef.current = data;
+  });
+
+  // Set when a connect (or reconnect) fired while the tab was hidden — we
+  // skipped the backfill at that moment to avoid joining the thundering
+  // herd, and the visibility listener will fire it the moment the user
+  // returns. Lives in a ref because the connect / visibility / unmount
+  // closures all need to read the same flag without re-running the effect.
+  const backfillNeededRef = useRef(false);
+
   const inFlightOlder = useRef(false);
   const loadOlder = useCallback(
     async (commit: (run: () => void) => void = flushSync): Promise<number> => {
@@ -113,8 +160,12 @@ export function useConversationEvents(
             const fresh = page.items.filter((m) => !have.has(m.id));
             added = fresh.length;
             if (added === 0) return prev;
-            // Server returns oldest-first; prepend in order.
-            return { ...prev, messages: [...fresh, ...prev.messages] };
+            // Server returns oldest-first; sort to keep optimistic / failed
+            // rows pinned at the bottom even after a prepend.
+            return {
+              ...prev,
+              messages: sortByTimestamp([...fresh, ...prev.messages]),
+            };
           });
           setOlderCursor(page.nextCursor);
         });
@@ -168,11 +219,93 @@ export function useConversationEvents(
     // subscription, every subsequent one covers a reconnect after a drop
     // longer than Socket.io's connectionStateRecovery window. Without this,
     // events for this thread silently stop arriving until the user reloads.
-    // Note: messages that landed during the drop are NOT backfilled here —
-    // navigating away and back re-fetches them via the server component.
+    //
+    // After (re)subscribing we also fire a delta fetch — `?after=<latest
+    // server timestamp>` — to close the SSR-render → socket-subscribe gap.
+    // Any webhook that arrived while the JS bundle was parsing / hydrating
+    // got emitted into an empty room, so without this backfill those
+    // messages don't surface until the next reload or thread switch. Same
+    // technique Slack RTM / Discord gateway / WhatsApp Web use on every
+    // reconnect.
     const onConnect = () => {
       socket.emit("subscribe:conversation", { conversationId });
+
+      // Skip the backfill when the tab isn't visible. A team of N agents
+      // with M tabs each → N·M parallel `?after=…` queries on every Caddy
+      // bounce / deploy — and most of those tabs are background or sleeping.
+      // The visibility-change listener below picks the backfill back up the
+      // moment the user returns to the tab.
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        backfillNeededRef.current = true;
+        return;
+      }
+
+      // Random jitter (0–1500ms) breaks the synchronized reconnect storm
+      // after a deploy. Without it, every open tab in the team fires its
+      // backfill GET at the same instant, dog-piling Postgres.
+      const delay = Math.floor(Math.random() * 1500);
+      window.setTimeout(() => runBackfill(), delay);
     };
+
+    // Pulled out so the visibility-change listener below can re-fire it
+    // without duplicating the closure.
+    const runBackfill = () => {
+      // Cursor = the most recent SERVER-confirmed message we already have.
+      // Optimistic / failed rows are skipped because their `timestamp` is
+      // the local clock — using one as the cursor could ask the server for
+      // a window in the future and miss real inbound that happened earlier.
+      const known = dataRef.current.messages;
+      let cursor: string | null = null;
+      for (let i = known.length - 1; i >= 0; i--) {
+        const m = known[i];
+        if (m && !m.pending && !m.failed) {
+          cursor = m.timestamp;
+          break;
+        }
+      }
+      if (!cursor) return;
+
+      backfillNeededRef.current = false;
+
+      void fetch(
+        `/api/conversations/${conversationId}/messages?after=${encodeURIComponent(cursor)}`,
+      )
+        .then((r) => (r.ok ? (r.json() as Promise<{ items: Message[] }>) : null))
+        .then((res) => {
+          if (!res?.items?.length) return;
+          setData((prev) => {
+            const have = new Set(prev.messages.map((m) => m.externalId));
+            const fresh = res.items.filter((m) => !have.has(m.externalId));
+            if (!fresh.length) return prev;
+            return {
+              ...prev,
+              messages: sortByTimestamp([...prev.messages, ...fresh]),
+            };
+          });
+        })
+        .catch(() => {
+          // Silent — the next reconnect or thread navigation re-fetches
+          // authoritatively via the server component. A noisy retry loop
+          // here would just compound a real outage.
+        });
+    };
+
+    // If a connect happened while the tab was hidden, re-run the backfill
+    // when the user returns. This is what makes "open laptop after lunch"
+    // recover the gap without forcing a manual reload.
+    const onVisibility = () => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "visible" &&
+        backfillNeededRef.current &&
+        socket.connected
+      ) {
+        runBackfill();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
     socket.on("connect", onConnect);
     if (socket.connected) onConnect();
 
@@ -225,10 +358,18 @@ export function useConversationEvents(
             })
           : prev.messages;
 
-        const reconciled =
+        const merged =
           tempId && messages.some((m) => m.id === payload.message.id)
             ? messages
             : [...messages, payload.message];
+
+        // Re-sort by server timestamp on every reconcile. This is the fix
+        // for the agent-vs-customer order mismatch: while an outbound
+        // upload is in flight (optimistic, sortKey = ∞) the bubble stays
+        // pinned at the bottom; the moment the server confirms the send
+        // we swap in the real timestamp and the message slots into its
+        // chronological position — same order the customer's phone shows.
+        const reconciled = sortByTimestamp(merged);
 
         // Inbound messages reset the 24h customer-service window. Outbound
         // doesn't — but we still bubble lastMessageAt for sort order.
@@ -400,6 +541,9 @@ export function useConversationEvents(
       socket.off("note:deleted", onNoteDeleted);
       socket.off("conversation:deleted", onConversationDeleted);
       socket.off("contact:updated", onContactUpdated);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
     };
   }, [conversationId, markRead, router]);
 
@@ -416,17 +560,27 @@ export function useConversationEvents(
         lastMessageAt: message.timestamp,
         lastMessagePreview: (message.body || "").slice(0, 200),
       },
-      messages: [...prev.messages, message],
+      // Sort pins pending bubbles at the bottom (sortKey = ∞) regardless of
+      // their local-clock timestamp, so a slow-system-clock or rapid-fire
+      // send doesn't shove the new bubble above an earlier real message.
+      messages: sortByTimestamp([...prev.messages, message]),
     }));
   }, []);
 
   const markOptimisticFailed = useCallback((clientTempId: string) => {
     setData((prev) => ({
       ...prev,
-      messages: prev.messages.map((m) =>
-        m.clientTempId === clientTempId && m.pending
-          ? { ...m, pending: false, failed: true }
-          : m,
+      // pending → failed keeps the same ∞ sort key, so the bubble stays
+      // anchored at the bottom while the user decides to retry / dismiss.
+      // The sort here is defensive: if a real message came in between
+      // optimistic creation and the failure, we want the failed bubble
+      // below it.
+      messages: sortByTimestamp(
+        prev.messages.map((m) =>
+          m.clientTempId === clientTempId && m.pending
+            ? { ...m, pending: false, failed: true }
+            : m,
+        ),
       ),
     }));
   }, []);

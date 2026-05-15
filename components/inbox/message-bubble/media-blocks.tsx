@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileText, FileAudio, Film, ImageIcon, ImageOff, Loader2, X } from "lucide-react";
+import { Download, FileText, FileAudio, Film, ImageOff, Loader2, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { MediaAttachment, MediaKind } from "@/lib/types";
@@ -39,27 +39,23 @@ export function MediaBlock({
 }
 
 function PendingMediaBlock({ kind, isOut }: { kind: MediaKind; isOut: boolean }) {
-  const { Icon, label, frame } = pendingPresentation(kind);
-  // Image/video get a wide thumbnail-shaped placeholder; audio/document use a
-  // compact row so the bubble doesn't suddenly grow tall for a voice note.
-  if (frame === "wide") {
+  // Image/video share the same 4:3 slot as the final bubble — render a clean
+  // shimmer at the exact same dimensions so the swap is a pure visual
+  // replace with no layout shift and no chrome to read. WhatsApp Web /
+  // Telegram do this — quieter than a labelled "Downloading…" placeholder.
+  if (kind === "image" || kind === "video") {
     return (
       <div
         className={cn(
-          "flex aspect-4/3 max-h-65 w-full items-center justify-center rounded-xl",
+          "aspect-4/3 max-h-65 w-80 max-w-full animate-pulse rounded-xl",
           isOut ? "bg-white/10" : "bg-muted",
         )}
-      >
-        <div className="flex flex-col items-center gap-1.5 opacity-80">
-          <Icon className="size-6" />
-          <div className="flex items-center gap-1.5 text-[11px]">
-            <Loader2 className="size-3 animate-spin" />
-            <span>{label}</span>
-          </div>
-        </div>
-      </div>
+      />
     );
   }
+  // Audio / document — compact row keeps the label because a bare shimmer
+  // in a narrow horizontal strip just reads as an empty UI bar.
+  const { Icon, label } = pendingPresentation(kind);
   return (
     <div
       className={cn(
@@ -83,24 +79,19 @@ function PendingMediaBlock({ kind, isOut }: { kind: MediaKind; isOut: boolean })
   );
 }
 
-function pendingPresentation(kind: MediaKind): {
-  Icon: typeof ImageIcon;
+function pendingPresentation(kind: "audio" | "document" | "sticker"): {
+  Icon: typeof FileText;
   label: string;
-  frame: "wide" | "compact";
 } {
   switch (kind) {
-    case "image":
-      return { Icon: ImageIcon, label: "Downloading photo…", frame: "wide" };
-    case "video":
-      return { Icon: Film, label: "Downloading video…", frame: "wide" };
     case "audio":
-      return { Icon: FileAudio, label: "Downloading voice…", frame: "compact" };
+      return { Icon: FileAudio, label: "Downloading voice…" };
     case "document":
-      return { Icon: FileText, label: "Downloading file…", frame: "compact" };
+      return { Icon: FileText, label: "Downloading file…" };
     case "sticker":
-      // Stickers never reach the pending branch (early-return in MediaBlock),
-      // but the discriminated union forces us to handle the case.
-      return { Icon: ImageIcon, label: "Downloading…", frame: "compact" };
+      // Unreachable — stickers early-return in MediaBlock. Required by the
+      // discriminated-union exhaustiveness check.
+      return { Icon: FileText, label: "Downloading…" };
   }
 }
 
@@ -126,15 +117,27 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
   // visibility:hidden (briefly, until useChatScroll positions it), Chromium
   // and Safari defer decode of any img inside, and the bytes-already-loaded
   // case leaves the slot blank until the next paint trigger. img.decode()
-  // is idempotent if decode already happened. Genuine load failures still
-  // hit the `onError` handler on the <img> below — we don't second-guess
-  // them here, because doing so during the hydration window where bytes
-  // haven't arrived yet would flip valid images to the error state.
+  // is idempotent if decode already happened.
+  //
+  // We also have to catch failures that happened BEFORE React attached its
+  // onError listener. Concretely: on a refresh the server-rendered <img>
+  // starts loading during hydration, and if the request fails before the
+  // listener mounts the event is swallowed — the slot stays as an empty
+  // dark frame instead of the "Image unavailable" fallback. Navigating
+  // away and back works fine because the <img> is then created fresh
+  // client-side AFTER the listener is attached. Checking `complete &&
+  // naturalWidth === 0` once on mount is the canonical cross-browser
+  // signal for "load already finished and there's no image data."
+  // `complete` is false while a load is in flight, so this won't ever
+  // flip a still-pending image to errored.
   useEffect(() => {
     const img = imgRef.current;
     if (!img || errored) return;
-    if (img.complete && img.naturalWidth > 0) {
+    if (!img.complete) return;
+    if (img.naturalWidth > 0) {
       void img.decode?.().catch(() => {});
+    } else {
+      setErrored(true);
     }
   }, [errored, media.url]);
 
@@ -168,6 +171,15 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
             src={media.url}
             alt={media.caption ?? "image"}
             onError={() => setErrored(true)}
+            // Lazy + async-decode prevents the cold-load thundering herd on a
+            // thread with many images. Without these, every image requests
+            // `/api/media/<id>` in parallel on mount → N simultaneous auth →
+            // redirect → CDN fetches → UploadThing rate-caps the burst with
+            // ERR_CONNECTION_RESET and the tab hangs. With lazy, only images
+            // near the viewport load; async decoding keeps the main thread
+            // free during paint.
+            loading="lazy"
+            decoding="async"
             className="absolute inset-0 block h-full w-full object-contain hover:opacity-95"
           />
         )}
@@ -178,15 +190,46 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
 }
 
 function VideoBlock({ media }: { media: MediaAttachment }) {
+  const [errored, setErrored] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Same SSR-error-recovery dance as ImageBlock — if the load failed before
+  // React attached its onError listener, the event was swallowed. <video>
+  // exposes .error after a failed load (MediaError object) so checking it
+  // once on mount catches the case. networkState === NETWORK_NO_SOURCE
+  // covers the case where the src URL itself was invalid.
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || errored) return;
+    if (el.error || el.networkState === 3 /* NETWORK_NO_SOURCE */) {
+      setErrored(true);
+    }
+  }, [errored, media.url]);
+
   // Same fixed 4:3 slot as ImageBlock for the same reason: stable bubble
   // height means useChatScroll's snap-to-bottom isn't fighting a late
   // metadata-driven resize. Native video controls overlay the bottom of
   // the frame; fullscreen is available via the controls bar.
+  if (errored) {
+    return (
+      <div className="flex aspect-4/3 max-h-65 w-80 max-w-full flex-col items-center justify-center gap-1.5 rounded-xl bg-black/80 text-muted-foreground">
+        <Film className="size-5" />
+        <span className="text-[11px]">Video unavailable</span>
+      </div>
+    );
+  }
   return (
     <video
+      ref={videoRef}
       src={media.url}
       controls
-      preload="metadata"
+      // `preload="none"` (was "metadata") — `metadata` fires a HEAD + range
+      // fetch per <video> on mount. On a thread with N videos that's N
+      // round-trips through /api/media/<id> just to learn the duration; the
+      // user usually never plays most of them. The browser fetches on demand
+      // when the user clicks the play control.
+      preload="none"
+      onError={() => setErrored(true)}
       // Same fixed-width reasoning as ImageBlock — shrink-to-fit bubble
       // parent collapses w-full to 0 without an intrinsic width source.
       className="block aspect-4/3 max-h-65 w-80 max-w-full rounded-xl bg-black"
@@ -195,14 +238,53 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
 }
 
 function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
+  const [errored, setErrored] = useState(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  // SSR-error-recovery: see VideoBlock for the long version.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || errored) return;
+    if (el.error || el.networkState === 3 /* NETWORK_NO_SOURCE */) {
+      setErrored(true);
+    }
+  }, [errored, media.url]);
+
+  if (errored) {
+    return (
+      <div
+        className={cn(
+          "flex items-center gap-3 rounded-xl px-3 py-2.5",
+          isOut ? "bg-white/10" : "bg-background/60",
+        )}
+      >
+        <div
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-md",
+            isOut ? "bg-white/15" : "bg-muted",
+          )}
+        >
+          <FileAudio className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1 text-xs text-muted-foreground">
+          Audio unavailable
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={cn("flex items-center gap-2 rounded-xl px-2.5 py-2")}>
       {/* Native player — keeps it dependency-free. The container sets a
           sensible width via flex so the bubble doesn't blow out. */}
       <audio
+        ref={audioRef}
         src={media.url}
         controls
-        preload="metadata"
+        // `none` (was "metadata") — duration is shown after click. See the
+        // matching note on <video> above for why we don't pay the per-element
+        // metadata fetch upfront.
+        preload="none"
+        onError={() => setErrored(true)}
         className={cn(
           "h-9 max-w-65 flex-1",
           isOut ? "[&::-webkit-media-controls-panel]:bg-white/10" : "",
@@ -254,6 +336,8 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
 function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const lastFocusedRef = useRef<HTMLElement | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [errored, setErrored] = useState(false);
 
   useEffect(() => {
     lastFocusedRef.current = document.activeElement as HTMLElement | null;
@@ -268,6 +352,16 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
     };
   }, [onClose]);
 
+  // Catch failures that completed before onError could be wired. Same
+  // pattern as ImageBlock — the Lightbox is client-only (mounts on click)
+  // so the SSR window doesn't apply here, but a runtime load failure of
+  // a cached 404 has the same race.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img || errored) return;
+    if (img.complete && img.naturalWidth === 0) setErrored(true);
+  }, [errored, url]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
@@ -276,13 +370,25 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
       aria-modal="true"
       aria-label="Image preview"
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={url}
-        alt="full size"
-        className="max-h-[90vh] max-w-[90vw] object-contain"
-        onClick={(e) => e.stopPropagation()}
-      />
+      {errored ? (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="flex flex-col items-center gap-2 rounded-xl bg-black/60 px-6 py-8 text-white/70"
+        >
+          <ImageOff className="size-7" />
+          <span className="text-xs">Image unavailable</span>
+        </div>
+      ) : (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          ref={imgRef}
+          src={url}
+          alt="full size"
+          onError={() => setErrored(true)}
+          className="max-h-[90vh] max-w-[90vw] object-contain"
+          onClick={(e) => e.stopPropagation()}
+        />
+      )}
       <button
         ref={closeBtnRef}
         type="button"

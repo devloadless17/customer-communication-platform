@@ -20,10 +20,12 @@ import { db } from "@/lib/db";
  * 302s are NOT in the HTTP default-cacheable status list — without explicit
  * Cache-Control headers, browsers refetch the redirect on every render. For
  * a thread with N images, that's N × (session lookup + DB query + 302) per
- * paint. We set `private, max-age=600` to let each user's browser cache the
- * redirect for 10 min, dropping the repeat-render cost to ~0. `private` keeps
- * shared proxies out; 10 min is short enough that a team-removal becomes
- * visible quickly, long enough to cover normal scrollback patterns.
+ * paint. We set `private, max-age=3600, immutable` so each user's browser
+ * caches the redirect for an hour AND skips revalidation on F5/hard-reload.
+ * `immutable` is safe here because the underlying blob URL is
+ * content-addressed (UploadThing fileKey is derived from bytes) — the URL
+ * for a given messageId never changes. `private` keeps shared proxies out.
+ * `Vary: Cookie` belt-and-suspenders against a future shared cache misroute.
  */
 
 export const runtime = "nodejs";
@@ -58,9 +60,12 @@ export async function GET(
   }
 
   // 302 (not 301) — keeps the same path the browser knows, and gives us a
-  // ceiling on cache lifetime via max-age. The Cache-Control header opts
-  // browsers into caching the redirect for the bounded window above.
+  // ceiling on cache lifetime via max-age. `immutable` opts the browser out
+  // of revalidating on hard-reload, which is what made the cold-load tab
+  // hang reproducible: with `max-age=600` alone, F5 / Ctrl-Shift-R still
+  // re-fires every redirect → every CDN handshake.
   const res = NextResponse.redirect(message.mediaUrl, { status: 302 });
-  res.headers.set("Cache-Control", "private, max-age=600");
+  res.headers.set("Cache-Control", "private, max-age=3600, immutable");
+  res.headers.set("Vary", "Cookie");
   return res;
 }

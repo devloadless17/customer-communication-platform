@@ -139,6 +139,18 @@ export function ReplyBox({
     >(),
   );
 
+  // Idempotency guard: while a submit is in flight, additional Enter
+  // presses / Send-button clicks no-op. The fetch IIFE clears the flag in
+  // its finally block. Without this, holding Enter or double-clicking
+  // sends the SAME draft twice — the input is cleared synchronously, but
+  // the second keydown fires before React re-renders, so its `value`
+  // closure still has the original text. The DB unique on `externalId`
+  // doesn't save us: each click generates a fresh `clientTempId`, and
+  // Meta returns a different wamid for each accepted send → the customer
+  // gets the same message twice.
+  const sendInFlightRef = useRef(false);
+  const [sendInFlight, setSendInFlight] = useState(false);
+
   // -------------------------------------------------------------------------
   // Slash-trigger snippet state.
   //
@@ -382,10 +394,17 @@ export function ReplyBox({
 
   const submit = () => {
     if (!canSend) return;
+    // Ref-guard against re-entry from a fast double-click / hold-Enter
+    // before the previous submit's input-clear has rendered. See
+    // sendInFlightRef declaration for the full reason.
+    if (sendInFlightRef.current) return;
 
     const trimmed = value.trim();
     const file = attachment;
     if (!file && !trimmed) return;
+
+    sendInFlightRef.current = true;
+    setSendInFlight(true);
 
     const clientTempId = newClientTempId();
     const snapshotValue = value;
@@ -524,6 +543,13 @@ export function ReplyBox({
           if (!isNote) onOptimisticRetry?.(clientTempId);
           return snapshotValue;
         });
+      } finally {
+        // Release the idempotency lock — the next Enter / click can now
+        // start a fresh send. Doing this in finally (not after setValue)
+        // makes sure a thrown setError or unexpected error path can't
+        // wedge the button permanently disabled.
+        sendInFlightRef.current = false;
+        setSendInFlight(false);
       }
     })();
   };
@@ -732,7 +758,11 @@ export function ReplyBox({
             <Button
               size="sm"
               onClick={submit}
-              disabled={!canSend}
+              // Disable while a previous submit is still being POSTed — pairs
+              // with the sendInFlightRef guard in `submit()` to make double-
+              // click a no-op. The ref is the source of truth; this just
+              // mirrors it visually so the user sees the button respond.
+              disabled={!canSend || sendInFlight}
               className={cn(
                 "h-8 gap-1.5",
                 isNote && "bg-note-fg text-background hover:bg-note-fg/90",

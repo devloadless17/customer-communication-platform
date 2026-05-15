@@ -47,13 +47,33 @@ export async function ingestEvents(
 ): Promise<void> {
   if (events.length === 0) return;
 
-  for (const evt of events) {
-    if (evt.kind === "message") {
-      await ingestInboundMessage(teamId, provider, evt);
-    } else {
-      await ingestStatusUpdate(evt);
-    }
-  }
+  // Process events in parallel. They're independent at the DB layer (each
+  // has its own externalId-keyed dedupe gate via the P2002 catch), so the
+  // sequential `for await` here was pure latency tax — Meta's webhook
+  // timeout is ~5s and a 10-event batch at ~6 DB roundtrips each was
+  // 800ms-1.5s blocking the 200. Each event is wrapped in its own try
+  // so one bad row doesn't make Meta retry the whole batch.
+  await Promise.all(
+    events.map(async (evt) => {
+      try {
+        if (evt.kind === "message") {
+          await ingestInboundMessage(teamId, provider, evt);
+        } else {
+          await ingestStatusUpdate(evt);
+        }
+      } catch (err) {
+        console.error(
+          `[ingest] event failed (kind=${evt.kind} externalId=${"externalId" in evt ? evt.externalId : "?"}):`,
+          err instanceof Error ? err.message : err,
+        );
+        // Swallow — Meta retries the whole batch on a non-200, and the
+        // unique-index gate makes successful sibling events safe to re-run.
+        // The detached automation dispatch, however, would fire twice on a
+        // retry. Returning 200 to Meta even when a single event blows up
+        // is the lesser evil.
+      }
+    }),
+  );
 }
 
 async function ingestStatusUpdate(evt: NormalizedStatusUpdate): Promise<void> {
@@ -152,42 +172,67 @@ async function ingestInboundMessage(
   // keep whatever stage they're already in.
   const defaultStageId = await ensureDefaultStage(teamId);
 
-  const contact = await db.contact.upsert({
-    where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
-    create: {
-      teamId,
-      phoneNumber: evt.contactPhone,
-      name: evt.contactName ?? evt.contactPhone,
-      stageId: defaultStageId,
-    },
-    update: {
-      // Intentionally empty: do NOT touch the name OR the stage. The agent's
-      // manually entered name (or the first-contact profile name) stays put,
-      // and a contact who progressed past the default stage isn't pulled
-      // back to it just because they sent another message.
-    },
-  });
+  // Contact + conversation resolution must be transactional. Without a tx,
+  // two simultaneous first-time inbounds from the same brand-new phone both
+  // see `findFirst({ status: { not: "closed" } }) === null` and both
+  // `conversation.create()` succeed — producing duplicate conversation rows
+  // for one contact. The contact upsert is already race-safe via the
+  // `teamId_phoneNumber` unique, but the conversation lookup-then-create
+  // pattern is the classic check-then-act race.
+  //
+  // We use `Serializable` because the read of "is there an open conversation?"
+  // must be conflict-protected against another tx's create. Postgres returns
+  // P2034 (serialization failure) on conflict; we retry once. Two retries is
+  // a sensible ceiling — by then the contention is real, not a fluke.
+  const { contact, conversation, isNewConversation } = await runWithSerializableRetry(
+    async () => {
+      const contact = await db.contact.upsert({
+        where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
+        create: {
+          teamId,
+          phoneNumber: evt.contactPhone,
+          name: evt.contactName ?? evt.contactPhone,
+          stageId: defaultStageId,
+        },
+        update: {
+          // Intentionally empty: do NOT touch the name OR the stage. The
+          // agent's manually entered name (or the first-contact profile
+          // name) stays put, and a contact who progressed past the default
+          // stage isn't pulled back to it just because they sent another
+          // message.
+        },
+      });
 
-  // Reuse the most recent non-closed conversation; otherwise open a new one.
-  // Closed threads stay closed — a fresh inbound is treated as a new ticket.
-  const openConvo = await db.conversation.findFirst({
-    where: { teamId, contactId: contact.id, status: { not: "closed" } },
-    orderBy: { lastMessageAt: "desc" },
-  });
-  const isNewConversation = !openConvo;
-  const conversation = openConvo ?? (await db.conversation.create({
-    data: {
-      teamId,
-      contactId: contact.id,
-      // New chats land in `pending` so they sit in the triage column until
-      // an agent claims them (→ open) or closes them out. Re-using an
-      // existing non-closed conversation keeps that conversation's current
-      // status (the `openConvo` branch above).
-      status: "pending",
-      lastMessageAt: evt.timestamp,
-      lastMessagePreview: "",
+      // Reuse the most recent non-closed conversation; otherwise open a new
+      // one. Closed threads stay closed — a fresh inbound is treated as a
+      // new ticket. `status IN ('open','pending')` lets the Postgres planner
+      // pick the (teamId, status, lastMessageAt desc) index instead of a
+      // negation scan.
+      const openConvo = await db.conversation.findFirst({
+        where: {
+          teamId,
+          contactId: contact.id,
+          status: { in: ["open", "pending"] },
+        },
+        orderBy: { lastMessageAt: "desc" },
+      });
+      const isNewConversation = !openConvo;
+      const conversation =
+        openConvo ??
+        (await db.conversation.create({
+          data: {
+            teamId,
+            contactId: contact.id,
+            // New chats land in `pending` so they sit in the triage column
+            // until an agent claims them (→ open) or closes them out.
+            status: "pending",
+            lastMessageAt: evt.timestamp,
+            lastMessagePreview: "",
+          },
+        }));
+      return { contact, conversation, isNewConversation };
     },
-  }));
+  );
 
   const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
 
@@ -568,5 +613,30 @@ function toReplySnapshot(row: {
     senderName: row.sender?.name ?? null,
     ...(row.mediaKind ? { mediaKind: row.mediaKind as MediaKind } : {}),
   };
+}
+
+/**
+ * Run `work` in a Serializable transaction, retrying once on Postgres
+ * `40001` (serialization failure). Two concurrent webhook handlers ingesting
+ * the first inbound from the same brand-new phone can race the
+ * findFirst→create on `Conversation` — Serializable + a retry is the
+ * cleanest fix without changing the schema (a partial unique on
+ * `(teamId, contactId) WHERE status != 'closed'` would also work but
+ * requires a migration).
+ */
+async function runWithSerializableRetry<T>(work: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await db.$transaction(work, { isolationLevel: "Serializable" });
+    } catch (err) {
+      const isSerializationFailure =
+        err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034";
+      if (!isSerializationFailure || attempt === 1) throw err;
+      // Brief jitter before retry to break the symmetric-conflict cycle.
+      await new Promise((r) => setTimeout(r, 5 + Math.random() * 20));
+    }
+  }
+  // Unreachable — the loop either returns or throws.
+  throw new Error("runWithSerializableRetry: exhausted retries");
 }
 
