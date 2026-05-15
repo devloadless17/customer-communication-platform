@@ -319,3 +319,19 @@ export function emitToConversation<E extends keyof ServerToClientEvents>(
 ) {
   getIO().to(conversationRoom(conversationId)).emit(event, ...args);
 }
+
+/**
+ * Tell every connected client on the team that a shared catalog moved.
+ * Clients respond with `router.refresh()` — see use-catalog-sync. Use this
+ * after every create / update / delete / reorder on a catalog table so
+ * other agents' UIs stay current without a manual reload.
+ *
+ * Scopes mirror the `team:catalog:changed` event's discriminator. Adding a
+ * new catalog: add the literal to that event, then emit from your route.
+ */
+export function emitCatalogChange(
+  teamId: string,
+  scope: Parameters<ServerToClientEvents["team:catalog:changed"]>[0]["scope"],
+) {
+  emitToTeam(teamId, "team:catalog:changed", { teamId, scope });
+}

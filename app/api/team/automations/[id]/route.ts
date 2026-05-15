@@ -7,6 +7,7 @@ import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { parseWebhookConfig, ActionConfigError } from "@/lib/automations/actions/webhook";
 import { validateConditions } from "@/lib/automations/conditions";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 import { redactActionConfig } from "../_shared";
 
@@ -133,6 +134,7 @@ export async function PATCH(
   }
 
   const updated = await db.automation.update({ where: { id }, data });
+  emitCatalogChange(session.teamId, "automations");
   return NextResponse.json({
     id: updated.id,
     name: updated.name,
@@ -164,5 +166,6 @@ export async function DELETE(
   // long-lived audit becomes a requirement we keep the rule and just disable
   // it instead. For now, intentional cleanup.
   await db.automation.delete({ where: { id } });
+  emitCatalogChange(session.teamId, "automations");
   return NextResponse.json({ ok: true });
 }

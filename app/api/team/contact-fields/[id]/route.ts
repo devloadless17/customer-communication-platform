@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { canManageContactFields } from "@/lib/auth/permissions";
+import { emitCatalogChange } from "@/lib/socket/server";
 import type { ContactFieldDefinition } from "@/lib/types";
 
 /**
@@ -90,6 +91,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     label: updated.label,
     order: updated.order,
   };
+  emitCatalogChange(session.teamId, "contact-fields");
   return NextResponse.json({ definition });
 }
 
@@ -124,5 +126,6 @@ export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string 
     db.contactFieldDefinition.delete({ where: { id } }),
   ]);
 
+  emitCatalogChange(session.teamId, "contact-fields");
   return NextResponse.json({ ok: true });
 }

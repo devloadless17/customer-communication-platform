@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileText, FileAudio, Film, ImageIcon, Loader2, X } from "lucide-react";
+import { Download, FileText, FileAudio, Film, ImageIcon, ImageOff, Loader2, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { MediaAttachment, MediaKind } from "@/lib/types";
@@ -106,20 +106,71 @@ function pendingPresentation(kind: MediaKind): {
 
 function ImageBlock({ media }: { media: MediaAttachment }) {
   const [open, setOpen] = useState(false);
+  const [errored, setErrored] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  // The bubble's box stays at a fixed 4:3 slot for the lifetime of the
+  // message. The <img> inside is absolutely positioned to fill it, cropped
+  // via object-cover, and the user opens the full image in a lightbox by
+  // clicking. WhatsApp Web / Telegram Web do this — fixed-size thumbnails
+  // in chat, full-size on tap.
+  //
+  // The reason it MUST be fixed-size (not "grow to natural ratio after
+  // load"): cached inbound images flip from placeholder to natural in a
+  // re-render that happens after useChatScroll has snapped to bottom on
+  // mount, and the ResizeObserver re-snap doesn't always win the timing
+  // race. Stable bubble heights → snap math is exact, refresh + chat-change
+  // reliably land at the bottom.
+  //
+  // We still force-decode after mount: when the bubble's container was
+  // visibility:hidden (briefly, until useChatScroll positions it), Chromium
+  // and Safari defer decode of any img inside, and the bytes-already-loaded
+  // case leaves the slot blank until the next paint trigger. img.decode()
+  // is idempotent if decode already happened. Genuine load failures still
+  // hit the `onError` handler on the <img> below — we don't second-guess
+  // them here, because doing so during the hydration window where bytes
+  // haven't arrived yet would flip valid images to the error state.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img || errored) return;
+    if (img.complete && img.naturalWidth > 0) {
+      void img.decode?.().catch(() => {});
+    }
+  }, [errored, media.url]);
+
   return (
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
-        className="block w-full overflow-hidden rounded-xl"
+        onClick={errored ? undefined : () => setOpen(true)}
+        disabled={errored}
+        // Fixed pixel width (w-80 = 320px) — without it the bubble's flex
+        // parent (items-end / items-start, shrink-to-fit) collapses the
+        // button to 0 width because the <img> below is absolute-positioned
+        // and contributes no intrinsic width source. With a definite width,
+        // aspect-4/3 computes a real height and the image actually paints.
+        // max-w-full keeps it polite on narrow viewports where the bubble's
+        // max-w-[70%] is smaller than 320px.
+        // bg-black gives portrait/ultra-wide images an intentional letterbox
+        // look since object-contain (below) preserves full content instead of
+        // cropping it, so non-4:3 photos show empty bands on the sides.
+        className="relative block aspect-4/3 max-h-65 w-80 max-w-full overflow-hidden rounded-xl bg-black/80"
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={media.url}
-          alt={media.caption ?? "image"}
-          className="max-h-90 w-full object-cover transition-opacity hover:opacity-95"
-          loading="lazy"
-        />
+        {errored ? (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-muted-foreground">
+            <ImageOff className="size-5" />
+            <span className="text-[11px]">Image unavailable</span>
+          </div>
+        ) : (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img
+            ref={imgRef}
+            src={media.url}
+            alt={media.caption ?? "image"}
+            onError={() => setErrored(true)}
+            className="absolute inset-0 block h-full w-full object-contain hover:opacity-95"
+          />
+        )}
       </button>
       {open && <Lightbox url={media.url} onClose={() => setOpen(false)} />}
     </>
@@ -127,12 +178,18 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
 }
 
 function VideoBlock({ media }: { media: MediaAttachment }) {
+  // Same fixed 4:3 slot as ImageBlock for the same reason: stable bubble
+  // height means useChatScroll's snap-to-bottom isn't fighting a late
+  // metadata-driven resize. Native video controls overlay the bottom of
+  // the frame; fullscreen is available via the controls bar.
   return (
     <video
       src={media.url}
       controls
       preload="metadata"
-      className="block max-h-90 w-full rounded-xl bg-black"
+      // Same fixed-width reasoning as ImageBlock — shrink-to-fit bubble
+      // parent collapses w-full to 0 without an intrinsic width source.
+      className="block aspect-4/3 max-h-65 w-80 max-w-full rounded-xl bg-black"
     />
   );
 }

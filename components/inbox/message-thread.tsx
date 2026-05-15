@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Loader2, X } from "lucide-react";
+import { ArrowDown, Loader2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -454,7 +454,7 @@ export function MessageThread({
   const isOwnSend =
     lastEntry?.kind === "message" && lastEntry.data.pending === true;
 
-  useChatScroll({
+  const { unreadBelow, scrollToBottom } = useChatScroll({
     scrollAreaRef,
     contentRef,
     topSentinelRef,
@@ -654,7 +654,30 @@ export function MessageThread({
           onCancel={selection.clear}
         />
       ) : (
-        <>
+        <div className="relative">
+          {/* New-messages pill — anchored to the TOP edge of the reply-area
+              wrapper so it always floats just above whatever's there
+              (typing indicator + reply box together), regardless of how
+              tall the textarea has grown. Click to jump to bottom and
+              clear. WhatsApp / Slack / Discord pattern. */}
+          <div className="pointer-events-none absolute inset-x-0 -top-10 z-20 flex justify-center">
+            <AnimatePresence>
+              {unreadBelow > 0 && (
+                <motion.button
+                  type="button"
+                  onClick={scrollToBottom}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  transition={{ duration: 0.15 }}
+                  className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
+                >
+                  <ArrowDown className="size-3.5" />
+                  {unreadBelow} new {unreadBelow === 1 ? "message" : "messages"}
+                </motion.button>
+              )}
+            </AnimatePresence>
+          </div>
           <TypingIndicator
             typingUserIds={typingUserIds}
             memberById={memberById}
@@ -673,7 +696,7 @@ export function MessageThread({
             onOptimisticRetry={removeOptimistic}
             prefill={composerPrefill}
           />
-        </>
+        </div>
       )}
 
       <ForwardDialog

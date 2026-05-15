@@ -9,6 +9,7 @@
  */
 
 import type {
+  Contact,
   ConversationStatus,
   ConversationWithRefs,
   InternalNote,
@@ -118,6 +119,30 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Editable contact data changed (name, email, location, customFields,
+   * stage, or tags). Payload carries the full updated Contact so consumers
+   * can splice it in without a refetch.
+   *
+   * Fanned out from /api/contacts/:id (PATCH) and /api/contacts/:id/tags
+   * (PATCH). Used by:
+   *   - use-team-events: updates the contact embedded in each matching
+   *     ConversationWithRefs in the sidebar (stage filter / stage counts
+   *     re-evaluate, conversation-list-item name + avatar refresh).
+   *   - use-conversation-events: updates `data.contact` so the message
+   *     thread's stage stepper, contact name in the header, etc. follow.
+   *   - ContactPanel: re-seeds its local mirror fields so two agents
+   *     editing the same contact stay in sync without a hard refresh.
+   *
+   * Phone number can never change on an existing contact (it's the
+   * WhatsApp identity used for inbound dedupe), so it's stable across
+   * every emit.
+   */
+  "contact:updated": (payload: {
+    teamId: string;
+    contact: Contact;
+  }) => void;
+
+  /**
    * Conversation was read — team-wide unread counter resets to 0. Fires when
    * a teammate opens the thread or explicitly marks it read. CLAUDE.md flags
    * per-agent unread as deferred, so this is shared across the team.
@@ -170,6 +195,34 @@ export interface ServerToClientEvents {
     sentCount: number;
     failedCount: number;
     totalCount: number;
+  }) => void;
+
+  /**
+   * A team-scoped catalog row was created, updated, deleted, or reordered.
+   * Catalogs are the lookup tables the inbox reads at render time —
+   * contact stages, tags, custom field definitions, automations, and team
+   * members. None of these are large enough or change frequently enough
+   * to warrant a per-row diff event; instead the server tells every client
+   * "the X catalog moved" and the client calls `router.refresh()` to
+   * re-run the affected server components.
+   *
+   * Why a single event instead of one per catalog:
+   *   - The client handler is identical (router.refresh) for every scope.
+   *   - Bundling them keeps both server emit-sites and the client listener
+   *     one-liners — there's no per-scope state on the client to merge,
+   *     so a discriminator field is enough.
+   *   - The `scope` field stays useful for telemetry / future
+   *     optimisations (e.g. skip refresh if the user isn't on a route
+   *     that consumes that catalog).
+   */
+  "team:catalog:changed": (payload: {
+    teamId: string;
+    scope:
+      | "stages"
+      | "tags"
+      | "contact-fields"
+      | "automations"
+      | "members";
   }) => void;
 }
 

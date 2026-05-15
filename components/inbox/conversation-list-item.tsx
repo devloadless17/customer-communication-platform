@@ -65,7 +65,7 @@ export function ConversationListItem({
             {conversation.lastMessagePreview}
           </p>
           {unread && (
-            <span className="ml-1 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-primary text-[10px] font-semibold tabular-nums text-primary-foreground">
+            <span className="ml-1 flex size-4.5 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] font-semibold tabular-nums text-primary-foreground">
               {conversation.unreadCount}
             </span>
           )}

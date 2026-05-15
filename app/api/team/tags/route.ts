@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { emitCatalogChange } from "@/lib/socket/server";
 import { TAG_COLORS, type Tag, type TagColor } from "@/lib/types";
 
 /**
@@ -66,6 +68,11 @@ export async function POST(req: Request) {
     const created = await db.tag.create({
       data: { teamId, name, color },
     });
+    // Bust the unstable_cache wrapper around listTags so the next inbox
+    // page render picks up the new tag, AND tell every connected client to
+    // re-fetch the routes that depend on it.
+    revalidateTag("tags");
+    emitCatalogChange(teamId, "tags");
     return NextResponse.json({
       tag: {
         id: created.id,

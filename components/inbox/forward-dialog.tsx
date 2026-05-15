@@ -1,5 +1,7 @@
 "use client";
 
+import { useRouter } from "next/navigation";
+
 import { ContactSelectDialog } from "@/components/contacts/contact-select-dialog";
 import type { ForwardResult } from "@/lib/types";
 
@@ -29,11 +31,14 @@ export function ForwardDialog({
   onError: (summary: string) => void;
 }) {
   const count = messageIds.length;
+  const router = useRouter();
 
   function submit(contactIds: string[]) {
     if (contactIds.length === 0 || messageIds.length === 0) return;
     onClose();
-    void runForward(messageIds, contactIds, count, onError);
+    void runForward(messageIds, contactIds, count, onError, () =>
+      router.refresh(),
+    );
   }
 
   if (!open) return null;
@@ -55,6 +60,7 @@ async function runForward(
   contactIds: string[],
   count: number,
   onError: (summary: string) => void,
+  onAnySent: () => void,
 ) {
   try {
     const res = await fetch("/api/messages/forward", {
@@ -72,6 +78,14 @@ async function runForward(
       );
       return;
     }
+    // Invalidate Next's client router cache if anything actually went out.
+    // Conversation-list links prefetch their target route's RSC payload; that
+    // cache is otherwise served when the user clicks into the destination
+    // thread, so a fresh forward would be missing from the initial render
+    // (the realtime message:new fires before the user mounts that thread, so
+    // the live append handler doesn't catch it either). The refresh marks
+    // every cached route stale → next click re-fetches with the new row.
+    if (data.results.some((r) => r.sent > 0)) onAnySent();
     const failed = data.results.filter((r) => !r.ok);
     if (failed.length === 0) return;
 

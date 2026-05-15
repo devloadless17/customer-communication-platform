@@ -38,19 +38,34 @@ export interface ConnectionStatus {
   recovered: boolean;
 }
 
+/**
+ * Grace period on first mount before we surface a "reconnecting" banner.
+ * The Socket.io handshake takes ~100-500ms on a healthy connection — without
+ * a grace, every page refresh briefly renders the amber "Reconnecting…"
+ * banner while the WS comes up. After this window we assume the server is
+ * actually unreachable and start surfacing the banner.
+ */
+const INITIAL_CONNECT_GRACE_MS = 3000;
+
 export function useConnectionStatus(opts?: {
   /** Fires once each time we transition back to `online` after a drop. */
   onRecovered?: () => void;
 }): ConnectionStatus {
+  // Optimistic start: assume online until we have proof otherwise. The lazy
+  // initializer used to return "reconnecting" when the socket hadn't finished
+  // its handshake yet — that's what flashed the banner on every refresh.
   const [state, setState] = useState<ConnectionState>(() => {
     if (typeof window === "undefined") return "online";
     if (!navigator.onLine) return "offline";
-    return getClientSocket().connected ? "online" : "reconnecting";
+    return "online";
   });
   const [recovered, setRecovered] = useState(false);
 
-  // Track the previous state to distinguish "first-mount online" from
-  // "online again after a drop". Only the latter should trigger refreshes.
+  // Tracks whether we've ever actually been connected. We only flip to
+  // "reconnecting" once we've either had a successful connect (any later
+  // drop is a real reconnect) OR exceeded the initial-connect grace
+  // (something is wrong with the server / network — surface it).
+  const allowReconnectingBanner = useRef(false);
   const everDisconnected = useRef(false);
   const onRecoveredRef = useRef(opts?.onRecovered);
   useEffect(() => {
@@ -60,9 +75,13 @@ export function useConnectionStatus(opts?: {
   useEffect(() => {
     const socket = getClientSocket();
 
-    const compute = () => {
+    const compute = (): ConnectionState => {
       if (typeof navigator !== "undefined" && !navigator.onLine) return "offline";
-      return socket.connected ? "online" : "reconnecting";
+      if (socket.connected) return "online";
+      // Pre-handshake on a fresh page load — suppress the banner. Once
+      // either the grace period elapses or we've seen a real connect, this
+      // gate opens and subsequent disconnects show the banner immediately.
+      return allowReconnectingBanner.current ? "reconnecting" : "online";
     };
 
     const apply = () => {
@@ -84,7 +103,11 @@ export function useConnectionStatus(opts?: {
       });
     };
 
-    const onConnect = () => apply();
+    const onConnect = () => {
+      // First successful connect arms the banner for any later drops.
+      allowReconnectingBanner.current = true;
+      apply();
+    };
     const onDisconnect = () => apply();
     const onOnline = () => {
       // Browser regained network — nudge the socket so we don't wait for its
@@ -99,11 +122,27 @@ export function useConnectionStatus(opts?: {
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
 
-    // Initial reconcile (in case state diverged between the lazy initializer
-    // and effect mount — e.g. an offline event fired between them).
+    // Grace-period timer: if we still haven't connected by the time it
+    // fires, open the banner gate. This is what makes "server actually
+    // down on first load" eventually visible to the user.
+    const graceTimer = window.setTimeout(() => {
+      if (!socket.connected) {
+        allowReconnectingBanner.current = true;
+        apply();
+      }
+    }, INITIAL_CONNECT_GRACE_MS);
+
+    // If the socket is already connected by the time this effect runs
+    // (e.g. a remount after a soft navigation), arm immediately so a later
+    // drop banners without waiting for the grace timer.
+    if (socket.connected) {
+      allowReconnectingBanner.current = true;
+    }
+
     apply();
 
     return () => {
+      window.clearTimeout(graceTimer);
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
       window.removeEventListener("online", onOnline);

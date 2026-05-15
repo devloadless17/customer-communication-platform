@@ -210,11 +210,32 @@ export function useTeamEvents(
       setConversations((prev) => prev.filter((c) => c.conversation.id !== conversationId));
     };
 
+    // Contact edits (name/email/location/stage/tags/customFields) — patch
+    // the embedded contact on every conversation that points at this id.
+    // The sidebar's stage filter + per-stage counts use contact.stageId, so
+    // a stage change made by a teammate now re-evaluates here without a
+    // page refresh. Conversations belonging to other contacts pass through
+    // untouched (the map keeps stable references where it can).
+    const onContactUpdated: Parameters<typeof socket.on<"contact:updated">>[1] = ({
+      contact,
+    }) => {
+      setConversations((prev) => {
+        let changed = false;
+        const next = prev.map((c) => {
+          if (c.contact.id !== contact.id) return c;
+          changed = true;
+          return { ...c, contact };
+        });
+        return changed ? next : prev;
+      });
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
     socket.on("conversation:read", onRead);
     socket.on("conversation:deleted", onConversationDeleted);
+    socket.on("contact:updated", onContactUpdated);
 
     return () => {
       socket.off("connect", onConnect);
@@ -223,6 +244,7 @@ export function useTeamEvents(
       socket.off("conversation:status", onStatus);
       socket.off("conversation:read", onRead);
       socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("contact:updated", onContactUpdated);
     };
   }, [teamId]);
 

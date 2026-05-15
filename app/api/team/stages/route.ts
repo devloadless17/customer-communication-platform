@@ -4,6 +4,7 @@ import { revalidateTag } from "next/cache";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { canManageStages } from "@/lib/auth/permissions";
+import { emitCatalogChange } from "@/lib/socket/server";
 import { TAG_COLORS, type ContactStage, type TagColor } from "@/lib/types";
 
 /**
@@ -100,6 +101,7 @@ export async function POST(req: Request) {
       },
     });
     revalidateTag("contact-stages");
+    emitCatalogChange(session.teamId, "stages");
 
     const stage: ContactStage = {
       id: created.id,

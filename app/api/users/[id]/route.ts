@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { assignableRoles, canModifyUser } from "@/lib/auth/permissions";
+import { emitCatalogChange } from "@/lib/socket/server";
 import type { Role } from "@/lib/types";
 
 /**
@@ -142,6 +143,11 @@ export async function PATCH(
     await db.session.deleteMany({ where: { userId: id } });
   }
 
+  // Roster mutation — fan out so other admins viewing the team page and
+  // the inbox shell (which renders teammates for presence + attribution)
+  // pull fresh data. Also covers the case where a teammate is deactivated
+  // while another agent has them in a typing / presence list.
+  emitCatalogChange(session.teamId, "members");
   return NextResponse.json({ user: updated });
 }
 
@@ -211,5 +217,6 @@ export async function DELETE(
   }
 
   await db.user.delete({ where: { id } });
+  emitCatalogChange(session.teamId, "members");
   return NextResponse.json({ ok: true });
 }

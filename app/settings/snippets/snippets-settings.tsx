@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   Check,
@@ -57,6 +58,7 @@ export function SnippetsSettings({
   fieldDefinitions: ContactFieldDefinition[];
 }) {
   const { confirm, confirmDialog } = useConfirm();
+  const router = useRouter();
   const [snippets, setSnippets] = useState<SnippetDto[]>(initialSnippets);
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
@@ -98,12 +100,17 @@ export function SnippetsSettings({
         return copy;
       });
       setEditingId(saved.id);
-      // The API route already calls revalidateTag("snippets"), so the inbox
-      // layout's cached snippet list will refresh on next navigation —
-      // nothing else to wire client-side.
+      // The API route's revalidateTag("snippets") clears the SERVER-side
+      // unstable_cache, but the Next App Router's CLIENT-side cache still
+      // holds the inbox layout's RSC payload (with the old snippet list)
+      // until something invalidates it. Without router.refresh(), an agent
+      // who just added a snippet won't see it in the reply-box `/menu`
+      // until a hard reload. The reload() call below keeps THIS page's
+      // local list in sync; refresh() takes care of the inbox.
       void reload();
+      router.refresh();
     },
-    [reload],
+    [reload, router],
   );
 
   const askDelete = useCallback(
@@ -122,8 +129,12 @@ export function SnippetsSettings({
       }
       setSnippets((cur) => cur.filter((s) => s.id !== target.id));
       if (editingId === target.id) setEditingId(null);
+      // Same reasoning as onSaved — invalidate the inbox layout's RSC so
+      // the deleted snippet stops appearing in the reply-box `/menu` for
+      // other agents (and this user, if they navigate away and back).
+      router.refresh();
     },
-    [confirm, editingId],
+    [confirm, editingId, router],
   );
 
   return (

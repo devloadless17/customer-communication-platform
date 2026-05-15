@@ -154,14 +154,17 @@ export async function getConversationWithRefs(
 
   // Latest inbound across ALL of this contact's conversations (not just the
   // current thread), since the 24h window is contact-level on Meta's side.
-  const lastInboundRow = await db.message.findFirst({
-    where: {
-      direction: "in",
-      conversation: { contactId: row.contactId },
-    },
-    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-    select: { timestamp: true },
-  });
+  // Run in parallel with the true-count queries — none of these depend on
+  // each other and they all hit different indices.
+  const [lastInboundRow, messageCount, noteCount] = await Promise.all([
+    db.message.findFirst({
+      where: { direction: "in", conversation: { contactId: row.contactId } },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      select: { timestamp: true },
+    }),
+    db.message.count({ where: { conversationId } }),
+    db.internalNote.count({ where: { conversationId } }),
+  ]);
 
   return {
     data: {
@@ -174,6 +177,8 @@ export async function getConversationWithRefs(
       messages: messagesAsc.map(mapMessage),
       notes: row.notes.map(mapNote),
       lastInboundAt: lastInboundRow ? lastInboundRow.timestamp.toISOString() : null,
+      messageCount,
+      noteCount,
     },
     nextOlderCursor,
   };

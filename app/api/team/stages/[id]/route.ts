@@ -4,6 +4,7 @@ import { revalidateTag } from "next/cache";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { canManageStages } from "@/lib/auth/permissions";
+import { emitCatalogChange } from "@/lib/socket/server";
 import { TAG_COLORS, type ContactStage, type TagColor } from "@/lib/types";
 
 /**
@@ -121,6 +122,7 @@ export async function PATCH(
     });
 
     revalidateTag("contact-stages");
+    emitCatalogChange(session.teamId, "stages");
     const stage: ContactStage = {
       id: updated.id,
       teamId: updated.teamId,
@@ -206,5 +208,6 @@ export async function DELETE(
 
   await db.contactStage.delete({ where: { id } });
   revalidateTag("contact-stages");
+  emitCatalogChange(session.teamId, "stages");
   return NextResponse.json({ ok: true });
 }

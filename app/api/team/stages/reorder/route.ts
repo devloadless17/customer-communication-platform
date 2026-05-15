@@ -4,6 +4,7 @@ import { revalidateTag } from "next/cache";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { canManageStages } from "@/lib/auth/permissions";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Bulk-reorder the team's stage catalog.
@@ -71,6 +72,7 @@ export async function PATCH(req: Request) {
     ),
   );
   revalidateTag("contact-stages");
+  emitCatalogChange(session.teamId, "stages");
 
   return NextResponse.json({ ok: true });
 }

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { canManageContactFields } from "@/lib/auth/permissions";
+import { emitCatalogChange } from "@/lib/socket/server";
 import type { ContactFieldDefinition } from "@/lib/types";
 
 /**
@@ -111,6 +112,7 @@ export async function POST(req: Request) {
       label: created.label,
       order: created.order,
     };
+    emitCatalogChange(session.teamId, "contact-fields");
     return NextResponse.json({ definition }, { status: 201 });
   } catch (err) {
     if (

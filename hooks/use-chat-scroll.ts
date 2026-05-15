@@ -6,6 +6,7 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
+  useState,
 } from "react";
 import { flushSync } from "react-dom";
 
@@ -62,10 +63,16 @@ export function useChatScroll({
   isOwnSend,
   hasMoreOlder,
   loadOlder,
-}: Options) {
+}: Options): { unreadBelow: number; scrollToBottom: () => void } {
   const viewportRef = useRef<HTMLElement | null>(null);
   const stickyRef = useRef(true);
   const settleStopRef = useRef<(() => void) | null>(null);
+  // Counter of new tail entries that arrived while the user was scrolled
+  // up reading history. Drives the "↓ N new messages" pill — UX pattern
+  // borrowed from WhatsApp / Slack / Discord. Clears on conversation
+  // change, on own-send (we snapped anyway), and when the user scrolls
+  // back to the bottom naturally.
+  const [unreadBelow, setUnreadBelow] = useState(0);
 
   // Resolve Radix's viewport once. Querying its data attribute is more
   // reliable than walking up by `overflow` — Radix keeps the viewport's
@@ -93,37 +100,92 @@ export function useChatScroll({
   // of behavior reads from this boolean. Writing it here also means the
   // pin-after-pin re-entry from ResizeObserver's own scrollTop write is
   // self-consistent: after the write we're at the bottom, so we stay sticky.
+  // Also clears the unread-below counter on the false→true transition: the
+  // user has caught up to the bottom on their own, no need to keep the pill.
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
     const onScroll = () => {
-      stickyRef.current = isAtBottom();
+      const wasSticky = stickyRef.current;
+      const isSticky = isAtBottom();
+      stickyRef.current = isSticky;
+      if (!wasSticky && isSticky) {
+        setUnreadBelow(0);
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, [isAtBottom]);
 
-  // Conversation change → hard reset to the bottom of the new thread.
+  // Conversation change (and initial mount) → hard reset to the bottom of
+  // the new thread. Same double-rAF safety net as the own-send snap: the
+  // bubble heights, the `scrollReady` re-render that reveals the area, and
+  // image aspect-ratio reservations dropping as bytes decode can all land
+  // on subsequent frames. Re-snap twice so the bottom is reached regardless
+  // of which one finishes last. Also clears any pending unread count from
+  // the previous thread — the pill should never linger across navigation.
   useLayoutEffect(() => {
     settleStopRef.current?.();
     stickyRef.current = true;
+    setUnreadBelow(0);
     snapToBottom();
+    requestAnimationFrame(() => {
+      if (stickyRef.current) snapToBottom();
+      requestAnimationFrame(() => {
+        if (stickyRef.current) snapToBottom();
+      });
+    });
   }, [conversationId, snapToBottom]);
 
-  // Tail-entry change. We only act when the new tail is THIS user's send;
-  // the global ResizeObserver below handles every other "content grew"
-  // case (inbound, teammate's send, note) gated by stickiness.
+  // Tail-entry change. Three cases:
+  //   - Own send: always snap and force sticky=true. The user's intent
+  //     is unambiguous — they expect to see what they just sent. Clears
+  //     any unread-below count from inbound that landed while typing.
+  //   - Inbound / teammate / note while sticky: snap, keep sticky.
+  //   - Inbound / teammate / note while NOT sticky: don't snap. Increment
+  //     the unread-below counter so the floating pill can offer a one-click
+  //     jump-to-latest. WhatsApp / Slack / Discord pattern.
   const lastEntryIdRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (lastEntryKey === lastEntryIdRef.current) return;
+    const isFirstObservation = lastEntryIdRef.current === null;
     lastEntryIdRef.current = lastEntryKey;
-    if (!isOwnSend) return;
-    // Kill any active load-older settle window — its ResizeObserver would
-    // otherwise re-pin to the OLD distance-from-bottom and undo this snap.
+    // First observation per mount is the initial render snapshot, not a
+    // "new message" — skip the unread bump that would otherwise show the
+    // pill the moment a thread loads.
+    if (isFirstObservation) return;
+    if (isOwnSend) {
+      // Kill any active load-older settle window — its ResizeObserver would
+      // otherwise re-pin to the OLD distance-from-bottom and undo this snap.
+      settleStopRef.current?.();
+      stickyRef.current = true;
+      setUnreadBelow(0);
+    } else if (!stickyRef.current) {
+      // Reading history → just bump the pill count, do not yank the view.
+      setUnreadBelow((n) => n + 1);
+      return;
+    }
+    snapToBottom();
+    requestAnimationFrame(() => {
+      if (stickyRef.current) snapToBottom();
+      requestAnimationFrame(() => {
+        if (stickyRef.current) snapToBottom();
+      });
+    });
+  }, [lastEntryKey, isOwnSend, snapToBottom]);
+
+  // Action exposed to the pill: clicking it jumps to bottom and clears
+  // the unread count. Forces sticky=true so subsequent inbound messages
+  // resume keeping the view pinned.
+  const scrollToBottom = useCallback(() => {
     settleStopRef.current?.();
     stickyRef.current = true;
+    setUnreadBelow(0);
     snapToBottom();
-  }, [lastEntryKey, isOwnSend, snapToBottom]);
+    requestAnimationFrame(() => {
+      if (stickyRef.current) snapToBottom();
+    });
+  }, [snapToBottom]);
 
   // The one ResizeObserver. Any content reflow while sticky → snap. Covers
   // new bubbles mounting, framer-motion entrance reflow, image/video
@@ -146,13 +208,24 @@ export function useChatScroll({
   // for `load` events in capture (they don't bubble) gives us a deterministic
   // re-snap the instant the media is ready. Same sticky gate, so reading
   // history is undisturbed.
+  //
+  // Double-rAF before the snap: in Chromium and Safari, `load` fires before
+  // the post-load reflow that resizes the bubble — measuring scrollHeight in
+  // the same tick yields the pre-grow value, so the snap lands mid-image and
+  // the bubble's meta-row sits below the fold ("image cut in half"). Yielding
+  // two frames guarantees layout has settled on the new dimensions.
   useEffect(() => {
     const content = contentRef.current;
     if (!content) return;
     const onMediaLoad = (e: Event) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag !== "IMG" && tag !== "VIDEO") return;
-      if (stickyRef.current) snapToBottom();
+      if (!stickyRef.current) return;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (stickyRef.current) snapToBottom();
+        });
+      });
     };
     content.addEventListener("load", onMediaLoad, true);
     content.addEventListener("loadedmetadata", onMediaLoad, true);
@@ -218,4 +291,6 @@ export function useChatScroll({
     obs.observe(sentinel);
     return () => obs.disconnect();
   }, [hasMoreOlder, loadOlder, contentRef, topSentinelRef]);
+
+  return { unreadBelow, scrollToBottom };
 }

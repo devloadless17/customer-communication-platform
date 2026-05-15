@@ -185,7 +185,7 @@ export function AppSidebar({
 
         <Section label="Settings">
           <SidebarLink
-            item={{ href: "/settings", label: "Team settings", icon: Sparkles }}
+            item={{ href: "/settings", label: "Workspace settings", icon: Sparkles }}
             pathname={pathname}
             active={isTeamSettingsRoute(pathname)}
           />
@@ -419,7 +419,7 @@ function UserMenu({ currentUser }: { currentUser: User }) {
         <DropdownMenuItem asChild>
           <Link href="/settings">
             <SettingsIcon className="size-4 text-muted-foreground" />
-            Team settings
+            Workspace settings
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />

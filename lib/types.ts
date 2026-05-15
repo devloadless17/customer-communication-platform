@@ -290,6 +290,19 @@ export interface ConversationWithRefs {
    * in that case (Meta Cloud API constraint).
    */
   lastInboundAt: string | null;
+  /**
+   * True totals for this conversation, used by the contact panel's
+   * "Messages · Notes" stat row. `messages` above is paginated (the most
+   * recent N), so its length lies for long threads. Notes happen to be
+   * loaded in full today, but we keep the field here for symmetry and
+   * to stay correct if note pagination is ever added.
+   *
+   * Optional: only populated by `getConversationWithRefs` (the per-thread
+   * hydration). The conversation list keeps these undefined to avoid a
+   * count() query per row — the sidebar doesn't render them.
+   */
+  messageCount?: number;
+  noteCount?: number;
 }
 
 /** Patch shape accepted by `PATCH /api/contacts/[id]`. All fields optional. */

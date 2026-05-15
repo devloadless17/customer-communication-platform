@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { emitCatalogChange } from "@/lib/socket/server";
 import {
   type CreateBody,
   parseAutomationBody,
@@ -90,6 +91,7 @@ export async function POST(req: Request) {
       actionConfig: parsed.actionConfig as Prisma.InputJsonValue,
     },
   });
+  emitCatalogChange(session.teamId, "automations");
   return NextResponse.json({
     id: created.id,
     name: created.name,

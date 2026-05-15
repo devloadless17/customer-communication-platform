@@ -13,6 +13,7 @@ import type {
 import { useTeamEvents } from "@/hooks/use-team-events";
 import { useSocketStatus } from "@/hooks/use-socket-status";
 import { usePresence } from "@/hooks/use-presence";
+import { useCatalogSync } from "@/hooks/use-catalog-sync";
 
 import { AppSidebar } from "@/components/layouts/app-sidebar";
 import { ConnectionBanner } from "./connection-banner";
@@ -65,6 +66,11 @@ export function InboxShell({
 
   const { connected } = useSocketStatus();
   const { onlineUserIds } = usePresence(team.id, currentUser.id);
+  // Re-run server components on any teammate-driven catalog mutation
+  // (stages / tags / contact fields / automations / members). One global
+  // listener covers the inbox layout's stage filter, the panel's tag /
+  // field rows, etc. — no per-component plumbing.
+  useCatalogSync();
 
   // Tab title gets a leading "(N)" while there's unread, so the user notices
   // a new message even when the window is unfocused. Excludes closed threads

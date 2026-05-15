@@ -299,6 +299,40 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     return { externalId, timestamp: new Date() };
   },
 
+  async sendTypingIndicator(externalId: string, config: MetaSendConfig): Promise<void> {
+    // Meta bundles the typing bubble onto the read-receipt endpoint: the call
+    // marks `externalId` as read AND shows the customer a typing indicator
+    // for up to 25 seconds. The indicator auto-dismisses when the next
+    // outbound message lands or the timer expires — there is no explicit
+    // "stop typing" endpoint. Caller is responsible for refreshing every
+    // ~20s while the agent keeps typing.
+    //
+    // Constraint: requires a recent inbound to anchor on. Outside the 24h
+    // window (no recent inbound), Meta rejects with policy errors — we
+    // swallow them since the agent's local UX shouldn't degrade.
+    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: externalId,
+        typing_indicator: { type: "text" },
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.warn(
+        `[meta] sendTypingIndicator failed for ${externalId}: ${res.status} ${body}`,
+      );
+    }
+  },
+
   async markIncomingRead(externalId: string, config: MetaSendConfig): Promise<void> {
     // Meta's read-receipt endpoint reuses the messages POST shape with
     // status: "read" — marking the latest wamid as read implicitly marks

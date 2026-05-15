@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { emitCatalogChange } from "@/lib/socket/server";
 import { TAG_COLORS, type TagColor } from "@/lib/types";
 
 /**
@@ -62,6 +64,8 @@ export async function PATCH(
 
   try {
     const updated = await db.tag.update({ where: { id }, data });
+    revalidateTag("tags");
+    emitCatalogChange(teamId, "tags");
     return NextResponse.json({
       tag: {
         id: updated.id,
@@ -101,5 +105,7 @@ export async function DELETE(
   }
 
   await db.tag.delete({ where: { id } });
+  revalidateTag("tags");
+  emitCatalogChange(teamId, "tags");
   return NextResponse.json({ ok: true });
 }

@@ -237,6 +237,13 @@ export function useConversationEvents(
             ? payload.lastMessageAt
             : prev.lastInboundAt;
 
+        // Bump the contact-panel's "Messages" tally. Always +1 here —
+        // optimistic bubbles intentionally don't count (addOptimistic
+        // leaves messageCount alone), so the server-confirmed row that
+        // arrives via message:new is the moment the message becomes
+        // "real" for tally purposes, whether or not it reconciles with
+        // an optimistic. Dedupe by externalId above already prevents
+        // double-counting on Meta webhook retries.
         return {
           ...prev,
           conversation: {
@@ -246,6 +253,9 @@ export function useConversationEvents(
           },
           messages: reconciled,
           lastInboundAt: nextLastInbound,
+          ...(prev.messageCount !== undefined
+            ? { messageCount: prev.messageCount + 1 }
+            : {}),
         };
       });
 
@@ -292,7 +302,13 @@ export function useConversationEvents(
       if (payload.conversationId !== conversationId) return;
       setData((prev) => {
         if (prev.notes.some((n) => n.id === payload.note.id)) return prev;
-        return { ...prev, notes: [...prev.notes, payload.note] };
+        return {
+          ...prev,
+          notes: [...prev.notes, payload.note],
+          ...(prev.noteCount !== undefined
+            ? { noteCount: prev.noteCount + 1 }
+            : {}),
+        };
       });
     };
 
@@ -327,10 +343,17 @@ export function useConversationEvents(
 
     const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => ({
-        ...prev,
-        notes: prev.notes.filter((n) => n.id !== payload.noteId),
-      }));
+      setData((prev) => {
+        const next = prev.notes.filter((n) => n.id !== payload.noteId);
+        if (next.length === prev.notes.length) return prev;
+        return {
+          ...prev,
+          notes: next,
+          ...(prev.noteCount !== undefined
+            ? { noteCount: Math.max(0, prev.noteCount - 1) }
+            : {}),
+        };
+      });
     };
 
     // The conversation we're viewing was deleted (by us, by a teammate, or as
@@ -342,6 +365,17 @@ export function useConversationEvents(
       router.replace("/inbox");
     };
 
+    // A teammate edited the contact on this conversation (name, email,
+    // stage, tags, …). Swap in the fresh contact so the message thread's
+    // stage stepper and header re-render. ContactPanel listens separately
+    // because it's a sibling component with its own local mirrors.
+    const onContactUpdated: Parameters<typeof socket.on<"contact:updated">>[1] = (payload) => {
+      setData((prev) => {
+        if (prev.contact.id !== payload.contact.id) return prev;
+        return { ...prev, contact: payload.contact };
+      });
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("message:status", onMessageStatus);
     socket.on("message:media:ready", onMessageMediaReady);
@@ -351,6 +385,7 @@ export function useConversationEvents(
     socket.on("conversation:read", onRead);
     socket.on("note:deleted", onNoteDeleted);
     socket.on("conversation:deleted", onConversationDeleted);
+    socket.on("contact:updated", onContactUpdated);
 
     return () => {
       socket.emit("unsubscribe:conversation", { conversationId });
@@ -364,6 +399,7 @@ export function useConversationEvents(
       socket.off("conversation:read", onRead);
       socket.off("note:deleted", onNoteDeleted);
       socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("contact:updated", onContactUpdated);
     };
   }, [conversationId, markRead, router]);
 

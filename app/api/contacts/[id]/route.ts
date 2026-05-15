@@ -159,6 +159,10 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
           ...update,
           ...(nextCustom !== undefined ? { customFields: nextCustom } : {}),
         },
+        // Pull current tag ids back so the socket payload below is complete
+        // — consumers (sidebar, thread, contact panel) need them to keep
+        // their local tag chips in sync without a refetch.
+        include: { tags: { select: { id: true } } },
       });
     });
 
@@ -177,7 +181,14 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       customFields: normalizeStringMap(updated.customFields),
       source: updated.source,
       stageId: updated.stageId,
+      tagIds: updated.tags.map((t) => t.id),
     };
+    // Broadcast so every viewer of this contact (sidebar rows, the active
+    // thread, the contact panel) merges the edit in real time. Two agents
+    // working the same conversation no longer need to refresh to see each
+    // other's stage / tag / name / field changes. Phone number isn't in the
+    // payload-relevant set — it's immutable for existing contacts.
+    emitToTeam(teamId, "contact:updated", { teamId, contact });
     return NextResponse.json({ contact });
   } catch (err) {
     console.error("[api/contacts/PATCH] failed", err);

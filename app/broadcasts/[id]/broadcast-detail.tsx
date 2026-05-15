@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -11,18 +11,26 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 
+import { getClientSocket } from "@/lib/socket/client";
 import { cn, formatListTime, formatPhone } from "@/lib/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
 
 /**
  * Broadcast detail client component.
  *
- * Polls `/api/broadcasts/[id]` every 2s while the broadcast is running. We
- * use polling instead of subscribing to the `broadcast:progress` socket event
- * because the inbox socket hook isn't mounted on this page — adding the
- * subscription would add a layer of state plumbing we don't need at v1 scale.
+ * Two parallel update channels:
+ *   - `broadcast:status` / `broadcast:progress` socket events from the
+ *     server's broadcast runner — usually arrive within a tick of the
+ *     underlying state change. Triggers an immediate /api/broadcasts/<id>
+ *     refresh so the per-recipient table follows along (the socket
+ *     summaries don't carry that detail).
+ *   - A 2s poll on `/api/broadcasts/<id>` while the broadcast is queued or
+ *     running, as a defence-in-depth for any client whose socket dropped
+ *     mid-send.
  *
- * Once status is `completed` or `failed` the polling stops.
+ * Once status flips to `completed` / `failed`, the poll stops; the socket
+ * listeners stay subscribed so a late-arriving event still applies (e.g.
+ * an admin retry kicking the broadcast back to `running`).
  */
 
 export interface BroadcastDetailDto {
@@ -61,22 +69,69 @@ const POLL_INTERVAL_MS = 2000;
 export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   const [data, setData] = useState(initial);
 
+  // Shared refresher so both the socket listeners and the poll go through
+  // the same code path. Inside a ref so the socket effect can call it
+  // without restarting on every render.
+  const cancelledRef = useRef(false);
+  const refreshRef = useRef<() => Promise<void>>(async () => {});
+  refreshRef.current = async () => {
+    try {
+      const res = await fetch(`/api/broadcasts/${data.id}`);
+      if (!res.ok) return;
+      const json = (await res.json()) as { broadcast?: BroadcastDetailDto };
+      if (cancelledRef.current || !json.broadcast) return;
+      setData(json.broadcast);
+    } catch {
+      // Best effort — transient network blips just skip a tick.
+    }
+  };
+
+  // Socket fast-path. Stays subscribed for the lifetime of the detail page
+  // — a late `broadcast:status` after the poll stopped is still applied.
   useEffect(() => {
+    const socket = getClientSocket();
+    const broadcastId = data.id;
+
+    const onStatus: Parameters<typeof socket.on<"broadcast:status">>[1] = (
+      payload,
+    ) => {
+      if (payload.broadcastId !== broadcastId) return;
+      void refreshRef.current();
+    };
+    const onProgress: Parameters<typeof socket.on<"broadcast:progress">>[1] = (
+      payload,
+    ) => {
+      if (payload.broadcastId !== broadcastId) return;
+      // Apply the summary counters immediately so the progress bar moves
+      // without waiting on the follow-up fetch. The fetch will land within
+      // a tick and refresh the recipient table too.
+      setData((prev) => ({
+        ...prev,
+        sentCount: payload.sentCount,
+        failedCount: payload.failedCount,
+        totalCount: payload.totalCount,
+      }));
+      void refreshRef.current();
+    };
+
+    socket.on("broadcast:status", onStatus);
+    socket.on("broadcast:progress", onProgress);
+    return () => {
+      socket.off("broadcast:status", onStatus);
+      socket.off("broadcast:progress", onProgress);
+    };
+  }, [data.id]);
+
+  // Poll fallback — defence in depth if the socket connection drops mid-
+  // send. Stops once the broadcast finishes.
+  useEffect(() => {
+    cancelledRef.current = false;
     if (data.status !== "queued" && data.status !== "running") return;
-    let cancelled = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await fetch(`/api/broadcasts/${data.id}`);
-        if (!res.ok) return;
-        const json = (await res.json()) as { broadcast?: BroadcastDetailDto };
-        if (cancelled || !json.broadcast) return;
-        setData(json.broadcast);
-      } catch {
-        // Best effort — transient network blips just skip a tick.
-      }
+    const timer = window.setInterval(() => {
+      void refreshRef.current();
     }, POLL_INTERVAL_MS);
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       window.clearInterval(timer);
     };
   }, [data.status, data.id]);
@@ -117,7 +172,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
           <div>
             <div className="font-medium">Broadcast failed</div>
-            <div className="mt-0.5 break-words font-mono text-[11px]">
+            <div className="mt-0.5 wrap-break-word font-mono text-[11px]">
               {data.lastError}
             </div>
           </div>
@@ -208,7 +263,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             </div>
           </div>
         </header>
-        <div className="max-h-[480px] overflow-y-auto">
+        <div className="max-h-120 overflow-y-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-card">
               <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">

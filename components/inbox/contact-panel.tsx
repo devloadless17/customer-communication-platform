@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { avatarGradient } from "@/lib/avatar-color";
+import { getClientSocket } from "@/lib/socket/client";
 import { formatPhone, initials } from "@/lib/utils";
 import type {
   ContactFieldDefinition,
@@ -52,6 +53,78 @@ export function ContactPanel({
 }: PanelProps) {
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
+
+  // ------------------------------------------------------------------
+  // Live stats. ContactPanel is a SIBLING of MessageThread (see
+  // app/inbox/[conversationId]/page.tsx) — both receive the same
+  // server-rendered `data` snapshot, but only MessageThread runs
+  // useConversationEvents, so its prop stays frozen on this side. We
+  // mirror the small slice the panel renders (status + counts) by
+  // subscribing to the same events here. Two listeners for the same
+  // events is cheap; the alternative would be lifting the hook into
+  // a shared parent, which is a much larger refactor for this one
+  // panel.
+  // ------------------------------------------------------------------
+  const [liveStatus, setLiveStatus] = useState<ConversationStatus>(
+    conversation.status,
+  );
+  const [liveMessageCount, setLiveMessageCount] = useState<number>(
+    data.messageCount ?? messages.length,
+  );
+  const [liveNoteCount, setLiveNoteCount] = useState<number>(
+    data.noteCount ?? notes.length,
+  );
+
+  // Reset whenever the user switches to a different conversation OR the
+  // server snapshot changes (router.refresh after a mutation). Without
+  // this the panel would keep showing the previous thread's counts when
+  // the prop changes.
+  useEffect(() => {
+    setLiveStatus(conversation.status);
+    setLiveMessageCount(data.messageCount ?? messages.length);
+    setLiveNoteCount(data.noteCount ?? notes.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation.id, conversation.status, data.messageCount, data.noteCount]);
+
+  useEffect(() => {
+    const socket = getClientSocket();
+    const conversationId = conversation.id;
+
+    const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (
+      payload,
+    ) => {
+      if (payload.conversationId !== conversationId) return;
+      setLiveStatus(payload.status);
+    };
+    const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (
+      payload,
+    ) => {
+      if (payload.conversationId !== conversationId) return;
+      setLiveMessageCount((n) => n + 1);
+    };
+    const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      setLiveNoteCount((n) => n + 1);
+    };
+    const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (
+      payload,
+    ) => {
+      if (payload.conversationId !== conversationId) return;
+      setLiveNoteCount((n) => Math.max(0, n - 1));
+    };
+
+    socket.on("conversation:status", onStatus);
+    socket.on("message:new", onMessageNew);
+    socket.on("note:new", onNoteNew);
+    socket.on("note:deleted", onNoteDeleted);
+
+    return () => {
+      socket.off("conversation:status", onStatus);
+      socket.off("message:new", onMessageNew);
+      socket.off("note:new", onNoteNew);
+      socket.off("note:deleted", onNoteDeleted);
+    };
+  }, [conversation.id]);
 
   // Local mirror of editable contact fields. Server is the source of truth —
   // we mirror here so edits feel instant. router.refresh() pulls the canonical
@@ -98,6 +171,33 @@ export function ContactPanel({
   useEffect(() => {
     setTags(tagCatalog);
   }, [tagCatalog]);
+
+  // Live merge of teammate edits to this contact. ContactPanel is a sibling
+  // of MessageThread and doesn't share its useConversationEvents state, so
+  // we listen directly. Re-seeds every local mirror in one shot — the
+  // semantic is "last write wins", same as the server's DB write. If the
+  // current user happens to be mid-typing into a field, their in-progress
+  // text is overwritten — matches the conflict resolution the backend
+  // would apply if both saves landed anyway, and avoids the alternative
+  // of silently dropping the teammate's update.
+  useEffect(() => {
+    const socket = getClientSocket();
+    const contactId = contact.id;
+    const onContactUpdated: Parameters<typeof socket.on<"contact:updated">>[1] = (
+      payload,
+    ) => {
+      if (payload.contact.id !== contactId) return;
+      setName(payload.contact.name);
+      setEmail(payload.contact.email ?? "");
+      setLocation(payload.contact.location ?? "");
+      setCustomFields(payload.contact.customFields ?? {});
+      setTagIds(payload.contact.tagIds ?? []);
+    };
+    socket.on("contact:updated", onContactUpdated);
+    return () => {
+      socket.off("contact:updated", onContactUpdated);
+    };
+  }, [contact.id]);
 
   // Close the picker when the user clicks outside.
   useEffect(() => {
@@ -395,12 +495,15 @@ export function ContactPanel({
           <ReadOnlyRow
             icon={FileText}
             label="Messages"
-            value={`${messages.length} · ${notes.length} note${notes.length === 1 ? "" : "s"}`}
+            // True server-side totals, kept in sync by the live listeners
+            // above. `messages.length` from props is just the paginated
+            // slice loaded into the thread and lies on long conversations.
+            value={`${liveMessageCount} message${liveMessageCount === 1 ? "" : "s"} · ${liveNoteCount} note${liveNoteCount === 1 ? "" : "s"}`}
           />
           <ReadOnlyRow
             icon={Clock}
             label="Status"
-            value={STATUS_LABEL[conversation.status]}
+            value={STATUS_LABEL[liveStatus]}
           />
         </Section>
 

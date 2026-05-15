@@ -296,4 +296,14 @@ export interface MessagingProvider<SendConfig = unknown> {
    * here must not break the agent's view, so callers should swallow errors.
    */
   markIncomingRead?(externalId: string, config: SendConfig): Promise<void>;
+  /**
+   * Show the customer a "typing…" bubble on their device. Anchored to a
+   * recent inbound message id (Meta requires the indicator to be sent as
+   * part of marking an inbound as read). Auto-dismisses on the provider
+   * side after a short window (Meta: 25s) or when an outbound is sent.
+   *
+   * Best-effort like markIncomingRead — callers swallow errors so a Meta
+   * hiccup doesn't degrade the local typing UX.
+   */
+  sendTypingIndicator?(externalId: string, config: SendConfig): Promise<void>;
 }
