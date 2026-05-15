@@ -577,7 +577,7 @@ export function ReplyBox({
                     : "Reply on WhatsApp…"
             }
             className={cn(
-              "min-h-[88px] resize-none border-0 bg-transparent px-3.5 py-3 text-sm shadow-none focus-visible:ring-0",
+              "min-h-22 resize-none border-0 bg-transparent px-3.5 py-3 text-sm shadow-none focus-visible:ring-0",
               !isNote && windowClosed && "cursor-not-allowed opacity-60",
             )}
             onKeyDown={(e) => {

@@ -114,7 +114,7 @@ export function WhatsappSettings({
           className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
         >
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <div className="break-words">{error}</div>
+          <div className="wrap-break-word">{error}</div>
         </div>
       )}
 

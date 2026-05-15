@@ -64,7 +64,7 @@ export function TemplateFillView({
 
   return (
     <form
-      className="flex max-h-[520px] flex-col"
+      className="flex max-h-130 flex-col"
       onSubmit={(e) => {
         e.preventDefault();
         if (!allFilled || sending) return;
@@ -137,7 +137,7 @@ export function TemplateFillView({
       {sendError && (
         <div className="flex items-start gap-2 border-t border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <span className="break-words">{sendError}</span>
+          <span className="wrap-break-word">{sendError}</span>
         </div>
       )}
 

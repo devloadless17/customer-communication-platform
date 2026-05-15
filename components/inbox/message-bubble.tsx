@@ -233,7 +233,7 @@ function BubbleContent({
           {message.body && (
             <p
               className={cn(
-                "whitespace-pre-wrap break-words",
+                "whitespace-pre-wrap wrap-break-word",
                 media || reply ? "px-2.5 pb-1.5 pt-2" : "",
               )}
             >

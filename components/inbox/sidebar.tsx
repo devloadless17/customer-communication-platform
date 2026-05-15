@@ -89,7 +89,7 @@ export function Sidebar({
   }, [teammates, currentUser]);
 
   return (
-    <aside className="flex h-full w-[240px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
+    <aside className="flex h-full w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex items-center gap-2.5 px-4 pt-4 pb-3">
         <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
           <MessageSquareText className="size-4" />
@@ -241,7 +241,7 @@ function UserMenu({ currentUser }: { currentUser: User }) {
         </TooltipTrigger>
         <TooltipContent side="top">Settings</TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="end" side="top" className="min-w-[180px]">
+      <DropdownMenuContent align="end" side="top" className="min-w-45">
         <DropdownMenuLabel>{roleLabel(currentUser.role)}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>

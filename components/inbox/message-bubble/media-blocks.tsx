@@ -46,7 +46,7 @@ function PendingMediaBlock({ kind, isOut }: { kind: MediaKind; isOut: boolean })
     return (
       <div
         className={cn(
-          "flex aspect-[4/3] max-h-[260px] w-full items-center justify-center rounded-xl",
+          "flex aspect-4/3 max-h-65 w-full items-center justify-center rounded-xl",
           isOut ? "bg-white/10" : "bg-muted",
         )}
       >
@@ -117,7 +117,7 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
         <img
           src={media.url}
           alt={media.caption ?? "image"}
-          className="max-h-[360px] w-full object-cover transition-opacity hover:opacity-95"
+          className="max-h-90 w-full object-cover transition-opacity hover:opacity-95"
           loading="lazy"
         />
       </button>
@@ -132,7 +132,7 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
       src={media.url}
       controls
       preload="metadata"
-      className="block max-h-[360px] w-full rounded-xl bg-black"
+      className="block max-h-90 w-full rounded-xl bg-black"
     />
   );
 }
@@ -147,7 +147,7 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
         controls
         preload="metadata"
         className={cn(
-          "h-9 max-w-[260px] flex-1",
+          "h-9 max-w-65 flex-1",
           isOut ? "[&::-webkit-media-controls-panel]:bg-white/10" : "",
         )}
       />

@@ -23,9 +23,6 @@
     "prod:local:nuke": "docker compose down -v",
     "postinstall": "prisma generate"
   },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
-  },
   "dependencies": {
     "@prisma/client": "^6.2.1",
     "@radix-ui/react-avatar": "^1.1.10",

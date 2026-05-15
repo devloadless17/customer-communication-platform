@@ -616,7 +616,7 @@ export function MessageThread({
 
       {/* Older-messages spinner — floats over the top of the thread, never in
           the scroll flow, so loading a page doesn't nudge the view at all. */}
-      <div className="pointer-events-none absolute inset-x-0 top-[60px] z-10 flex justify-center pt-2">
+      <div className="pointer-events-none absolute inset-x-0 top-15 z-10 flex justify-center pt-2">
         <AnimatePresence>
           {loadingOlder && (
             <motion.span
