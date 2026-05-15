@@ -120,7 +120,7 @@ Tags, labels, analytics, automations, AI replies, template send/manage UI, bulk 
 2. **Caddy reverse proxy** in front for HTTPS (not nginx — Caddy handles Let's Encrypt automatically and forwards WebSocket upgrade headers by default, which Socket.io needs). Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
 3. **VPS sizing**: ≥4GB RAM for the app, +2GB for Postgres, +headroom. 8GB total is the floor.
 
-### Dev-environment OOM (`tsx watch` chewing memory)
+### Dev-environment OOM (`tsx watch` chewing memory) 
 Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `tsx watch` + Next.js dev mode accumulate bundler/AST state across hot-reloads. Fix order:
 1. `rm -rf .next` (the dev cache bloats past 500MB after heavy days)
 2. Restart `npm run dev`
