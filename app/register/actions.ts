@@ -1,6 +1,7 @@
 "use server";
 
 import { Prisma } from "@prisma/client";
+import { redirect } from "next/navigation";
 
 import { signIn } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -66,29 +67,17 @@ export async function registerAction(
   }
 
   try {
-    // signIn throws NEXT_REDIRECT — same dance as the login action.
+    // redirect:false avoids Auth.js's redirect side-effects corrupting
+    // the RSC payload. See app/login/actions.ts for the full rationale.
     await signIn("credentials", {
       email,
       password,
-      redirectTo: "/settings/whatsapp",
+      redirect: false,
     });
   } catch (err) {
-    if (isRedirectError(err)) throw err;
-    // Don't `instanceof AuthError` — production bundling can break the
-    // prototype chain across server-action / auth chunks. Catch everything.
     console.error("[register] post-create sign-in failed:", err);
     return { error: "Account created — please sign in." };
   }
 
-  return { error: null };
-}
-
-function isRedirectError(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "digest" in err &&
-    typeof (err as { digest?: unknown }).digest === "string" &&
-    (err as { digest: string }).digest.startsWith("NEXT_REDIRECT")
-  );
+  redirect("/settings/whatsapp");
 }

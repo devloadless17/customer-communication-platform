@@ -1,5 +1,7 @@
 import { MessageSquareText } from "lucide-react";
 
+import { auth } from "@/lib/auth";
+
 import { LoginForm } from "./login-form";
 
 export const metadata = {
@@ -11,6 +13,12 @@ interface PageProps {
 }
 
 export default async function LoginPage({ searchParams }: PageProps) {
+  // Pre-warm Auth.js cookie context. Without this, the first signIn()
+  // from a fresh browser session races with the CSRF / callback-url
+  // Set-Cookie writes and corrupts the server-action RSC payload —
+  // user sees "unexpected response" on the first attempt only.
+  await auth();
+
   const { next } = await searchParams;
   const nextPath = typeof next === "string" && next.startsWith("/") ? next : "/inbox";
 

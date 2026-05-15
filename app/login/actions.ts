@@ -1,5 +1,7 @@
 "use server";
 
+import { redirect } from "next/navigation";
+
 import { signIn } from "@/lib/auth";
 
 export interface LoginState {
@@ -19,35 +21,28 @@ export async function loginAction(
   }
 
   try {
+    // `redirect: false` disables Auth.js's internal redirect/Set-Cookie
+    // side-effects. With redirectTo: the failure path emits stray
+    // Set-Cookie headers that corrupt the server-action RSC payload —
+    // the client sees a generic "unexpected response" instead of our
+    // returned error state. redirect:false → signIn either sets the
+    // session cookie cleanly (success) or throws (failure). Nothing else.
     await signIn("credentials", {
       email,
       password,
-      redirectTo: safeNext(next),
+      redirect: false,
     });
-    return { error: null };
   } catch (err) {
-    // Success path: signIn throws NEXT_REDIRECT — re-throw so Next can navigate.
-    if (isRedirectError(err)) throw err;
-    // Anything else (wrong credentials, DB hiccup) → log server-side, show
-    // a generic message. We deliberately do not `instanceof AuthError`:
-    // bundle/module duplication in production breaks the prototype chain
-    // and lets the error leak out as "unexpected response."
     console.error("[login] sign in failed:", err);
     return { error: "Invalid email or password." };
   }
+
+  // Success path: navigate explicitly. redirect() throws NEXT_REDIRECT
+  // which Next.js's server-action handler picks up.
+  redirect(safeNext(next));
 }
 
 function safeNext(next: string): string {
   if (!next.startsWith("/") || next.startsWith("//")) return "/inbox";
   return next;
-}
-
-function isRedirectError(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "digest" in err &&
-    typeof (err as { digest?: unknown }).digest === "string" &&
-    (err as { digest: string }).digest.startsWith("NEXT_REDIRECT")
-  );
 }

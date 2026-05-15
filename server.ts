@@ -62,7 +62,7 @@ const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const app = next({ dev, hostname, port, turbopack: dev });
 const handle = app.getRequestHandler();
 
-void app.prepare().then(() => {
+void app.prepare().then(async () => {
   const httpServer = createServer((req, res) => {
     if (!req.url) {
       res.statusCode = 400;
@@ -74,13 +74,18 @@ void app.prepare().then(() => {
 
   initSocketServer(httpServer);
 
-  // Open a Prisma connection eagerly. Without this, the first DB-touching
-  // request (typically the first /api/messages send or the first inbox
-  // load) pays the ~30–100ms pool-establishment cost on top of whatever it
-  // was already doing — exactly the "first send feels slower" tax.
-  void db.$connect().catch((err) => {
-    console.error("[server] prisma $connect failed:", err);
-  });
+  // Block the server from accepting requests until Prisma has at least one
+  // warm connection. Awaiting (not fire-and-forget) ensures the first login
+  // — including its Auth.js authorize() DB lookup — never hits a cold pool.
+  // The count() forces an actual round-trip; $connect() alone doesn't always
+  // open a usable connection on every Prisma engine version.
+  try {
+    await db.$connect();
+    await db.user.count();
+  } catch (err) {
+    console.error("[server] prisma warmup failed:", err);
+    process.exit(1);
+  }
 
   void reconcileInterruptedBroadcasts();
 
