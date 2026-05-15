@@ -33,7 +33,7 @@ export default function InboxError({
             Try again
           </button>
           <a
-            href="/login?invalid=1"
+            href="/logout"
             className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
           >
             Sign out

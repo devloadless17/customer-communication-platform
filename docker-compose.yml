@@ -68,4 +68,9 @@ services:
       AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
     ports:
-      - "${APP_PORT:-3000}:3000"
+      # Bind to loopback only — Caddy on the host is the public ingress.
+      # Without 127.0.0.1, this would publish on 0.0.0.0 and the app would
+      # be reachable directly on http://<vps-ip>:3000, bypassing Caddy
+      # (no TLS, no security headers, no rate limit on a real proxy hop).
+      # Postgres and Redis above already follow this pattern.
+      - "127.0.0.1:${APP_PORT:-3000}:3000"

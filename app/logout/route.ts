@@ -4,17 +4,16 @@ import type { NextRequest } from "next/server";
 import { auth } from "@/lib/auth/better-auth";
 
 /**
- * Cookie-clearing logout endpoint. Used by:
- *   - Server components in lib/auth/current-user.ts when they detect a
- *     stale session row (server components can't mutate cookies, so they
- *     redirect here)
- *   - Anywhere a GET-based logout link is preferable to the server-action
- *     signOutAction (older browsers, fallback paths)
+ * Cookie-clearing logout endpoint. The canonical sign-out path — every
+ * caller (sidebar menus, stale-session redirects from server components,
+ * error pages) navigates here via a hard browser navigation.
  *
- * Browser-side signout from React components should still go through
- * `signOutAction` in lib/auth/actions.ts (POST server action, plays nicely
- * with the sidebar's "close socket then sign out" sequence). This route is
- * the lower-level escape hatch.
+ * Why not a server action: pairing a Better Auth cookie mutation with
+ * `redirect()` inside a server action can intermittently produce "An
+ * unexpected response was received from the server" in Next 15's client
+ * runtime (same race that broke /login?next=/). A route handler runs as
+ * a normal HTTP request — its 302 + Set-Cookie response is what the
+ * browser understands natively, with no Next-client parsing involved.
  *
  * Both GET and POST so a plain anchor tag works AND a form submit works.
  */

@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,15 @@ export function AcceptForm({
   email: string;
 }) {
   const [state, action] = useActionState(acceptInviteAction, INITIAL);
+  const router = useRouter();
+
+  // Navigate after the action lands. Same pattern as /login and /register —
+  // avoids the Better Auth nextCookies + redirect() race in useActionState.
+  useEffect(() => {
+    if (state.redirectTo) {
+      router.replace(state.redirectTo);
+    }
+  }, [state.redirectTo, router]);
 
   return (
     <form action={action} className="flex flex-col gap-4">

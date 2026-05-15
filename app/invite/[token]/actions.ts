@@ -1,7 +1,6 @@
 "use server";
 
 import { Prisma } from "@prisma/client";
-import { redirect } from "next/navigation";
 
 import { signInWithCredentials } from "@/lib/auth";
 import { auth } from "@/lib/auth/better-auth";
@@ -23,6 +22,8 @@ import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/l
 
 export interface AcceptState {
   error: string | null;
+  /** Destination for the client to navigate to after accepting the invite. */
+  redirectTo?: string;
 }
 
 export async function acceptInviteAction(
@@ -110,7 +111,10 @@ export async function acceptInviteAction(
     return { error: "Account created — please sign in." };
   }
 
-  redirect("/inbox");
+  // Do NOT call redirect() here — same Better Auth nextCookies + redirect
+  // race that broke /login and /register. Hand the destination to the
+  // client and let it navigate after the cookie lands.
+  return { error: null, redirectTo: "/inbox" };
 }
 
 class InviteError extends Error {}

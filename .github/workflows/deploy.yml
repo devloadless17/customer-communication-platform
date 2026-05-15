@@ -49,6 +49,20 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      # Server-side manifest copy: no layer transfer, no extra storage (layers are
+      # content-addressed and shared with :latest). Skips on first-ever deploy.
+      - name: Retag current :latest as :previous (rollback safety net)
+        env:
+          REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$REPO:latest" >/dev/null 2>&1; then
+            docker buildx imagetools create --tag "$REPO:previous" "$REPO:latest"
+            echo "✓ retagged current :latest → :previous"
+          else
+            echo "no :latest in registry yet (first deploy?), skipping retag"
+          fi
+
       - uses: docker/build-push-action@v6
         with:
           context: .

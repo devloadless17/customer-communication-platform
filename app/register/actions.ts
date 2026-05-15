@@ -1,7 +1,6 @@
 "use server";
 
 import { Prisma } from "@prisma/client";
-import { redirect } from "next/navigation";
 
 import { signInWithCredentials } from "@/lib/auth";
 import { auth } from "@/lib/auth/better-auth";
@@ -27,6 +26,8 @@ import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/l
 
 export interface RegisterState {
   error: string | null;
+  /** Destination for the client to navigate to after a successful signup. */
+  redirectTo?: string;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -101,5 +102,10 @@ export async function registerAction(
     return { error: "Account created — please sign in." };
   }
 
-  redirect("/settings/whatsapp");
+  // Do NOT call redirect() here. Better Auth's nextCookies plugin commits
+  // the session cookie into the server-action response; redirect() throws
+  // NEXT_REDIRECT in the same call which races the cookie commit on Next
+  // 15 + useActionState. Same root cause as the /login?next=/ bug — return
+  // the destination and let the client navigate.
+  return { error: null, redirectTo: "/settings/whatsapp" };
 }

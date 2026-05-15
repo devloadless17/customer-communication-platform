@@ -1,11 +1,11 @@
 "use server";
 
-import { redirect } from "next/navigation";
-
 import { signInWithCredentials } from "@/lib/auth";
 
 export interface LoginState {
   error: string | null;
+  /** Destination for the client to navigate to after a successful sign-in. */
+  redirectTo?: string;
 }
 
 export async function loginAction(
@@ -28,13 +28,22 @@ export async function loginAction(
     return { error: result.error ?? "Invalid email or password." };
   }
 
-  // redirect() throws NEXT_REDIRECT which Next.js's server-action handler
-  // picks up and turns into a navigation response. Must be outside the
-  // result-checking branch — throwing inside the wrapper would be caught.
-  redirect(safeNext(next));
+  // Do NOT call redirect() here. Better Auth's nextCookies plugin commits
+  // the session cookie into the server-action response; redirect() throws
+  // NEXT_REDIRECT in the same call which races the cookie commit on Next
+  // 15 + useActionState and intermittently produces "An unexpected response
+  // was received from the server." Returning the destination lets the
+  // client navigate after the action result lands — the cookie is already
+  // present on the response so the navigation arrives authenticated.
+  return { error: null, redirectTo: safeNext(next) };
 }
 
 function safeNext(next: string): string {
   if (!next.startsWith("/") || next.startsWith("//")) return "/inbox";
+  // "/" is a server component that itself redirects to /inbox. Chaining an
+  // action-response redirect into an RSC-render redirect produces "An
+  // unexpected response was received from the server" in the Next.js
+  // client runtime. Normalize upstream so the navigation lands directly.
+  if (next === "/") return "/inbox";
   return next;
 }

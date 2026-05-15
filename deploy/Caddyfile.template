@@ -57,7 +57,11 @@ __DOMAIN__ {
 	# overrides anything the app emits, so keep these aligned with
 	# next.config.ts's `headers()`.
 	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		# No `preload` — that token signals you intend to submit the
+		# domain to the HSTS preload list, which is very hard to undo. Add
+		# it only after you've decided to commit and verified all
+		# subdomains can serve HTTPS.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"

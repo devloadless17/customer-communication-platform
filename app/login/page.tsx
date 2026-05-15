@@ -12,7 +12,15 @@ interface PageProps {
 
 export default async function LoginPage({ searchParams }: PageProps) {
   const { next } = await searchParams;
-  const nextPath = typeof next === "string" && next.startsWith("/") ? next : "/inbox";
+  // Normalize "/" up front — it's a server component that redirects to
+  // /inbox, and chaining that RSC redirect after the action-response
+  // redirect breaks the Next.js client runtime ("An unexpected response
+  // was received from the server"). Also reject protocol-relative and
+  // external paths.
+  const nextPath =
+    typeof next === "string" && next.startsWith("/") && !next.startsWith("//") && next !== "/"
+      ? next
+      : "/inbox";
 
   return (
     <div className="grid min-h-svh place-items-center bg-background px-4">

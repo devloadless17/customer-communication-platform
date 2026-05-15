@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useTransition } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
 import {
   Inbox,
@@ -30,7 +30,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { signOutAction } from "@/lib/auth/actions";
 import { roleLabel } from "@/lib/auth/permissions";
 import { closeClientSocket } from "@/lib/socket/client";
 import type { ConversationWithRefs, Team, User } from "@/lib/types";
@@ -226,7 +225,6 @@ export function Sidebar({
 }
 
 function UserMenu({ currentUser }: { currentUser: User }) {
-  const [pending, startTransition] = useTransition();
   return (
     <DropdownMenu>
       <Tooltip>
@@ -262,14 +260,18 @@ function UserMenu({ currentUser }: { currentUser: User }) {
         <DropdownMenuItem
           onSelect={(e) => {
             e.preventDefault();
-            // Drop the socket FIRST. Auth.js's signOut redirect is a soft
-            // client-side navigation — the page doesn't unload and the
-            // socket would otherwise stay connected as the just-signed-out
-            // user, leaving their presence dot lit on every other client.
+            // Drop the socket FIRST so other clients see this user go offline
+            // immediately — soft client navigations keep the socket alive.
             closeClientSocket();
-            startTransition(() => signOutAction());
+            // Hard navigation to the /logout route handler. The handler
+            // clears the Better Auth cookie server-side and 302s to /login.
+            // We avoid the previous signOutAction (server action that
+            // called redirect()) because Better Auth's nextCookies cookie
+            // mutation combined with redirect() inside an action can race
+            // and surface as "An unexpected response was received from the
+            // server." Same root cause as the /login?next=/ bug.
+            window.location.assign("/logout");
           }}
-          disabled={pending}
         >
           <LogOut className="size-4 text-muted-foreground" />
           Sign out

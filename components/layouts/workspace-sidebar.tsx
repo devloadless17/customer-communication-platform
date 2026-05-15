@@ -1,6 +1,5 @@
 "use client";
 
-import { useTransition } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -28,7 +27,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { signOutAction } from "@/lib/auth/actions";
 import { roleLabel } from "@/lib/auth/permissions";
 import { closeClientSocket } from "@/lib/socket/client";
 import { cn, initials } from "@/lib/utils";
@@ -173,7 +171,6 @@ export function WorkspaceSidebar({
 }
 
 function UserMenu({ currentUser }: { currentUser: User }) {
-  const [pending, startTransition] = useTransition();
   return (
     <DropdownMenu>
       <Tooltip>
@@ -212,9 +209,11 @@ function UserMenu({ currentUser }: { currentUser: User }) {
             // Drop the socket BEFORE signing out so the just-signed-out
             // user's presence dot doesn't linger on every other client.
             closeClientSocket();
-            startTransition(() => signOutAction());
+            // Hard navigation to the /logout route handler — see the
+            // matching comment in components/inbox/sidebar.tsx for why
+            // we avoid the server-action signout path.
+            window.location.assign("/logout");
           }}
-          disabled={pending}
         >
           <LogOut className="size-4 text-muted-foreground" />
           Sign out

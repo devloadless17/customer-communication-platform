@@ -10,8 +10,10 @@ User=deploy
 Group=deploy
 WorkingDirectory=/opt/ccp
 EnvironmentFile=/opt/ccp/.env
-# Keeps broadcast runner + Socket.io fanout from hitting the default ~2GB heap.
-Environment=NODE_OPTIONS=--max-old-space-size=4096
+# NODE_OPTIONS=--max-old-space-size=4096 is set on the Node process inside
+# the container via Dockerfile's ENV — systemd env vars on this host shell
+# don't propagate through `docker compose up`. Don't add Environment=
+# NODE_OPTIONS here; it would be inert and misleading.
 
 ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull --quiet
 ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up

@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,16 @@ const INITIAL: RegisterState = { error: null };
 
 export function RegisterForm() {
   const [state, action] = useActionState(registerAction, INITIAL);
+  const router = useRouter();
+
+  // Navigate after the action lands. Doing the navigation client-side
+  // sidesteps the cookie-commit + action-redirect race that broke the
+  // login flow (see app/login/actions.ts comment for the full story).
+  useEffect(() => {
+    if (state.redirectTo) {
+      router.replace(state.redirectTo);
+    }
+  }, [state.redirectTo, router]);
 
   return (
     <form action={action} className="flex flex-col gap-4">

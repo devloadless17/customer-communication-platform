@@ -7,9 +7,8 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
 
 1. `typecheck` job — `npm ci`, `prisma generate`, `tsc --noEmit`. Runs on every push and PR.
 2. `deploy` job — runs only on push to `main` (or manual `workflow_dispatch`). Needs typecheck to pass.
-   - builds the Docker image
-   - tags it `${DOCKER_USERNAME}/customer-communication-platform:sha-<commit>` and `:latest`
-   - pushes to Docker Hub
+   - retags the current `:latest` as `:previous` on Docker Hub (manifest-only copy, free)
+   - builds the new image and pushes it as `:latest`
    - SSHes to the VPS and writes/refreshes 4 config files
    - `docker compose pull && systemctl restart ccp && systemctl reload caddy`
    - polls `/api/health` end-to-end
@@ -21,8 +20,8 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
    ┌────────────────────────┐              ┌─────────────────────────────────┐
    │ <docker_username>/     │              │  Caddy (host) :443 (HTTPS)      │
    │   customer-communica…  │              │   ↓                             │
-   │   :sha-<commit>        │   ──pull──►  │  app    :3000  ← from Docker Hub│
-   │   :latest              │              │   ↓                             │
+   │   :latest              │   ──pull──►  │  app    :3000  ← from Docker Hub│
+   │   :previous            │              │   ↓                             │
    └────────────────────────┘              │  postgres :5432                 │
                                            │  redis    :6379                 │
                                            └─────────────────────────────────┘
@@ -292,16 +291,35 @@ those four rows.
 
 # Rolling back
 
+Two paths depending on urgency. Database migrations do NOT auto-revert
+either way — fix forward at the schema layer.
+
+## Fast rollback (~30s) — `:previous` swap
+
+Every deploy retags the prior `:latest` as `:previous` on Docker Hub
+(manifest-only copy, no layer transfer, no extra storage). To roll back
+one step: promote `:previous` back to `:latest`, then pull + restart.
+
+From your dev machine (one-shot):
+
+```bash
+REPO=<docker-username>/customer-communication-platform
+docker buildx imagetools create --tag $REPO:latest $REPO:previous
+
+ssh deploy@central.loadless.site '
+  docker compose -f /opt/ccp/docker-compose.yml --env-file /opt/ccp/.env pull app
+  sudo systemctl restart ccp
+'
+```
+
+Only goes one deploy back. If the deploy two-back is also bad, use
+`git revert` instead.
+
+## Normal rollback — `git revert`
+
 `git revert` the offending commit on `main` and push — the deploy workflow
-rebuilds + redeploys. ~3 min round-trip.
-
-The image is tagged `:latest` only (no per-commit SHA tags), so the only
-fast rollback is `git revert`. If you ever need a hot rollback without
-waiting for CI: SSH in and `docker pull <user>/customer-communication-platform@<digest>`
-using a digest from `docker images --digests` history (limited to images
-still on disk).
-
-Database migrations do NOT auto-revert — fix forward.
+rebuilds + redeploys. ~3 min round-trip. Use this when `:previous` is also
+bad, or for non-urgent rollbacks.
 
 # Bumping image versions for Postgres / Redis
 
@@ -333,6 +351,3 @@ The workflow only needs those five binaries with sudo.
 - **Database backups** — Hostinger snapshots + a daily `pg_dump | gzip` cron.
 - **Uptime monitoring** — UptimeRobot or BetterStack on `/api/health`.
 - **Docker Hub image scanning** — Hub's built-in scan, or Trivy in CI before push.
-- **Image tag cleanup** — Docker Hub keeps tags forever. Set a retention
-  policy or write a monthly cron that prunes `sha-*` tags older than N days
-  via Hub's API.

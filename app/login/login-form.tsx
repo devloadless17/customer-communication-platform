@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,19 @@ const INITIAL: LoginState = { error: null };
 
 export function LoginForm({ next }: { next: string }) {
   const [state, action] = useActionState(loginAction, INITIAL);
+  const router = useRouter();
+
+  // Navigate after the action resolves. Doing the navigation client-side
+  // (instead of redirect() inside the action) avoids the
+  // server-action-redirect + RSC-render-redirect chain that breaks the
+  // Next.js client runtime on routes like "/" → "/inbox". By the time this
+  // effect runs, the session cookie set by Better Auth's nextCookies plugin
+  // is already on the browser, so the push lands authenticated.
+  useEffect(() => {
+    if (state.redirectTo) {
+      router.replace(state.redirectTo);
+    }
+  }, [state.redirectTo, router]);
 
   return (
     <form action={action} className="flex flex-col gap-4">
