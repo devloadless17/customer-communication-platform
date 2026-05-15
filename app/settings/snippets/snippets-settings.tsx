@@ -17,7 +17,12 @@ import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { FieldTokenPicker } from "@/components/templates/field-token-picker";
 import { TokenHighlightTextarea } from "@/components/templates/token-highlight";
-import { findUnknownTokens, resolveFieldTokens, SAMPLE_CONTACT } from "@/lib/field-tokens";
+import {
+  findUnknownTokens,
+  resolveFieldTokens,
+  SAMPLE_AGENT,
+  SAMPLE_CONTACT,
+} from "@/lib/field-tokens";
 import type { ContactFieldDefinition } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -39,7 +44,7 @@ interface SnippetDto {
   name: string;
   label: string;
   body: string;
-  createdById: string;
+  createdById: string | null;
   createdByName: string;
   updatedAt: string;
 }
@@ -130,14 +135,16 @@ export function SnippetsSettings({
           <code className="rounded bg-muted px-1 text-[12px]">/name</code> in
           the reply box. Use{" "}
           <code className="rounded bg-muted px-1 text-[12px]">$var.contact.name</code>{" "}
-          and similar tokens to personalize per recipient.
+          for per-recipient values, or{" "}
+          <code className="rounded bg-muted px-1 text-[12px]">$var.agent.name</code>{" "}
+          for sign-offs that use whoever inserted the snippet.
         </p>
       </div>
 
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <span className="break-words">{error}</span>
+          <span className="wrap-break-word">{error}</span>
         </div>
       )}
 
@@ -210,7 +217,7 @@ export function SnippetsSettings({
               onDelete={editing.id !== "new" ? () => askDelete(editing) : undefined}
             />
           ) : (
-            <div className="flex h-full min-h-[260px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-card px-6 py-10 text-center">
+            <div className="flex h-full min-h-65 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-card px-6 py-10 text-center">
               <div className="inline-flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary">
                 <Sparkles className="size-4" />
               </div>
@@ -260,11 +267,11 @@ function SnippetEditor({
   const canSave = nameValid && labelValid && bodyValid && !saving;
 
   const unknown = useMemo(
-    () => findUnknownTokens(body, fieldDefinitions),
+    () => findUnknownTokens(body, fieldDefinitions, { includeAgent: true }),
     [body, fieldDefinitions],
   );
   const preview = useMemo(
-    () => resolveFieldTokens(body, SAMPLE_CONTACT),
+    () => resolveFieldTokens(body, SAMPLE_CONTACT, SAMPLE_AGENT),
     [body],
   );
 
@@ -386,23 +393,25 @@ function SnippetEditor({
           <FieldTokenPicker
             fieldDefinitions={fieldDefinitions}
             onInsert={insertToken}
-            hint="Tokens resolve against the active conversation's contact when the agent inserts the snippet."
+            includeAgent
+            hint="Contact tokens resolve against the active conversation. Agent tokens resolve to whoever inserted the snippet — great for sign-offs."
           />
         </div>
         <TokenHighlightTextarea
           ref={bodyRef}
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder="Hi $var.contact.name, welcome to our service!"
+          placeholder="Hi $var.contact.name, welcome to our service! — $var.agent.name"
           maxLength={4500}
           rows={5}
           className="font-mono text-[13px]"
           fieldDefinitions={fieldDefinitions}
+          includeAgent
         />
         {unknown.length > 0 && (
           <p className="text-[10.5px] text-amber-600 dark:text-amber-400">
-            Unknown field{unknown.length === 1 ? "" : "s"}:{" "}
-            {unknown.map((u) => `$var.contact.${u}`).join(", ")} — these will resolve to empty.
+            Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
+            {unknown.join(", ")} — these will resolve to empty.
           </p>
         )}
       </Field>
@@ -415,15 +424,16 @@ function SnippetEditor({
           {preview || <span className="text-muted-foreground italic">(empty)</span>}
         </div>
         <p className="mt-1 text-[10.5px] text-muted-foreground">
-          Rendered against a sample contact ({SAMPLE_CONTACT.name}). In a real
-          conversation, the tokens use that contact&apos;s actual fields.
+          Rendered against a sample contact ({SAMPLE_CONTACT.name}) and a sample
+          agent ({SAMPLE_AGENT.name}). In the inbox, those resolve to the live
+          contact and the agent inserting the snippet.
         </p>
       </div>
 
       {err && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <span className="break-words">{err}</span>
+          <span className="wrap-break-word">{err}</span>
         </div>
       )}
 

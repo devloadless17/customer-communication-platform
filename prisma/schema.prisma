@@ -295,12 +295,16 @@ model Snippet {
   // tokens which the picker resolves at insertion time against the active
   // conversation's contact.
   body        String
-  createdById String
+  // Nullable + SetNull so deleting a teammate preserves the snippet they
+  // authored (just shows "Removed user" in the UI). Cascading would delete
+  // team-wide snippets just because their creator left, which is destroying
+  // shared content.
+  createdById String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  team      Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User @relation("CreatedSnippets", fields: [createdById], references: [id], onDelete: Cascade)
+  team      Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("CreatedSnippets", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@unique([teamId, name])
   @@index([teamId, label])
@@ -497,13 +501,16 @@ model Invite {
   email       String
   role        Role      @default(agent)
   tokenHash   String    @unique
-  createdById String
+  // Nullable + SetNull so deleting the inviter leaves their pending invites
+  // in place — the token still works, the "invited by" label just falls
+  // back to "Removed user".
+  createdById String?
   createdAt   DateTime  @default(now())
   expiresAt   DateTime
   acceptedAt  DateTime?
 
-  team      Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User @relation("InvitedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  team      Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("InvitedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([teamId, email])
 }
@@ -599,12 +606,14 @@ model AudienceGroup {
   teamId      String
   name        String
   description String?
-  createdById String
+  // Nullable + SetNull — audience groups are team-shared and shouldn't be
+  // destroyed when their creator is removed.
+  createdById String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User      @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: Cascade)
+  team      Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: SetNull)
   tags      Tag[]     @relation("AudienceGroupTags")
   contacts  Contact[] @relation("AudienceGroupContacts")
 
@@ -623,7 +632,9 @@ model AudienceGroup {
 model Broadcast {
   id                String          @id @default(cuid())
   teamId            String
-  createdById       String
+  // Nullable + SetNull — broadcasts are audit history; we never want them
+  // destroyed when the agent who launched them is removed.
+  createdById       String?
   status            BroadcastStatus @default(queued)
   // Snapshot of the template at send time.
   templateId        String
@@ -661,7 +672,7 @@ model Broadcast {
   completedAt       DateTime?
 
   team       Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy  User                 @relation("CreatedBroadcasts", fields: [createdById], references: [id], onDelete: Cascade)
+  createdBy  User?                @relation("CreatedBroadcasts", fields: [createdById], references: [id], onDelete: SetNull)
   recipients BroadcastRecipient[]
 
   @@index([teamId, createdAt(sort: Desc)])
@@ -695,12 +706,15 @@ model BroadcastRecipient {
 model InternalNote {
   id             String   @id @default(cuid())
   conversationId String
-  authorUserId   String
+  // Nullable + SetNull — internal notes are critical audit trail. When the
+  // author is removed, the note STAYS and the UI renders "Removed user".
+  // Cascading would destroy customer-context the next agent needs.
+  authorUserId   String?
   body           String
   timestamp      DateTime @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  author       User         @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  author       User?        @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, timestamp])
 }

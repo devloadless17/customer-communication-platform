@@ -41,7 +41,7 @@ export async function GET() {
       label: r.label,
       body: r.body,
       createdById: r.createdById,
-      createdByName: r.createdBy.name,
+      createdByName: r.createdBy?.name ?? "Removed user",
       updatedAt: r.updatedAt.toISOString(),
     })),
   });

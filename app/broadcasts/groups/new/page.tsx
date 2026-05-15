@@ -2,7 +2,11 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
-import { listContactFieldDefinitions, listTags } from "@/lib/queries";
+import {
+  listContactFieldDefinitions,
+  listContactStages,
+  listTags,
+} from "@/lib/queries";
 
 import { GroupForm } from "@/components/audience-groups/group-form";
 
@@ -12,13 +16,14 @@ export const dynamic = "force-dynamic";
 export default async function NewGroupPage() {
   const { teamId } = await getSession();
 
-  const [team, tags, fieldDefinitions] = await Promise.all([
+  const [team, tags, fieldDefinitions, stages] = await Promise.all([
     db.team.findUnique({
       where: { id: teamId },
       select: { metaPhoneNumberId: true },
     }),
     listTags(teamId),
     listContactFieldDefinitions(teamId),
+    listContactStages(teamId),
   ]);
 
   // Pre-flight: groups are only useful when WhatsApp is connected (you need
@@ -27,5 +32,7 @@ export default async function NewGroupPage() {
     redirect("/settings/whatsapp?from=audience-groups");
   }
 
-  return <GroupForm tags={tags} fieldDefinitions={fieldDefinitions} />;
+  return (
+    <GroupForm tags={tags} fieldDefinitions={fieldDefinitions} stages={stages} />
+  );
 }

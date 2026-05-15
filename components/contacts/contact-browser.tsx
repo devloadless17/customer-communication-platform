@@ -19,6 +19,7 @@ import type {
 import { BrowserRow } from "./contact-browser/browser-row";
 import { Chip } from "./contact-browser/chip";
 import { FieldFilterRow, type FieldFilter } from "./contact-browser/field-filter-row";
+import { SelectAllRow } from "./contact-browser/select-all-row";
 import { StageFilterControl, type StageFilter } from "./contact-browser/stage-filter-control";
 
 export type { FieldFilter, StageFilter };
@@ -425,7 +426,7 @@ export function TagFilterControl({
       )}
 
       {open && (
-        <div className="absolute left-0 top-full z-30 mt-1.5 flex max-h-[300px] w-64 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
+        <div className="absolute left-0 top-full z-30 mt-1.5 flex max-h-75 w-64 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
           <div className="border-b border-border px-2.5 py-2">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -526,16 +527,13 @@ export function ContactBrowser({
     onSelectedChange(copy);
   }
 
-  const allVisibleSelected =
-    items.length > 0 && items.every((i) => selectedIds.has(i.contact.id));
-  const someVisibleSelected =
-    !allVisibleSelected && items.some((i) => selectedIds.has(i.contact.id));
-
-  function toggleAllVisible(next: boolean) {
+  // "Select all visible" preserves picks from prior pages — additive, not
+  // a replace, so loading more then toggling doesn't drop earlier choices.
+  function toggleAllVisible(checked: boolean, visibleIds: string[]) {
     const copy = new Set(selectedIds);
-    for (const i of items) {
-      if (next) copy.add(i.contact.id);
-      else copy.delete(i.contact.id);
+    for (const id of visibleIds) {
+      if (checked) copy.add(id);
+      else copy.delete(id);
     }
     onSelectedChange(copy);
   }
@@ -585,24 +583,16 @@ export function ContactBrowser({
           </div>
         ) : (
           <>
-            <div className="flex items-center gap-3 border-b border-border bg-muted/20 px-4 py-2 text-[11px]">
-              <label className="flex cursor-pointer items-center gap-2 text-muted-foreground">
-                <input
-                  type="checkbox"
-                  className="size-4 cursor-pointer accent-primary"
-                  checked={allVisibleSelected}
-                  ref={(el) => {
-                    if (el) el.indeterminate = someVisibleSelected;
-                  }}
-                  onChange={(e) => toggleAllVisible(e.target.checked)}
-                  aria-label="Select all visible"
-                />
-                Select all visible
-              </label>
-              <span className="ml-auto tabular-nums">
-                {items.length} shown · {selectedIds.size} selected
-              </span>
-            </div>
+            <SelectAllRow
+              items={items}
+              selectedIds={selectedIds}
+              onToggleAll={toggleAllVisible}
+              rightSlot={
+                <span className="tabular-nums">
+                  {items.length} shown · {selectedIds.size} selected
+                </span>
+              }
+            />
             <ul className={cn("divide-y divide-border overflow-y-auto", listClassName)}>
               {items.map((item) => (
                 <BrowserRow

@@ -9,18 +9,22 @@ export const metadata = { title: "Team · Settings" };
 export default async function TeamSettingsPage() {
   const { user, teamId } = await getSession();
 
-  const rows = await db.user.findMany({
-    where: { teamId },
-    orderBy: [{ deactivatedAt: "asc" }, { createdAt: "asc" }],
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      role: true,
-      deactivatedAt: true,
-      createdAt: true,
-    },
-  });
+  // Team name + members in parallel — small saving but cheap to do right.
+  const [team, rows] = await Promise.all([
+    db.team.findUnique({ where: { id: teamId }, select: { name: true } }),
+    db.user.findMany({
+      where: { teamId },
+      orderBy: [{ deactivatedAt: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        deactivatedAt: true,
+        createdAt: true,
+      },
+    }),
+  ]);
 
   const users: TeamUserRow[] = rows.map((u) => ({
     id: u.id,
@@ -35,6 +39,7 @@ export default async function TeamSettingsPage() {
     <TeamSettings
       currentUserId={user.id}
       currentUserRole={user.role}
+      teamName={team?.name ?? "your organization"}
       users={users}
     />
   );

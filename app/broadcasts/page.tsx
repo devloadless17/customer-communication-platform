@@ -85,7 +85,7 @@ export default async function BroadcastsPage() {
                       {b.templateName}
                     </Link>
                     <div className="text-[11px] text-muted-foreground">
-                      {b.templateLanguage} · by {b.createdBy.name}
+                      {b.templateLanguage} · by {b.createdBy?.name ?? "Removed user"}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">

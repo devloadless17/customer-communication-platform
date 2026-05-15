@@ -10,7 +10,7 @@ import {
   type ContactLabel,
 } from "@/components/contacts/contact-select-dialog";
 import { formatPhone, initials } from "@/lib/utils";
-import type { ContactFieldDefinition, Tag } from "@/lib/types";
+import type { ContactFieldDefinition, ContactStage, Tag } from "@/lib/types";
 
 export type { ContactLabel };
 
@@ -30,6 +30,7 @@ export function ContactMultiSelectField({
   initialLabels = [],
   fieldDefinitions,
   tags,
+  stages,
   dialogTitle,
   dialogDescription,
   confirmLabel,
@@ -41,6 +42,7 @@ export function ContactMultiSelectField({
   initialLabels?: ContactLabel[];
   fieldDefinitions?: ContactFieldDefinition[];
   tags?: Tag[];
+  stages?: ContactStage[];
   dialogTitle?: string;
   dialogDescription?: string;
   confirmLabel?: string;
@@ -164,6 +166,7 @@ export function ContactMultiSelectField({
         initialSelectedIds={selectedIds}
         fieldDefinitions={fieldDefinitions}
         tags={tags}
+        stages={stages}
         title={dialogTitle}
         description={dialogDescription}
         confirmLabel={confirmLabel}

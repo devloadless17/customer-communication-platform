@@ -14,16 +14,25 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
 import type {
   Contact,
+  ContactStage,
   Conversation,
   ConversationWithRefs,
   User,
 } from "@/lib/types";
 import { ConversationListItem } from "./conversation-list-item";
-import type { FilterId } from "./sidebar";
+import type { Filter, PresetFilterId } from "./inbox-controls";
+
+const PRESET_LABELS: Record<PresetFilterId, string> = {
+  all: "All open",
+  mine: "Assigned to me",
+  unassigned: "Unassigned",
+  closed: "Closed",
+};
 
 export function ConversationList({
   currentUser,
   conversations,
+  stages,
   filter,
   search,
   onSearchChange,
@@ -33,7 +42,8 @@ export function ConversationList({
 }: {
   currentUser: User;
   conversations: ConversationWithRefs[];
-  filter: FilterId;
+  stages: ContactStage[];
+  filter: Filter;
   search: string;
   onSearchChange: (s: string) => void;
   hasMore: boolean;
@@ -98,10 +108,17 @@ export function ConversationList({
     const q = search.trim().toLowerCase();
 
     return conversations.filter(({ conversation: c, contact }) => {
-      if (filter === "mine" && c.assignedUserId !== currentUser.id) return false;
-      if (filter === "unassigned" && c.assignedUserId !== null) return false;
-      if (filter === "closed" && c.status !== "closed") return false;
-      if (filter === "all" && c.status === "closed") return false;
+      if (filter.kind === "preset") {
+        if (filter.id === "mine" && c.assignedUserId !== currentUser.id) return false;
+        if (filter.id === "unassigned" && c.assignedUserId !== null) return false;
+        if (filter.id === "closed" && c.status !== "closed") return false;
+        if (filter.id === "all" && c.status === "closed") return false;
+      } else {
+        // Stage view mirrors "All": skip closed threads so the visible set
+        // matches what the user expects when they click into a stage.
+        if (c.status === "closed") return false;
+        if (contact.stageId !== filter.stageId) return false;
+      }
 
       if (q) {
         const haystack =
@@ -112,12 +129,13 @@ export function ConversationList({
     });
   }, [conversations, currentUser.id, filter, search]);
 
-  const filterLabel: Record<FilterId, string> = {
-    all: "All open",
-    mine: "Assigned to me",
-    unassigned: "Unassigned",
-    closed: "Closed",
-  };
+  const headerTitle = useMemo(() => {
+    if (filter.kind === "preset") {
+      return PRESET_LABELS[filter.id];
+    }
+    const stage = stages.find((s) => s.id === filter.stageId);
+    return stage ? `Stage · ${stage.name}` : "Stage";
+  }, [filter, stages]);
 
   // Infinite-scroll sentinel: an empty div near the bottom of the list. When
   // it enters the scroll container's viewport, fetch the next page. Held in
@@ -156,10 +174,10 @@ export function ConversationList({
   }, [hasMore, conversations.length]);
 
   return (
-    <div className="flex h-full w-[380px] shrink-0 flex-col bg-background">
+    <div className="flex h-full w-95 shrink-0 flex-col bg-background">
       <header className="flex items-center justify-between gap-2 border-b border-border px-4 pt-4 pb-3">
         <div>
-          <h1 className="text-base font-semibold leading-tight">{filterLabel[filter]}</h1>
+          <h1 className="text-base font-semibold leading-tight">{headerTitle}</h1>
           <p className="text-xs text-muted-foreground">
             {selectionMode && selectedIds.size > 0
               ? `${selectedIds.size} selected`

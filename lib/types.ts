@@ -255,7 +255,8 @@ export interface SnippetItem {
 export interface InternalNote {
   id: string;
   conversationId: string;
-  authorUserId: string;
+  /** Null when the author was hard-deleted. UI renders "Removed user". */
+  authorUserId: string | null;
   body: string;
   timestamp: string;
 }

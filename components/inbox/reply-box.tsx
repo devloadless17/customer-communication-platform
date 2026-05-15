@@ -156,7 +156,11 @@ export function ReplyBox({
   const onSelectSnippet = useCallback(
     (s: SnippetItem) => {
       if (!slashRange) return;
-      const resolved = resolveFieldTokens(s.body, contact);
+      // Resolve `$var.contact.*` against the live conversation contact and
+      // `$var.agent.*` against the agent inserting it — that's `currentUser`.
+      // Both namespaces are valid in snippets (configured by listAvailableTokens
+      // in the snippets editor); the runner here doesn't need to gate them.
+      const resolved = resolveFieldTokens(s.body, contact, currentUser);
       const before = value.slice(0, slashRange.start);
       const after = value.slice(slashRange.end);
       const next = before + resolved + after;

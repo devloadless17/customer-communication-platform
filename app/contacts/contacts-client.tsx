@@ -45,6 +45,7 @@ import {
   useContactList,
   type StageFilter,
 } from "@/components/contacts/contact-browser";
+import { SelectAllRow } from "@/components/contacts/contact-browser/select-all-row";
 import { ContactStagePicker } from "@/components/contacts/contact-stage-picker";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
@@ -219,7 +220,18 @@ export function ContactsClient({
             <SelectAllRow
               items={items}
               selectedIds={selectedIds}
-              onChange={setSelectedIds}
+              onToggleAll={(checked, visibleIds) => {
+                // Replace semantics — the page drops non-visible selections
+                // whenever filters change (see the effect on `items`), so
+                // "select all visible" naturally means "set to visible".
+                if (checked) setSelectedIds(new Set(visibleIds));
+                else setSelectedIds(new Set());
+              }}
+              rightSlot={
+                <span>
+                  {items.length} contact{items.length === 1 ? "" : "s"}
+                </span>
+              }
             />
             <ul className="divide-y divide-border">
               {items.map((item) => (
@@ -667,43 +679,6 @@ async function safeReadError(res: Response): Promise<string> {
   } catch {
     return `HTTP ${res.status}`;
   }
-}
-
-function SelectAllRow({
-  items,
-  selectedIds,
-  onChange,
-}: {
-  items: ContactListItem[];
-  selectedIds: Set<string>;
-  onChange: (next: Set<string>) => void;
-}) {
-  const allSelected = items.length > 0 && items.every((i) => selectedIds.has(i.contact.id));
-  const someSelected = !allSelected && items.some((i) => selectedIds.has(i.contact.id));
-  return (
-    <div className="flex items-center gap-3 border-b border-border bg-muted/20 px-4 py-2 text-[11px]">
-      <label className="flex cursor-pointer items-center gap-2 text-muted-foreground">
-        <input
-          type="checkbox"
-          className="size-4 cursor-pointer accent-primary"
-          checked={allSelected}
-          ref={(el) => {
-            if (el) el.indeterminate = someSelected;
-          }}
-          onChange={(e) => {
-            if (e.target.checked) {
-              onChange(new Set(items.map((i) => i.contact.id)));
-            } else {
-              onChange(new Set());
-            }
-          }}
-          aria-label="Select all visible"
-        />
-        Select all visible
-      </label>
-      <span className="ml-auto">{items.length} contact{items.length === 1 ? "" : "s"}</span>
-    </div>
-  );
 }
 
 function BulkActionBar({

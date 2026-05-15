@@ -84,6 +84,18 @@ export async function registerAction(
           password: passwordHash,
         },
       });
+      // Seed the team's pipeline with three lifecycle stages. Stage 1 is the
+      // default landing spot for new contacts; the admin can rename, recolor,
+      // or add more in /settings/stages. Done here (not lazily via
+      // ensureDefaultStage) so the inbox sidebar shows a real pipeline from
+      // the very first login instead of an empty list.
+      await tx.contactStage.createMany({
+        data: [
+          { teamId: team.id, name: "Stage 1", color: "sky", position: 0, isDefault: true },
+          { teamId: team.id, name: "Stage 2", color: "amber", position: 1, isDefault: false },
+          { teamId: team.id, name: "Stage 3", color: "emerald", position: 2, isDefault: false },
+        ],
+      });
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {

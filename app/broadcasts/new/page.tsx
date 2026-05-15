@@ -6,6 +6,7 @@ import {
   countContacts,
   listAudienceGroups,
   listContactFieldDefinitions,
+  listContactStages,
   listTags,
   lookupContacts,
 } from "@/lib/queries";
@@ -40,18 +41,26 @@ export default async function NewBroadcastPage({
   // resolves counts / chip labels server-side. So all we fetch here is the
   // team total, the small tag/group/field catalogs, and the labels for any
   // contacts that were deep-linked in.
-  const [team, totalContactCount, tags, groups, fieldDefinitions, contactLabels] =
-    await Promise.all([
-      db.team.findUnique({
-        where: { id: teamId },
-        select: { metaPhoneNumberId: true, metaWabaId: true },
-      }),
-      countContacts(teamId),
-      listTags(teamId),
-      listAudienceGroups(teamId),
-      listContactFieldDefinitions(teamId),
-      lookupContacts(teamId, preselectedContactIds),
-    ]);
+  const [
+    team,
+    totalContactCount,
+    tags,
+    groups,
+    fieldDefinitions,
+    stages,
+    contactLabels,
+  ] = await Promise.all([
+    db.team.findUnique({
+      where: { id: teamId },
+      select: { metaPhoneNumberId: true, metaWabaId: true },
+    }),
+    countContacts(teamId),
+    listTags(teamId),
+    listAudienceGroups(teamId),
+    listContactFieldDefinitions(teamId),
+    listContactStages(teamId),
+    lookupContacts(teamId, preselectedContactIds),
+  ]);
 
   // Pre-flight: if WhatsApp isn't even connected, bounce to the settings
   // page so the user knows what to fix.
@@ -65,6 +74,7 @@ export default async function NewBroadcastPage({
       initialContactLabels={contactLabels}
       tags={tags}
       fieldDefinitions={fieldDefinitions}
+      stages={stages}
       groups={groups}
       hasWabaId={Boolean(team.metaWabaId)}
       preselectedContactIds={preselectedContactIds}

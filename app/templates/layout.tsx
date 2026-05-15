@@ -2,7 +2,7 @@ import { getSession } from "@/lib/auth/current-user";
 import { listTeamMembers } from "@/lib/queries";
 import { db } from "@/lib/db";
 
-import { WorkspaceSidebar } from "@/components/layouts/workspace-sidebar";
+import { AppSidebar } from "@/components/layouts/app-sidebar";
 
 /**
  * Sidebar shell for /templates/*. Identical pattern to the /broadcasts and
@@ -29,7 +29,7 @@ export default async function TemplatesLayout({
 
   return (
     <div className="flex min-h-svh bg-background text-foreground">
-      <WorkspaceSidebar
+      <AppSidebar
         currentUser={user}
         team={{ id: team.id, name: team.name }}
         teammates={teammates}

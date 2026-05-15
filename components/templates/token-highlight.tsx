@@ -27,6 +27,8 @@ import type { ContactFieldDefinition } from "@/lib/types";
 
 interface CommonProps {
   fieldDefinitions: ContactFieldDefinition[];
+  /** When true, `$var.agent.name` / `$var.agent.email` highlight as known. */
+  includeAgent?: boolean;
   /** Optional wrapper class on the outer relative container. */
   wrapperClassName?: string;
 }
@@ -37,16 +39,16 @@ interface CommonProps {
 
 /**
  * Split text into <span> nodes — plain runs as-is, token runs in a chip-style
- * span. The token regex matches `$var.contact.<lowercase_underscore>`; we
- * cross-check each match against `fieldDefinitions` so typos render in an
- * amber/muted shade rather than the confident blue.
+ * span. The regex matches both `$var.contact.<key>` and `$var.agent.<key>`;
+ * we namespace-scope the known-keys set so a contact field name leaking into
+ * the agent namespace (or vice versa) still renders amber/unknown.
  */
 function renderTokenized(
   text: string,
   knownKeys: Set<string>,
 ): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
-  const re = /(?<![A-Za-z0-9_])\$var\.contact\.([a-z][a-z0-9_]*)\b/g;
+  const re = /(?<![A-Za-z0-9_])\$var\.(contact|agent)\.([a-z][a-z0-9_]*)\b/g;
   let lastIndex = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -54,8 +56,9 @@ function renderTokenized(
     if (m.index > lastIndex) {
       nodes.push(text.slice(lastIndex, m.index));
     }
-    const key = m[1]!;
-    const isKnown = knownKeys.has(key);
+    const namespace = m[1]!;
+    const key = m[2]!;
+    const isKnown = knownKeys.has(`${namespace}.${key}`);
     nodes.push(
       <span
         key={`tok-${i++}`}
@@ -82,17 +85,26 @@ function renderTokenized(
   return nodes;
 }
 
-function useKnownKeys(fieldDefinitions: ContactFieldDefinition[]): Set<string> {
+function useKnownKeys(
+  fieldDefinitions: ContactFieldDefinition[],
+  includeAgent: boolean,
+): Set<string> {
   return React.useMemo(
-    () =>
-      new Set<string>([
-        "name",
-        "phone",
-        "email",
-        "location",
-        ...fieldDefinitions.map((d) => d.key),
-      ]),
-    [fieldDefinitions],
+    () => {
+      const set = new Set<string>([
+        "contact.name",
+        "contact.phone",
+        "contact.email",
+        "contact.location",
+        ...fieldDefinitions.map((d) => `contact.${d.key}`),
+      ]);
+      if (includeAgent) {
+        set.add("agent.name");
+        set.add("agent.email");
+      }
+      return set;
+    },
+    [fieldDefinitions, includeAgent],
   );
 }
 
@@ -115,8 +127,8 @@ export type TokenHighlightInputProps = React.InputHTMLAttributes<HTMLInputElemen
 export const TokenHighlightInput = React.forwardRef<
   HTMLInputElement,
   TokenHighlightInputProps
->(({ className, wrapperClassName, fieldDefinitions, value, ...props }, ref) => {
-  const knownKeys = useKnownKeys(fieldDefinitions);
+>(({ className, wrapperClassName, fieldDefinitions, includeAgent = false, value, ...props }, ref) => {
+  const knownKeys = useKnownKeys(fieldDefinitions, includeAgent);
   const text = typeof value === "string" ? value : "";
   const innerRef = React.useRef<HTMLInputElement>(null);
   // Merge the external ref with our internal one. Callers can still focus /
@@ -181,8 +193,8 @@ export type TokenHighlightTextareaProps =
 export const TokenHighlightTextarea = React.forwardRef<
   HTMLTextAreaElement,
   TokenHighlightTextareaProps
->(({ className, wrapperClassName, fieldDefinitions, value, ...props }, ref) => {
-  const knownKeys = useKnownKeys(fieldDefinitions);
+>(({ className, wrapperClassName, fieldDefinitions, includeAgent = false, value, ...props }, ref) => {
+  const knownKeys = useKnownKeys(fieldDefinitions, includeAgent);
   const text = typeof value === "string" ? value : "";
   const innerRef = React.useRef<HTMLTextAreaElement>(null);
   React.useImperativeHandle(ref, () => innerRef.current as HTMLTextAreaElement);
@@ -196,7 +208,7 @@ export const TokenHighlightTextarea = React.forwardRef<
       <div
         aria-hidden="true"
         className={cn(
-          "pointer-events-none absolute inset-px overflow-hidden whitespace-pre-wrap break-words px-3 py-2 text-sm leading-relaxed text-foreground",
+          "pointer-events-none absolute inset-px overflow-hidden whitespace-pre-wrap wrap-break-word px-3 py-2 text-sm leading-relaxed text-foreground",
           // Match the textarea's font choice. Callers can pass `font-mono`
           // etc. via `className` and we apply it both here and on the
           // textarea below so metrics stay identical.
@@ -211,7 +223,7 @@ export const TokenHighlightTextarea = React.forwardRef<
         value={value}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
         className={cn(
-          "flex min-h-[60px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors",
+          "flex min-h-15 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors",
           "placeholder:text-muted-foreground",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           "disabled:cursor-not-allowed disabled:opacity-50",

@@ -251,7 +251,7 @@ export async function GET() {
       sentCount: b.sentCount,
       failedCount: b.failedCount,
       createdById: b.createdById,
-      createdByName: b.createdBy.name,
+      createdByName: b.createdBy?.name ?? "Removed user",
       createdAt: b.createdAt.toISOString(),
       startedAt: b.startedAt?.toISOString() ?? null,
       completedAt: b.completedAt?.toISOString() ?? null,

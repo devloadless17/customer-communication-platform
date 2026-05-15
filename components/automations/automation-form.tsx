@@ -251,12 +251,15 @@ export function AutomationForm({ mode, automation }: Props) {
         <legend className="px-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           Webhook
         </legend>
-        <Field label="URL" hint="HTTPS preferred. n8n example: https://n8n.you.com/webhook/abc123">
+        <Field
+          label="URL"
+          hint="HTTPS preferred. Contact tokens like $var.contact.email or $var.contact.<custom_field> are substituted per run."
+        >
           <Input
-            type="url"
+            type="text"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://"
+            placeholder="https://n8n.you.com/webhook/$var.contact.email"
             required
           />
         </Field>
@@ -264,8 +267,8 @@ export function AutomationForm({ mode, automation }: Props) {
           label="Bearer token (optional)"
           hint={
             tokenSet
-              ? "A token is already saved. Leave blank to keep, or enter a new value to overwrite."
-              : "Sent as `Authorization: Bearer …` if set."
+              ? "A token is already saved. Leave blank to keep, or enter a new value to overwrite. $var.contact.* tokens are resolved per run."
+              : "Sent as `Authorization: Bearer …` if set. $var.contact.* tokens are resolved per run."
           }
         >
           <Input
@@ -278,12 +281,12 @@ export function AutomationForm({ mode, automation }: Props) {
         </Field>
         <Field
           label="Custom headers (optional)"
-          hint='One per line, format: Header-Name: value'
+          hint="One per line, format: Header-Name: value. $var.contact.* tokens in values are substituted per run."
         >
           <Textarea
             value={headersText}
             onChange={(e) => setHeadersText(e.target.value)}
-            placeholder="X-Source: ccp"
+            placeholder="X-Contact-Id: $var.contact.phone"
             rows={3}
           />
         </Field>

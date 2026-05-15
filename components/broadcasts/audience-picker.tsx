@@ -1,16 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ChevronRight, FolderHeart, Loader2, Search, Tag as TagIcon, Users, UserPlus } from "lucide-react";
+import { ChevronRight, FolderHeart, Loader2, Tag as TagIcon, Users, UserPlus } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { TagChip } from "@/components/tags/tag-chip";
+import { TagFilterControl } from "@/components/contacts/contact-browser";
 import { ContactMultiSelectField } from "@/components/contacts/contact-multi-select-field";
 import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
-import type { ContactFieldDefinition, Tag } from "@/lib/types";
+import type { ContactFieldDefinition, ContactStage, Tag } from "@/lib/types";
 import type { AudienceGroupDto } from "@/lib/queries";
 
 /**
@@ -39,6 +37,7 @@ export interface AudienceState {
 export function AudiencePicker({
   tags,
   fieldDefinitions = [],
+  stages = [],
   groups,
   totalContactCount,
   taggedRecipientCount,
@@ -51,6 +50,8 @@ export function AudiencePicker({
   tags: Tag[];
   /** Custom-field defs — used for the "filter by field" pills in the picker. */
   fieldDefinitions?: ContactFieldDefinition[];
+  /** Lifecycle stages — used for the stage filter inside the "Pick contacts" dialog. */
+  stages?: ContactStage[];
   /** All saved audience groups for "from group" mode. */
   groups: AudienceGroupDto[];
   /** Total contacts in the team — the "All contacts" recipient count. */
@@ -120,6 +121,7 @@ export function AudiencePicker({
             <SelectedContactsInput
               tags={tags}
               fieldDefinitions={fieldDefinitions}
+              stages={stages}
               initialContactLabels={initialContactLabels}
               selectedIds={value.selectedIds}
               onChange={(selectedIds) => onChange({ ...value, selectedIds })}
@@ -202,21 +204,6 @@ function TagAudienceSelector({
   recipientCount: number;
   recipientLoading: boolean;
 }) {
-  const [query, setQuery] = useState("");
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return tags;
-    return tags.filter((t) => t.name.toLowerCase().includes(q));
-  }, [tags, query]);
-
-  function toggle(id: string) {
-    onChange(
-      selectedTagIds.includes(id)
-        ? selectedTagIds.filter((x) => x !== id)
-        : [...selectedTagIds, id],
-    );
-  }
-
   if (tags.length === 0) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-4 text-center text-[12px] text-muted-foreground">
@@ -227,32 +214,13 @@ function TagAudienceSelector({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search tags…"
-          className="h-9 pl-8"
-        />
-      </div>
-
-      <div className="flex flex-wrap gap-1.5">
-        {filtered.map((t) => (
-          <TagChip
-            key={t.id}
-            tag={t}
-            size="md"
-            onClick={() => toggle(t.id)}
-            selected={selectedTagIds.includes(t.id)}
-          />
-        ))}
-        {filtered.length === 0 && (
-          <span className="text-[12px] text-muted-foreground">
-            No tags match &quot;{query}&quot;.
-          </span>
-        )}
-      </div>
+      <TagFilterControl
+        tags={tags}
+        selectedTagIds={selectedTagIds}
+        onChange={onChange}
+        label=""
+        emptyTriggerLabel="Search & add tags"
+      />
 
       <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3">
         <div className="flex items-center gap-2 text-sm">
@@ -413,12 +381,14 @@ function AllContactsCard({ count }: { count: number }) {
 function SelectedContactsInput({
   tags,
   fieldDefinitions,
+  stages,
   initialContactLabels,
   selectedIds,
   onChange,
 }: {
   tags: Tag[];
   fieldDefinitions: ContactFieldDefinition[];
+  stages: ContactStage[];
   initialContactLabels: ContactLabel[];
   selectedIds: string[];
   onChange: (next: string[]) => void;
@@ -428,6 +398,7 @@ function SelectedContactsInput({
       <ContactMultiSelectField
         tags={tags}
         fieldDefinitions={fieldDefinitions}
+        stages={stages}
         initialLabels={initialContactLabels}
         selectedIds={selectedIds}
         onChange={onChange}

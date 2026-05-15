@@ -20,7 +20,8 @@ export interface AudienceGroupDto {
   contactIds: string[];
   /** Computed member count at read time. */
   memberCount: number;
-  createdById: string;
+  /** Null when the creator was hard-deleted; UI shows "Removed user". */
+  createdById: string | null;
   createdByName: string;
   createdAt: string;
   updatedAt: string;
@@ -56,7 +57,7 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
     contactIds: g.contacts.map((c) => c.id),
     memberCount: counts[i] ?? 0,
     createdById: g.createdById,
-    createdByName: g.createdBy.name,
+    createdByName: g.createdBy?.name ?? "Removed user",
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
   }));
@@ -88,7 +89,7 @@ export async function getAudienceGroup(
     contactIds: g.contacts.map((c) => c.id),
     memberCount,
     createdById: g.createdById,
-    createdByName: g.createdBy.name,
+    createdByName: g.createdBy?.name ?? "Removed user",
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
   };

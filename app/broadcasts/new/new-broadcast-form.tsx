@@ -21,7 +21,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import type { ContactFieldDefinition, Tag, TemplateDto } from "@/lib/types";
+import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@/lib/types";
 import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
 import type { TemplateComponent } from "@/lib/providers/types";
 import type { AudienceGroupDto } from "@/lib/queries";
@@ -59,6 +59,7 @@ export function NewBroadcastForm({
   initialContactLabels,
   tags,
   fieldDefinitions,
+  stages,
   groups,
   hasWabaId,
   preselectedContactIds,
@@ -69,6 +70,7 @@ export function NewBroadcastForm({
   initialContactLabels: ContactLabel[];
   tags: Tag[];
   fieldDefinitions: ContactFieldDefinition[];
+  stages: ContactStage[];
   groups: AudienceGroupDto[];
   hasWabaId: boolean;
   preselectedContactIds: string[];
@@ -393,6 +395,7 @@ export function NewBroadcastForm({
         <AudiencePicker
           tags={tags}
           fieldDefinitions={fieldDefinitions}
+          stages={stages}
           groups={groups}
           totalContactCount={totalContactCount}
           taggedRecipientCount={taggedCount}
@@ -822,8 +825,8 @@ function VarField({
       )}
       {unknown.length > 0 && (
         <div className="mt-0.5 text-[10.5px] text-amber-600 dark:text-amber-400">
-          Unknown field{unknown.length === 1 ? "" : "s"}:{" "}
-          {unknown.map((u) => `$var.contact.${u}`).join(", ")} — these will resolve to empty for every recipient.
+          Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
+          {unknown.join(", ")} — these will resolve to empty for every recipient.
         </div>
       )}
     </label>

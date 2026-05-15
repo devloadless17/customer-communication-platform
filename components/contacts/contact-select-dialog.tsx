@@ -5,7 +5,12 @@ import { Check, Users, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ContactBrowser } from "@/components/contacts/contact-browser";
-import type { ContactFieldDefinition, ContactListItem, Tag } from "@/lib/types";
+import type {
+  ContactFieldDefinition,
+  ContactListItem,
+  ContactStage,
+  Tag,
+} from "@/lib/types";
 
 /** Minimal id → display shape, shared with {@link ContactMultiSelectField}. */
 export interface ContactLabel {
@@ -31,6 +36,7 @@ export function ContactSelectDialog({
   initialSelectedIds = [],
   fieldDefinitions = [],
   tags = [],
+  stages = [],
   title = "Select contacts",
   description,
   confirmLabel = "Use selection",
@@ -41,6 +47,7 @@ export function ContactSelectDialog({
   initialSelectedIds?: string[];
   fieldDefinitions?: ContactFieldDefinition[];
   tags?: Tag[];
+  stages?: ContactStage[];
   title?: string;
   description?: string;
   confirmLabel?: string;
@@ -122,6 +129,7 @@ export function ContactSelectDialog({
             onSelectedChange={setSelected}
             fieldDefinitions={fieldDefinitions}
             tags={tags}
+            stages={stages}
             onItemsLoaded={rememberRows}
           />
         </div>

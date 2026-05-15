@@ -1,119 +1,48 @@
-import Link from "next/link";
-import {
-  ArrowLeft,
-  KeyRound,
-  Layers,
-  MessageSquare,
-  Sparkles,
-  Users,
-  UserCircle2,
-} from "lucide-react";
-
 import { getSession } from "@/lib/auth/current-user";
-import { canManageStages, canManageUsers } from "@/lib/auth/permissions";
+import { listTeamMembers } from "@/lib/queries";
+import { db } from "@/lib/db";
+
+import { AppSidebar } from "@/components/layouts/app-sidebar";
 
 /**
- * Settings shell. Server component — gates by session and surfaces nav.
+ * Settings shell. Uses the same `AppSidebar` every other area uses — Account,
+ * Team, WhatsApp, API keys, Snippets, and Stages now all live in labeled
+ * groups in the main sidebar, so users don't lose the global nav the moment
+ * they open settings.
  *
- * Nav is grouped into two sections so it stays scannable as more
- * chatting-related settings get added:
- *   - "Chat" → things that shape how agents reply / route customers
- *     (snippets, stages today; templates / automations later).
- *   - "Workspace" → identity + plumbing (account, team, WhatsApp creds,
- *     API keys). Admin-only links auto-hide.
- *
- * Admin-only links auto-hide; everyone sees Account, Team, Snippets, Stages.
+ * The old inline sub-sidebar (Chat / Workspace groups) is gone; navigation
+ * happens from the same shell on every page, and a settings landing card
+ * grid still exists at /settings for direct deep-links.
  */
 export default async function SettingsLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const { user } = await getSession();
+  const { user, teamId } = await getSession();
+
+  const [team, teammates] = await Promise.all([
+    db.team.findUnique({
+      where: { id: teamId },
+      select: { id: true, name: true },
+    }),
+    listTeamMembers(teamId),
+  ]);
+
+  if (!team) {
+    throw new Error("team not found");
+  }
 
   return (
-    <div className="grid min-h-svh grid-cols-[220px_1fr] bg-background text-foreground">
-      <aside className="flex flex-col border-r border-border bg-sidebar text-sidebar-foreground">
-        <div className="px-4 pt-5 pb-3">
-          <Link
-            href="/inbox"
-            className="inline-flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="size-3.5" />
-            Back to inbox
-          </Link>
-        </div>
-
-        <NavGroup label="Chat">
-          <NavLink href="/settings/snippets" icon={<Sparkles className="size-4" />}>
-            Snippets
-          </NavLink>
-          {canManageStages(user.role) && (
-            <NavLink href="/settings/stages" icon={<Layers className="size-4" />}>
-              Stages
-            </NavLink>
-          )}
-        </NavGroup>
-
-        <NavGroup label="Workspace">
-          <NavLink href="/settings/account" icon={<UserCircle2 className="size-4" />}>
-            Account
-          </NavLink>
-          <NavLink href="/settings/team" icon={<Users className="size-4" />}>
-            Team
-          </NavLink>
-          {canManageUsers(user.role) && (
-            <NavLink href="/settings/whatsapp" icon={<MessageSquare className="size-4" />}>
-              WhatsApp
-            </NavLink>
-          )}
-          {canManageUsers(user.role) && (
-            <NavLink href="/settings/api-keys" icon={<KeyRound className="size-4" />}>
-              API keys
-            </NavLink>
-          )}
-        </NavGroup>
-      </aside>
-      <main className="overflow-y-auto">
+    <div className="flex min-h-svh bg-background text-foreground">
+      <AppSidebar
+        currentUser={user}
+        team={{ id: team.id, name: team.name }}
+        teammates={teammates}
+      />
+      <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-8 py-10">{children}</div>
       </main>
     </div>
-  );
-}
-
-function NavGroup({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="mt-2">
-      <div className="px-4 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <nav className="flex flex-col gap-0.5 px-2">{children}</nav>
-    </div>
-  );
-}
-
-function NavLink({
-  href,
-  icon,
-  children,
-}: {
-  href: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      href={href}
-      className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-    >
-      {icon}
-      <span>{children}</span>
-    </Link>
   );
 }

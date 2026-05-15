@@ -24,7 +24,7 @@ import { TagFilterControl } from "@/components/contacts/contact-browser";
 import { RecipientsPreviewDialog } from "@/components/broadcasts/recipients-preview-dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import type { ContactLabel } from "@/components/contacts/contact-select-dialog";
-import type { ContactFieldDefinition, Tag } from "@/lib/types";
+import type { ContactFieldDefinition, ContactStage, Tag } from "@/lib/types";
 import type { AudienceGroupDto } from "@/lib/queries";
 
 /**
@@ -45,6 +45,7 @@ export interface GroupFormProps {
   initial?: AudienceGroupDto;
   tags: Tag[];
   fieldDefinitions?: ContactFieldDefinition[];
+  stages?: ContactStage[];
   /** Server-provided labels for the group's existing manual contacts. */
   initialContactLabels?: ContactLabel[];
 }
@@ -53,6 +54,7 @@ export function GroupForm({
   initial,
   tags,
   fieldDefinitions = [],
+  stages = [],
   initialContactLabels = [],
 }: GroupFormProps) {
   const router = useRouter();
@@ -261,6 +263,7 @@ export function GroupForm({
       <ManualContactsSection
         tags={tags}
         fieldDefinitions={fieldDefinitions}
+        stages={stages}
         initialContactLabels={initialContactLabels}
         selectedIds={manualContactIds}
         onChange={setManualContactIds}
@@ -281,7 +284,7 @@ export function GroupForm({
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <span className="break-words">{error}</span>
+          <span className="wrap-break-word">{error}</span>
         </div>
       )}
 
@@ -405,12 +408,14 @@ function TagSection({
 function ManualContactsSection({
   tags,
   fieldDefinitions,
+  stages,
   initialContactLabels,
   selectedIds,
   onChange,
 }: {
   tags: Tag[];
   fieldDefinitions: ContactFieldDefinition[];
+  stages: ContactStage[];
   initialContactLabels: ContactLabel[];
   selectedIds: string[];
   onChange: (next: string[]) => void;
@@ -437,6 +442,7 @@ function ManualContactsSection({
         <ContactMultiSelectField
           tags={tags}
           fieldDefinitions={fieldDefinitions}
+          stages={stages}
           initialLabels={initialContactLabels}
           selectedIds={selectedIds}
           onChange={onChange}

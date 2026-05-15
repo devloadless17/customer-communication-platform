@@ -144,3 +144,72 @@ export async function PATCH(
 
   return NextResponse.json({ user: updated });
 }
+
+/**
+ * Hard-delete a team member. Permanently removes the User row plus their
+ * Session + Account rows (Cascade). Historical attribution survives via
+ * SetNull FKs — messages, notes, broadcasts, snippets, audience groups,
+ * and invites they authored remain in the DB, just unlinked. The UI
+ * renders them as "Removed user."
+ *
+ * Same authorization gates as PATCH:
+ *   - actor canModifyUser(target) — admin can't delete a superAdmin
+ *   - last-active-admin guard — never strip the team of every manager
+ *   - self-delete refused — admins should disable themselves elsewhere
+ *     first; preventing accidental self-locks-out is worth more than the
+ *     small inconvenience
+ */
+export async function DELETE(
+  _req: Request,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  const session = await requireAdmin();
+  if (session instanceof NextResponse) return session;
+
+  const { id } = await ctx.params;
+
+  const target = await db.user.findFirst({
+    where: { id, teamId: session.teamId },
+    select: { id: true, role: true, deactivatedAt: true },
+  });
+  if (!target) {
+    return NextResponse.json({ error: "user not found" }, { status: 404 });
+  }
+
+  if (!canModifyUser(session.role, target.role)) {
+    return NextResponse.json({ error: "cannot delete this user" }, { status: 403 });
+  }
+
+  if (id === session.userId) {
+    return NextResponse.json(
+      { error: "cannot delete your own account" },
+      { status: 400 },
+    );
+  }
+
+  // Last-active-manager guard. Deleting the only person who can manage users
+  // locks the team out of /settings/team forever. Same shape as the PATCH
+  // deactivation guard.
+  const targetCurrentlyManages =
+    (target.role === "admin" || target.role === "superAdmin") &&
+    !target.deactivatedAt;
+  if (targetCurrentlyManages) {
+    const otherManagers = await db.user.count({
+      where: {
+        teamId: session.teamId,
+        role: { in: ["admin", "superAdmin"] },
+        deactivatedAt: null,
+        NOT: { id },
+      },
+    });
+    if (otherManagers === 0) {
+      return NextResponse.json(
+        { error: "cannot delete the last active admin" },
+        { status: 400 },
+      );
+    }
+  }
+
+  await db.user.delete({ where: { id } });
+  return NextResponse.json({ ok: true });
+}

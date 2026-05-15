@@ -4,6 +4,7 @@ import { getSession } from "@/lib/auth/current-user";
 import {
   getAudienceGroup,
   listContactFieldDefinitions,
+  listContactStages,
   listTags,
   lookupContacts,
 } from "@/lib/queries";
@@ -24,9 +25,10 @@ export default async function EditGroupPage({
   const group = await getAudienceGroup(teamId, id);
   if (!group) notFound();
 
-  const [tags, fieldDefinitions, contactLabels] = await Promise.all([
+  const [tags, fieldDefinitions, stages, contactLabels] = await Promise.all([
     listTags(teamId),
     listContactFieldDefinitions(teamId),
+    listContactStages(teamId),
     lookupContacts(teamId, group.contactIds),
   ]);
 
@@ -35,6 +37,7 @@ export default async function EditGroupPage({
       initial={group}
       tags={tags}
       fieldDefinitions={fieldDefinitions}
+      stages={stages}
       initialContactLabels={contactLabels}
     />
   );

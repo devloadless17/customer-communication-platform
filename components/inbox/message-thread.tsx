@@ -603,7 +603,11 @@ export function MessageThread({
                   ) : (
                     <InternalNoteCard
                       note={entry.data}
-                      author={memberById.get(entry.data.authorUserId) ?? unknownAuthor(entry.data.authorUserId)}
+                      author={
+                        (entry.data.authorUserId
+                          ? memberById.get(entry.data.authorUserId)
+                          : undefined) ?? unknownAuthor(entry.data.authorUserId)
+                      }
                       onDelete={deleteNote}
                     />
                   )}

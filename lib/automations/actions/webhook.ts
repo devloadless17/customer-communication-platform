@@ -3,7 +3,11 @@
 
 import type { AutomationActionType } from "@prisma/client";
 
-import type { AutomationWebhookEnvelope } from "@/lib/automations/events";
+import type {
+  AutomationContactSnapshot,
+  AutomationWebhookEnvelope,
+} from "@/lib/automations/events";
+import { type ContactLike, resolveFieldTokens } from "@/lib/field-tokens";
 
 /**
  * Webhook action handler.
@@ -72,15 +76,27 @@ export async function runWebhookAction(
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeout);
 
+  // Resolve `$var.contact.*` tokens in the URL, bearer token, and each custom
+  // header value against the contact in the envelope. Every trigger payload
+  // carries a contact snapshot, so this is safe to do unconditionally.
+  // Body stays the full JSON envelope — n8n / Zapier do their own templating
+  // from the structured data downstream.
+  const contact = contactLikeFromSnapshot(envelope.data.contact);
+  const resolvedUrl = resolveFieldTokens(config.url, contact);
+  const resolvedToken = config.bearerToken
+    ? resolveFieldTokens(config.bearerToken, contact)
+    : undefined;
+  const resolvedHeaders = resolveHeaderValues(config.customHeaders, contact);
+
   let res: Response;
   try {
-    res = await fetch(config.url, {
+    res = await fetch(resolvedUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "ccp-automations/1",
-        ...(config.bearerToken ? { Authorization: `Bearer ${config.bearerToken}` } : {}),
-        ...(config.customHeaders ?? {}),
+        ...(resolvedToken ? { Authorization: `Bearer ${resolvedToken}` } : {}),
+        ...(resolvedHeaders ?? {}),
       },
       body: JSON.stringify(envelope),
       signal: controller.signal,
@@ -107,3 +123,30 @@ export async function runWebhookAction(
 }
 
 export const WEBHOOK_ACTION_TYPE = "webhook" satisfies AutomationActionType;
+
+/**
+ * Project an AutomationContactSnapshot down to the leaner ContactLike shape
+ * the token resolver expects. `location` isn't carried by the snapshot today —
+ * resolves to empty, matching what the resolver does for missing fields.
+ */
+function contactLikeFromSnapshot(snap: AutomationContactSnapshot): ContactLike {
+  return {
+    name: snap.name,
+    phoneNumber: snap.phoneNumber,
+    email: snap.email,
+    location: null,
+    customFields: snap.customFields,
+  };
+}
+
+function resolveHeaderValues(
+  headers: Record<string, string> | undefined,
+  contact: ContactLike,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    out[k] = resolveFieldTokens(v, contact);
+  }
+  return out;
+}

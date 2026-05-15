@@ -7,6 +7,7 @@ import {
   Copy,
   Loader2,
   ShieldAlert,
+  Trash2,
   UserCheck,
   UserPlus,
   UserX,
@@ -15,6 +16,7 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import {
   assignableRoles,
@@ -43,20 +45,25 @@ interface InviteResult {
 export function TeamSettings({
   currentUserId,
   currentUserRole,
+  teamName,
   users,
 }: {
   currentUserId: string;
   currentUserRole: Role;
+  teamName: string;
   users: TeamUserRow[];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [lastInvite, setLastInvite] = useState<InviteResult | null>(null);
+  const { confirm, confirmDialog } = useConfirm();
 
   const refresh = () => router.refresh();
   const canManage = canManageUsers(currentUserRole);
   const inviteRoles = useMemo(() => assignableRoles(currentUserRole), [currentUserRole]);
+  // Org-delete is admin/superAdmin only — same gate as user-management.
+  const canDeleteOrg = canManage;
 
   async function createInvite(form: FormData) {
     setError(null);
@@ -95,6 +102,46 @@ export function TeamSettings({
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       setError(data.error ?? "Failed to update user");
     }
+  }
+
+  async function deleteUser(id: string, name: string) {
+    setError(null);
+    const ok = await confirm({
+      title: `Delete ${name}?`,
+      description:
+        "This permanently removes the account. Messages and notes they wrote stay in the inbox, but the author becomes \"Removed user.\" This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/users/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      setError(data.error ?? "Failed to delete user");
+      return;
+    }
+    refresh();
+  }
+
+  async function deleteOrg() {
+    setError(null);
+    const ok = await confirm({
+      title: `Delete ${teamName}?`,
+      description:
+        "This permanently removes the organization and EVERYTHING in it — contacts, conversations, messages, broadcasts, automations, every teammate's account. The WhatsApp connection is dropped. This cannot be undone. You will be signed out immediately.",
+      confirmLabel: "Delete organization",
+      destructive: true,
+    });
+    if (!ok) return;
+    const res = await fetch("/api/team", { method: "DELETE" });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      setError(data.error ?? "Failed to delete organization");
+      return;
+    }
+    // Cascade nuked our Session row already; force a hard navigation to
+    // /logout so the cookie is cleared and we land on /login cleanly.
+    window.location.assign("/logout");
   }
 
   return (
@@ -158,10 +205,21 @@ export function TeamSettings({
                   refresh();
                 })
               }
+              onDelete={() => startTransition(() => deleteUser(u.id, u.name))}
             />
           ))}
         </ul>
       </div>
+
+      {canDeleteOrg && (
+        <DangerZone
+          teamName={teamName}
+          pending={pending}
+          onDeleteOrg={() => startTransition(() => deleteOrg())}
+        />
+      )}
+
+      {confirmDialog}
     </div>
   );
 }
@@ -172,12 +230,14 @@ function UserRow({
   actorRole,
   pending,
   onPatch,
+  onDelete,
 }: {
   user: TeamUserRow;
   isSelf: boolean;
   actorRole: Role;
   pending: boolean;
   onPatch: (body: { role?: Role; deactivated?: boolean }) => void;
+  onDelete: () => void;
 }) {
   const editable = canManageUsers(actorRole) && canModifyUser(actorRole, user.role);
   const options = useMemo(() => {
@@ -263,8 +323,57 @@ function UserRow({
             )}
           </Button>
         )}
+        {editable && !isSelf && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={pending}
+            title="Permanently remove this account"
+            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={onDelete}
+          >
+            <Trash2 className="size-3.5" />
+            Delete
+          </Button>
+        )}
       </div>
     </li>
+  );
+}
+
+function DangerZone({
+  teamName,
+  pending,
+  onDeleteOrg,
+}: {
+  teamName: string;
+  pending: boolean;
+  onDeleteOrg: () => void;
+}) {
+  return (
+    <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
+      <div className="mb-1 text-sm font-medium text-destructive">Danger zone</div>
+      <p className="text-[12px] text-muted-foreground">
+        Deleting <span className="font-medium text-foreground">{teamName}</span>{" "}
+        permanently removes the organization, every teammate account, every
+        conversation, every contact, every broadcast, every automation, and
+        every uploaded file. The WhatsApp connection is dropped. This action
+        cannot be undone.
+      </p>
+      <div className="mt-3">
+        <Button
+          type="button"
+          variant="outline"
+          disabled={pending}
+          className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          onClick={onDeleteOrg}
+        >
+          <Trash2 className="size-3.5" />
+          Delete organization
+        </Button>
+      </div>
+    </div>
   );
 }
 

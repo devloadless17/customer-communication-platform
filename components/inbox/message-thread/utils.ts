@@ -1,11 +1,18 @@
 import type { User } from "@/lib/types";
 
-export function unknownAuthor(id: string): User {
+/**
+ * Synthesize a placeholder user for the inbox UI in three cases:
+ *   - We don't have the row in our local `memberById` map (rare race).
+ *   - The note/message was authored by a teammate who has been hard-deleted
+ *     (authorUserId / senderUserId is now NULL in the DB).
+ *   - We want to render "Removed user" without crashing.
+ */
+export function unknownAuthor(id: string | null): User {
   return {
-    id,
+    id: id ?? "removed",
     teamId: "",
     role: "agent",
-    name: "Unknown",
+    name: id ? "Unknown" : "Removed user",
     email: "",
   };
 }

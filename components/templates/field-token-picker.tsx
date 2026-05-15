@@ -1,6 +1,6 @@
 "use client";
 
-import { AtSign, ChevronDown, Hash, MapPin, Tag, User } from "lucide-react";
+import { AtSign, ChevronDown, Hash, MapPin, Tag, User, UserCircle } from "lucide-react";
 
 import {
   DropdownMenu,
@@ -35,16 +35,23 @@ export function FieldTokenPicker({
   className,
   /** Use `replace` mode in single-line inputs where mixing literal + token doesn't make sense. */
   hint,
+  /**
+   * Expose `$var.agent.*` tokens (snippets only — broadcasts have no single
+   * agent per send so they leave this off).
+   */
+  includeAgent = false,
 }: {
   fieldDefinitions: ContactFieldDefinition[];
   onInsert: (token: string) => void;
   label?: string;
   className?: string;
   hint?: string;
+  includeAgent?: boolean;
 }) {
-  const tokens = listAvailableTokens(fieldDefinitions);
+  const tokens = listAvailableTokens(fieldDefinitions, { includeAgent });
   const builtins = tokens.filter((t) => t.group === "builtin");
   const customs = tokens.filter((t) => t.group === "custom");
+  const agents = tokens.filter((t) => t.group === "agent");
 
   return (
     <DropdownMenu>
@@ -62,7 +69,7 @@ export function FieldTokenPicker({
           <ChevronDown className="size-3" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[220px]">
+      <DropdownMenuContent align="end" className="min-w-55">
         <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Contact
         </DropdownMenuLabel>
@@ -92,6 +99,27 @@ export function FieldTokenPicker({
                 className="flex items-center gap-2 text-[12px]"
               >
                 <Hash className="size-3.5 text-muted-foreground" />
+                <span className="flex-1 truncate">{t.label}</span>
+                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                  {compactToken(t.token)}
+                </code>
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+        {agents.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Agent
+            </DropdownMenuLabel>
+            {agents.map((t) => (
+              <DropdownMenuItem
+                key={t.token}
+                onSelect={() => onInsert(t.token)}
+                className="flex items-center gap-2 text-[12px]"
+              >
+                <UserCircle className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
                 <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
                   {compactToken(t.token)}

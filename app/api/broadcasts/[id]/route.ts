@@ -55,7 +55,7 @@ export async function GET(
       failedCount: row.failedCount,
       lastError: row.lastError,
       createdById: row.createdById,
-      createdByName: row.createdBy.name,
+      createdByName: row.createdBy?.name ?? "Removed user",
       createdAt: row.createdAt.toISOString(),
       startedAt: row.startedAt?.toISOString() ?? null,
       completedAt: row.completedAt?.toISOString() ?? null,

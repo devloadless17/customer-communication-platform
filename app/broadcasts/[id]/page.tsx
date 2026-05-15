@@ -44,7 +44,7 @@ export default async function BroadcastDetailPage({
     sentCount: row.sentCount,
     failedCount: row.failedCount,
     lastError: row.lastError,
-    createdByName: row.createdBy.name,
+    createdByName: row.createdBy?.name ?? "Removed user",
     createdAt: row.createdAt.toISOString(),
     startedAt: row.startedAt?.toISOString() ?? null,
     completedAt: row.completedAt?.toISOString() ?? null,

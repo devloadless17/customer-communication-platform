@@ -9,10 +9,13 @@ import {
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { getSession } from "@/lib/auth/current-user";
 import { getTeamDetailForSuperAdmin } from "@/lib/queries";
 import { roleLabel } from "@/lib/auth/permissions";
 import { formatListTime, formatPhone, initials } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+
+import { DeleteTeamButton } from "./delete-team-button";
 
 export const metadata = { title: "Organization · Admin" };
 export const dynamic = "force-dynamic";
@@ -30,7 +33,10 @@ export default async function AdminTeamDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const detail = await getTeamDetailForSuperAdmin(id);
+  const [detail, session] = await Promise.all([
+    getTeamDetailForSuperAdmin(id),
+    getSession(),
+  ]);
   if (!detail) notFound();
 
   const { team, members } = detail;
@@ -39,13 +45,20 @@ export default async function AdminTeamDetailPage({
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-8 py-8">
-      <Link
-        href="/admin"
-        className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="size-3.5" />
-        All organizations
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link
+          href="/admin"
+          className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="size-3.5" />
+          All organizations
+        </Link>
+        <DeleteTeamButton
+          teamId={team.id}
+          teamName={team.name}
+          isOwnTeam={team.id === session.teamId}
+        />
+      </div>
 
       <header className="flex flex-col gap-2">
         <h1 className="text-2xl font-semibold tracking-tight">{team.name}</h1>

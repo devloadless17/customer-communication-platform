@@ -1,6 +1,6 @@
 import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
-import { listConversations, listSnippets } from "@/lib/queries";
+import { listConversations, listContactStages, listSnippets } from "@/lib/queries";
 import { InboxShell } from "@/components/inbox/inbox-shell";
 import type { Team, User } from "@/lib/types";
 
@@ -14,7 +14,7 @@ export default async function InboxLayout({ children }: { children: React.ReactN
   const teamRow = await db.team.findUniqueOrThrow({ where: { id: teamId } });
   const team: Team = { id: teamRow.id, name: teamRow.name };
 
-  const [conversationsPage, memberRows, snippets] = await Promise.all([
+  const [conversationsPage, memberRows, snippets, stages] = await Promise.all([
     listConversations(teamId),
     db.user.findMany({
       where: { teamId, deactivatedAt: null },
@@ -22,6 +22,7 @@ export default async function InboxLayout({ children }: { children: React.ReactN
       select: { id: true, teamId: true, role: true, name: true, email: true, avatarUrl: true },
     }),
     listSnippets(teamId),
+    listContactStages(teamId),
   ]);
 
   const teammates: User[] = memberRows.map((u) => ({
@@ -41,6 +42,7 @@ export default async function InboxLayout({ children }: { children: React.ReactN
       conversations={conversationsPage.items}
       nextConversationCursor={conversationsPage.nextCursor}
       snippets={snippets}
+      stages={stages}
     >
       {children}
     </InboxShell>
