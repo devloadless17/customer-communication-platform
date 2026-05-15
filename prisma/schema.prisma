@@ -182,12 +182,22 @@ model User {
   role          Role      @default(agent)
   name          String
   email         String    @unique
+  // Better Auth requires this column. Default true: existing users were
+  // verified via the invite flow; new sign-ups get true on creation since
+  // we don't run an email-confirmation step yet.
+  emailVerified Boolean   @default(true)
+  // Mapped to Better Auth's `image` field via lib/auth/better-auth.ts so the
+  // column name stays domain-meaningful while Better Auth sees the standard
+  // field name in session payloads.
   avatarUrl     String?
-  // Nullable so a future SSO/OAuth user can exist without a local password.
+  // Retained for the existing Credentials flow + the data migration that
+  // copies these into Account.password (Better Auth stores credential hashes
+  // there). Safe to drop once the data migration is verified in production.
   passwordHash  String?
   // Soft-disable: keeps FK history intact (authored messages, assignments).
   deactivatedAt DateTime?
   createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   team              Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
   authoredMsgs      Message[]       @relation("AuthoredMessages")
@@ -197,8 +207,72 @@ model User {
   createdBroadcasts Broadcast[]     @relation("CreatedBroadcasts")
   createdAudienceGroups AudienceGroup[] @relation("CreatedAudienceGroups")
   createdSnippets   Snippet[]       @relation("CreatedSnippets")
+  sessions          Session[]
+  accounts          Account[]
 
   @@index([teamId])
+}
+
+// ---------------------------------------------------------------------------
+// Better Auth tables. Names + columns match the framework's expected schema
+// (see @better-auth/core/db/get-tables.ts). DO NOT rename columns without
+// also configuring the matching `fields` map in lib/auth/better-auth.ts —
+// the adapter reads/writes by these exact names.
+// ---------------------------------------------------------------------------
+
+// One row per active sign-in. Cookie holds `token`; everything else is
+// looked up server-side. Deleting a row signs the user out from that device.
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Credential / OAuth account record. For our email+password users the row
+// has providerId="credential", accountId=email, and password=<bcrypt hash>.
+// OAuth providers (future) populate access/refresh/idToken instead.
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+// Short-lived tokens for email verification, password reset, etc. Not used
+// by our current invite flow (that's the separate Invite model) but Better
+// Auth requires the table to exist for any verification-style endpoints.
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
 }
 
 // Saved canned response. Agents trigger one in the reply box by typing

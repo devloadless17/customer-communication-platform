@@ -1,18 +1,28 @@
-import NextAuth from "next-auth";
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { getSessionCookie } from "better-auth/cookies";
 
-import { authConfig } from "@/lib/auth/config";
 import { rateLimit } from "@/lib/rate-limit";
 
-const { auth } = NextAuth(authConfig);
-
 /**
- * Unauthenticated POSTs worth throttling against credential stuffing / signup
- * abuse: a per-IP allowance over a 10-minute fixed window. GETs are never
- * limited — NextAuth polls `/api/auth/session` constantly.
+ * Edge middleware. Two jobs:
+ *   1. Rate-limit the unauthenticated POSTs that get hammered (login + register)
+ *   2. Gate every other route on session-cookie presence
+ *
+ * Why cookie presence and not full session validation: doing a DB lookup on
+ * every request from every route is the wrong place to pay for it.
+ * Better Auth signs the session cookie, so a forged cookie fails parse here
+ * (`getSessionCookie` returns null). A cookie that *parses* but points to a
+ * deleted/expired session row is allowed through here — the route handler
+ * (`requireSession` for APIs, `getSession` for pages) does the DB recheck and
+ * returns 401 / redirects through /logout. That's the right division of work:
+ * cheap at the edge, authoritative in the handler.
+ *
+ * Public routes never check cookies. Protected routes check cookies and
+ * bounce when missing.
  */
 const RATE_LIMITED_POSTS: Record<string, number> = {
-  "/api/auth/callback/credentials": 20, // login attempts
+  "/api/auth/sign-in/email": 20, // login attempts (Better Auth credential endpoint)
+  "/login": 20, // login attempts via the server action
   "/register": 8, // account creation
 };
 const RATE_WINDOW_MS = 10 * 60 * 1000;
@@ -30,7 +40,7 @@ const TRUSTED_PROXY_HOPS = Math.max(
   Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? "1", 10) || 0,
 );
 
-function clientIp(req: Request & { ip?: string }): string {
+function clientIp(req: NextRequest): string {
   if (TRUSTED_PROXY_HOPS > 0) {
     const fwd = req.headers.get("x-forwarded-for");
     if (fwd) {
@@ -46,10 +56,10 @@ function clientIp(req: Request & { ip?: string }): string {
     if (realIp) return realIp.trim();
   }
   // No trusted proxy (or no headers from one) — fall back to the TCP remote
-  // address. NextRequest exposes this; in environments where it's missing,
-  // everything collapses to one bucket, which keeps the limiter conservative
-  // rather than completely defeated.
-  return req.ip ?? "unknown";
+  // address. NextRequest exposes this on `req.ip` in Edge runtime; in
+  // environments where it's missing, everything collapses to one bucket,
+  // which keeps the limiter conservative rather than completely defeated.
+  return (req as NextRequest & { ip?: string }).ip ?? "unknown";
 }
 
 /**
@@ -57,16 +67,19 @@ function clientIp(req: Request & { ip?: string }): string {
  *
  * Allowlist (no auth required):
  *   - /login                 — the sign-in page itself
- *   - /api/auth/*            — NextAuth's own endpoints
+ *   - /register              — the sign-up page itself
+ *   - /invite/[token]        — invite acceptance
+ *   - /logout                — cookie-clearing route handler
+ *   - /api/auth/*            — Better Auth's own endpoints
  *   - /api/webhooks/*        — Meta posts here unauthenticated; verified by HMAC
  *   - /api/socket            — Socket.io handshake (separately authenticated)
  *   - /api/health            — Caddy / systemd liveness probes; no privileged data
+ *   - /api/external/*        — bearer-token auth, not session cookies
  *
- * Everything else requires a session. Unauthenticated requests to a page get
- * redirected to /login?next=<path>; API requests get a JSON 401 so client
- * fetches don't accidentally render an HTML login page.
+ * Everything else requires a session cookie. Unauthenticated page requests
+ * get redirected to /login?next=<path>; API requests get a JSON 401.
  */
-export default auth((req) => {
+export default function middleware(req: NextRequest): NextResponse {
   const { pathname, search } = req.nextUrl;
 
   if (req.method === "POST" && pathname in RATE_LIMITED_POSTS) {
@@ -83,6 +96,7 @@ export default auth((req) => {
   const isPublicPage =
     pathname === "/login" ||
     pathname === "/register" ||
+    pathname === "/logout" ||
     pathname.startsWith("/invite/");
   const isPublicApi =
     pathname.startsWith("/api/auth") ||
@@ -92,68 +106,33 @@ export default auth((req) => {
     // External API uses bearer-token auth (TeamApiKey), not session cookies —
     // bypass the cookie gate so n8n / partner integrations can reach it. The
     // route handler does its own authentication via lib/auth/external.ts.
-    pathname.startsWith("/api/external/") ||
-    // Server actions for registration / invite acceptance run as POSTs to
-    // these page routes; auth() returns null until the action signs the user
-    // in, so the request must be allowed through unauth'd.
-    pathname === "/register" ||
-    pathname.startsWith("/invite/");
+    pathname.startsWith("/api/external/");
 
-  // ?invalid=1 marker: a server component (lib/auth/current-user.ts) decided
-  // this user's JWT can't be honored — e.g. the user row is gone, deactivated,
-  // or the JWT shape is stale — and redirected here to break out. We clear
-  // cookies and let the login page render even if req.auth still looks valid;
-  // otherwise the "signed-in → bounce to /inbox" path below would loop the
-  // user right back into the same rejection.
-  if (pathname === "/login" && req.nextUrl.searchParams.has("invalid")) {
-    const res = NextResponse.next();
-    clearAuthCookies(res);
-    return res;
-  }
+  // Cookie presence + signature check. Returns null for missing or tampered
+  // cookies, the cookie value otherwise. Does NOT verify the session row
+  // exists in the DB — that's the route handler's job.
+  const sessionCookie = getSessionCookie(req);
+  const hasCookie = Boolean(sessionCookie);
 
   if (isPublicPage || isPublicApi) {
     // Bonus: if a signed-in user hits /login or /register, bounce them home.
-    if (req.auth && (pathname === "/login" || pathname === "/register")) {
+    // The DB recheck on /inbox will catch the stale-cookie case if any.
+    if (hasCookie && (pathname === "/login" || pathname === "/register")) {
       return NextResponse.redirect(new URL("/inbox", req.url));
     }
     return NextResponse.next();
   }
 
-  if (!req.auth) {
+  if (!hasCookie) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
     const url = new URL("/login", req.url);
     url.searchParams.set("next", pathname + search);
-    const res = NextResponse.redirect(url);
-    // Defensive: clear any auth cookies on the way to /login. A stale or
-    // unverifiable session cookie (e.g. from an AUTH_SECRET rotation, or
-    // from an old session-shape that the middleware reads but the server
-    // component rejects) can otherwise drive an infinite redirect loop —
-    // middleware sees "looks valid", page bounces, repeat.
-    clearAuthCookies(res);
-    return res;
+    return NextResponse.redirect(url);
   }
 
   return NextResponse.next();
-});
-
-/**
- * Strip every auth cookie from the outgoing response. Used both on the
- * unauthenticated redirect path and on the ?invalid=1 bail-out, so a stale
- * cookie can't survive either route.
- *
- * Use the descriptor form so the Set-Cookie deletion replays Secure +
- * Path=/. __Host- / __Secure- prefixed cookies are silently NOT deleted
- * by Chrome unless the deletion Set-Cookie itself satisfies the prefix
- * rules (Secure required, Path=/, no Domain).
- */
-function clearAuthCookies(res: NextResponse): void {
-  const isProd = process.env.NODE_ENV === "production";
-  const names = isProd
-    ? ["__Secure-authjs.session-token", "__Secure-authjs.callback-url", "__Host-authjs.csrf-token"]
-    : ["authjs.session-token", "authjs.callback-url", "authjs.csrf-token"];
-  for (const n of names) res.cookies.delete({ name: n, path: "/", secure: isProd });
 }
 
 export const config = {

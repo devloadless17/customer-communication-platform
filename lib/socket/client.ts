@@ -32,7 +32,7 @@ export function getClientSocket(): ClientSocket {
     autoConnect: true,
     reconnection: true,
     reconnectionDelay: 500,
-    // Same-origin: forwards the NextAuth session cookie so the server-side
+    // Same-origin: forwards the Better Auth session cookie so the server-side
     // io.use() middleware can authenticate the handshake.
     withCredentials: true,
   });

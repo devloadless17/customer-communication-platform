@@ -3,7 +3,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 
 import { loadActiveUser } from "@/lib/auth/active-user";
-import { auth } from "@/lib/auth";
+import { getCurrentSession, signOutCurrentSession } from "@/lib/auth";
 import { canManageUsers } from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
 
@@ -27,28 +27,22 @@ export interface ApiSession {
 }
 
 export async function requireSession(): Promise<ApiSession | NextResponse> {
-  const session = await auth();
+  const session = await getCurrentSession();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   // Re-check the DB so an admin who just deactivated a user can't be served
-  // for the remaining lifetime of that user's JWT. Cheap and important —
-  // without this, deactivation is up to 14 days late for API routes.
+  // for the remaining lifetime of that session row. Cheap and important —
+  // without this, deactivation is up to 90 days late for API routes.
   // (Pages already do this via lib/auth/current-user.ts → getSession.)
   const user = await loadActiveUser(session.user.id);
   if (!user) {
-    // JWT is valid but the underlying user is gone/deactivated. Clear the
-    // session cookie on the way out so the next page navigation hits the
-    // unauth'd path cleanly instead of looping through getSession's
-    // ?invalid=1 redirect. Symmetric with middleware.ts's clearAuthCookies.
-    const res = NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    const isProd = process.env.NODE_ENV === "production";
-    const names = isProd
-      ? ["__Secure-authjs.session-token", "__Secure-authjs.callback-url", "__Host-authjs.csrf-token"]
-      : ["authjs.session-token", "authjs.callback-url", "authjs.csrf-token"];
-    for (const n of names) res.cookies.delete({ name: n, path: "/", secure: isProd });
-    return res;
+    // Session row exists but the underlying user is gone/deactivated. Tear
+    // down the session so the next request doesn't repeat the work — and
+    // so the cookie doesn't keep masquerading as logged-in.
+    await signOutCurrentSession();
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   return {

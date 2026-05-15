@@ -2,7 +2,7 @@
 
 import { redirect } from "next/navigation";
 
-import { signIn } from "@/lib/auth";
+import { signInWithCredentials } from "@/lib/auth";
 
 export interface LoginState {
   error: string | null;
@@ -20,25 +20,17 @@ export async function loginAction(
     return { error: "Email and password are required." };
   }
 
-  try {
-    // `redirect: false` disables Auth.js's internal redirect/Set-Cookie
-    // side-effects. With redirectTo: the failure path emits stray
-    // Set-Cookie headers that corrupt the server-action RSC payload —
-    // the client sees a generic "unexpected response" instead of our
-    // returned error state. redirect:false → signIn either sets the
-    // session cookie cleanly (success) or throws (failure). Nothing else.
-    await signIn("credentials", {
-      email,
-      password,
-      redirect: false,
-    });
-  } catch (err) {
-    console.error("[login] sign in failed:", err);
-    return { error: "Invalid email or password." };
+  // signInWithCredentials wraps Better Auth + the lockout/deactivation gates
+  // and returns a result instead of throwing. The session cookie is set by
+  // Better Auth's nextCookies plugin during the call — no extra wiring here.
+  const result = await signInWithCredentials(email, password);
+  if (!result.ok) {
+    return { error: result.error ?? "Invalid email or password." };
   }
 
-  // Success path: navigate explicitly. redirect() throws NEXT_REDIRECT
-  // which Next.js's server-action handler picks up.
+  // redirect() throws NEXT_REDIRECT which Next.js's server-action handler
+  // picks up and turns into a navigation response. Must be outside the
+  // result-checking branch — throwing inside the wrapper would be caught.
   redirect(safeNext(next));
 }
 

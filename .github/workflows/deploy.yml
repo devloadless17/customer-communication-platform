@@ -22,9 +22,8 @@ jobs:
     env:
       DATABASE_URL: postgres://ci:ci@localhost:5432/ci?schema=public
       REDIS_URL: redis://localhost:6379
-      NEXTAUTH_SECRET: ci-placeholder
-      AUTH_SECRET: ci-placeholder
-      NEXTAUTH_URL: http://localhost:3000
+      BETTER_AUTH_SECRET: ci-placeholder
+      BETTER_AUTH_URL: http://localhost:3000
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -66,7 +65,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
-          NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+          BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
         run: |
           set -euo pipefail
@@ -79,11 +78,9 @@ jobs:
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
           NODE_ENV=production
           APP_PORT=3000
-          NEXTAUTH_URL=https://${APP_DOMAIN}
+          BETTER_AUTH_URL=https://${APP_DOMAIN}
           APP_PUBLIC_URL=https://${APP_DOMAIN}
-          NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
-          AUTH_SECRET=${NEXTAUTH_SECRET}
-          AUTH_TRUST_HOST=true
+          BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
           AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0

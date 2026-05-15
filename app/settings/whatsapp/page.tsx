@@ -45,7 +45,7 @@ export default async function WhatsappSettingsPage() {
 
   // Build the public origin from the proxy headers so the webhook URL the
   // admin sees matches what Meta will actually call (ngrok host in dev,
-  // real domain in prod). Falls back to NEXTAUTH_URL when behind no proxy.
+  // real domain in prod). Falls back to the host header when behind no proxy.
   const h = await headers();
   const proto = h.get("x-forwarded-proto") ?? "http";
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";

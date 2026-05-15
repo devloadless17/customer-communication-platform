@@ -84,8 +84,8 @@ export async function POST(req: Request) {
   });
 
   // Build the share URL from the request origin so dev (ngrok) and prod
-  // (your real domain) Just Work without an env var. NEXTAUTH_URL would be
-  // wrong on the rotating ngrok URL.
+  // (your real domain) Just Work without an env var. BETTER_AUTH_URL would
+  // be wrong on the rotating ngrok URL.
   const origin = new URL(req.url).origin;
   const url = `${origin}/invite/${token}`;
 

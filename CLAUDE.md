@@ -15,7 +15,7 @@ A web platform where multiple internal agents collaborate on WhatsApp conversati
 - **Backend:** Next.js API routes + custom server for Socket.io
 - **Database:** PostgreSQL (via Prisma)
 - **Realtime:** Socket.io (rejected managed alternatives — I want to learn this)
-- **Auth:** NextAuth
+- **Auth:** Better Auth (DB-backed sessions, custom bcrypt hasher, see [lib/auth/better-auth.ts](lib/auth/better-auth.ts))
 - **WhatsApp provider:** Meta WhatsApp Cloud API (only)
 - **Infra:** Docker Compose, single VPS for MVP
 
@@ -78,7 +78,7 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 
 **Week 1 — Foundations**
 - Docker Compose: Postgres + Next.js
-- Next.js project with NextAuth, Prisma schema with team_id everywhere
+- Next.js project with Better Auth, Prisma schema with team_id everywhere
 - Meta app set up, webhook verified, test recipient added
 - Webhook endpoint: receive → verify signature → normalize → dedupe → save (raw_payload kept)
 - `MessagingProvider` interface + `MetaProvider` implementation (parse + sendText)

@@ -4,8 +4,8 @@
 
 import type { Server as HttpServer } from "node:http";
 import { Server as IOServer } from "socket.io";
-import { getToken } from "next-auth/jwt";
 
+import { auth } from "@/lib/auth/better-auth";
 import { db } from "@/lib/db";
 import {
   SOCKET_PATH,
@@ -72,25 +72,31 @@ export function initSocketServer(http: HttpServer): IO {
 
   // -------------------------------------------------------------------------
   // Auth middleware. Runs once per handshake; rejects sockets without a valid
-  // NextAuth session cookie. After this runs, socket.data.userId/teamId/role
-  // are trustworthy — DO NOT read identity from event payloads.
+  // Better Auth session. After this runs, socket.data.userId/teamId/role are
+  // trustworthy — DO NOT read identity from event payloads.
+  //
+  // Cost: one DB roundtrip per handshake (Better Auth's getSession reads
+  // Session + User by token). Connection-state-recovery means a brief drop
+  // doesn't re-handshake, so the cost is per-real-connect, not per-tick.
   // -------------------------------------------------------------------------
   io.use(async (socket, next) => {
     try {
-      const headers = socket.handshake.headers as Record<string, string>;
-      const token = await getToken({
-        req: { headers },
-        secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
-        // Auth.js cookie prefix changes between http/https. Production behind
-        // a TLS-terminating proxy will need this true.
-        secureCookie: process.env.NODE_ENV === "production",
-      });
-      if (!token?.id || !token.teamId) {
+      // Forward the cookie header from the websocket handshake into a Headers
+      // object that Better Auth's getSession can read. The handshake includes
+      // every cookie the browser would send to a same-origin HTTP request.
+      const reqHeaders = new Headers();
+      const cookieHeader = socket.handshake.headers.cookie;
+      if (cookieHeader) reqHeaders.set("cookie", cookieHeader);
+
+      const session = await auth.api.getSession({ headers: reqHeaders });
+      const userId = session?.user?.id;
+      const teamId = (session?.user as { teamId?: string } | undefined)?.teamId;
+      if (!userId || !teamId) {
         return next(new Error("unauthorized"));
       }
-      socket.data.userId = token.id as string;
-      socket.data.teamId = token.teamId as string;
-      socket.data.role = token.role as Role;
+      socket.data.userId = userId;
+      socket.data.teamId = teamId;
+      socket.data.role = (session!.user as { role?: Role }).role as Role;
       socket.data.typingIn = new Set();
       next();
     } catch (err) {

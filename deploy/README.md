@@ -162,7 +162,7 @@ ADMIN_EMAIL           your.real.email@example.com
 POSTGRES_DB           ccp
 POSTGRES_USER         app
 POSTGRES_PASSWORD     (openssl rand -hex 32)
-NEXTAUTH_SECRET       (openssl rand -base64 32)
+BETTER_AUTH_SECRET    (openssl rand -base64 32)
 UPLOADTHING_TOKEN     (from UploadThing dashboard)
 ```
 
@@ -193,7 +193,7 @@ gh secret set ADMIN_EMAIL       --repo "$REPO" --body "<your-real-email>"
 gh secret set POSTGRES_DB       --repo "$REPO" --body "ccp"
 gh secret set POSTGRES_USER     --repo "$REPO" --body "app"
 gh secret set POSTGRES_PASSWORD --repo "$REPO" --body "$(openssl rand -hex 32)"
-gh secret set NEXTAUTH_SECRET   --repo "$REPO" --body "$(openssl rand -base64 32)"
+gh secret set BETTER_AUTH_SECRET --repo "$REPO" --body "$(openssl rand -base64 32)"
 
 # Blob storage
 gh secret set UPLOADTHING_TOKEN --repo "$REPO" --body "<your-uploadthing-token>"

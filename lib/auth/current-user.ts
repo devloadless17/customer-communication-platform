@@ -4,20 +4,24 @@ import { cache } from "react";
 import { redirect } from "next/navigation";
 
 import { loadActiveUser } from "@/lib/auth/active-user";
-import { auth } from "@/lib/auth";
+import { getCurrentSession } from "@/lib/auth";
 import type { User } from "@/lib/types";
 
 /**
  * Server-component helper. Resolves the current authenticated user, or
- * redirects to /login when there's no session.
+ * bounces through /logout (which clears the session cookie and redirects
+ * to /login) when there's no valid session.
  *
- * Callers that already pass through middleware (every page under /inbox)
- * can rely on this never returning a guest. The redirect is the
- * defense-in-depth: if middleware is ever bypassed, server components
- * still bounce.
+ * Why /logout instead of plain redirect("/login"): server components can't
+ * mutate cookies. If the session row is gone but the cookie is still
+ * present, a direct /login redirect leaves the cookie in place — the next
+ * navigation re-enters this function, which redirects again, in a loop
+ * that only the browser can break by clearing storage. Routing through
+ * /logout (a route handler that CAN mutate cookies) clears the session
+ * and stops the loop in one trip.
  *
  * Wrapped in `React.cache` so layouts + pages + child server components in
- * the same render share one auth() call and one DB hit, instead of each
+ * the same render share one auth check and one DB hit, instead of each
  * paying the round-trip. Per-request memoization — cache resets between
  * navigations.
  */
@@ -28,25 +32,18 @@ export interface Session {
 }
 
 export const getSession = cache(async (): Promise<Session> => {
-  const session = await auth();
-  // The ?invalid=1 marker tells middleware to clear the session cookie when
-  // it serves /login — otherwise middleware sees the still-valid-looking JWT
-  // and bounces back here, producing an infinite redirect that only resolves
-  // when the user manually clears cookies. This branch covers JWTs that
-  // decode but lack a usable user.id (malformed / schema-mismatched cookies).
+  const session = await getCurrentSession();
   if (!session?.user?.id) {
-    redirect("/login?invalid=1");
+    redirect("/logout");
   }
 
   // Hydrate from the DB so we always have current name/avatar/role and to
-  // catch users that were deactivated in another tab. JWT sessions cache
-  // attributes for the token's lifetime; the DB is the source of truth.
-  // Same ?invalid=1 marker: the JWT is still cryptographically valid here
-  // (middleware let us through), but the underlying user is gone or
-  // deactivated. Without the marker, middleware would just bounce us back.
+  // catch users that were deactivated in another tab. Better Auth's session
+  // payload (and the cookieCache) are the framework's view; the User row
+  // is the domain truth for `deactivatedAt`.
   const row = await loadActiveUser(session.user.id);
   if (!row) {
-    redirect("/login?invalid=1");
+    redirect("/logout");
   }
 
   return {

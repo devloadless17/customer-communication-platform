@@ -1,21 +1,21 @@
 import "server-only";
 
-import NextAuth from "next-auth";
-import Credentials from "next-auth/providers/credentials";
+import { headers } from "next/headers";
 
 import { db } from "@/lib/db";
-import { verifyPassword } from "@/lib/auth/password";
+import { auth } from "@/lib/auth/better-auth";
 import { clearFailures, isLockedOut, recordFailure } from "@/lib/rate-limit";
 
-import { authConfig } from "./config";
-
 /**
- * Full NextAuth config — Node runtime only. Adds the Credentials provider that
- * looks up the user by email and bcrypt-verifies the password.
+ * Server-side auth surface. Wraps Better Auth so the rest of the app keeps
+ * the same call sites (`signInWithCredentials`, `signOutCurrentSession`,
+ * `getCurrentSession`) it had with NextAuth. The wrappers also layer the
+ * non-framework gates that Better Auth doesn't know about: account-level
+ * lockout and the `deactivatedAt` soft-delete.
  *
- * Anything outside middleware imports `auth`/`signIn`/`signOut` from here.
- * The shared edge-safe pieces (callbacks, pages, session strategy) live in
- * lib/auth/config.ts.
+ * Why wrap instead of calling Better Auth directly: keeps every credential
+ * check + every signout going through one bookkeeping point. A future swap
+ * to magic-link / SSO / SAML lands here, not scattered across actions.
  */
 
 /** Lock an account after this many failed password attempts within the window. */
@@ -23,61 +23,93 @@ const LOCKOUT_LIMIT = 5;
 /** Lockout window — failed attempts within this duration count toward the limit. */
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
-  ...authConfig,
-  providers: [
-    Credentials({
-      name: "Email and password",
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-      },
-      async authorize(raw) {
-        const email = typeof raw?.email === "string" ? raw.email.trim().toLowerCase() : "";
-        const password = typeof raw?.password === "string" ? raw.password : "";
-        if (!email || !password) return null;
+export interface SignInResult {
+  ok: boolean;
+  /** Generic error message safe to surface to the user (no enumeration leaks). */
+  error?: string;
+}
 
-        // Account-level lockout. The middleware's IP limit catches one attacker
-        // hammering one IP; this catches a distributed attack hammering one
-        // account from many IPs. Keyed by email so the limiter is per-account.
-        const lockoutKey = `auth:account:${email}`;
-        if (isLockedOut(lockoutKey, LOCKOUT_LIMIT)) {
-          // Return null so NextAuth surfaces the same "Invalid email or
-          // password" message — don't leak that the account is locked.
-          return null;
-        }
+/**
+ * Verify email + password and create a session. Sets the session cookie via
+ * Better Auth's nextCookies plugin — no cookie handling required at the
+ * call site beyond awaiting this.
+ *
+ * The order of checks is deliberate:
+ *   1. Lockout check (fast, no DB)
+ *   2. User lookup → record failure if missing (defeats email enumeration
+ *      via the lockout counter — attackers probing unknown emails still
+ *      hit the limit)
+ *   3. Deactivated check → return generic error WITHOUT recording a failure
+ *      (a deactivated user typing their correct password is not an attacker;
+ *      we just deny them)
+ *   4. Delegate to Better Auth which does bcrypt verify against
+ *      Account.password
+ *   5. On success: clear failures and stamp the session cookie
+ *   6. On failure: record failure and return generic error
+ */
+export async function signInWithCredentials(
+  rawEmail: string,
+  password: string,
+): Promise<SignInResult> {
+  const email = rawEmail.trim().toLowerCase();
+  if (!email || !password) return { ok: false, error: "Invalid email or password." };
 
-        const user = await db.user.findUnique({ where: { email } });
-        if (!user || !user.passwordHash) {
-          // Count as a failure so attackers probing unknown emails still hit
-          // the limit. Without this, the lockout only protects accounts that
-          // actually exist — which lets the attacker enumerate emails by
-          // observing which ones eventually lock.
-          recordFailure(lockoutKey, LOCKOUT_WINDOW_MS);
-          return null;
-        }
-        // Block sign-in for soft-disabled users — admins deactivate without
-        // deleting so message attribution survives. Don't count as a failure;
-        // it's not a credential issue.
-        if (user.deactivatedAt) return null;
+  const lockoutKey = `auth:account:${email}`;
+  if (isLockedOut(lockoutKey, LOCKOUT_LIMIT)) {
+    // Don't surface "locked out" — return the same message as bad-password
+    // so an attacker can't tell whether they tripped the limit or just got
+    // a wrong password.
+    return { ok: false, error: "Invalid email or password." };
+  }
 
-        const ok = await verifyPassword(password, user.passwordHash);
-        if (!ok) {
-          recordFailure(lockoutKey, LOCKOUT_WINDOW_MS);
-          return null;
-        }
+  const user = await db.user.findUnique({
+    where: { email },
+    select: { id: true, deactivatedAt: true },
+  });
+  if (!user) {
+    recordFailure(lockoutKey, LOCKOUT_WINDOW_MS);
+    return { ok: false, error: "Invalid email or password." };
+  }
 
-        clearFailures(lockoutKey);
+  if (user.deactivatedAt) {
+    // Same generic message — don't tell the user (or an enumeration probe)
+    // that the account exists but is disabled.
+    return { ok: false, error: "Invalid email or password." };
+  }
 
-        return {
-          id: user.id,
-          teamId: user.teamId,
-          role: user.role,
-          name: user.name,
-          email: user.email,
-          image: user.avatarUrl ?? null,
-        };
-      },
-    }),
-  ],
-});
+  try {
+    await auth.api.signInEmail({
+      body: { email, password },
+      headers: await headers(),
+    });
+  } catch {
+    // Better Auth throws APIError on bad credentials. Treat any throw as
+    // "wrong password" — the framework already returns generic errors so
+    // we don't leak which factor failed.
+    recordFailure(lockoutKey, LOCKOUT_WINDOW_MS);
+    return { ok: false, error: "Invalid email or password." };
+  }
+
+  clearFailures(lockoutKey);
+  return { ok: true };
+}
+
+/**
+ * Clear the current session. Server actions that call this should follow
+ * with a `redirect()` — Better Auth doesn't redirect on its own, and the
+ * sidebar's signout flow needs to close the socket FIRST anyway (see
+ * components/inbox/sidebar.tsx).
+ */
+export async function signOutCurrentSession(): Promise<void> {
+  await auth.api.signOut({ headers: await headers() });
+}
+
+/**
+ * Read the current session from cookies. Returns the raw Better Auth
+ * payload (`{ session, user }`) or null. Most callers want the higher-level
+ * helpers in lib/auth/helpers.ts (API routes) or lib/auth/current-user.ts
+ * (server components) — those layer the deactivation recheck on top.
+ */
+export async function getCurrentSession() {
+  return auth.api.getSession({ headers: await headers() });
+}

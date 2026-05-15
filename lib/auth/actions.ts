@@ -1,8 +1,13 @@
 "use server";
 
-import { signOut } from "@/lib/auth";
+import { redirect } from "next/navigation";
 
-// Server action invoked by the sidebar's "Sign out" button.
+import { signOutCurrentSession } from "@/lib/auth";
+
+// Server action invoked by the sidebar's "Sign out" button. The sidebar
+// closes the websocket BEFORE calling this so other tabs see the user go
+// offline immediately — see components/inbox/sidebar.tsx.
 export async function signOutAction() {
-  await signOut({ redirectTo: "/login" });
+  await signOutCurrentSession();
+  redirect("/login");
 }

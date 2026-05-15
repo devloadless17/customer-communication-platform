@@ -3,20 +3,22 @@
 import { Prisma } from "@prisma/client";
 import { redirect } from "next/navigation";
 
-import { signIn } from "@/lib/auth";
+import { signInWithCredentials } from "@/lib/auth";
+import { auth } from "@/lib/auth/better-auth";
 import { db } from "@/lib/db";
 import { hashInviteToken } from "@/lib/auth/invite-token";
 import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/auth/password";
 
 /**
  * Accept an invite. The token in the URL is hashed and looked up; we verify
- * it's still pending and unexpired, create the User in the invite's team,
- * stamp the invite as accepted, then sign the user in and bounce them to
- * the inbox.
+ * it's still pending and unexpired, create the User + credential Account in
+ * the invite's team, stamp the invite as accepted, then sign the user in
+ * and bounce them to the inbox.
  *
  * Both the invite consumption and the user creation happen in a single
  * transaction so a failed user create (e.g. unique-email race against a
- * concurrent /register call) doesn't burn the invite.
+ * concurrent /register call) doesn't burn the invite. Better Auth's Account
+ * row joins the same transaction for the same reason.
  */
 
 export interface AcceptState {
@@ -43,7 +45,10 @@ export async function acceptInviteAction(
   }
 
   const tokenHash = hashInviteToken(token);
-  const passwordHash = await hashPassword(password);
+  const passwordHash =
+    auth.options.emailAndPassword?.password?.hash
+      ? await auth.options.emailAndPassword.password.hash(password)
+      : await hashPassword(password);
 
   let signInEmail: string;
 
@@ -64,13 +69,21 @@ export async function acceptInviteAction(
         throw new InviteError("An account with this email already exists. Sign in instead.");
       }
 
-      await tx.user.create({
+      const user = await tx.user.create({
         data: {
           teamId: invite.teamId,
           role: invite.role,
           name,
           email: invite.email,
           passwordHash,
+        },
+      });
+      await tx.account.create({
+        data: {
+          userId: user.id,
+          providerId: "credential",
+          accountId: invite.email,
+          password: passwordHash,
         },
       });
       await tx.invite.update({
@@ -91,15 +104,9 @@ export async function acceptInviteAction(
     return { error: "Something went wrong accepting the invite." };
   }
 
-  try {
-    // redirect:false — see app/login/actions.ts for rationale.
-    await signIn("credentials", {
-      email: signInEmail,
-      password,
-      redirect: false,
-    });
-  } catch (err) {
-    console.error("[invite/accept] post-create sign-in failed:", err);
+  const signIn = await signInWithCredentials(signInEmail, password);
+  if (!signIn.ok) {
+    console.error("[invite/accept] post-create sign-in failed:", signIn.error);
     return { error: "Account created — please sign in." };
   }
 

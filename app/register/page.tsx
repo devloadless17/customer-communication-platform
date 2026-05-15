@@ -1,8 +1,6 @@
 import Link from "next/link";
 import { MessageSquareText } from "lucide-react";
 
-import { auth } from "@/lib/auth";
-
 import { RegisterForm } from "./register-form";
 
 export const metadata = {
@@ -10,9 +8,6 @@ export const metadata = {
 };
 
 export default async function RegisterPage() {
-  // Pre-warm Auth.js cookie context — same rationale as app/login/page.tsx.
-  await auth();
-
   return (
     <div className="grid min-h-svh place-items-center bg-background px-4">
       <div className="w-full max-w-sm">

@@ -23,8 +23,6 @@ interface Check {
   name: string;
   /** Optional human description shown when the check fails. */
   hint?: string;
-  /** Fallback that satisfies this check (e.g. NEXTAUTH_SECRET when AUTH_SECRET is missing). */
-  fallbackVar?: string;
 }
 
 const required: Check[] = [
@@ -37,18 +35,18 @@ const required: Check[] = [
     hint: "BullMQ broker (automations queue). See docker-compose.yml.",
   },
   {
-    name: "AUTH_SECRET",
-    fallbackVar: "NEXTAUTH_SECRET",
+    name: "BETTER_AUTH_SECRET",
     hint:
-      "NextAuth signing secret. Generate with: openssl rand -base64 32. " +
-      "Set both AUTH_SECRET and NEXTAUTH_SECRET to the same value.",
+      "Better Auth signing secret. Generate with: openssl rand -base64 32.",
   },
 ];
 
 const prodRequired: Check[] = [
   {
-    name: "NEXTAUTH_URL",
-    hint: "Public URL of the app (https://your-domain). NextAuth uses it to sign callbacks.",
+    name: "BETTER_AUTH_URL",
+    hint:
+      "Public URL of the app (https://your-domain). Better Auth uses it as the " +
+      "default trusted origin for signin endpoints — must match the Caddy host.",
   },
   {
     name: "APP_PUBLIC_URL",
@@ -66,14 +64,11 @@ const recommended: Check[] = [
 ];
 
 function present(c: Check): boolean {
-  if (process.env[c.name]) return true;
-  if (c.fallbackVar && process.env[c.fallbackVar]) return true;
-  return false;
+  return Boolean(process.env[c.name]);
 }
 
 function describe(c: Check): string {
-  const both = c.fallbackVar ? `${c.name} (or ${c.fallbackVar})` : c.name;
-  return c.hint ? `${both} — ${c.hint}` : both;
+  return c.hint ? `${c.name} — ${c.hint}` : c.name;
 }
 
 /**
@@ -112,9 +107,9 @@ export function validateEnv(): void {
   // Sanity check on the public URL in prod — a localhost callback URL hitting
   // production is one of those bugs that only surfaces after a customer tries
   // to log in, by which point it's already embarrassing.
-  if (PROD && process.env.NEXTAUTH_URL?.includes("localhost")) {
+  if (PROD && process.env.BETTER_AUTH_URL?.includes("localhost")) {
     console.warn(
-      "[env] warning: NEXTAUTH_URL points at localhost in production. " +
+      "[env] warning: BETTER_AUTH_URL points at localhost in production. " +
         "Auth callbacks will fail for real users.",
     );
   }
