@@ -8,7 +8,12 @@
 -- defaults true because every existing user got in via the invite flow,
 -- which is itself an email-confirmation step.
 ALTER TABLE "User" ADD COLUMN "emailVerified" BOOLEAN NOT NULL DEFAULT true;
+-- updatedAt: add WITH a default so existing rows get a valid timestamp,
+-- then drop the default to match Prisma's @updatedAt schema (which expects
+-- the app to set it, not the DB). Without this two-step, Prisma's drift
+-- detection generates a follow-up migration that fights migration order.
 ALTER TABLE "User" ADD COLUMN "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE "User" ALTER COLUMN "updatedAt" DROP DEFAULT;
 
 -- CreateTable: Session
 CREATE TABLE "Session" (
