@@ -37,25 +37,54 @@ export const MESSAGES_PAGE = 30;
  * silently skip rows after a bump. Cursor is the *last item shown* so the
  * caller can pass it back to ask "give me the next page after this."
  *
+ * `search` filters by contact name / phone / latest-message preview using
+ * case-insensitive substring match. Searches the loaded slice's haystack
+ * server-side so the user can find threads buried under hundreds of others
+ * without scrolling. Without a pg_trgm index this is a sequential scan —
+ * fine at pilot scale (single-digit ms for a few thousand rows). Switch to
+ * a trigram index past ~50k conversations.
+ *
  * Includes contact + assigned user; does NOT pull messages/notes (the
  * thread page hydrates those separately to keep the list query lean).
  */
 export async function listConversations(
   teamId: string,
-  opts: { take?: number; cursor?: string | null } = {},
+  opts: { take?: number; cursor?: string | null; search?: string } = {},
 ): Promise<CursorPage<ConversationWithRefs>> {
   const take = clampTake(opts.take, CONVERSATIONS_PAGE);
   const cursor = parseConvoCursor(opts.cursor ?? null);
+  const search = opts.search?.trim() ?? "";
 
-  const where = cursor
+  // Keyset clause (recency-paginated). Built separately so it composes
+  // with the optional search clause via `AND`.
+  const keysetClause: Prisma.ConversationWhereInput | null = cursor
     ? {
-        teamId,
         OR: [
           { lastMessageAt: { lt: cursor.lastMessageAt } },
           { lastMessageAt: cursor.lastMessageAt, id: { lt: cursor.id } },
         ],
       }
-    : { teamId };
+    : null;
+
+  // Search clause: name / phone / last-message preview, case-insensitive.
+  // Phone numbers are stored normalised so a plain `contains` covers
+  // "5551234" matching "+15551234567" — no need for digit-only stripping.
+  const searchClause: Prisma.ConversationWhereInput | null = search
+    ? {
+        OR: [
+          { contact: { name: { contains: search, mode: "insensitive" } } },
+          { contact: { phoneNumber: { contains: search } } },
+          { lastMessagePreview: { contains: search, mode: "insensitive" } },
+        ],
+      }
+    : null;
+
+  const where: Prisma.ConversationWhereInput = {
+    teamId,
+    ...(keysetClause && searchClause
+      ? { AND: [keysetClause, searchClause] }
+      : (keysetClause ?? searchClause ?? {})),
+  };
 
   const rows = await db.conversation.findMany({
     where,

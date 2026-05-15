@@ -79,12 +79,12 @@ async function runForward(
       return;
     }
     // Invalidate Next's client router cache if anything actually went out.
-    // Conversation-list links prefetch their target route's RSC payload; that
-    // cache is otherwise served when the user clicks into the destination
-    // thread, so a fresh forward would be missing from the initial render
-    // (the realtime message:new fires before the user mounts that thread, so
-    // the live append handler doesn't catch it either). The refresh marks
-    // every cached route stale → next click re-fetches with the new row.
+    // Once a user clicks into a thread its RSC payload is cached; without
+    // this refresh, navigating back to a forwarded-to thread would render
+    // from that stale cache and miss the forwarded message (the realtime
+    // message:new fires before the user mounts that thread, so the live
+    // append handler doesn't catch it either). The refresh marks every
+    // cached route stale → next click re-fetches with the new row.
     if (data.results.some((r) => r.sent > 0)) onAnySent();
     const failed = data.results.filter((r) => !r.ok);
     if (failed.length === 0) return;

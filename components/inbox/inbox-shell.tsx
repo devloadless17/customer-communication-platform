@@ -14,6 +14,7 @@ import { useTeamEvents } from "@/hooks/use-team-events";
 import { useSocketStatus } from "@/hooks/use-socket-status";
 import { usePresence } from "@/hooks/use-presence";
 import { useCatalogSync } from "@/hooks/use-catalog-sync";
+import { useConversationSearch } from "@/hooks/use-conversation-search";
 
 import { AppSidebar } from "@/components/layouts/app-sidebar";
 import { ConnectionBanner } from "./connection-banner";
@@ -57,12 +58,24 @@ export function InboxShell({
   // Threading it into useTeamEvents lets us suppress the unread-bump for the
   // conversation the user is literally reading.
   const activeConversationId = useSelectedLayoutSegment();
-  const { conversations, hasMore, loadingMore, loadMore } = useTeamEvents(
+  const live = useTeamEvents(
     team.id,
     initialConversations,
     nextConversationCursor,
     activeConversationId,
   );
+
+  // When search is non-empty, the conversation list switches to server-side
+  // matches so contacts buried below the loaded slice are findable. The live
+  // list keeps updating in the background; clearing search restores it.
+  const searchState = useConversationSearch(search);
+
+  const conversationList = searchState.active ? searchState.results : live.conversations;
+  const hasMore = searchState.active
+    ? searchState.nextCursor !== null
+    : live.hasMore;
+  const loadingMore = searchState.active ? searchState.loadingMore : live.loadingMore;
+  const loadMore = searchState.active ? searchState.loadMore : live.loadMore;
 
   const { connected } = useSocketStatus();
   const { onlineUserIds } = usePresence(team.id, currentUser.id);
@@ -74,15 +87,16 @@ export function InboxShell({
 
   // Tab title gets a leading "(N)" while there's unread, so the user notices
   // a new message even when the window is unfocused. Excludes closed threads
-  // because they shouldn't pull attention.
+  // because they shouldn't pull attention. Always reads from the live list —
+  // a partial search result shouldn't change the total.
   const totalUnread = useMemo(() => {
-    return conversations.reduce(
+    return live.conversations.reduce(
       (acc, c) =>
         acc +
         (c.conversation.status === "closed" ? 0 : c.conversation.unreadCount),
       0,
     );
-  }, [conversations]);
+  }, [live.conversations]);
 
   useEffect(() => {
     const base = "Inbox · " + team.name;
@@ -102,7 +116,7 @@ export function InboxShell({
           inboxControls={
             <InboxControls
               currentUser={currentUser}
-              conversations={conversations}
+              conversations={live.conversations}
               stages={stages}
               filter={filter}
               onFilterChange={setFilter}
@@ -112,11 +126,12 @@ export function InboxShell({
         <div className="flex min-w-0 flex-1">
           <ConversationList
             currentUser={currentUser}
-            conversations={conversations}
+            conversations={conversationList}
             stages={stages}
             filter={filter}
             search={search}
             onSearchChange={setSearch}
+            searching={searchState.active && searchState.loading}
             hasMore={hasMore}
             loadingMore={loadingMore}
             onLoadMore={loadMore}
@@ -125,7 +140,7 @@ export function InboxShell({
             {children}
           </main>
         </div>
-        <DevTools conversations={conversations} currentUser={currentUser} />
+        <DevTools conversations={live.conversations} currentUser={currentUser} />
       </div>
     </SnippetsProvider>
   );

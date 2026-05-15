@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useLinkStatus } from "next/link";
-import { useRouter, useSelectedLayoutSegment } from "next/navigation";
+import { useSelectedLayoutSegment } from "next/navigation";
 import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -36,6 +36,7 @@ export function ConversationList({
   filter,
   search,
   onSearchChange,
+  searching = false,
   hasMore,
   loadingMore,
   onLoadMore,
@@ -46,12 +47,15 @@ export function ConversationList({
   filter: Filter;
   search: string;
   onSearchChange: (s: string) => void;
+  /** True while a debounced server search is in flight. Drives the spinner
+   *  in the search box; the listed rows are still the previous results until
+   *  the new ones arrive. */
+  searching?: boolean;
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
 }) {
   const selectedId = useSelectedLayoutSegment();
-  const router = useRouter();
   const { confirm, alert, confirmDialog } = useConfirm();
   // "selection mode": clicking a row toggles its checkbox instead of opening
   // the chat. Toggled by the toolbar button or auto-engaged when the agent
@@ -212,8 +216,14 @@ export function ConversationList({
             placeholder="Search name, phone, or message…"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="h-9 pl-8"
+            className="h-9 pl-8 pr-8"
           />
+          {searching && (
+            <Loader2
+              className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground"
+              aria-label="Searching"
+            />
+          )}
         </div>
       </div>
 
@@ -259,17 +269,7 @@ export function ConversationList({
                       </div>
                     </label>
                   ) : (
-                    <Link
-                      href={`/inbox/${conversation.id}`}
-                      // Warm the route on hover: by the time the user clicks
-                      // (~150ms after pointer-enter on average) the RSC
-                      // payload is usually already in the router cache, so
-                      // the click triggers a near-instant swap instead of a
-                      // round-trip. router.prefetch is safe to call
-                      // repeatedly — Next.js de-dupes internally.
-                      onMouseEnter={() => router.prefetch(`/inbox/${conversation.id}`)}
-                      onFocus={() => router.prefetch(`/inbox/${conversation.id}`)}
-                    >
+                    <Link href={`/inbox/${conversation.id}`} prefetch={false}>
                       <ConversationListItemWithPending
                         conversation={conversation}
                         contact={contact}

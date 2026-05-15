@@ -37,30 +37,70 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
       contacts: { select: { id: true } },
     },
   });
-  // Resolve member counts in parallel — one query per group. Acceptable at
-  // pilot scale (groups are dozens, not thousands). Switch to a single SQL
-  // aggregate when this matters.
-  const counts = await Promise.all(
-    rows.map((g) =>
-      resolveAudienceGroupMemberCount(teamId, {
-        tagIds: g.tags.map((t) => t.id),
-        manualContactIds: g.contacts.map((c) => c.id),
-      }),
-    ),
+
+  // Resolve member counts for every group in ONE query instead of one per
+  // group (the previous Promise.all spawned N COUNT queries — fine at a
+  // dozen groups, painful at fifty). Strategy:
+  //   1. Collect every tag id referenced by any group on this page.
+  //   2. Fetch each tag's contact carriers, scoped to this team, in a
+  //      single Prisma query.
+  //   3. For each group, union (manual contacts) ∪ (contacts carrying any
+  //      of its tags) in memory and take the set size.
+  // Memory bound: O(tagged-contacts × tags-per-contact). At the scale where
+  // that gets uncomfortable (~50k contacts × 5+ tags) switch to a CTE-based
+  // raw SQL aggregate that does the union server-side.
+  const usedTagIds = Array.from(
+    new Set(rows.flatMap((g) => g.tags.map((t) => t.id))),
   );
-  return rows.map((g, i) => ({
-    id: g.id,
-    teamId: g.teamId,
-    name: g.name,
-    description: g.description,
-    tagIds: g.tags.map((t) => t.id),
-    contactIds: g.contacts.map((c) => c.id),
-    memberCount: counts[i] ?? 0,
-    createdById: g.createdById,
-    createdByName: g.createdBy?.name ?? "Removed user",
-    createdAt: g.createdAt.toISOString(),
-    updatedAt: g.updatedAt.toISOString(),
-  }));
+  const tagCarriers =
+    usedTagIds.length > 0
+      ? await db.contact.findMany({
+          where: { teamId, tags: { some: { id: { in: usedTagIds } } } },
+          select: {
+            id: true,
+            // Scope the tag list to the ids we care about; otherwise Prisma
+            // would ship every tag on every matching contact.
+            tags: {
+              where: { id: { in: usedTagIds } },
+              select: { id: true },
+            },
+          },
+        })
+      : [];
+
+  const contactsByTag = new Map<string, Set<string>>();
+  for (const c of tagCarriers) {
+    for (const t of c.tags) {
+      let bucket = contactsByTag.get(t.id);
+      if (!bucket) {
+        bucket = new Set();
+        contactsByTag.set(t.id, bucket);
+      }
+      bucket.add(c.id);
+    }
+  }
+
+  return rows.map((g) => {
+    const members = new Set<string>(g.contacts.map((c) => c.id));
+    for (const t of g.tags) {
+      const carriers = contactsByTag.get(t.id);
+      if (!carriers) continue;
+      for (const id of carriers) members.add(id);
+    }
+    return {
+      id: g.id,
+      teamId: g.teamId,
+      name: g.name,
+      description: g.description,
+      tagIds: g.tags.map((t) => t.id),
+      contactIds: g.contacts.map((c) => c.id),
+      memberCount: members.size,
+      createdById: g.createdById,
+      createdByName: g.createdBy?.name ?? "Removed user",
+      createdAt: g.createdAt.toISOString(),
+      updatedAt: g.updatedAt.toISOString(),
+    };
+  });
 }
 
 export async function getAudienceGroup(

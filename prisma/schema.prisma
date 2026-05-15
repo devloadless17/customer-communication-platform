@@ -434,6 +434,11 @@ model Conversation {
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
+  // Keyset-paginated inbox listing: WHERE teamId = $1 ORDER BY lastMessageAt
+  // DESC, id DESC. The status-leading index above stays for filtered views
+  // (open / pending / closed) but doesn't help the unfiltered list — the
+  // planner needs status to participate in WHERE for that one to be useful.
+  @@index([teamId, lastMessageAt(sort: Desc), id(sort: Desc)])
 }
 
 model Message {
@@ -489,6 +494,16 @@ model Message {
   @@index([conversationId, timestamp])
   @@index([teamId])
   @@index([replyToMessageId])
+  // Keyset for thread loads + "load older": WHERE conversationId = $1
+  // ORDER BY timestamp DESC, id DESC. The ascending index above still
+  // serves chronological/range scans; this one is purpose-built for the
+  // backward keyset cursor with id as the same-millisecond tiebreaker.
+  @@index([conversationId, timestamp(sort: Desc), id(sort: Desc)])
+  // NOTE: a partial index on inbound-only messages also exists in the DB
+  // (see migration add_chat_perf_indexes). Prisma can't express partial
+  // indexes in `@@index`, so it's declared in raw SQL. It powers the
+  // "what was the contact's last inbound?" lookups (24h-window UI +
+  // getConversationWithRefs.lastInboundAt) without scanning outbound rows.
 }
 
 // Pending team invite. Admin POSTs to /api/invites; the link contains a
