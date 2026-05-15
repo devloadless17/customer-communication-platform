@@ -247,10 +247,11 @@ function BubbleContent({
         <BubbleMeta message={message} sender={sender} isOut={isOut} />
         {message.failed && (
           <FailedRecovery
-            // Media retries would need the original File object back; we don't
-            // keep one once the bubble is in the timeline. Text retries always
-            // work — fall back to dismiss-only for media bubbles.
-            canRetry={!message.media && Boolean(onRetryFailed)}
+            // Both text and media retries are supported. The composer caches
+            // the File for each in-flight media send keyed by clientTempId,
+            // so Retry pops it back into the attachment preview without
+            // forcing a re-pick from disk. See pendingFilesRef in reply-box.
+            canRetry={Boolean(onRetryFailed)}
             onRetry={onRetryFailed ? () => onRetryFailed(message) : undefined}
             onDismiss={onDismissFailed ? () => onDismissFailed(message) : undefined}
           />

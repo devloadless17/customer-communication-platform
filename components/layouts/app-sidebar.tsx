@@ -7,16 +7,14 @@ import {
   ContactRound,
   FileText,
   Inbox,
-  KeyRound,
   LogOut,
   type LucideIcon,
   Megaphone,
-  MessageSquare,
   MessageSquareText,
   Settings as SettingsIcon,
   ShieldCheck,
+  Sparkles,
   UserCircle2,
-  Users,
   Users2,
   Zap,
 } from "lucide-react";
@@ -32,7 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { canManageUsers, roleLabel } from "@/lib/auth/permissions";
+import { roleLabel } from "@/lib/auth/permissions";
 import { closeClientSocket } from "@/lib/socket/client";
 import { cn, initials } from "@/lib/utils";
 import type { Team, User } from "@/lib/types";
@@ -116,7 +114,6 @@ export function AppSidebar({
     return me ? [me, ...others] : [currentUser, ...others];
   }, [teammates, currentUser]);
 
-  const isAdmin = canManageUsers(currentUser.role);
   const onInbox = pathname === "/inbox" || pathname.startsWith("/inbox/");
 
   return (
@@ -186,27 +183,16 @@ export function AppSidebar({
           />
         </Section>
 
-        {isAdmin && (
-          <Section label="Workspace">
-            <SidebarLink
-              item={{ href: "/settings/team", label: "Team", icon: Users }}
-              pathname={pathname}
-            />
-            <SidebarLink
-              item={{ href: "/settings/whatsapp", label: "WhatsApp", icon: MessageSquare }}
-              pathname={pathname}
-            />
-            <SidebarLink
-              item={{ href: "/settings/api-keys", label: "API keys", icon: KeyRound }}
-              pathname={pathname}
-            />
-          </Section>
-        )}
-
-        <Section label="Account">
+        <Section label="Settings">
           <SidebarLink
-            item={{ href: "/settings/account", label: "Account", icon: UserCircle2 }}
+            item={{ href: "/settings", label: "Team settings", icon: Sparkles }}
             pathname={pathname}
+            active={isTeamSettingsRoute(pathname)}
+          />
+          <SidebarLink
+            item={{ href: "/settings/workspace", label: "Account settings", icon: UserCircle2 }}
+            pathname={pathname}
+            active={isAccountSettingsRoute(pathname)}
           />
           {currentUser.role === "superAdmin" && (
             <SidebarLink
@@ -325,19 +311,20 @@ function SidebarLink({
   pathname,
   extra,
   tone = "default",
+  active: activeOverride,
 }: {
   item: NavItem;
   pathname: string;
   /** Rendered nested under this link when present (used by Inbox controls). */
   extra?: ReactNode;
   tone?: "default" | "admin";
+  /** Optional override. Needed when the default prefix match would over- or
+   *  under-match — e.g. /settings would otherwise highlight for every /settings/* page. */
+  active?: boolean;
 }) {
   const { href, label, icon: Icon } = item;
   // Active = exact match OR sub-path. /broadcasts highlights for /broadcasts/123 too.
-  // Special-case the settings root to avoid false positives — without it, every
-  // /settings/* page would also light up "Snippets" because it lives under
-  // /settings/snippets and that prefix matches everything.
-  const active = pathname === href || pathname.startsWith(href + "/");
+  const active = activeOverride ?? (pathname === href || pathname.startsWith(href + "/"));
   const isAdminTone = tone === "admin";
 
   return (
@@ -378,6 +365,31 @@ function SidebarLink({
   );
 }
 
+// Settings is split into two landing pages with shared child routes underneath
+// them, so prefix-matching alone misclassifies (every /settings/* would light
+// up Team settings). These helpers route each child page to the right parent.
+const TEAM_SETTINGS_CHILDREN = ["/settings/snippets", "/settings/stages"];
+const ACCOUNT_SETTINGS_CHILDREN = [
+  "/settings/workspace",
+  "/settings/account",
+  "/settings/team",
+  "/settings/whatsapp",
+  "/settings/api-keys",
+];
+
+function isTeamSettingsRoute(pathname: string): boolean {
+  if (pathname === "/settings") return true;
+  return TEAM_SETTINGS_CHILDREN.some(
+    (p) => pathname === p || pathname.startsWith(p + "/"),
+  );
+}
+
+function isAccountSettingsRoute(pathname: string): boolean {
+  return ACCOUNT_SETTINGS_CHILDREN.some(
+    (p) => pathname === p || pathname.startsWith(p + "/"),
+  );
+}
+
 function UserMenu({ currentUser }: { currentUser: User }) {
   return (
     <DropdownMenu>
@@ -399,15 +411,15 @@ function UserMenu({ currentUser }: { currentUser: User }) {
         <DropdownMenuLabel>{roleLabel(currentUser.role)}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <Link href="/settings/account">
+          <Link href="/settings/workspace">
             <UserCircle2 className="size-4 text-muted-foreground" />
-            Account
+            Account settings
           </Link>
         </DropdownMenuItem>
         <DropdownMenuItem asChild>
           <Link href="/settings">
             <SettingsIcon className="size-4 text-muted-foreground" />
-            All settings
+            Team settings
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />

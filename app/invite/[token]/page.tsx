@@ -1,10 +1,12 @@
 import { MessageSquareText } from "lucide-react";
 
 import { db } from "@/lib/db";
+import { getCurrentSession } from "@/lib/auth";
 import { hashInviteToken } from "@/lib/auth/invite-token";
 import { roleLabel } from "@/lib/auth/permissions";
 
 import { AcceptForm } from "./accept-form";
+import { RedirectToInbox } from "./redirect-to-inbox";
 
 export const metadata = {
   title: "Accept invite · Loadless Inbox",
@@ -32,6 +34,20 @@ export default async function AcceptInvitePage({ params }: PageProps) {
 
   if (!invite) return <Shell title="Invalid link">This invite link doesn&apos;t exist.</Shell>;
   if (invite.acceptedAt) {
+    // Server actions auto-revalidate the route they were called from. After
+    // a successful accept the page re-renders here with `acceptedAt` set —
+    // which unmounts AcceptForm before its router.replace effect can fire.
+    // If the current visitor is the user who just accepted (session email
+    // matches invite email), do the navigation in a fresh client subtree
+    // that survives the refresh. Stale visitors with no matching session
+    // still see the "go to sign in" Shell.
+    const session = await getCurrentSession();
+    if (
+      session?.user?.email &&
+      session.user.email.toLowerCase() === invite.email.toLowerCase()
+    ) {
+      return <RedirectToInbox />;
+    }
     return <Shell title="Already accepted">This invite has already been used.</Shell>;
   }
   if (invite.expiresAt < new Date()) {

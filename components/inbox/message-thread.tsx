@@ -182,8 +182,16 @@ export function MessageThread({
   const cancelReply = useCallback(() => setReplyTarget(null), []);
 
   // Failed-bubble recovery: dismiss drops it; retry drops it AND pre-loads
-  // the body back into the composer so the user can fix + resend.
-  const [composerPrefill, setComposerPrefill] = useState<{ body: string; nonce: string } | null>(null);
+  // the body back into the composer so the user can fix + resend. For media
+  // retries the composer also looks up the original File by clientTempId
+  // and restores it as the attachment (no re-pick needed). If the failed
+  // message was a quoted reply, we also re-seat the reply target so the
+  // resend keeps its context.
+  const [composerPrefill, setComposerPrefill] = useState<{
+    body: string;
+    nonce: string;
+    clientTempId?: string;
+  } | null>(null);
   const dismissFailed = useCallback(
     (msg: Message) => {
       if (msg.clientTempId) removeOptimistic(msg.clientTempId);
@@ -193,9 +201,11 @@ export function MessageThread({
   const retryFailed = useCallback(
     (msg: Message) => {
       if (msg.clientTempId) removeOptimistic(msg.clientTempId);
+      if (msg.replyTo) setReplyTarget(msg.replyTo);
       setComposerPrefill({
         body: msg.body,
         nonce: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        ...(msg.clientTempId ? { clientTempId: msg.clientTempId } : {}),
       });
     },
     [removeOptimistic],

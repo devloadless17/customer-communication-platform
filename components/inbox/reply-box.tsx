@@ -99,8 +99,13 @@ export function ReplyBox({
    * Pre-load the composer with text — currently used for "Retry" on a failed
    * bubble. The `nonce` distinguishes back-to-back retries of the same body
    * so the effect re-fires.
+   *
+   * `clientTempId` ties this prefill back to a specific failed optimistic
+   * send. When set, we also pop any cached File from `pendingFilesRef`,
+   * restoring the attachment preview so the agent can resend a media
+   * message without re-picking the file.
    */
-  prefill?: { body: string; nonce: string } | null;
+  prefill?: { body: string; nonce: string; clientTempId?: string } | null;
 }) {
   // Tick once a minute so the "8h left" countdown advances without a refresh.
   // The window itself flips state at the same cadence.
@@ -119,6 +124,20 @@ export function ReplyBox({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Holds the File for every in-flight or failed media send, keyed by
+  // clientTempId. Lets a "Retry" on a failed media bubble restore the
+  // attachment in the composer without forcing the agent to re-pick the
+  // file. Lives in a ref (not state) — mutating doesn't need to re-render.
+  // Cleared per-entry on retry; full ref is naturally dropped on unmount
+  // (i.e. when navigating away from the conversation), matching the
+  // optimistic state's per-thread lifecycle.
+  const pendingFilesRef = useRef(
+    new Map<
+      string,
+      { file: File; caption: string; replyToMessageId?: string }
+    >(),
+  );
 
   // -------------------------------------------------------------------------
   // Slash-trigger snippet state.
@@ -337,11 +356,26 @@ export function ReplyBox({
   // Pre-load text from a "Retry" click on a failed bubble. Each retry has a
   // unique nonce so back-to-back retries of the same body still fire. Also
   // flips back to Reply mode if the user happens to be writing a note.
+  //
+  // For media retries: prefill carries the original clientTempId. We pop the
+  // cached File entry and re-seat it as the attachment so the agent doesn't
+  // have to re-pick. caption from the entry takes precedence over body (the
+  // bubble's `body` is the caption for media messages, but if the user
+  // already typed something into the composer we honor the prefill order).
   useEffect(() => {
     if (!prefill) return;
     setMode("reply");
-    setValue(prefill.body);
     setError(null);
+    let restoredCaption: string | null = null;
+    if (prefill.clientTempId) {
+      const entry = pendingFilesRef.current.get(prefill.clientTempId);
+      if (entry) {
+        setAttachment(entry.file);
+        restoredCaption = entry.caption;
+        pendingFilesRef.current.delete(prefill.clientTempId);
+      }
+    }
+    setValue(restoredCaption ?? prefill.body);
     ref.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.nonce]);
@@ -430,8 +464,29 @@ export function ReplyBox({
     ref.current?.focus();
     setError(null);
 
+    // Cache the File for a possible Retry. Without this, a failed media send
+    // would force the agent to re-pick the file from disk — frustrating
+    // when the only problem was a transient network hiccup.
+    if (file && !isNote) {
+      pendingFilesRef.current.set(clientTempId, {
+        file,
+        caption: trimmed,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
+      });
+    }
+
     void (async () => {
       try {
+        // Fast-fail when the browser knows we're offline. fetch() against a
+        // dead connection takes 30-90s to time out — the bubble would sit
+        // in "pending" state the whole time. Throwing immediately surfaces
+        // a "failed" bubble + Retry button right away. The connection
+        // banner is already telling the user why.
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+          throw new Error(
+            "offline — your device is not connected to the internet",
+          );
+        }
         if (file && !isNote) {
           const fd = new FormData();
           fd.append("conversationId", conversationId);

@@ -188,17 +188,41 @@ export function useConversationEvents(
         // Match by clientTempId when present; otherwise just append.
         const tempId = payload.clientTempId;
         const messages = tempId
-          ? prev.messages.map((m) =>
-              m.clientTempId === tempId && m.pending
-                ? // Swap the optimistic row with the server's authoritative
-                  // copy so the bubble's id, externalId, status, and media URL
-                  // line up with reality. Preserve clientTempId on the
-                  // confirmed row so the React key stays stable across the
-                  // swap — otherwise the DOM node unmounts and the entrance
-                  // animation re-fires, producing a brief flicker.
-                  { ...payload.message, clientTempId: tempId }
-                : m,
-            )
+          ? prev.messages.map((m) => {
+              if (m.clientTempId !== tempId || !m.pending) return m;
+              // Swap the optimistic row with the server's authoritative
+              // copy so the bubble's id, externalId, status, etc. line up
+              // with reality. Preserve clientTempId so the React key stays
+              // stable — otherwise the DOM node unmounts and the entrance
+              // animation re-fires.
+              //
+              // Media-url preservation: if the optimistic carried a `blob:`
+              // URL, keep it across the swap rather than overwriting with
+              // /api/media/<id>. The image is already painted; rewriting
+              // forces the browser to refetch through the auth redirect →
+              // CDN, producing a visible flicker (and the "Downloading…"
+              // gap if anything below is slow). Next page load reads the
+              // persisted URL via mapMessage naturally.
+              //
+              // If the server dropped media entirely (blob upload failed
+              // server-side), keep the optimistic blob too — Meta did
+              // deliver to the customer, we just can't render across
+              // reloads, so don't yank the image out from under the agent
+              // in the current session.
+              const optimisticMedia = m.media;
+              const serverMedia = payload.message.media;
+              let media = serverMedia;
+              if (optimisticMedia?.url.startsWith("blob:")) {
+                media = serverMedia
+                  ? { ...serverMedia, url: optimisticMedia.url }
+                  : optimisticMedia;
+              }
+              return {
+                ...payload.message,
+                clientTempId: tempId,
+                ...(media ? { media } : {}),
+              };
+            })
           : prev.messages;
 
         const reconciled =

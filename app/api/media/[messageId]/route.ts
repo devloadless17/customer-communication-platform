@@ -16,6 +16,14 @@ import { db } from "@/lib/db";
  * so subsequent views hit UploadThing's CDN — not our app server. No bytes
  * flow through our process. Disposition + filename are advisory; browsers
  * read the Content-Disposition the CDN returns, not ours.
+ *
+ * 302s are NOT in the HTTP default-cacheable status list — without explicit
+ * Cache-Control headers, browsers refetch the redirect on every render. For
+ * a thread with N images, that's N × (session lookup + DB query + 302) per
+ * paint. We set `private, max-age=600` to let each user's browser cache the
+ * redirect for 10 min, dropping the repeat-render cost to ~0. `private` keeps
+ * shared proxies out; 10 min is short enough that a team-removal becomes
+ * visible quickly, long enough to cover normal scrollback patterns.
  */
 
 export const runtime = "nodejs";
@@ -49,7 +57,10 @@ export async function GET(
     return new NextResponse("not found", { status: 404 });
   }
 
-  // 302 (not 301) — the browser refetches the team check on every page load.
-  // Caching the redirect itself would silently break access revocation.
-  return NextResponse.redirect(message.mediaUrl, { status: 302 });
+  // 302 (not 301) — keeps the same path the browser knows, and gives us a
+  // ceiling on cache lifetime via max-age. The Cache-Control header opts
+  // browsers into caching the redirect for the bounded window above.
+  const res = NextResponse.redirect(message.mediaUrl, { status: 302 });
+  res.headers.set("Cache-Control", "private, max-age=600");
+  return res;
 }

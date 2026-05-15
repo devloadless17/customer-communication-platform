@@ -165,8 +165,11 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
           },
           // Row was inserted before the binary finished downloading — the
           // bubble renders a placeholder until the message:media:ready event
-          // (or a later page load) fills it in.
-          ...(!m.mediaUrl ? { mediaPending: true } : {}),
+          // (or a later page load) fills it in. Inbound-only: outbound has
+          // no background-download path that could ever clear the flag, so
+          // a missing mediaUrl on outbound is a hard failure (caption-only
+          // row), not pending state.
+          ...(m.direction === "in" && !m.mediaUrl ? { mediaPending: true } : {}),
         }
       : {}),
   };

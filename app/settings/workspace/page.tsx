@@ -1,42 +1,57 @@
 import Link from "next/link";
 import {
   ArrowRight,
-  Layers,
-  Sparkles,
+  KeyRound,
+  MessageSquare,
+  UserCircle2,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import { canManageStages } from "@/lib/auth/permissions";
+import { canManageUsers } from "@/lib/auth/permissions";
 
-export const metadata = { title: "Team settings" };
+export const metadata = { title: "Account settings" };
 export const dynamic = "force-dynamic";
 
 /**
- * Team settings landing — shared conversation-flow config that affects how
- * everyone on the team replies and routes customers. Account / workspace
- * plumbing lives one level over at /settings/workspace.
+ * Account settings landing — identity + integration plumbing. Pair with
+ * /settings (Team settings) for the conversation-flow knobs. Admin-only
+ * cards hide for agents; Account + Team stay visible to everyone.
  */
-export default async function TeamSettingsIndex() {
+export default async function WorkspaceSettingsIndex() {
   const { user } = await getSession();
-  const canStages = canManageStages(user.role);
+  const isAdmin = canManageUsers(user.role);
 
   const cards: Card[] = [
     {
-      href: "/settings/snippets",
-      icon: Sparkles,
-      title: "Snippets",
-      description:
-        "Saved canned replies your team triggers with `/name` in the reply box.",
+      href: "/settings/account",
+      icon: UserCircle2,
+      title: "Account",
+      description: "Your name, email, and password.",
     },
-    ...(canStages
+    {
+      href: "/settings/team",
+      icon: Users,
+      title: "Team members",
+      description: isAdmin
+        ? "Invite teammates, change roles, deactivate accounts."
+        : "See who else is on this team.",
+    },
+    ...(isAdmin
       ? [
           {
-            href: "/settings/stages",
-            icon: Layers,
-            title: "Stages",
+            href: "/settings/whatsapp",
+            icon: MessageSquare,
+            title: "WhatsApp",
             description:
-              "Lifecycle buckets for contacts (New → Qualified → …). Drives filtering and stage-targeted broadcasts.",
+              "Meta Cloud API credentials, phone number, and template catalog.",
+          } satisfies Card,
+          {
+            href: "/settings/api-keys",
+            icon: KeyRound,
+            title: "API keys",
+            description: "Bearer tokens for the external /api/external/v1 endpoints.",
           } satisfies Card,
         ]
       : []),
@@ -45,10 +60,10 @@ export default async function TeamSettingsIndex() {
   return (
     <div>
       <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Team settings</h1>
+        <h1 className="text-2xl font-semibold">Account settings</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          How your team replies and routes customers — shared across everyone
-          in the workspace.
+          Your profile, the team roster, and the integrations that connect
+          this workspace to WhatsApp and external systems.
         </p>
       </header>
 

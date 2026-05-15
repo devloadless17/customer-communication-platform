@@ -15,6 +15,7 @@ import { useSocketStatus } from "@/hooks/use-socket-status";
 import { usePresence } from "@/hooks/use-presence";
 
 import { AppSidebar } from "@/components/layouts/app-sidebar";
+import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
 import { DevTools } from "./dev-tools";
 import { InboxControls, type Filter } from "./inbox-controls";
@@ -84,7 +85,8 @@ export function InboxShell({
 
   return (
     <SnippetsProvider snippets={snippets}>
-      <div className="flex h-svh w-full overflow-hidden bg-background text-foreground">
+      <div className="relative flex h-svh w-full overflow-hidden bg-background text-foreground">
+        <ConnectionBanner />
         <AppSidebar
           currentUser={currentUser}
           team={team}

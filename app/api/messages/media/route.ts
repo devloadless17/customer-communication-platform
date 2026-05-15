@@ -281,20 +281,25 @@ export async function POST(req: Request) {
       ...(saved ? {} : { blobUploadFailed: true }),
     } as Prisma.InputJsonValue,
     timestamp: receivedAt,
-    mediaKind: kind,
-    // Persist media columns only when the blob upload succeeded. Without
-    // these the bubble renders the caption only and the file is gone from
-    // our side (Meta's mediaId is single-use), but the row exists.
+    // Persist media columns only when the blob upload succeeded. mediaKind
+    // and mediaMimeType were previously written unconditionally — the bug
+    // was that mapMessage (lib/queries/_shared.ts) treats `mediaKind &&
+    // !mediaUrl` as "still downloading" and renders the inbound pending
+    // placeholder. Outbound has no background-download path, so that state
+    // would persist across reloads as a stuck "Downloading photo…" spinner.
+    // When the blob failed, leave the row as text-only — the caption is
+    // already in `body` so the bubble still renders.
     ...(saved
       ? {
+          mediaKind: kind,
+          mediaMimeType: mimeType,
+          mediaCaption: caption || null,
+          mediaFilename: kind === "document" ? filename : null,
           mediaKey: saved.key,
           mediaUrl: saved.url,
           mediaSizeBytes: saved.sizeBytes,
         }
       : {}),
-    mediaMimeType: mimeType,
-    mediaCaption: caption || null,
-    mediaFilename: kind === "document" ? filename : null,
     ...(replyToMessageId ? { replyToMessageId } : {}),
   }).catch((err): null => {
     console.error(
