@@ -132,5 +132,15 @@ export async function PATCH(
     },
   });
 
+  // If we just deactivated the user, drop their Session rows so the in-cookie
+  // 5-min session cache can't keep authorizing them after this point. Without
+  // this, page navs + API routes still kick them out via `loadActiveUser`,
+  // but their open Socket.io connections and any fresh socket inside the
+  // cache window would continue to pass. Belt-and-braces with the new
+  // handshake-time deactivation check in lib/socket/server.ts.
+  if (data.deactivatedAt) {
+    await db.session.deleteMany({ where: { userId: id } });
+  }
+
   return NextResponse.json({ user: updated });
 }

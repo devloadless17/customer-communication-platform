@@ -191,6 +191,15 @@ async function ingestInboundMessage(
 
   const preview = (evt.body.trim() || mediaPreview(evt.media?.kind)).slice(0, 200);
 
+  // When media is still being fetched in the background (the webhook now
+  // ingests-fast and downloads after returning to Meta), we persist the
+  // kind/mime/caption/filename/duration so the bubble can render a typed
+  // placeholder immediately. The mediaKey + mediaUrl + mediaSizeBytes columns
+  // stay null until the binary lands and the webhook UPDATEs the row.
+  const mediaPending = Boolean(
+    evt.media && !(evt.media.storageKey && evt.media.storageUrl),
+  );
+
   let createdId: string;
   try {
     const created = await db.message.create({
@@ -206,16 +215,20 @@ async function ingestInboundMessage(
         rawPayload: evt.rawPayload as Prisma.InputJsonValue,
         timestamp: evt.timestamp,
         ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
-        ...(evt.media && evt.media.storageKey && evt.media.storageUrl
+        ...(evt.media
           ? {
               mediaKind: evt.media.kind,
-              mediaKey: evt.media.storageKey,
-              mediaUrl: evt.media.storageUrl,
               mediaMimeType: evt.media.mimeType,
               mediaCaption: evt.body || null,
               mediaFilename: evt.media.filename ?? null,
-              mediaSizeBytes: evt.media.sizeBytes ?? null,
               mediaDurationMs: evt.media.durationMs ?? null,
+              ...(evt.media.storageKey && evt.media.storageUrl
+                ? {
+                    mediaKey: evt.media.storageKey,
+                    mediaUrl: evt.media.storageUrl,
+                    mediaSizeBytes: evt.media.sizeBytes ?? null,
+                  }
+                : {}),
             }
           : {}),
       },
@@ -254,12 +267,14 @@ async function ingestInboundMessage(
     ...(replySnapshot
       ? { replyToMessageId: replySnapshot.id, replyTo: replySnapshot }
       : {}),
-    ...(evt.media && evt.media.storageKey && evt.media.storageUrl
+    ...(evt.media
       ? {
           media: {
             kind: evt.media.kind,
             // Still served through our route so the team-ownership check
-            // runs before the 302 to the CDN.
+            // runs before the 302 to the CDN. 404s while mediaPending is
+            // true; the bubble checks that flag and renders a placeholder
+            // instead of attempting to load the URL.
             url: `/api/media/${createdId}`,
             mimeType: evt.media.mimeType,
             sizeBytes: evt.media.sizeBytes ?? 0,
@@ -267,6 +282,7 @@ async function ingestInboundMessage(
             ...(evt.media.filename ? { filename: evt.media.filename } : {}),
             ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
           },
+          ...(mediaPending ? { mediaPending: true } : {}),
         }
       : {}),
   };
@@ -301,30 +317,42 @@ async function ingestInboundMessage(
     ...(newConversation ? { newConversation } : {}),
   });
 
-  // Fire automations. Awaited but the dispatcher is fast (one indexed query
-  // + sync condition eval + enqueue); actual webhook delivery happens in the
-  // BullMQ worker so a slow n8n endpoint can't delay Meta's 200 here. Dispatch
-  // never throws — failures are logged and swallowed.
-  await dispatch(teamId, "message_received", {
-    message: toAutomationMessage({
-      id: createdId,
-      conversationId: conversation.id,
-      externalId: evt.externalId,
-      senderUserId: null,
-      body: evt.body,
-      direction: "in",
-      mediaKind: evt.media?.kind ?? null,
-      mediaCaption: evt.media && evt.body ? evt.body : null,
-      timestamp: evt.timestamp,
-    }),
-    conversation: toAutomationConversation({
-      ...conversation,
-      lastMessageAt: evt.timestamp,
-      unreadCount: (conversation.unreadCount ?? 0) + 1,
-    }),
-    contact: toAutomationContact(contact),
-    recentMessages: await loadRecentForAutomation(conversation.id, createdId),
-  });
+  // Fire automations. Truly fire-and-forget: the dispatcher snapshots its
+  // own payload and never throws, but the chain hits Pg (findMany +
+  // recentMessages) and Redis (BullMQ add) before returning. A degraded Redis
+  // would otherwise stall the webhook hot path long enough that Meta retries
+  // the whole batch. Wrapping the whole prep+dispatch in an async IIFE
+  // detaches it cleanly — and we capture errors locally so background
+  // rejections don't surface as unhandledRejection.
+  void (async () => {
+    try {
+      await dispatch(teamId, "message_received", {
+        message: toAutomationMessage({
+          id: createdId,
+          conversationId: conversation.id,
+          externalId: evt.externalId,
+          senderUserId: null,
+          body: evt.body,
+          direction: "in",
+          mediaKind: evt.media?.kind ?? null,
+          mediaCaption: evt.media && evt.body ? evt.body : null,
+          timestamp: evt.timestamp,
+        }),
+        conversation: toAutomationConversation({
+          ...conversation,
+          lastMessageAt: evt.timestamp,
+          unreadCount: (conversation.unreadCount ?? 0) + 1,
+        }),
+        contact: toAutomationContact(contact),
+        recentMessages: await loadRecentForAutomation(conversation.id, createdId),
+      });
+    } catch (err) {
+      console.error(
+        `[ingest] background automation dispatch failed for team=${teamId} msg=${createdId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  })();
 }
 
 // ---------------------------------------------------------------------------

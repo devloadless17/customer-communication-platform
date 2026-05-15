@@ -243,6 +243,27 @@ export function useConversationEvents(
       }));
     };
 
+    // Inbound media finished downloading in the background. Swap the
+    // placeholder media block (or drop it on download failure) without
+    // touching the rest of the row.
+    const onMessageMediaReady: Parameters<typeof socket.on<"message:media:ready">>[1] = (
+      payload,
+    ) => {
+      if (payload.conversationId !== conversationId) return;
+      setData((prev) => ({
+        ...prev,
+        messages: prev.messages.map((m) => {
+          if (m.id !== payload.messageId) return m;
+          if (payload.media) {
+            return { ...m, media: payload.media, mediaPending: false };
+          }
+          // Download failed — strip the media block, keep the row as text.
+          const { media: _media, mediaPending: _p, ...rest } = m;
+          return rest;
+        }),
+      }));
+    };
+
     const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
       setData((prev) => {
@@ -299,6 +320,7 @@ export function useConversationEvents(
 
     socket.on("message:new", onMessageNew);
     socket.on("message:status", onMessageStatus);
+    socket.on("message:media:ready", onMessageMediaReady);
     socket.on("note:new", onNoteNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
@@ -311,6 +333,7 @@ export function useConversationEvents(
       socket.off("connect", onConnect);
       socket.off("message:new", onMessageNew);
       socket.off("message:status", onMessageStatus);
+      socket.off("message:media:ready", onMessageMediaReady);
       socket.off("note:new", onNoteNew);
       socket.off("conversation:assigned", onAssigned);
       socket.off("conversation:status", onStatus);

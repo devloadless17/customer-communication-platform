@@ -216,6 +216,14 @@ export interface Message {
   timestamp: string;
   /** Set when the message carries an attachment; absent for text-only. */
   media?: MediaAttachment;
+  /**
+   * Inbound media only: true while the binary is still being downloaded from
+   * Meta + uploaded to our blob provider in the background. The bubble shows
+   * a placeholder for the kind (image/video/audio/document) until a
+   * `message:media:ready` event swaps in the real `media` block. Lets the
+   * agent see "📷 Photo" in ~100ms instead of waiting for the full download.
+   */
+  mediaPending?: boolean;
   /** When this message is a quoted reply, the id of the original. */
   replyToMessageId?: string | null;
   /** Snapshot used by the bubble to render the quote block inline. */
@@ -323,42 +331,3 @@ export interface CursorPage<T> {
   nextCursor: string | null;
 }
 
-/**
- * Provider abstraction. App code only ever talks to this interface. The
- * Evolution and Meta Cloud implementations live behind it.
- *
- * Phase 2 forward-compat notes (flagged in CLAUDE.md):
- * - sendText to a fresh contact requires a pre-approved template on Cloud API.
- * - sendMedia returns a URL on Evolution; on Cloud API it'll be a media id.
- * - typingIndicator may not be available on Cloud API.
- */
-export interface MessagingProvider {
-  readonly name: ProviderName;
-  sendText(input: SendTextInput): Promise<SendResult>;
-  sendMedia(input: SendMediaInput): Promise<SendResult>;
-  typingIndicator?(input: TypingInput): Promise<void>;
-}
-
-export interface SendTextInput {
-  teamId: string;
-  conversationId: string;
-  toPhoneNumber: string;
-  body: string;
-  /** The agent authoring the message — recorded for attribution. */
-  senderUserId: string;
-}
-
-export interface SendMediaInput extends Omit<SendTextInput, "body"> {
-  mediaUrl: string;
-  caption?: string;
-}
-
-export interface TypingInput {
-  toPhoneNumber: string;
-  durationMs: number;
-}
-
-export interface SendResult {
-  externalId: string;
-  status: MessageStatus;
-}

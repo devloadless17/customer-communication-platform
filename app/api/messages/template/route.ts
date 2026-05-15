@@ -3,11 +3,12 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
-  MetaSendError,
+  normalizeMetaSendError,
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@/lib/providers/types";
@@ -172,15 +173,21 @@ export async function POST(req: Request) {
       sendConfig,
     );
   } catch (err) {
-    if (err instanceof MetaSendError) {
+    const normalized = normalizeMetaSendError(err);
+    if (normalized) {
       return NextResponse.json(
-        { error: "provider rejected send", status: err.httpStatus, detail: err.body },
+        {
+          error: normalized.code,
+          message: normalized.message,
+          status: normalized.httpStatus,
+          detail: normalized.detail,
+        },
         { status: 422 },
       );
     }
     console.error("[api/messages/template] send failed", err);
     return NextResponse.json(
-      { error: "send failed", detail: err instanceof Error ? err.message : String(err) },
+      { error: "send_failed", detail: err instanceof Error ? err.message : String(err) },
       { status: 502 },
     );
   }
@@ -191,28 +198,26 @@ export async function POST(req: Request) {
   const renderedBody = renderTemplateBody(template.bodyText, variables.body);
   const previewBody = renderedBody.slice(0, 200);
 
-  const created = await db.message.create({
-    data: {
-      teamId,
-      conversationId,
-      externalId: send.externalId,
-      senderUserId: userId,
-      body: renderedBody,
-      direction: "out",
-      provider: "meta_cloud",
-      status: "sent",
-      rawPayload: {
-        sentVia: "api/messages/template",
-        templateId: template.id,
-        templateName: template.name,
-        templateLanguage: template.language,
-        variables: {
-          body: variables.body,
-          ...(variables.header ? { header: variables.header } : {}),
-        },
-      } as Prisma.InputJsonValue,
-      timestamp: receivedAt,
-    },
+  const created = await createOutboundMessageIdempotent({
+    teamId,
+    conversationId,
+    externalId: send.externalId,
+    senderUserId: userId,
+    body: renderedBody,
+    direction: "out",
+    provider: "meta_cloud",
+    status: "sent",
+    rawPayload: {
+      sentVia: "api/messages/template",
+      templateId: template.id,
+      templateName: template.name,
+      templateLanguage: template.language,
+      variables: {
+        body: variables.body,
+        ...(variables.header ? { header: variables.header } : {}),
+      },
+    } as Prisma.InputJsonValue,
+    timestamp: receivedAt,
   });
 
   await db.conversation.update({

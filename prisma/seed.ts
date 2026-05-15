@@ -195,6 +195,19 @@ async function main() {
         deactivatedAt: null,
       },
     });
+    // Better Auth verifies signin against Account.password (providerId
+    // "credential", accountId = email), NOT User.passwordHash. Without this
+    // row the seeded user fails login with "Credential account not found".
+    await db.account.upsert({
+      where: { providerId_accountId: { providerId: "credential", accountId: u.email } },
+      create: {
+        userId: u.id,
+        providerId: "credential",
+        accountId: u.email,
+        password: DEV_PASSWORD_HASH,
+      },
+      update: { password: DEV_PASSWORD_HASH, userId: u.id },
+    });
   }
 
   console.log(`→ ${CONTACTS.length} contacts`);

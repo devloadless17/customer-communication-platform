@@ -3,11 +3,13 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
   MetaSendError,
+  normalizeMetaSendError,
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import { emitToTeam } from "@/lib/socket/server";
@@ -247,26 +249,24 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       const renderedBody = renderTemplateBody(templateBody, perRecipientVars.body);
       const preview = renderedBody.slice(0, 200);
 
-      const created = await db.message.create({
-        data: {
-          teamId: broadcast.teamId,
-          conversationId,
-          externalId: send.externalId,
-          senderUserId: broadcast.createdById,
-          body: renderedBody,
-          direction: "out",
-          provider: "meta_cloud",
-          status: "sent",
-          rawPayload: {
-            sentVia: "broadcast",
-            broadcastId: broadcast.id,
-            templateId: broadcast.templateId,
-            templateName: broadcast.templateName,
-            templateLanguage: broadcast.templateLanguage,
-            variables,
-          } as unknown as Prisma.InputJsonValue,
-          timestamp: send.timestamp,
-        },
+      const created = await createOutboundMessageIdempotent({
+        teamId: broadcast.teamId,
+        conversationId,
+        externalId: send.externalId,
+        senderUserId: broadcast.createdById,
+        body: renderedBody,
+        direction: "out",
+        provider: "meta_cloud",
+        status: "sent",
+        rawPayload: {
+          sentVia: "broadcast",
+          broadcastId: broadcast.id,
+          templateId: broadcast.templateId,
+          templateName: broadcast.templateName,
+          templateLanguage: broadcast.templateLanguage,
+          variables,
+        } as unknown as Prisma.InputJsonValue,
+        timestamp: send.timestamp,
       });
 
       await db.conversation.update({
@@ -438,6 +438,8 @@ function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
 }
 
 function errorDetail(err: unknown): string {
+  const normalized = normalizeMetaSendError(err);
+  if (normalized) return `${normalized.code}: ${normalized.message}`;
   if (err instanceof MetaSendError) {
     return `Meta ${err.httpStatus}: ${err.body}`;
   }

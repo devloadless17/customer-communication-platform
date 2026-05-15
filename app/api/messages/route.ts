@@ -3,12 +3,14 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import { loadReplySnapshotById } from "@/lib/providers/ingest";
-import { MetaSendError } from "@/lib/providers/meta";
+import { normalizeMetaSendError } from "@/lib/providers/meta";
 import { emitToTeam } from "@/lib/socket/server";
 import type { Message } from "@/lib/types";
+import { computeWindowStatus } from "@/lib/window";
 
 /**
  * Outbound message endpoint.
@@ -62,11 +64,10 @@ export async function POST(req: Request) {
   }
 
   // ── Phase A — parallel pre-flight reads. The conversation row, the reply
-  // target row, and the provider config are independent; running them
-  // sequentially was costing ~2x round-trip-time for no reason. The
-  // findFirst on conversation now `select`s only what Meta needs (just the
-  // contact phone) instead of pulling the full contact row.
-  const [conversation, replyToRow, config] = await Promise.all([
+  // target row, the provider config, and the last-inbound timestamp (for the
+  // 24h window check) are all independent; running them sequentially was
+  // costing ~3x round-trip-time for no reason.
+  const [conversation, replyToRow, config, lastInbound] = await Promise.all([
     db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: { id: true, contact: { select: { phoneNumber: true } } },
@@ -83,6 +84,15 @@ export async function POST(req: Request) {
         throw err;
       },
     ),
+    // Pre-fetch the latest inbound so we can short-circuit on a closed 24h
+    // window WITHOUT a Meta round-trip. Meta would reject with 131047 anyway,
+    // but the round-trip is ~300ms wasted and the agent gets a clearer error
+    // sourced from our own UX copy rather than Meta's raw body.
+    db.message.findFirst({
+      where: { conversationId, direction: "in" },
+      orderBy: { timestamp: "desc" },
+      select: { timestamp: true },
+    }),
   ]);
 
   if (!conversation) {
@@ -90,8 +100,25 @@ export async function POST(req: Request) {
   }
   if (config instanceof ProviderNotConfiguredError) {
     return NextResponse.json(
-      { error: "whatsapp not connected", detail: config.message },
+      { error: "whatsapp_not_connected", detail: config.message },
       { status: 409 },
+    );
+  }
+
+  // 24h window pre-check. Free-form text only works inside the window —
+  // outside, the agent must send an approved template via /api/messages/
+  // template. We surface the same `outside_24h_window` code the external API
+  // returns so the UI can branch on a stable string.
+  const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+  if (win.state === "closed" || win.state === "never") {
+    return NextResponse.json(
+      {
+        error: "outside_24h_window",
+        detail:
+          "24-hour window closed — send an approved template to re-engage this contact.",
+        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+      },
+      { status: 422 },
     );
   }
 
@@ -127,16 +154,24 @@ export async function POST(req: Request) {
       config,
     );
   } catch (err) {
-    if (err instanceof MetaSendError) {
-      // Pass Meta's error code/body through verbatim — the agent needs it.
+    const normalized = normalizeMetaSendError(err);
+    if (normalized) {
+      // Stable error code surface — the UI / external consumers can branch
+      // on `error` ("outside_24h_window", "rate_limited", etc.) instead of
+      // substring-matching Meta's raw body.
       return NextResponse.json(
-        { error: "provider rejected send", status: err.httpStatus, detail: err.body },
+        {
+          error: normalized.code,
+          message: normalized.message,
+          status: normalized.httpStatus,
+          detail: normalized.detail,
+        },
         { status: 422 },
       );
     }
     console.error("[api/messages] sendText failed", err);
     return NextResponse.json(
-      { error: "send failed", detail: err instanceof Error ? err.message : String(err) },
+      { error: "send_failed", detail: err instanceof Error ? err.message : String(err) },
       { status: 502 },
     );
   }
@@ -145,20 +180,18 @@ export async function POST(req: Request) {
   // gets us the id we need for the emit; the snapshot lookup is already
   // mostly done from its head start above.
   const [created, replySnapshot] = await Promise.all([
-    db.message.create({
-      data: {
-        teamId,
-        conversationId,
-        externalId: send.externalId,
-        senderUserId: userId,
-        body,
-        direction: "out",
-        provider: "meta_cloud",
-        status: "sent",
-        rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
-        timestamp: receivedAt,
-        ...(replyToMessageId ? { replyToMessageId } : {}),
-      },
+    createOutboundMessageIdempotent({
+      teamId,
+      conversationId,
+      externalId: send.externalId,
+      senderUserId: userId,
+      body,
+      direction: "out",
+      provider: "meta_cloud",
+      status: "sent",
+      rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
+      timestamp: receivedAt,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
     }),
     replySnapshotPromise,
   ]);

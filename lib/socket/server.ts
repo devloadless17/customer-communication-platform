@@ -52,10 +52,12 @@ export function initSocketServer(http: HttpServer): IO {
     path: SOCKET_PATH,
     serveClient: false,
     cors: {
-      // Phase 1 trusts same-origin only because the custom server fronts both
-      // the app and the websocket. Phase 2 should tighten with an allowlist
-      // pulled from env when we deploy publicly.
-      origin: true,
+      // The browser is same-origin in normal use (Caddy fronts both the app
+      // and the websocket), but reflecting `Origin: *` with credentials
+      // would let a phishing page open a websocket on behalf of a logged-in
+      // user. Lock to BETTER_AUTH_URL (the canonical public origin) in prod
+      // and fall back to permissive only when no env is set (local dev).
+      origin: process.env.BETTER_AUTH_URL || true,
       credentials: true,
     },
     transports: ["websocket", "polling"],
@@ -92,6 +94,19 @@ export function initSocketServer(http: HttpServer): IO {
       const userId = session?.user?.id;
       const teamId = (session?.user as { teamId?: string } | undefined)?.teamId;
       if (!userId || !teamId) {
+        return next(new Error("unauthorized"));
+      }
+      // Deactivation gate. Better Auth's getSession reads from the in-cookie
+      // cache (5 min) and the Session row — neither knows about
+      // `deactivatedAt`. Without this check a deactivated user's still-valid
+      // cookie keeps authorizing fresh socket connections, letting them
+      // observe team events long after an admin disabled them. Match the
+      // page (lib/auth/current-user.ts) and API (lib/auth/helpers.ts) gates.
+      const dbUser = await db.user.findUnique({
+        where: { id: userId },
+        select: { deactivatedAt: true },
+      });
+      if (!dbUser || dbUser.deactivatedAt) {
         return next(new Error("unauthorized"));
       }
       socket.data.userId = userId;

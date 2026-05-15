@@ -223,7 +223,13 @@ function BubbleContent({
               }
             />
           )}
-          {media && <MediaBlock media={media} isOut={isOut} />}
+          {media && (
+            <MediaBlock
+              media={media}
+              isOut={isOut}
+              pending={message.mediaPending}
+            />
+          )}
           {message.body && (
             <p
               className={cn(

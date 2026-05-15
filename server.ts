@@ -32,15 +32,29 @@ validateEnv();
 /**
  * Broadcasts run in-process via `setImmediate` (see lib/broadcast-runner.ts),
  * so a restart mid-send leaves rows stuck at `running` forever — the progress
- * UI would lie indefinitely. On boot, mark any such orphan as `failed`. The
- * per-recipient rows already carry their own status, so a future "resume"
- * could re-enqueue the `queued` ones; for now, fail-fast so the dashboard is
- * honest.
+ * UI would lie indefinitely. On boot:
+ *   - Any `running` broadcast was interrupted mid-send → mark as `failed`.
+ *   - Any `queued` broadcast older than the grace window means we crashed
+ *     between the POST that wrote the row and runBroadcast's atomic claim →
+ *     also mark `failed`. Without this, the dashboard sticks on "queued"
+ *     indefinitely and the user has no way to retry. Fresh queued rows from
+ *     a concurrent POST in the last few minutes are spared.
+ * The per-recipient rows already carry their own status, so a future "resume"
+ * feature could re-enqueue the survivors; for now, fail-fast so the dashboard
+ * is honest.
  */
+const STALE_QUEUED_GRACE_MS = 5 * 60 * 1000;
+
 async function reconcileInterruptedBroadcasts(): Promise<void> {
   try {
+    const staleQueuedBefore = new Date(Date.now() - STALE_QUEUED_GRACE_MS);
     const { count } = await db.broadcast.updateMany({
-      where: { status: "running" },
+      where: {
+        OR: [
+          { status: "running" },
+          { status: "queued", createdAt: { lt: staleQueuedBefore } },
+        ],
+      },
       data: {
         status: "failed",
         completedAt: new Date(),
@@ -87,7 +101,10 @@ void app.prepare().then(async () => {
     process.exit(1);
   }
 
-  void reconcileInterruptedBroadcasts();
+  // Await — opening the HTTP listener before this resolves means a concurrent
+  // POST to /api/broadcasts could create a fresh `queued` row that the
+  // reconciler then immediately flips to `failed`. Cheap, single UPDATE.
+  await reconcileInterruptedBroadcasts();
 
   // Boot the automations worker in this same Node process. For MVP this is
   // simpler than running a separate worker container; the queue is shared via
@@ -99,6 +116,19 @@ void app.prepare().then(async () => {
   } catch (err) {
     console.error("[server] failed to start automation worker:", err);
   }
+
+  // Lightweight memory-usage heartbeat. CLAUDE.md's ops notes call this the
+  // floor before adopting an APM — journald keeps the rolling history and
+  // a single line every 60s is invisible noise but invaluable when the
+  // first OOM happens. Numbers are in MB, rounded to one decimal.
+  const memTimer = setInterval(() => {
+    const m = process.memoryUsage();
+    const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
+    console.log(
+      `[mem] rss=${mb(m.rss)} heapUsed=${mb(m.heapUsed)} heapTotal=${mb(m.heapTotal)} external=${mb(m.external)}`,
+    );
+  }, 60_000);
+  memTimer.unref();
 
   // Graceful shutdown — stop accepting jobs, then drain BullMQ + Redis. Without
   // this, `docker stop` would force-kill mid-attempt and the run row would stay

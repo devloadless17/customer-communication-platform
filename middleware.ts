@@ -21,7 +21,9 @@ import { rateLimit } from "@/lib/rate-limit";
  * bounce when missing.
  */
 const RATE_LIMITED_POSTS: Record<string, number> = {
-  "/api/auth/sign-in/email": 20, // login attempts (Better Auth credential endpoint)
+  // Better Auth's /api/auth/sign-in/email is now blocked outright above —
+  // all signins must go through the /login server action which has the
+  // lockout gate. Same for /register / /invite (no direct API).
   "/login": 20, // login attempts via the server action
   "/register": 8, // account creation
 };
@@ -82,6 +84,22 @@ function clientIp(req: NextRequest): string {
 export default function middleware(req: NextRequest): NextResponse {
   const { pathname, search } = req.nextUrl;
 
+  // Block Better Auth's public credential endpoints. They're mounted by the
+  // catch-all in app/api/auth/[...all]/route.ts but our login/register/invite
+  // flows use server actions that go through `signInWithCredentials` instead.
+  // The wrapper layers lockout (5 fails / 15 min per account) and the
+  // `deactivatedAt` check; calling Better Auth's HTTP endpoints directly
+  // bypasses both, so a deactivated user could log right back in and an
+  // attacker could brute-force passwords without ever tripping the lockout.
+  // The IP-based rate limit below isn't a substitute — it's per-IP, not
+  // per-account, and a botnet defeats it.
+  if (
+    req.method === "POST" &&
+    (pathname === "/api/auth/sign-in/email" || pathname === "/api/auth/sign-up/email")
+  ) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
   if (req.method === "POST" && pathname in RATE_LIMITED_POSTS) {
     const limit = RATE_LIMITED_POSTS[pathname]!;
     const { ok, retryAfter } = rateLimit(`${pathname}:${clientIp(req)}`, limit, RATE_WINDOW_MS);
@@ -111,7 +129,12 @@ export default function middleware(req: NextRequest): NextResponse {
   // Cookie presence + signature check. Returns null for missing or tampered
   // cookies, the cookie value otherwise. Does NOT verify the session row
   // exists in the DB — that's the route handler's job.
-  const sessionCookie = getSessionCookie(req);
+  //
+  // cookiePrefix MUST match `advanced.cookiePrefix` in lib/auth/better-auth.ts
+  // ("ccp"). The default is "better-auth"; without this argument the gate
+  // looks for the wrong cookie name and bounces a freshly-signed-in user
+  // straight back to /login.
+  const sessionCookie = getSessionCookie(req, { cookiePrefix: "ccp" });
   const hasCookie = Boolean(sessionCookie);
 
   if (isPublicPage || isPublicApi) {

@@ -1,12 +1,28 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileText, X } from "lucide-react";
+import { Download, FileText, FileAudio, Film, ImageIcon, Loader2, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import type { MediaAttachment } from "@/lib/types";
+import type { MediaAttachment, MediaKind } from "@/lib/types";
 
-export function MediaBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
+export function MediaBlock({
+  media,
+  isOut,
+  pending,
+}: {
+  media: MediaAttachment;
+  isOut: boolean;
+  /**
+   * Inbound only: the binary is still being downloaded in the background.
+   * Render a typed placeholder so the agent sees "📷 Photo" with a spinner
+   * in ~100ms instead of waiting for the full Meta-fetch + blob-upload.
+   */
+  pending?: boolean;
+}) {
+  if (pending && media.kind !== "sticker") {
+    return <PendingMediaBlock kind={media.kind} isOut={isOut} />;
+  }
   switch (media.kind) {
     case "image":
       return <ImageBlock media={media} />;
@@ -19,6 +35,72 @@ export function MediaBlock({ media, isOut }: { media: MediaAttachment; isOut: bo
     case "sticker":
       // Stickers are handled by the parent's early return (no bubble chrome).
       return null;
+  }
+}
+
+function PendingMediaBlock({ kind, isOut }: { kind: MediaKind; isOut: boolean }) {
+  const { Icon, label, frame } = pendingPresentation(kind);
+  // Image/video get a wide thumbnail-shaped placeholder; audio/document use a
+  // compact row so the bubble doesn't suddenly grow tall for a voice note.
+  if (frame === "wide") {
+    return (
+      <div
+        className={cn(
+          "flex aspect-[4/3] max-h-[260px] w-full items-center justify-center rounded-xl",
+          isOut ? "bg-white/10" : "bg-muted",
+        )}
+      >
+        <div className="flex flex-col items-center gap-1.5 opacity-80">
+          <Icon className="size-6" />
+          <div className="flex items-center gap-1.5 text-[11px]">
+            <Loader2 className="size-3 animate-spin" />
+            <span>{label}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-xl px-3 py-2.5",
+        isOut ? "bg-white/10" : "bg-background/60",
+      )}
+    >
+      <div
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-md",
+          isOut ? "bg-white/15" : "bg-muted",
+        )}
+      >
+        <Icon className="size-4" />
+      </div>
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs">
+        <Loader2 className="size-3 animate-spin opacity-70" />
+        <span className="opacity-80">{label}</span>
+      </div>
+    </div>
+  );
+}
+
+function pendingPresentation(kind: MediaKind): {
+  Icon: typeof ImageIcon;
+  label: string;
+  frame: "wide" | "compact";
+} {
+  switch (kind) {
+    case "image":
+      return { Icon: ImageIcon, label: "Downloading photo…", frame: "wide" };
+    case "video":
+      return { Icon: Film, label: "Downloading video…", frame: "wide" };
+    case "audio":
+      return { Icon: FileAudio, label: "Downloading voice…", frame: "compact" };
+    case "document":
+      return { Icon: FileText, label: "Downloading file…", frame: "compact" };
+    case "sticker":
+      // Stickers never reach the pending branch (early-return in MediaBlock),
+      // but the discriminated union forces us to handle the case.
+      return { Icon: ImageIcon, label: "Downloading…", frame: "compact" };
   }
 }
 

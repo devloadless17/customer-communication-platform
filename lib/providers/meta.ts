@@ -718,6 +718,115 @@ export class MetaSendError extends Error {
 }
 
 /**
+ * Stable error code surfaced to the UI / external API consumers. Substring-
+ * matching Meta's free-form `body` string in every callsite was both fragile
+ * (one wording change from Meta breaks the match) and inconsistent (only the
+ * forward route did it). One translator, used everywhere.
+ *
+ * `code` is the only thing UI / n8n flows should branch on. `message` is a
+ * one-liner safe to show as the toast. `detail` is the raw Meta body for the
+ * dev console.
+ *
+ * Meta error reference: https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes
+ */
+export type MetaErrorCode =
+  | "outside_24h_window"   // 131047 — recipient hasn't messaged in 24h; templates only
+  | "invalid_recipient"    // 131026/131051 — number invalid or not on WhatsApp
+  | "rate_limited"         // 4 / 80007 — Meta rate limit hit
+  | "auth_expired"         // 190 — access token expired
+  | "unsupported_message"  // 131009 — content type not supported on this account
+  | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
+
+export interface NormalizedSendError {
+  code: MetaErrorCode;
+  /** UI-safe one-liner. */
+  message: string;
+  /** Raw Meta body (truncated). For logs / dev console. */
+  detail: string;
+  /** Original HTTP status from Meta. */
+  httpStatus: number;
+}
+
+/**
+ * Translate a thrown `MetaSendError` into the normalized shape above. The
+ * detection uses Meta's numeric error code first, then a few well-known
+ * substring fallbacks for cases where the body shape varies. Order matters:
+ * the first match wins.
+ *
+ * Returns `null` for non-Meta errors so callers can keep their own catch-all
+ * 502 path.
+ */
+export function normalizeMetaSendError(err: unknown): NormalizedSendError | null {
+  if (!(err instanceof MetaSendError)) return null;
+  const body = err.body;
+  const httpStatus = err.httpStatus;
+  const detail = body.slice(0, 500);
+
+  // Parse Meta's numeric error code if present. Body is usually JSON like
+  // `{"error":{"code":131047,"message":"...","error_subcode":...}}`. We try
+  // JSON first and fall back to a regex so a non-JSON body still hits.
+  const numericCode = extractMetaErrorCode(body);
+
+  if (numericCode === 131047 || /131047|re-engagement|24 hours/i.test(body)) {
+    return {
+      code: "outside_24h_window",
+      message: "24-hour window closed — send an approved template to re-engage.",
+      detail,
+      httpStatus,
+    };
+  }
+  if (numericCode === 131026 || numericCode === 131051) {
+    return {
+      code: "invalid_recipient",
+      message: "Recipient number isn't valid or isn't on WhatsApp.",
+      detail,
+      httpStatus,
+    };
+  }
+  if (numericCode === 4 || numericCode === 80007) {
+    return {
+      code: "rate_limited",
+      message: "WhatsApp is rate-limiting this number — slow down or wait.",
+      detail,
+      httpStatus,
+    };
+  }
+  if (numericCode === 190) {
+    return {
+      code: "auth_expired",
+      message: "WhatsApp access token expired — reconnect the number in Settings.",
+      detail,
+      httpStatus,
+    };
+  }
+  if (numericCode === 131009) {
+    return {
+      code: "unsupported_message",
+      message: "This message type isn't supported on this WhatsApp number.",
+      detail,
+      httpStatus,
+    };
+  }
+  return {
+    code: "provider_rejected",
+    message: `WhatsApp rejected the send: ${detail.slice(0, 160)}`,
+    detail,
+    httpStatus,
+  };
+}
+
+function extractMetaErrorCode(body: string): number | null {
+  try {
+    const json = JSON.parse(body) as { error?: { code?: unknown } };
+    if (typeof json.error?.code === "number") return json.error.code;
+  } catch {
+    // Not JSON — fall through to regex.
+  }
+  const m = body.match(/"code"\s*:\s*(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
+/**
  * Thrown by fetchTemplates when the team hasn't pasted a WABA id yet. The
  * templates route catches this and returns a 409 + actionable message
  * pointing the admin at /settings/whatsapp.

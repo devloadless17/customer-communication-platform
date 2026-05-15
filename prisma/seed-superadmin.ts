@@ -33,6 +33,21 @@ async function main() {
     },
   });
 
+  // Better Auth verifies credentials against Account.password (providerId
+  // "credential", accountId = email). Mirror the hash here so signin works on
+  // a freshly-seeded DB — the old per-migration backfill is gone after the
+  // init-migration squash.
+  await db.account.upsert({
+    where: { providerId_accountId: { providerId: "credential", accountId: EMAIL } },
+    create: {
+      userId: user.id,
+      providerId: "credential",
+      accountId: EMAIL,
+      password: passwordHash,
+    },
+    update: { password: passwordHash, userId: user.id },
+  });
+
   console.log(`✓ superAdmin ready: ${user.email} / ${PASSWORD}`);
 }
 

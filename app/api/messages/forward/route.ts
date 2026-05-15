@@ -4,9 +4,11 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getConversationWithRefs } from "@/lib/queries";
 import { mediaPreview } from "@/lib/providers/ingest";
-import { metaProvider, MetaSendError } from "@/lib/providers/meta";
+import { getMetaProvider } from "@/lib/providers";
+import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import {
   getMetaSendConfig,
   ProviderNotConfiguredError,
@@ -48,8 +50,13 @@ interface Body {
   contactIds?: unknown;
 }
 
-const MAX_MESSAGES = 30;
-const MAX_CONTACTS = 20;
+// Forwarding runs sequentially in the request handler (no BullMQ — that's the
+// broadcast runner's job). Each Meta send is ~300ms, so the product cap is
+// chosen to keep the worst case under the reverse-proxy idle timeout. Past
+// these numbers users should use the broadcast feature instead.
+const MAX_MESSAGES = 10;
+const MAX_CONTACTS = 5;
+const MAX_TOTAL_SENDS = 40;
 
 function asStringList(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -61,17 +68,13 @@ function asStringList(v: unknown): string[] {
 }
 
 function describeSendError(err: unknown): string {
-  if (err instanceof MetaSendError) {
-    if (/131047|re-engagement|24 hours/i.test(err.body)) {
-      return "24-hour window closed — send a template to re-engage";
-    }
-    return `provider rejected the send: ${err.body.slice(0, 160)}`;
-  }
+  const normalized = normalizeMetaSendError(err);
+  if (normalized) return normalized.message;
   return err instanceof Error ? err.message : String(err);
 }
 
 function isWindowClosed(err: unknown): boolean {
-  return err instanceof MetaSendError && /131047/.test(err.body);
+  return normalizeMetaSendError(err)?.code === "outside_24h_window";
 }
 
 const captionable = (kind: MediaKind) =>
@@ -106,6 +109,14 @@ export async function POST(req: Request) {
   if (contactIds.length > MAX_CONTACTS) {
     return NextResponse.json(
       { error: `too many recipients — max ${MAX_CONTACTS} per forward` },
+      { status: 400 },
+    );
+  }
+  if (messageIds.length * contactIds.length > MAX_TOTAL_SENDS) {
+    return NextResponse.json(
+      {
+        error: `too many sends — max ${MAX_TOTAL_SENDS} messages × recipients per forward (use a broadcast for larger fan-outs)`,
+      },
       { status: 400 },
     );
   }
@@ -236,6 +247,14 @@ export async function POST(req: Request) {
     let firstError: string | undefined;
 
     for (const src of sourceRows) {
+      // Two distinct failure scopes per iteration:
+      //   - PRE-send (Meta upload + Meta send): a throw here is a real fail.
+      //     Mark the recipient failed and continue (or break on a closed
+      //     window).
+      //   - POST-send (blob upload + DB row + emit): Meta has already
+      //     delivered. A throw here would lie to the agent ("failed!") AND
+      //     could be retried by the UI → duplicate. We log and mark `sent`
+      //     so the customer-visible reality matches our report.
       try {
         if (src.mediaKind) {
           const mb = await loadMediaBytes(src);
@@ -249,11 +268,13 @@ export async function POST(req: Request) {
           const filename = mb.filename ?? "upload";
           const withCaption = captionable(mb.kind) ? caption : undefined;
 
-          const uploaded = await metaProvider.uploadMedia!(
+          // Pre-send: upload to Meta, then send. Either throwing here is a
+          // legitimate failure — the message has NOT gone to the customer.
+          const uploaded = await getMetaProvider().uploadMedia!(
             { bytes: mb.bytes, mimeType: mb.mime, filename },
             sendConfig,
           );
-          const send = await metaProvider.sendMedia!(
+          const send = await getMetaProvider().sendMedia!(
             {
               to: contact.phoneNumber,
               kind: mb.kind,
@@ -264,67 +285,104 @@ export async function POST(req: Request) {
             sendConfig,
           );
 
-          const saved = await blobStorage.upload({
-            bytes: mb.bytes,
-            mimeType: mb.mime,
-            kind: mb.kind,
-            context: {
-              teamId,
-              teamSlug: teamRow?.name,
-              direction: "out",
-              contactPhone: contact.phoneNumber,
-              contactName: contact.name,
-              conversationId: conversation.id,
-              externalId: send.externalId,
-              originalFilename: filename,
-            },
-          });
+          // ── Post-send: from here, every error is local-state-only. The
+          // customer already has the message.
+          const saved = await blobStorage
+            .upload({
+              bytes: mb.bytes,
+              mimeType: mb.mime,
+              kind: mb.kind,
+              context: {
+                teamId,
+                teamSlug: teamRow?.name,
+                direction: "out",
+                contactPhone: contact.phoneNumber,
+                contactName: contact.name,
+                conversationId: conversation.id,
+                externalId: send.externalId,
+                originalFilename: filename,
+              },
+            })
+            .catch((err) => {
+              console.error(
+                `[forward] blob upload failed after Meta send (wamid=${send.externalId})`,
+                err,
+              );
+              return null;
+            });
           const previewBody = (withCaption || mediaPreview(mb.kind)).slice(
             0,
             200,
           );
 
-          const created = await db.message.create({
-            data: {
-              teamId,
-              conversationId: conversation.id,
-              externalId: send.externalId,
-              senderUserId: userId,
-              body: withCaption ?? "",
-              direction: "out",
-              provider: "meta_cloud",
-              status: "sent",
-              rawPayload: {
-                sentVia: "api/messages/forward",
-                forwardedFrom: src.id,
-                mediaId: uploaded.mediaId,
-              } as Prisma.InputJsonValue,
-              timestamp: send.timestamp,
-              mediaKind: mb.kind,
-              mediaKey: saved.key,
-              mediaUrl: saved.url,
-              mediaMimeType: mb.mime,
-              mediaCaption: withCaption ?? null,
-              mediaFilename: mb.kind === "document" ? filename : null,
-              mediaSizeBytes: saved.sizeBytes,
-            },
-          });
-          await db.conversation.update({
-            where: { id: conversation.id },
-            data: {
-              lastMessageAt: send.timestamp,
-              lastMessagePreview: previewBody,
-            },
+          const created = await createOutboundMessageIdempotent({
+            teamId,
+            conversationId: conversation.id,
+            externalId: send.externalId,
+            senderUserId: userId,
+            body: withCaption ?? "",
+            direction: "out",
+            provider: "meta_cloud",
+            status: "sent",
+            rawPayload: {
+              sentVia: "api/messages/forward",
+              forwardedFrom: src.id,
+              mediaId: uploaded.mediaId,
+              ...(saved ? {} : { blobUploadFailed: true }),
+            } as Prisma.InputJsonValue,
+            timestamp: send.timestamp,
+            mediaKind: mb.kind,
+            ...(saved
+              ? {
+                  mediaKey: saved.key,
+                  mediaUrl: saved.url,
+                  mediaSizeBytes: saved.sizeBytes,
+                }
+              : {}),
+            mediaMimeType: mb.mime,
+            mediaCaption: withCaption ?? null,
+            mediaFilename: mb.kind === "document" ? filename : null,
+          }).catch((err): null => {
+            console.error(
+              `[forward] DB persist failed after Meta send (wamid=${send.externalId})`,
+              err,
+            );
+            return null;
           });
 
-          const media: MediaAttachment = {
-            kind: mb.kind,
-            url: `/api/media/${created.id}`,
-            mimeType: mb.mime,
-            sizeBytes: saved.sizeBytes,
-            ...(withCaption ? { caption: withCaption } : {}),
-            ...(mb.kind === "document" ? { filename } : {}),
-          };
+          // Even if local persistence broke, count this recipient as sent —
+          // Meta has confirmed the customer received the message. Skip the
+          // emit + conversation bump; the inbox will catch up on next refresh.
+          if (!created) {
+            sent++;
+            continue;
+          }
+
+          void db.conversation
+            .update({
+              where: { id: conversation.id },
+              data: {
+                lastMessageAt: send.timestamp,
+                lastMessagePreview: previewBody,
+              },
+            })
+            .catch((err) =>
+              console.error(
+                "[forward] deferred conversation.update failed",
+                err,
+              ),
+            );
+
+          const media: MediaAttachment | undefined = saved
+            ? {
+                kind: mb.kind,
+                url: `/api/media/${created.id}`,
+                mimeType: mb.mime,
+                sizeBytes: saved.sizeBytes,
+                ...(withCaption ? { caption: withCaption } : {}),
+                ...(mb.kind === "document" ? { filename } : {}),
+              }
+            : undefined;
           const message: Message = {
             id: created.id,
             teamId,
@@ -340,39 +398,62 @@ export async function POST(req: Request) {
               forwardedFrom: src.id,
             },
             timestamp: send.timestamp.toISOString(),
-            media,
+            ...(media ? { media } : {}),
           };
-          await emitForwarded(message, previewBody, send.timestamp.toISOString());
+          await emitForwarded(message, previewBody, send.timestamp.toISOString()).catch(
+            (err) =>
+              console.error("[forward] emit failed (already sent)", err),
+          );
         } else {
           const body = (src.body ?? "").trim();
           if (!body) continue; // nothing to forward (shouldn't happen)
 
-          const send = await metaProvider.sendText(
+          // Pre-send.
+          const send = await getMetaProvider().sendText(
             { to: contact.phoneNumber, body },
             sendConfig,
           );
-          const created = await db.message.create({
-            data: {
-              teamId,
-              conversationId: conversation.id,
-              externalId: send.externalId,
-              senderUserId: userId,
-              body,
-              direction: "out",
-              provider: "meta_cloud",
-              status: "sent",
-              rawPayload: {
-                sentVia: "api/messages/forward",
-                forwardedFrom: src.id,
-              } as Prisma.InputJsonValue,
-              timestamp: send.timestamp,
-            },
+
+          // Post-send: best-effort persistence.
+          const created = await createOutboundMessageIdempotent({
+            teamId,
+            conversationId: conversation.id,
+            externalId: send.externalId,
+            senderUserId: userId,
+            body,
+            direction: "out",
+            provider: "meta_cloud",
+            status: "sent",
+            rawPayload: {
+              sentVia: "api/messages/forward",
+              forwardedFrom: src.id,
+            } as Prisma.InputJsonValue,
+            timestamp: send.timestamp,
+          }).catch((err): null => {
+            console.error(
+              `[forward] DB persist failed after Meta send (wamid=${send.externalId})`,
+              err,
+            );
+            return null;
           });
+
+          if (!created) {
+            sent++;
+            continue;
+          }
+
           const preview = body.slice(0, 200);
-          await db.conversation.update({
-            where: { id: conversation.id },
-            data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
-          });
+          void db.conversation
+            .update({
+              where: { id: conversation.id },
+              data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
+            })
+            .catch((err) =>
+              console.error(
+                "[forward] deferred conversation.update failed",
+                err,
+              ),
+            );
 
           const message: Message = {
             id: created.id,
@@ -390,7 +471,10 @@ export async function POST(req: Request) {
             },
             timestamp: send.timestamp.toISOString(),
           };
-          await emitForwarded(message, preview, send.timestamp.toISOString());
+          await emitForwarded(message, preview, send.timestamp.toISOString()).catch(
+            (err) =>
+              console.error("[forward] emit failed (already sent)", err),
+          );
         }
         sent++;
       } catch (err) {

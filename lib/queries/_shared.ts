@@ -163,6 +163,10 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
             ...(m.mediaFilename ? { filename: m.mediaFilename } : {}),
             ...(m.mediaDurationMs != null ? { durationMs: m.mediaDurationMs } : {}),
           },
+          // Row was inserted before the binary finished downloading — the
+          // bubble renders a placeholder until the message:media:ready event
+          // (or a later page load) fills it in.
+          ...(!m.mediaUrl ? { mediaPending: true } : {}),
         }
       : {}),
   };

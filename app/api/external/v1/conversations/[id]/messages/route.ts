@@ -6,9 +6,10 @@ import { NextResponse } from "next/server";
 import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
 import { toExternalMessage } from "@/lib/external-shapes";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
-import { MetaSendError } from "@/lib/providers/meta";
+import { normalizeMetaSendError } from "@/lib/providers/meta";
 import { emitToTeam } from "@/lib/socket/server";
 import type { Message } from "@/lib/types";
 import { computeWindowStatus } from "@/lib/window";
@@ -159,9 +160,15 @@ export async function POST(
         { status: 409 },
       );
     }
-    if (err instanceof MetaSendError) {
+    const normalized = normalizeMetaSendError(err);
+    if (normalized) {
       return NextResponse.json(
-        { error: "provider_rejected", status: err.httpStatus, detail: err.body },
+        {
+          error: normalized.code,
+          message: normalized.message,
+          status: normalized.httpStatus,
+          detail: normalized.detail,
+        },
         { status: 422 },
       );
     }
@@ -172,25 +179,23 @@ export async function POST(
     );
   }
 
-  const created = await db.message.create({
-    data: {
-      teamId: auth.teamId,
-      conversationId,
-      externalId: send.externalId,
-      // Outbound via external API has no human author — keep senderUserId
-      // null and record provenance in rawPayload for debugging.
-      senderUserId: null,
-      body,
-      direction: "out",
-      provider: "meta_cloud",
-      status: "sent",
-      rawPayload: {
-        sentVia: "api/external/v1",
-        apiKeyId: auth.apiKeyId,
-      } as Prisma.InputJsonValue,
-      timestamp: send.timestamp,
-      ...(replyToMessageId ? { replyToMessageId } : {}),
-    },
+  const created = await createOutboundMessageIdempotent({
+    teamId: auth.teamId,
+    conversationId,
+    externalId: send.externalId,
+    // Outbound via external API has no human author — keep senderUserId
+    // null and record provenance in rawPayload for debugging.
+    senderUserId: null,
+    body,
+    direction: "out",
+    provider: "meta_cloud",
+    status: "sent",
+    rawPayload: {
+      sentVia: "api/external/v1",
+      apiKeyId: auth.apiKeyId,
+    } as Prisma.InputJsonValue,
+    timestamp: send.timestamp,
+    ...(replyToMessageId ? { replyToMessageId } : {}),
   });
 
   const preview = body.slice(0, 200);

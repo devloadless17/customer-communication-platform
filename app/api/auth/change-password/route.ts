@@ -63,10 +63,17 @@ export async function POST(req: Request) {
   }
 
   const newHash = await hashPassword(newPassword);
-  await db.user.update({
-    where: { id: user.id },
-    data: { passwordHash: newHash },
-  });
+  // Better Auth verifies signin credentials against Account.password, not
+  // User.passwordHash. If we only updated User.passwordHash, the new password
+  // would fail signin and the OLD password would still work. Update both in
+  // one transaction so the two columns can't diverge.
+  await db.$transaction([
+    db.user.update({ where: { id: user.id }, data: { passwordHash: newHash } }),
+    db.account.updateMany({
+      where: { userId: user.id, providerId: "credential" },
+      data: { password: newHash },
+    }),
+  ]);
 
   return NextResponse.json({ ok: true });
 }

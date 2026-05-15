@@ -5,9 +5,10 @@ import { NextResponse } from "next/server";
 import { blobStorage } from "@/lib/blob-storage";
 import { db } from "@/lib/db";
 import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
+import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
 import { ingestEvents } from "@/lib/providers/ingest";
-import { metaProvider } from "@/lib/providers/meta";
+import { emitToTeam } from "@/lib/socket/server";
 import type { NormalizedEvent } from "@/lib/providers/types";
 
 /**
@@ -79,16 +80,29 @@ export async function POST(
     return NextResponse.json({ ok: true, dropped: "malformed" });
   }
 
-  const events = metaProvider.parseWebhook(payload);
+  const events = getMetaProvider().parseWebhook(payload);
   if (events.length === 0) {
     return NextResponse.json({ ok: true, ingested: 0 });
   }
 
-  // For each event with media, download the binary from Meta NOW — the
-  // signed URL Meta returns for /<media-id> expires in ~5 minutes. We can't
-  // defer this to a worker on the MVP without losing media on a slow queue.
-  await downloadInboundMedia(teamId, events);
-
+  // Two-phase media flow for low-latency inbound:
+  //
+  //   Phase 1 (sync, fast):
+  //     ingest immediately so the message row exists and the agent's UI gets
+  //     `message:new` with `mediaPending: true` in ~50ms. Bubble paints a
+  //     placeholder (📷 Photo / 🎥 Video / …).
+  //
+  //   Phase 2 (background, after 200 to Meta):
+  //     fetch the binary from Meta + upload to our blob provider, then UPDATE
+  //     the row and emit `message:media:ready` so the bubble swaps in the
+  //     real file. Meta's signed URL has a ~5-min window which starts on the
+  //     /<media-id> metadata GET — not on webhook receipt — so deferring the
+  //     download until after we return 200 is still well inside the window.
+  //
+  // On a single VPS with our custom Node server, detached promises continue
+  // running after the Response is sent (no serverless cold-cutoff). On
+  // failure mid-download, the row stays text-only (we emit a media:ready
+  // with no media payload so the placeholder clears).
   try {
     await ingestEvents(teamId, "meta_cloud", events);
   } catch (err) {
@@ -96,17 +110,48 @@ export async function POST(
     return new NextResponse("ingest failed", { status: 500 });
   }
 
+  void downloadInboundMedia(teamId, events).catch((err) =>
+    console.error(`[meta-webhook ${teamId}] background media download failed`, err),
+  );
+
   return NextResponse.json({ ok: true, ingested: events.length });
 }
 
+/**
+ * Phase 2 of the inbound media flow — runs detached from the webhook
+ * response. Picks up the rows ingest just inserted (mediaKind set, mediaUrl
+ * still null), fetches the binary from Meta, uploads to blob storage, UPDATEs
+ * the row, and emits `message:media:ready` so the bubble swaps its
+ * placeholder for the real file.
+ *
+ * Failures (network, Meta 4xx, size cap exceeded) clear the media columns on
+ * the row and emit a `message:media:ready` with no media payload — the
+ * placeholder drops and the bubble renders as a regular text row (caption
+ * preserved). Better than a stuck "downloading…" spinner.
+ */
 async function downloadInboundMedia(
   teamId: string,
   events: NormalizedEvent[],
 ): Promise<void> {
   const mediaEvents = events.filter(
-    (e) => e.kind === "message" && e.media && !e.media.storageKey,
+    (e): e is Extract<NormalizedEvent, { kind: "message" }> =>
+      e.kind === "message" && !!e.media && !e.media.storageKey,
   );
   if (mediaEvents.length === 0) return;
+
+  // Look up the rows ingest just inserted. Skip rows whose mediaUrl is
+  // already populated — that's a Meta retry where we previously succeeded.
+  const externalIds = mediaEvents.map((e) => e.externalId);
+  const rows = await db.message.findMany({
+    where: { teamId, externalId: { in: externalIds } },
+    select: { id: true, externalId: true, conversationId: true, mediaUrl: true },
+  });
+  const rowByExtId = new Map(rows.map((r) => [r.externalId, r]));
+  const todo = mediaEvents.filter((e) => {
+    const row = rowByExtId.get(e.externalId);
+    return row && !row.mediaUrl;
+  });
+  if (todo.length === 0) return;
 
   // Send config has the access token Meta requires for both the media-meta
   // call AND the binary CDN. Webhook config (verify token + app secret) is
@@ -119,6 +164,7 @@ async function downloadInboundMedia(
       `[meta-webhook ${teamId}] cannot download media — send config missing`,
       err,
     );
+    await Promise.all(todo.map((e) => clearMediaOnRow(teamId, rowByExtId.get(e.externalId)!.id, rowByExtId.get(e.externalId)!.conversationId)));
     return;
   }
 
@@ -131,10 +177,12 @@ async function downloadInboundMedia(
   });
 
   await Promise.all(
-    mediaEvents.map(async (evt) => {
-      if (evt.kind !== "message" || !evt.media) return;
+    todo.map(async (evt) => {
+      if (!evt.media) return;
+      const row = rowByExtId.get(evt.externalId);
+      if (!row) return;
       try {
-        const fetched = await metaProvider.fetchMedia!(
+        const fetched = await getMetaProvider().fetchMedia!(
           evt.media.externalMediaId,
           sendConfig,
         );
@@ -143,7 +191,7 @@ async function downloadInboundMedia(
           console.warn(
             `[meta-webhook ${teamId}] dropping ${evt.media.kind} over cap (${fetched.bytes.length} > ${cap})`,
           );
-          delete evt.media; // ingest the message as text-only with empty body
+          await clearMediaOnRow(teamId, row.id, row.conversationId);
           return;
         }
         const saved = await blobStorage.upload({
@@ -156,30 +204,81 @@ async function downloadInboundMedia(
             direction: "in",
             contactPhone: evt.contactPhone,
             contactName: evt.contactName ?? undefined,
-            // conversationId isn't known yet — ingest find-or-creates it. The
-            // filename still has enough scoping (team + phone + wamid) to be
-            // useful in the dashboard.
             externalId: evt.externalId,
             originalFilename: evt.media.filename ?? null,
           },
         });
-        evt.media.storageKey = saved.key;
-        evt.media.storageUrl = saved.url;
-        evt.media.sizeBytes = saved.sizeBytes;
+
         // Meta's metadata sometimes refines the mime type vs what was on the
         // webhook (e.g. image/jpeg vs image/jpg). Trust the metadata call.
-        evt.media.mimeType = fetched.mimeType;
+        await db.message.update({
+          where: { id: row.id },
+          data: {
+            mediaKey: saved.key,
+            mediaUrl: saved.url,
+            mediaSizeBytes: saved.sizeBytes,
+            mediaMimeType: fetched.mimeType,
+          },
+        });
+
+        emitToTeam(teamId, "message:media:ready", {
+          teamId,
+          conversationId: row.conversationId,
+          messageId: row.id,
+          media: {
+            kind: evt.media.kind,
+            url: `/api/media/${row.id}`,
+            mimeType: fetched.mimeType,
+            sizeBytes: saved.sizeBytes,
+            ...(evt.body ? { caption: evt.body } : {}),
+            ...(evt.media.filename ? { filename: evt.media.filename } : {}),
+            ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+          },
+        });
       } catch (err) {
         console.error(
           `[meta-webhook ${teamId}] media download failed for ${evt.externalId}`,
           err,
         );
-        // Best-effort: drop the media block but keep the message so the
-        // agent at least sees "Media unavailable" in the thread.
-        delete evt.media;
+        await clearMediaOnRow(teamId, row.id, row.conversationId);
       }
     }),
   );
+}
+
+/**
+ * Strip a row's media columns and tell the room — the placeholder drops and
+ * the bubble renders as a text-only row (caption stays in `body`). Used when
+ * the binary download fails or the file exceeds the per-kind cap.
+ */
+async function clearMediaOnRow(
+  teamId: string,
+  messageId: string,
+  conversationId: string,
+): Promise<void> {
+  try {
+    await db.message.update({
+      where: { id: messageId },
+      data: {
+        mediaKind: null,
+        mediaMimeType: null,
+        mediaCaption: null,
+        mediaFilename: null,
+        mediaDurationMs: null,
+        mediaKey: null,
+        mediaUrl: null,
+        mediaSizeBytes: null,
+      },
+    });
+  } catch (err) {
+    console.error(`[meta-webhook ${teamId}] clearMediaOnRow failed for ${messageId}`, err);
+  }
+  emitToTeam(teamId, "message:media:ready", {
+    teamId,
+    conversationId,
+    messageId,
+    // No media → client drops the placeholder.
+  });
 }
 
 function verifySignature(rawBody: string, header: string | null, secret: string): boolean {

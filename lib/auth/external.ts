@@ -4,6 +4,16 @@ import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
 import { hashToken, looksLikeApiKey } from "@/lib/auth/api-key";
+import { rateLimit } from "@/lib/rate-limit";
+
+/** External-API rate limit: 240 requests per minute per key. n8n flows that
+ *  legitimately stream can still poll every ~250ms; brute-force / runaway
+ *  scripts get 429 before we even ask the DB whether the key is real. The
+ *  bucket key is the hashed token, so the raw secret never lands in the rate
+ *  limiter's Map.
+ */
+const EXTERNAL_RATE_LIMIT = 240;
+const EXTERNAL_RATE_WINDOW_MS = 60 * 1000;
 
 /**
  * Bearer-token auth for /api/external/v1.
@@ -37,6 +47,15 @@ export async function authenticateApiKey(
     return jsonError(401, "invalid api key");
   }
   const tokenHash = hashToken(token);
+
+  const limit = rateLimit(`external:${tokenHash}`, EXTERNAL_RATE_LIMIT, EXTERNAL_RATE_WINDOW_MS);
+  if (!limit.ok) {
+    return NextResponse.json(
+      { error: "rate_limited" },
+      { status: 429, headers: { "retry-after": String(limit.retryAfter) } },
+    );
+  }
+
   const row = await db.teamApiKey.findUnique({
     where: { tokenHash },
     select: { id: true, teamId: true, revokedAt: true },

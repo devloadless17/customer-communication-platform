@@ -665,10 +665,11 @@ export function MessageThread({
       <ForwardDialog
         open={forwardOpen}
         messageIds={forwardIds}
-        onClose={() => setForwardOpen(false)}
-        onDone={(summary) => {
+        onClose={() => {
           setForwardOpen(false);
           selection.clear();
+        }}
+        onError={(summary) => {
           void alert(summary);
         }}
       />

@@ -69,6 +69,11 @@ export const auth = betterAuth({
   database: prismaAdapter(db, { provider: "postgresql" }),
   secret: readSecret(),
   baseURL: readBaseURL(),
+  // Better Auth defaults trustedOrigins to [baseURL] when not set — fine in
+  // practice, but spelling it out makes the CSRF guard's intent obvious and
+  // protects against a future Better Auth default change silently widening
+  // the check. lib/env.ts already requires BETTER_AUTH_URL in prod.
+  trustedOrigins: process.env.BETTER_AUTH_URL ? [process.env.BETTER_AUTH_URL] : [],
 
   emailAndPassword: {
     enabled: true,

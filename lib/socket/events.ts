@@ -12,6 +12,7 @@ import type {
   ConversationStatus,
   ConversationWithRefs,
   InternalNote,
+  MediaAttachment,
   Message,
   MessageStatus,
   User,
@@ -51,6 +52,21 @@ export interface ServerToClientEvents {
     conversationId: string;
     messageId: string;
     status: MessageStatus;
+  }) => void;
+
+  /**
+   * Inbound media finished downloading (or failed). Fired after `message:new`
+   * (which carries `mediaPending: true`) when the webhook's background
+   * download + blob upload completes.
+   *   - `media` present → bubble swaps in the real media block.
+   *   - `media` absent → download failed or hit the size cap; bubble drops
+   *     the placeholder and renders as a text-only bubble (caption preserved).
+   */
+  "message:media:ready": (payload: {
+    teamId: string;
+    conversationId: string;
+    messageId: string;
+    media?: MediaAttachment;
   }) => void;
 
   /** A teammate added an internal note. */
