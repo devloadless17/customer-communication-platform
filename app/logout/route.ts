@@ -21,10 +21,16 @@ import { auth } from "@/lib/auth/better-auth";
 export const runtime = "nodejs";
 
 async function handler(req: NextRequest) {
-  // Derive base URL from the request so we work behind any proxy / domain
-  // without needing BETTER_AUTH_URL set just for this redirect.
   await auth.api.signOut({ headers: req.headers });
-  return NextResponse.redirect(new URL("/login", req.url));
+  // Use BETTER_AUTH_URL when set (always in prod — see lib/env.ts) instead
+  // of req.url. Next's `request.url` behind our Caddy → Node hop falls back
+  // to the server's listening address (0.0.0.0:3000) for Location-header
+  // redirects, so without this the Location ends up at
+  // https://0.0.0.0:3000/login and the browser bounces to "site can't be
+  // reached." Sticking to the canonical public origin is the only safe
+  // base for absolute redirects from a route handler.
+  const base = process.env.BETTER_AUTH_URL || new URL(req.url).origin;
+  return NextResponse.redirect(new URL("/login", base));
 }
 
 export { handler as GET, handler as POST };

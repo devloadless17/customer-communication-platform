@@ -83,11 +83,12 @@ export async function POST(req: Request) {
     select: { id: true, expiresAt: true },
   });
 
-  // Build the share URL from the request origin so dev (ngrok) and prod
-  // (your real domain) Just Work without an env var. BETTER_AUTH_URL would
-  // be wrong on the rotating ngrok URL.
-  const origin = new URL(req.url).origin;
-  const url = `${origin}/invite/${token}`;
+  // Build the share URL from BETTER_AUTH_URL (the canonical public origin)
+  // when set, else fall back to req.url. Behind a reverse proxy `req.url`
+  // can resolve to the server's listening address (e.g. 0.0.0.0:3000),
+  // which would produce unusable invite links in emails.
+  const origin = process.env.BETTER_AUTH_URL || new URL(req.url).origin;
+  const url = `${origin.replace(/\/$/, "")}/invite/${token}`;
 
   return NextResponse.json({
     invite: { id: invite.id, expiresAt: invite.expiresAt.toISOString(), url },

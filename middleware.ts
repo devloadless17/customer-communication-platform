@@ -137,11 +137,18 @@ export default function middleware(req: NextRequest): NextResponse {
   const sessionCookie = getSessionCookie(req, { cookiePrefix: "ccp" });
   const hasCookie = Boolean(sessionCookie);
 
+  // Base for absolute redirects. Behind our Caddy → Node setup, `req.url`
+  // can fall back to the server's listening address (0.0.0.0:3000) when
+  // building the Location header, which the browser then can't reach.
+  // BETTER_AUTH_URL is `prodRequired` (lib/env.ts), so in prod we always
+  // have the canonical public origin to anchor redirects against.
+  const redirectBase = process.env.BETTER_AUTH_URL || new URL(req.url).origin;
+
   if (isPublicPage || isPublicApi) {
     // Bonus: if a signed-in user hits /login or /register, bounce them home.
     // The DB recheck on /inbox will catch the stale-cookie case if any.
     if (hasCookie && (pathname === "/login" || pathname === "/register")) {
-      return NextResponse.redirect(new URL("/inbox", req.url));
+      return NextResponse.redirect(new URL("/inbox", redirectBase));
     }
     return NextResponse.next();
   }
@@ -150,7 +157,7 @@ export default function middleware(req: NextRequest): NextResponse {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
-    const url = new URL("/login", req.url);
+    const url = new URL("/login", redirectBase);
     url.searchParams.set("next", pathname + search);
     return NextResponse.redirect(url);
   }
