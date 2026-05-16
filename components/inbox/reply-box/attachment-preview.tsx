@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText, ImageIcon, Mic, Video, X } from "lucide-react";
+import { FileText, Image as ImageIcon, Mic, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 

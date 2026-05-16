@@ -49,7 +49,18 @@ export const MESSAGES_PAGE = 30;
  */
 export async function listConversations(
   teamId: string,
-  opts: { take?: number; cursor?: string | null; search?: string } = {},
+  opts: {
+    take?: number;
+    cursor?: string | null;
+    search?: string;
+    /**
+     * The signed-in agent. When set we populate `conversation.unreadForMe`
+     * by comparing their ConversationReadReceipt against each row's
+     * lastMessageAt. Omit for server-to-server reads where per-agent unread
+     * is meaningless (broadcasts, automations, external API).
+     */
+    viewerUserId?: string;
+  } = {},
 ): Promise<CursorPage<ConversationWithRefs>> {
   const take = clampTake(opts.take, CONVERSATIONS_PAGE);
   const cursor = parseConvoCursor(opts.cursor ?? null);
@@ -90,7 +101,33 @@ export async function listConversations(
     where,
     orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
     take: take + 1,
-    include: { contact: true, assignedUser: true },
+    include: {
+      // Explicit select keeps the per-row payload lean — adding heavier
+      // relations to Contact (customFields, identityProvider, etc.) doesn't
+      // automatically bloat every inbox-list response. Tags come back via
+      // the nested `tags` include since they live on Contact in this app
+      // (one contact = one conversation, so per-thread tags would be dead
+      // complexity).
+      contact: {
+        select: {
+          id: true,
+          teamId: true,
+          name: true,
+          phoneNumber: true,
+          identityProvider: true,
+          externalContactId: true,
+          avatarUrl: true,
+          email: true,
+          location: true,
+          customFields: true,
+          source: true,
+          stageId: true,
+          createdAt: true,
+          tags: { select: { id: true } },
+        },
+      },
+      assignedUser: true,
+    },
   });
 
   const hasMore = rows.length > take;
@@ -105,16 +142,39 @@ export async function listConversations(
   // Drives the 24h-window chip on the inbox conversation list. The contact
   // ids are bounded by `take`, so this is at most `take` lateral lookups.
   const contactIds = sliced.map((r) => r.contact.id);
-  const inboundMap = await fetchLastInboundMap(contactIds);
+  const inboundMap = await fetchLastInboundMap(teamId, contactIds);
 
-  const items = sliced.map((row) => ({
-    conversation: mapConversation(row),
-    contact: mapContact(row.contact),
-    assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
-    messages: [],
-    notes: [],
-    lastInboundAt: inboundMap.get(row.contact.id) ?? null,
-  }));
+  // Per-agent unread map. One indexed read scoped to this slice — no N+1.
+  const sliceIds = sliced.map((r) => r.id);
+  const receiptMap = new Map<string, Date>();
+  if (opts.viewerUserId && sliceIds.length > 0) {
+    const receipts = await db.conversationReadReceipt.findMany({
+      where: { userId: opts.viewerUserId, conversationId: { in: sliceIds } },
+      select: { conversationId: true, lastReadAt: true },
+    });
+    for (const r of receipts) receiptMap.set(r.conversationId, r.lastReadAt);
+  }
+
+  const items = sliced.map((row) => {
+    const seenAt = receiptMap.get(row.id);
+    const unreadForMe = opts.viewerUserId
+      ? !seenAt || seenAt.getTime() < row.lastMessageAt.getTime()
+      : undefined;
+    return {
+      conversation: {
+        ...mapConversation(row),
+        ...(unreadForMe !== undefined ? { unreadForMe } : {}),
+      },
+      contact: {
+        ...mapContact(row.contact),
+        tagIds: row.contact.tags.map((t) => t.id),
+      },
+      assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
+      messages: [],
+      notes: [],
+      lastInboundAt: inboundMap.get(row.contact.id) ?? null,
+    };
+  });
 
   return { items, nextCursor };
 }
@@ -123,8 +183,14 @@ export async function listConversations(
  * Latest inbound timestamp per contact. Pulled in a single grouped query so
  * the conversation-list page doesn't N+1 on its way to rendering window
  * chips. Returns ISO strings so callers can pass them straight through.
+ *
+ * Defence in depth: the contactIds are already team-scoped by the caller's
+ * earlier query, but we still pass teamId and gate on it here so a future
+ * caller that bypasses the upstream scoping (or a refactor that loses it)
+ * can't accidentally cross-tenant-read.
  */
 async function fetchLastInboundMap(
+  teamId: string,
   contactIds: string[],
 ): Promise<Map<string, string>> {
   if (contactIds.length === 0) return new Map();
@@ -136,6 +202,7 @@ async function fetchLastInboundMap(
     FROM "Message" m
     JOIN "Conversation" co ON co.id = m."conversationId"
     WHERE m.direction = 'in'
+      AND co."teamId" = ${teamId}
       AND co."contactId" IN (${Prisma.join(contactIds)})
     GROUP BY co."contactId"
   `;

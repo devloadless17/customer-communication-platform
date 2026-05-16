@@ -198,24 +198,50 @@ export async function POST(req: Request) {
   const results: ForwardResult[] = [];
 
   for (const contact of contacts) {
-    // Find-or-create the active conversation (mirrors inbound ingest /
-    // broadcast send: reuse the latest non-closed thread, else open one).
+    // WhatsApp forward requires a phone number. Non-phone-identity contacts
+    // (Instagram/Telegram) can't receive WhatsApp messages — skip them with
+    // an explicit failure rather than crashing the whole forward batch.
+    if (!contact.phoneNumber) {
+      results.push({
+        contactId: contact.id,
+        contactName: contact.name,
+        ok: false,
+        sent: 0,
+        failed: sourceRows.length,
+        error: "contact has no WhatsApp phone number",
+      });
+      continue;
+    }
+    const contactPhone = contact.phoneNumber;
+    // Strict invariant: one contact = one conversation. Reuse the contact's
+    // single conversation no matter its status; a closed one reopens to
+    // `pending` (same semantics as webhook ingest + broadcast runner).
     const existing = await db.conversation.findFirst({
-      where: { teamId, contactId: contact.id, status: { not: "closed" } },
+      where: { teamId, contactId: contact.id },
       orderBy: { lastMessageAt: "desc" },
     });
-    const conversation =
-      existing ??
-      (await db.conversation.create({
-        data: {
-          teamId,
-          contactId: contact.id,
-          // New chats land in `pending` — matches the webhook ingest +
-          // broadcast runner so every fresh thread starts in triage.
-          status: "pending",
-          lastMessagePreview: "",
-        },
-      }));
+    const conversation = !existing
+      ? await db.conversation.create({
+          data: {
+            teamId,
+            contactId: contact.id,
+            status: "pending",
+            lastMessagePreview: "",
+          },
+        })
+      : existing.status === "closed"
+        ? await db.conversation.update({
+            where: { id: existing.id },
+            data: { status: "pending" },
+          })
+        : existing;
+    if (existing?.status === "closed") {
+      emitToTeam(teamId, "conversation:status", {
+        teamId,
+        conversationId: conversation.id,
+        status: "pending",
+      });
+    }
     const conversationIsNew = !existing;
     let emittedForConversation = false;
 
@@ -276,7 +302,7 @@ export async function POST(req: Request) {
           );
           const send = await getMetaProvider().sendMedia!(
             {
-              to: contact.phoneNumber,
+              to: contactPhone,
               kind: mb.kind,
               mediaId: uploaded.mediaId,
               caption: withCaption,
@@ -296,7 +322,7 @@ export async function POST(req: Request) {
                 teamId,
                 teamSlug: teamRow?.name,
                 direction: "out",
-                contactPhone: contact.phoneNumber,
+                contactPhone,
                 contactName: contact.name,
                 conversationId: conversation.id,
                 externalId: send.externalId,
@@ -410,7 +436,7 @@ export async function POST(req: Request) {
 
           // Pre-send.
           const send = await getMetaProvider().sendText(
-            { to: contact.phoneNumber, body },
+            { to: contactPhone, body },
             sendConfig,
           );
 

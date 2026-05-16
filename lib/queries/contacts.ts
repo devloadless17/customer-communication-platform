@@ -85,7 +85,9 @@ export async function listContacts(
     Array<{
       id: string;
       teamId: string;
-      phoneNumber: string;
+      phoneNumber: string | null;
+      identityProvider: "meta_cloud" | null;
+      externalContactId: string | null;
       name: string;
       avatarUrl: string | null;
       email: string | null;
@@ -103,6 +105,8 @@ export async function listContacts(
       c.id,
       c."teamId",
       c."phoneNumber",
+      c."identityProvider",
+      c."externalContactId",
       c.name,
       c."avatarUrl",
       c.email,
@@ -200,7 +204,7 @@ export async function listContacts(
 
   // Fetch tag links for this page in one go. We don't need the tag rows
   // themselves here — the UI passes the catalog separately — so this is a
-  // single GROUP BY on the implicit join table. Empty page → no query.
+  // single Prisma query over the implicit join table. Empty page → no query.
   const tagIdsByContact = new Map<string, string[]>();
   if (sliced.length > 0) {
     const ids = sliced.map((r) => r.id);
@@ -218,6 +222,8 @@ export async function listContacts(
       id: r.id,
       teamId: r.teamId,
       phoneNumber: r.phoneNumber,
+      identityProvider: r.identityProvider,
+      externalContactId: r.externalContactId,
       name: r.name,
       avatarUrl: r.avatarUrl ?? undefined,
       email: r.email ?? undefined,
@@ -273,7 +279,7 @@ export async function countContacts(teamId: string): Promise<number> {
 export async function lookupContacts(
   teamId: string,
   ids: string[],
-): Promise<Array<{ id: string; name: string; phoneNumber: string }>> {
+): Promise<Array<{ id: string; name: string; phoneNumber: string | null }>> {
   const clean = Array.from(
     new Set(ids.map((s) => s.trim()).filter((s) => s.length > 0)),
   ).slice(0, 1000);

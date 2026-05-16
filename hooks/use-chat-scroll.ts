@@ -90,9 +90,26 @@ export function useChatScroll({
     return el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
   }, []);
 
+  // Timestamp of the most recent programmatic snap. Setting scrollTop in JS
+  // fires a scroll event ASYNCHRONOUSLY (queued by the browser to the next
+  // frame). Between the snap and the event firing, content can grow
+  // (image decode, font swap, framer-motion entrance), which shifts
+  // scrollHeight upward without moving our scrollTop — so when the queued
+  // event finally fires, isAtBottom() reads "drifted from the bottom" and
+  // the listener mistakenly concludes the user scrolled, sets stickyRef=
+  // false, and saves the (wrong) scroll position to scrollMemory.
+  //
+  // Next time the user opens that chat, recallScroll returns the saved
+  // position instead of snapping to the bottom — manifests as "chat-to-chat
+  // switch doesn't land at the bottom anymore." Ignore scroll events
+  // within a short window after every snap so this content-growth race
+  // can't poison the stickiness state.
+  const lastProgrammaticSnapAtRef = useRef(0);
+
   const snapToBottom = useCallback(() => {
     const el = viewportRef.current;
     if (!el) return;
+    lastProgrammaticSnapAtRef.current = Date.now();
     el.scrollTop = el.scrollHeight;
   }, []);
 
@@ -106,6 +123,13 @@ export function useChatScroll({
     const el = viewportRef.current;
     if (!el) return;
     const onScroll = () => {
+      // Ignore scroll events that are echoes of a programmatic snap we
+      // just performed. 200ms catches the queued event(s) from the snap
+      // + the rAF re-snap chain in the conversationId / tail-entry
+      // effects, plus any extra queue produced by ResizeObserver's
+      // re-snap on image decode. Real user scrolls happen on a much
+      // longer timescale.
+      if (Date.now() - lastProgrammaticSnapAtRef.current < 200) return;
       const wasSticky = stickyRef.current;
       const isSticky = isAtBottom();
       stickyRef.current = isSticky;
@@ -117,17 +141,24 @@ export function useChatScroll({
     return () => el.removeEventListener("scroll", onScroll);
   }, [isAtBottom]);
 
-  // Conversation change (and initial mount) → hard reset to the bottom of
-  // the new thread. Same double-rAF safety net as the own-send snap: the
-  // bubble heights, the `scrollReady` re-render that reveals the area, and
-  // image aspect-ratio reservations dropping as bytes decode can all land
-  // on subsequent frames. Re-snap twice so the bottom is reached regardless
-  // of which one finishes last. Also clears any pending unread count from
-  // the previous thread — the pill should never linger across navigation.
+  // Conversation change (and initial mount) → always snap to the bottom.
+  // Matches WhatsApp Web behavior: every chat open lands at the latest
+  // message. We previously had a per-chat scroll-position memory (resume
+  // where the user left off, Telegram-style), but it produced surprising
+  // results in practice — content growth from image-decode or font-swap
+  // could poison the saved position with a not-quite-bottom value, and the
+  // user would land mid-thread on subsequent visits. Pure snap-to-bottom is
+  // both the expected UX and structurally simpler.
+  //
+  // Double-rAF safety net: bubble heights, image aspect-ratio reservations,
+  // and framer-motion entrance reflow can all land on subsequent frames.
+  // Re-snap twice so the bottom is reached regardless of which finishes
+  // last. Each re-snap is gated by stickyRef so a user who scrolled away
+  // within the window isn't yanked back.
   useLayoutEffect(() => {
     settleStopRef.current?.();
-    stickyRef.current = true;
     setUnreadBelow(0);
+    stickyRef.current = true;
     snapToBottom();
     requestAnimationFrame(() => {
       if (stickyRef.current) snapToBottom();
@@ -280,7 +311,17 @@ export function useChatScroll({
           if (contentRef.current) ro.observe(contentRef.current);
           root.addEventListener("wheel", stop, { passive: true });
           root.addEventListener("touchmove", stop, { passive: true });
-          const timer = window.setTimeout(stop, 1000);
+          // Settle window length adapts to connection quality. On 3G, image
+          // decode can outlast a 1s window — the user scrolls up, history
+          // loads, then 1s later the viewport jumps because a late image
+          // decode shifted the layout after we stopped pinning. The Network
+          // Information API isn't supported on Safari but degrades cleanly
+          // to the 4G default. Slow-2g / 2g get the full 3s budget.
+          const conn = (navigator as Navigator & { connection?: { effectiveType?: string } }).connection;
+          const eff = conn?.effectiveType ?? "4g";
+          const settleMs =
+            eff === "slow-2g" || eff === "2g" ? 3_000 : eff === "3g" ? 2_000 : 1_000;
+          const timer = window.setTimeout(stop, settleMs);
           settleStopRef.current = stop;
         }).finally(() => {
           inFlightRef.current = false;

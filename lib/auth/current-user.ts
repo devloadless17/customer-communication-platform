@@ -54,6 +54,10 @@ export const getSession = cache(async (): Promise<Session> => {
       name: row.name,
       email: row.email,
       avatarUrl: row.avatarUrl ?? undefined,
+      // `loadActiveUser` already gated on deactivatedAt === null, so any row
+      // that reaches here is active. Spelled out so the type lines up with
+      // `User`.
+      isActive: true,
     },
     teamId: row.teamId,
   };

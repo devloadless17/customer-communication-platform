@@ -142,6 +142,12 @@ export async function POST(
     }
   }
 
+  if (!conversation.contact.phoneNumber) {
+    return NextResponse.json(
+      { error: "contact_has_no_phone", detail: "This contact has no WhatsApp number." },
+      { status: 400 },
+    );
+  }
   let send;
   try {
     const config = await getMetaSendConfig(auth.teamId);

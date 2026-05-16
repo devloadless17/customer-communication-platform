@@ -59,7 +59,7 @@ export async function ingestEvents(
         if (evt.kind === "message") {
           await ingestInboundMessage(teamId, provider, evt);
         } else {
-          await ingestStatusUpdate(evt);
+          await ingestStatusUpdate(teamId, provider, evt);
         }
       } catch (err) {
         console.error(
@@ -76,14 +76,38 @@ export async function ingestEvents(
   );
 }
 
-async function ingestStatusUpdate(evt: NormalizedStatusUpdate): Promise<void> {
+async function ingestStatusUpdate(
+  teamId: string,
+  provider: ProviderName,
+  evt: NormalizedStatusUpdate,
+): Promise<void> {
+  // (teamId, provider, externalId) is the compound unique key post the
+  // multi-channel refactor. teamId + provider come from the webhook route
+  // (the URL is per-team and the route is per-provider); the wire payload
+  // carries only the externalId.
   const existing = await db.message.findUnique({
-    where: { externalId: evt.externalId },
+    where: {
+      teamId_provider_externalId: {
+        teamId,
+        provider,
+        externalId: evt.externalId,
+      },
+    },
     select: { id: true, teamId: true, conversationId: true, status: true },
   });
-  // Status arriving for an unknown message is normal during dev (e.g. you
-  // wiped the DB but Meta still has the wamid). Drop silently.
-  if (!existing) return;
+  // Status arriving for an unknown message can be normal in dev (DB wiped
+  // but Meta still has the wamid). In production it usually means a race:
+  // Meta is delivering the `delivered`/`read` for an outbound BEFORE our
+  // create-message path has committed the row. Without a log this is
+  // invisible — the message stays stuck at `sent` forever with no signal.
+  // Log so ops can grep for it; we still drop because there's no row to
+  // update and Meta won't redeliver the status.
+  if (!existing) {
+    console.warn(
+      `[ingest] status update for unknown message (teamId=${teamId} provider=${provider} externalId=${evt.externalId} status=${evt.status}) — message row missing, status discarded`,
+    );
+    return;
+  }
 
   // Don't downgrade — Meta sometimes delivers `sent` after `delivered`/`read`
   // due to per-recipient-device fan-out.
@@ -140,10 +164,17 @@ async function ingestInboundMessage(
   provider: ProviderName,
   evt: NormalizedInboundMessage,
 ): Promise<void> {
-  // Rule #3 dedupe gate. Cheap pre-check; the unique index on externalId is
-  // the actual race guard via the P2002 catch below.
+  // Rule #3 dedupe gate. Cheap pre-check; the compound unique
+  // (teamId, provider, externalId) is the actual race guard via the P2002
+  // catch below.
   const existing = await db.message.findUnique({
-    where: { externalId: evt.externalId },
+    where: {
+      teamId_provider_externalId: {
+        teamId,
+        provider,
+        externalId: evt.externalId,
+      },
+    },
     select: { id: true },
   });
   if (existing) return;
@@ -154,7 +185,10 @@ async function ingestInboundMessage(
   // arrives without a quote anchor and we just drop the link.
   let replySnapshot: ReplySnapshot | null = null;
   if (evt.replyToExternalId) {
-    replySnapshot = await loadReplySnapshotByExternalId(evt.replyToExternalId);
+    replySnapshot = await loadReplySnapshotByExternalId(evt.replyToExternalId, {
+      teamId,
+      provider,
+    });
   }
 
   // Name policy: set on CREATE, sticky after.
@@ -184,7 +218,7 @@ async function ingestInboundMessage(
   // must be conflict-protected against another tx's create. Postgres returns
   // P2034 (serialization failure) on conflict; we retry once. Two retries is
   // a sensible ceiling — by then the contention is real, not a fluke.
-  const { contact, conversation, isNewConversation } = await runWithSerializableRetry(
+  const { contact, conversation, isNewConversation, reopened } = await runWithSerializableRetry(
     async () => {
       const contact = await db.contact.upsert({
         where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
@@ -203,23 +237,21 @@ async function ingestInboundMessage(
         },
       });
 
-      // Reuse the most recent non-closed conversation; otherwise open a new
-      // one. Closed threads stay closed — a fresh inbound is treated as a
-      // new ticket. `status IN ('open','pending')` lets the Postgres planner
-      // pick the (teamId, status, lastMessageAt desc) index instead of a
-      // negation scan.
-      const openConvo = await db.conversation.findFirst({
-        where: {
-          teamId,
-          contactId: contact.id,
-          status: { in: ["open", "pending"] },
-        },
+      // Strict invariant: one contact = one conversation, forever. If the
+      // contact has any prior conversation (including closed), reuse it.
+      // Closed → pending on a new inbound, so the thread "reopens" in the
+      // agent's inbox rather than fragmenting history across multiple rows.
+      // Only when a contact has literally never had a conversation do we
+      // create one.
+      const existingConvo = await db.conversation.findFirst({
+        where: { teamId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
-      const isNewConversation = !openConvo;
-      const conversation =
-        openConvo ??
-        (await db.conversation.create({
+      const isNewConversation = !existingConvo;
+      let conversation = existingConvo;
+      let reopened = false;
+      if (!conversation) {
+        conversation = await db.conversation.create({
           data: {
             teamId,
             contactId: contact.id,
@@ -229,8 +261,18 @@ async function ingestInboundMessage(
             lastMessageAt: evt.timestamp,
             lastMessagePreview: "",
           },
-        }));
-      return { contact, conversation, isNewConversation };
+        });
+      } else if (conversation.status === "closed") {
+        // Reopen. We bump to `pending` (matches the new-thread default) so
+        // the conversation re-enters the triage column instead of jumping
+        // straight to `open`, which would imply an agent has it.
+        conversation = await db.conversation.update({
+          where: { id: conversation.id },
+          data: { status: "pending" },
+        });
+        reopened = true;
+      }
+      return { contact, conversation, isNewConversation, reopened };
     },
   );
 
@@ -362,6 +404,17 @@ async function ingestInboundMessage(
     ...(newConversation ? { newConversation } : {}),
   });
 
+  // Reopen broadcast: a closed conversation that took a fresh inbound is
+  // now `pending`. Tell every live client so the row jumps from "Closed"
+  // back into the triage column without a refetch.
+  if (reopened) {
+    emitToTeam(teamId, "conversation:status", {
+      teamId,
+      conversationId: conversation.id,
+      status: "pending",
+    });
+  }
+
   // Fire automations. Truly fire-and-forget: the dispatcher snapshots its
   // own payload and never throws, but the chain hits Pg (findMany +
   // recentMessages) and Redis (BullMQ add) before returning. A degraded Redis
@@ -369,6 +422,11 @@ async function ingestInboundMessage(
   // the whole batch. Wrapping the whole prep+dispatch in an async IIFE
   // detaches it cleanly — and we capture errors locally so background
   // rejections don't surface as unhandledRejection.
+  //
+  // Durability: the dispatcher applies its own retry-with-backoff around
+  // each Redis enqueue (lib/automations/dispatcher.ts), so a transient
+  // Redis/Pg blip no longer drops the automation run silently. A permanent
+  // failure is loudly logged; a future sweep job is the next layer.
   void (async () => {
     try {
       await dispatch(teamId, "message_received", {
@@ -448,7 +506,9 @@ function toAutomationConversation(c: {
 
 function toAutomationContact(c: {
   id: string;
-  phoneNumber: string;
+  phoneNumber: string | null;
+  identityProvider?: ProviderName | null;
+  externalContactId?: string | null;
   name: string;
   email?: string | null;
   customFields?: unknown;
@@ -456,6 +516,8 @@ function toAutomationContact(c: {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
+    identityProvider: c.identityProvider ?? null,
+    externalContactId: c.externalContactId ?? null,
     name: c.name,
     email: c.email ?? null,
     customFields: normalizeCustomFields(c.customFields),
@@ -532,7 +594,9 @@ function toDomainConversation(c: {
 function toDomainContact(c: {
   id: string;
   teamId: string;
-  phoneNumber: string;
+  phoneNumber: string | null;
+  identityProvider?: ProviderName | null;
+  externalContactId?: string | null;
   name: string;
   avatarUrl: string | null;
   email?: string | null;
@@ -544,6 +608,8 @@ function toDomainContact(c: {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
+    identityProvider: c.identityProvider ?? null,
+    externalContactId: c.externalContactId ?? null,
     name: c.name,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
@@ -572,9 +638,19 @@ function normalizeCustomFields(raw: unknown): Record<string, string> {
  */
 export async function loadReplySnapshotByExternalId(
   externalId: string,
+  scope: { teamId: string; provider: ProviderName },
 ): Promise<ReplySnapshot | null> {
+  // Post the (teamId, provider, externalId) compound unique migration,
+  // externalId alone isn't unique; pass the scope explicitly so cross-team
+  // / cross-channel replies can't accidentally resolve to a different row.
   const row = await db.message.findUnique({
-    where: { externalId },
+    where: {
+      teamId_provider_externalId: {
+        teamId: scope.teamId,
+        provider: scope.provider,
+        externalId,
+      },
+    },
     select: replySnapshotSelect,
   });
   return row ? toReplySnapshot(row) : null;

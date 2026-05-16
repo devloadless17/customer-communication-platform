@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Loader2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -43,6 +43,7 @@ export function MessageThread({
   nextOlderCursor,
   stageCatalog,
   canManageStages,
+  onMarkRead,
 }: {
   data: ConversationWithRefs;
   teamMembers: User[];
@@ -52,6 +53,10 @@ export function MessageThread({
   stageCatalog: ContactStage[];
   /** Whether the current user can edit the team's stage catalog. */
   canManageStages: boolean;
+  /** Forwarded to useConversationEvents so the shell can patch its cached
+   *  unreadCount=0 after the mark-read POST resolves. Optional so tests and
+   *  other mount points don't need to thread it. */
+  onMarkRead?: (conversationId: string) => void;
 }) {
   const {
     data,
@@ -62,7 +67,7 @@ export function MessageThread({
     markOptimisticFailed,
     removeOptimistic,
     replaceWithContext,
-  } = useConversationEvents(initialData, nextOlderCursor);
+  } = useConversationEvents(initialData, nextOlderCursor, onMarkRead);
   const { conversation, contact, assignedUser, messages, notes } = data;
   const { confirm, alert, confirmDialog } = useConfirm();
 
@@ -428,6 +433,23 @@ export function MessageThread({
     });
   }, [messages, notes, hasMoreOlder]);
 
+  // Day-separator labels keyed by timeline index. Pre-computed alongside the
+  // timeline so the per-entry render doesn't run formatDaySeparator twice per
+  // bubble (which was 60+ Intl calls per timeline render). Each label is the
+  // date string when this entry should show a separator above it; null means
+  // the previous entry is on the same calendar day.
+  const dayLabels = useMemo(() => {
+    const labels: Array<string | null> = new Array(timeline.length);
+    let prevLabel: string | null = null;
+    for (let i = 0; i < timeline.length; i++) {
+      const entry = timeline[i]!;
+      const label = formatDaySeparator(entry.data.timestamp);
+      labels[i] = label !== prevLabel ? label : null;
+      prevLabel = label;
+    }
+    return labels;
+  }, [timeline]);
+
   // Entrance animation is reserved for genuinely new tail entries (a fresh
   // send/receive). The initial load and prepended older pages mount without
   // animation — a bubble sliding in near the top of the viewport during a
@@ -465,15 +487,18 @@ export function MessageThread({
     loadOlder,
   });
 
-  // Hide the scroll area until useChatScroll has positioned it at the bottom.
-  // Without this gate, the SSR HTML paints at scrollTop=0 — the user sees the
-  // OLDEST loaded message for a frame before hydration snaps to the bottom.
-  // This effect runs in commit phase AFTER useChatScroll's layout effects, so
-  // by the time we reveal, the snap has happened.
-  const [scrollReady, setScrollReady] = useState(false);
-  useLayoutEffect(() => {
-    setScrollReady(true);
-  }, []);
+  // Note: we deliberately do NOT hide the scroll area until layout effects
+  // run. The previous version gated `invisible` on a `scrollReady` boolean
+  // flipped in a useLayoutEffect, to avoid a one-frame flash of the OLDEST
+  // loaded message before the bottom-snap. The cost was that the entire
+  // thread stayed blank until React hydration finished — visibly ~1s in dev
+  // mode (uncompressed JS bundle, source maps) and a few hundred ms in prod.
+  // Trading that for the brief scroll-position blip is the better deal: the
+  // SSR'd messages are already in the HTML, so we let the browser paint them
+  // immediately. useChatScroll's first useLayoutEffect (`snapToBottom` +
+  // double-rAF, line 175 of use-chat-scroll.ts) still lands the viewport at
+  // the bottom on the very next frame; at 60fps the user effectively never
+  // sees the wrong position.
 
   return (
     <section className="relative flex min-w-0 flex-1 flex-col bg-background">
@@ -523,7 +548,12 @@ export function MessageThread({
 
       <ScrollArea
         ref={scrollAreaRef}
-        className={cn("flex-1", !scrollReady && "invisible")}
+        className="flex-1"
+        // Marker for the SSR bottom-snap script in InboxShell. Lets the
+        // script find this thread's viewport unambiguously — the script
+        // runs as a later sibling so by then the workspace's full flex row
+        // (this thread + ContactPanel) has been parsed and laid out.
+        data-thread-scroll-root
       >
         <div
           ref={contentRef}
@@ -537,11 +567,8 @@ export function MessageThread({
               floating pill below) so triggering a load never changes layout. */}
           <div ref={topSentinelRef} className="h-px" />
           {timeline.map((entry, idx) => {
-            const prev = timeline[idx - 1];
-            const showDay =
-              !prev ||
-              formatDaySeparator(entry.data.timestamp) !==
-                formatDaySeparator(prev.data.timestamp);
+            const dayLabel = dayLabels[idx];
+            const showDay = dayLabel !== null;
             // For outbound messages we key on clientTempId when present so
             // the React node survives the optimistic→confirmed swap (server
             // assigns a fresh id, but the bubble is conceptually the same
@@ -570,17 +597,24 @@ export function MessageThread({
                   <div className="my-3 flex items-center gap-3">
                     <div className="h-px flex-1 bg-border" />
                     <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      {formatDaySeparator(entry.data.timestamp)}
+                      {dayLabel}
                     </span>
                     <div className="h-px flex-1 bg-border" />
                   </div>
                 )}
-                <motion.div
-                  initial={animateIn ? { opacity: 0, y: 4 } : false}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.14, ease: "easeOut" }}
+                {/* Plain <div> with a one-off CSS enter class. Was a
+                    framer-motion `motion.div` per entry — fine when there
+                    were 10 messages on screen, expensive on a 500-message
+                    thread receiving inbound traffic. CSS keyframe runs once
+                    on mount, then the class is inert. `animateIn` already
+                    gates this to genuinely new tail entries from someone
+                    else, so the user's own sends still appear instantly. */}
+                <div
                   data-message-id={entry.kind === "message" ? entry.data.id : undefined}
-                  className="rounded-2xl transition-shadow"
+                  className={cn(
+                    "rounded-2xl transition-shadow",
+                    animateIn && "animate-enter",
+                  )}
                 >
                   {entry.kind === "message" ? (
                     <MessageBubble
@@ -621,7 +655,7 @@ export function MessageThread({
                       onDelete={deleteNote}
                     />
                   )}
-                </motion.div>
+                </div>
               </div>
             );
           })}

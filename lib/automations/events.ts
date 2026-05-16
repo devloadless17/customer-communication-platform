@@ -13,7 +13,7 @@
  *   4. Update lib/automations/conditions.ts if you want new condition fields
  *   5. Update the UI's trigger picker
  */
-import type { AutomationTriggerEvent, ConversationStatus } from "@prisma/client";
+import type { AutomationTriggerEvent, ConversationStatus, ProviderName } from "@prisma/client";
 import type { MediaKind } from "@/lib/types";
 
 export type { AutomationTriggerEvent };
@@ -65,11 +65,53 @@ export interface AutomationConversationSnapshot {
 
 export interface AutomationContactSnapshot {
   id: string;
-  phoneNumber: string;
+  /**
+   * Null for non-phone-identity channels (Instagram/Telegram). WhatsApp-only
+   * automations can short-circuit on null; channel-agnostic ones should
+   * resolve identity through {@link identityProvider}+{@link externalContactId}.
+   */
+  phoneNumber: string | null;
+  identityProvider: ProviderName | null;
+  externalContactId: string | null;
   name: string;
   email: string | null;
   /** Custom fields the team has configured; empty `{}` when none. */
   customFields: Record<string, string>;
+}
+
+/**
+ * Build an {@link AutomationContactSnapshot} from a Prisma Contact row (or
+ * any object with the same fields). Centralized so the conversation routes
+ * (assign / status / tags / messages) don't each inline the same field list
+ * and forget to add new ones when the snapshot shape grows.
+ */
+export function automationContactSnapshot(c: {
+  id: string;
+  phoneNumber: string | null;
+  identityProvider?: ProviderName | null;
+  externalContactId?: string | null;
+  name: string;
+  email?: string | null;
+  customFields?: unknown;
+}): AutomationContactSnapshot {
+  return {
+    id: c.id,
+    phoneNumber: c.phoneNumber,
+    identityProvider: c.identityProvider ?? null,
+    externalContactId: c.externalContactId ?? null,
+    name: c.name,
+    email: c.email ?? null,
+    customFields: normalizeCustomFields(c.customFields),
+  };
+}
+
+function normalizeCustomFields(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
 }
 
 export interface AutomationUserSnapshot {

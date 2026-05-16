@@ -108,7 +108,16 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 
 ## Explicitly deferred (don't build, don't suggest)
 
-Tags, labels, analytics, automations, AI replies, template send/manage UI, bulk send, multi-channel, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, BullMQ, NestJS, Embedded Signup, media (images/audio/video) send + receive.
+**Current focus is WhatsApp depth, not breadth.** Perfecting WhatsApp chatting + the three active workstreams (automations, AI agents, external API) comes first. Everything below stays off the table until that's done — *especially* don't suggest these as shortcuts when one of the active workstreams hits friction.
+
+**Deferred until WhatsApp + automations + AI agents are solid:**
+- **WhatsApp Embedded Signup.** Right answer for SaaS-scale onboarding (no more manual `META_*` credential pasting), needs Meta Tech Provider review. Comes *after* the product itself is worth onboarding into.
+- **Multi-channel (Instagram / FB Messenger / SMS / Email / etc.).** Provider interface is ready, don't add one until a pilot actively asks and WhatsApp depth is done. Resisting this is the single biggest scope discipline call on the project.
+
+**Deferred indefinitely (no clear trigger yet):**
+- Analytics dashboards, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, NestJS, voice/calling, native CRM integrations (Salesforce/HubSpot — n8n via the external API covers this).
+
+> Note: tags, labels, template send/manage, bulk send, BullMQ, and media send/receive were on this list at MVP-start but are now shipped — see [audit on 2026-05-16]. The three "depth pass" workstreams above are the active expansion; treat them as in-flight, not deferred.
 
 ## Operations & deployment notes (don't forget)
 
@@ -154,8 +163,40 @@ This is a `tsx watch` artifact, NOT a memory leak in our code. Don't chase phant
 
 ## What I'm working on right now
 
-[REPLACE THIS WITH YOUR CURRENT TASK]
+The 4-week MVP is shipped — inbox, realtime, templates, broadcasts, contacts (with tags / stages / custom fields / audience groups), media send+receive, snippets, internal notes, forwarding, external API, and a first-pass automations engine (triggers + conditions + webhook actions, BullMQ-backed) are all live. Next two workstreams, in this order:
 
-## My first ask
+### 1. Workflow automations — depth pass
 
-[REPLACE THIS WITH YOUR FIRST CONCRETE REQUEST]
+The current engine ([lib/automations/](lib/automations/)) is real but thin: three triggers (`message_received`, `conversation_assigned`, `conversation_status_changed`), AND-only conditions, one action type (`webhook`). Goal is to make this a usable workflow builder, not a feature-match against respond.io.
+
+- More triggers: `conversation_created`, `tag_added`, `contact_created`, `keyword_match`, time-based ("no reply in N hours")
+- More actions, in priority order: `send_template`, `send_snippet`, `assign_to_user`/`assign_to_round_robin`, `set_status`, `add_tag`/`remove_tag`, `move_stage`, `add_note`. `webhook` stays.
+- Condition logic: OR groups + nesting (current AND-only is too rigid)
+- Run history UI: surface `AutomationRun` rows with replay/inspect, not just a JSON dump
+- Multi-step workflows (action chains with branching) — defer until single-action flows are proven in pilot
+
+### 2. AI agents — auto-reply, lead qualify, multilingual
+
+The data layer is already there: [app/api/conversations/[id]/messages/context/route.ts](app/api/conversations/%5Bid%5D/messages/context/route.ts) loads the message window. No LLM calls wired yet. Approach:
+
+- Start with **suggested replies** (agent-in-the-loop) before autonomous send — lower trust bar, faster to ship, gives us prompt-quality signal
+- Then **auto-reply when no human is online** with a configurable "handoff" trigger (keyword or AI confidence threshold flips conversation to `pending` + assigns to a human)
+- **Lead qualification** = an automation action that runs an LLM classifier on the conversation and writes to contact custom fields / stage / tags. Reuses workstream 1's plumbing — that's why automations come first.
+- **Multilingual** is mostly free if we use a frontier model; the work is detection + per-team language preferences, not translation
+- Provider: Claude API ([claude-opus-4-7] for reasoning-heavy, [claude-haiku-4-5-20251001] for classification), with prompt caching on the system prompt + conversation history
+- Per-team `aiEnabled` flag + per-team prompt overrides on the `Team` table. Per-team API keys later if cost shaping is needed.
+- Guardrails: never auto-send a template (cost + Meta policy), never auto-send outside the 24h window, hard cap on auto-replies per conversation per hour.
+
+### 3. External API for integrations — depth pass
+
+Today's [app/api/external/v1/](app/api/external/v1/) routes are Bearer-auth'd via `TeamApiKey` and cover contacts + conversations + messages + notes — enough for n8n today, not enough for a real integrations story. Goal is to make this the public API a customer (or Zapier/Make/n8n template) can build on without us hand-holding.
+
+- **Outbound webhooks (we POST out)**: subscribe per-team to events — `message.received`, `message.sent`, `conversation.assigned`, `conversation.status_changed`, `contact.created`, `contact.updated`, `automation.run`. Signed payloads (HMAC), retries with backoff, delivery log. This is what closes the loop with n8n/Zapier without them polling.
+- **Coverage gaps in inbound API**: tags CRUD, snippets, audience groups, broadcasts (create + status), templates list, automations list. Anything an admin can do in the UI should be doable via API.
+- **Auth hygiene**: scoped API keys (read-only vs read-write vs admin), rotation, IP allowlists optional. Today's keys are full-access.
+- **Versioned + documented**: keep `/v1/`, write a minimal OpenAPI spec, ship a Postman collection. Don't build a full docs site yet — README + spec is enough for pilot-era.
+- **Rate limiting**: per-key, sliding window. Pick numbers when we have one external integration actually live.
+
+### Why this order
+
+Automations is the runway. AI agents reuse its triggers, conditions, and action machinery — building AI first means rebuilding it on top of a shallow engine, then doing the deep pass anyway. External API webhooks pair naturally with the new automation triggers (same event taxonomy on both sides — internal automations *and* outbound webhooks fire from the same dispatcher). Pilot customer feedback still trumps the roadmap; if they ask for analytics first, that jumps the queue.

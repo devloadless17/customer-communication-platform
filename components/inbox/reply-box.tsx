@@ -26,6 +26,7 @@ import type {
 } from "@/lib/types";
 import { computeWindowStatus } from "@/lib/window";
 import { resolveFieldTokens } from "@/lib/field-tokens";
+import { useNow } from "@/hooks/use-now";
 
 import { WindowBadgeFromStatus } from "./window-badge";
 import { TemplatePicker } from "./template-picker";
@@ -43,6 +44,28 @@ import {
 } from "./reply-box/utils";
 
 type Mode = "reply" | "note";
+
+// Meta Cloud API media size caps (per their docs). We trim ~5% off each so a
+// borderline file doesn't get rejected after a 4-minute upload due to
+// multipart envelope overhead.
+const MEDIA_SIZE_LIMITS = {
+  image: { bytes: 4_800_000, label: "Image" }, // Meta: 5 MB
+  video: { bytes: 15_000_000, label: "Video" }, // Meta: 16 MB
+  audio: { bytes: 15_000_000, label: "Audio" }, // Meta: 16 MB
+  document: { bytes: 95_000_000, label: "Document" }, // Meta: 100 MB
+} as const;
+
+function pickSizeLimit(file: File): { bytes: number; label: string } {
+  const mime = file.type;
+  if (mime.startsWith("image/")) return MEDIA_SIZE_LIMITS.image;
+  if (mime.startsWith("video/")) return MEDIA_SIZE_LIMITS.video;
+  if (mime.startsWith("audio/")) return MEDIA_SIZE_LIMITS.audio;
+  return MEDIA_SIZE_LIMITS.document;
+}
+
+function formatMb(bytes: number): string {
+  return `${(bytes / 1_000_000).toFixed(0)} MB`;
+}
 
 /**
  * Reply composer with Reply/Note toggle and media attachments.
@@ -107,18 +130,45 @@ export function ReplyBox({
    */
   prefill?: { body: string; nonce: string; clientTempId?: string } | null;
 }) {
-  // Tick once a minute so the "8h left" countdown advances without a refresh.
-  // The window itself flips state at the same cadence.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 60_000);
-    return () => window.clearInterval(id);
-  }, []);
-  const windowStatus = computeWindowStatus(lastInboundAt, now);
+  // Shared 60s tick across the inbox so we don't run N parallel intervals
+  // (one in WindowBadge, one here, …). `now` stays null until the first
+  // post-mount tick fires, keeping SSR deterministic.
+  const now = useNow();
+  const windowStatus = computeWindowStatus(lastInboundAt, now ?? Date.now());
   const windowClosed =
     windowStatus.state === "closed" || windowStatus.state === "never";
   const [mode, setMode] = useState<Mode>("reply");
+  // Draft persistence: WhatsApp/Slack/Telegram all hold typed-but-unsent text
+  // across chat switches. We persist to localStorage keyed by team+conv id so
+  // the draft survives chat switches AND refreshes within the same browser.
+  // Cleared on successful send + on explicit Cancel of the reply target.
+  const draftKey = `inbox:${currentUser.teamId}:draft:${conversationId}`;
+  // Initial value MUST match SSR (always ""), otherwise the submit button's
+  // `disabled` attribute hydrates mismatched when a draft exists. Load the
+  // saved draft post-mount.
   const [value, setValue] = useState("");
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(draftKey);
+      if (saved) setValue((cur) => (cur === "" ? saved : cur));
+    } catch {
+      // Privacy mode — no draft restore, composer still works.
+    }
+  }, [draftKey]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (value) window.localStorage.setItem(draftKey, value);
+      else window.localStorage.removeItem(draftKey);
+    } catch {
+      // Quota / privacy mode — draft just won't survive a refresh. The
+      // composer still works fine.
+    }
+  }, [draftKey, value]);
+  // Latest-value mirror so async handlers can read the live input without
+  // doing side effects inside a setValue updater (React 19 warns).
+  const valueRef = useRef(value);
+  valueRef.current = value;
   const [error, setError] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -537,12 +587,14 @@ export function ReplyBox({
         setError(err instanceof Error ? err.message : "failed to send");
         if (!isNote) onOptimisticFail?.(clientTempId);
         // Restore the user's text (only if they haven't started typing again).
-        setValue((cur) => {
-          if (cur !== "") return cur;
-          // Drop the failed bubble; the input now holds their text again.
+        // Read the live value via ref instead of a setValue updater — putting
+        // the onOptimisticRetry side effect inside a state updater triggers
+        // React 19's "setState while rendering another component" warning,
+        // because updaters can run during render.
+        if (valueRef.current === "") {
           if (!isNote) onOptimisticRetry?.(clientTempId);
-          return snapshotValue;
-        });
+          setValue(snapshotValue);
+        }
       } finally {
         // Release the idempotency lock — the next Enter / click can now
         // start a fresh send. Doing this in finally (not after setValue)
@@ -563,7 +615,7 @@ export function ReplyBox({
             <ToggleButton active={mode === "note"} onClick={() => setMode("note")} icon={StickyNote} label="Note" />
           </div>
           {!isNote && (
-            <WindowBadgeFromStatus status={windowStatus} size="sm" />
+            <WindowBadgeFromStatus status={windowStatus} size="sm" hideRemaining={now === null} />
           )}
           {!isNote && windowClosed && (
             <Button
@@ -699,7 +751,22 @@ export function ReplyBox({
               accept="image/*,video/*,audio/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain"
               onChange={(e) => {
                 const file = e.target.files?.[0] ?? null;
-                if (file) setAttachment(file);
+                if (!file) return;
+                // Client-side guardrails against Meta's hard caps. Without
+                // these, a 12MB iPhone photo would upload for several minutes
+                // on 3G before the server rejected it — terrible UX. Caps are
+                // a hair under Meta's documented limits so we don't false-
+                // reject borderline files due to multipart envelope overhead.
+                // See https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
+                const limit = pickSizeLimit(file);
+                if (file.size > limit.bytes) {
+                  setError(
+                    `${limit.label} attachments can't exceed ${formatMb(limit.bytes)}. Try a smaller file.`,
+                  );
+                  if (fileInputRef.current) fileInputRef.current.value = "";
+                  return;
+                }
+                setAttachment(file);
               }}
             />
             <Button

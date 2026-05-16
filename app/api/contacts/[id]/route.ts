@@ -170,10 +170,13 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       return NextResponse.json({ error: "contact not found" }, { status: 404 });
     }
 
+    const tagIds = updated.tags.map((t) => t.id);
     const contact: Contact = {
       id: updated.id,
       teamId: updated.teamId,
       phoneNumber: updated.phoneNumber,
+      identityProvider: updated.identityProvider,
+      externalContactId: updated.externalContactId,
       name: updated.name,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
@@ -181,7 +184,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       customFields: normalizeStringMap(updated.customFields),
       source: updated.source,
       stageId: updated.stageId,
-      tagIds: updated.tags.map((t) => t.id),
+      tagIds,
     };
     // Broadcast so every viewer of this contact (sidebar rows, the active
     // thread, the contact panel) merges the edit in real time. Two agents

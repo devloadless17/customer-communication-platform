@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket/client";
+import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import type { ConversationWithRefs, CursorPage } from "@/lib/types";
 
 export interface TeamEventsState {
@@ -56,7 +57,7 @@ export function useTeamEvents(
     const cursor = cursorRef.current;
     if (!cursor) return;
     setLoadingMore(true);
-    fetch(`/api/conversations?cursor=${encodeURIComponent(cursor)}`)
+    fetchWithSessionGuard(`/api/conversations?cursor=${encodeURIComponent(cursor)}`)
       .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
       .then((page) => {
         if (!page) return;
@@ -96,7 +97,7 @@ export function useTeamEvents(
       // Reconnect: refetch page 1 and merge in. Items in the refetched page
       // overwrite the equivalent in state; older items not in the refetch
       // (loaded via loadMore) are kept below in their current order.
-      void fetch(`/api/conversations`)
+      void fetchWithSessionGuard(`/api/conversations`)
         .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
         .then((page) => {
           if (!page) return;

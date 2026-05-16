@@ -14,6 +14,7 @@ export function unknownAuthor(id: string | null): User {
     role: "agent",
     name: id ? "Unknown" : "Removed user",
     email: "",
+    isActive: false,
   };
 }
 

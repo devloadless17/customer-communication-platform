@@ -154,6 +154,26 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * New audit row on a conversation (assign / status_changed for now —
+   * tag_added / tag_removed values exist in the enum but no writer fires
+   * them since tags moved back onto Contact). Lets a live history-panel
+   * viewer prepend the entry without a refetch.
+   */
+  "conversation:event": (payload: {
+    teamId: string;
+    conversationId: string;
+    event: {
+      id: string;
+      kind: "assigned" | "status_changed" | "tag_added" | "tag_removed";
+      userId: string | null;
+      userName: string | null;
+      before: unknown;
+      after: unknown;
+      at: string;
+    };
+  }) => void;
+
+  /**
    * Snapshot of which teammates currently have a live socket. Broadcast to
    * the team room whenever the set changes; also sent to a single socket on
    * subscribe so it doesn't have to wait for the next change to populate.
@@ -222,7 +242,23 @@ export interface ServerToClientEvents {
       | "tags"
       | "contact-fields"
       | "automations"
-      | "members";
+      | "members"
+      // Reply-composer snippets. Previously relied on `revalidateTag` alone,
+      // which only re-validates the data cache on the next render — other
+      // open tabs never see the new/edited/deleted snippet until they
+      // navigate. The actor's own tab also waited for a click, since
+      // revalidateTag doesn't push to the browser.
+      | "snippets"
+      // Broadcast audience groups (lists of saved contact filters). Used
+      // by /broadcasts/new and the groups list under /broadcasts/groups.
+      | "audience-groups"
+      // Meta-managed WhatsApp message templates. The catalog is mirrored
+      // into our DB and shown in the template-send picker + the manage UI.
+      | "whatsapp-templates"
+      // Pending team invites (un-accepted, un-expired). Fires on create,
+      // revoke, and accept so admin tabs viewing /settings/team see the
+      // "Pending invites" panel update without a manual refresh.
+      | "invites";
   }) => void;
 }
 

@@ -6,16 +6,31 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 import "./globals.css";
 
+// `display: "optional"` eliminates the font-swap reflow that "swap" causes.
+// With swap: browser paints in fallback, then re-renders in Inter when the
+// font arrives → bubble heights shift → the snapped-to-bottom message drifts
+// up → useChatScroll has to re-snap. The user sees this as a small "lag"
+// after first paint on hard refresh.
+//
+// With optional: the browser keeps the fallback for this page load if Inter
+// doesn't arrive within ~100ms. Inter caches for next time, so every
+// subsequent visit (including normal navigations within a session) gets the
+// custom font without any CLS. First cold visit on a slow connection shows
+// the fallback — acceptable trade for zero layout shift inside the inbox.
+//
+// next/font already injects size-adjust + ascent/descent overrides so the
+// fallback and Inter have closely matched metrics; "optional" plus that
+// metric-matching is the modern best-practice combo for chat-style UIs.
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
-  display: "swap",
+  display: "optional",
 });
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
-  display: "swap",
+  display: "optional",
 });
 
 export const metadata: Metadata = {

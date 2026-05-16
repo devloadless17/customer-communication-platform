@@ -36,14 +36,21 @@ export async function createOutboundMessageIdempotent(
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError) {
         // P2002: duplicate externalId — legitimate, return existing row.
-        // The unique index is global on externalId, but tenant-mismatch
-        // would mean Meta replayed a wamid across our customers; treat
-        // as unrecoverable (caller will surface a 500 / log loudly).
-        if (err.code === "P2002" && data.externalId) {
+        // Uniqueness is now compound on (teamId, provider, externalId)
+        // (post the multi-channel refactor) so cross-tenant collisions
+        // can't surface here in the first place; the lookup mirrors the
+        // unique key.
+        if (err.code === "P2002" && data.externalId && data.provider) {
           const existing = await db.message.findUnique({
-            where: { externalId: data.externalId },
+            where: {
+              teamId_provider_externalId: {
+                teamId: data.teamId,
+                provider: data.provider,
+                externalId: data.externalId,
+              },
+            },
           });
-          if (existing && existing.teamId === data.teamId) return existing;
+          if (existing) return existing;
           throw err;
         }
       }

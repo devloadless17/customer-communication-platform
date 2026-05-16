@@ -1,20 +1,46 @@
 "use client";
 
+import { memo } from "react";
+import { Loader2 } from "lucide-react";
+
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatListTime, initials } from "@/lib/utils";
 import type { Contact, Conversation, User } from "@/lib/types";
 
-export function ConversationListItem({
+/**
+ * One row in the inbox conversation list.
+ *
+ * Memoized — every `message:new` in the team room re-renders the parent list,
+ * but only the touched row's `conversation` reference actually changes. Without
+ * memo, every visible row's React tree rebuilds; with memo, only the moved /
+ * mutated row re-renders. On a busy team this drops re-renders per inbound
+ * message from ~30 (visible rows) to ~1.
+ *
+ * The comparator checks every prop that affects the visual output:
+ * - identity refs for `assignedUser` and `contact` (they change as objects on
+ *   teammate edits)
+ * - scalar fields on `conversation` (timestamp / preview / unread / status)
+ * - the boolean flags
+ *
+ * Anything not listed here is intentionally NOT compared: it doesn't drive
+ * the render.
+ */
+function ConversationListItemImpl({
   conversation,
   contact,
   assignedUser,
   active,
+  pending,
 }: {
   conversation: Conversation;
   contact: Contact;
   assignedUser: User | null;
+  /** This conversation is currently rendered in the workspace pane. */
   active: boolean;
+  /** This conversation was just clicked but its data is still fetching.
+   *  Adds a subtle visual cue so the click doesn't feel ignored. */
+  pending: boolean;
 }) {
   const unread = conversation.unreadCount > 0;
 
@@ -22,7 +48,11 @@ export function ConversationListItem({
     <div
       className={cn(
         "group relative flex cursor-pointer gap-3 rounded-lg px-2.5 py-2.5 transition-colors",
-        active ? "bg-accent" : "hover:bg-accent/60",
+        active
+          ? "bg-accent"
+          : pending
+            ? "bg-accent/60"
+            : "hover:bg-accent/60",
       )}
     >
       {unread && !active && (
@@ -64,11 +94,16 @@ export function ConversationListItem({
           >
             {conversation.lastMessagePreview}
           </p>
-          {unread && (
+          {pending && !active ? (
+            <Loader2
+              className="ml-1 size-3 shrink-0 animate-spin text-muted-foreground"
+              aria-label="Loading conversation"
+            />
+          ) : unread ? (
             <span className="ml-1 flex size-4.5 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] font-semibold tabular-nums text-primary-foreground">
               {conversation.unreadCount}
             </span>
-          )}
+          ) : null}
         </div>
 
         <div className="mt-1.5 flex items-center gap-1.5">
@@ -97,3 +132,18 @@ export function ConversationListItem({
     </div>
   );
 }
+
+export const ConversationListItem = memo(
+  ConversationListItemImpl,
+  (prev, next) =>
+    prev.active === next.active &&
+    prev.pending === next.pending &&
+    prev.assignedUser === next.assignedUser &&
+    prev.contact === next.contact &&
+    prev.conversation.id === next.conversation.id &&
+    prev.conversation.lastMessageAt === next.conversation.lastMessageAt &&
+    prev.conversation.lastMessagePreview === next.conversation.lastMessagePreview &&
+    prev.conversation.unreadCount === next.conversation.unreadCount &&
+    prev.conversation.status === next.conversation.status &&
+    prev.conversation.assignedUserId === next.conversation.assignedUserId,
+);

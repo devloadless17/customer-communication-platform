@@ -66,6 +66,8 @@ export async function PUT(
     id: updated.id,
     teamId: updated.teamId,
     phoneNumber: updated.phoneNumber,
+    identityProvider: updated.identityProvider,
+    externalContactId: updated.externalContactId,
     name: updated.name,
     avatarUrl: updated.avatarUrl ?? undefined,
     email: updated.email ?? undefined,

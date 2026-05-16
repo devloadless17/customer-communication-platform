@@ -1,17 +1,18 @@
 "use client";
 
+import { memo } from "react";
 import { StickyNote, Trash2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { formatMessageTime, initials } from "@/lib/utils";
-import type { InternalNote, User } from "@/lib/types";
+import type { InternalNote as InternalNoteType, User } from "@/lib/types";
 
-export function InternalNote({
+function InternalNoteImpl({
   note,
   author,
   onDelete,
 }: {
-  note: InternalNote;
+  note: InternalNoteType;
   author: User;
   /** Optional hover-action: pass to expose a delete button on the note. */
   onDelete?: (noteId: string) => void;
@@ -49,3 +50,8 @@ export function InternalNote({
     </div>
   );
 }
+
+// Same pattern as MessageBubble — the parent re-renders on every message:new
+// but note rows preserve identity unless the note itself was touched, so memo
+// makes that work for free.
+export const InternalNote = memo(InternalNoteImpl);

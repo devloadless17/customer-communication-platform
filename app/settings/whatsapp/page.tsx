@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 
 import { getSession } from "@/lib/auth/current-user";
+import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { canManageUsers } from "@/lib/auth/permissions";
 
@@ -32,6 +33,24 @@ export default async function WhatsappSettingsPage() {
     },
   });
 
+  // Decrypt before shipping to the browser — the DB stores envelope-encrypted
+  // values (enc:v1:<base64>) since the credential encryption migration. The
+  // form pre-fill needs plaintext; otherwise the admin clicking Save without
+  // retyping POSTs ciphertext back, Meta rejects it as a malformed token
+  // ("Cannot parse access token"), and the route would re-wrap it on write
+  // → double-encryption. decryptSecret passes legacy plaintext rows through
+  // unchanged, so this is safe for un-migrated data.
+  //
+  // Tolerate decrypt failure here (key rotated, value corrupt, wrong env):
+  // surface it as an empty pre-fill so the admin can re-paste fresh
+  // credentials instead of getting a blank-screen crash. The send path in
+  // lib/providers/config.ts intentionally stays strict — there, a failed
+  // decrypt should be loud, since silently sending nothing is worse.
+  const accessToken = tryDecrypt(team?.metaAccessToken ?? null, "metaAccessToken");
+  const appSecret = tryDecrypt(team?.metaAppSecret ?? null, "metaAppSecret");
+  const credentialsUndecryptable =
+    (team?.metaAccessToken != null && accessToken === null) ||
+    (team?.metaAppSecret != null && appSecret === null);
   const current: WhatsappCurrent = {
     connected: Boolean(team?.metaPhoneNumberId),
     phoneNumberId: team?.metaPhoneNumberId ?? null,
@@ -39,8 +58,9 @@ export default async function WhatsappSettingsPage() {
     wabaId: team?.metaWabaId ?? null,
     appId: team?.metaAppId ?? null,
     verifyToken: team?.metaVerifyToken ?? null,
-    accessToken: team?.metaAccessToken ?? null,
-    appSecret: team?.metaAppSecret ?? null,
+    accessToken,
+    appSecret,
+    credentialsUndecryptable,
   };
 
   // Build the public origin from the proxy headers so the webhook URL the
@@ -59,4 +79,24 @@ export default async function WhatsappSettingsPage() {
       canManage={canManageUsers(user.role)}
     />
   );
+}
+
+function tryDecrypt(value: string | null, field: string): string | null {
+  if (!value) return null;
+  try {
+    return decryptSecret(value);
+  } catch (err) {
+    // GCM auth-tag mismatch or malformed envelope. Most often: ENCRYPTION_KEY
+    // changed between write and read (env rotated, different deploy, missing
+    // var). The DB row is intact — only the key to read it is wrong.
+    // Logged at warn (not error) because this is a *handled* condition: the
+    // UI auto-opens the credentials form for re-entry. Next.js dev overlay
+    // promotes console.error into the modal, which would scare the admin on
+    // every page load until they re-paste.
+    console.warn(
+      `[settings/whatsapp] could not decrypt ${field} for team — admin needs to re-paste credentials. ` +
+        `Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
 }

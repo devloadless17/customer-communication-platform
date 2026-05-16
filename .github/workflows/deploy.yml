@@ -80,6 +80,7 @@ jobs:
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
         run: |
           set -euo pipefail
@@ -95,6 +96,7 @@ jobs:
           BETTER_AUTH_URL=https://${APP_DOMAIN}
           APP_PUBLIC_URL=https://${APP_DOMAIN}
           BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+          ENCRYPTION_KEY=${ENCRYPTION_KEY}
           AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0

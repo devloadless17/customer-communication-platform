@@ -30,11 +30,22 @@ export async function POST(
 
   const conversation = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
-    select: { id: true, unreadCount: true },
+    select: { id: true, unreadCount: true, lastMessageAt: true },
   });
   if (!conversation) {
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
   }
+
+  // Per-agent read receipt: stamp the lastMessageAt we just saw so the
+  // sidebar's "unread for me" badge computes against the agent's own
+  // baseline, not a team-wide counter that any teammate can zero out.
+  // Idempotent — upsert ensures repeated reads of the same thread don't
+  // create new rows, just refresh the timestamp.
+  await db.conversationReadReceipt.upsert({
+    where: { userId_conversationId: { userId, conversationId } },
+    create: { userId, conversationId, lastReadAt: conversation.lastMessageAt },
+    update: { lastReadAt: conversation.lastMessageAt },
+  });
 
   // Always look up the latest inbound, even when local unread is already 0 —
   // a teammate may have local-marked-read without ever notifying Meta. We
@@ -46,16 +57,29 @@ export async function POST(
   });
 
   if (conversation.unreadCount > 0) {
-    await db.conversation.update({
-      where: { id: conversationId },
+    // CAS on the observed unreadCount. The race we're guarding:
+    //   T0  agent clicks read → we read unread = 2
+    //   T1  inbound webhook lands → ingest does increment(1) → unread = 3
+    //   T2  unconditional `set 0` would clobber the new message's bump
+    // With WHERE unreadCount = observed, the bump invalidates the predicate
+    // and updateMany matches 0 rows; we skip the emit and let the next
+    // `message:new` event re-sync the badge to the real count.
+    const result = await db.conversation.updateMany({
+      where: {
+        id: conversationId,
+        teamId,
+        unreadCount: conversation.unreadCount,
+      },
       data: { unreadCount: 0 },
     });
 
-    emitToTeam(teamId, "conversation:read", {
-      teamId,
-      conversationId,
-      readByUserId: userId,
-    });
+    if (result.count > 0) {
+      emitToTeam(teamId, "conversation:read", {
+        teamId,
+        conversationId,
+        readByUserId: userId,
+      });
+    }
   }
 
   // Fire-and-forget the provider ack so the customer's WhatsApp lights up

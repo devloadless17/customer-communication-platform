@@ -60,6 +60,10 @@ async function main() {
 
   const groups = new Map<string, typeof allContacts>();
   for (const c of allContacts) {
+    // Post-multi-channel: phoneNumber is nullable. Contacts without a phone
+    // can't have a "phone duplicate" — skip them. This script only deals
+    // with the legacy `+digits` vs `digits` mismatch on WhatsApp contacts.
+    if (!c.phoneNumber) continue;
     const digits = c.phoneNumber.replace(/\D/g, "");
     if (!digits) continue;
     const key = `${c.teamId}|${digits}`;
@@ -76,17 +80,9 @@ async function main() {
     const orphans = dupGroup.slice(1);
 
     for (const orphan of orphans) {
-      // Tag union: connect every orphan tag to the survivor.
-      const orphanWithTags = await db.contact.findUnique({
-        where: { id: orphan.id },
-        select: { tags: { select: { id: true } } },
-      });
-      if (orphanWithTags && orphanWithTags.tags.length > 0) {
-        await db.contact.update({
-          where: { id: survivor.id },
-          data: { tags: { connect: orphanWithTags.tags } },
-        });
-      }
+      // Tag merging used to copy Contact.tags here; tags moved to Conversation
+      // in the conversation-tags refactor, so the conversation reparent below
+      // already brings the orphan's tag rows along to the survivor.
 
       // Reparent conversations.
       await db.conversation.updateMany({
@@ -132,9 +128,12 @@ async function main() {
       const survivorRow = await db.contact.findUnique({ where: { id: survivor.id } });
       if (!survivorRow) continue;
       const patch: Prisma.ContactUpdateInput = {};
+      // Grouping above already ensured both contacts have a phoneNumber.
       const survivorNameLooksLikePhone =
+        survivorRow.phoneNumber !== null &&
         survivorRow.name.replace(/\D/g, "") === survivorRow.phoneNumber.replace(/\D/g, "");
       const orphanNameLooksLikePhone =
+        orphan.phoneNumber !== null &&
         orphan.name.replace(/\D/g, "") === orphan.phoneNumber.replace(/\D/g, "");
       if (survivorNameLooksLikePhone && !orphanNameLooksLikePhone) {
         patch.name = orphan.name;
@@ -168,6 +167,7 @@ async function main() {
     select: { id: true, phoneNumber: true, teamId: true },
   });
   for (const c of survivingWithPlus) {
+    if (!c.phoneNumber) continue;
     const digits = stripPlus(c.phoneNumber);
     // Defensive: if a digits-only row already exists for the same team
     // (shouldn't, since phase 1 deduped) skip rather than crash on the unique.

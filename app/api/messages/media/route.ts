@@ -135,6 +135,15 @@ export async function POST(req: Request) {
   const bytes = new Uint8Array(arrayBuffer);
   const filename = file.name || "upload";
 
+  if (!conversation.contact.phoneNumber) {
+    return NextResponse.json(
+      { error: "contact_has_no_phone", detail: "This contact has no WhatsApp number." },
+      { status: 400 },
+    );
+  }
+  const toPhone = conversation.contact.phoneNumber;
+  const toName = conversation.contact.name;
+
   // Provider config — fail clearly if WhatsApp isn't connected yet.
   let sendConfig;
   try {
@@ -168,8 +177,8 @@ export async function POST(req: Request) {
         teamId: session.teamId,
         teamSlug: teamRow?.name,
         direction: "out",
-        contactPhone: conversation.contact.phoneNumber,
-        contactName: conversation.contact.name,
+        contactPhone: toPhone,
+        contactName: toName,
         conversationId,
         // No wamid yet — Meta hasn't returned one. Use the client temp id (or
         // a generated uuid) so the dashboard filename is still unique and
@@ -216,7 +225,7 @@ export async function POST(req: Request) {
   try {
     send = await getMetaProvider().sendMedia!(
       {
-        to: conversation.contact.phoneNumber,
+        to: toPhone,
         kind,
         mediaId,
         caption: caption || undefined,

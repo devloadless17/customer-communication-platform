@@ -52,6 +52,8 @@ function syntheticPayload(trigger: "message_received" | "conversation_assigned" 
   const baseContact = {
     id: "test_contact",
     phoneNumber: "10000000000",
+    identityProvider: null,
+    externalContactId: null,
     name: "Test Contact",
     email: null,
     customFields: {},

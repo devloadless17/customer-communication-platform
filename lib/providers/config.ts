@@ -1,5 +1,6 @@
 import "server-only";
 
+import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 
 /**
@@ -90,9 +91,27 @@ async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
   if (!team.metaPhoneNumberId) missing.push("phoneNumberId");
   if (!team.metaAccessToken) missing.push("accessToken");
   if (missing.length > 0) throw new ProviderNotConfiguredError(teamId, missing);
+  let accessToken: string;
+  try {
+    // Stored as envelope-encrypted ciphertext (lib/crypto/envelope.ts).
+    // decryptSecret() passes legacy plaintext rows through unchanged so the
+    // first load after rollout still works; the next credential save in
+    // /api/team/whatsapp rewrites the row as ciphertext.
+    accessToken = decryptSecret(team.metaAccessToken!);
+  } catch (err) {
+    console.error(
+      `[provider-config] failed to decrypt send secrets for team=${teamId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    // Surface as ProviderNotConfigured so callers (reply box, broadcast
+    // runner) render the "reconnect WhatsApp" prompt instead of a 500.
+    // ENCRYPTION_KEY rotation or ciphertext corruption land here.
+    throw new ProviderNotConfiguredError(teamId, ["accessToken (decrypt failed)"]);
+  }
   return {
     phoneNumberId: team.metaPhoneNumberId!,
-    accessToken: team.metaAccessToken!,
+    accessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
     ...(team.metaWabaId ? { wabaId: team.metaWabaId } : {}),
     ...(team.metaAppId ? { appId: team.metaAppId } : {}),
@@ -127,6 +146,12 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
 /**
  * Loads the webhook-side config. Used by /api/webhooks/meta/[teamId] for
  * both the GET verify dance and POST HMAC verification.
+ *
+ * Returns null on missing-config OR on decrypt failure (corrupted ciphertext,
+ * rotated ENCRYPTION_KEY) — the dispatcher maps that to 403 silently, which
+ * is correct: Meta retries on non-2xx, so a 500 here would create a webhook
+ * retry storm during an outage we can't fix from the request handler. The
+ * underlying error is logged for ops.
  */
 export async function getMetaWebhookConfig(
   teamId: string,
@@ -137,10 +162,26 @@ export async function getMetaWebhookConfig(
     where: { id: teamId },
     select: { metaAppSecret: true, metaVerifyToken: true },
   });
-  const value: MetaWebhookConfig | null =
-    !team || !team.metaAppSecret || !team.metaVerifyToken
-      ? null
-      : { appSecret: team.metaAppSecret, verifyToken: team.metaVerifyToken };
+  let value: MetaWebhookConfig | null;
+  if (!team || !team.metaAppSecret || !team.metaVerifyToken) {
+    value = null;
+  } else {
+    try {
+      // App secret signs every inbound webhook (HMAC-SHA256). Stored
+      // encrypted; legacy plaintext rows decrypt through unchanged.
+      value = {
+        appSecret: decryptSecret(team.metaAppSecret),
+        verifyToken: team.metaVerifyToken,
+      };
+    } catch (err) {
+      console.error(
+        `[provider-config] failed to decrypt webhook secrets for team=${teamId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      value = null;
+    }
+  }
   webhookCache.set(teamId, { value, exp: Date.now() + CONFIG_TTL_MS });
   return value;
 }

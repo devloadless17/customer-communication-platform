@@ -354,7 +354,7 @@ function SnippetEditor({
             {isNew ? "New snippet" : "Edit snippet"}
           </div>
           {!isNew && snippet.createdByName && (
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
+            <div className="mt-0.5 text-[11px] text-muted-foreground" suppressHydrationWarning>
               Created by {snippet.createdByName} · last updated {formatDate(snippet.updatedAt)}
             </div>
           )}

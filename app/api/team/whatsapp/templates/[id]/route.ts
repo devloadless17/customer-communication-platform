@@ -6,6 +6,7 @@ import { db } from "@/lib/db";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
 import { MetaSendError, MissingWabaIdError } from "@/lib/providers/meta";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Per-template operations.
@@ -106,6 +107,7 @@ export async function DELETE(
   }
 
   await db.messageTemplate.delete({ where: { id: template.id } });
+  emitCatalogChange(teamId, "whatsapp-templates");
   return NextResponse.json({ ok: true });
 }
 
@@ -154,5 +156,6 @@ export async function PATCH(
   if (updated.count === 0) {
     return NextResponse.json({ error: "template not found" }, { status: 404 });
   }
+  emitCatalogChange(teamId, "whatsapp-templates");
   return NextResponse.json({ ok: true });
 }

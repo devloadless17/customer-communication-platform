@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { dispatch } from "@/lib/automations/dispatcher";
+import { automationContactSnapshot } from "@/lib/automations/events";
 import { db } from "@/lib/db";
+import { recordConversationEvent } from "@/lib/inbox/events";
 import { emitToTeam } from "@/lib/socket/server";
 import type { User } from "@/lib/types";
 
@@ -24,7 +26,7 @@ export async function POST(
 ) {
   const session = await requireSession();
   if (session instanceof NextResponse) return session;
-  const { teamId } = session;
+  const { teamId, userId: actorUserId } = session;
   const { id: conversationId } = await ctx.params;
 
   let raw: Body;
@@ -70,11 +72,36 @@ export async function POST(
     }
   }
 
-  const updated = await db.conversation.update({
-    where: { id: conversationId },
-    data: { assignedUserId },
-    include: { assignedUser: true, contact: true },
-  });
+  // Compare-and-set on the previous assignee. Two agents both filtered to
+  // "Unassigned" can race to "Assign to me" — without CAS, Prisma's
+  // findFirst→update sequence lets both succeed and the second silently
+  // overwrites the first. With CAS, the loser gets P2025 and we return 409
+  // so their UI refreshes and sees the new owner.
+  let updated;
+  try {
+    updated = await db.conversation.update({
+      where: {
+        id: conversationId,
+        teamId,
+        assignedUserId: previousAssignedUserId,
+      },
+      data: { assignedUserId },
+      include: { assignedUser: true, contact: true },
+    });
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: string }).code === "P2025"
+    ) {
+      return NextResponse.json(
+        { error: "conversation was reassigned by someone else" },
+        { status: 409 },
+      );
+    }
+    throw err;
+  }
 
   const assignedUser: User | null = updated.assignedUser
     ? {
@@ -84,6 +111,7 @@ export async function POST(
         name: updated.assignedUser.name,
         email: updated.assignedUser.email,
         avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
+        isActive: updated.assignedUser.deactivatedAt === null,
       }
     : null;
 
@@ -92,6 +120,19 @@ export async function POST(
     conversationId,
     assignedUser,
   });
+
+  // Audit. Only on actual change so "Assign to me" clicks on an already-self-
+  // assigned thread don't churn the timeline.
+  if (previousAssignedUserId !== assignedUserId) {
+    await recordConversationEvent({
+      conversationId,
+      teamId,
+      userId: actorUserId,
+      kind: "assigned",
+      before: { assignedUserId: previousAssignedUserId },
+      after: { assignedUserId },
+    });
+  }
 
   // Fire automations. Only emit on an actual change — pointless to retrigger
   // workflows when the same agent is reassigned to themselves.
@@ -104,13 +145,7 @@ export async function POST(
         unreadCount: updated.unreadCount,
         lastMessageAt: updated.lastMessageAt.toISOString(),
       },
-      contact: {
-        id: updated.contact.id,
-        phoneNumber: updated.contact.phoneNumber,
-        name: updated.contact.name,
-        email: updated.contact.email ?? null,
-        customFields: customFieldsFromJson(updated.contact.customFields),
-      },
+      contact: automationContactSnapshot(updated.contact),
       assignedUser: assignedUser
         ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
         : null,

@@ -3,6 +3,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 
 import { dispatch } from "@/lib/automations/dispatcher";
+import { automationContactSnapshot } from "@/lib/automations/events";
 import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket/server";
@@ -74,13 +75,7 @@ export async function POST(
         unreadCount: conversation.unreadCount,
         lastMessageAt: conversation.lastMessageAt.toISOString(),
       },
-      contact: {
-        id: conversation.contact.id,
-        phoneNumber: conversation.contact.phoneNumber,
-        name: conversation.contact.name,
-        email: conversation.contact.email ?? null,
-        customFields: cf(conversation.contact.customFields),
-      },
+      contact: automationContactSnapshot(conversation.contact),
       previousStatus,
       newStatus: status,
       // External API has no acting user — record the API key id in a future

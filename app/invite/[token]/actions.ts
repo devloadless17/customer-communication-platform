@@ -7,6 +7,7 @@ import { auth } from "@/lib/auth/better-auth";
 import { db } from "@/lib/db";
 import { hashInviteToken } from "@/lib/auth/invite-token";
 import { hashPassword, isPasswordBreached, validatePasswordStructure } from "@/lib/auth/password";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Accept an invite. The token in the URL is hashed and looked up; we verify
@@ -52,6 +53,7 @@ export async function acceptInviteAction(
       : await hashPassword(password);
 
   let signInEmail: string;
+  let teamId: string;
 
   try {
     const result = await db.$transaction(async (tx) => {
@@ -92,10 +94,11 @@ export async function acceptInviteAction(
         data: { acceptedAt: new Date() },
       });
 
-      return { email: invite.email };
+      return { email: invite.email, teamId: invite.teamId };
     });
 
     signInEmail = result.email;
+    teamId = result.teamId;
   } catch (err) {
     if (err instanceof InviteError) return { error: err.message };
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -104,6 +107,14 @@ export async function acceptInviteAction(
     console.error("[invite/accept] failed", err);
     return { error: "Something went wrong accepting the invite." };
   }
+
+  // Fan out so any admin watching /settings/team sees the pending list
+  // shrink (this invite is now accepted) AND the members list grow (the
+  // new user just appeared). Single team-room emit for each scope; the
+  // catalog-sync boundary on /settings calls router.refresh() and the
+  // page re-fetches both lists in parallel.
+  emitCatalogChange(teamId, "invites");
+  emitCatalogChange(teamId, "members");
 
   const signIn = await signInWithCredentials(signInEmail, password);
   if (!signIn.ok) {

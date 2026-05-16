@@ -38,6 +38,31 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   // Custom server (server.ts) replaces Next's default server, so the
   // standalone output pattern from slice 1 is dropped.
+  //
+  // Router cache: keep dynamic segments (e.g. /inbox/[conversationId]) in the
+  // client-side router cache for 60s. Re-clicking a recently-viewed chat is
+  // then instant — no Postgres round trip, no loading skeleton — because the
+  // rendered RSC payload is served from memory. Socket events keep the cached
+  // page fresh while it's on screen, and 60s is short enough that a chat the
+  // agent left an hour ago will still refetch on revisit. Default is 0
+  // (always re-fetch); 60 trades a small staleness window for instant feel.
+  experimental: {
+    staleTimes: {
+      dynamic: 60,
+      static: 300,
+    },
+  },
+  // Per-icon imports for lucide-react. Without this, Next's bundler treats
+  // `import { X, Y } from "lucide-react"` as importing the full barrel and
+  // tree-shaking is unreliable across edge/server boundaries. The transform
+  // rewrites each named import to a deep path so only the icon's own module
+  // hits the bundle. ~50–70 KB gzipped saved on the inbox chunk where ~30
+  // icons are imported across the conversation list, header, and composer.
+  modularizeImports: {
+    "lucide-react": {
+      transform: "lucide-react/dist/esm/icons/{{kebabCase member}}",
+    },
+  },
   async headers() {
     return [
       {

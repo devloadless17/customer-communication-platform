@@ -100,7 +100,7 @@ export function RunsTable({ automationId }: { automationId: string }) {
                   <span className="text-xs">
                     attempt {r.attempts}
                   </span>
-                  <span className="ml-auto text-[11px] text-muted-foreground">
+                  <span className="ml-auto text-[11px] text-muted-foreground" suppressHydrationWarning>
                     {new Date(r.startedAt).toLocaleString()}
                   </span>
                 </button>

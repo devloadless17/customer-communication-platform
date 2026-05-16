@@ -26,6 +26,13 @@ export interface User {
   name: string;
   email: string;
   avatarUrl?: string;
+  /**
+   * False when the row has a `deactivatedAt` timestamp. Lets the client tell
+   * who's still on the roster (sidebar / online dots / assignment dropdown)
+   * vs. who only exists for historical message attribution. We expose the
+   * boolean — not the date — to keep the client payload lean.
+   */
+  isActive: boolean;
 }
 
 /** How this contact got into the DB. See ContactSource enum on the schema. */
@@ -34,7 +41,21 @@ export type ContactSource = "inbound" | "manual";
 export interface Contact {
   id: string;
   teamId: string;
-  phoneNumber: string;
+  /**
+   * WhatsApp/SMS contacts carry a phone number; Instagram/Telegram contacts
+   * don't (their identity lives in `identityProvider` + `externalContactId`).
+   * Nullable end-to-end so the UI degrades to "show what identity we have."
+   */
+  phoneNumber: string | null;
+  /**
+   * Multi-channel identity. Set together with `externalContactId` when the
+   * contact's natural id isn't a phone number — Instagram scoped-user-id,
+   * Telegram chat-id, etc. WhatsApp contacts leave both null and use
+   * phoneNumber. The DB enforces `(teamId, identityProvider, externalContactId)`
+   * uniqueness so a contact can be deduped on either key.
+   */
+  identityProvider?: ProviderName | null;
+  externalContactId?: string | null;
   name: string;
   avatarUrl?: string;
   email?: string;
@@ -43,9 +64,11 @@ export interface Contact {
   customFields: Record<string, string>;
   source: ContactSource;
   /**
-   * Tags currently applied to this contact. Empty array when the contact has
-   * none. Tags themselves are listed in `/api/team/tags`; the strings here
-   * are just the tag ids — the UI joins against the catalog.
+   * Derived view: the union of tag ids across every conversation this contact
+   * owns. Tags live on Conversation (post the conversation-tags refactor), so
+   * a contact's "tags" is computed by JOINing through their threads.
+   * Populated only by routes that opt into the (cheap) extra JOIN; otherwise
+   * undefined — never trust this client-side without a server-rendered value.
    */
   tagIds?: string[];
   /**
@@ -267,10 +290,24 @@ export interface Conversation {
   contactId: string;
   assignedUserId: string | null;
   status: ConversationStatus;
-  /** Denormalized for inbox-list rendering — kept in sync server-side. */
+  /**
+   * Team-wide "has anything not been acked yet" hint. The sidebar badge
+   * counts unread for the SIGNED-IN agent — that calc reads
+   * `ConversationReadReceipt` rows for the user and compares against
+   * `lastMessageAt`. This counter exists for cheap previews and the
+   * conversation:read socket payload; don't use it as the canonical "is
+   * this unread for the current user" answer.
+   */
   unreadCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
+  /**
+   * True iff there's at least one message in this conversation newer than
+   * the signed-in agent's read receipt. Populated server-side on routes that
+   * resolve a session; undefined elsewhere (server-to-server calls,
+   * background runners) so callers can't accidentally trust a missing value.
+   */
+  unreadForMe?: boolean;
 }
 
 /**

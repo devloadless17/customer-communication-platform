@@ -77,6 +77,7 @@ export function mapUser(u: PrismaUser): User {
     name: u.name,
     email: u.email,
     avatarUrl: u.avatarUrl ?? undefined,
+    isActive: u.deactivatedAt === null,
   };
 }
 
@@ -85,6 +86,8 @@ export function mapContact(c: PrismaContact): Contact {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
+    identityProvider: c.identityProvider as ProviderName | null,
+    externalContactId: c.externalContactId,
     name: c.name,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,

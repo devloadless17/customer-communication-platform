@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { dispatch } from "@/lib/automations/dispatcher";
+import { automationContactSnapshot } from "@/lib/automations/events";
 import { db } from "@/lib/db";
+import { recordConversationEvent } from "@/lib/inbox/events";
 import { emitToTeam } from "@/lib/socket/server";
 import type { ConversationStatus } from "@/lib/types";
 
@@ -53,16 +55,47 @@ export async function POST(
   }
   const previousStatus = conversation.status as ConversationStatus;
 
-  await db.conversation.update({
-    where: { id: conversationId },
-    data: { status },
-  });
+  // Compare-and-set on the previous status. Two tabs racing "Close" + "Open"
+  // would otherwise let the later write silently clobber the earlier; with
+  // CAS, the loser gets a 409 and refetches so the UI matches reality.
+  try {
+    await db.conversation.update({
+      where: { id: conversationId, teamId, status: previousStatus },
+      data: { status },
+    });
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: string }).code === "P2025"
+    ) {
+      return NextResponse.json(
+        { error: "conversation status changed by someone else" },
+        { status: 409 },
+      );
+    }
+    throw err;
+  }
 
   emitToTeam(teamId, "conversation:status", {
     teamId,
     conversationId,
     status,
   });
+
+  // Audit. No-op for self-transitions so re-saves of the same status don't
+  // bloat the timeline.
+  if (previousStatus !== status) {
+    await recordConversationEvent({
+      conversationId,
+      teamId,
+      userId,
+      kind: "status_changed",
+      before: { status: previousStatus },
+      after: { status },
+    });
+  }
 
   // Fire automations. No-op for self-transitions (e.g. clicking "Open" while
   // already open) so workflows don't trigger on UI re-renders.
@@ -75,13 +108,7 @@ export async function POST(
         unreadCount: conversation.unreadCount,
         lastMessageAt: conversation.lastMessageAt.toISOString(),
       },
-      contact: {
-        id: conversation.contact.id,
-        phoneNumber: conversation.contact.phoneNumber,
-        name: conversation.contact.name,
-        email: conversation.contact.email ?? null,
-        customFields: customFieldsFromJson(conversation.contact.customFields),
-      },
+      contact: automationContactSnapshot(conversation.contact),
       previousStatus,
       newStatus: status,
       changedByUserId: userId,

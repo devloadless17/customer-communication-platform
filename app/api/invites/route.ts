@@ -5,6 +5,50 @@ import { db } from "@/lib/db";
 import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/lib/auth/invite-token";
 import { assignableRoles } from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
+import { emitCatalogChange } from "@/lib/socket/server";
+
+/**
+ * Admin-only: list every PENDING invite for the team (un-accepted,
+ * un-expired). Drives the "Pending invites" panel in /settings/team so
+ * admins can see who's been invited and revoke a link before it's used.
+ *
+ * Filters out accepted invites (those are audit rows; the redeeming user
+ * shows up in the team list instead) and expired ones (the accept-page
+ * already rejects them; surfacing them just clutters the UI).
+ */
+export async function GET() {
+  const session = await requireAdmin();
+  if (session instanceof NextResponse) return session;
+  const { teamId } = session;
+
+  const rows = await db.invite.findMany({
+    where: {
+      teamId,
+      acceptedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      expiresAt: true,
+      createdAt: true,
+      createdBy: { select: { name: true } },
+    },
+  });
+
+  return NextResponse.json({
+    invites: rows.map((r) => ({
+      id: r.id,
+      email: r.email,
+      role: r.role as Role,
+      expiresAt: r.expiresAt.toISOString(),
+      createdAt: r.createdAt.toISOString(),
+      createdByName: r.createdBy?.name ?? "Removed user",
+    })),
+  });
+}
 
 /**
  * Admin-only: create an invite link for a teammate.
@@ -65,8 +109,20 @@ export async function POST(req: Request) {
   // Wipe any prior pending invite for this (team, email) so the new link is
   // the only valid one. We don't touch already-accepted invites — those are
   // historical audit rows.
+  //
+  // Opportunistic side-cleanup: drop EXPIRED un-accepted invites for this
+  // team in the same query. Avoids a separate cron job for what is a
+  // low-volume table; the accept-page already rejects expired tokens, so
+  // these are just data hygiene. Scoped to teamId to keep the query bounded.
   await db.invite.deleteMany({
-    where: { teamId: session.teamId, email, acceptedAt: null },
+    where: {
+      teamId: session.teamId,
+      acceptedAt: null,
+      OR: [
+        { email },
+        { expiresAt: { lt: new Date() } },
+      ],
+    },
   });
 
   const token = generateInviteToken();
@@ -89,6 +145,11 @@ export async function POST(req: Request) {
   // which would produce unusable invite links in emails.
   const origin = process.env.BETTER_AUTH_URL || new URL(req.url).origin;
   const url = `${origin.replace(/\/$/, "")}/invite/${token}`;
+
+  // Tell every admin's open /settings/team tab that the pending list moved.
+  // The catalog-sync boundary mounted on /settings calls router.refresh()
+  // which re-runs the page server component and re-fetches the list.
+  emitCatalogChange(session.teamId, "invites");
 
   return NextResponse.json({
     invite: { id: invite.id, expiresAt: invite.expiresAt.toISOString(), url },

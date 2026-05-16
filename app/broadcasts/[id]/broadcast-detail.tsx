@@ -56,7 +56,7 @@ export interface BroadcastRecipientDto {
   id: string;
   contactId: string;
   contactName: string;
-  contactPhone: string;
+  contactPhone: string | null;
   conversationId: string | null;
   status: string;
   externalId: string | null;

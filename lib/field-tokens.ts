@@ -117,7 +117,10 @@ export function extractFieldTokens(text: string): string[] {
  */
 export interface ContactLike {
   name: string;
-  phoneNumber: string;
+  // Nullable post the multi-channel refactor — Instagram/Telegram contacts
+  // have no phone. Token resolver substitutes empty string when null, same
+  // as for any other empty field.
+  phoneNumber: string | null;
   // Optional in both senses (DB row uses null; UI Contact dto omits the
   // field entirely when absent). Resolvers fall back to empty string.
   email?: string | null;

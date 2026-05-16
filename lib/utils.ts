@@ -1,5 +1,10 @@
 import { clsx, type ClassValue } from "clsx";
-import { parsePhoneNumberFromString } from "libphonenumber-js";
+// `/min` ships the smallest country-metadata bundle libphonenumber supports
+// (~70% smaller than the default `/max`). All we use it for is
+// `formatInternational()` on E.164 numbers we already trust — the trimmed
+// metadata is plenty for that, and the saved bytes show up on every page
+// that pulls `lib/utils` into its chunk.
+import { parsePhoneNumberFromString } from "libphonenumber-js/min";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -61,12 +66,37 @@ export function formatDaySeparator(iso: string, now: Date = new Date()): string 
  * `display_phone_number` can arrive without a + or be otherwise malformed,
  * and we'd rather show *something* than crash.
  */
-export function formatPhone(raw: string): string {
+export function formatPhone(raw: string | null | undefined): string {
+  if (!raw) return "";
   const trimmed = raw.trim();
-  if (!trimmed) return raw;
+  if (!trimmed) return "";
   const withPlus = trimmed.startsWith("+") ? trimmed : `+${trimmed.replace(/[^\d]/g, "")}`;
   const parsed = parsePhoneNumberFromString(withPlus);
   if (parsed) return parsed.formatInternational();
   const digits = trimmed.replace(/\D/g, "");
   return digits ? `+${digits}` : raw;
+}
+
+/**
+ * Display string for a contact's natural identity:
+ *   - Phone number when set (WhatsApp/SMS contacts).
+ *   - "instagram:<id>", "telegram:<id>", … for channel-native identities.
+ *   - "—" fallback when neither is present (shouldn't happen post-ingest).
+ *
+ * Use this everywhere a contact is rendered as a single line and the UI
+ * doesn't already have a richer surface (channel chip + handle). Keeps
+ * non-phone contacts legible without forcing every component to learn the
+ * multi-channel identity model.
+ */
+export function formatContactIdentity(contact: {
+  phoneNumber: string | null;
+  identityProvider?: string | null;
+  externalContactId?: string | null;
+}): string {
+  if (contact.phoneNumber) return formatPhone(contact.phoneNumber);
+  if (contact.identityProvider && contact.externalContactId) {
+    const channel = contact.identityProvider.replace(/_/g, " ");
+    return `${channel}:${contact.externalContactId}`;
+  }
+  return "—";
 }

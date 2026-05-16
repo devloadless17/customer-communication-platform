@@ -143,6 +143,15 @@ export async function POST(req: Request) {
     ? loadReplySnapshotById(replyToMessageId)
     : Promise.resolve(null);
 
+  if (!conversation.contact.phoneNumber) {
+    // Reachable only on non-phone-channel contacts (future Instagram/Telegram).
+    // WhatsApp send needs a number; non-phone channels will have their own
+    // send routes per the multi-channel provider work.
+    return NextResponse.json(
+      { error: "contact_has_no_phone", detail: "This contact has no WhatsApp number." },
+      { status: 400 },
+    );
+  }
   let send;
   try {
     send = await getMetaProvider().sendText(

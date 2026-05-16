@@ -564,7 +564,7 @@ function DetailDrawer({
                 </div>
               )}
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-[11px] text-muted-foreground" suppressHydrationWarning>
                   Last synced {new Date(template.syncedAt).toLocaleString()}
                 </span>
                 <div className="flex items-center gap-2">

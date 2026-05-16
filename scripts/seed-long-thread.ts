@@ -86,7 +86,13 @@ async function main() {
     const externalId = `dev_long_${conversation.id}_${String(i).padStart(4, "0")}`;
 
     await db.message.upsert({
-      where: { externalId },
+      where: {
+        teamId_provider_externalId: {
+          teamId: conversation.teamId,
+          provider: "meta_cloud",
+          externalId,
+        },
+      },
       create: {
         teamId: conversation.teamId,
         conversationId: conversation.id,

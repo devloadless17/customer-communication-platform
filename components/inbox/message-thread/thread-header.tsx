@@ -32,7 +32,7 @@ export function ThreadHeader({
   conversationId: string;
   contactId: string;
   contactName: string;
-  phone: string;
+  phone: string | null;
   status: ConversationStatus;
   assignedUserId: string | null;
   assignedUserName: string | null;

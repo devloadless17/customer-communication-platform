@@ -16,7 +16,8 @@ import type {
 export interface ContactLabel {
   id: string;
   name: string;
-  phoneNumber: string;
+  /** Null for non-phone-channel contacts; formatContactIdentity handles display. */
+  phoneNumber: string | null;
 }
 
 /**

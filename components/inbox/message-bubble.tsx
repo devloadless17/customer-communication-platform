@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { Check } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -55,8 +56,17 @@ interface MessageBubbleProps {
  * Selection mode: the whole row becomes a checkbox toggle; the bubble is
  * rendered read-only. Pending/failed rows can't be forwarded (no real wamid
  * yet) so they show disabled and aren't selectable.
+ *
+ * Wrapped in `React.memo` at the bottom of this file. Every `message:new`
+ * socket event triggers a parent re-render where the messages array gets a
+ * new identity but the individual row objects don't (the touched row is the
+ * only one with a new ref). Default shallow comparison + useCallback-stable
+ * action handlers + primitive flags means React skips re-rendering ~all
+ * rows except the one that actually changed. Without memo, every inbound /
+ * status update / selection toggle / search keystroke re-rendered every
+ * visible bubble — the dominant perf hit on busy threads.
  */
-export function MessageBubble(props: MessageBubbleProps) {
+function MessageBubbleImpl(props: MessageBubbleProps) {
   const { message, selecting, selected, onToggleSelect } = props;
 
   if (selecting) {
@@ -296,3 +306,5 @@ function SelectCheckbox({
     </span>
   );
 }
+
+export const MessageBubble = memo(MessageBubbleImpl);

@@ -39,6 +39,14 @@ const required: Check[] = [
     hint:
       "Better Auth signing secret. Generate with: openssl rand -base64 32.",
   },
+  {
+    name: "ENCRYPTION_KEY",
+    hint:
+      "AES-256-GCM key for envelope encryption of per-team Meta secrets " +
+      "(accessToken, appSecret). Must be base64 of 32 random bytes. " +
+      "Generate with: openssl rand -base64 32. Rotating this without " +
+      "re-encrypting Team rows breaks every team's WhatsApp integration.",
+  },
 ];
 
 const prodRequired: Check[] = [

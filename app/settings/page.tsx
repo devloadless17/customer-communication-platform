@@ -3,6 +3,7 @@ import {
   ArrowRight,
   Layers,
   Sparkles,
+  Tag as TagIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -28,6 +29,13 @@ export default async function TeamSettingsIndex() {
       title: "Snippets",
       description:
         "Saved canned replies your team triggers with `/name` in the reply box.",
+    },
+    {
+      href: "/settings/tags",
+      icon: TagIcon,
+      title: "Tags",
+      description:
+        "Labels for segmenting contacts. Drives the contacts filter and tag-based broadcast audiences.",
     },
     ...(canStages
       ? [

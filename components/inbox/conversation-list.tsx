@@ -1,9 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { useLinkStatus } from "next/link";
-import { useSelectedLayoutSegment } from "next/navigation";
 import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -13,9 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
 import type {
-  Contact,
   ContactStage,
-  Conversation,
   ConversationWithRefs,
   User,
 } from "@/lib/types";
@@ -40,6 +35,10 @@ export function ConversationList({
   hasMore,
   loadingMore,
   onLoadMore,
+  activeConversationId,
+  pendingConversationId,
+  onOpenConversation,
+  onPrefetchConversation,
 }: {
   currentUser: User;
   conversations: ConversationWithRefs[];
@@ -54,8 +53,21 @@ export function ConversationList({
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
+  /** Id of the conversation the shell is currently showing. Drives the
+   *  highlighted-row style. */
+  activeConversationId: string | null;
+  /** Set to the id of a chat the agent just clicked while its data is being
+   *  fetched from /api/inbox/conversation/<id>. Lets the row render an
+   *  immediate "I heard you" state without waiting for the network. */
+  pendingConversationId: string | null;
+  /** Open a conversation in the workspace. The shell handles cache + URL
+   *  sync — this list just dispatches. */
+  onOpenConversation: (conversationId: string) => void;
+  /** Warm the workspace cache for a conversation the agent is likely about
+   *  to click. Idempotent and cheap — fires on hover/focus, no-ops if the
+   *  row is already cached or in flight. */
+  onPrefetchConversation: (conversationId: string) => void;
 }) {
-  const selectedId = useSelectedLayoutSegment();
   const { confirm, alert, confirmDialog } = useConfirm();
   // "selection mode": clicking a row toggles its checkbox instead of opening
   // the chat. Toggled by the toolbar button or auto-engaged when the agent
@@ -69,7 +81,40 @@ export function ConversationList({
     setSelectedIds(new Set());
   }, [selectionMode]);
 
+  // Hover-prefetch debounce. Without this, scrolling through 20 rows fires
+  // 20 fetches in ~200ms — those evict useful entries from the LRU before
+  // the agent has a chance to click anything. 150ms is long enough to weed
+  // out drive-by mouse paths but short enough that an intentional hover
+  // before a click still warms the cache.
+  const hoverTimerRef = useRef<number | null>(null);
+  const cancelHoverPrefetch = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
+  const scheduleHoverPrefetch = (conversationId: string) => {
+    cancelHoverPrefetch();
+    hoverTimerRef.current = window.setTimeout(() => {
+      hoverTimerRef.current = null;
+      onPrefetchConversation(conversationId);
+    }, 150);
+  };
+  useEffect(() => cancelHoverPrefetch, []);
+
+  // Entrance-animation gating — same pattern as MessageThread. Without this
+  // every row had `animate-enter` unconditionally, so a hard refresh played
+  // a 140ms fade+slideUp on the entire conversation list. Rows the user has
+  // already seen shouldn't re-animate; only genuinely-new rows (a fresh
+  // inbound that pushed a conversation to the top) should. Same trick:
+  // first render mountedRef is false → no animations; after commit we
+  // record the current set of ids; from then on, only ids that weren't in
+  // the previous snapshot get the class.
+  const animateMountedRef = useRef(false);
+  const seenIdsRef = useRef<Set<string>>(new Set());
+
   function toggle(id: string) {
+
     setSelectedIds((prev) => {
       const copy = new Set(prev);
       if (copy.has(id)) copy.delete(id);
@@ -132,6 +177,14 @@ export function ConversationList({
       return true;
     });
   }, [conversations, currentUser.id, filter, search]);
+
+  // Record what's currently visible AFTER each render so the next render can
+  // tell which rows are genuinely new and worth animating. No dependency
+  // array — runs every commit, matches MessageThread's pattern.
+  useEffect(() => {
+    animateMountedRef.current = true;
+    seenIdsRef.current = new Set(visible.map((v) => v.conversation.id));
+  });
 
   const headerTitle = useMemo(() => {
     if (filter.kind === "preset") {
@@ -229,18 +282,26 @@ export function ConversationList({
 
       <ScrollArea className="flex-1">
         <ul className="flex flex-col px-1.5 pb-3">
-          <AnimatePresence initial={false} mode="popLayout">
+          {/* Plain <li> with a CSS-only enter animation. The previous version
+              wrapped every row in framer-motion's `motion.li` with `layout`
+              for FLIP-style reorder on `message:new` events. The reorder
+              looked nice but the cost was real: every row re-ran a layout
+              measure per render, and AnimatePresence kept removed rows
+              mounted through their exit transition — multiplied over 100+
+              rows + frequent event traffic, this was the inbox's hottest
+              JS path. Matches WhatsApp/Telegram, which also don't animate
+              row reorder. */}
             {visible.map(({ conversation, contact, assignedUser }) => {
               const checked = selectedIds.has(conversation.id);
+              // Animate only NEW rows after first mount. On initial paint
+              // (mountedRef=false) and for rows already in the seen set, no
+              // animation — matches MessageThread's first-paint discipline.
+              const animateIn =
+                animateMountedRef.current && !seenIdsRef.current.has(conversation.id);
               return (
-                <motion.li
+                <li
                   key={conversation.id}
-                  layout
-                  initial={{ opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.16, ease: "easeOut" }}
-                  className="relative"
+                  className={cn("relative", animateIn && "animate-enter")}
                 >
                   {selectionMode ? (
                     // <label> wrapping the checkbox is the canonical way to
@@ -265,23 +326,31 @@ export function ConversationList({
                           contact={contact}
                           assignedUser={assignedUser}
                           active={false}
+                          pending={false}
                         />
                       </div>
                     </label>
                   ) : (
-                    <Link href={`/inbox/${conversation.id}`} prefetch={false}>
-                      <ConversationListItemWithPending
+                    <button
+                      type="button"
+                      onClick={() => onOpenConversation(conversation.id)}
+                      onMouseEnter={() => scheduleHoverPrefetch(conversation.id)}
+                      onMouseLeave={cancelHoverPrefetch}
+                      onFocus={() => onPrefetchConversation(conversation.id)}
+                      className="block w-full text-left"
+                    >
+                      <ConversationListItem
                         conversation={conversation}
                         contact={contact}
                         assignedUser={assignedUser}
-                        active={selectedId === conversation.id}
+                        active={activeConversationId === conversation.id}
+                        pending={pendingConversationId === conversation.id}
                       />
-                    </Link>
+                    </button>
                   )}
-                </motion.li>
+                </li>
               );
             })}
-          </AnimatePresence>
           {visible.length === 0 && (
             <li className="px-3 py-12 text-center text-xs text-muted-foreground">
               No conversations match.
@@ -356,30 +425,3 @@ export function ConversationList({
   );
 }
 
-/**
- * Wraps ConversationListItem with `useLinkStatus` so a click flips the row
- * into an "active-pending" state instantly — before the new RSC payload lands.
- * That single visual ack is what makes the inbox feel snappy: even on a slow
- * connection the user sees the selection register the moment they tap.
- */
-function ConversationListItemWithPending({
-  conversation,
-  contact,
-  assignedUser,
-  active,
-}: {
-  conversation: Conversation;
-  contact: Contact;
-  assignedUser: User | null;
-  active: boolean;
-}) {
-  const { pending } = useLinkStatus();
-  return (
-    <ConversationListItem
-      conversation={conversation}
-      contact={contact}
-      assignedUser={assignedUser}
-      active={active || pending}
-    />
-  );
-}

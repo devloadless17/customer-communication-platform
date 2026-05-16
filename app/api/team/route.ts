@@ -4,6 +4,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { requireAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { invalidateProviderConfig } from "@/lib/providers/config";
+import { disconnectUserSockets } from "@/lib/socket/server";
 
 /**
  * Admin-only: permanently delete the current team. This cascades through
@@ -28,12 +29,17 @@ export async function DELETE() {
   if (session instanceof NextResponse) return session;
   const teamId = session.teamId;
 
-  // Collect blob keys BEFORE the cascade nukes the message rows. Filter to
-  // non-null so we don't pass undefineds into the blob delete call.
-  const blobKeyRows = await db.message.findMany({
-    where: { teamId, mediaKey: { not: null } },
-    select: { mediaKey: true },
-  });
+  // Collect blob keys AND the full team-member id list BEFORE the cascade
+  // nukes the rows. Blob keys feed the post-delete cleanup; member ids feed
+  // the explicit socket disconnect below (the cascade clears their sessions
+  // but already-connected Socket.io clients stay live until we kick them).
+  const [blobKeyRows, teamMembers] = await Promise.all([
+    db.message.findMany({
+      where: { teamId, mediaKey: { not: null } },
+      select: { mediaKey: true },
+    }),
+    db.user.findMany({ where: { teamId }, select: { id: true } }),
+  ]);
   const blobKeys = blobKeyRows
     .map((r) => r.mediaKey)
     .filter((k): k is string => Boolean(k));
@@ -51,6 +57,23 @@ export async function DELETE() {
   // Best-effort cache eviction so a re-registered team with the same id
   // (unlikely on cuid, but harmless) won't pick up a stale provider config.
   invalidateProviderConfig(teamId);
+
+  // Kick every live socket the team's members had open. Cascade nuked their
+  // Session rows already, but Socket.io connections sit on top of an
+  // already-validated handshake and would otherwise stay subscribed to the
+  // (now empty) team room until the browser's next request hits a 401 or
+  // the underlying TCP socket times out. Disconnecting now means every
+  // teammate's tab immediately sees a connection drop — symmetrical with
+  // what we do on user-deactivate and user-delete.
+  let droppedSockets = 0;
+  for (const m of teamMembers) {
+    droppedSockets += disconnectUserSockets(m.id);
+  }
+  if (droppedSockets > 0) {
+    console.info(
+      `[api/team DELETE] dropped ${droppedSockets} live socket(s) across ${teamMembers.length} member(s)`,
+    );
+  }
 
   // Fire-and-forget blob cleanup. Don't make the user wait on UploadThing's
   // batch delete (can be 5-30s for a busy team), and don't fail the delete

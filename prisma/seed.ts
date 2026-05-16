@@ -241,7 +241,13 @@ async function main() {
     for (const [idx, m] of c.messages.entries()) {
       const externalId = `seed_${c.id}_${idx}`;
       await db.message.upsert({
-        where: { externalId },
+        where: {
+          teamId_provider_externalId: {
+            teamId: TEAM.id,
+            provider: "meta_cloud",
+            externalId,
+          },
+        },
         create: {
           teamId: TEAM.id, conversationId: c.id, externalId,
           senderUserId: m.dir === "out" ? m.senderUserId : null,

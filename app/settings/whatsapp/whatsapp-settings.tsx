@@ -28,6 +28,10 @@ export interface WhatsappCurrent {
   // selectively. Only ever rendered to admins viewing their own team.
   accessToken: string | null;
   appSecret: string | null;
+  // True when a stored secret exists but couldn't be decrypted (most often
+  // ENCRYPTION_KEY changed between write and read). The form is shown empty
+  // and the banner tells the admin to re-paste from Meta.
+  credentialsUndecryptable?: boolean;
 }
 
 export function WhatsappSettings({
@@ -45,7 +49,12 @@ export function WhatsappSettings({
   const { confirm, confirmDialog } = useConfirm();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(!current.connected);
+  // Open the form by default when there are no creds yet, OR when the stored
+  // creds couldn't be decrypted (key rotated / different env) — the admin
+  // needs to re-paste in both cases.
+  const [showForm, setShowForm] = useState(
+    !current.connected || Boolean(current.credentialsUndecryptable),
+  );
 
   const webhookUrl = `${webhookBaseUrl}/api/webhooks/meta/${teamId}`;
 

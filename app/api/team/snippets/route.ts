@@ -3,6 +3,7 @@ import { revalidateTag } from "next/cache";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Team snippets CRUD.
@@ -90,8 +91,11 @@ export async function POST(req: Request) {
       data: { teamId, name, label, body, createdById: userId },
     });
     // Invalidate the inbox-layout's cached snippet list so the next
-    // navigation hydrates the new row immediately.
+    // navigation hydrates the new row immediately. The socket emit pushes
+    // the change to every connected tab right now so a teammate composing
+    // a reply on another tab sees the new snippet without a refresh.
     revalidateTag("snippets");
+    emitCatalogChange(teamId, "snippets");
     return NextResponse.json({ ok: true, id: created.id });
   } catch (err) {
     // Unique constraint on (teamId, name) — friendly error.

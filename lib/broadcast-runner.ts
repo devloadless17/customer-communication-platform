@@ -46,11 +46,24 @@ import type { Message } from "@/lib/types";
  * mid-broadcast doesn't leave them dangling — but in-flight Meta sends from
  * the dead process are not retried (we don't know if they landed).
  *
- * Rate: a 200ms gap between sends keeps us at ~5 msg/sec, well under Meta's
- * default tier 1 limit (1000 unique recipients / 24h, 80 msg/sec hard cap).
+ * Rate: SEND_CONCURRENCY workers, each leaving a 200ms gap between its
+ * own sends → ~25 msg/sec aggregate, well under Meta's 80 msg/sec hard cap.
+ * Earlier versions were single-threaded at ~5/sec, which made a 1k-recipient
+ * broadcast take ~3 minutes; concurrency cuts that to under a minute without
+ * risking rate-limit responses.
  */
 
 const SEND_GAP_MS = 200;
+const SEND_CONCURRENCY = 5;
+/**
+ * Hard cap on recipients processed in-process. CLAUDE.md notes the
+ * scaling cliff at ~10k: the recipients list is loaded into memory once at
+ * the top of `runBroadcast`, and the worker pool holds per-task closures.
+ * Past this size, move to a separate worker / BullMQ. Enforce here so a
+ * config drift (audience-group blow-up, accidental "send to all") can't
+ * OOM the Next.js server.
+ */
+const MAX_RECIPIENTS_IN_PROCESS = 10_000;
 
 interface BroadcastVariables {
   body: string[];
@@ -89,6 +102,14 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     // Already claimed by another runner / completed / explicitly failed —
     // never restart it from here. The reconciler on boot is the only thing
     // that revives `running` rows (by failing them).
+    return;
+  }
+
+  if (broadcast.recipients.length > MAX_RECIPIENTS_IN_PROCESS) {
+    await fail(
+      broadcast.id,
+      `Broadcast too large for in-process send: ${broadcast.recipients.length} recipients (cap ${MAX_RECIPIENTS_IN_PROCESS}). Split the audience or move to a worker.`,
+    );
     return;
   }
 
@@ -145,39 +166,136 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     status: "running",
   });
 
-  for (const recipient of broadcast.recipients) {
-    // Per-recipient conversation resolution. Outside the send try because a
-    // DB error here means we DIDN'T touch Meta — safe to mark `failed` and
-    // let the user retry.
+  // Worker-pool: SEND_CONCURRENCY workers pull from one shared queue. Each
+  // worker waits SEND_GAP_MS after its own send before grabbing the next
+  // recipient, so global throughput is bounded by (workers ÷ gap) and Meta
+  // never sees a thundering herd from a single broadcast.
+  //
+  // Counter bumps inside processOneRecipient fire-and-forget so the DB
+  // roundtrip doesn't serialize with the next recipient's send. We track
+  // their promises in `pendingBumps` so we can drain them before flipping
+  // the broadcast to `completed` — otherwise a UI watching for the status
+  // change can briefly observe sentCount + failedCount < totalCount.
+  const pendingBumps = new Set<Promise<unknown>>();
+  const queue = broadcast.recipients.slice();
+  const lanes = Math.min(SEND_CONCURRENCY, queue.length);
+  await Promise.all(
+    Array.from({ length: lanes }, async () => {
+      while (queue.length > 0) {
+        const recipient = queue.shift();
+        if (!recipient) return;
+        await processOneRecipient(
+          broadcast,
+          recipient,
+          provider,
+          config,
+          bindings,
+          variables,
+          templateBody,
+          pendingBumps,
+        );
+        if (SEND_GAP_MS > 0) await sleep(SEND_GAP_MS);
+      }
+    }),
+  );
+
+  // Drain any in-flight bumps before stamping completed. allSettled because
+  // individual bump failures are already logged inside the wrapper — we just
+  // want to wait for resolution, not surface the errors twice.
+  if (pendingBumps.size > 0) {
+    await Promise.allSettled(pendingBumps);
+  }
+
+  await db.broadcast.update({
+    where: { id: broadcast.id },
+    data: { status: "completed", completedAt: new Date() },
+  });
+  emitToTeam(broadcast.teamId, "broadcast:status", {
+    teamId: broadcast.teamId,
+    broadcastId: broadcast.id,
+    status: "completed",
+  });
+}
+
+/**
+ * One recipient's full send path: resolve conversation, send template, lock
+ * in `sent`, write the Message row, emit. Each branch maps cleanly to the
+ * matching `markRecipientFailed` + `bumpCounters({ failed: 1 })` pair so a
+ * failure mid-path doesn't leave the recipient stuck in `queued`. The
+ * concurrency pool above calls this once per recipient and applies the
+ * inter-send delay around the call.
+ */
+async function processOneRecipient(
+  broadcast: {
+    id: string;
+    teamId: string;
+    templateId: string;
+    templateName: string;
+    templateLanguage: string;
+    createdById: string | null;
+  },
+  recipient: {
+    id: string;
+    contactId: string;
+    contact: {
+      id: string;
+      name: string;
+      phoneNumber: string | null;
+      email: string | null;
+      location: string | null;
+      customFields: Prisma.JsonValue;
+    };
+  },
+  provider: ReturnType<typeof getMetaProvider>,
+  config: Awaited<ReturnType<typeof getMetaSendConfig>>,
+  bindings: VariableBindings,
+  variables: BroadcastVariables,
+  templateBody: string,
+  pendingBumps: Set<Promise<unknown>>,
+): Promise<void> {
+  if (!provider.sendTemplate) {
+    await markRecipientFailed(recipient.id, "provider does not support templates");
+    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+    return;
+  }
+  // Per-recipient conversation resolution. Outside the send try because a
+  // DB error here means we DIDN'T touch Meta — safe to mark `failed` and
+  // let the user retry.
     let conversationId: string;
     try {
+      // Strict invariant: one contact = one conversation. Reuse the existing
+      // row regardless of status; a closed conversation just reopens
+      // (→ pending) when a broadcast lands. Matches the webhook ingest path.
       const existing = await db.conversation.findFirst({
-        where: {
-          teamId: broadcast.teamId,
-          contactId: recipient.contactId,
-          status: { not: "closed" },
-        },
+        where: { teamId: broadcast.teamId, contactId: recipient.contactId },
         orderBy: { lastMessageAt: "desc" },
       });
-      const conversation =
-        existing ??
-        (await db.conversation.create({
+      let conversation = existing;
+      if (!conversation) {
+        conversation = await db.conversation.create({
           data: {
             teamId: broadcast.teamId,
             contactId: recipient.contactId,
-            // New chats land in `pending` — matches the webhook ingest
-            // default so a freshly-broadcast contact sits in the triage
-            // column until an agent claims (open) or closes it.
             status: "pending",
             lastMessagePreview: "",
           },
-        }));
+        });
+      } else if (conversation.status === "closed") {
+        conversation = await db.conversation.update({
+          where: { id: conversation.id },
+          data: { status: "pending" },
+        });
+        emitToTeam(broadcast.teamId, "conversation:status", {
+          teamId: broadcast.teamId,
+          conversationId: conversation.id,
+          status: "pending",
+        });
+      }
       conversationId = conversation.id;
     } catch (err) {
       await markRecipientFailed(recipient.id, errorDetail(err));
-      await bumpCounters(broadcast.id, broadcast.teamId, { failed: 1 });
-      if (SEND_GAP_MS > 0) await sleep(SEND_GAP_MS);
-      continue;
+      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      return;
     }
 
     // Resolve per-recipient variable values from the template's bindings.
@@ -191,13 +309,26 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       recipient.contact,
     );
 
+    // WhatsApp templates require a phone number. Skip non-phone recipients
+    // (Instagram/Telegram contacts that wandered into the audience) with a
+    // clear failure message rather than feeding `null` to Meta.
+    if (!recipient.contact.phoneNumber) {
+      await markRecipientFailed(
+        recipient.id,
+        "Contact has no phone number — WhatsApp templates require one.",
+      );
+      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      return;
+    }
+    const toPhone = recipient.contact.phoneNumber;
+
     // The send itself. Anything that throws here counts as a failed recipient
     // — Meta either rejected us or the network died, no message went out.
     let send: Awaited<ReturnType<typeof provider.sendTemplate>>;
     try {
       send = await provider.sendTemplate(
         {
-          to: recipient.contact.phoneNumber,
+          to: toPhone,
           name: broadcast.templateName,
           language: broadcast.templateLanguage,
           variables: {
@@ -209,9 +340,8 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       );
     } catch (err) {
       await markRecipientFailed(recipient.id, errorDetail(err));
-      await bumpCounters(broadcast.id, broadcast.teamId, { failed: 1 });
-      if (SEND_GAP_MS > 0) await sleep(SEND_GAP_MS);
-      continue;
+      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      return;
     }
 
     // Send SUCCEEDED. Lock in the recipient as `sent` BEFORE doing any
@@ -233,10 +363,9 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       console.warn(
         `[broadcast ${broadcast.id}] recipient ${recipient.id} was already claimed; skipping post-send bookkeeping`,
       );
-      if (SEND_GAP_MS > 0) await sleep(SEND_GAP_MS);
-      continue;
+      return;
     }
-    await bumpCounters(broadcast.id, broadcast.teamId, { sent: 1 });
+    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { sent: 1 }, pendingBumps);
 
     // Best-effort post-send bookkeeping. A failure here is a real bug worth
     // logging, but it must NEVER flip the recipient back to `failed`: the
@@ -302,21 +431,6 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         err,
       );
     }
-
-    if (SEND_GAP_MS > 0) {
-      await sleep(SEND_GAP_MS);
-    }
-  }
-
-  await db.broadcast.update({
-    where: { id: broadcast.id },
-    data: { status: "completed", completedAt: new Date() },
-  });
-  emitToTeam(broadcast.teamId, "broadcast:status", {
-    teamId: broadcast.teamId,
-    broadcastId: broadcast.id,
-    status: "completed",
-  });
 }
 
 async function markRecipientFailed(recipientId: string, message: string): Promise<void> {
@@ -350,6 +464,36 @@ async function bumpCounters(
     failedCount: updated.failedCount,
     totalCount: updated.totalCount,
   });
+}
+
+/**
+ * Fire-and-forget counter bump. Used inside the per-recipient send path so
+ * the DB roundtrip + socket emit don't block the next send. Increments are
+ * atomic at the DB level, so out-of-order completion still yields correct
+ * final totals; subscribers may briefly observe counters out of order but
+ * never miss an update (each `update` is its own committed row). Errors are
+ * logged, never thrown — a bookkeeping miss must not abort the broadcast.
+ *
+ * `pendingBumps` is a per-broadcast tracker the caller drains before flipping
+ * the row to `completed`, so a UI watching for that status change never
+ * observes sentCount + failedCount < totalCount.
+ */
+function bumpCountersFireAndForget(
+  broadcastId: string,
+  teamId: string,
+  delta: { sent?: number; failed?: number },
+  pendingBumps: Set<Promise<unknown>>,
+): void {
+  const p = bumpCounters(broadcastId, teamId, delta).catch((err) => {
+    console.error(
+      `[broadcast ${broadcastId}] counter bump failed (delta=${JSON.stringify(delta)})`,
+      err,
+    );
+  });
+  pendingBumps.add(p);
+  // Self-evict so the Set doesn't grow unbounded across a long broadcast —
+  // we only care about what's still in-flight at the drain point.
+  void p.finally(() => pendingBumps.delete(p));
 }
 
 async function fail(broadcastId: string, message: string): Promise<void> {
@@ -396,7 +540,7 @@ function resolvePerRecipientVariables(
   literals: BroadcastVariables,
   contact: {
     name: string;
-    phoneNumber: string;
+    phoneNumber: string | null;
     email: string | null;
     location: string | null;
     customFields: Prisma.JsonValue;

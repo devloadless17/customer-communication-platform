@@ -177,6 +177,15 @@ export function initSocketServer(http: HttpServer): IO {
     });
 
     socket.on("subscribe:conversation", async ({ conversationId }) => {
+      // Idempotency check first: useConversationEvents re-emits this on every
+      // reconnect, so a long-lived session sees many subscribes for the same
+      // conversation. Skip the DB lookup + emit if we're already in the room.
+      // Socket.io's join() is internally idempotent, but the auth round-trip
+      // and the typing-state emit aren't — those would fire N times per
+      // session for the same id without this guard.
+      const roomName = conversationRoom(conversationId);
+      if (socket.rooms.has(roomName)) return;
+
       // Multi-tenancy guardrail: verify the conversation belongs to the
       // socket's team before joining its room. Without this, an authenticated
       // user from team A could subscribe to a conversation in team B and
@@ -193,7 +202,7 @@ export function initSocketServer(http: HttpServer): IO {
         console.error("[socket] subscribe:conversation lookup failed", err);
         return;
       }
-      socket.join(conversationRoom(conversationId));
+      socket.join(roomName);
       socket.emit("typing:update", {
         conversationId,
         typingUserIds: snapshotTyping(conversationId),

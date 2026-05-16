@@ -281,6 +281,7 @@ async function handleAssign(
         name: updated.assignedUser.name,
         email: updated.assignedUser.email,
         avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
+        isActive: updated.assignedUser.deactivatedAt === null,
       }
     : null;
 

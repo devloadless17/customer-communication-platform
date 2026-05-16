@@ -144,6 +144,8 @@ export async function resolveAudienceGroupMembers(
   teamId: string,
   { tagIds, manualContactIds }: { tagIds: string[]; manualContactIds: string[] },
 ): Promise<string[]> {
+  if (tagIds.length === 0 && manualContactIds.length === 0) return [];
+
   const where: Prisma.ContactWhereInput =
     tagIds.length > 0
       ? {
@@ -154,8 +156,6 @@ export async function resolveAudienceGroupMembers(
           ],
         }
       : { teamId, id: { in: manualContactIds } };
-
-  if (tagIds.length === 0 && manualContactIds.length === 0) return [];
 
   const rows = await db.contact.findMany({
     where,
@@ -215,7 +215,7 @@ export async function previewAudienceContacts(
   sample: Array<{
     id: string;
     name: string;
-    phoneNumber: string;
+    phoneNumber: string | null;
     tags: Tag[];
   }>;
 }> {

@@ -96,6 +96,18 @@ enum ContactSource {
   manual
 }
 
+// What a ConversationEvent row records. The audit timeline reads these to
+// show "Agent X assigned the conversation to Y at 10:14" etc. Adding a new
+// value here is half the work — the write site (assign/status/tags route)
+// needs to call recordConversationEvent with the matching `before`/`after`
+// shape, documented per-kind in lib/inbox/events.ts.
+enum ConversationEventKind {
+  assigned
+  status_changed
+  tag_added
+  tag_removed
+}
+
 // Domain events automations can subscribe to. Adding a new value here is
 // half the work — the dispatcher (lib/automations/dispatcher.ts) needs the
 // matching call site, and the conditions evaluator
@@ -144,9 +156,11 @@ model Team {
   // registered teams haven't connected their WhatsApp number yet — they paste
   // these into /settings/whatsapp. CLAUDE.md rule #6.
   //
-  // TODO(security): metaAccessToken + metaAppSecret are stored plaintext for
-  // MVP. Wrap with envelope encryption (one app key, per-team data key) before
-  // any production traffic that isn't your own pilot.
+  // metaAccessToken + metaAppSecret are stored envelope-encrypted by
+  // lib/crypto/envelope.ts (AES-256-GCM with the app-wide ENCRYPTION_KEY).
+  // Column type stays String? — the wire format is `enc:v1:<base64>`.
+  // Legacy plaintext rows written before this rollout decrypt through
+  // unchanged; scripts/encrypt-legacy-secrets.ts rewrites them in place.
   metaPhoneNumberId      String? @unique
   metaDisplayPhoneNumber String?
   metaWabaId             String?
@@ -174,6 +188,7 @@ model Team {
   automationRuns          AutomationRun[]
   apiKeys                 TeamApiKey[]
   snippets                Snippet[]
+  conversationEvents      ConversationEvent[]
 }
 
 model User {
@@ -199,16 +214,23 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  team              Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  authoredMsgs      Message[]       @relation("AuthoredMessages")
-  authoredNotes     InternalNote[]
-  assignedConvos    Conversation[]  @relation("AssignedConversations")
-  createdInvites    Invite[]        @relation("InvitedBy")
-  createdBroadcasts Broadcast[]     @relation("CreatedBroadcasts")
-  createdAudienceGroups AudienceGroup[] @relation("CreatedAudienceGroups")
-  createdSnippets   Snippet[]       @relation("CreatedSnippets")
-  sessions          Session[]
-  accounts          Account[]
+  team                  Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  authoredMsgs          Message[]                 @relation("AuthoredMessages")
+  authoredNotes         InternalNote[]
+  assignedConvos        Conversation[]            @relation("AssignedConversations")
+  createdInvites        Invite[]                  @relation("InvitedBy")
+  createdBroadcasts     Broadcast[]               @relation("CreatedBroadcasts")
+  createdAudienceGroups AudienceGroup[]           @relation("CreatedAudienceGroups")
+  createdSnippets       Snippet[]                 @relation("CreatedSnippets")
+  // Per-agent read state. One row per (user, conversation) the agent has
+  // ever read. Cascading from User: when a user is hard-deleted their
+  // receipts go too (they're personal state, not audit data).
+  readReceipts          ConversationReadReceipt[]
+  // Audit-log authorship. Nullable on the event row + SetNull so deleting a
+  // user keeps the audit trail; the timeline just renders "Removed user".
+  authoredEvents        ConversationEvent[]
+  sessions              Session[]
+  accounts              Account[]
 
   @@index([teamId])
 }
@@ -311,45 +333,65 @@ model Snippet {
 }
 
 model Contact {
-  id           String   @id @default(cuid())
-  teamId       String
-  phoneNumber  String
-  name         String
-  avatarUrl    String?
+  id                String        @id @default(cuid())
+  teamId            String
+  // Nullable so non-phone channels (Instagram, Telegram) can land contacts
+  // without a phone number. WhatsApp contacts always populate it; the
+  // existing webhook + manual-create + CSV-import paths still set it
+  // explicitly. The compound unique below stays valid since Postgres treats
+  // multiple NULLs as distinct.
+  phoneNumber       String?
+  // Multi-channel identity. Used when phoneNumber isn't the natural key
+  // (Instagram scoped-user-id, Telegram chat-id). For WhatsApp these are
+  // null and phoneNumber is the identity. The compound unique below allows
+  // future Instagram/Telegram ingest to dedupe contacts by their native id.
+  identityProvider  ProviderName?
+  externalContactId String?
+  name              String
+  avatarUrl         String?
   // Optional profile fields surfaced in the right-rail contact panel.
-  email        String?
-  location     String?
+  email             String?
+  location          String?
   // Bag of contact-level custom field values, keyed by field key.
   // - Keys defined in ContactFieldDefinition are the team-wide schema (always
   //   shown on every contact, even when blank).
   // - Keys NOT in the team schema are per-contact extras (one-offs added on
   //   a single contact). Both kinds are string-valued for now.
-  customFields Json          @default("{}")
+  customFields      Json          @default("{}")
   // Customer-lifecycle stage. Per-team configurable list (managed in
   // /settings/stages). Defaulted to the team's `isDefault` stage at create
   // time — see ensureDefaultStage in lib/queries.ts. SetNull on delete so
   // removing a stage doesn't take its contacts with it; the bulk-move flow
   // in /api/team/stages/[id] DELETE empties this manually first.
-  stageId      String?
+  stageId           String?
   // How this row got into the DB. Defaulted to inbound because the webhook
   // ingest path uses the bare default; the manual create + CSV import paths
   // explicitly set 'manual'.
-  source       ContactSource @default(inbound)
-  createdAt    DateTime      @default(now())
+  source            ContactSource @default(inbound)
+  createdAt         DateTime      @default(now())
 
-  team               Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  stage              ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
-  conversations      Conversation[]
+  team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  conversations       Conversation[]
   broadcastRecipients BroadcastRecipient[]
   // Many-to-many: an agent tags a contact with one or more labels for
   // segmentation. Implicit join table — Prisma manages the link rows.
-  tags               Tag[]
+  // Tags live on Contact (NOT Conversation): one contact = one conversation
+  // in this app's invariant (closed threads reopen rather than fragment),
+  // so per-thread tagging would be dead complexity. See the
+  // 20260516160000_revert_conversation_tags migration for the history of
+  // why this lives here and not on Conversation.
+  tags                Tag[]
   // M2M with saved audience groups via manual membership. Dynamic membership
   // (by tag) doesn't materialize here — it's resolved at send time.
-  audienceGroups     AudienceGroup[] @relation("AudienceGroupContacts")
+  audienceGroups      AudienceGroup[]      @relation("AudienceGroupContacts")
 
   // A phone number is unique within a team, but the same number can exist across tenants.
   @@unique([teamId, phoneNumber])
+  // Compound identity for non-phone channels. Only enforced when both fields
+  // are set — Postgres treats NULL as distinct in unique constraints, so
+  // WhatsApp-only contacts (both nulls) coexist freely.
+  @@unique([teamId, identityProvider, externalContactId])
   @@index([teamId])
   @@index([teamId, source])
   @@index([teamId, stageId])
@@ -426,11 +468,20 @@ model Conversation {
   lastMessagePreview String             @default("")
   createdAt          DateTime           @default(now())
 
-  team         Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  contact      Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  assignedUser User?          @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  team         Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contact      Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignedUser User?                     @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
   messages     Message[]
   notes        InternalNote[]
+  // Per-agent read state. The team-wide `unreadCount` on this row is still
+  // the source of truth for "are there messages here nobody has acked," but
+  // an agent's personal badge is computed against their receipt row.
+  readReceipts ConversationReadReceipt[]
+  // Audit timeline rows for this conversation. Cascade with the parent —
+  // a deleted conversation drops its history. Team-level audit (if we want
+  // a global "show me everything" feed) lives on the ConversationEvent.teamId
+  // index, independent of cascade.
+  events       ConversationEvent[]
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
@@ -445,8 +496,13 @@ model Message {
   id             String           @id @default(cuid())
   teamId         String
   conversationId String
-  // Provider-assigned id; UNIQUE across messages so duplicate webhooks dedupe via upsert.
-  externalId     String           @unique
+  // Provider-assigned id. Dedupe via the compound unique below — bare
+  // `@unique` would collide across providers because Meta's WhatsApp wamid
+  // and Instagram message-id share the same opaque-string shape and could
+  // theoretically clash (Telegram numeric ids definitely will against
+  // something). Compound on (teamId, provider, externalId) keeps each
+  // channel's id space isolated.
+  externalId     String
   // null on inbound — only outbound has an authoring agent.
   senderUserId   String?
   // For text-only messages this is the body. For media messages this holds
@@ -490,7 +546,13 @@ model Message {
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
+  // NOTE: a partial index on inbound-only messages also exists in the DB
+  // (see migration add_chat_perf_indexes). Prisma can't express partial
+  // indexes in `@@index`, so it's declared in raw SQL. It powers the
+  // "what was the contact's last inbound?" lookups (24h-window UI +
+  // getConversationWithRefs.lastInboundAt) without scanning outbound rows.
 
+  @@unique([teamId, provider, externalId])
   @@index([conversationId, timestamp])
   @@index([teamId])
   @@index([replyToMessageId])
@@ -499,11 +561,6 @@ model Message {
   // serves chronological/range scans; this one is purpose-built for the
   // backward keyset cursor with id as the same-millisecond tiebreaker.
   @@index([conversationId, timestamp(sort: Desc), id(sort: Desc)])
-  // NOTE: a partial index on inbound-only messages also exists in the DB
-  // (see migration add_chat_perf_indexes). Prisma can't express partial
-  // indexes in `@@index`, so it's declared in raw SQL. It powers the
-  // "what was the contact's last inbound?" lookups (24h-window UI +
-  // getConversationWithRefs.lastInboundAt) without scanning outbound rows.
 }
 
 // Pending team invite. Admin POSTs to /api/invites; the link contains a
@@ -543,19 +600,19 @@ model Invite {
 // id — the sync upserts by the natural key so the cached row tracks the
 // latest version.
 model MessageTemplate {
-  id          String           @id @default(cuid())
-  teamId      String
-  externalId  String?
-  name        String
-  language    String
-  category    TemplateCategory
-  status      TemplateStatus
+  id               String           @id @default(cuid())
+  teamId           String
+  externalId       String?
+  name             String
+  language         String
+  category         TemplateCategory
+  status           TemplateStatus
   // Body text with `{{1}}, {{2}}, …` placeholders. Denormalized from components
   // for cheap previews / search; the canonical source is `components`.
-  bodyText    String           @default("")
+  bodyText         String           @default("")
   // Full components array as Meta returned it. Schema:
   //   [{ type: "HEADER" | "BODY" | "FOOTER" | "BUTTONS", format?, text?, buttons? }]
-  components  Json
+  components       Json
   // Per-variable metadata layered on top of Meta's positional `{{n}}` model:
   // human-readable label + source (manual / contact field / custom field) +
   // optional fallback value used at send time when the contact's field is
@@ -572,8 +629,8 @@ model MessageTemplate {
   // Empty `{}` for templates synced from Meta before bindings existed — the
   // runner treats a missing binding the same as `manual`, so old broadcasts
   // keep working.
-  variableBindings Json    @default("{}")
-  syncedAt    DateTime         @default(now())
+  variableBindings Json             @default("{}")
+  syncedAt         DateTime         @default(now())
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
@@ -594,10 +651,14 @@ model Tag {
   color     String   @default("slate")
   createdAt DateTime @default(now())
 
-  team     Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  contacts Contact[]
-  // M2M with audience groups built off a tag-based filter. A group with tags
-  // = "ramadan, women" includes the union of contacts carrying any of them.
+  team           Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  // Tags live on Contact. Implicit M2M; join table is `_ContactToTag` (re-
+  // created by the revert migration). One contact = one conversation in
+  // this app, so per-thread tagging would be dead complexity.
+  contacts       Contact[]
+  // M2M with audience groups built off a tag-based filter. A group with
+  // tags = "ramadan, women" includes the union of contacts carrying any
+  // of them.
   audienceGroups AudienceGroup[] @relation("AudienceGroupTags")
 
   @@unique([teamId, name])
@@ -627,8 +688,8 @@ model AudienceGroup {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  team      Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User? @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: SetNull)
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("CreatedAudienceGroups", fields: [createdById], references: [id], onDelete: SetNull)
   tags      Tag[]     @relation("AudienceGroupTags")
   contacts  Contact[] @relation("AudienceGroupContacts")
 
@@ -751,11 +812,11 @@ model InternalNote {
 // before invoking the action so partial failures are always auditable.
 
 model Automation {
-  id          String                 @id @default(cuid())
-  teamId      String
-  name        String
-  enabled     Boolean                @default(true)
-  trigger     AutomationTriggerEvent
+  id      String                 @id @default(cuid())
+  teamId  String
+  name    String
+  enabled Boolean                @default(true)
+  trigger AutomationTriggerEvent
 
   // List of AND'd condition rows: `[{ field, op, value }, ...]`. An empty
   // array means "fire on every trigger event". Field+op pairs are validated
@@ -770,53 +831,53 @@ model Automation {
   //            "starts_with" | "ends_with" | "regex" | "is_null" | "is_not_null",
   //     value: string  // ignored for is_null / is_not_null
   //   }]
-  conditions  Json                   @default("[]")
+  conditions Json @default("[]")
 
-  actionType  AutomationActionType   @default(webhook)
+  actionType   AutomationActionType @default(webhook)
   // Action-specific config. For `webhook`:
   //   { url: string, bearerToken?: string, customHeaders?: { [k]: string },
   //     timeoutMs?: number }
   // Validated on write by the management API route.
   actionConfig Json
 
-  createdAt   DateTime               @default(now())
-  updatedAt   DateTime               @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  team        Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  runs        AutomationRun[]
+  team Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runs AutomationRun[]
 
   // Hot path: the dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true`.
   @@index([teamId, trigger, enabled])
 }
 
 model AutomationRun {
-  id              String                 @id @default(cuid())
-  automationId    String
+  id           String                 @id @default(cuid())
+  automationId String
   // Denormalized so the team-scoped runs feed doesn't have to JOIN through
   // Automation just to filter — and so a deleted automation still leaves
   // auditable history on the team. (Cascade is on automationId; if the rule
   // is deleted, its runs go too. That's intentional: per-rule debugging.)
-  teamId          String
-  status          AutomationRunStatus    @default(queued)
-  trigger         AutomationTriggerEvent
+  teamId       String
+  status       AutomationRunStatus    @default(queued)
+  trigger      AutomationTriggerEvent
 
   // Snapshot of the payload that was (or would have been) sent to the
   // action. Keeping the body verbatim makes "why did this fire?" debugging
   // possible without rehydrating the source event from Postgres.
-  eventPayload    Json
+  eventPayload Json
 
-  attempts        Int                    @default(0)
-  responseStatus  Int?
+  attempts       Int     @default(0)
+  responseStatus Int?
   // Response body, truncated to ~2KB by the action runner — we don't want
   // a verbose n8n error page to bloat the DB.
-  responseBody    String?
-  errorMessage    String?
+  responseBody   String?
+  errorMessage   String?
 
-  startedAt       DateTime               @default(now())
-  finishedAt      DateTime?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
 
-  automation      Automation             @relation(fields: [automationId], references: [id], onDelete: Cascade)
-  team            Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  team       Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@index([automationId, startedAt(sort: Desc)])
   @@index([teamId, startedAt(sort: Desc)])
@@ -840,7 +901,75 @@ model TeamApiKey {
   createdAt   DateTime  @default(now())
   revokedAt   DateTime?
 
-  team        Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@index([teamId, revokedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Per-agent read state
+// ---------------------------------------------------------------------------
+//
+// Replaces the implicit "team-wide unreadCount" semantic with a real
+// per-(user, conversation) record. The Conversation.unreadCount counter
+// stays as a cheap "is there anything in here" preview, but the inbox
+// sidebar badge counts conversations where the *signed-in agent* has unread
+// messages — i.e. their `lastReadAt` is older than `Conversation.lastMessageAt`.
+//
+// We don't shadow every message read state; the per-message read receipts
+// model is heavier and we don't have a UX for it yet. Threshold-style
+// receipts cover the inbox-badge use case at 1/10th the row count.
+model ConversationReadReceipt {
+  id             String   @id @default(cuid())
+  userId         String
+  conversationId String
+  // The lastMessageAt the user had seen at the moment they marked-read.
+  // Comparing to Conversation.lastMessageAt yields "unread for me" without
+  // a separate counter to drift out of sync on race.
+  lastReadAt     DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, conversationId])
+  @@index([conversationId])
+}
+
+// ---------------------------------------------------------------------------
+// Conversation audit log
+// ---------------------------------------------------------------------------
+//
+// Append-only timeline of state changes on a conversation. Powers the right-
+// rail "history" panel (future) and answers the "who closed this 3 days ago"
+// question that always comes up after pilot launch.
+//
+// Schema by `kind`:
+//   assigned         — `before` = { assignedUserId: string | null }
+//                      `after`  = { assignedUserId: string | null }
+//   status_changed   — `before` = { status: ConversationStatus }
+//                      `after`  = { status: ConversationStatus }
+//   tag_added        — `after`  = { tagId: string, tagName: string }
+//   tag_removed      — `before` = { tagId: string, tagName: string }
+//
+// `userId` is the agent who performed the action. Nullable + SetNull so
+// removing an agent doesn't take their audit trail with them (the UI
+// renders "Removed user" for the actor label). For system actions (e.g.
+// a webhook auto-assignment, an automation closing a thread), `userId` is
+// null and the actor is "System."
+model ConversationEvent {
+  id             String                @id @default(cuid())
+  conversationId String
+  teamId         String
+  userId         String?
+  kind           ConversationEventKind
+  before         Json?
+  after          Json?
+  at             DateTime              @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, at(sort: Desc)])
+  @@index([teamId, at(sort: Desc)])
 }

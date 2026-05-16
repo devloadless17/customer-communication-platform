@@ -31,7 +31,15 @@ export function getClientSocket(): ClientSocket {
     transports: ["websocket", "polling"],
     autoConnect: true,
     reconnection: true,
+    // Exponential backoff with jitter. Fixed 500ms re-tries would dog-pile
+    // the server when a whole team reconnects after a deploy or transient
+    // outage. The first reconnect is fast (~500ms-625ms) so a momentary
+    // hiccup recovers instantly; subsequent attempts back off geometrically
+    // to a 5s ceiling. `randomizationFactor` adds ±25% jitter to each delay
+    // so a team of N agents doesn't all retry at the same millisecond.
     reconnectionDelay: 500,
+    reconnectionDelayMax: 5_000,
+    randomizationFactor: 0.25,
     // Same-origin: forwards the Better Auth session cookie so the server-side
     // io.use() middleware can authenticate the handshake.
     withCredentials: true,

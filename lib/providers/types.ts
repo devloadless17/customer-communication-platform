@@ -247,8 +247,34 @@ export interface UploadHeaderMediaResult {
  * provider declares its own shape; today only Meta exists. The ingest /
  * webhook routes load this from the Team row via lib/providers/config.ts.
  */
+/**
+ * Declarative per-provider feature flags. Lets channel-agnostic code branch
+ * on capabilities without instanceof checks against MetaProvider.
+ *
+ *   freeFormWindowMs   Time window (ms) inside which free-form outbound is
+ *                      allowed. Outside it, only templated sends work.
+ *                      Meta WhatsApp: 24h. Instagram (when added): different.
+ *                      Telegram, SMS, etc.: null (no such constraint).
+ *   templates          True if the provider has a server-side approved-
+ *                      template catalog. Drives whether the template picker
+ *                      renders at all.
+ *   readReceipts       True if `markIncomingRead` does anything observable
+ *                      to the customer (blue ticks etc.). Drives whether
+ *                      we bother calling it.
+ *   typingIndicators   True if `sendTypingIndicator` propagates to the
+ *                      customer's device.
+ */
+export interface ProviderCapabilities {
+  freeFormWindowMs: number | null;
+  templates: boolean;
+  readReceipts: boolean;
+  typingIndicators: boolean;
+}
+
 export interface MessagingProvider<SendConfig = unknown> {
   name: ProviderName;
+  /** Feature flags channel-agnostic code branches on. */
+  capabilities: ProviderCapabilities;
   /**
    * Pure parser: webhook JSON → normalized events. Throws on malformed input;
    * the route handler decides whether to 200 or 4xx based on the throw.

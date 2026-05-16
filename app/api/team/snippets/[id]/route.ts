@@ -3,6 +3,7 @@ import { revalidateTag } from "next/cache";
 
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Per-snippet routes.
@@ -81,6 +82,7 @@ export async function PATCH(
       return NextResponse.json({ error: "snippet not found" }, { status: 404 });
     }
     revalidateTag("snippets");
+    emitCatalogChange(teamId, "snippets");
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (
@@ -111,5 +113,6 @@ export async function DELETE(
     return NextResponse.json({ error: "snippet not found" }, { status: 404 });
   }
   revalidateTag("snippets");
+  emitCatalogChange(teamId, "snippets");
   return NextResponse.json({ ok: true });
 }

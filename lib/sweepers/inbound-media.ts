@@ -20,13 +20,15 @@ import { emitToTeam } from "@/lib/socket/server";
  * media id from the rawPayload JSONB and re-call fetchMedia + blob upload;
  * that's a larger change and orthogonal to "make the UI honest."
  *
- * Cadence: 5 min interval, 10 min stale threshold. Most downloads finish
- * within ~5s; anything still pending after 10 min is a restart casualty,
- * not slow throughput.
+ * Cadence: 1 min interval, 2 min stale threshold. Most downloads finish
+ * within ~5s; anything still pending after 2 min is a restart casualty,
+ * not slow throughput. Earlier values (5 min / 10 min) left agents staring
+ * at a stuck "downloading…" placeholder for up to 15 min after every
+ * deploy — too painful for pilot use.
  */
 
-const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
-const STALE_THRESHOLD_MS = 10 * 60 * 1000;
+const SWEEP_INTERVAL_MS = 60 * 1000;
+const STALE_THRESHOLD_MS = 2 * 60 * 1000;
 
 let timer: NodeJS.Timeout | null = null;
 

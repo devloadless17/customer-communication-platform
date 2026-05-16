@@ -10,10 +10,13 @@ import { getClientSocket } from "@/lib/socket/client";
  * moment the transport drops so the user knows their inbox is stale.
  */
 export function useSocketStatus(): { connected: boolean } {
-  const [connected, setConnected] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return getClientSocket().connected;
-  });
+  // Always start as `false`. Reading `socket.connected` in the initializer
+  // SSR-rendered `false` but the client mount could read `true` (the
+  // module-level socket can connect before React commits), and that delta
+  // lit up as a React hydration mismatch in the sidebar status dot. The
+  // useEffect below resyncs the real value on the first post-hydration
+  // render — one extra render, no flicker, no warning.
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
     const socket = getClientSocket();

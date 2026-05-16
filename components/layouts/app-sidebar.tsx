@@ -368,7 +368,11 @@ function SidebarLink({
 // Settings is split into two landing pages with shared child routes underneath
 // them, so prefix-matching alone misclassifies (every /settings/* would light
 // up Team settings). These helpers route each child page to the right parent.
-const TEAM_SETTINGS_CHILDREN = ["/settings/snippets", "/settings/stages"];
+const TEAM_SETTINGS_CHILDREN = [
+  "/settings/snippets",
+  "/settings/tags",
+  "/settings/stages",
+];
 const ACCOUNT_SETTINGS_CHILDREN = [
   "/settings/workspace",
   "/settings/account",

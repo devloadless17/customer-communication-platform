@@ -19,7 +19,14 @@ import type {
 
 export interface ExternalContact {
   id: string;
-  phoneNumber: string;
+  /**
+   * Null for non-phone channels (Instagram/Telegram). Integrators that key
+   * by phone should fall back to identityProvider+externalContactId or skip
+   * the row.
+   */
+  phoneNumber: string | null;
+  identityProvider: "meta_cloud" | null;
+  externalContactId: string | null;
   name: string;
   email: string | null;
   customFields: Record<string, string>;
@@ -53,6 +60,8 @@ export function toExternalContact(c: DbContact): ExternalContact {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
+    identityProvider: c.identityProvider,
+    externalContactId: c.externalContactId,
     name: c.name,
     email: c.email ?? null,
     customFields: normalizeCustomFields(c.customFields),

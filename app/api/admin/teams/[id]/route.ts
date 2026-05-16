@@ -4,6 +4,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { requireSuperAdmin } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { invalidateProviderConfig } from "@/lib/providers/config";
+import { disconnectUserSockets } from "@/lib/socket/server";
 
 /**
  * superAdmin-only: permanently delete ANY team on the platform. Same cascade
@@ -42,10 +43,13 @@ export async function DELETE(
     return NextResponse.json({ error: "team not found" }, { status: 404 });
   }
 
-  const blobKeyRows = await db.message.findMany({
-    where: { teamId, mediaKey: { not: null } },
-    select: { mediaKey: true },
-  });
+  const [blobKeyRows, teamMembers] = await Promise.all([
+    db.message.findMany({
+      where: { teamId, mediaKey: { not: null } },
+      select: { mediaKey: true },
+    }),
+    db.user.findMany({ where: { teamId }, select: { id: true } }),
+  ]);
   const blobKeys = blobKeyRows
     .map((r) => r.mediaKey)
     .filter((k): k is string => Boolean(k));
@@ -61,6 +65,18 @@ export async function DELETE(
   }
 
   invalidateProviderConfig(teamId);
+
+  // Same socket-kick rationale as /api/team DELETE: the cascade clears
+  // sessions but doesn't reach already-connected Socket.io clients.
+  let droppedSockets = 0;
+  for (const m of teamMembers) {
+    droppedSockets += disconnectUserSockets(m.id);
+  }
+  if (droppedSockets > 0) {
+    console.info(
+      `[api/admin/teams ${teamId} DELETE] dropped ${droppedSockets} live socket(s) across ${teamMembers.length} member(s)`,
+    );
+  }
 
   if (blobKeys.length > 0) {
     void blobStorage.delete(blobKeys);

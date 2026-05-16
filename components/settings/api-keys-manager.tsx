@@ -178,8 +178,10 @@ export function ApiKeysManager({ initialKeys }: Props) {
                   </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
                     <code className="font-mono">{k.tokenPrefix}…</code>
-                    <span>created {new Date(k.createdAt).toLocaleDateString()}</span>
-                    <span>
+                    <span suppressHydrationWarning>
+                      created {new Date(k.createdAt).toLocaleDateString()}
+                    </span>
+                    <span suppressHydrationWarning>
                       last used {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never"}
                     </span>
                   </div>

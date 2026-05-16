@@ -59,7 +59,7 @@ export function BrowserRow({
             className="text-xs text-white"
             style={{ backgroundImage: avatarGradient(contact.id) }}
           >
-            {initials(contact.name || contact.phoneNumber)}
+            {initials(contact.name || contact.phoneNumber || "?")}
           </AvatarFallback>
         </Avatar>
         <div className="min-w-0 flex-1">

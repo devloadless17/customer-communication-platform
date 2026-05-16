@@ -58,7 +58,7 @@ export async function GET() {
         ? (c.customFields as Record<string, unknown>)
         : {};
     const row: Record<string, string> = {
-      phone_number: c.phoneNumber,
+      phone_number: c.phoneNumber ?? "",
       name: c.name,
       email: c.email ?? "",
       location: c.location ?? "",

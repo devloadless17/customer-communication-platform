@@ -1,17 +1,22 @@
 /**
- * 24-hour customer service window logic.
+ * Free-form customer-service window logic.
  *
- * From CLAUDE.md: WhatsApp Cloud API only allows free-form outbound to
- * contacts that messaged us within the last 24 hours. Outside the window,
- * only pre-approved templates can be sent. This helper turns "last inbound
- * timestamp" into a UI-friendly status.
+ * Some channels (WhatsApp Cloud API) only allow free-form outbound to
+ * contacts that messaged us within a per-channel time window. Outside the
+ * window, only pre-approved templates can be sent. This module turns
+ * "last inbound timestamp" + "channel capability" into a UI-friendly status.
  *
- * Pure (no DB / no time mocking) so client and server can both compute it
- * from a serialized timestamp. The current time is `now` so callers can
- * pass `Date.now()` from a `useEffect` ticker if they want the badge to
- * update as the window approaches close.
+ * Channel-specific durations live on each provider's `capabilities.freeFormWindowMs`
+ * (lib/providers/types.ts). The constants below are the WhatsApp defaults
+ * exported for backwards compat with existing inbox UI; new code should
+ * read from provider capabilities.
+ *
+ * Pure (no DB / no time mocking) so client and server can both compute it.
+ * `now` is parameterized so a ticker hook can re-derive on each second to
+ * make the badge tick down without re-fetching.
  */
 
+/** WhatsApp's 24h customer-service window — the default we still ship. */
 export const WINDOW_DURATION_MS = 24 * 60 * 60 * 1000;
 /** Below this remaining time we flag "closing soon" so agents can wrap up. */
 export const WINDOW_CLOSING_SOON_MS = 4 * 60 * 60 * 1000;
@@ -31,6 +36,7 @@ export interface WindowStatus {
 export function computeWindowStatus(
   lastInboundAt: string | null,
   now: number = Date.now(),
+  windowMs: number = WINDOW_DURATION_MS,
 ): WindowStatus {
   if (!lastInboundAt) {
     return { state: "never", lastInboundAt: null, expiresAt: null, msUntilClose: null };
@@ -39,7 +45,7 @@ export function computeWindowStatus(
   if (Number.isNaN(lastMs)) {
     return { state: "never", lastInboundAt: null, expiresAt: null, msUntilClose: null };
   }
-  const expires = lastMs + WINDOW_DURATION_MS;
+  const expires = lastMs + windowMs;
   const msUntilClose = expires - now;
   let state: WindowState;
   if (msUntilClose <= 0) state = "closed";

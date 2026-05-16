@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { getAudienceGroup } from "@/lib/queries";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Audience group detail.
@@ -119,6 +120,7 @@ export async function PATCH(
   try {
     await db.audienceGroup.update({ where: { id }, data });
     const updated = await getAudienceGroup(teamId, id);
+    emitCatalogChange(teamId, "audience-groups");
     return NextResponse.json({ group: updated });
   } catch (err) {
     if (
@@ -150,5 +152,6 @@ export async function DELETE(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
   await db.audienceGroup.delete({ where: { id } });
+  emitCatalogChange(teamId, "audience-groups");
   return NextResponse.json({ ok: true });
 }

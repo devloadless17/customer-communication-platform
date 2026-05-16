@@ -8,6 +8,7 @@ import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/c
 import { MetaSendError, MissingWabaIdError } from "@/lib/providers/meta";
 import type { ProviderTemplate, TemplateComponent } from "@/lib/providers/types";
 import type { TemplateDto } from "@/lib/types";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Template catalog.
@@ -145,6 +146,12 @@ export async function POST() {
     where: { teamId },
     orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
   });
+
+  // Tell every tab — including the agent who triggered the refresh — that
+  // the cached template list moved. Without this, two admins watching
+  // /settings/whatsapp would see different catalogs until the second one
+  // navigated.
+  emitCatalogChange(teamId, "whatsapp-templates");
 
   return NextResponse.json({
     templates: rows.map(toDto),

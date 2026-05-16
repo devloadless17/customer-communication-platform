@@ -10,6 +10,7 @@ import type {
   TemplateCategory,
   TemplateComponent,
 } from "@/lib/providers/types";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Create a new WhatsApp template.
@@ -178,6 +179,7 @@ export async function POST(req: Request) {
     },
   });
 
+  emitCatalogChange(teamId, "whatsapp-templates");
   return NextResponse.json({ ok: true, templateId: saved.id, status: saved.status });
 }
 

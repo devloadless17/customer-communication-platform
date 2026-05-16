@@ -191,6 +191,15 @@ function mapMetaStatus(s: string | undefined): MessageStatus | null {
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
   name: "meta_cloud",
 
+  capabilities: {
+    // WhatsApp's customer-service window: 24h since last inbound. Outside
+    // it, only pre-approved templates can be sent.
+    freeFormWindowMs: 24 * 60 * 60 * 1000,
+    templates: true,
+    readReceipts: true,
+    typingIndicators: true,
+  },
+
   parseWebhook(payload: unknown): NormalizedEvent[] {
     if (!isObject(payload)) return [];
     const env = payload as MetaEnvelope;
@@ -1024,3 +1033,54 @@ export function renderTemplateBody(text: string, vars: string[]): string {
     return v && v.length > 0 ? v : `{{${idxStr}}}`;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Webhook adapter
+// ---------------------------------------------------------------------------
+
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+import type {
+  ProviderWebhookSecrets,
+  WebhookProvider,
+} from "@/lib/providers/webhook";
+
+/**
+ * Meta-specific implementation of WebhookProvider. Shares the parser with
+ * the MessagingProvider half (`metaProvider.parseWebhook`) — the two halves
+ * are the same logical adapter, just split along verify/parse vs. send.
+ *
+ * GET handshake echoes `hub.challenge` only when the request carries the
+ * team's verify token. POST validates the HMAC-SHA256 in
+ * `X-Hub-Signature-256` against the team's app secret, using the raw body
+ * bytes (Next.js's `req.text()` preserves them; calling `.json()` would
+ * re-serialize and invalidate the comparison).
+ */
+export const metaWebhookProvider: WebhookProvider = {
+  name: "meta_cloud",
+
+  verifyChallenge({ url, secrets }) {
+    const mode = url.searchParams.get("hub.mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
+    if (mode !== "subscribe" || !challenge) return null;
+    if (!secrets.verifyToken || token !== secrets.verifyToken) return null;
+    return challenge;
+  },
+
+  verifyPost({ rawBody, headers, secrets }) {
+    if (!secrets.appSecret) return false;
+    const header = headers.get("x-hub-signature-256");
+    if (!header) return false;
+    const expected =
+      "sha256=" + createHmac("sha256", secrets.appSecret).update(rawBody).digest("hex");
+    const a = Buffer.from(expected);
+    const b = Buffer.from(header);
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  },
+
+  parse(payload) {
+    return metaProvider.parseWebhook(payload);
+  },
+};

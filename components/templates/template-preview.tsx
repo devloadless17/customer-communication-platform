@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ImageIcon, FileText as FileTextIcon, Video, ExternalLink, Phone, Reply } from "lucide-react";
+import { Image as ImageIcon, FileText as FileTextIcon, Video, ExternalLink, Phone, Reply } from "lucide-react";
 
 import type { TemplateComponent } from "@/lib/providers/types";
 import { cn } from "@/lib/utils";

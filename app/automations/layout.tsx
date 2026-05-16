@@ -3,6 +3,7 @@ import { listTeamMembers } from "@/lib/queries";
 import { db } from "@/lib/db";
 
 import { AppSidebar } from "@/components/layouts/app-sidebar";
+import { CatalogSyncBoundary } from "@/components/providers/catalog-sync-boundary";
 
 /**
  * Sidebar shell for /automations/*. Mirrors broadcasts/contacts layouts so
@@ -28,13 +29,15 @@ export default async function AutomationsLayout({
   }
 
   return (
-    <div className="flex min-h-svh bg-background text-foreground">
-      <AppSidebar
-        currentUser={user}
-        team={{ id: team.id, name: team.name }}
-        teammates={teammates}
-      />
-      <main className="flex-1 overflow-y-auto">{children}</main>
-    </div>
+    <CatalogSyncBoundary>
+      <div className="flex min-h-svh bg-background text-foreground">
+        <AppSidebar
+          currentUser={user}
+          team={{ id: team.id, name: team.name }}
+          teammates={teammates}
+        />
+        <main className="flex-1 overflow-y-auto">{children}</main>
+      </div>
+    </CatalogSyncBoundary>
   );
 }

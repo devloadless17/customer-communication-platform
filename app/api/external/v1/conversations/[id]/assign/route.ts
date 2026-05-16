@@ -3,6 +3,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 
 import { dispatch } from "@/lib/automations/dispatcher";
+import { automationContactSnapshot } from "@/lib/automations/events";
 import { authenticateApiKey } from "@/lib/auth/external";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket/server";
@@ -84,6 +85,7 @@ export async function POST(
         name: updated.assignedUser.name,
         email: updated.assignedUser.email,
         avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
+        isActive: updated.assignedUser.deactivatedAt === null,
       }
     : null;
 
@@ -102,13 +104,7 @@ export async function POST(
         unreadCount: updated.unreadCount,
         lastMessageAt: updated.lastMessageAt.toISOString(),
       },
-      contact: {
-        id: updated.contact.id,
-        phoneNumber: updated.contact.phoneNumber,
-        name: updated.contact.name,
-        email: updated.contact.email ?? null,
-        customFields: cf(updated.contact.customFields),
-      },
+      contact: automationContactSnapshot(updated.contact),
       assignedUser: assignedUser
         ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
         : null,

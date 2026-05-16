@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket/client";
+import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import type { ConversationWithRefs, CursorPage, Message } from "@/lib/types";
 
 /**
@@ -27,6 +28,36 @@ function sortByTimestamp(messages: Message[]): Message[] {
     if (ka !== kb) return ka - kb;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
+  return next;
+}
+
+/**
+ * Fast path for the common case: a new inbound/outbound message lands at
+ * the end of an already-sorted list. Walks back past pending/failed
+ * (sortKey = ∞) entries and inserts the new message at the right boundary.
+ * Falls back to a full sort if the message is out of order (rare — typically
+ * only on optimistic-vs-real reconcile when the server timestamp is earlier
+ * than the local one). Avoids the O(N log N) of a full Array.sort on every
+ * inbound, which adds up on busy threads.
+ */
+function appendSorted(messages: Message[], incoming: Message): Message[] {
+  if (messages.length === 0) return [incoming];
+  const incomingKey = sortKey(incoming);
+
+  // Find the index where the new message belongs. Scanning from the right is
+  // ~O(1) for the dominant case (new message at/near the end), and capped at
+  // O(N) for the pathological case which would also degrade a full sort.
+  let insertAt = messages.length;
+  while (insertAt > 0) {
+    const prev = messages[insertAt - 1]!;
+    if (sortKey(prev) <= incomingKey) break;
+    insertAt -= 1;
+  }
+  if (insertAt === messages.length) {
+    return [...messages, incoming];
+  }
+  const next = messages.slice();
+  next.splice(insertAt, 0, incoming);
   return next;
 }
 
@@ -97,6 +128,11 @@ export interface ConversationEventsState {
 export function useConversationEvents(
   initial: ConversationWithRefs,
   initialNextOlderCursor: string | null,
+  // Called after the mark-read POST resolves so the shell can patch its
+  // cached thread snapshot (unreadCount → 0). Without this, switching back
+  // to a thread already viewed this session would re-fire the POST every
+  // time MessageThread re-mounts.
+  onMarkRead?: (conversationId: string) => void,
 ): ConversationEventsState {
   const router = useRouter();
   const [data, setData] = useState<ConversationWithRefs>(initial);
@@ -146,7 +182,7 @@ export function useConversationEvents(
       inFlightOlder.current = true;
       setLoadingOlder(true);
       try {
-        const res = await fetch(
+        const res = await fetchWithSessionGuard(
           `/api/conversations/${conversationId}/messages?before=${encodeURIComponent(cursor)}`,
         );
         if (!res.ok) return 0;
@@ -178,23 +214,30 @@ export function useConversationEvents(
     [conversationId],
   );
 
-  // Throttled mark-read: a burst of inbound messages must not fan out into a
-  // burst of HTTP calls. While one is in flight we just remember to fire one
-  // more on completion — the second call coalesces any further requests.
+  // Mark-read coordination. The shell tells us via `onMarkRead` to patch
+  // the cached unreadCount=0 after the POST succeeds, so re-mounting the
+  // thread (chat-switch back) finds initialUnread=0 and skips the POST.
+  // Throttled: a burst of inbound messages must not fan out into a burst of
+  // HTTP calls; while one is in flight we coalesce.
   const inFlight = useRef(false);
   const queued = useRef(false);
+  const onMarkReadRef = useRef(onMarkRead);
+  onMarkReadRef.current = onMarkRead;
   const markRead = useCallback(async () => {
     if (inFlight.current) {
       queued.current = true;
       return;
     }
     inFlight.current = true;
+    let ok = false;
     try {
-      await fetch(`/api/conversations/${conversationId}/read`, { method: "POST" });
+      const res = await fetch(`/api/conversations/${conversationId}/read`, { method: "POST" });
+      ok = res.ok;
     } catch {
       // Silent — server state reconciles on the next call / page reload.
     } finally {
       inFlight.current = false;
+      if (ok) onMarkReadRef.current?.(conversationId);
       if (queued.current) {
         queued.current = false;
         void markRead();
@@ -202,11 +245,12 @@ export function useConversationEvents(
     }
   }, [conversationId]);
 
-  // Mark read when the thread becomes visible (and again whenever the
-  // conversationId changes — i.e. the user navigated to a different thread).
-  // Skip when the server already says unreadCount is zero so we don't fan
-  // out a needless POST + team-wide `conversation:read` broadcast on every
-  // navigation.
+  // Mark read when the thread becomes visible. The shell remounts this
+  // hook on every chat switch (via key=displayedId), and on remount we read
+  // initial.conversation.unreadCount from the cache — which the shell's
+  // onMarkRead callback has already patched to 0 if we marked the thread
+  // read earlier in this session. Net effect: at most one POST per
+  // (conversation × unread-cycle), even with rapid chat switching.
   const initialUnread = initial.conversation.unreadCount;
   useEffect(() => {
     if (initialUnread > 0) void markRead();
@@ -267,7 +311,7 @@ export function useConversationEvents(
 
       backfillNeededRef.current = false;
 
-      void fetch(
+      void fetchWithSessionGuard(
         `/api/conversations/${conversationId}/messages?after=${encodeURIComponent(cursor)}`,
       )
         .then((r) => (r.ok ? (r.json() as Promise<{ items: Message[] }>) : null))
@@ -358,18 +402,21 @@ export function useConversationEvents(
             })
           : prev.messages;
 
+        // Reconcile into the sorted list. Two paths:
+        //   - Optimistic match already in `messages` (tempId reconcile): the
+        //     map() above swapped the optimistic for the server copy. The
+        //     bubble's sortKey changed from ∞ to the real timestamp, so the
+        //     ordering of the *whole* list might shift around that one row.
+        //     Full sort.
+        //   - No reconcile (fresh inbound or fresh outbound from another tab):
+        //     append-sorted is O(N) worst-case but O(1) for the dominant
+        //     "new message lands at the end" case. Avoids a full Array.sort
+        //     per `message:new` event.
         const merged =
           tempId && messages.some((m) => m.id === payload.message.id)
-            ? messages
-            : [...messages, payload.message];
-
-        // Re-sort by server timestamp on every reconcile. This is the fix
-        // for the agent-vs-customer order mismatch: while an outbound
-        // upload is in flight (optimistic, sortKey = ∞) the bubble stays
-        // pinned at the bottom; the moment the server confirms the send
-        // we swap in the real timestamp and the message slots into its
-        // chronological position — same order the customer's phone shows.
-        const reconciled = sortByTimestamp(merged);
+            ? sortByTimestamp(messages)
+            : appendSorted(messages, payload.message);
+        const reconciled = merged;
 
         // Inbound messages reset the 24h customer-service window. Outbound
         // doesn't — but we still bubble lastMessageAt for sort order.

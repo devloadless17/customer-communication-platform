@@ -28,6 +28,11 @@ export async function GET(req: Request) {
   const take = takeRaw ? Number.parseInt(takeRaw, 10) : undefined;
   const search = url.searchParams.get("search") || undefined;
 
-  const page = await listConversations(session.teamId, { take, cursor, search });
+  const page = await listConversations(session.teamId, {
+    take,
+    cursor,
+    search,
+    viewerUserId: session.userId,
+  });
   return NextResponse.json(page);
 }

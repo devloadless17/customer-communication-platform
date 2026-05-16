@@ -15,7 +15,7 @@ import {
   Trash2,
   Upload,
   X,
-  TagsIcon,
+  Tags as TagsIcon,
   MinusCircle,
 } from "lucide-react";
 
@@ -34,12 +34,14 @@ import {
   type TagColor,
 } from "@/lib/types";
 import type {
+  Contact,
   ContactFieldDefinition,
   ContactListItem,
   ContactSource,
   ContactStage,
   Tag,
 } from "@/lib/types";
+import { getClientSocket } from "@/lib/socket/client";
 import {
   ContactFilterBar,
   useContactList,
@@ -126,6 +128,46 @@ export function ContactsClient({
       return new Set(filtered);
     });
   }, [items]);
+
+  // Live updates: when a teammate edits or deletes a contact elsewhere
+  // (inbox panel, another tab, bulk-tag op, etc.), reflect it here without
+  // a refresh. Patches the row in place if visible; silently no-ops if it
+  // isn't on the current filtered page. Drops deleted rows out of `items`
+  // AND `selectedIds` so a bulk action can't target a gone contact.
+  //
+  // The deps are empty on purpose: `setItems` from `useContactList` is
+  // stable, and capturing it in the closure once avoids re-binding the
+  // listener every render.
+  useEffect(() => {
+    const socket = getClientSocket();
+    const onContactUpdated = (payload: { contact: Contact }) => {
+      setItems((prev) => {
+        let changed = false;
+        const next = prev.map((row) => {
+          if (row.contact.id !== payload.contact.id) return row;
+          changed = true;
+          return { ...row, contact: payload.contact };
+        });
+        return changed ? next : prev;
+      });
+    };
+    const onContactDeleted = (payload: { contactId: string }) => {
+      setItems((prev) => prev.filter((row) => row.contact.id !== payload.contactId));
+      setSelectedIds((prev) => {
+        if (!prev.has(payload.contactId)) return prev;
+        const copy = new Set(prev);
+        copy.delete(payload.contactId);
+        return copy;
+      });
+    };
+    socket.on("contact:updated", onContactUpdated);
+    socket.on("contact:deleted", onContactDeleted);
+    return () => {
+      socket.off("contact:updated", onContactUpdated);
+      socket.off("contact:deleted", onContactDeleted);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Patch a single contact's tag list in-place — used when the per-row tag
   // picker saves. Avoids a router.refresh that would also reset selection.

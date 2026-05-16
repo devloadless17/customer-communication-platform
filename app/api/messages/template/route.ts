@@ -158,6 +158,12 @@ export async function POST(req: Request) {
     );
   }
 
+  if (!conversation.contact.phoneNumber) {
+    return NextResponse.json(
+      { error: "contact_has_no_phone", detail: "This contact has no WhatsApp number." },
+      { status: 400 },
+    );
+  }
   let send;
   try {
     send = await provider.sendTemplate(

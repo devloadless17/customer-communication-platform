@@ -174,7 +174,13 @@ async function main() {
       const ts = new Date(baseTime + m.minutesOffset * 60 * 1000);
       const externalId = `${conversationId}_msg_${String(i).padStart(3, "0")}`;
       await db.message.upsert({
-        where: { externalId },
+        where: {
+          teamId_provider_externalId: {
+            teamId: team.id,
+            provider: "meta_cloud",
+            externalId,
+          },
+        },
         create: {
           teamId: team.id,
           conversationId,

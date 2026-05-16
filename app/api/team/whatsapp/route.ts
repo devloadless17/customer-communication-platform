@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { requireAdmin } from "@/lib/auth/helpers";
+import { encryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 
@@ -104,8 +105,12 @@ export async function POST(req: Request) {
       where: { id: session.teamId },
       data: {
         metaPhoneNumberId: phoneNumberId,
-        metaAccessToken: accessToken,
-        metaAppSecret: appSecret,
+        // Encrypted at rest with the app-wide ENCRYPTION_KEY
+        // (lib/crypto/envelope.ts). Read paths decrypt via getMetaSendConfig
+        // / getMetaWebhookConfig; nothing in the codebase reads these columns
+        // raw, so transparent rewrites stay safe.
+        metaAccessToken: encryptSecret(accessToken),
+        metaAppSecret: encryptSecret(appSecret),
         metaVerifyToken: verifyToken,
         metaDisplayPhoneNumber: displayNumber ?? null,
         // wabaId is supplied by the admin (from WhatsApp Manager) so we can

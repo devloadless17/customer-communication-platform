@@ -6,11 +6,13 @@ import {
   Check,
   Copy,
   Loader2,
+  Mail,
   ShieldAlert,
   Trash2,
   UserCheck,
   UserPlus,
   UserX,
+  X,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -36,6 +38,16 @@ export interface TeamUserRow {
   createdAt: string;
 }
 
+/** A still-redeemable invite — un-accepted and un-expired. */
+export interface PendingInviteRow {
+  id: string;
+  email: string;
+  role: Role;
+  expiresAt: string;
+  createdAt: string;
+  createdByName: string;
+}
+
 interface InviteResult {
   url: string;
   expiresAt: string;
@@ -47,11 +59,14 @@ export function TeamSettings({
   currentUserRole,
   teamName,
   users,
+  pendingInvites,
 }: {
   currentUserId: string;
   currentUserRole: Role;
   teamName: string;
   users: TeamUserRow[];
+  /** Empty for non-admins (they can't see this panel). */
+  pendingInvites: PendingInviteRow[];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -123,6 +138,28 @@ export function TeamSettings({
     refresh();
   }
 
+  async function revokeInvite(id: string, email: string) {
+    setError(null);
+    const ok = await confirm({
+      title: `Revoke invite for ${email}?`,
+      description:
+        "The link stops working immediately. You can always send a new invite to the same email later.",
+      confirmLabel: "Revoke",
+      destructive: true,
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/invites/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      setError(data.error ?? "Failed to revoke invite");
+      return;
+    }
+    // The socket emit on the server will trigger router.refresh() everywhere
+    // else; our own tab gets the same path here so the row disappears
+    // without waiting on the round-trip.
+    refresh();
+  }
+
   async function deleteOrg() {
     setError(null);
     const ok = await confirm({
@@ -181,6 +218,16 @@ export function TeamSettings({
       )}
 
       {lastInvite && <InviteLinkCard invite={lastInvite} onClose={() => setLastInvite(null)} />}
+
+      {canManage && pendingInvites.length > 0 && (
+        <PendingInvitesCard
+          invites={pendingInvites}
+          pending={pending}
+          onRevoke={(id, email) =>
+            startTransition(() => revokeInvite(id, email))
+          }
+        />
+      )}
 
       <div className="rounded-xl border border-border">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -449,7 +496,7 @@ function InviteLinkCard({
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-medium text-foreground">Invite ready</div>
-          <div className="mt-0.5 text-[11px] text-muted-foreground">
+          <div className="mt-0.5 text-[11px] text-muted-foreground" suppressHydrationWarning>
             Share this link with <span className="font-medium">{invite.email}</span>. It expires{" "}
             {new Date(invite.expiresAt).toLocaleDateString()}.
           </div>
@@ -478,6 +525,73 @@ function InviteLinkCard({
           )}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Pending invites panel. Only shown to admins (filtered by the caller) and
+ * only when there's at least one invite to show. Each row carries the
+ * invited email, role, who created it + when, when it expires, and a
+ * Revoke button that DELETEs the invite.
+ *
+ * Empty-state collapsing is intentional: a panel saying "0 pending invites"
+ * adds noise without information. When the list re-fills (admin sends a
+ * new invite, or a teammate accepts and the list shrinks to 0), the
+ * server-component refetch toggles visibility.
+ */
+function PendingInvitesCard({
+  invites,
+  pending,
+  onRevoke,
+}: {
+  invites: PendingInviteRow[];
+  pending: boolean;
+  onRevoke: (id: string, email: string) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-card">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Mail className="size-4 text-muted-foreground" />
+          <div className="text-sm font-medium">
+            Pending invites ({invites.length})
+          </div>
+        </div>
+        <div className="text-[11px] text-muted-foreground">
+          Invite links expire after 7 days.
+        </div>
+      </div>
+      <ul className="divide-y divide-border">
+        {invites.map((inv) => (
+          <li key={inv.id} className="flex items-center gap-3 px-4 py-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="truncate text-sm">{inv.email}</span>
+                <Badge variant="muted" className="px-1.5 py-0 text-[10px] uppercase tracking-wider">
+                  {roleLabel(inv.role)}
+                </Badge>
+              </div>
+              <div className="text-[11px] text-muted-foreground" suppressHydrationWarning>
+                Invited by {inv.createdByName} · expires{" "}
+                {new Date(inv.expiresAt).toLocaleDateString()}
+              </div>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              title="Revoke this invite link"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+              onClick={() => onRevoke(inv.id, inv.email)}
+            >
+              <X className="size-3.5" />
+              Revoke
+            </Button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

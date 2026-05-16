@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { getAudienceGroup, listAudienceGroups } from "@/lib/queries";
+import { emitCatalogChange } from "@/lib/socket/server";
 
 /**
  * Audience groups: list + create.
@@ -86,6 +87,7 @@ export async function POST(req: Request) {
     });
 
     const dto = await getAudienceGroup(teamId, created.id);
+    emitCatalogChange(teamId, "audience-groups");
     return NextResponse.json({ group: dto });
   } catch (err) {
     if (

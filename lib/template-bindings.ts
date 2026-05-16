@@ -107,7 +107,11 @@ function parseSource(v: unknown): VariableSource {
  */
 export interface ContactLike {
   name: string;
-  phoneNumber: string;
+  // Nullable for non-phone channels (Instagram/Telegram). resolveBinding
+  // treats null the same as "" — the runner already filters non-phone
+  // recipients out of WhatsApp template sends, so binding resolution falling
+  // back to empty is the right degraded behavior for the rest.
+  phoneNumber: string | null;
   email: string | null;
   location: string | null;
   customFields: Prisma.JsonValue;
@@ -129,7 +133,7 @@ export function resolveBinding(
       f === "name"
         ? contact.name
         : f === "phoneNumber"
-          ? contact.phoneNumber
+          ? contact.phoneNumber ?? ""
           : f === "email"
             ? contact.email ?? ""
             : f === "location"

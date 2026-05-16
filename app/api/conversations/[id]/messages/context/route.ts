@@ -35,10 +35,19 @@ export async function GET(
     return NextResponse.json({ error: "messageId required" }, { status: 400 });
   }
 
-  const beforeRaw = url.searchParams.get("before");
-  const afterRaw = url.searchParams.get("after");
-  const before = beforeRaw ? Number.parseInt(beforeRaw, 10) : undefined;
-  const after = afterRaw ? Number.parseInt(afterRaw, 10) : undefined;
+  // Cap the window dimensions so a malformed (or malicious) client can't
+  // request a 20k-message slice — that would block the response thread for
+  // seconds on the DB side and balloon the JSON payload to MBs over 3G.
+  // 100 in each direction keeps the response a few KB regardless of input.
+  const CONTEXT_WINDOW_MAX = 100;
+  const parseClamped = (raw: string | null): number | undefined => {
+    if (raw === null) return undefined;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return Math.min(parsed, CONTEXT_WINDOW_MAX);
+  };
+  const before = parseClamped(url.searchParams.get("before"));
+  const after = parseClamped(url.searchParams.get("after"));
 
   const window = await loadMessageContextWindow(session.teamId, conversationId, {
     targetMessageId: messageId,
