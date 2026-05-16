@@ -1,0 +1,116 @@
+// Note: no `server-only` import — pulled in by the BullMQ worker which boots
+// from server.ts, outside the Next bundler context.
+
+import type { WorkflowStepType, WorkflowTriggerEvent } from "@prisma/client";
+
+import type {
+  WorkflowConversationSnapshot,
+  WorkflowContactSnapshot,
+  WorkflowEventEnvelope,
+} from "@/lib/workflows/events";
+import type { WorkflowGraph } from "@/lib/workflows/graph";
+
+/**
+ * Context handed to every step handler at run time. The envelope already
+ * carries teamId / contact / conversation; this is the slim extras a
+ * handler couldn't infer.
+ */
+export interface StepRunContext {
+  teamId: string;
+  workflowId: string;
+  runId: string;
+  trigger: WorkflowTriggerEvent;
+  attempt: number;
+  /** Current step id (for diagnostics + jump_to_step bookkeeping). */
+  stepId: string;
+  /** Read-only — handlers may need to peek at peers for branch/jump logic. */
+  graph: WorkflowGraph;
+}
+
+/**
+ * What a step handler returns. HTTP-shaped on purpose so we can reuse the
+ * webhook idiom from the automations era ("2xx/3xx good, 4xx no-retry,
+ * throw to retry"). Beyond that, three control-flow variants tell the
+ * runner what to do next:
+ *
+ *   advance — proceed to the unlabeled outgoing edge (most steps)
+ *   branch  — proceed to the edge whose label matches `selectedLabel`
+ *   jump    — proceed to a specific node id (jump_to_step)
+ *   wait    — schedule a resume `delayMs` from now, mark the run waiting
+ *
+ * Returning a 4xx + `advance` is a non-throw failure that still advances
+ * the flow — useful for "tried to add a tag the team deleted, log + move
+ * on" rather than dead-ending the run.
+ */
+export type StepResult =
+  | { kind: "advance"; status: number; body: string }
+  | { kind: "branch"; status: number; body: string; selectedLabel: string }
+  | { kind: "jump"; status: number; body: string; targetStepId: string }
+  | { kind: "wait"; status: number; body: string; delayMs: number };
+
+export interface StepHandler<C = unknown> {
+  type: WorkflowStepType;
+  /** Throws on garbage; message surfaces back to the admin via the API. */
+  parseConfig(raw: unknown): C;
+  redactConfig?(config: C): unknown;
+  describeConfig?(config: C): string;
+  run(
+    envelope: WorkflowEventEnvelope,
+    config: C,
+    ctx: StepRunContext,
+  ): Promise<StepResult>;
+}
+
+export class StepConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepConfigError";
+  }
+}
+
+export function truncateBody(s: string): string {
+  return s.length > 2048 ? s.slice(0, 2048) + "…[truncated]" : s;
+}
+
+/** Helper for common "did it" success results. */
+export function advance(payload: unknown = {}): StepResult {
+  return {
+    kind: "advance",
+    status: 200,
+    body: truncateBody(typeof payload === "string" ? payload : JSON.stringify(payload)),
+  };
+}
+
+/** Helper for 4xx "user config issue, don't retry, but advance" results. */
+export function advanceWithError(status: number, error: string, detail?: string): StepResult {
+  return {
+    kind: "advance",
+    status,
+    body: truncateBody(JSON.stringify({ error, ...(detail ? { detail } : {}) })),
+  };
+}
+
+/**
+ * Read the conversation snapshot from an envelope, or null. Some triggers
+ * (contact_tag_updated, contact_field_updated, contact_lifecycle_updated,
+ * incoming_webhook) don't carry one — handlers that need a conversation
+ * should advanceWithError(400) when this returns null.
+ */
+export function envelopeConversation(
+  envelope: WorkflowEventEnvelope,
+): WorkflowConversationSnapshot | null {
+  const data = envelope.data as { conversation?: WorkflowConversationSnapshot | null };
+  return data.conversation ?? null;
+}
+
+/**
+ * Read the contact snapshot from an envelope, or null. Most triggers carry
+ * one but incoming_webhook can be null until enriched by a contact-match
+ * step (round 2c).
+ */
+export function envelopeContact(
+  envelope: WorkflowEventEnvelope,
+): WorkflowContactSnapshot | null {
+  const data = envelope.data as { contact?: WorkflowContactSnapshot | null };
+  return data.contact ?? null;
+}

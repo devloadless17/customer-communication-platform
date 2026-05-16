@@ -241,7 +241,9 @@ export interface ServerToClientEvents {
       | "stages"
       | "tags"
       | "contact-fields"
-      | "automations"
+      // Multi-step workflow definitions (canvas). Round 2 replaced
+      // single-action "automations" with this.
+      | "workflows"
       | "members"
       // Reply-composer snippets. Previously relied on `revalidateTag` alone,
       // which only re-validates the data cache on the next render — other
@@ -258,8 +260,164 @@ export interface ServerToClientEvents {
       // Pending team invites (un-accepted, un-expired). Fires on create,
       // revoke, and accept so admin tabs viewing /settings/team see the
       // "Pending invites" panel update without a manual refresh.
-      | "invites";
+      | "invites"
+      // Workflow definitions — fires on workflow create / publish / disable
+      // so the /automations list updates across open tabs.
+      | "workflows"
+      // Team chat channels. Fires on channel create / rename / delete so
+      // every agent's sidebar refreshes without a page reload.
+      | "team-channels";
   }) => void;
+
+  // -------------------------------------------------------------------------
+  // Team chat (internal channels). All payloads carry `teamId` so the team
+  // room's clients can ignore events from other tenants in the rare case
+  // they ever cross a room (e.g. multi-team accounts in the future).
+  // -------------------------------------------------------------------------
+
+  /**
+   * A new message landed in a channel — top-level OR thread reply. Clients
+   * subscribed to that channel append it to their feed; clients on the
+   * channel list (sidebar) bump unread counts. `threadRootId` discriminates:
+   *   - null → top-level: append to channel feed, bump lastMessage preview.
+   *   - set  → reply: skip the channel feed (it lives in the thread panel).
+   *            Use `team:channel:thread:reply` to bump the root's reply pill.
+   *
+   * `clientTempId` is echoed for the originating client's optimistic swap,
+   * same pattern as `message:new` for customer threads.
+   */
+  "team:channel:message": (payload: {
+    teamId: string;
+    channelId: string;
+    message: TeamChannelMessageDto;
+    /** Truncated body / media hint for the channel-list preview. Null for replies. */
+    preview: string | null;
+    /** Updated channel.lastMessageAt — only set for top-level messages. */
+    lastMessageAt: string | null;
+    clientTempId?: string;
+  }) => void;
+
+  /** Reply landed in a thread. Fired in addition to `team:channel:message`. */
+  "team:channel:thread:reply": (payload: {
+    teamId: string;
+    channelId: string;
+    rootMessageId: string;
+    replyCount: number;
+    lastReplyAt: string;
+  }) => void;
+
+  /**
+   * A message body was edited in place. `editedAt` becomes the "(edited)"
+   * label source. Body is the post-edit content; old body isn't carried.
+   */
+  "team:channel:message:edited": (payload: {
+    teamId: string;
+    channelId: string;
+    messageId: string;
+    body: string;
+    editedAt: string;
+  }) => void;
+
+  /** A message was hard-deleted. Splice from the feed and any open thread. */
+  "team:channel:message:deleted": (payload: {
+    teamId: string;
+    channelId: string;
+    messageId: string;
+    /** Set when the deleted message was a reply — so the thread panel can
+     *  decrement its count without a refetch. Null for top-level deletes. */
+    threadRootId: string | null;
+  }) => void;
+
+  /**
+   * Reaction snapshot for an emoji on a message. We emit the FULL user-id
+   * list per emoji on every change (add or remove) rather than diff events
+   * — payload is tiny (a few cuids) and the receiver doesn't need a reducer
+   * to apply add/remove deltas correctly. Empty `userIds` means the last
+   * reaction was removed.
+   */
+  "team:channel:reaction:changed": (payload: {
+    teamId: string;
+    channelId: string;
+    messageId: string;
+    emoji: string;
+    userIds: string[];
+  }) => void;
+
+  /** A message was pinned or unpinned in a channel. */
+  "team:channel:pin:changed": (payload: {
+    teamId: string;
+    channelId: string;
+    messageId: string;
+    pinned: boolean;
+  }) => void;
+
+  /**
+   * A user marked a channel read. Broadcast to the team so every tab of the
+   * SAME user clears its badge (and so other agents don't accidentally
+   * re-mark on the next paint). Carries the new `lastReadAt` so receivers
+   * can reconcile against any in-flight `team:channel:message` events.
+   */
+  "team:channel:read": (payload: {
+    teamId: string;
+    channelId: string;
+    readByUserId: string;
+    lastReadAt: string;
+  }) => void;
+
+  /**
+   * Typing snapshot for a channel. Same shape as the conversation typing
+   * event but scoped to a channel room. Fires on every change to the set.
+   */
+  "team:channel:typing:update": (payload: {
+    channelId: string;
+    typingUserIds: string[];
+  }) => void;
+}
+
+// -------------------------------------------------------------------------
+// Team-chat DTOs. Defined here (not in lib/types.ts) so the socket layer
+// stays self-contained — adding a field is a one-file edit on both ends.
+// -------------------------------------------------------------------------
+
+export interface TeamChannelMediaDto {
+  kind: string;
+  /** Public URL (CDN). Channel media isn't proxied through an auth route. */
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+  caption?: string;
+  filename?: string;
+  durationMs?: number;
+}
+
+export interface TeamChannelMessageDto {
+  id: string;
+  channelId: string;
+  teamId: string;
+  /** Null when author was removed. UI renders "Removed user." */
+  authorUserId: string | null;
+  authorName: string | null;
+  authorAvatarUrl: string | null;
+  body: string;
+  media?: TeamChannelMediaDto;
+  /** Null = never edited. Otherwise the most recent edit timestamp. */
+  editedAt: string | null;
+  /** Null on top-level messages. */
+  threadRootId: string | null;
+  /** Live counts on the ROOT message (0 / null on reply rows). */
+  threadReplyCount: number;
+  threadLastReplyAt: string | null;
+  /** Mentioned user ids (small array — denormalized for cheap render). */
+  mentionedUserIds: string[];
+  /** Per-emoji snapshot of reactor user ids. */
+  reactions: { emoji: string; userIds: string[] }[];
+  /** True iff a TeamChannelPin row exists for this message. */
+  pinned: boolean;
+  createdAt: string;
+  // ---- Client-only optimistic fields (never persisted) ----
+  clientTempId?: string;
+  pending?: boolean;
+  failed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +442,18 @@ export interface ClientToServerEvents {
   "typing:start": (payload: { conversationId: string }) => void;
   /** Agent stopped typing — explicit, e.g. on send or on blur. */
   "typing:stop": (payload: { conversationId: string }) => void;
+
+  // -------------------------------------------------------------------------
+  // Team-chat room joins. Subscribing to a channel gets you message/edit/
+  // delete/reaction/pin/typing events for that channel. Subscribing to a
+  // thread also gets you the per-reply stream for the side panel.
+  // -------------------------------------------------------------------------
+  "subscribe:channel": (payload: { channelId: string }) => void;
+  "unsubscribe:channel": (payload: { channelId: string }) => void;
+  "subscribe:channel-thread": (payload: { rootMessageId: string }) => void;
+  "unsubscribe:channel-thread": (payload: { rootMessageId: string }) => void;
+  "typing:channel:start": (payload: { channelId: string }) => void;
+  "typing:channel:stop": (payload: { channelId: string }) => void;
 }
 
 // Inter-server events left empty until we add a Redis adapter (deferred per CLAUDE.md).
@@ -296,6 +466,8 @@ export interface SocketData {
   role?: import("@/lib/types").Role;
   /** Conversations this socket is currently flagged as typing in. */
   typingIn?: Set<string>;
+  /** Channels (team chat) this socket is currently flagged as typing in. */
+  typingInChannel?: Set<string>;
 }
 
 /** Path Socket.io binds to. Kept here so client and server cannot drift. */

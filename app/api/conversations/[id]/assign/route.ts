@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
-import { dispatch } from "@/lib/automations/dispatcher";
-import { automationContactSnapshot } from "@/lib/automations/events";
+import { trackOnAssigned } from "@/lib/conversations/analytics";
 import { db } from "@/lib/db";
 import { recordConversationEvent } from "@/lib/inbox/events";
 import { emitToTeam } from "@/lib/socket/server";
 import type { User } from "@/lib/types";
+import { dispatch } from "@/lib/workflows/dispatcher";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshot,
+} from "@/lib/workflows/events";
 
 /**
  * Assign / unassign a conversation. Body: `{ assignedUserId: string | null }`.
@@ -134,33 +138,31 @@ export async function POST(
     });
   }
 
-  // Fire automations. Only emit on an actual change — pointless to retrigger
+  // Fire workflows. Only emit on an actual change — pointless to retrigger
   // workflows when the same agent is reassigned to themselves.
   if (previousAssignedUserId !== assignedUserId) {
-    await dispatch(teamId, "conversation_assigned", {
-      conversation: {
-        id: updated.id,
-        status: updated.status,
-        assignedUserId: updated.assignedUserId,
-        unreadCount: updated.unreadCount,
-        lastMessageAt: updated.lastMessageAt.toISOString(),
-      },
-      contact: automationContactSnapshot(updated.contact),
-      assignedUser: assignedUser
-        ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
-        : null,
+    // Analytics first (so the snapshot we ship to workflows already reflects
+    // the bumped counters and the freshly-set firstAssignedAt).
+    await trackOnAssigned({
+      conversationId,
+      teamId,
+      assignedUserId,
       previousAssignedUserId,
     });
+    const fresh = await db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+    });
+    if (fresh) {
+      await dispatch(teamId, "conversation_assigned", {
+        conversation: workflowConversationSnapshot(fresh),
+        contact: workflowContactSnapshot(updated.contact),
+        assignedUser: assignedUser
+          ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
+          : null,
+        previousAssignedUserId,
+      });
+    }
   }
 
   return NextResponse.json({ ok: true });
-}
-
-function customFieldsFromJson(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
 }

@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   ContactRound,
   FileText,
+  Hash,
   Inbox,
   LogOut,
   type LucideIcon,
@@ -16,7 +17,7 @@ import {
   Sparkles,
   UserCircle2,
   Users2,
-  Zap,
+  Workflow,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -37,7 +38,7 @@ import type { Team, User } from "@/lib/types";
 
 /**
  * App-wide left sidebar. Used by every authenticated area (inbox, contacts,
- * broadcasts, templates, automations, settings, admin) so users see the same
+ * broadcasts, templates, workflows, settings, admin) so users see the same
  * shell on every page.
  *
  * Items are grouped into labeled sections — "Conversations / Contacts /
@@ -71,6 +72,9 @@ interface NavItem {
 
 const CONVERSATION_NAV: NavItem[] = [
   { href: "/inbox", label: "Inbox", icon: Inbox },
+  // Team chat (internal channels) sits next to Inbox so the "messages" mental
+  // model is grouped — customer threads above, teammate threads below.
+  { href: "/team", label: "Team chat", icon: Hash },
 ];
 
 const CONTACTS_NAV: NavItem[] = [
@@ -178,7 +182,7 @@ export function AppSidebar({
             }
           />
           <SidebarLink
-            item={{ href: "/automations", label: "Automations", icon: Zap }}
+            item={{ href: "/workflows", label: "Workflows", icon: Workflow }}
             pathname={pathname}
           />
         </Section>

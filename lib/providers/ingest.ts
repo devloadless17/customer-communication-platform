@@ -4,12 +4,12 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { ensureDefaultStage } from "@/lib/queries";
-import { dispatch } from "@/lib/automations/dispatcher";
+import { dispatch } from "@/lib/workflows/dispatcher";
 import type {
-  AutomationContactSnapshot,
-  AutomationConversationSnapshot,
-  AutomationMessageSnapshot,
-} from "@/lib/automations/events";
+  WorkflowContactSnapshot,
+  WorkflowConversationSnapshot,
+  WorkflowMessageSnapshot,
+} from "@/lib/workflows/events";
 import type {
   NormalizedEvent,
   NormalizedInboundMessage,
@@ -335,6 +335,7 @@ async function ingestInboundMessage(
       lastMessageAt: evt.timestamp,
       lastMessagePreview: preview,
       unreadCount: { increment: 1 },
+      incomingMessagesCount: { increment: 1 },
     },
   });
 
@@ -424,13 +425,31 @@ async function ingestInboundMessage(
   // rejections don't surface as unhandledRejection.
   //
   // Durability: the dispatcher applies its own retry-with-backoff around
-  // each Redis enqueue (lib/automations/dispatcher.ts), so a transient
+  // each Redis enqueue (lib/workflows/dispatcher.ts), so a transient
   // Redis/Pg blip no longer drops the automation run silently. A permanent
   // failure is loudly logged; a future sweep job is the next layer.
   void (async () => {
+    const conversationSnapshot = toWorkflowConversation({
+      ...conversation,
+      lastMessageAt: evt.timestamp,
+      unreadCount: (conversation.unreadCount ?? 0) + 1,
+    });
+    const contactSnapshot = toWorkflowContact(contact);
     try {
+      // Conversation-created fires alongside message-received on the very
+      // first inbound for this contact. Two separate triggers because their
+      // intent diverges: welcome flows want a once-per-contact hook, while
+      // routing rules want every message. Empirically, mixing them into a
+      // single trigger leads to "fire on every message but check if it's
+      // the first" conditions, which most admins get wrong.
+      if (isNewConversation) {
+        await dispatch(teamId, "conversation_created", {
+          conversation: conversationSnapshot,
+          contact: contactSnapshot,
+        });
+      }
       await dispatch(teamId, "message_received", {
-        message: toAutomationMessage({
+        message: toWorkflowMessage({
           id: createdId,
           conversationId: conversation.id,
           externalId: evt.externalId,
@@ -441,13 +460,9 @@ async function ingestInboundMessage(
           mediaCaption: evt.media && evt.body ? evt.body : null,
           timestamp: evt.timestamp,
         }),
-        conversation: toAutomationConversation({
-          ...conversation,
-          lastMessageAt: evt.timestamp,
-          unreadCount: (conversation.unreadCount ?? 0) + 1,
-        }),
-        contact: toAutomationContact(contact),
-        recentMessages: await loadRecentForAutomation(conversation.id, createdId),
+        conversation: conversationSnapshot,
+        contact: contactSnapshot,
+        recentMessages: await loadRecentForWorkflow(conversation.id, createdId),
       });
     } catch (err) {
       console.error(
@@ -459,12 +474,12 @@ async function ingestInboundMessage(
 }
 
 // ---------------------------------------------------------------------------
-// Automation payload mappers — kept local. Each maps a DB-shaped object to
-// the trimmed snapshot the automations subsystem consumes. Three mappers, no
+// Workflow payload mappers — kept local. Each maps a DB-shaped object to
+// the trimmed snapshot the workflows subsystem consumes. Three mappers, no
 // hidden behavior — fine to copy here vs. building a shared utility.
 // ---------------------------------------------------------------------------
 
-function toAutomationMessage(m: {
+function toWorkflowMessage(m: {
   id: string;
   conversationId: string;
   externalId: string;
@@ -474,7 +489,7 @@ function toAutomationMessage(m: {
   mediaCaption: string | null;
   timestamp: Date;
   senderUserId: string | null;
-}): AutomationMessageSnapshot {
+}): WorkflowMessageSnapshot {
   return {
     id: m.id,
     conversationId: m.conversationId,
@@ -488,31 +503,59 @@ function toAutomationMessage(m: {
   };
 }
 
-function toAutomationConversation(c: {
+function toWorkflowConversation(c: {
   id: string;
   status: string;
   assignedUserId: string | null;
   unreadCount: number;
   lastMessageAt: Date;
-}): AutomationConversationSnapshot {
+  firstAssignedAt?: Date | null;
+  firstAssignedUserId?: string | null;
+  lastAssignedAt?: Date | null;
+  firstResponseAt?: Date | null;
+  firstResponseByUserId?: string | null;
+  closedAt?: Date | null;
+  closedByUserId?: string | null;
+  closedCategory?: string | null;
+  closedSummary?: string | null;
+  assignmentsCount?: number;
+  incomingMessagesCount?: number;
+  outgoingMessagesCount?: number;
+  responsesCount?: number;
+}): WorkflowConversationSnapshot {
   return {
     id: c.id,
-    status: c.status as AutomationConversationSnapshot["status"],
+    status: c.status as WorkflowConversationSnapshot["status"],
     assignedUserId: c.assignedUserId,
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
+    firstAssignedAt: c.firstAssignedAt?.toISOString() ?? null,
+    firstAssignedUserId: c.firstAssignedUserId ?? null,
+    lastAssignedAt: c.lastAssignedAt?.toISOString() ?? null,
+    firstResponseAt: c.firstResponseAt?.toISOString() ?? null,
+    firstResponseByUserId: c.firstResponseByUserId ?? null,
+    closedAt: c.closedAt?.toISOString() ?? null,
+    closedByUserId: c.closedByUserId ?? null,
+    closedCategory: c.closedCategory ?? null,
+    closedSummary: c.closedSummary ?? null,
+    assignmentsCount: c.assignmentsCount ?? 0,
+    incomingMessagesCount: c.incomingMessagesCount ?? 0,
+    outgoingMessagesCount: c.outgoingMessagesCount ?? 0,
+    responsesCount: c.responsesCount ?? 0,
   };
 }
 
-function toAutomationContact(c: {
+function toWorkflowContact(c: {
   id: string;
   phoneNumber: string | null;
   identityProvider?: ProviderName | null;
   externalContactId?: string | null;
   name: string;
   email?: string | null;
+  stageId?: string | null;
+  tags?: Array<{ id: string }>;
   customFields?: unknown;
-}): AutomationContactSnapshot {
+}): WorkflowContactSnapshot {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
@@ -520,6 +563,8 @@ function toAutomationContact(c: {
     externalContactId: c.externalContactId ?? null,
     name: c.name,
     email: c.email ?? null,
+    stageId: c.stageId ?? null,
+    tagIds: (c.tags ?? []).map((t) => t.id),
     customFields: normalizeCustomFields(c.customFields),
   };
 }
@@ -527,10 +572,10 @@ function toAutomationContact(c: {
 /** Pull the most recent N messages on the conversation, excluding the trigger
  *  message itself. Surfaced in MessageReceivedPayload.recentMessages so a
  *  downstream AI flow has short-term context without a callback. */
-async function loadRecentForAutomation(
+async function loadRecentForWorkflow(
   conversationId: string,
   excludeMessageId: string,
-): Promise<AutomationMessageSnapshot[]> {
+): Promise<WorkflowMessageSnapshot[]> {
   const rows = await db.message.findMany({
     where: { conversationId, NOT: { id: excludeMessageId } },
     orderBy: { timestamp: "desc" },
@@ -548,7 +593,7 @@ async function loadRecentForAutomation(
     },
   });
   return rows
-    .map((r) => toAutomationMessage({
+    .map((r) => toWorkflowMessage({
       id: r.id,
       conversationId: r.conversationId,
       externalId: r.externalId,

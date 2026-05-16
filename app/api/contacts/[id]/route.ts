@@ -139,9 +139,10 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   }
 
   try {
-    const updated = await db.$transaction(async (tx) => {
+    const result = await db.$transaction(async (tx) => {
       const existing = await tx.contact.findFirst({
         where: { id: contactId, teamId },
+        include: { tags: { select: { id: true } } },
       });
       if (!existing) return null;
 
@@ -153,22 +154,21 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
               customFieldsPatch,
             );
 
-      return tx.contact.update({
+      const updated = await tx.contact.update({
         where: { id: contactId },
         data: {
           ...update,
           ...(nextCustom !== undefined ? { customFields: nextCustom } : {}),
         },
-        // Pull current tag ids back so the socket payload below is complete
-        // — consumers (sidebar, thread, contact panel) need them to keep
-        // their local tag chips in sync without a refetch.
         include: { tags: { select: { id: true } } },
       });
+      return { existing, updated };
     });
 
-    if (!updated) {
+    if (!result) {
       return NextResponse.json({ error: "contact not found" }, { status: 404 });
     }
+    const { existing, updated } = result;
 
     const tagIds = updated.tags.map((t) => t.id);
     const contact: Contact = {
@@ -186,12 +186,47 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       stageId: updated.stageId,
       tagIds,
     };
-    // Broadcast so every viewer of this contact (sidebar rows, the active
-    // thread, the contact panel) merges the edit in real time. Two agents
-    // working the same conversation no longer need to refresh to see each
-    // other's stage / tag / name / field changes. Phone number isn't in the
-    // payload-relevant set — it's immutable for existing contacts.
     emitToTeam(teamId, "contact:updated", { teamId, contact });
+
+    // Workflow dispatches — fire for stage AND each changed custom field
+    // value. Done outside the transaction so a Redis blip never rolls back
+    // the actual edit. fire-and-forget per the dispatcher's contract.
+    const oldCustom = normalizeStringMap(existing.customFields);
+    const newCustom = normalizeStringMap(updated.customFields);
+    const fieldChanges: Array<{ key: string; previous: string | null; next: string | null }> = [];
+    const allKeys = new Set([...Object.keys(oldCustom), ...Object.keys(newCustom)]);
+    for (const key of allKeys) {
+      const prev = oldCustom[key] ?? null;
+      const next = newCustom[key] ?? null;
+      if (prev !== next) fieldChanges.push({ key, previous: prev, next });
+    }
+    const stageChanged = existing.stageId !== updated.stageId;
+    if (fieldChanges.length > 0 || stageChanged) {
+      // Import inline to avoid a server-only module being imported at the
+      // top of a request module that doesn't always need it; the route is
+      // already nodejs-runtime so this is a no-op import cost.
+      const { dispatch } = await import("@/lib/workflows/dispatcher");
+      const { workflowContactSnapshot } = await import("@/lib/workflows/events");
+      const snap = workflowContactSnapshot(updated);
+      for (const change of fieldChanges) {
+        await dispatch(teamId, "contact_field_updated", {
+          contact: snap,
+          fieldKey: change.key,
+          previousValue: change.previous,
+          newValue: change.next,
+          changedByUserId: session.userId,
+        });
+      }
+      if (stageChanged) {
+        await dispatch(teamId, "contact_lifecycle_updated", {
+          contact: snap,
+          previousStageId: existing.stageId,
+          newStageId: updated.stageId,
+          changedByUserId: session.userId,
+        });
+      }
+    }
+
     return NextResponse.json({ contact });
   } catch (err) {
     console.error("[api/contacts/PATCH] failed", err);

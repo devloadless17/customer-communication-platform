@@ -4,6 +4,8 @@ import { requireSession } from "@/lib/auth/helpers";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket/server";
 import type { Contact } from "@/lib/types";
+import { dispatch } from "@/lib/workflows/dispatcher";
+import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 /**
  * Set the tags applied to a contact.
@@ -13,6 +15,10 @@ import type { Contact } from "@/lib/types";
  * Replace semantics — the array is the new full set. Tags not in the array
  * are removed, tags not previously on the contact are added. Cross-team tag
  * ids are silently filtered out (defense against id-stuffing).
+ *
+ * Dispatches one `contact_tag_updated` event per changed tag — additions
+ * and removals fire separately so workflow authors can filter by
+ * `tag_change_kind` ("added" / "removed").
  */
 
 export const runtime = "nodejs";
@@ -24,7 +30,7 @@ export async function PUT(
 ) {
   const session = await requireSession();
   if (session instanceof NextResponse) return session;
-  const { teamId } = session;
+  const { teamId, userId } = session;
   const { id } = await ctx.params;
 
   let raw: { tagIds?: unknown };
@@ -37,13 +43,14 @@ export async function PUT(
     ? raw.tagIds.filter((x): x is string => typeof x === "string")
     : [];
 
-  const contact = await db.contact.findFirst({ where: { id, teamId } });
+  const contact = await db.contact.findFirst({
+    where: { id, teamId },
+    include: { tags: { select: { id: true } } },
+  });
   if (!contact) {
     return NextResponse.json({ error: "contact not found" }, { status: 404 });
   }
 
-  // Filter to tags that belong to this team. Anyone trying to apply a
-  // foreign-team tag id just gets it dropped silently.
   const validIds =
     requestedIds.length === 0
       ? []
@@ -54,14 +61,17 @@ export async function PUT(
           })
         ).map((t) => t.id);
 
+  const previousIds = new Set(contact.tags.map((t) => t.id));
+  const nextIds = new Set(validIds);
+  const added = validIds.filter((tagId) => !previousIds.has(tagId));
+  const removed = [...previousIds].filter((tagId) => !nextIds.has(tagId));
+
   const updated = await db.contact.update({
     where: { id },
     data: { tags: { set: validIds.map((tagId) => ({ id: tagId })) } },
+    include: { tags: { select: { id: true } } },
   });
 
-  // Broadcast so other viewers of this contact (sidebar rows, the active
-  // thread, the contact panel) merge the new tag set in real time — matches
-  // the contact:updated contract used by the PATCH route.
   const payload: Contact = {
     id: updated.id,
     teamId: updated.teamId,
@@ -78,6 +88,28 @@ export async function PUT(
     tagIds: validIds,
   };
   emitToTeam(teamId, "contact:updated", { teamId, contact: payload });
+
+  // Workflow dispatches — one event per changed tag, additions then removals.
+  // The conversation field on the payload would require a fetch we don't
+  // want on this hot path; leave it null and let workflow authors look up
+  // the conversation by contactId via the external API if they need it.
+  const contactSnap = workflowContactSnapshot(updated);
+  for (const tagId of added) {
+    await dispatch(teamId, "contact_tag_updated", {
+      contact: contactSnap,
+      kind: "added",
+      tagId,
+      changedByUserId: userId,
+    });
+  }
+  for (const tagId of removed) {
+    await dispatch(teamId, "contact_tag_updated", {
+      contact: contactSnap,
+      kind: "removed",
+      tagId,
+      changedByUserId: userId,
+    });
+  }
 
   return NextResponse.json({ ok: true, tagIds: validIds });
 }

@@ -2,12 +2,16 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { dispatch } from "@/lib/automations/dispatcher";
-import { automationContactSnapshot } from "@/lib/automations/events";
 import { authenticateApiKey } from "@/lib/auth/external";
+import { trackOnStatusChanged } from "@/lib/conversations/analytics";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket/server";
 import type { ConversationStatus } from "@/lib/types";
+import { dispatch } from "@/lib/workflows/dispatcher";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshot,
+} from "@/lib/workflows/events";
 
 /**
  * POST /api/external/v1/conversations/[id]/status
@@ -48,7 +52,7 @@ export async function POST(
 
   const conversation = await db.conversation.findFirst({
     where: { id: conversationId, teamId: auth.teamId },
-    include: { contact: true },
+    include: { contact: { include: { tags: { select: { id: true } } } } },
   });
   if (!conversation) {
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
@@ -67,32 +71,48 @@ export async function POST(
   });
 
   if (previousStatus !== status) {
-    await dispatch(auth.teamId, "conversation_status_changed", {
-      conversation: {
-        id: conversation.id,
-        status,
-        assignedUserId: conversation.assignedUserId,
-        unreadCount: conversation.unreadCount,
-        lastMessageAt: conversation.lastMessageAt.toISOString(),
-      },
-      contact: automationContactSnapshot(conversation.contact),
+    await trackOnStatusChanged({
+      conversationId,
+      teamId: auth.teamId,
       previousStatus,
       newStatus: status,
-      // External API has no acting user — record the API key id in a future
-      // audit table, but for now leave this null so n8n-driven transitions
-      // don't claim to be from a person.
+      // External API has no acting user — leave null.
       changedByUserId: null,
     });
+
+    const fresh = await db.conversation.findFirst({
+      where: { id: conversationId, teamId: auth.teamId },
+    });
+    if (fresh) {
+      const conversationSnap = workflowConversationSnapshot(fresh);
+      const contactSnap = workflowContactSnapshot(conversation.contact);
+
+      await dispatch(auth.teamId, "conversation_status_changed", {
+        conversation: conversationSnap,
+        contact: contactSnap,
+        previousStatus,
+        newStatus: status,
+        changedByUserId: null,
+      });
+      if (status === "open") {
+        await dispatch(auth.teamId, "conversation_opened", {
+          conversation: conversationSnap,
+          contact: contactSnap,
+          previousStatus,
+          openedByUserId: null,
+        });
+      } else if (status === "closed") {
+        await dispatch(auth.teamId, "conversation_closed", {
+          conversation: conversationSnap,
+          contact: contactSnap,
+          previousStatus,
+          closedByUserId: null,
+          closedCategory: fresh.closedCategory,
+          closedSummary: fresh.closedSummary,
+        });
+      }
+    }
   }
 
   return NextResponse.json({ ok: true });
-}
-
-function cf(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
 }

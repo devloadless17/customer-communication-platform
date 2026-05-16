@@ -21,8 +21,8 @@ import next from "next";
 import { db } from "./lib/db";
 import { validateEnv } from "./lib/env";
 import { initSocketServer } from "./lib/socket/server";
-import { startAutomationWorker, stopAutomationWorker } from "./lib/automations/worker";
-import { closeAutomationQueue } from "./lib/automations/queue";
+import { startWorkflowWorker, stopWorkflowWorker } from "./lib/workflows/worker";
+import { closeWorkflowQueue } from "./lib/workflows/queue";
 import { startInboundMediaSweeper, stopInboundMediaSweeper } from "./lib/sweepers/inbound-media";
 
 // Fail-fast on missing required env vars BEFORE Next prepares the build
@@ -107,15 +107,15 @@ void app.prepare().then(async () => {
   // reconciler then immediately flips to `failed`. Cheap, single UPDATE.
   await reconcileInterruptedBroadcasts();
 
-  // Boot the automations worker in this same Node process. For MVP this is
+  // Boot the workflows worker in this same Node process. For MVP this is
   // simpler than running a separate worker container; the queue is shared via
   // Redis, so splitting later is a single new entrypoint that calls
-  // startAutomationWorker() in isolation. Failures here don't take down the
-  // app — Redis being unreachable degrades automations only.
+  // startWorkflowWorker() in isolation. Failures here don't take down the
+  // app — Redis being unreachable degrades workflows only.
   try {
-    startAutomationWorker();
+    startWorkflowWorker();
   } catch (err) {
-    console.error("[server] failed to start automation worker:", err);
+    console.error("[server] failed to start workflows worker:", err);
   }
 
   // Periodic GC for inbound media rows whose phase-2 download was lost to
@@ -144,8 +144,8 @@ void app.prepare().then(async () => {
     console.log(`[server] received ${signal}, shutting down...`);
     try {
       stopInboundMediaSweeper();
-      await stopAutomationWorker();
-      await closeAutomationQueue();
+      await stopWorkflowWorker();
+      await closeWorkflowQueue();
     } catch (err) {
       console.error("[server] shutdown error", err);
     }

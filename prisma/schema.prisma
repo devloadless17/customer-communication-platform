@@ -108,37 +108,69 @@ enum ConversationEventKind {
   tag_removed
 }
 
-// Domain events automations can subscribe to. Adding a new value here is
-// half the work — the dispatcher (lib/automations/dispatcher.ts) needs the
-// matching call site, and the conditions evaluator
-// (lib/automations/conditions.ts) needs to know which fields the payload
-// carries for filtering.
-enum AutomationTriggerEvent {
+// Domain events workflows can subscribe to. Adding a new value is half the
+// work — the dispatcher (lib/workflows/dispatcher.ts) needs the matching
+// call site, and lib/workflows/conditions.ts needs to know which fields
+// the payload carries for trigger-time filtering.
+enum WorkflowTriggerEvent {
+  // Inbox events
   message_received
+  conversation_created
+  conversation_opened
+  conversation_closed
   conversation_assigned
   conversation_status_changed
+  // Contact events
+  contact_field_updated
+  contact_tag_updated
+  contact_lifecycle_updated
+  // External / on-demand triggers
+  manual_trigger
+  incoming_webhook
 }
 
-// What an automation does when its conditions match. `webhook` is the only
-// shipped action; future internal actions (auto-assign, auto-reply, add
-// tag, …) plug in as additional enum values + handlers under
-// lib/automations/actions/.
-enum AutomationActionType {
-  webhook
+// What a workflow step does when it runs. Steps are registered in
+// lib/workflows/steps/index.ts — adding a value without a registered
+// handler causes the runner to mark the step as failed. Control-flow
+// steps (branch / wait / jump_to_step) are special-cased in the runner;
+// everything else is a plain "do the thing, advance to next."
+enum WorkflowStepType {
+  // Messaging
+  send_message
+  send_template
+  add_comment
+  // Conversation state
+  assign_to
+  set_status
+  open_conversation
+  close_conversation
+  // Contact mutations
+  add_tag
+  remove_tag
+  update_field
+  update_lifecycle
+  // Control flow
+  branch
+  wait
+  jump_to_step
+  // External
+  http_request
+  trigger_workflow
 }
 
-// Lifecycle of a single automation execution.
-//   queued    — enqueued in BullMQ, not yet picked up by a worker
-//   running   — worker accepted the job, action is in flight
-//   success   — action returned 2xx (webhook) / completed cleanly
-//   failed    — action failed after exhausting retries
-//   skipped   — automation matched the event but conditions evaluated false
-//               (recorded only when explicitly traced — most condition misses
-//               short-circuit before a run row is created)
-enum AutomationRunStatus {
+// Lifecycle of a single workflow execution.
+//   queued     — enqueued in BullMQ, not yet picked up by a worker
+//   running    — worker is currently executing a step
+//   waiting    — paused at a `wait` step (resume job scheduled)
+//   completed  — reached a terminal step or end-of-graph
+//   failed     — exhausted retries on a non-recoverable step error
+//   skipped    — workflow was disabled / deleted between dispatch and run,
+//                or conditions later flipped
+enum WorkflowRunStatus {
   queued
   running
-  success
+  waiting
+  completed
   failed
   skipped
 }
@@ -184,11 +216,14 @@ model Team {
   broadcasts              Broadcast[]
   tags                    Tag[]
   audienceGroups          AudienceGroup[]
-  automations             Automation[]
-  automationRuns          AutomationRun[]
+  workflows               Workflow[]
+  workflowRuns            WorkflowRun[]
+  workflowContactStates   WorkflowContactState[]
   apiKeys                 TeamApiKey[]
   snippets                Snippet[]
   conversationEvents      ConversationEvent[]
+  teamChannels            TeamChannel[]
+  teamChannelMessages     TeamChannelMessage[]
 }
 
 model User {
@@ -229,6 +264,16 @@ model User {
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
   authoredEvents        ConversationEvent[]
+  // Team-chat (internal messaging between agents). All SetNull on user delete
+  // so deactivating a teammate leaves their messages, reactions, pins, and
+  // mentions in place with a "Removed user" actor label — same audit-trail
+  // discipline as customer conversations.
+  createdChannels        TeamChannel[]            @relation("CreatedChannels")
+  authoredChannelMessages TeamChannelMessage[]    @relation("AuthoredChannelMessages")
+  channelReactions       TeamChannelReaction[]    @relation("ChannelReactions")
+  channelMentions        TeamChannelMention[]     @relation("ChannelMentions")
+  pinnedChannelMessages  TeamChannelPin[]         @relation("PinnedMessages")
+  channelReadReceipts    TeamChannelReadReceipt[]
   sessions              Session[]
   accounts              Account[]
 
@@ -467,6 +512,34 @@ model Conversation {
   lastMessageAt      DateTime           @default(now())
   lastMessagePreview String             @default("")
   createdAt          DateTime           @default(now())
+
+  // ---- Workflow analytics ----
+  // Populated incrementally by lib/conversations/analytics.ts on assign /
+  // status-change / message-create. All nullable until the first qualifying
+  // event happens. Exposed to the workflow trigger payload as
+  // $conversation.first_response_time etc.
+  firstAssignedAt   DateTime?
+  firstAssignedUserId String?
+  lastAssignedAt    DateTime?
+  // First outbound message timestamp, regardless of channel — used for
+  // first_response_time and the assignment→response variants.
+  firstResponseAt   DateTime?
+  firstResponseByUserId String?
+  // When the conversation moved into `closed`. Reopens (status going from
+  // closed back to anything else) zero this out so the closed-conv analytics
+  // refer to the most-recent close.
+  closedAt          DateTime?
+  closedByUserId    String?
+  // Free-text fields populated by the close_conversation step + the manual
+  // "Close" action in the inbox (round 2b adds the inbox surface).
+  closedCategory    String?
+  closedSummary     String?
+  // Lightweight counters — denormalized so the closed-conv analytics
+  // payload doesn't run aggregates against Message on every workflow run.
+  assignmentsCount        Int @default(0)
+  incomingMessagesCount   Int @default(0)
+  outgoingMessagesCount   Int @default(0)
+  responsesCount          Int @default(0)
 
   team         Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
   contact      Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -796,91 +869,140 @@ model InternalNote {
 }
 
 // ---------------------------------------------------------------------------
-// Automations
+// Workflows
 // ---------------------------------------------------------------------------
 //
-// Respond.io-style workflow triggers. Admins build rules in /automations:
-//   "When <trigger> [+ conditions], do <action>."
-// Today the only shipped action is a webhook (primary use case: n8n with an
-// AI/RAG agent). Future internal actions plug in as new AutomationActionType
-// values + handlers under lib/automations/actions/.
+// Multi-step DAG workflows built on a React Flow canvas. Admins design them
+// at /workflows. Each workflow has:
+//   - one trigger (when does this fire?)
+//   - optional trigger-time conditions (does it actually fire for THIS event?)
+//   - optional once-per-contact dedupe (welcome flows don't want to fire twice)
+//   - a graph of steps with edges, including branch / wait / jump control flow
 //
-// Dispatch path: a domain event (message received, conversation assigned,
-// status changed) calls `dispatch(teamId, event, payload)`. The dispatcher
-// loads enabled rows for this team+trigger, evaluates `conditions`, and
-// enqueues a BullMQ job per match. The worker creates an AutomationRun row
-// before invoking the action so partial failures are always auditable.
+// Dispatch path: a domain event calls `dispatch(teamId, event, payload)` in
+// lib/workflows/dispatcher.ts. The dispatcher loads enabled workflows for
+// this team+trigger, evaluates `triggerConditions`, optionally checks the
+// once-per-contact ledger (`WorkflowContactState`), and enqueues a BullMQ
+// job per match. The worker runs the DAG one step at a time, persisting
+// state on WorkflowRun after each step so `wait` can resume cleanly and
+// failures are debuggable per step.
+//
+// Round 1 (pre-canvas) used flat single-action Automation rows; those were
+// migrated to single-step Workflow rows in the 20260516180000_workflows
+// migration. Removed entirely: `Automation`, `AutomationRun`, and their
+// enums.
 
-model Automation {
-  id      String                 @id @default(cuid())
-  teamId  String
-  name    String
-  enabled Boolean                @default(true)
-  trigger AutomationTriggerEvent
+model Workflow {
+  id              String               @id @default(cuid())
+  teamId          String
+  name            String
+  // `enabled` is the kill switch; `published` gates whether real triggers
+  // actually fire the workflow (vs. test-only). A workflow can be enabled
+  // but unpublished (still being edited) — the dispatcher requires BOTH to
+  // match production triggers.
+  enabled         Boolean              @default(true)
+  published       Boolean              @default(false)
+  trigger         WorkflowTriggerEvent
+  // Trigger-specific config. Shape depends on trigger:
+  //   incoming_webhook → { secret: string }  (HMAC for signature validation)
+  //   manual_trigger   → { allowedRoles: ("admin"|"agent")[] }
+  //   contact_tag_updated → { kind: "added" | "removed" | "any" }
+  //   contact_field_updated → { fieldKey?: string }  (omit = any field)
+  //   contact_lifecycle_updated → { toStageId?: string }  (omit = any stage)
+  //   others → {}
+  triggerConfig   Json                 @default("{}")
+  // Same nested AND/OR group shape used by automations Round 1 — see
+  // lib/workflows/conditions.ts.
+  triggerConditions Json               @default("{\"op\":\"AND\",\"children\":[]}")
+  triggerOncePerContact Boolean        @default(false)
 
-  // List of AND'd condition rows: `[{ field, op, value }, ...]`. An empty
-  // array means "fire on every trigger event". Field+op pairs are validated
-  // against the trigger by lib/automations/conditions.ts — e.g.
-  // body_contains only makes sense on message_received.
-  //
-  // Shape:
-  //   [{
-  //     field: "body" | "body_lower" | "status_from" | "status_to" |
-  //            "assigned_user_id" | "contact_phone" | "contact_name",
-  //     op:    "equals" | "not_equals" | "contains" | "not_contains" |
-  //            "starts_with" | "ends_with" | "regex" | "is_null" | "is_not_null",
-  //     value: string  // ignored for is_null / is_not_null
-  //   }]
-  conditions Json @default("[]")
-
-  actionType   AutomationActionType @default(webhook)
-  // Action-specific config. For `webhook`:
-  //   { url: string, bearerToken?: string, customHeaders?: { [k]: string },
-  //     timeoutMs?: number }
-  // Validated on write by the management API route.
-  actionConfig Json
+  // DAG. Shape:
+  //   {
+  //     startNodeId: string,
+  //     nodes: [{ id, type: WorkflowStepType, config: {...}, position?: {x,y} }],
+  //     edges: [{ from, to, label?: "true" | "false" | string }],
+  //   }
+  // `position` is round-trip persistence for the canvas — runner ignores it.
+  // Validated server-side in lib/workflows/graph.ts at write time.
+  graph           Json                 @default("{\"startNodeId\":\"\",\"nodes\":[],\"edges\":[]}")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  team Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  runs AutomationRun[]
+  team          Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  runs          WorkflowRun[]
+  contactStates WorkflowContactState[]
 
-  // Hot path: the dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true`.
-  @@index([teamId, trigger, enabled])
+  // Hot path: dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true AND published=true`.
+  @@index([teamId, trigger, enabled, published])
+  @@unique([teamId, name])
 }
 
-model AutomationRun {
-  id           String                 @id @default(cuid())
-  automationId String
-  // Denormalized so the team-scoped runs feed doesn't have to JOIN through
-  // Automation just to filter — and so a deleted automation still leaves
-  // auditable history on the team. (Cascade is on automationId; if the rule
-  // is deleted, its runs go too. That's intentional: per-rule debugging.)
-  teamId       String
-  status       AutomationRunStatus    @default(queued)
-  trigger      AutomationTriggerEvent
+model WorkflowRun {
+  id         String              @id @default(cuid())
+  workflowId String
+  teamId     String
+  status     WorkflowRunStatus   @default(queued)
+  trigger    WorkflowTriggerEvent
 
-  // Snapshot of the payload that was (or would have been) sent to the
-  // action. Keeping the body verbatim makes "why did this fire?" debugging
-  // possible without rehydrating the source event from Postgres.
+  // The contact this run is acting on. Nullable for triggers that aren't
+  // contact-scoped (none today, but keeps the schema flexible if we add a
+  // team-level "any time of day" cron trigger). Used by:
+  //   - once-per-contact dedupe (combined with workflowId in WorkflowContactState)
+  //   - Ask a Question step resume routing (Round 2c)
+  contactId      String?
+  conversationId String?
+
+  // Snapshot of the event payload at dispatch time. Used by branch/condition
+  // evaluation throughout the run AND by the runs UI to show "why did this fire."
   eventPayload Json
 
-  attempts       Int     @default(0)
-  responseStatus Int?
-  // Response body, truncated to ~2KB by the action runner — we don't want
-  // a verbose n8n error page to bloat the DB.
-  responseBody   String?
-  errorMessage   String?
+  // DAG state. `currentStepId` is the step that will run NEXT (queued state),
+  // or the step that's PAUSED (waiting state), or NULL (completed/failed).
+  currentStepId String?
+  // For waiting state: when the resume job is scheduled to fire. Lets the UI
+  // show "resumes in 1h" without consulting BullMQ.
+  waitUntil     DateTime?
+  // Jump-to-step uses this to cap loops. Hard ceiling enforced in runner.ts.
+  jumpsUsed     Int                 @default(0)
 
-  startedAt  DateTime  @default(now())
-  finishedAt DateTime?
+  // Per-step audit log. Append-only array of:
+  //   { stepId, type, status, startedAt, finishedAt?, responseStatus?,
+  //     responseBody?, errorMessage?, nextStepId? }
+  // Limited to ~100 entries by the runner's step ceiling.
+  stepLog Json @default("[]")
 
-  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
-  team       Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  attempts     Int       @default(0)
+  errorMessage String?
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
 
-  @@index([automationId, startedAt(sort: Desc)])
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId, startedAt(sort: Desc)])
   @@index([teamId, startedAt(sort: Desc)])
+  // Status-leading index for the worker's "find runs to resume" sweep
+  // (round 3 fallback if a wait job goes missing).
+  @@index([status, waitUntil])
+}
+
+// Per-(workflow, contact) ledger row for `triggerOncePerContact`. Existence
+// of the row means "this workflow has fired for this contact." Cheap to
+// look up via the compound unique; cleared when the workflow is deleted via
+// cascade.
+model WorkflowContactState {
+  id         String   @id @default(cuid())
+  workflowId String
+  contactId  String
+  teamId     String
+  firedAt    DateTime @default(now())
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, contactId])
+  @@index([teamId])
 }
 
 // API key for the external (n8n-facing) endpoints under /api/external/v1.
@@ -972,4 +1094,203 @@ model ConversationEvent {
 
   @@index([conversationId, at(sort: Desc)])
   @@index([teamId, at(sort: Desc)])
+}
+
+// ---------------------------------------------------------------------------
+// Team chat (internal channels)
+// ---------------------------------------------------------------------------
+//
+// Slack-style group chat between agents on the same team. Distinct from
+// customer-facing Conversation/Message because the surfaces don't overlap:
+// - No provider, no externalId, no direction, no status, no rawPayload
+// - Different read-receipt cadence and indexes
+// - Different permission model (every team member is implicitly in every
+//   channel for v0; per-channel membership is the future hook)
+//
+// Keeping the two graphs apart means a query against `Message` (the customer
+// surface) cannot accidentally leak into team-chat results, and vice versa.
+// Cost: some duplicated media columns. Worth it.
+
+model TeamChannel {
+  id          String   @id @default(cuid())
+  teamId      String
+  // Lowercase slug, unique per team. Becomes the URL: /team/<slug>.
+  // The default channel "general" is auto-created at team setup time and
+  // protected — the DELETE and rename routes refuse to touch it.
+  name        String
+  description String?
+  // The first channel created with name="general" per team is the default.
+  // Used to (a) redirect /team to the default channel, (b) protect from
+  // deletion/rename. At-most-one-default-per-team is enforced in app code,
+  // not by a partial unique (Prisma can't model those).
+  isDefault   Boolean  @default(false)
+  // Nullable + SetNull — channels are team-shared and shouldn't be destroyed
+  // when their creator leaves. The audit label degrades to "Removed user."
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Denormalized for cheap list rendering. Kept in sync by the message-send
+  // route; reads never have to join through TeamChannelMessage to render the
+  // sidebar. Best-effort consistency — a race that leaves these slightly
+  // stale is fine; the next message corrects them.
+  lastMessageAt      DateTime @default(now())
+  lastMessagePreview String   @default("")
+
+  team      Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User?                     @relation("CreatedChannels", fields: [createdById], references: [id], onDelete: SetNull)
+  messages  TeamChannelMessage[]
+  receipts  TeamChannelReadReceipt[]
+  pins      TeamChannelPin[]
+
+  @@unique([teamId, name])
+  @@index([teamId, lastMessageAt(sort: Desc)])
+}
+
+// One row per top-level channel message OR thread reply. The discriminator is
+// `threadRootId`:
+//   - NULL  → top-level channel message. Surfaces in the channel scroller.
+//   - SET   → reply to a root message; appears in the thread side panel only.
+//
+// Slack-style: replies never appear in the main channel feed by default. A
+// future "also send to channel" toggle would post a sibling top-level message
+// instead of changing this row.
+//
+// Hover toolbar wires up author-only edits (PATCH within 24h), author-or-
+// admin deletes, anyone-can-react, admin/manager pins. The route handlers
+// own those checks; the model just stores the data.
+model TeamChannelMessage {
+  id           String   @id @default(cuid())
+  channelId    String
+  // Denormalized for cheap tenant guards. The channel obviously already
+  // carries teamId, but every read site otherwise has to JOIN — and the
+  // socket-emit path wants teamId without a lookup.
+  teamId       String
+  // Null when the original author was deactivated/removed. UI renders
+  // "Removed user" — same pattern as InternalNote.authorUserId.
+  authorUserId String?
+  body         String
+
+  // ---- Media columns: mirror Message.media* exactly ----
+  // The agent attaches a file in the composer; we run it through the same
+  // UploadThing pipeline as customer media and store the result here. No
+  // background-download phase — there's no provider to fetch from.
+  mediaKind       String?
+  mediaKey        String?
+  mediaUrl        String?
+  mediaMimeType   String?
+  mediaCaption    String?
+  mediaFilename   String?
+  mediaSizeBytes  Int?
+  mediaDurationMs Int?
+
+  // ---- Edit history ----
+  // Null = never edited. Edit window is enforced at the PATCH route (24h);
+  // edited messages render an "(edited)" label sourced from this column.
+  // Edit history (prior bodies) is not stored — add TeamChannelMessageRevision
+  // later if anyone asks.
+  editedAt DateTime?
+
+  // ---- Thread linkage ----
+  // Null = top-level channel message (the "thread root"). When set, this row
+  // is a reply living in the side panel for that root. We don't allow
+  // sub-threads (no nesting): a reply's threadRootId always points at a
+  // top-level message, never at another reply. The POST route enforces this.
+  threadRootId String?
+
+  // ---- Thread denormalization (lives on the ROOT row only) ----
+  // Always null/0 on reply rows. The reply route increments threadReplyCount
+  // and updates threadLastReplyAt on the parent in the same transaction as
+  // the insert, so the channel feed can render "12 replies · 2m ago" without
+  // a COUNT().
+  threadReplyCount  Int       @default(0)
+  threadLastReplyAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  channel       TeamChannel           @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  team          Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  author        User?                 @relation("AuthoredChannelMessages", fields: [authorUserId], references: [id], onDelete: SetNull)
+  threadRoot    TeamChannelMessage?   @relation("ChannelThread", fields: [threadRootId], references: [id], onDelete: Cascade)
+  threadReplies TeamChannelMessage[]  @relation("ChannelThread")
+  mentions      TeamChannelMention[]
+  reactions     TeamChannelReaction[]
+  pin           TeamChannelPin?
+
+  // Keyset on the main feed: WHERE channelId = ? AND threadRootId IS NULL
+  // ORDER BY createdAt DESC, id DESC. The migration adds a PARTIAL index
+  // (Prisma can't model partial indexes) — see the migration SQL for the
+  // CREATE INDEX. The full index here covers the thread-panel read:
+  // WHERE threadRootId = ? ORDER BY createdAt ASC.
+  @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([threadRootId, createdAt])
+  @@index([teamId])
+}
+
+// @user mention. One row per (message, mentionedUser) so the "show me my
+// mentions" query is a single indexed lookup, not a JSONB scan. The mention
+// is also encoded inline in the body as `@[Display Name](userId)` so plain-
+// text previews keep working — these rows are the structured index, not the
+// source of truth for the display string.
+model TeamChannelMention {
+  id              String @id @default(cuid())
+  messageId       String
+  mentionedUserId String
+
+  message       TeamChannelMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  mentionedUser User               @relation("ChannelMentions", fields: [mentionedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, mentionedUserId])
+  @@index([mentionedUserId])
+}
+
+// Emoji reaction on a channel message. `emoji` is the raw Unicode codepoint
+// (e.g. "👍"), NOT a shortcode — simpler render path, no shortcode→unicode
+// map to maintain. Each user can apply each emoji at most once per message.
+model TeamChannelReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message TeamChannelMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User               @relation("ChannelReactions", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+// Pinned message bar. Separate table (not a boolean on the message) so we
+// retain who pinned, when. A message can be pinned at most once per channel;
+// pin permission is admin/manager — enforced at the route, not by the model.
+model TeamChannelPin {
+  id         String   @id @default(cuid())
+  channelId  String
+  messageId  String   @unique
+  // SetNull — keep the pin even when the pinner leaves the team.
+  pinnedById String?
+  pinnedAt   DateTime @default(now())
+
+  channel  TeamChannel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  message  TeamChannelMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  pinnedBy User?              @relation("PinnedMessages", fields: [pinnedById], references: [id], onDelete: SetNull)
+
+  @@index([channelId, pinnedAt(sort: Desc)])
+}
+
+// Per-(user, channel) read state. Same shape as ConversationReadReceipt —
+// `lastReadAt` vs `channel.lastMessageAt` yields "unread for me" without a
+// per-message receipt row. Mention-with-unread is a JOIN against
+// TeamChannelMention.
+model TeamChannelReadReceipt {
+  id         String   @id @default(cuid())
+  userId     String
+  channelId  String
+  lastReadAt DateTime @default(now())
+
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel TeamChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channelId])
+  @@index([channelId])
 }

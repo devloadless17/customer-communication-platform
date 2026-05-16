@@ -1,16 +1,26 @@
 import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
-import { dispatch } from "@/lib/automations/dispatcher";
-import { automationContactSnapshot } from "@/lib/automations/events";
+import { trackOnStatusChanged } from "@/lib/conversations/analytics";
 import { db } from "@/lib/db";
 import { recordConversationEvent } from "@/lib/inbox/events";
 import { emitToTeam } from "@/lib/socket/server";
 import type { ConversationStatus } from "@/lib/types";
+import { dispatch } from "@/lib/workflows/dispatcher";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshot,
+} from "@/lib/workflows/events";
 
 /**
  * Change conversation status (open / pending / closed). Emits
  * `conversation:status` so every connected client updates instantly.
+ *
+ * Workflow dispatch fires THREE triggers per change so authors can pick the
+ * granularity they want:
+ *   - conversation_status_changed (every transition)
+ *   - conversation_opened (any status → open)
+ *   - conversation_closed (any status → closed)
  */
 
 export const runtime = "nodejs";
@@ -48,16 +58,13 @@ export async function POST(
 
   const conversation = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
-    include: { contact: true },
+    include: { contact: { include: { tags: { select: { id: true } } } } },
   });
   if (!conversation) {
     return NextResponse.json({ error: "conversation not found" }, { status: 404 });
   }
   const previousStatus = conversation.status as ConversationStatus;
 
-  // Compare-and-set on the previous status. Two tabs racing "Close" + "Open"
-  // would otherwise let the later write silently clobber the earlier; with
-  // CAS, the loser gets a 409 and refetches so the UI matches reality.
   try {
     await db.conversation.update({
       where: { id: conversationId, teamId, status: previousStatus },
@@ -78,14 +85,8 @@ export async function POST(
     throw err;
   }
 
-  emitToTeam(teamId, "conversation:status", {
-    teamId,
-    conversationId,
-    status,
-  });
+  emitToTeam(teamId, "conversation:status", { teamId, conversationId, status });
 
-  // Audit. No-op for self-transitions so re-saves of the same status don't
-  // bloat the timeline.
   if (previousStatus !== status) {
     await recordConversationEvent({
       conversationId,
@@ -95,34 +96,52 @@ export async function POST(
       before: { status: previousStatus },
       after: { status },
     });
-  }
 
-  // Fire automations. No-op for self-transitions (e.g. clicking "Open" while
-  // already open) so workflows don't trigger on UI re-renders.
-  if (previousStatus !== status) {
-    await dispatch(teamId, "conversation_status_changed", {
-      conversation: {
-        id: conversation.id,
-        status,
-        assignedUserId: conversation.assignedUserId,
-        unreadCount: conversation.unreadCount,
-        lastMessageAt: conversation.lastMessageAt.toISOString(),
-      },
-      contact: automationContactSnapshot(conversation.contact),
+    // Analytics tracking happens before workflow dispatch so the snapshot
+    // carries the freshly-stamped closedAt / closedByUserId.
+    await trackOnStatusChanged({
+      conversationId,
+      teamId,
       previousStatus,
       newStatus: status,
       changedByUserId: userId,
     });
+
+    const fresh = await db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+    });
+    if (fresh) {
+      const conversationSnap = workflowConversationSnapshot(fresh);
+      const contactSnap = workflowContactSnapshot(conversation.contact);
+
+      // Three dispatches — workflows can listen to whichever granularity
+      // they need. Fire-and-forget per existing dispatcher contract.
+      await dispatch(teamId, "conversation_status_changed", {
+        conversation: conversationSnap,
+        contact: contactSnap,
+        previousStatus,
+        newStatus: status,
+        changedByUserId: userId,
+      });
+      if (status === "open") {
+        await dispatch(teamId, "conversation_opened", {
+          conversation: conversationSnap,
+          contact: contactSnap,
+          previousStatus,
+          openedByUserId: userId,
+        });
+      } else if (status === "closed") {
+        await dispatch(teamId, "conversation_closed", {
+          conversation: conversationSnap,
+          contact: contactSnap,
+          previousStatus,
+          closedByUserId: userId,
+          closedCategory: fresh.closedCategory,
+          closedSummary: fresh.closedSummary,
+        });
+      }
+    }
   }
 
   return NextResponse.json({ ok: true });
-}
-
-function customFieldsFromJson(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
 }

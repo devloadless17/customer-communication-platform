@@ -71,6 +71,14 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  // Legacy /automations URLs → /workflows. The migration renamed the
+  // surface; stale bookmarks and tabs should not dead-end at a 404.
+  async redirects() {
+    return [
+      { source: "/automations", destination: "/workflows", permanent: false },
+      { source: "/automations/:path*", destination: "/workflows/:path*", permanent: false },
+    ];
+  },
 };
 
 export default nextConfig;

@@ -37,6 +37,8 @@ interface SocketGlobals {
   presence?: Map<string, Map<string, Set<string>>>;
   /** conversation → user → set of socket ids. Same shape, scoped to threads. */
   typing?: Map<string, Map<string, Set<string>>>;
+  /** channel → user → set of socket ids. Same shape, scoped to team-chat channels. */
+  channelTyping?: Map<string, Map<string, Set<string>>>;
 }
 
 const globalForIO = globalThis as unknown as { __ccpIO?: SocketGlobals };
@@ -47,6 +49,7 @@ export function initSocketServer(http: HttpServer): IO {
 
   state.presence ??= new Map();
   state.typing ??= new Map();
+  state.channelTyping ??= new Map();
 
   const io: IO = new IOServer(http, {
     path: SOCKET_PATH,
@@ -135,6 +138,7 @@ export function initSocketServer(http: HttpServer): IO {
       socket.data.teamId = teamId;
       socket.data.role = (session!.user as { role?: Role }).role as Role;
       socket.data.typingIn = new Set();
+      socket.data.typingInChannel = new Set();
       next();
     } catch (err) {
       console.error("[socket] auth middleware error", err);
@@ -241,6 +245,80 @@ export function initSocketServer(http: HttpServer): IO {
       });
     });
 
+    // -----------------------------------------------------------------------
+    // Team-chat channel rooms. Subscribe verifies the channel belongs to the
+    // socket's team — same multi-tenancy guard we apply on conversations.
+    // -----------------------------------------------------------------------
+    socket.on("subscribe:channel", async ({ channelId }) => {
+      const room = channelRoom(channelId);
+      if (socket.rooms.has(room)) return;
+      try {
+        const owns = await db.teamChannel.findFirst({
+          where: { id: channelId, teamId },
+          select: { id: true },
+        });
+        if (!owns) return;
+      } catch (err) {
+        console.error("[socket] subscribe:channel lookup failed", err);
+        return;
+      }
+      socket.join(room);
+      // Send a fresh typing snapshot so the typing dots light up immediately
+      // for someone already mid-typing when this socket joins.
+      socket.emit("team:channel:typing:update", {
+        channelId,
+        typingUserIds: snapshotChannelTyping(channelId),
+      });
+    });
+
+    socket.on("unsubscribe:channel", ({ channelId }) => {
+      socket.leave(channelRoom(channelId));
+      if (socket.data.typingInChannel?.delete(channelId)) {
+        removeChannelTyping(channelId, userId, socket.id);
+        io.to(channelRoom(channelId)).emit("team:channel:typing:update", {
+          channelId,
+          typingUserIds: snapshotChannelTyping(channelId),
+        });
+      }
+    });
+
+    // Thread side-panel rooms. We do NOT verify the root message id against
+    // the team — the route that emits to this room already does that check
+    // (and the channel-room subscribe gates the parent), so a malicious
+    // subscribe leaks nothing because no events will ever target the wrong
+    // room. Keep this cheap.
+    socket.on("subscribe:channel-thread", ({ rootMessageId }) => {
+      socket.join(channelThreadRoom(rootMessageId));
+    });
+    socket.on("unsubscribe:channel-thread", ({ rootMessageId }) => {
+      socket.leave(channelThreadRoom(rootMessageId));
+    });
+
+    socket.on("typing:channel:start", ({ channelId }) => {
+      // Only count typing if the socket has actually subscribed to this
+      // channel — otherwise a malicious client could spam typing events
+      // into channels it can't read.
+      if (!socket.rooms.has(channelRoom(channelId))) return;
+      const wasTyping = socket.data.typingInChannel?.has(channelId);
+      socket.data.typingInChannel?.add(channelId);
+      addChannelTyping(channelId, userId, socket.id);
+      if (!wasTyping) {
+        io.to(channelRoom(channelId)).emit("team:channel:typing:update", {
+          channelId,
+          typingUserIds: snapshotChannelTyping(channelId),
+        });
+      }
+    });
+
+    socket.on("typing:channel:stop", ({ channelId }) => {
+      if (!socket.data.typingInChannel?.delete(channelId)) return;
+      removeChannelTyping(channelId, userId, socket.id);
+      io.to(channelRoom(channelId)).emit("team:channel:typing:update", {
+        channelId,
+        typingUserIds: snapshotChannelTyping(channelId),
+      });
+    });
+
     socket.on("disconnect", () => {
       // Drop typing flags first — they're scoped to conversation rooms and
       // need their own emit even if presence didn't change.
@@ -253,6 +331,18 @@ export function initSocketServer(http: HttpServer): IO {
           });
         }
         socket.data.typingIn.clear();
+      }
+      // Same drop for channel typing — a typing dot left behind after a
+      // closed tab is the kind of thing teammates notice and complain about.
+      if (socket.data.typingInChannel) {
+        for (const channelId of socket.data.typingInChannel) {
+          removeChannelTyping(channelId, userId, socket.id);
+          io.to(channelRoom(channelId)).emit("team:channel:typing:update", {
+            channelId,
+            typingUserIds: snapshotChannelTyping(channelId),
+          });
+        }
+        socket.data.typingInChannel.clear();
       }
 
       const wentOffline = removePresence(teamId, userId, socket.id);
@@ -324,6 +414,8 @@ export function disconnectUserSockets(userId: string): number {
 
 export const teamRoom = (teamId: string) => `team:${teamId}`;
 export const conversationRoom = (id: string) => `conv:${id}`;
+export const channelRoom = (id: string) => `chan:${id}`;
+export const channelThreadRoom = (rootMessageId: string) => `chan-thr:${rootMessageId}`;
 
 // ---------------------------------------------------------------------------
 // Presence + typing tracking. Per-user *socket* sets, not booleans, because
@@ -381,6 +473,33 @@ function snapshotTyping(conversationId: string): string[] {
   return convo ? [...convo.keys()] : [];
 }
 
+// Channel typing — same shape as conversation typing, separate map so a
+// conversation typing event and a channel typing event for the same id can
+// coexist (impossible in practice, but the separation keeps the helpers
+// trivially scoped and avoids a key-collision footgun).
+function addChannelTyping(channelId: string, userId: string, socketId: string): void {
+  const chan = state.channelTyping!.get(channelId) ?? new Map<string, Set<string>>();
+  const sockets = chan.get(userId) ?? new Set<string>();
+  sockets.add(socketId);
+  chan.set(userId, sockets);
+  state.channelTyping!.set(channelId, chan);
+}
+
+function removeChannelTyping(channelId: string, userId: string, socketId: string): void {
+  const chan = state.channelTyping!.get(channelId);
+  if (!chan) return;
+  const sockets = chan.get(userId);
+  if (!sockets) return;
+  sockets.delete(socketId);
+  if (sockets.size === 0) chan.delete(userId);
+  if (chan.size === 0) state.channelTyping!.delete(channelId);
+}
+
+function snapshotChannelTyping(channelId: string): string[] {
+  const chan = state.channelTyping!.get(channelId);
+  return chan ? [...chan.keys()] : [];
+}
+
 // ---------------------------------------------------------------------------
 // Typed emit helpers — the only thing app code should reach for. Keeps every
 // emit going through the typed event surface so a typo is a build error.
@@ -415,6 +534,32 @@ export function emitToConversation<E extends keyof ServerToClientEvents>(
     return;
   }
   io.to(conversationRoom(conversationId)).emit(event, ...args);
+}
+
+export function emitToChannel<E extends keyof ServerToClientEvents>(
+  channelId: string,
+  event: E,
+  ...args: Parameters<ServerToClientEvents[E]>
+) {
+  const io = getIOOrNull();
+  if (!io) {
+    console.warn(`[socket] emitToChannel("${event}") dropped — IO not initialized yet`);
+    return;
+  }
+  io.to(channelRoom(channelId)).emit(event, ...args);
+}
+
+export function emitToChannelThread<E extends keyof ServerToClientEvents>(
+  rootMessageId: string,
+  event: E,
+  ...args: Parameters<ServerToClientEvents[E]>
+) {
+  const io = getIOOrNull();
+  if (!io) {
+    console.warn(`[socket] emitToChannelThread("${event}") dropped — IO not initialized yet`);
+    return;
+  }
+  io.to(channelThreadRoom(rootMessageId)).emit(event, ...args);
 }
 
 /**

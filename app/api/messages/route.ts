@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { requireSession } from "@/lib/auth/helpers";
+import { trackOnOutboundMessage } from "@/lib/conversations/analytics";
 import { db } from "@/lib/db";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getMetaProvider } from "@/lib/providers";
@@ -253,6 +254,11 @@ export async function POST(req: Request) {
     .catch((err) =>
       console.error("[api/messages] deferred conversation.update failed", err),
     );
+
+  // Analytics: count this outbound + stamp firstResponseAt if it's the first
+  // outbound after an inbound. Fire-and-forget — failure here doesn't ghost
+  // the message the agent just sent.
+  void trackOnOutboundMessage({ conversationId, teamId, senderUserId: userId });
 
   return NextResponse.json({ ok: true, messageId: created.id });
 }

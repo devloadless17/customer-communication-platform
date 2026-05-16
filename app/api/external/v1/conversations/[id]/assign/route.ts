@@ -2,11 +2,15 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { dispatch } from "@/lib/automations/dispatcher";
-import { automationContactSnapshot } from "@/lib/automations/events";
 import { authenticateApiKey } from "@/lib/auth/external";
+import { trackOnAssigned } from "@/lib/conversations/analytics";
 import { db } from "@/lib/db";
 import { emitToTeam } from "@/lib/socket/server";
+import { dispatch } from "@/lib/workflows/dispatcher";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshot,
+} from "@/lib/workflows/events";
 
 /**
  * POST /api/external/v1/conversations/[id]/assign
@@ -96,20 +100,25 @@ export async function POST(
   });
 
   if (previousAssignedUserId !== assignedUserId) {
-    await dispatch(auth.teamId, "conversation_assigned", {
-      conversation: {
-        id: updated.id,
-        status: updated.status,
-        assignedUserId: updated.assignedUserId,
-        unreadCount: updated.unreadCount,
-        lastMessageAt: updated.lastMessageAt.toISOString(),
-      },
-      contact: automationContactSnapshot(updated.contact),
-      assignedUser: assignedUser
-        ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
-        : null,
+    await trackOnAssigned({
+      conversationId,
+      teamId: auth.teamId,
+      assignedUserId,
       previousAssignedUserId,
     });
+    const fresh = await db.conversation.findFirst({
+      where: { id: conversationId, teamId: auth.teamId },
+    });
+    if (fresh) {
+      await dispatch(auth.teamId, "conversation_assigned", {
+        conversation: workflowConversationSnapshot(fresh),
+        contact: workflowContactSnapshot(updated.contact),
+        assignedUser: assignedUser
+          ? { id: assignedUser.id, name: assignedUser.name, email: assignedUser.email }
+          : null,
+        previousAssignedUserId,
+      });
+    }
   }
 
   return NextResponse.json({ ok: true });

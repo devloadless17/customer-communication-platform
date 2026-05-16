@@ -10,7 +10,7 @@ A web platform where multiple internal agents collaborate on WhatsApp conversati
 - 4-week MVP timeline.
 - Building on the **official Meta WhatsApp Cloud API**. Evolution / Baileys / unofficial bridges have been removed from this project on purpose — the ban risk for self-hosted bridges isn't acceptable for a SaaS.
 
-## Stack (decided, don't suggest alternatives)
+## Stack
 - **Frontend:** Next.js (App Router)
 - **Backend:** Next.js API routes + custom server for Socket.io
 - **Database:** PostgreSQL (via Prisma)
@@ -163,17 +163,26 @@ This is a `tsx watch` artifact, NOT a memory leak in our code. Don't chase phant
 
 ## What I'm working on right now
 
-The 4-week MVP is shipped — inbox, realtime, templates, broadcasts, contacts (with tags / stages / custom fields / audience groups), media send+receive, snippets, internal notes, forwarding, external API, and a first-pass automations engine (triggers + conditions + webhook actions, BullMQ-backed) are all live. Next two workstreams, in this order:
+The 4-week MVP is shipped — inbox, realtime, templates, broadcasts, contacts (with tags / stages / custom fields / audience groups), media send+receive, snippets, internal notes, forwarding, external API, and a multi-step **workflow engine + React Flow canvas** ([lib/workflows/](lib/workflows/), [/workflows](app/workflows/)) are all live. Next two workstreams, in this order:
 
-### 1. Workflow automations — depth pass
+### 1. Workflow engine — depth pass
 
-The current engine ([lib/automations/](lib/automations/)) is real but thin: three triggers (`message_received`, `conversation_assigned`, `conversation_status_changed`), AND-only conditions, one action type (`webhook`). Goal is to make this a usable workflow builder, not a feature-match against respond.io.
+The engine is a respond.io-style multi-step DAG builder. Trigger → optional conditions → graph of steps with branch / wait / jump control flow. State lives on `WorkflowRun` (status, currentStepId, jumpsUsed, stepLog); waits resume via BullMQ delayed jobs. Round 1 single-action "Automations" were migrated into single-step Workflows by [migrations/20260516180000_workflows](prisma/migrations/20260516180000_workflows/migration.sql).
 
-- More triggers: `conversation_created`, `tag_added`, `contact_created`, `keyword_match`, time-based ("no reply in N hours")
-- More actions, in priority order: `send_template`, `send_snippet`, `assign_to_user`/`assign_to_round_robin`, `set_status`, `add_tag`/`remove_tag`, `move_stage`, `add_note`. `webhook` stays.
-- Condition logic: OR groups + nesting (current AND-only is too rigid)
-- Run history UI: surface `AutomationRun` rows with replay/inspect, not just a JSON dump
-- Multi-step workflows (action chains with branching) — defer until single-action flows are proven in pilot
+What's shipped (Round 2a+2b):
+- **11 triggers**: `message_received`, `conversation_created`/`_opened`/`_closed`/`_assigned`/`_status_changed`, `contact_field_updated`, `contact_tag_updated`, `contact_lifecycle_updated`, `manual_trigger`, `incoming_webhook` (HMAC-signed per-workflow URL).
+- **16 step types**: `send_message`, `send_template`, `add_comment`, `assign_to`, `set_status`, `open_conversation`, `close_conversation`, `add_tag`, `remove_tag`, `update_field`, `update_lifecycle`, `branch` (AND/OR/nested), `wait` (BullMQ delayed), `jump_to_step` (with max-jump counter), `http_request`, `trigger_workflow`. Adding a step type = a handler module + a registry entry + a per-step editor; no engine changes.
+- **Conversation analytics**: `firstAssignedAt`, `firstResponseAt`, `closedAt`, `assignmentsCount`, `incomingMessagesCount`, `outgoingMessagesCount`, `responsesCount` columns populated by [lib/conversations/analytics.ts](lib/conversations/analytics.ts) — feeds the workflow conversation_closed payload's many variables.
+- **React Flow canvas** ([components/workflows/builder/](components/workflows/builder/)) with palette + trigger card + step nodes + branch nodes (true/false handles) + run history.
+- **Trigger-once-per-contact** dedupe via `WorkflowContactState`.
+
+What's deferred to Round 2c (when pilot pulls these forward):
+- **Ask a Question** step (stateful: pauses run until matching inbound). Requires resume-on-message-received wiring.
+- **Date & Time / Business Hours** branch — needs a Team business-hours model.
+- **Round-robin assignment** + **AI assignment** (`assign_to.mode = "round_robin"` / `"ai"`).
+- **Platform integrations** as steps: Meta CAPI / TikTok Events / Google Sheets row (each is its own multi-day OAuth + API integration).
+- **AI Objective** (Legacy) — pairs with workstream 2 (AI agents).
+- **Outbound-from-step `$var.body.*` token resolution** for incoming_webhook payloads.
 
 ### 2. AI agents — auto-reply, lead qualify, multilingual
 
@@ -181,7 +190,7 @@ The data layer is already there: [app/api/conversations/[id]/messages/context/ro
 
 - Start with **suggested replies** (agent-in-the-loop) before autonomous send — lower trust bar, faster to ship, gives us prompt-quality signal
 - Then **auto-reply when no human is online** with a configurable "handoff" trigger (keyword or AI confidence threshold flips conversation to `pending` + assigns to a human)
-- **Lead qualification** = an automation action that runs an LLM classifier on the conversation and writes to contact custom fields / stage / tags. Reuses workstream 1's plumbing — that's why automations come first.
+- **Lead qualification** = a workflow step that runs an LLM classifier on the conversation and writes to contact custom fields / stage / tags. Reuses workstream 1's plumbing — that's why workflows come first.
 - **Multilingual** is mostly free if we use a frontier model; the work is detection + per-team language preferences, not translation
 - Provider: Claude API ([claude-opus-4-7] for reasoning-heavy, [claude-haiku-4-5-20251001] for classification), with prompt caching on the system prompt + conversation history
 - Per-team `aiEnabled` flag + per-team prompt overrides on the `Team` table. Per-team API keys later if cost shaping is needed.
@@ -191,12 +200,12 @@ The data layer is already there: [app/api/conversations/[id]/messages/context/ro
 
 Today's [app/api/external/v1/](app/api/external/v1/) routes are Bearer-auth'd via `TeamApiKey` and cover contacts + conversations + messages + notes — enough for n8n today, not enough for a real integrations story. Goal is to make this the public API a customer (or Zapier/Make/n8n template) can build on without us hand-holding.
 
-- **Outbound webhooks (we POST out)**: subscribe per-team to events — `message.received`, `message.sent`, `conversation.assigned`, `conversation.status_changed`, `contact.created`, `contact.updated`, `automation.run`. Signed payloads (HMAC), retries with backoff, delivery log. This is what closes the loop with n8n/Zapier without them polling.
-- **Coverage gaps in inbound API**: tags CRUD, snippets, audience groups, broadcasts (create + status), templates list, automations list. Anything an admin can do in the UI should be doable via API.
+- **Outbound webhooks (we POST out)**: subscribe per-team to events — `message.received`, `message.sent`, `conversation.assigned`, `conversation.status_changed`, `contact.created`, `contact.updated`, `workflow.run`. Signed payloads (HMAC), retries with backoff, delivery log. This is what closes the loop with n8n/Zapier without them polling.
+- **Coverage gaps in inbound API**: tags CRUD, snippets, audience groups, broadcasts (create + status), templates list, workflows list. Anything an admin can do in the UI should be doable via API.
 - **Auth hygiene**: scoped API keys (read-only vs read-write vs admin), rotation, IP allowlists optional. Today's keys are full-access.
 - **Versioned + documented**: keep `/v1/`, write a minimal OpenAPI spec, ship a Postman collection. Don't build a full docs site yet — README + spec is enough for pilot-era.
 - **Rate limiting**: per-key, sliding window. Pick numbers when we have one external integration actually live.
 
 ### Why this order
 
-Automations is the runway. AI agents reuse its triggers, conditions, and action machinery — building AI first means rebuilding it on top of a shallow engine, then doing the deep pass anyway. External API webhooks pair naturally with the new automation triggers (same event taxonomy on both sides — internal automations *and* outbound webhooks fire from the same dispatcher). Pilot customer feedback still trumps the roadmap; if they ask for analytics first, that jumps the queue.
+Workflows are the runway. AI agents plug in as new step types and reuse the trigger / conditions / dispatcher machinery — building AI first means rebuilding it on top of a shallow engine, then doing the deep pass anyway. External API webhooks pair naturally with the workflow triggers (same event taxonomy on both sides — internal workflows *and* outbound webhooks fire from the same dispatcher). Pilot customer feedback still trumps the roadmap; if they ask for analytics first, that jumps the queue.

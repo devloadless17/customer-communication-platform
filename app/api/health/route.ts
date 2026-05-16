@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
-import { getRedisConnection } from "@/lib/automations/queue";
+import { getRedisConnection } from "@/lib/workflows/queue";
 
 /**
  * Health endpoint for reverse proxy + systemd liveness probes.
