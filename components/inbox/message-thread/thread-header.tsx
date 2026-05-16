@@ -47,7 +47,7 @@ export function ThreadHeader({
   canManageStages: boolean;
 }) {
   return (
-    <header className="flex h-[60px] shrink-0 items-center gap-3 border-b border-border px-4">
+    <header className="flex h-15 shrink-0 items-center gap-3 border-b border-border px-4">
       <Avatar className="size-9">
         <AvatarFallback
           className="text-xs text-white"

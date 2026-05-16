@@ -63,7 +63,7 @@ function renderTokenized(
       <span
         key={`tok-${i++}`}
         className={cn(
-          "rounded-sm px-0.5",
+          "rounded-xs px-0.5",
           isKnown
             ? "bg-blue-500/10 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
             : "bg-amber-500/10 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
@@ -169,7 +169,7 @@ export const TokenHighlightInput = React.forwardRef<
         className={cn(
           "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors",
           "placeholder:text-muted-foreground",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
           "disabled:cursor-not-allowed disabled:opacity-50",
           // The overlay paints the visible text; the input itself holds
           // an invisible copy so caret + selection still work natively.
@@ -225,7 +225,7 @@ export const TokenHighlightTextarea = React.forwardRef<
         className={cn(
           "flex min-h-15 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors",
           "placeholder:text-muted-foreground",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "resize-none",
           "text-transparent caret-foreground selection:bg-blue-500/30 selection:text-transparent",

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { getClientSocket } from "@/lib/socket/client";
+import { getClientSocket, isSocketTeardown } from "@/lib/socket/client";
 
 /**
  * Combined view of the client's network and realtime state. Drives the
@@ -76,6 +76,10 @@ export function useConnectionStatus(opts?: {
     const socket = getClientSocket();
 
     const compute = (): ConnectionState => {
+      // Signout / org-delete in progress: a hard nav to /logout is queued
+      // behind us. Don't surface "Reconnecting…" for that doomed socket —
+      // the user has nothing to do about it and the banner just flashes.
+      if (isSocketTeardown()) return "online";
       if (typeof navigator !== "undefined" && !navigator.onLine) return "offline";
       if (socket.connected) return "online";
       // Pre-handshake on a fresh page load — suppress the banner. Once

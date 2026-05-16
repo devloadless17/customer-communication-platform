@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { LocalTime } from "@/components/local-time";
 import { getSession } from "@/lib/auth/current-user";
 import { getTeamDetailForSuperAdmin } from "@/lib/queries";
 import { roleLabel } from "@/lib/auth/permissions";
@@ -65,7 +66,7 @@ export default async function AdminTeamDetailPage({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted-foreground">
           <span className="font-mono">{team.id}</span>
           <span>·</span>
-          <span>Created {formatListTime(team.createdAt)}</span>
+          <span>Created <LocalTime iso={team.createdAt} format={formatListTime} /></span>
           <span>·</span>
           {team.whatsappConnected ? (
             <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
@@ -138,7 +139,7 @@ export default async function AdminTeamDetailPage({
                   </div>
                 </div>
                 <div className="text-[11px] text-muted-foreground">
-                  Joined {formatListTime(m.createdAt)}
+                  Joined <LocalTime iso={m.createdAt} format={formatListTime} />
                 </div>
               </li>
             ))}

@@ -53,7 +53,7 @@ export function AutomationToggle({
     >
       <span
         className={
-          "inline-block size-4 transform rounded-full bg-background shadow-sm transition-transform " +
+          "inline-block size-4 transform rounded-full bg-background shadow-xs transition-transform " +
           (enabled ? "translate-x-[18px]" : "translate-x-0.5")
         }
       />

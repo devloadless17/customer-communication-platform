@@ -215,7 +215,7 @@ function PreviewBubble({
       : null;
 
   return (
-    <div className="rounded-lg border border-border bg-card p-3 shadow-sm">
+    <div className="rounded-lg border border-border bg-card p-3 shadow-xs">
       <div className="rounded-md bg-emerald-500/5 p-3 ring-1 ring-emerald-500/10">
         {/* Header */}
         {headerComp?.format === "TEXT" && renderedHeader && (

@@ -211,8 +211,8 @@ function BubbleContent({
             // send feels instant rather than slightly-loading.
             message.failed && "opacity-80 ring-destructive/60",
             isOut
-              ? "rounded-br-sm bg-outbound-bg text-outbound-fg ring-transparent"
-              : "rounded-bl-sm bg-inbound-bg text-inbound-fg ring-border",
+              ? "rounded-br-xs bg-outbound-bg text-outbound-fg ring-transparent"
+              : "rounded-bl-xs bg-inbound-bg text-inbound-fg ring-border",
             // Active search match — a soft neutral ring that stays for as
             // long as the bubble is the selected match. Uses the
             // foreground color at low opacity so it adapts to light/dark

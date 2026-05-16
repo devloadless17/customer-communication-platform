@@ -46,7 +46,7 @@ export function ConnectionBanner() {
           exit={{ y: -32, opacity: 0 }}
           transition={{ duration: 0.18, ease: "easeOut" }}
           className={cn(
-            "absolute inset-x-0 top-0 z-50 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-medium shadow-sm",
+            "absolute inset-x-0 top-0 z-50 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-medium shadow-xs",
             state === "offline"
               ? "bg-destructive text-destructive-foreground"
               : "bg-amber-500 text-white",

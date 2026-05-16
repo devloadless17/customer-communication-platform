@@ -15,6 +15,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@/lib/avatar-color";
 import { getClientSocket } from "@/lib/socket/client";
 import { formatPhone, initials } from "@/lib/utils";
@@ -43,6 +44,14 @@ interface PanelProps {
   canManageFields: boolean;
   /** Team-wide tag catalog. Used by the tag picker for select/create. */
   tagCatalog: Tag[];
+}
+
+function formatShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 export function ContactPanel({
@@ -363,11 +372,13 @@ export function ContactPanel({
           <ReadOnlyRow
             icon={Clock}
             label="First contacted"
-            value={new Date(messages[0]?.timestamp ?? Date.now()).toLocaleDateString("en-US", {
-              month: "short",
-              day: "numeric",
-              year: "numeric",
-            })}
+            value={
+              messages[0] ? (
+                <LocalTime iso={messages[0].timestamp} format={formatShortDate} />
+              ) : (
+                "—"
+              )
+            }
           />
 
           {/* Team-wide fields. Rendered in their definition order. */}

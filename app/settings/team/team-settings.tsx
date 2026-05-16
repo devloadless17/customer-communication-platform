@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { closeClientSocket } from "@/lib/socket/client";
 import {
   assignableRoles,
   canManageUsers,
@@ -27,7 +28,8 @@ import {
   roleLabel,
 } from "@/lib/auth/permissions";
 import type { Role } from "@/lib/types";
-import { initials } from "@/lib/utils";
+import { formatLocaleDate, initials } from "@/lib/utils";
+import { LocalTime } from "@/components/local-time";
 
 export interface TeamUserRow {
   id: string;
@@ -72,6 +74,12 @@ export function TeamSettings({
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [lastInvite, setLastInvite] = useState<InviteResult | null>(null);
+  // Separate from `pending` (useTransition) — org-delete needs its own flag so
+  // the cascade-delete spinner overlay isn't tangled up with the "Generate
+  // link" / "Disable" / "Delete user" buttons all sharing the transition.
+  // Sharing `pending` made clicking "Delete organization" look like nothing
+  // happened while quietly disabling every other button on the page.
+  const [deletingOrg, setDeletingOrg] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
 
   const refresh = () => router.refresh();
@@ -119,7 +127,7 @@ export function TeamSettings({
     }
   }
 
-  async function deleteUser(id: string, name: string) {
+  async function confirmDeleteUser(id: string, name: string) {
     setError(null);
     const ok = await confirm({
       title: `Delete ${name}?`,
@@ -129,16 +137,21 @@ export function TeamSettings({
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetch(`/api/users/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to delete user");
-      return;
-    }
-    refresh();
+    // Only the mutation goes inside the transition — keeps the global
+    // `pending` flag from lighting up every other button on the page while
+    // the user is still reading the confirm dialog.
+    startTransition(async () => {
+      const res = await fetch(`/api/users/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Failed to delete user");
+        return;
+      }
+      refresh();
+    });
   }
 
-  async function revokeInvite(id: string, email: string) {
+  async function confirmRevokeInvite(id: string, email: string) {
     setError(null);
     const ok = await confirm({
       title: `Revoke invite for ${email}?`,
@@ -148,19 +161,22 @@ export function TeamSettings({
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetch(`/api/invites/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(data.error ?? "Failed to revoke invite");
-      return;
-    }
-    // The socket emit on the server will trigger router.refresh() everywhere
-    // else; our own tab gets the same path here so the row disappears
-    // without waiting on the round-trip.
-    refresh();
+    startTransition(async () => {
+      const res = await fetch(`/api/invites/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Failed to revoke invite");
+        return;
+      }
+      // The socket emit on the server will trigger router.refresh() everywhere
+      // else; our own tab gets the same path here so the row disappears
+      // without waiting on the round-trip.
+      refresh();
+    });
   }
 
   async function deleteOrg() {
+    if (deletingOrg) return;
     setError(null);
     const ok = await confirm({
       title: `Delete ${teamName}?`,
@@ -170,14 +186,24 @@ export function TeamSettings({
       destructive: true,
     });
     if (!ok) return;
+    setDeletingOrg(true);
+    // Drop the socket BEFORE the fetch so the connection banner never gets a
+    // chance to flash "Reconnecting…" between the server-side socket kick
+    // (api/team DELETE → disconnectUserSockets) and the /logout hard nav.
+    // The flag inside closeClientSocket also suppresses the banner across
+    // the rest of this teardown.
+    closeClientSocket();
     const res = await fetch("/api/team", { method: "DELETE" });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       setError(data.error ?? "Failed to delete organization");
+      setDeletingOrg(false);
       return;
     }
     // Cascade nuked our Session row already; force a hard navigation to
-    // /logout so the cookie is cleared and we land on /login cleanly.
+    // /logout so the cookie is cleared and we land on /login cleanly. Keep
+    // the overlay up — the navigation takes a beat and we don't want the
+    // page to look interactive again in the meantime.
     window.location.assign("/logout");
   }
 
@@ -223,9 +249,9 @@ export function TeamSettings({
         <PendingInvitesCard
           invites={pendingInvites}
           pending={pending}
-          onRevoke={(id, email) =>
-            startTransition(() => revokeInvite(id, email))
-          }
+          onRevoke={(id, email) => {
+            void confirmRevokeInvite(id, email);
+          }}
         />
       )}
 
@@ -252,7 +278,9 @@ export function TeamSettings({
                   refresh();
                 })
               }
-              onDelete={() => startTransition(() => deleteUser(u.id, u.name))}
+              onDelete={() => {
+                void confirmDeleteUser(u.id, u.name);
+              }}
             />
           ))}
         </ul>
@@ -261,12 +289,36 @@ export function TeamSettings({
       {canDeleteOrg && (
         <DangerZone
           teamName={teamName}
-          pending={pending}
-          onDeleteOrg={() => startTransition(() => deleteOrg())}
+          pending={deletingOrg}
+          onDeleteOrg={() => {
+            void deleteOrg();
+          }}
         />
       )}
 
       {confirmDialog}
+      {deletingOrg && <DeletingOrgOverlay teamName={teamName} />}
+    </div>
+  );
+}
+
+function DeletingOrgOverlay({ teamName }: { teamName: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed inset-0 z-70 flex items-center justify-center bg-background/70 backdrop-blur-xs"
+    >
+      <div className="flex w-full max-w-sm flex-col items-center gap-3 rounded-xl border border-border bg-card px-6 py-7 text-center shadow-xl">
+        <Loader2 className="size-6 animate-spin text-primary" />
+        <div className="space-y-1">
+          <div className="text-sm font-medium">Deleting {teamName}…</div>
+          <p className="text-[12px] text-muted-foreground">
+            Removing every conversation, contact, broadcast, and teammate. You'll
+            be signed out as soon as this finishes.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -329,7 +381,7 @@ function UserRow({
             value={user.role}
             disabled={pending}
             onChange={(e) => onPatch({ role: e.target.value as Role })}
-            className="h-8 rounded-md border border-input bg-transparent px-2 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-8 rounded-md border border-input bg-transparent px-2 text-xs shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           >
             {options.map((r) => (
               <option key={r} value={r}>
@@ -452,7 +504,7 @@ function InviteCard({
         <select
           name="role"
           defaultValue="agent"
-          className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         >
           {assignableRoles.map((r) => (
             <option key={r} value={r}>
@@ -496,9 +548,9 @@ function InviteLinkCard({
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-medium text-foreground">Invite ready</div>
-          <div className="mt-0.5 text-[11px] text-muted-foreground" suppressHydrationWarning>
+          <div className="mt-0.5 text-[11px] text-muted-foreground">
             Share this link with <span className="font-medium">{invite.email}</span>. It expires{" "}
-            {new Date(invite.expiresAt).toLocaleDateString()}.
+            <LocalTime iso={invite.expiresAt} format={formatLocaleDate} />.
           </div>
         </div>
         <button
@@ -572,9 +624,9 @@ function PendingInvitesCard({
                   {roleLabel(inv.role)}
                 </Badge>
               </div>
-              <div className="text-[11px] text-muted-foreground" suppressHydrationWarning>
+              <div className="text-[11px] text-muted-foreground">
                 Invited by {inv.createdByName} · expires{" "}
-                {new Date(inv.expiresAt).toLocaleDateString()}
+                <LocalTime iso={inv.expiresAt} format={formatLocaleDate} />
               </div>
             </div>
             <Button

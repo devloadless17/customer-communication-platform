@@ -35,7 +35,7 @@ export default async function LoginPage({ searchParams }: PageProps) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+        <div className="rounded-xl border border-border bg-card p-6 shadow-xs">
           <h1 className="mb-1 text-base font-semibold tracking-tight">Sign in</h1>
           <p className="mb-5 text-xs text-muted-foreground">
             Use the email your admin invited you with.

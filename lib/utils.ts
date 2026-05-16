@@ -43,6 +43,16 @@ export function formatMessageTime(iso: string): string {
   });
 }
 
+/** Locale-formatted "YYYY-MM-DD, HH:MM:SS AM/PM" for log/admin views. */
+export function formatLocaleString(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
+
+/** Locale-formatted short date, e.g. "5/14/2026". */
+export function formatLocaleDate(iso: string): string {
+  return new Date(iso).toLocaleDateString();
+}
+
 /** Day separator label used between message clusters. */
 export function formatDaySeparator(iso: string, now: Date = new Date()): string {
   const then = new Date(iso);

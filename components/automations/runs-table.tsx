@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, RefreshCw, XCircle } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
+import { formatLocaleString } from "@/lib/utils";
 
 /**
  * Runs table. Fetches on mount + manual refresh — no live updates yet (runs
@@ -100,9 +102,11 @@ export function RunsTable({ automationId }: { automationId: string }) {
                   <span className="text-xs">
                     attempt {r.attempts}
                   </span>
-                  <span className="ml-auto text-[11px] text-muted-foreground" suppressHydrationWarning>
-                    {new Date(r.startedAt).toLocaleString()}
-                  </span>
+                  <LocalTime
+                    iso={r.startedAt}
+                    format={formatLocaleString}
+                    className="ml-auto text-[11px] text-muted-foreground"
+                  />
                 </button>
                 {open && (
                   <div className="border-t border-border bg-muted/20 px-3 py-2 text-xs">

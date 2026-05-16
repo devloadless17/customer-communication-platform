@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus, Webhook, Zap } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
@@ -90,7 +91,7 @@ export default async function AutomationsPage() {
                 </div>
                 <div className="hidden flex-col items-end gap-0.5 text-right text-[11px] text-muted-foreground sm:flex">
                   <div>{r._count.runs} run{r._count.runs === 1 ? "" : "s"}</div>
-                  <div>{formatListTime(r.createdAt.toISOString())}</div>
+                  <div><LocalTime iso={r.createdAt} format={formatListTime} /></div>
                 </div>
                 {canManage && (
                   <AutomationToggle id={r.id} enabled={r.enabled} />

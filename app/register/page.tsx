@@ -21,7 +21,7 @@ export default async function RegisterPage() {
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+        <div className="rounded-xl border border-border bg-card p-6 shadow-xs">
           <h1 className="mb-1 text-base font-semibold tracking-tight">
             Create your workspace
           </h1>

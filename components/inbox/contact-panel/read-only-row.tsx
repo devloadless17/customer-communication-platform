@@ -8,7 +8,7 @@ export function ReadOnlyRow({
 }: {
   icon?: React.ComponentType<{ className?: string }>;
   label: string;
-  value: string;
+  value: React.ReactNode;
   mono?: boolean;
 }) {
   return (

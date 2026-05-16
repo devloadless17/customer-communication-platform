@@ -4,6 +4,7 @@ import { memo } from "react";
 import { Loader2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatListTime, initials } from "@/lib/utils";
 import type { Contact, Conversation, User } from "@/lib/types";
@@ -77,12 +78,11 @@ function ConversationListItemImpl({
           >
             {contact.name}
           </span>
-          <span
+          <LocalTime
+            iso={conversation.lastMessageAt}
+            format={formatListTime}
             className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground"
-            suppressHydrationWarning
-          >
-            {formatListTime(conversation.lastMessageAt)}
-          </span>
+          />
         </div>
 
         <div className="mt-0.5 flex items-center gap-2">

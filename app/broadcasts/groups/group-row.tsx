@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { TagChip } from "@/components/tags/tag-chip";
 import { formatListTime } from "@/lib/utils";
 import type { Tag } from "@/lib/types";
@@ -61,7 +62,7 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
       </td>
       <td className="px-4 py-3 text-right font-medium tabular-nums">{group.memberCount}</td>
       <td className="px-4 py-3 text-[12px] text-muted-foreground">
-        {formatListTime(group.updatedAt)}
+        <LocalTime iso={group.updatedAt} format={formatListTime} />
       </td>
       <td className="px-4 py-3 text-right">
         <ChevronRight className="ml-auto size-4 text-muted-foreground" />

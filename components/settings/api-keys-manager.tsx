@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { formatLocaleDate, formatLocaleString } from "@/lib/utils";
 
 interface ApiKey {
   id: string;
@@ -178,11 +180,16 @@ export function ApiKeysManager({ initialKeys }: Props) {
                   </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
                     <code className="font-mono">{k.tokenPrefix}…</code>
-                    <span suppressHydrationWarning>
-                      created {new Date(k.createdAt).toLocaleDateString()}
+                    <span>
+                      created <LocalTime iso={k.createdAt} format={formatLocaleDate} />
                     </span>
-                    <span suppressHydrationWarning>
-                      last used {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never"}
+                    <span>
+                      last used{" "}
+                      {k.lastUsedAt ? (
+                        <LocalTime iso={k.lastUsedAt} format={formatLocaleString} />
+                      ) : (
+                        "never"
+                      )}
                     </span>
                   </div>
                 </div>

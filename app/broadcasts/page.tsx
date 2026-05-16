@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Megaphone, Plus } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/current-user";
 import { db } from "@/lib/db";
@@ -104,7 +105,7 @@ export default async function BroadcastsPage() {
                     />
                   </td>
                   <td className="px-4 py-3 text-[12px] text-muted-foreground">
-                    {formatListTime(b.createdAt.toISOString())}
+                    <LocalTime iso={b.createdAt} format={formatListTime} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <BroadcastDeleteButton

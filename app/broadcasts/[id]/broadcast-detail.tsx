@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 
+import { LocalTime } from "@/components/local-time";
 import { getClientSocket } from "@/lib/socket/client";
 import { cn, formatListTime, formatPhone } from "@/lib/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
@@ -157,11 +158,11 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           <span>·</span>
           <span>By {data.createdByName}</span>
           <span>·</span>
-          <span>{formatListTime(data.createdAt)}</span>
+          <LocalTime iso={data.createdAt} format={formatListTime} />
           {data.completedAt && (
             <>
               <span>·</span>
-              <span>Finished {formatListTime(data.completedAt)}</span>
+              <span>Finished <LocalTime iso={data.completedAt} format={formatListTime} /></span>
             </>
           )}
         </div>
@@ -289,7 +290,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                     <RecipientStatusPill recipient={r} />
                   </td>
                   <td className="px-4 py-2.5 text-[12px] text-muted-foreground">
-                    {r.sentAt ? formatListTime(r.sentAt) : "—"}
+                    {r.sentAt ? <LocalTime iso={r.sentAt} format={formatListTime} /> : "—"}
                   </td>
                   <td className="px-4 py-2.5 text-right">
                     {r.conversationId ? (

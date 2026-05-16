@@ -4,6 +4,7 @@ import { memo } from "react";
 import { StickyNote, Trash2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { LocalTime } from "@/components/local-time";
 import { formatMessageTime, initials } from "@/lib/utils";
 import type { InternalNote as InternalNoteType, User } from "@/lib/types";
 
@@ -30,10 +31,10 @@ function InternalNoteImpl({
               </Avatar>
               <span>{author.name}</span>
               <span className="opacity-60">·</span>
-              <span suppressHydrationWarning>{formatMessageTime(note.timestamp)}</span>
+              <LocalTime iso={note.timestamp} format={formatMessageTime} />
             </span>
           </div>
-          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{note.body}</p>
+          <p className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed">{note.body}</p>
         </div>
         {onDelete && (
           <button

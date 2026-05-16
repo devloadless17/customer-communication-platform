@@ -286,7 +286,7 @@ function GroupSelector({
                 onClick={() => onChange(selected ? null : g.id)}
                 className={cn(
                   "flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 text-left transition-colors",
-                  "hover:bg-accent/50 focus:bg-accent/50 focus:outline-none",
+                  "hover:bg-accent/50 focus:bg-accent/50 focus:outline-hidden",
                   selected && "bg-primary/5 hover:bg-primary/5",
                 )}
               >

@@ -41,7 +41,7 @@ export function TemplatePreview({
 
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
-      <div className="w-full max-w-sm overflow-hidden rounded-2xl rounded-tl-sm border border-emerald-500/15 bg-emerald-500/[0.04] shadow-sm">
+      <div className="w-full max-w-sm overflow-hidden rounded-2xl rounded-tl-xs border border-emerald-500/15 bg-emerald-500/4 shadow-xs">
         {header && <HeaderBlock header={header} value={headerValue} mediaUrl={headerMediaUrl ?? null} />}
         <div className="px-3 py-2.5">
           <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-foreground">
@@ -97,7 +97,7 @@ function HeaderBlock({
   const Icon =
     fmt === "IMAGE" ? ImageIcon : fmt === "VIDEO" ? Video : FileTextIcon;
   return (
-    <div className="flex h-32 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/[0.06] text-[12px] text-muted-foreground">
+    <div className="flex h-32 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-[12px] text-muted-foreground">
       <Icon className="size-5" />
       <span>{fmt} header</span>
     </div>
@@ -118,7 +118,7 @@ function HeaderImage({ url }: { url: string }) {
   }, [errored, url]);
   if (errored) {
     return (
-      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/[0.06] text-[12px] text-muted-foreground">
+      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-[12px] text-muted-foreground">
         <ImageIcon className="size-5" />
         <span>Image unavailable</span>
       </div>
@@ -148,7 +148,7 @@ function HeaderVideo({ url }: { url: string }) {
   }, [errored, url]);
   if (errored) {
     return (
-      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/[0.06] text-[12px] text-muted-foreground">
+      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-[12px] text-muted-foreground">
         <Video className="size-5" />
         <span>Video unavailable</span>
       </div>

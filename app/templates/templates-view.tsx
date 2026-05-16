@@ -18,12 +18,13 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { LocalTime } from "@/components/local-time";
 import { TemplatePreview } from "@/components/templates/template-preview";
 import { VariableBindingsEditor } from "@/components/templates/variable-bindings-editor";
 import type { ContactFieldDefinition, TemplateDto } from "@/lib/types";
 import type { TemplateComponent } from "@/lib/providers/types";
 import { parseVariableBindings, type VariableBindings } from "@/lib/template-bindings";
-import { cn } from "@/lib/utils";
+import { cn, formatLocaleString } from "@/lib/utils";
 
 /**
  * Templates index UI. Three pieces:
@@ -191,7 +192,7 @@ export function TemplatesView({
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[220px] max-w-md">
+        <div className="relative flex-1 min-w-55 max-w-md">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={query}
@@ -225,7 +226,7 @@ export function TemplatesView({
       {syncError && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-          <span className="break-words">{syncError}</span>
+          <span className="wrap-break-word">{syncError}</span>
         </div>
       )}
 
@@ -293,7 +294,7 @@ function TemplateCard({
       onClick={onClick}
       className={cn(
         "group flex h-full flex-col gap-3 rounded-xl border bg-card p-4 text-left transition-all",
-        "hover:border-primary/30 hover:shadow-sm",
+        "hover:border-primary/30 hover:shadow-xs",
         selected ? "border-primary ring-2 ring-primary/20" : "border-border",
       )}
     >
@@ -451,7 +452,7 @@ function DetailDrawer({
       {template && (
         <>
           <motion.div
-            className="fixed inset-0 z-40 bg-background/60 backdrop-blur-sm"
+            className="fixed inset-0 z-40 bg-background/60 backdrop-blur-xs"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -560,12 +561,12 @@ function DetailDrawer({
               {deleteError && (
                 <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                  <span className="break-words">{deleteError}</span>
+                  <span className="wrap-break-word">{deleteError}</span>
                 </div>
               )}
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[11px] text-muted-foreground" suppressHydrationWarning>
-                  Last synced {new Date(template.syncedAt).toLocaleString()}
+                <span className="text-[11px] text-muted-foreground">
+                  Last synced <LocalTime iso={template.syncedAt} format={formatLocaleString} />
                 </span>
                 <div className="flex items-center gap-2">
                   <Button

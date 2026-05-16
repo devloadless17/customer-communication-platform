@@ -438,7 +438,14 @@ export function MessageThread({
   // bubble (which was 60+ Intl calls per timeline render). Each label is the
   // date string when this entry should show a separator above it; null means
   // the previous entry is on the same calendar day.
+  //
+  // Gated on `mounted` so SSR + the first client render emit no labels — the
+  // server is UTC and the user's browser isn't, so "Today" / "Yesterday" can
+  // disagree across midnight UTC. After mount they pop in once.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const dayLabels = useMemo(() => {
+    if (!mounted) return new Array<string | null>(timeline.length).fill(null);
     const labels: Array<string | null> = new Array(timeline.length);
     let prevLabel: string | null = null;
     for (let i = 0; i < timeline.length; i++) {
@@ -448,7 +455,7 @@ export function MessageThread({
       prevLabel = label;
     }
     return labels;
-  }, [timeline]);
+  }, [timeline, mounted]);
 
   // Entrance animation is reserved for genuinely new tail entries (a fresh
   // send/receive). The initial load and prepended older pages mount without
@@ -532,7 +539,7 @@ export function MessageThread({
       )}
       {searchError && (
         <div className="pointer-events-none flex justify-center bg-background pt-1">
-          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 text-[11px] text-destructive shadow-sm">
+          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 text-[11px] text-destructive shadow-xs">
             {searchError}
             <button
               type="button"
@@ -672,7 +679,7 @@ export function MessageThread({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.15 }}
-              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-[11px] text-muted-foreground shadow-sm"
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-[11px] text-muted-foreground shadow-xs"
             >
               <Loader2 className="size-3 animate-spin" />
               Loading older messages…

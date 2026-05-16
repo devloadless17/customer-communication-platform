@@ -704,7 +704,7 @@ function TemplatePickerInline({
                   onClick={() => onSelect(t.id)}
                   className={cn(
                     "group flex w-full cursor-pointer items-start gap-3 px-3 py-2.5 text-left transition-colors",
-                    "hover:bg-accent/50 focus:bg-accent/50 focus:outline-none",
+                    "hover:bg-accent/50 focus:bg-accent/50 focus:outline-hidden",
                     selected && "bg-primary/5 hover:bg-primary/5",
                     !sendable && "cursor-not-allowed opacity-60 hover:bg-transparent",
                   )}
@@ -882,7 +882,7 @@ function PreviewBubble({
       ? renderPlaceholders(headerComp.text, [headerValue])
       : null;
   return (
-    <div className="rounded-lg border border-border bg-card p-3 shadow-sm">
+    <div className="rounded-lg border border-border bg-card p-3 shadow-xs">
       <div className="rounded-md bg-emerald-500/5 p-3 ring-1 ring-emerald-500/10">
         {headerComp?.format === "TEXT" && renderedHeader && (
           <div className="mb-1 text-sm font-semibold text-foreground">{renderedHeader}</div>

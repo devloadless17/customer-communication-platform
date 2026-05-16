@@ -69,7 +69,7 @@ export function TemplateListView({
                   disabled={t.status !== "approved"}
                   className={cn(
                     "group flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left transition-colors",
-                    "hover:bg-accent/60 focus:bg-accent/60 focus:outline-none",
+                    "hover:bg-accent/60 focus:bg-accent/60 focus:outline-hidden",
                     t.status !== "approved" && "cursor-not-allowed opacity-60 hover:bg-transparent",
                   )}
                 >

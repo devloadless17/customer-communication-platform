@@ -2,6 +2,7 @@
 
 import { AlertCircle, Check, CheckCheck, Clock } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { cn, formatMessageTime } from "@/lib/utils";
 import type { Message, User } from "@/lib/types";
 
@@ -21,7 +22,7 @@ export function BubbleMeta({
         isOut ? "flex-row-reverse" : "flex-row",
       )}
     >
-      <span suppressHydrationWarning>{formatMessageTime(message.timestamp)}</span>
+      <LocalTime iso={message.timestamp} format={formatMessageTime} />
       {isOut && sender && (
         <>
           <span className="opacity-50">·</span>

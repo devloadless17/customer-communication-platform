@@ -19,6 +19,17 @@ export type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
  */
 
 let socket: ClientSocket | null = null;
+// One-way "this tab is on its way out" flag. Set by closeClientSocket() when
+// the user signs out or deletes their org. The connection-status hook reads
+// this to suppress the amber "Reconnecting…" banner during the gap between
+// `socket.disconnect()` firing and the subsequent hard navigation to /logout
+// — without it, the banner has time to render for ~1 frame and the user sees
+// a flash they can't act on.
+let teardown = false;
+
+export function isSocketTeardown(): boolean {
+  return teardown;
+}
 
 export function getClientSocket(): ClientSocket {
   if (typeof window === "undefined") {
@@ -59,6 +70,7 @@ export function getClientSocket(): ClientSocket {
  * we want here.
  */
 export function closeClientSocket(): void {
+  teardown = true;
   if (!socket) return;
   socket.disconnect();
   socket = null;

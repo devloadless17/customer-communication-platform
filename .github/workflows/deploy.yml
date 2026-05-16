@@ -1,4 +1,19 @@
-# PR → typecheck only. Push to main → typecheck + build/push image + roll out to VPS.
+# PR → typecheck only.
+# Push to main → typecheck + build/smoke-test/push image (in parallel with typecheck)
+#                + ship to VPS + external health + auto-rollback on failure.
+#
+# Job graph (push to main):
+#
+#   typecheck ─┐
+#              ├─→ ship → wait-for-health → (rollback if red)
+#   build ─────┘
+#
+# Why this shape: typecheck and image build are independent, so they run in
+# parallel and ship gates on both. Image is smoke-tested inside the build job
+# (boots full compose stack on the runner) so a broken env / broken compose /
+# bad migration is caught BEFORE the VPS container is touched. If external
+# health fails after restart, the rollback step retags :previous → :latest and
+# restarts ccp — site is back on the last-good image in ~30s.
 name: Deploy
 
 on:
@@ -34,13 +49,44 @@ jobs:
       - run: npx prisma generate
       - run: npm run typecheck
 
-  deploy:
+  build:
     if: github.event_name != 'pull_request'
-    needs: typecheck
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+
+      # Fail-fast on missing secrets. GH Actions exports unset secrets as
+      # EMPTY strings (not unset), so `set -u` won't catch a typo'd secret
+      # name — we have to explicitly test for empty. This is what would have
+      # caught the 2026-05-16 ENCRYPTION_KEY-missing incident.
+      - name: Validate required GH secrets are non-empty
+        env:
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in ENCRYPTION_KEY BETTER_AUTH_SECRET POSTGRES_PASSWORD UPLOADTHING_TOKEN \
+                   APP_DOMAIN ADMIN_EMAIL HEALTHCHECK_URL DOCKER_USERNAME DOCKER_PASSWORD \
+                   VPS_HOST VPS_USER VPS_SSH_KEY; do
+            [ -z "${!v:-}" ] && missing+=("$v")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf '✗ missing GH Actions secret: %s\n' "${missing[@]}"
+            exit 1
+          fi
+          echo "✓ all required GH secrets present"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -51,6 +97,8 @@ jobs:
 
       # Server-side manifest copy: no layer transfer, no extra storage (layers are
       # content-addressed and shared with :latest). Skips on first-ever deploy.
+      # Must run BEFORE the new build pushes, otherwise we'd retag the new image
+      # as :previous (defeats the rollback safety net).
       - name: Retag current :latest as :previous (rollback safety net)
         env:
           REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}
@@ -63,15 +111,20 @@ jobs:
             echo "no :latest in registry yet (first deploy?), skipping retag"
           fi
 
-      - uses: docker/build-push-action@v6
+      # load: true + push: true requires single-platform (we only build amd64).
+      # `load` makes the image available to the local docker daemon for the
+      # smoke test step below; `push` ships it to the registry concurrently.
+      - name: Build + load + push image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          load: true
           tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Stage deploy artifacts
+      - name: Stage deploy artifacts (env + compose + caddy + systemd)
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
@@ -107,9 +160,68 @@ jobs:
           grep -q '__DOMAIN__\|__ADMIN_EMAIL__' _deploy/Caddyfile && { echo "✗ unrendered placeholders"; exit 1; } || true
           cp docker-compose.yml _deploy/docker-compose.yml
           cp deploy/ccp.service _deploy/ccp.service
-          ls -la _deploy/
           tar -czf ccp-deploy.tar.gz -C _deploy .
-          ls -la ccp-deploy.tar.gz
+
+      # The whole point of this gate: prove the *exact* image + .env + compose
+      # we're about to ship can actually boot, BEFORE the VPS container is
+      # restarted. Catches: env-validator aborts, missing-but-required env vars
+      # not wired in compose, broken Prisma migrations, bad Dockerfile changes.
+      # Uses the image loaded into the local daemon above, so no registry
+      # round-trip. Postgres+Redis run alongside as fresh containers; the app
+      # container's HEALTHCHECK (in Dockerfile) is what we poll.
+      - name: Smoke-test image with prod-shaped env
+        working-directory: _deploy
+        run: |
+          set -euo pipefail
+          echo "==> Booting CI stack with prod env"
+          docker compose --env-file .env up -d
+          echo "==> Waiting for app container to be healthy (≤90s)"
+          deadline=$((SECONDS + 90))
+          while [ $SECONDS -lt $deadline ]; do
+            app_id=$(docker compose --env-file .env ps -q app)
+            if [ -z "$app_id" ]; then
+              echo "✗ app container missing — compose never created it"
+              docker compose --env-file .env logs
+              exit 1
+            fi
+            state=$(docker inspect --format '{{.State.Status}}' "$app_id")
+            health=$(docker inspect --format '{{.State.Health.Status}}' "$app_id" 2>/dev/null || echo "none")
+            if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+              echo "✗ app exited during smoke test (state=$state)"
+              docker compose --env-file .env logs app
+              exit 1
+            fi
+            if [ "$health" = "healthy" ]; then
+              echo "✓ app healthy after ${SECONDS}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "✗ app never reported healthy in 90s"
+          docker compose --env-file .env logs app
+          exit 1
+
+      - name: Tear down CI stack
+        if: always()
+        working-directory: _deploy
+        run: docker compose --env-file .env down -v || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-bundle
+          path: ccp-deploy.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  ship:
+    if: github.event_name != 'pull_request'
+    needs: [typecheck, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle
 
       - uses: appleboy/scp-action@v0.1.7
         with:
@@ -155,6 +267,7 @@ jobs:
             sudo systemctl reload-or-restart caddy
 
       - name: Wait for health
+        id: health
         env:
           HEALTH_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
@@ -164,3 +277,30 @@ jobs:
           done
           echo "✗ health never green in 60s"
           exit 1
+
+      # Only fires if external health failed (not earlier steps), so we don't
+      # try to rollback when the VPS was never touched. Restores :previous
+      # → :latest and restarts. Site is back on last-good image in ~30s.
+      - name: Auto-rollback on health failure
+        if: always() && steps.health.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DOCKER_USERNAME,DOCKER_PASSWORD,REPO
+          script: |
+            set -euo pipefail
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+            if ! docker buildx imagetools inspect "$REPO:previous" >/dev/null 2>&1; then
+              echo "✗ no :previous tag in registry — cannot auto-rollback. Manual fix required."
+              exit 1
+            fi
+            docker pull "$REPO:previous"
+            docker tag "$REPO:previous" "$REPO:latest"
+            sudo systemctl restart ccp
+            echo "✓ rolled back to :previous"

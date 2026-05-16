@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { LocalTime } from "@/components/local-time";
 import { FieldTokenPicker } from "@/components/templates/field-token-picker";
 import { TokenHighlightTextarea } from "@/components/templates/token-highlight";
 import {
@@ -354,8 +355,9 @@ function SnippetEditor({
             {isNew ? "New snippet" : "Edit snippet"}
           </div>
           {!isNew && snippet.createdByName && (
-            <div className="mt-0.5 text-[11px] text-muted-foreground" suppressHydrationWarning>
-              Created by {snippet.createdByName} · last updated {formatDate(snippet.updatedAt)}
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              Created by {snippet.createdByName} · last updated{" "}
+              <LocalTime iso={snippet.updatedAt} format={formatDate} />
             </div>
           )}
         </div>

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Building2, CheckCircle2, ChevronRight, Phone, X } from "lucide-react";
 
+import { LocalTime } from "@/components/local-time";
 import { listAllTeamsForSuperAdmin } from "@/lib/queries";
 import { formatListTime, formatPhone } from "@/lib/utils";
 
@@ -103,7 +104,7 @@ export default async function AdminOrganizationsPage() {
                     {t.broadcastCount}
                   </td>
                   <td className="px-4 py-3 text-[12px] text-muted-foreground">
-                    {formatListTime(t.createdAt)}
+                    <LocalTime iso={t.createdAt} format={formatListTime} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <Link

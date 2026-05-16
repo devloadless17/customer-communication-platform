@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { WindowBadge } from "@/components/inbox/window-badge";
+import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@/lib/avatar-color";
 import { cn, formatListTime, formatPhone, initials } from "@/lib/utils";
 import { TagChip, TagAddButton } from "@/components/tags/tag-chip";
@@ -670,9 +671,11 @@ function ContactRow({
         </div>
         <WindowBadge lastInboundAt={lastInboundAt} size="xs" className="hidden md:inline-flex" />
         {lastMessageAt && (
-          <span className="hidden tabular-nums lg:inline">
-            {formatListTime(lastMessageAt)}
-          </span>
+          <LocalTime
+            iso={lastMessageAt}
+            format={formatListTime}
+            className="hidden tabular-nums lg:inline"
+          />
         )}
         <button
           type="button"

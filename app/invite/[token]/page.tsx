@@ -71,7 +71,7 @@ export default async function AcceptInvitePage({ params }: PageProps) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+        <div className="rounded-xl border border-border bg-card p-6 shadow-xs">
           <h1 className="mb-1 text-base font-semibold tracking-tight">
             Join {invite.team.name}
           </h1>
@@ -90,7 +90,7 @@ export default async function AcceptInvitePage({ params }: PageProps) {
 function Shell({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="grid min-h-svh place-items-center bg-background px-4 text-center">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-sm">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-xs">
         <h1 className="mb-2 text-base font-semibold tracking-tight">{title}</h1>
         <p className="text-xs text-muted-foreground">{children}</p>
         <a
