@@ -60,6 +60,9 @@ services:
       # check on signin endpoints.
       BETTER_AUTH_URL: ${BETTER_AUTH_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      # AES-256-GCM key for per-team Meta secret envelope encryption.
+      # Rotating this without re-encrypting Team rows breaks every team's WhatsApp integration.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       # We sit behind one trusted reverse proxy (Caddy on the host). The
       # rate limiter in middleware.ts uses this to pick the right XFF entry.
       TRUSTED_PROXY_HOPS: "1"
