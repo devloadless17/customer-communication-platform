@@ -1,21 +1,29 @@
-FROM node:22-slim AS deps
+FROM node:22-slim AS base
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+FROM base AS deps
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma
-RUN npm ci
+# Mount cache for npm's download cache. When package-lock changes the layer
+# above invalidates, but the download cache is still hot — npm ci re-uses
+# downloaded tarballs instead of re-fetching from the registry.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci
 
-FROM node:22-slim AS builder
-WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npx prisma generate && npm run build
+# Mount cache for Next.js incremental build artifacts. The COPY above
+# invalidates on any source change (i.e. every commit), so without this
+# `next build` does a full cold compile every time. With it, only changed
+# routes/modules recompile — biggest deploy-speed win in this Dockerfile.
+# Cache mount survives across CI runs via cache-to: type=gha,mode=max.
+RUN --mount=type=cache,target=/app/.next/cache,sharing=locked \
+    npx prisma generate && npm run build
 
-FROM node:22-slim AS runner
-WORKDIR /app
+FROM base AS runner
 ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0 NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server"
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder --chown=node:node /app ./
 USER node
 EXPOSE 3000

@@ -500,9 +500,9 @@ function Field({
   );
 }
 
-function formatDate(iso: string): string {
+function formatDate(iso: string, tz?: string): string {
   try {
-    return new Date(iso).toLocaleDateString();
+    return new Date(iso).toLocaleDateString(undefined, { timeZone: tz });
   } catch {
     return iso;
   }

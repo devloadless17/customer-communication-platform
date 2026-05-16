@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useTzNow } from "@/components/tz-provider";
 import { cn, formatDaySeparator } from "@/lib/utils";
 import type {
   ContactStage,
@@ -439,23 +440,20 @@ export function MessageThread({
   // date string when this entry should show a separator above it; null means
   // the previous entry is on the same calendar day.
   //
-  // Gated on `mounted` so SSR + the first client render emit no labels — the
-  // server is UTC and the user's browser isn't, so "Today" / "Yesterday" can
-  // disagree across midnight UTC. After mount they pop in once.
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  // `tz` + `now` come from TimezoneProvider — same values on server and
+  // client, so "Today" / "Yesterday" buckets agree across hydration.
+  const { tz, now } = useTzNow();
   const dayLabels = useMemo(() => {
-    if (!mounted) return new Array<string | null>(timeline.length).fill(null);
     const labels: Array<string | null> = new Array(timeline.length);
     let prevLabel: string | null = null;
     for (let i = 0; i < timeline.length; i++) {
       const entry = timeline[i]!;
-      const label = formatDaySeparator(entry.data.timestamp);
+      const label = formatDaySeparator(entry.data.timestamp, tz, now);
       labels[i] = label !== prevLabel ? label : null;
       prevLabel = label;
     }
     return labels;
-  }, [timeline, mounted]);
+  }, [timeline, tz, now]);
 
   // Entrance animation is reserved for genuinely new tail entries (a fresh
   // send/receive). The initial load and prepended older pages mount without

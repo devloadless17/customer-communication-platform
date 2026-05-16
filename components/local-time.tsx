@@ -1,36 +1,28 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useTzNow } from "@/components/tz-provider";
 
 /**
- * Renders time-derived text only after hydration. SSR and the first client
- * paint emit `fallback` (empty by default); a layout effect swaps in the
- * formatted string before the browser paints the next frame, so the user
- * never sees the server's UTC value flash before the local one.
+ * Renders `format(iso, tz, now)` synchronously. Server and client both pull
+ * `tz` + `now` from TimezoneProvider — the same values — so the rendered
+ * string is identical on both sides. That eliminates the post-hydration
+ * flicker the previous useEffect-based version had.
  *
- * Pass a module-level `format` reference — an inline arrow re-creates each
- * parent render, which re-fires the effect (the write is a no-op but it's
- * wasted work).
+ * `format` must be a stable module-level reference (e.g., the exports in
+ * `lib/utils.ts`). Functions can opt into either arg by accepting them in
+ * their signature; those that don't simply ignore them.
  */
 export function LocalTime({
   iso,
   format,
-  fallback = "",
   className,
 }: {
   iso: string | Date | null | undefined;
-  format: (iso: string) => string;
-  fallback?: ReactNode;
+  format: (iso: string, tz?: string, now?: number) => string;
   className?: string;
 }) {
-  const [text, setText] = useState<ReactNode>(fallback);
-  useEffect(() => {
-    if (iso == null) {
-      setText(fallback);
-      return;
-    }
-    const s = iso instanceof Date ? iso.toISOString() : iso;
-    setText(format(s));
-  }, [iso, format, fallback]);
-  return <span className={className}>{text}</span>;
+  const { tz, now } = useTzNow();
+  if (iso == null) return <span className={className} />;
+  const s = iso instanceof Date ? iso.toISOString() : iso;
+  return <span className={className}>{format(s, tz, now)}</span>;
 }

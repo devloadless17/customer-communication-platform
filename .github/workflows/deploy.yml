@@ -111,6 +111,19 @@ jobs:
             echo "no :latest in registry yet (first deploy?), skipping retag"
           fi
 
+      # Rotate buildx cache scope weekly. GHA cache is capped at 10GB per repo
+      # with LRU eviction; without rotation, the .next/cache mount layer keeps
+      # growing within a single scope and cache-to upload time creeps up.
+      # `prev` is listed as a cache-from fallback so the first build of a new
+      # week restores from the previous week and isn't a full cold rebuild.
+      # `buildkit` is the legacy default scope — kept as a final fallback so
+      # the first deploy after this change isn't a cold build either.
+      - name: Compute weekly buildx cache scope
+        id: cache
+        run: |
+          echo "scope=buildkit-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+          echo "prev=buildkit-$(date -u -d '7 days ago' +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       # load: true + push: true requires single-platform (we only build amd64).
       # `load` makes the image available to the local docker daemon for the
       # smoke test step below; `push` ships it to the registry concurrently.
@@ -121,8 +134,11 @@ jobs:
           push: true
           load: true
           tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=${{ steps.cache.outputs.scope }}
+            type=gha,scope=${{ steps.cache.outputs.prev }}
+            type=gha,scope=buildkit
+          cache-to: type=gha,mode=max,scope=${{ steps.cache.outputs.scope }}
 
       - name: Stage deploy artifacts (env + compose + caddy + systemd)
         env:

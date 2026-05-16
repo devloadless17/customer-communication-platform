@@ -46,11 +46,12 @@ interface PanelProps {
   tagCatalog: Tag[];
 }
 
-function formatShortDate(iso: string): string {
+function formatShortDate(iso: string, tz?: string): string {
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
+    timeZone: tz,
   });
 }
 

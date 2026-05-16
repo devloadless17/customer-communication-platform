@@ -18,52 +18,86 @@ export function initials(name: string): string {
   return (first + last).toUpperCase();
 }
 
-const RTF = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+// All time formatters take `(iso, tz?, now?)`:
+//   - `tz` is an IANA timezone passed through to Intl. Server reads this
+//     from the `tz` cookie via getServerTimezone(); client reads it from
+//     TimezoneProvider's context. Same value on both sides → identical
+//     strings on SSR + first paint, so no UTC flash and no hydration warning.
+//   - `now` is wall-clock ms used for relative buckets. Provided by the
+//     same context (initialised to the server's render time and ticked
+//     every 60s on the client).
+// `tz` undefined means "use the runtime default zone" — only happens in
+// raw test/script contexts; in-app calls always go through <LocalTime>.
+
+/** Returns `{ y, m, d }` for `d` interpreted in `tz` (the calendar day
+ *  the user sees, not the runtime's day). */
+function calendarDay(d: Date, tz?: string): { y: number; m: number; d: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(d);
+  return {
+    y: Number(parts.find((p) => p.type === "year")?.value),
+    m: Number(parts.find((p) => p.type === "month")?.value),
+    d: Number(parts.find((p) => p.type === "day")?.value),
+  };
+}
 
 /** Compact relative time used in the conversation list ("now", "12m", "3h", "Mon", "Mar 4"). */
-export function formatListTime(iso: string, now: Date = new Date()): string {
+export function formatListTime(iso: string, tz?: string, now?: number): string {
   const then = new Date(iso);
-  const diffSec = Math.round((then.getTime() - now.getTime()) / 1000);
+  const nowMs = now ?? Date.now();
+  const diffSec = Math.round((then.getTime() - nowMs) / 1000);
   const abs = Math.abs(diffSec);
 
   if (abs < 60) return "now";
   if (abs < 3600) return `${Math.round(abs / 60)}m`;
   if (abs < 86400) return `${Math.round(abs / 3600)}h`;
   if (abs < 86400 * 7) {
-    return then.toLocaleDateString("en-US", { weekday: "short" });
+    return then.toLocaleDateString("en-US", { weekday: "short", timeZone: tz });
   }
-  return then.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return then.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: tz });
 }
 
 /** Time stamp inside the message thread. */
-export function formatMessageTime(iso: string): string {
+export function formatMessageTime(iso: string, tz?: string): string {
   return new Date(iso).toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
+    timeZone: tz,
   });
 }
 
 /** Locale-formatted "YYYY-MM-DD, HH:MM:SS AM/PM" for log/admin views. */
-export function formatLocaleString(iso: string): string {
-  return new Date(iso).toLocaleString();
+export function formatLocaleString(iso: string, tz?: string): string {
+  return new Date(iso).toLocaleString(undefined, { timeZone: tz });
 }
 
 /** Locale-formatted short date, e.g. "5/14/2026". */
-export function formatLocaleDate(iso: string): string {
-  return new Date(iso).toLocaleDateString();
+export function formatLocaleDate(iso: string, tz?: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { timeZone: tz });
 }
 
 /** Day separator label used between message clusters. */
-export function formatDaySeparator(iso: string, now: Date = new Date()): string {
+export function formatDaySeparator(iso: string, tz?: string, now?: number): string {
   const then = new Date(iso);
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const thatDay = new Date(then.getFullYear(), then.getMonth(), then.getDate());
-  const diffDays = Math.round((today.getTime() - thatDay.getTime()) / 86400000);
+  const a = calendarDay(now != null ? new Date(now) : new Date(), tz);
+  const b = calendarDay(then, tz);
+  const aDate = new Date(a.y, a.m - 1, a.d);
+  const bDate = new Date(b.y, b.m - 1, b.d);
+  const diffDays = Math.round((aDate.getTime() - bDate.getTime()) / 86400000);
 
   if (diffDays === 0) return "Today";
   if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) return then.toLocaleDateString("en-US", { weekday: "long" });
-  return then.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  if (diffDays < 7) return then.toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
+  return then.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: tz,
+  });
 }
 
 /**

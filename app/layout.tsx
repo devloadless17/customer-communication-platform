@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 
 import { ThemeProvider } from "@/components/theme-provider";
+import { TimezoneProvider } from "@/components/tz-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { getServerTimezone } from "@/lib/server-tz";
 
 import "./globals.css";
 
@@ -38,11 +40,13 @@ export const metadata: Metadata = {
   description: "Shared inbox for WhatsApp customer conversations.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const tz = await getServerTimezone();
+  const serverNow = Date.now();
   return (
     <html
       lang="en"
@@ -51,7 +55,9 @@ export default function RootLayout({
     >
       <body className="font-sans">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
-          <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
+          <TimezoneProvider tz={tz} serverNow={serverNow}>
+            <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
+          </TimezoneProvider>
         </ThemeProvider>
       </body>
     </html>
