@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Loader2, Plus, Search, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { TagChip } from "@/components/tags/tag-chip";
 import { cn } from "@/lib/utils";
 import type {
+  Contact,
   ContactFieldDefinition,
   ContactListItem,
   ContactSource,
@@ -86,6 +87,80 @@ export async function fetchContactsPage(
 }
 
 // ---------------------------------------------------------------------------
+// Client-side filter evaluation.
+//
+// Mirrors the SQL in lib/queries/contacts.ts. Used to reconcile live
+// contact:updated events against the current filter set so a stage/tag/etc.
+// change in another tab reflects here without a refresh.
+//
+// `matchesContactFiltersExceptWindow` works on a Contact alone (no row
+// context) — used to decide whether a contact NOT currently in the list
+// could now join it. The window dimension can't be evaluated from a
+// Contact (needs lastInboundAt), so it's punted to the refetch.
+//
+// `matchesContactFilters` works on a ContactListItem (the row carries
+// lastInboundAt), so window can be evaluated locally — used to decide
+// whether an EXISTING row still belongs in the filtered view.
+//
+// Keep both aligned with the SQL: server is authoritative, these are an
+// optimistic local mirror that gets reconciled by the next refetch if it
+// drifts.
+// ---------------------------------------------------------------------------
+
+const WINDOW_OPEN_MS = 24 * 60 * 60 * 1000;
+
+export function matchesContactFiltersExceptWindow(
+  contact: Contact,
+  filters: ContactListFilters,
+): boolean {
+  if (filters.stageFilter === "none") {
+    if (contact.stageId) return false;
+  } else if (filters.stageFilter !== "any") {
+    if (contact.stageId !== filters.stageFilter) return false;
+  }
+  if (filters.sourceFilter !== "all" && contact.source !== filters.sourceFilter) {
+    return false;
+  }
+  if (filters.tagIds.length > 0) {
+    const contactTagIds = contact.tagIds ?? [];
+    if (!filters.tagIds.some((id) => contactTagIds.includes(id))) return false;
+  }
+  if (filters.fieldFilter) {
+    const v = contact.customFields?.[filters.fieldFilter.key];
+    const s = typeof v === "string" ? v : "";
+    if (!s.toLowerCase().includes(filters.fieldFilter.value.toLowerCase())) return false;
+  }
+  const trimmed = filters.search.trim();
+  if (trimmed) {
+    const q = trimmed.toLowerCase();
+    // Mirrors the server's `customFields::text ILIKE` — JSON.stringify is
+    // close enough for substring matching and avoids walking each key.
+    const haystack = [
+      contact.name ?? "",
+      contact.phoneNumber ?? "",
+      contact.email ?? "",
+      JSON.stringify(contact.customFields ?? {}),
+    ]
+      .join("\n")
+      .toLowerCase();
+    if (!haystack.includes(q)) return false;
+  }
+  return true;
+}
+
+export function matchesContactFilters(
+  item: ContactListItem,
+  filters: ContactListFilters,
+): boolean {
+  if (!matchesContactFiltersExceptWindow(item.contact, filters)) return false;
+  if (filters.windowFilter === "any") return true;
+  const recent =
+    item.lastInboundAt !== null &&
+    Date.now() - new Date(item.lastInboundAt).getTime() < WINDOW_OPEN_MS;
+  return filters.windowFilter === "open" ? recent : !recent;
+}
+
+// ---------------------------------------------------------------------------
 // useContactList — shared list state for the page and the picker
 // ---------------------------------------------------------------------------
 
@@ -112,6 +187,16 @@ export interface UseContactListResult {
   error: string | null;
   setError: (v: string | null) => void;
   loadMore: () => void;
+  /**
+   * Reconcile a single contact:updated event against the current filter
+   * state. If the row exists and still matches: patch in place. If it
+   * exists but no longer matches: drop it. If it doesn't exist but now
+   * matches (non-window dimensions): schedule a debounced page-1 refetch
+   * to surface it. Window-dimension matches for newly-appearing contacts
+   * are decided by the refetch (we can't evaluate lastInboundAt locally
+   * from a Contact payload).
+   */
+  reconcileContactUpdate: (contact: Contact) => void;
 }
 
 export function useContactList(opts?: {
@@ -195,6 +280,78 @@ export function useContactList(opts?: {
     })();
   }
 
+  // Latest filter state in a ref so the reconcile callback stays stable
+  // across renders (the contacts-client subscribes its socket listener
+  // once in a [] effect — recreating the callback would tear it down).
+  // Both the appear-case refetch and the in-place predicate read from
+  // here, so they always see the freshest filters even if a filter changed
+  // between the socket event firing and React committing the next render.
+  const filtersRef = useRef<ContactListFilters>({
+    search,
+    fieldFilter,
+    sourceFilter,
+    windowFilter,
+    tagIds,
+    stageFilter,
+  });
+  filtersRef.current = { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter };
+
+  const reconcileTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (reconcileTimerRef.current !== null) {
+        window.clearTimeout(reconcileTimerRef.current);
+        reconcileTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const reconcileContactUpdate = useCallback((contact: Contact) => {
+    const filters = filtersRef.current;
+    let needsRefetch = false;
+    setItems((prev) => {
+      const idx = prev.findIndex((row) => row.contact.id === contact.id);
+      if (idx === -1) {
+        // Not in the current view. If it matches the non-window dimensions
+        // of the filter, it MIGHT belong on the page now — schedule a
+        // refetch and let the server's window/sort be authoritative.
+        if (matchesContactFiltersExceptWindow(contact, filters)) {
+          needsRefetch = true;
+        }
+        return prev;
+      }
+      const patched: ContactListItem = { ...prev[idx]!, contact };
+      if (matchesContactFilters(patched, filters)) {
+        const next = [...prev];
+        next[idx] = patched;
+        return next;
+      }
+      return prev.filter((_, i) => i !== idx);
+    });
+    if (needsRefetch) {
+      if (reconcileTimerRef.current !== null) {
+        window.clearTimeout(reconcileTimerRef.current);
+      }
+      // Debounced so a burst of contact:updated events (e.g. a bulk tag
+      // op fanning out one event per contact) coalesces into one refetch.
+      reconcileTimerRef.current = window.setTimeout(() => {
+        reconcileTimerRef.current = null;
+        const my = ++reqId.current;
+        void (async () => {
+          try {
+            const page = await fetchContactsPage(filtersRef.current, null);
+            if (reqId.current !== my) return;
+            setItems(page.items);
+            setNextCursor(page.nextCursor);
+          } catch {
+            // Silent — next filter change or refresh recovers. A noisy
+            // banner here for a background reconciliation would be worse.
+          }
+        })();
+      }, 250);
+    }
+  }, []);
+
   return {
     items,
     setItems,
@@ -216,6 +373,7 @@ export function useContactList(opts?: {
     error,
     setError,
     loadMore,
+    reconcileContactUpdate,
   };
 }
 

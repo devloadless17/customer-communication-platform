@@ -90,7 +90,7 @@ export function ContactsClient({
     initialNextCursor,
     initialStageFilter,
   });
-  const { items, setItems, setError } = list;
+  const { items, setItems, setError, reconcileContactUpdate } = list;
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
   const [fieldDefinitions, setFieldDefinitions] =
@@ -132,25 +132,21 @@ export function ContactsClient({
 
   // Live updates: when a teammate edits or deletes a contact elsewhere
   // (inbox panel, another tab, bulk-tag op, etc.), reflect it here without
-  // a refresh. Patches the row in place if visible; silently no-ops if it
-  // isn't on the current filtered page. Drops deleted rows out of `items`
-  // AND `selectedIds` so a bulk action can't target a gone contact.
+  // a refresh. `reconcileContactUpdate` is filter-aware: it patches the row
+  // in place when it still matches, drops it when an edit moves it out of
+  // the filtered set (e.g. stage filter active, contact stage changed), and
+  // refetches when an edit moves a previously-hidden contact INTO the set.
+  // Deleted rows drop out of `items` AND `selectedIds` so a bulk action
+  // can't target a gone contact.
   //
-  // The deps are empty on purpose: `setItems` from `useContactList` is
-  // stable, and capturing it in the closure once avoids re-binding the
-  // listener every render.
+  // The deps are empty on purpose: `setItems` and `reconcileContactUpdate`
+  // from `useContactList` are stable (the latter reads filters via a ref),
+  // and capturing them in the closure once avoids re-binding the listener
+  // every render.
   useEffect(() => {
     const socket = getClientSocket();
     const onContactUpdated = (payload: { contact: Contact }) => {
-      setItems((prev) => {
-        let changed = false;
-        const next = prev.map((row) => {
-          if (row.contact.id !== payload.contact.id) return row;
-          changed = true;
-          return { ...row, contact: payload.contact };
-        });
-        return changed ? next : prev;
-      });
+      reconcileContactUpdate(payload.contact);
     };
     const onContactDeleted = (payload: { contactId: string }) => {
       setItems((prev) => prev.filter((row) => row.contact.id !== payload.contactId));
