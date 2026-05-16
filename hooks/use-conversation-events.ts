@@ -6,6 +6,14 @@ import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket/client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import {
+  applyConversationAssignment,
+  applyConversationRead,
+  applyConversationStatus,
+  applyMessageMediaReady,
+  applyMessageStatus,
+  applyNoteDeleted,
+} from "@/lib/inbox/thread-reducers";
 import type { ConversationWithRefs, CursorPage, Message } from "@/lib/types";
 
 /**
@@ -457,12 +465,7 @@ export function useConversationEvents(
 
     const onMessageStatus: Parameters<typeof socket.on<"message:status">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => ({
-        ...prev,
-        messages: prev.messages.map((m) =>
-          m.id === payload.messageId ? { ...m, status: payload.status } : m,
-        ),
-      }));
+      setData((prev) => applyMessageStatus(prev, payload));
     };
 
     // Inbound media finished downloading in the background. Swap the
@@ -472,18 +475,7 @@ export function useConversationEvents(
       payload,
     ) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => ({
-        ...prev,
-        messages: prev.messages.map((m) => {
-          if (m.id !== payload.messageId) return m;
-          if (payload.media) {
-            return { ...m, media: payload.media, mediaPending: false };
-          }
-          // Download failed — strip the media block, keep the row as text.
-          const { media: _media, mediaPending: _p, ...rest } = m;
-          return rest;
-        }),
-      }));
+      setData((prev) => applyMessageMediaReady(prev, payload));
     };
 
     const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
@@ -502,46 +494,22 @@ export function useConversationEvents(
 
     const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => ({
-        ...prev,
-        conversation: {
-          ...prev.conversation,
-          assignedUserId: payload.assignedUser?.id ?? null,
-        },
-        assignedUser: payload.assignedUser,
-      }));
+      setData((prev) => applyConversationAssignment(prev, payload));
     };
 
     const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => ({
-        ...prev,
-        conversation: { ...prev.conversation, status: payload.status },
-      }));
+      setData((prev) => applyConversationStatus(prev, payload));
     };
 
     const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) =>
-        prev.conversation.unreadCount === 0
-          ? prev
-          : { ...prev, conversation: { ...prev.conversation, unreadCount: 0 } },
-      );
+      setData(applyConversationRead);
     };
 
     const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => {
-        const next = prev.notes.filter((n) => n.id !== payload.noteId);
-        if (next.length === prev.notes.length) return prev;
-        return {
-          ...prev,
-          notes: next,
-          ...(prev.noteCount !== undefined
-            ? { noteCount: Math.max(0, prev.noteCount - 1) }
-            : {}),
-        };
-      });
+      setData((prev) => applyNoteDeleted(prev, payload));
     };
 
     // The conversation we're viewing was deleted (by us, by a teammate, or as

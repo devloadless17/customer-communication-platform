@@ -26,6 +26,14 @@ import { useCatalogSync } from "@/hooks/use-catalog-sync";
 import { useConversationSearch } from "@/hooks/use-conversation-search";
 import { getClientSocket } from "@/lib/socket/client";
 import { ThreadCache, type CachedThread } from "@/lib/inbox/thread-cache";
+import {
+  applyConversationAssignment,
+  applyConversationRead,
+  applyConversationStatus,
+  applyMessageMediaReady,
+  applyMessageStatus,
+  applyNoteDeleted,
+} from "@/lib/inbox/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 
 import dynamic from "next/dynamic";
@@ -386,11 +394,13 @@ export function InboxShell({
   // stays visible" pattern + skeleton with contact name keeps the UX smooth
   // even on that one-time miss.
   //
-  // Cheap, low-stakes events (message:status, message:media:ready,
-  // conversation:read, conversation:assigned, conversation:status) we let
-  // drift in the cache until next visit — the consequence is at most a
-  // single-tick stale value the next time the thread mounts, which
-  // useConversationEvents corrects on its own.
+  // Every event that updates the LIVE displayed thread but isn't already
+  // covered by message/note eviction is also patched into the cache below.
+  // Without these patches, switching chats unmounts MessageThread, and on
+  // chat-back the shell re-seeds it from a stale cached snapshot — visible
+  // as: status reverting, assignment reverting, delivered checkmarks gone,
+  // media stuck on "Downloading…", a teammate-deleted note reappearing,
+  // or the unread badge surviving a teammate's read.
   // ---------------------------------------------------------------
   useEffect(() => {
     const socket = getClientSocket();
@@ -421,16 +431,78 @@ export function InboxShell({
       cache.delete(payload.conversationId);
     };
 
+    // Patches below keep the cached snapshot in sync with what
+    // useConversationEvents applies to the LIVE displayed thread, so a
+    // chat-switch round-trip doesn't revert to stale data. Both consumers
+    // share the same reducers from @/lib/inbox/thread-reducers — when a
+    // new event needs per-thread state, add a reducer there once and call
+    // it from both the hook and here.
+    //
+    // `patchData` adapts a (ConversationWithRefs) → ConversationWithRefs
+    // reducer to ThreadCache's patch shape: returns null on identity-no-op
+    // so the cache short-circuits and LRU order stays stable.
+    const patchData = (
+      conversationId: string,
+      reducer: (data: ConversationWithRefs) => ConversationWithRefs,
+    ) => {
+      cache.patch(conversationId, (curr) => {
+        const next = reducer(curr.data);
+        return next === curr.data ? null : { ...curr, data: next };
+      });
+    };
+
+    const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (payload) => {
+      if (!payload?.conversationId) return;
+      patchData(payload.conversationId, (d) => applyConversationStatus(d, payload));
+    };
+    const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (payload) => {
+      if (!payload?.conversationId) return;
+      patchData(payload.conversationId, (d) => applyConversationAssignment(d, payload));
+    };
+    const onMessageStatus: Parameters<typeof socket.on<"message:status">>[1] = (payload) => {
+      if (!payload?.conversationId) return;
+      patchData(payload.conversationId, (d) => applyMessageStatus(d, payload));
+    };
+    const onMessageMediaReady: Parameters<typeof socket.on<"message:media:ready">>[1] = (
+      payload,
+    ) => {
+      if (!payload?.conversationId) return;
+      patchData(payload.conversationId, (d) => applyMessageMediaReady(d, payload));
+    };
+    const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (payload) => {
+      if (!payload?.conversationId) return;
+      patchData(payload.conversationId, (d) => applyNoteDeleted(d, payload));
+    };
+    // conversation:read covers the teammate case. Our own mark-read path
+    // is already patched via handleMarkRead → onMarkRead; this patch is
+    // idempotent so the duplicate event from our own POST is a no-op.
+    const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = (payload) => {
+      if (!payload?.conversationId) return;
+      patchData(payload.conversationId, applyConversationRead);
+    };
+
     socket.on("message:new", evictIfBackground);
     socket.on("note:new", evictIfBackground);
     socket.on("contact:updated", onContactUpdated);
     socket.on("conversation:deleted", onConversationDeleted);
+    socket.on("conversation:status", onStatus);
+    socket.on("conversation:assigned", onAssigned);
+    socket.on("message:status", onMessageStatus);
+    socket.on("message:media:ready", onMessageMediaReady);
+    socket.on("note:deleted", onNoteDeleted);
+    socket.on("conversation:read", onRead);
 
     return () => {
       socket.off("message:new", evictIfBackground);
       socket.off("note:new", evictIfBackground);
       socket.off("contact:updated", onContactUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("conversation:status", onStatus);
+      socket.off("conversation:assigned", onAssigned);
+      socket.off("message:status", onMessageStatus);
+      socket.off("message:media:ready", onMessageMediaReady);
+      socket.off("note:deleted", onNoteDeleted);
+      socket.off("conversation:read", onRead);
     };
   }, [cache]);
 
