@@ -53,11 +53,22 @@ FROM deps AS runtime
 # Disable telemetry HERE, before `next build` runs below — the ping happens
 # during build too, not just runtime.
 ENV NEXT_TELEMETRY_DISABLED=1
+# Build-time injection of public env vars. Next.js inlines NEXT_PUBLIC_*
+# into the client bundle at `next build`, so anything the browser needs
+# must be present in the build environment — runtime env from compose is
+# too late for these.
+ARG NEXT_PUBLIC_API_URL=""
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 COPY apps/web ./apps/web
 COPY packages ./packages
 COPY prisma ./prisma
 COPY tsconfig.json prisma.config.ts ./
-RUN pnpm exec prisma generate
+# `prisma generate` only reads the schema + emits client code — no DB
+# connection is opened — but Prisma 7's config validates DATABASE_URL
+# eagerly when `prisma.config.ts` is loaded. Pass a placeholder URL just
+# for this step; the real value comes from compose at runtime.
+RUN DATABASE_URL="postgresql://placeholder:placeholder@placeholder:5432/placeholder" \
+    pnpm exec prisma generate
 # .next/cache mount — incremental compile across builds. The source copies
 # above invalidate on every commit, so without this `next build` does a
 # full cold compile every time. With it only the changed routes/modules

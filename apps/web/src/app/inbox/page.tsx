@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 
 import { getSession } from "@/lib/auth/current-user";
 import {
@@ -80,6 +81,13 @@ export default async function InboxPage({
 
   const initialActiveConversationId = initialThread ? requestedConversationId ?? null : null;
 
+  // CSP nonce from src/proxy.ts. Threaded into InboxShell so the SSR
+  // scroll-init <script> inside ThreadWorkspace executes under
+  // `script-src 'nonce-...'` — without this the script is blocked and
+  // hard-refresh shows a one-frame scroll flicker before useChatScroll
+  // catches up.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <InboxShell
       currentUser={user}
@@ -96,6 +104,7 @@ export default async function InboxPage({
       canManageContactFields={canManageContactFields(user.role)}
       initialActiveConversationId={initialActiveConversationId}
       initialThread={initialThread}
+      nonce={nonce}
     />
   );
 }

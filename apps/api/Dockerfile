@@ -46,7 +46,12 @@ COPY apps/api ./apps/api
 COPY packages ./packages
 COPY prisma ./prisma
 COPY tsconfig.json prisma.config.ts ./
-RUN pnpm exec prisma generate
+# `prisma generate` only reads the schema + emits client code — no DB
+# connection is opened — but Prisma 7's config validates DATABASE_URL
+# eagerly when `prisma.config.ts` is loaded. Pass a placeholder URL just
+# for this step; the real value comes from compose at runtime.
+RUN DATABASE_URL="postgresql://placeholder:placeholder@placeholder:5432/placeholder" \
+    pnpm exec prisma generate
 
 ENV NODE_ENV=production \
     NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server"

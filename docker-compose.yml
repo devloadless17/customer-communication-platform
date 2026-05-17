@@ -48,6 +48,11 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        # Forwarded into `next build` so the client bundle has the right
+        # Socket.io target. Runtime env (below) can't help here — Next.js
+        # inlines NEXT_PUBLIC_* at build time.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:

@@ -121,6 +121,7 @@ export function InboxShell({
   canManageContactFields,
   initialActiveConversationId,
   initialThread,
+  nonce,
 }: {
   currentUser: User;
   team: Team;
@@ -136,6 +137,11 @@ export function InboxShell({
   canManageContactFields: boolean;
   initialActiveConversationId: string | null;
   initialThread: CachedThread | null;
+  // CSP nonce read at request time from x-nonce by the page's RSC; threaded
+  // here so ThreadWorkspace can attach it to the SSR scroll-init <script>.
+  // Optional: missing nonce (older proxy / direct prerender) degrades to
+  // useChatScroll's hydration-time snap, which is functional but flickers.
+  nonce?: string;
 }) {
   const [filter, setFilter] = useState<Filter>({ kind: "preset", id: "all" });
   const [search, setSearch] = useState("");
@@ -640,6 +646,7 @@ export function InboxShell({
                 canManageContactFields={canManageContactFields}
                 tags={tags}
                 onMarkRead={handleMarkRead}
+                nonce={nonce}
               />
             ) : activeId && skeletonContact ? (
               <ChatSkeleton contact={skeletonContact} />
@@ -670,6 +677,7 @@ function ThreadWorkspace({
   canManageContactFields,
   tags,
   onMarkRead,
+  nonce,
 }: {
   thread: CachedThread;
   teamMembers: User[];
@@ -680,6 +688,7 @@ function ThreadWorkspace({
   canManageContactFields: boolean;
   tags: Tag[];
   onMarkRead: (conversationId: string) => void;
+  nonce?: string;
 }) {
   return (
     <>
@@ -727,6 +736,7 @@ function ThreadWorkspace({
           synchronously before first paint of the new thread (so client
           nav is already perfect). */}
       <script
+        nonce={nonce}
         dangerouslySetInnerHTML={{
           __html:
             "(function(){var sa=document.querySelector('[data-thread-scroll-root]');if(!sa)return;var v=sa.querySelector('[data-radix-scroll-area-viewport]');if(v)v.scrollTop=v.scrollHeight;})()",

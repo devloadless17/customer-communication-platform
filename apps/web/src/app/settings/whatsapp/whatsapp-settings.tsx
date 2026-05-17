@@ -57,7 +57,11 @@ export function WhatsappSettings({
     !current.connected || Boolean(current.credentialsUndecryptable),
   );
 
-  const webhookUrl = `${webhookBaseUrl}/api/webhooks/meta/${teamId}`;
+  // Canonical post-migration path. NestJS owns `/webhooks/*` directly; the
+  // legacy `/api/webhooks/meta/{teamId}` proxy stays in place as insurance
+  // for subscriptions Meta still has pointed at the old URL — but new
+  // installs should always paste this one into the Meta dashboard.
+  const webhookUrl = `${webhookBaseUrl}/webhooks/meta/${teamId}`;
 
   async function save(form: FormData) {
     setError(null);

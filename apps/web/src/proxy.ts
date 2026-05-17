@@ -47,7 +47,8 @@ const TRUSTED_PROXY_HOPS = Math.max(
 );
 
 /**
- * Per-request CSP. The nonce slot is filled at request time.
+ * Per-request CSP. The nonce slot is filled at request time; everything
+ * else is resolved at module load (NEXT_PUBLIC_* envs are inlined at build).
  *
  * Notes:
  *   - `script-src 'nonce-X' 'strict-dynamic'`: only inline scripts carrying
@@ -63,11 +64,31 @@ const TRUSTED_PROXY_HOPS = Math.max(
  *   - `img-src 'self' data: blob: https:`: avatars from arbitrary HTTPS hosts
  *     (contact-supplied URLs, Gravatar fallbacks), local blobs for media
  *     previews, base64 placeholders.
- *   - `connect-src` defaults to `'self'` which covers the same-origin
- *     Socket.io WebSocket upgrade; no need to spell out `ws:`/`wss:`.
+ *   - `connect-src 'self' <api-origin> <ws-scheme>//<api-host>`: in prod
+ *     Caddy fronts Next + NestJS on a single origin so `'self'` covers
+ *     everything; in dev `NEXT_PUBLIC_API_URL` points the browser at the
+ *     NestJS process on a different port and the Socket.io WebSocket
+ *     handshake needs both the explicit origin AND the matching ws:/wss:
+ *     scheme (browsers don't infer the WS scheme from an http(s) origin).
  *   - `frame-ancestors 'none'`: clickjacking defense, replaces the static
  *     CSP header that previously lived in `next.config.ts`.
  */
+function buildConnectSrc(): string {
+  const raw = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (!raw) return "connect-src 'self'";
+  try {
+    const u = new URL(raw);
+    const wsScheme = u.protocol === "https:" ? "wss:" : "ws:";
+    // Listing the origin twice when it equals page-origin is harmless;
+    // CSP origin matching is OR-wise. Prod (Caddy same-origin) just gets
+    // a redundant entry, no behavior change.
+    return `connect-src 'self' ${u.origin} ${wsScheme}//${u.host}`;
+  } catch {
+    return "connect-src 'self'";
+  }
+}
+const CONNECT_SRC = buildConnectSrc();
+
 function buildCsp(nonce: string): string {
   return [
     "default-src 'self'",
@@ -75,7 +96,7 @@ function buildCsp(nonce: string): string {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    CONNECT_SRC,
     "media-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",

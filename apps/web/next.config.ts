@@ -81,6 +81,40 @@ const nextConfig: NextConfig = {
       { source: "/automations/:path*", destination: "/workflows/:path*", permanent: false },
     ];
   },
+  // In prod, Caddy fronts both processes and routes `/api/*` to NestJS
+  // before requests reach Next.js — so these rewrites are a no-op there.
+  // They exist for the no-Caddy paths (local Docker stack, `npm run dev`
+  // against a host-side api) so that browser fetches to api-owned routes
+  // proxy through transparently instead of 404-ing on Next.js.
+  //
+  // Reuses INTERNAL_API_URL (already wired in docker-compose at
+  // http://api:4000) — same target the RSC layer uses for server→api
+  // calls, so we don't grow another env var for the same address.
+  async rewrites() {
+    const apiUpstream = process.env.INTERNAL_API_URL ?? "http://api:4000";
+    return {
+      beforeFiles: [
+        // Lives on NestJS, but Next.js's `/api/auth/[...all]` Better Auth
+        // catch-all would otherwise swallow it — beforeFiles takes priority
+        // over filesystem routes.
+        {
+          source: "/api/auth/change-password",
+          destination: `${apiUpstream}/api/auth/change-password`,
+        },
+      ],
+      afterFiles: [
+        // Anything under `/api/*` the filesystem didn't claim falls through
+        // to NestJS. Next.js's own routes (`/api/auth/[...all]`, `/api/health`,
+        // `/api/webhooks/meta/*`) win because afterFiles only fires when no
+        // filesystem route matches.
+        { source: "/api/:path*", destination: `${apiUpstream}/api/:path*` },
+        // Canonical post-migration webhook path. NestJS owns it; this lets
+        // the path also work when Next.js receives it directly (no-Caddy
+        // dev, or a tunnel that happens to terminate at :3000).
+        { source: "/webhooks/:path*", destination: `${apiUpstream}/webhooks/:path*` },
+      ],
+    };
+  },
 };
 
 export default nextConfig;
