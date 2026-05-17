@@ -1,0 +1,37 @@
+{
+  "name": "@ccp/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./types": "./src/types.ts",
+    "./queries": "./src/queries.ts",
+    "./socket/events": "./src/socket/events.ts",
+    "./auth/permissions": "./src/auth/permissions.ts",
+    "./providers/types": "./src/providers/types.ts",
+    "./team-chat/types": "./src/team-chat/types.ts",
+    "./team-chat/permissions": "./src/team-chat/permissions.ts",
+    "./team-chat/mentions": "./src/team-chat/mentions.ts",
+    "./workflows/events": "./src/workflows/events.ts",
+    "./events/types": "./src/events/types.ts",
+    "./field-tokens": "./src/field-tokens.ts",
+    "./template-bindings": "./src/template-bindings.ts",
+    "./utils": "./src/utils.ts",
+    "./utils/avatar-color": "./src/utils/avatar-color.ts",
+    "./utils/tag-colors": "./src/utils/tag-colors.ts",
+    "./utils/phone": "./src/utils/phone.ts",
+    "./utils/window": "./src/utils/window.ts"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "libphonenumber-js": "^1.12.43",
+    "tailwind-merge": "^2.5.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@ccp/tsconfig": "workspace:*",
+    "@prisma/client": "^6.2.1",
+    "typescript": "^5.7.2"
+  }
+}
