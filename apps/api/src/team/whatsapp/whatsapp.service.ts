@@ -99,17 +99,43 @@ export class WhatsappService {
         verifyToken: null,
         accessToken: null,
         appSecret: null,
+        credentialsUndecryptable: false,
       };
     }
+    // Tolerate decrypt failure here (key rotated, value corrupt, wrong env):
+    // surface it via the `credentialsUndecryptable` flag so the page can ask
+    // the admin to re-paste. The send path in lib/providers/config.ts stays
+    // strict — there, a failed decrypt is loud (silent send-nothing is worse).
+    const accessToken = this.tryDecrypt(team.metaAccessToken, "metaAccessToken");
+    const appSecret = this.tryDecrypt(team.metaAppSecret, "metaAppSecret");
+    const credentialsUndecryptable =
+      (team.metaAccessToken != null && accessToken === null) ||
+      (team.metaAppSecret != null && appSecret === null);
     return {
       phoneNumberId: team.metaPhoneNumberId,
       displayPhoneNumber: team.metaDisplayPhoneNumber,
       wabaId: team.metaWabaId,
       appId: team.metaAppId,
       verifyToken: team.metaVerifyToken,
-      accessToken: team.metaAccessToken ? decryptSecret(team.metaAccessToken) : null,
-      appSecret: team.metaAppSecret ? decryptSecret(team.metaAppSecret) : null,
+      accessToken,
+      appSecret,
+      credentialsUndecryptable,
     };
+  }
+
+  private tryDecrypt(value: string | null, field: string): string | null {
+    if (!value) return null;
+    try {
+      return decryptSecret(value);
+    } catch (err) {
+      // GCM auth-tag mismatch or malformed envelope — most often ENCRYPTION_KEY
+      // changed between write and read. Logged at warn (not error) because the
+      // UI handles this gracefully (auto-opens the credentials form).
+      this.logger.warn(
+        `could not decrypt ${field}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -241,6 +267,7 @@ export class WhatsappService {
   async listTemplates(teamId: string): Promise<{
     templates: TemplateDto[];
     hasWabaId: boolean;
+    hasAppId: boolean;
     connected: boolean;
   }> {
     const [rows, team] = await Promise.all([
@@ -250,12 +277,13 @@ export class WhatsappService {
       }),
       this.prisma.team.findUnique({
         where: { id: teamId },
-        select: { metaWabaId: true, metaPhoneNumberId: true },
+        select: { metaWabaId: true, metaAppId: true, metaPhoneNumberId: true },
       }),
     ]);
     return {
       templates: rows.map(toTemplateDto),
       hasWabaId: Boolean(team?.metaWabaId),
+      hasAppId: Boolean(team?.metaAppId),
       connected: Boolean(team?.metaPhoneNumberId),
     };
   }

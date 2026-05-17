@@ -127,6 +127,9 @@ export interface WhatsappConfigView {
   /** Decrypted plaintext — wire path is server→browser only, never client→server. */
   accessToken: string | null;
   appSecret: string | null;
+  /** True when secrets are present in the DB but decrypt failed (key rotated,
+   *  envelope corrupt). Page surfaces this so admin can re-paste. */
+  credentialsUndecryptable: boolean;
 }
 
 // Re-export commonly co-imported types so callers can grab everything from

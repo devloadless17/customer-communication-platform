@@ -66,10 +66,23 @@ services:
       # We sit behind one trusted reverse proxy (Caddy on the host). The
       # rate limiter in middleware.ts uses this to pick the right XFF entry.
       TRUSTED_PROXY_HOPS: "1"
-      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
       UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
-      AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      # Browser Socket.io target. Caddy on the host fronts both processes
+      # and routes `/socket.io/*` to the api on :4000, so the browser uses
+      # the public origin (same host as the page). In dev, app and api run
+      # on different ports — set this to the api's URL there.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+      # Server-side target for RSC fetches + server actions. apps/web calls
+      # apps/api over this URL to read pages + run state mutations. Distinct
+      # from NEXT_PUBLIC_API_URL because the browser uses the public origin
+      # (same-host through Caddy) while the web container reaches the api
+      # container directly over the internal docker network.
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:4000}
+      # Post-Phase-5: Next.js owns auth pages + RSC reads only. The NestJS
+      # api container owns everything else (REST, Socket.io, webhooks, the
+      # workflow worker, audit/analytics/dispatch). No env-toggle here for
+      # those ownerships any more — they're structural, not flagged.
     ports:
       # Bind to loopback only — Caddy on the host is the public ingress.
       # Without 127.0.0.1, this would publish on 0.0.0.0 and the app would
@@ -77,3 +90,80 @@ services:
       # (no TLS, no security headers, no rate limit on a real proxy hop).
       # Postgres and Redis above already follow this pattern.
       - "127.0.0.1:${APP_PORT:-3000}:3000"
+
+  # ---- NestJS API ---------------------------------------------------------
+  # Sits next to `app` (Next.js) on a different port. Caddy on the host
+  # routes `/api/*`, `/socket.io/*`, `/webhooks/*` here; `/`, `/_next/*`,
+  # `/api/auth/*` go to `app`.
+  #
+  # Same image as `app` — no extra Docker build. Only the CMD differs.
+  # Owns: REST, Socket.io, Meta webhooks, BullMQ workers, audit/analytics
+  # event subscribers, workflow dispatcher.
+  api:
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest
+    build:
+      context: .
+    restart: unless-stopped
+    networks: [ccp_net]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      # Separate pool from `app`'s — both processes share the same Postgres
+      # but get their own connections. Sized for the api's eventual share of
+      # traffic (all of it, post Phase 5). Until then it can be lower; revisit
+      # at Phase 3 when REST starts moving over.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public&connection_limit=30&pool_timeout=10
+      REDIS_URL: redis://redis:6379
+      # Better Auth secrets — used by SessionGuard to call auth.api.getSession
+      # against the same Session table the Next.js side writes to. Both must
+      # match `app` exactly or session validation fails silently.
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
+      UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      TRUSTED_PROXY_HOPS: "1"
+      API_PORT: "4000"
+      API_HOST: "0.0.0.0"
+      # Post-Phase-4: api owns the workflow worker by default. Override
+      # with API_RUN_WORKER_INLINE=0 if scaling demands an external worker
+      # container (run `docker compose --profile worker up worker` then).
+      # Workflow worker + media sweeper run in-process by default. Override
+      # to 0 only if scaling demands an external worker container — but
+      # that's a future-state setup; nothing under `profiles` runs the
+      # worker today (worker.ts and the old `worker` service were removed
+      # post-Phase-5 cleanup).
+      RUN_WORKER_INLINE: ${API_RUN_WORKER_INLINE:-1}
+      WORKFLOW_WORKER_CONCURRENCY: ${WORKFLOW_WORKER_CONCURRENCY:-5}
+      AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
+    ports:
+      # Loopback-only — Caddy is the public ingress (same posture as `app`).
+      - "127.0.0.1:${API_PORT:-4000}:4000"
+    # @swc-node/register transpiles .ts on require with proper decorator
+    # metadata (which esbuild — tsx's backend — explicitly does not emit).
+    # SWC_NODE_PROJECT tells it to read apps/api/tsconfig.json so
+    # experimentalDecorators + emitDecoratorMetadata get picked up. Without
+    # this NestJS DI silently passes undefined to every constructor.
+    #
+    # --conditions=react-server matters because many shared lib/ files use
+    # `import "server-only"` which throws by default; under react-server it
+    # resolves to a no-op (the same way Next.js handles it).
+    #
+    # Phase 6+: switch to `nest build` + `node dist/main.js` for faster cold
+    # start once the controller surface stabilizes.
+    command: ["sh", "-c", "SWC_NODE_PROJECT=apps/api/tsconfig.json NODE_OPTIONS='--conditions=react-server --max-old-space-size=4096' node -r @swc-node/register apps/api/src/main.ts"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  # NOTE: The standalone `worker` service was removed post-Phase-5 cleanup.
+  # `worker.ts` is gone; the NestJS `api` container owns BullMQ workers
+  # via `RUN_WORKER_INLINE=1` (default in this file). If a future scaling
+  # cliff requires an external worker container, add it back here pointing
+  # at the NestJS entrypoint with worker-only flags (no HTTP listener).
