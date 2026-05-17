@@ -220,7 +220,7 @@ The generic `app/api/webhooks/[provider]/[teamId]` dispatcher shim was removed i
 
 ### Cutover playbook (dev → prod)
 
-The pre-cutover env-flag dance (`SKIP_SOCKET_FANOUT`, `BUS_REDIS_BRIDGE`, `SKIP_WORKFLOW_DISPATCH`, `RUN_WORKER_INLINE` on Next.js) is gone — those env vars no longer exist in [docker-compose.yml](docker-compose.yml). Ownership is now structural (Next.js: pages + auth; NestJS: everything else).
+The pre-cutover env-flag dance is gone. The Next.js-side flags (`SKIP_SOCKET_FANOUT`, `BUS_REDIS_BRIDGE`, `SKIP_WORKFLOW_DISPATCH`, `RUN_WORKER_INLINE` on the `app` service) no longer exist in [docker-compose.yml](docker-compose.yml) — ownership is now structural (Next.js: pages + auth; NestJS: everything else). One flag survives by design: `RUN_WORKER_INLINE=1` on the `api` service, which keeps BullMQ processors inside the NestJS process. Set to `0` only if you re-introduce a standalone worker container; the default is correct for single-VPS pilot.
 
 Remaining steps for the actual deploy:
 
