@@ -39,6 +39,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# turbo (monorepo task cache)
+.turbo
+
 # editor
 .idea
 .vscode/*
