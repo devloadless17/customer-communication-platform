@@ -7,8 +7,8 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
-import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/lib/auth/invite-token";
-import { hashPassword, isPasswordBreached } from "@/lib/auth/password";
+import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/auth/invite-token";
+import { hashPassword, isPasswordBreached } from "@/auth/password";
 import { assignableRoles } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 

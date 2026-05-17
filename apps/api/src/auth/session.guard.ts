@@ -7,7 +7,7 @@ import {
 } from "@nestjs/common";
 import type { Request } from "express";
 
-import { auth } from "@/lib/auth/better-auth";
+import { auth } from "@/auth/better-auth";
 import type { Role } from "@ccp/shared/types";
 
 import { PrismaService } from "../prisma/prisma.service";

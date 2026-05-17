@@ -13,7 +13,7 @@ import {
   isPasswordBreached,
   validatePasswordStructure,
   verifyPassword,
-} from "@/lib/auth/password";
+} from "@/auth/password";
 
 import { zBody } from "../common/zod-validation.pipe";
 import { PrismaService } from "../prisma/prisma.service";

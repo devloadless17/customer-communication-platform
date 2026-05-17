@@ -6,7 +6,7 @@ module that can be called from:
 
 - NestJS services / controllers (they `import` and call directly),
 - BullMQ worker callbacks running detached from a request,
-- Module-load contexts like Better Auth's `prismaAdapter(db, …)` setup,
+- Module-load contexts (e.g. the Better Auth singleton at `apps/api/src/auth/better-auth.ts` calls `prismaAdapter(db, …)` at import time),
 - Standalone scripts (`prisma/seed*.ts`).
 
 NestJS code lives one level up — at `apps/api/src/{conversations,messages,…}`,
@@ -37,7 +37,6 @@ branching.
 
 | Folder | What's inside | Consumers |
 |---|---|---|
-| `auth/` | Better Auth instance (`better-auth.ts`), password hashing helpers, API key + invite token verifiers | `SessionGuard`, `ApiKeyGuard`, change-password controller |
 | `blob-storage/` | UploadThing client + the `BlobStorageProvider` interface; swap impls here to change providers | media upload paths in messages/messaging |
 | `broadcast-runner.ts` | The async loop that walks a broadcast's recipient list, sends templates, and publishes per-recipient bus events | `BroadcastsService` (kicked off via `setImmediate`) |
 | `conversations/` | Analytics helpers (event-recording, audit-trail entries) | audit subscriber + ConversationsService |

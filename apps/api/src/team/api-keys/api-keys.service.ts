@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 
-import { generateApiKey } from "@/lib/auth/api-key";
+import { generateApiKey } from "@/auth/api-key";
 
 import { PrismaService } from "../../prisma/prisma.service";
 import type { CreateApiKeyInput } from "./api-keys.schemas";

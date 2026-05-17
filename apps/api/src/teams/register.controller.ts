@@ -2,7 +2,7 @@ import { BadRequestException, Body, ConflictException, Controller, Post } from "
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
-import { hashPassword, isPasswordBreached } from "@/lib/auth/password";
+import { hashPassword, isPasswordBreached } from "@/auth/password";
 
 import { zBody } from "../common/zod-validation.pipe";
 import { PrismaService } from "../prisma/prisma.service";
