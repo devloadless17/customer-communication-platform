@@ -19,7 +19,7 @@ import { PrismaModule } from "./prisma/prisma.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { TeamModule } from "./team/team.module";
 import { TeamChatModule } from "./team-chat/team-chat.module";
-import { TeamsModule } from "./teams/teams.module";
+import { TeamsModule } from "./registration/teams.module";
 import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { WorkflowsModule } from "./workflows/workflows.module";
