@@ -57,7 +57,11 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     MessagesModule,
     MediaModule,
     ExternalV1Module,
-    DevModule,
+    // DevModule is import-gated on NODE_ENV. The module's onModuleInit also
+    // throws hard if production somehow reaches it — belt-and-suspenders so
+    // a refactor that swaps the import order or the env check still can't
+    // accidentally expose the dev event-firehose in prod.
+    ...(process.env.NODE_ENV !== "production" ? [DevModule] : []),
     // Smoke
     HealthModule,
   ],
