@@ -17,17 +17,25 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
 
 ```
    Docker Hub                              Hostinger KVM2 (Ubuntu, as root)
-   ┌────────────────────────┐              ┌─────────────────────────────────┐
-   │ <docker_username>/     │              │  Caddy (host) :443 (HTTPS)      │
-   │   customer-communica…  │              │   ↓                             │
-   │   :latest              │   ──pull──►  │  app    :3000  ← from Docker Hub│
-   │   :previous            │              │   ↓                             │
-   └────────────────────────┘              │  postgres :5432                 │
-                                           │  redis    :6379                 │
-                                           └─────────────────────────────────┘
+   ┌────────────────────────┐              ┌──────────────────────────────────┐
+   │ <docker_username>/     │              │  Caddy (host) :443 (HTTPS)       │
+   │   customer-communica…  │              │   ↓ (path-based routing)         │
+   │   :latest              │   ──pull──►  │  ┌────────────┐ ┌──────────────┐ │
+   │   :previous            │              │  │ web  :3000 │ │ api    :4000 │ │
+   └────────────────────────┘              │  │ (Next.js)  │ │ (NestJS)     │ │
+                                           │  └────────────┘ └──────────────┘ │
+                                           │   ↓                ↓             │
+                                           │  postgres :5432   redis :6379    │
+                                           └──────────────────────────────────┘
                                                     central.loadless.site
                                                     187.77.180.44
 ```
+
+Caddy splits traffic by path between the two app containers — see
+`deploy/Caddyfile.template` for the exact rule order. Short version:
+
+- `/api/auth/change-password*` and `/api/*`, `/webhooks/*`, `/socket.io/*` → api (NestJS)
+- everything else (`/`, `/_next/*`, `/api/auth/*`, `/api/health`, `/api/webhooks/meta/*`) → web (Next.js)
 
 ## What lives on the VPS
 

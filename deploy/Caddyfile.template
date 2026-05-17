@@ -10,6 +10,31 @@
 # `systemctl reload caddy` is run. Editing /etc/caddy/Caddyfile directly on
 # the VPS works for a single deploy but the next deploy will overwrite it —
 # changes belong in this template, committed to git.
+#
+# -----------------------------------------------------------------------------
+# Two-upstream topology (post NestJS migration)
+# -----------------------------------------------------------------------------
+#
+#   web   = Next.js     on :3000  → RSC pages, Better Auth pages, /api/auth/*,
+#                                   /api/health, legacy Meta webhook proxy
+#   api   = NestJS      on :4000  → REST controllers, Socket.io gateway,
+#                                   webhook ingest, BullMQ workers, workflows
+#
+# Rule ordering inside the site block is LOAD-BEARING. Caddy evaluates
+# `handle` blocks in source order — the first match wins. Two rules below
+# look like they overlap but the order resolves which one fires:
+#
+#   `/api/auth/change-password*` is matched BEFORE `/api/auth/*`, so
+#   change-password (which moved off Better Auth onto a NestJS controller
+#   when the api process took ownership) reaches the api upstream. If you
+#   ever flip these two blocks, change-password will silently 404 because
+#   Next.js has no handler for that path anymore.
+#
+#   `/api/webhooks/meta/*` reaches the web upstream where a small proxy
+#   handler in apps/web/src/app/api/webhooks/meta/[teamId]/route.ts forwards
+#   raw bytes verbatim to NestJS. This is insurance for Meta subscriptions
+#   still pointing at the old URL; delete that file (and this handle block)
+#   once every subscription has been re-pointed at /webhooks/meta/{teamId}.
 
 {
 	# ACME contact email. Let's Encrypt mails this address on renewal failure
@@ -21,33 +46,6 @@
 __DOMAIN__ {
 	# Auto-HTTPS — Caddy provisions and renews via Let's Encrypt with no
 	# config. HTTP requests get a 308 redirect to HTTPS automatically.
-
-	# Reverse proxy to the Next.js + Socket.io app. Caddy auto-forwards
-	# X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host already;
-	# only X-Real-IP needs to be set explicitly since it's a non-standard
-	# convention some upstreams prefer to read.
-	reverse_proxy 127.0.0.1:3000 {
-		header_up X-Real-IP {remote_host}
-
-		# Socket.io heartbeats — keep the upstream connection alive long
-		# enough for the 25s default ping interval + jitter.
-		transport http {
-			read_buffer 64KB
-			write_buffer 64KB
-			# Long-lived connections (websocket + SSE) shouldn't hit
-			# the default 5-min idle cap.
-			read_timeout 5m
-			write_timeout 5m
-		}
-
-		# Probe the app's /api/health every 10s so Caddy can return a clean
-		# 502 immediately during the ~3s restart window instead of holding
-		# the request until upstream times out.
-		health_uri /api/health
-		health_interval 10s
-		health_timeout 3s
-		health_status 200
-	}
 
 	# Compression for HTML / JSON / JS. Static assets are already content-
 	# encoded by Next; this is for API responses + HTML.
@@ -66,17 +64,88 @@ __DOMAIN__ {
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		# Caddy adds Server: Caddy by default. Strip it — no point telling
-		# every attacker which version of the proxy is running.
 		-Server
 	}
 
-	# Access logs to stdout → systemd-journald (captured automatically because
-	# Caddy is a systemd unit). View with `journalctl -u caddy -f`. Journald
-	# handles rotation. Avoids the permission-denied class of bug from
-	# writing into /var/log/caddy/ from inside Caddy's systemd sandbox.
+	# Access logs to stdout → systemd-journald.
 	log {
 		output stdout
 		format json
+	}
+
+	# -------------------------------------------------------------------------
+	# Routing — order matters. See header comment for the rationale on the
+	# change-password and legacy-meta-webhook blocks.
+	# -------------------------------------------------------------------------
+
+	# (1) /api/auth/change-password → api (NestJS). MUST come before the
+	#     /api/auth/* catch-all below.
+	handle /api/auth/change-password* {
+		reverse_proxy 127.0.0.1:4000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (2) /api/auth/* → web (Next.js / Better Auth catch-all).
+	handle /api/auth/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (3) /api/health → web (Next.js). Legacy probe URL; the api process
+	#     exposes its own /health on :4000 for direct probing.
+	handle /api/health {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (4) /api/webhooks/meta/* → web (Next.js proxy). The Next.js handler
+	#     forwards raw bytes to api:4000/webhooks/meta/{teamId} so the HMAC
+	#     computed over the unmodified body still verifies.
+	handle /api/webhooks/meta/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (5) /api/*, /webhooks/*, /socket.io/* → api (NestJS).
+	#     Socket.io heartbeats need long-lived connection support.
+	@apiBackend {
+		path /api/* /webhooks/* /socket.io/*
+	}
+	handle @apiBackend {
+		reverse_proxy 127.0.0.1:4000 {
+			header_up X-Real-IP {remote_host}
+			transport http {
+				read_buffer 64KB
+				write_buffer 64KB
+				# Long-lived connections (websocket + SSE) shouldn't hit
+				# the default 5-min idle cap.
+				read_timeout 5m
+				write_timeout 5m
+			}
+			# Direct probe of the NestJS /health endpoint.
+			health_uri /health
+			health_interval 10s
+			health_timeout 3s
+			health_status 200
+		}
+	}
+
+	# (6) Default — everything else (`/`, `/_next/*`, RSC pages, static
+	#     assets, login/register/inbox pages) → web (Next.js).
+	handle {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+			# Probe Next.js's /api/health for upstream liveness — Caddy
+			# returns 502 immediately during the ~3s restart window instead
+			# of holding the request until upstream times out.
+			health_uri /api/health
+			health_interval 10s
+			health_timeout 3s
+			health_status 200
+		}
 	}
 }
