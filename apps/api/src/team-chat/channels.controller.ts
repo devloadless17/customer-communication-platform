@@ -66,6 +66,24 @@ export class ChannelsController {
     return { channel };
   }
 
+  @Get(":id")
+  async getById(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const channel = await this.channels.getById(session.teamId, id);
+    return { channel };
+  }
+
+  @Get(":id/pins")
+  async listPins(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const pins = await this.channels.listPins(session.teamId, id);
+    return { pins };
+  }
+
   @Post()
   @HttpCode(201)
   async create(

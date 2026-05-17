@@ -20,9 +20,11 @@ import {
 import {
   buildMessagePreview,
   decodeCursor,
+  getChannelById,
   getDefaultChannel,
   listChannelMessages,
   listChannelMessagesAfter,
+  listChannelPins,
   listChannelsForUser,
   loadMessageForEmit,
   mapChannel,
@@ -66,6 +68,22 @@ export class ChannelsService {
    */
   getDefault(teamId: string) {
     return getDefaultChannel(teamId);
+  }
+
+  /**
+   * Fetch a single channel by id (scoped to team). Returns null when the
+   * id is foreign — controller turns that into 404.
+   */
+  getById(teamId: string, channelId: string) {
+    return getChannelById(channelId, teamId);
+  }
+
+  /**
+   * Pinned messages for a channel, newest-pin first. Each entry carries
+   * the full message DTO so the pins panel renders without extra fetches.
+   */
+  listPins(teamId: string, channelId: string) {
+    return listChannelPins(channelId, teamId);
   }
 
   async create(

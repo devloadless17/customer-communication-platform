@@ -44,6 +44,7 @@ export class UsersService {
       name: u.name,
       email: u.email,
       ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
+      createdAt: u.createdAt.toISOString(),
       isActive: u.deactivatedAt === null,
     }));
   }

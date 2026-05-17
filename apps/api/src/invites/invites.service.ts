@@ -142,6 +142,58 @@ export class InvitesService {
   }
 
   /**
+   * Read-only invite lookup for the landing page. Returns the invite shape
+   * the page needs to render (email + role + team name) or a status code
+   * indicating why this isn't usable. Never exposes tokenHash and doesn't
+   * mutate the row — accept() is the only place that does.
+   */
+  async lookup(token: string): Promise<{
+    status: "valid" | "invalid" | "used" | "expired";
+    invite: { email: string; role: Role; teamName: string } | null;
+  }> {
+    const tokenHash = hashInviteToken(token);
+    const invite = await this.prisma.invite.findUnique({
+      where: { tokenHash },
+      select: {
+        email: true,
+        role: true,
+        acceptedAt: true,
+        expiresAt: true,
+        team: { select: { name: true } },
+      },
+    });
+    if (!invite) return { status: "invalid", invite: null };
+    if (invite.acceptedAt) {
+      return {
+        status: "used",
+        invite: {
+          email: invite.email,
+          role: invite.role as Role,
+          teamName: invite.team?.name ?? "your team",
+        },
+      };
+    }
+    if (invite.expiresAt < new Date()) {
+      return {
+        status: "expired",
+        invite: {
+          email: invite.email,
+          role: invite.role as Role,
+          teamName: invite.team?.name ?? "your team",
+        },
+      };
+    }
+    return {
+      status: "valid",
+      invite: {
+        email: invite.email,
+        role: invite.role as Role,
+        teamName: invite.team?.name ?? "your team",
+      },
+    };
+  }
+
+  /**
    * Accept an invite: validate the token + password, create the User +
    * Better-Auth `Account` row + stamp `acceptedAt` in one transaction,
    * publish catalog events. Returns the email + teamId so the (web-side)
