@@ -2,9 +2,7 @@
   "extends": "@ccp/tsconfig/base.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": "./src",
-    "baseUrl": "."
-  },
+    "rootDir": "./src"},
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules"]
 }

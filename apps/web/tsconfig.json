@@ -1,7 +1,6 @@
 {
   "extends": "@ccp/tsconfig/next.json",
   "compilerOptions": {
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
       "@ccp/shared/*": ["../../packages/shared/src/*"]
