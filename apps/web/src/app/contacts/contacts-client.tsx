@@ -11,7 +11,6 @@ import {
   Plus,
   Search,
   Send,
-  Tag as TagIcon,
   Trash2,
   Upload,
   X,

@@ -5,7 +5,6 @@ import { UTApi, UTFile } from "uploadthing/server";
 import { extFromMime } from "@/lib/media-storage";
 import type {
   BlobStorageProvider,
-  MediaNameContext,
   UploadInput,
   UploadResult,
 } from "./types";
@@ -150,7 +149,7 @@ export const uploadthingProvider: BlobStorageProvider = {
  * name greppable in the dashboard search.
  */
 export function buildFilename(input: UploadInput): string {
-  const { context, mimeType, kind } = input;
+  const { context, mimeType } = input;
   const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const team = slug(context.teamSlug ?? context.teamId, 16);
   const phone = context.contactPhone ?? "unknown";

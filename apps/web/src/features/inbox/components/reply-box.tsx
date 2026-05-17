@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   MessageSquare,
-  Mic,
   Paperclip,
   Send,
   Smile,

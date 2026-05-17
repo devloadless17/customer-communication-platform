@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn, initials } from "@ccp/shared/utils";

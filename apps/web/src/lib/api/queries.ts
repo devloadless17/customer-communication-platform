@@ -16,7 +16,6 @@ import type {
   ChannelPinDto,
   TeamChannelDto,
   TeamChannelListItemDto,
-  TeamChannelMessageDto,
 } from "@ccp/shared/team-chat/types";
 import type {
   Contact,

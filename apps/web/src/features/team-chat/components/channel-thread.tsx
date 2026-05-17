@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { canDeleteMessage, canPinMessage } from "@ccp/shared/team-chat/permissions";
+import { canDeleteMessage } from "@ccp/shared/team-chat/permissions";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
 

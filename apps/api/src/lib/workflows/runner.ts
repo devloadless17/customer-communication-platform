@@ -2,7 +2,7 @@ import type { Prisma, WorkflowTriggerEvent } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { type WorkflowEventEnvelope } from "@/lib/workflows/events";
-import { findNextStep, type WorkflowGraph, toGraph } from "@/lib/workflows/graph";
+import { findNextStep, toGraph } from "@/lib/workflows/graph";
 import { enqueueWorkflowResume } from "@/lib/workflows/queue";
 import {
   UnknownStepTypeError,

@@ -1040,10 +1040,7 @@ export function renderTemplateBody(text: string, vars: string[]): string {
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import type {
-  ProviderWebhookSecrets,
-  WebhookProvider,
-} from "@/lib/providers/webhook";
+import type { WebhookProvider } from "@/lib/providers/webhook";
 
 /**
  * Meta-specific implementation of WebhookProvider. Shares the parser with

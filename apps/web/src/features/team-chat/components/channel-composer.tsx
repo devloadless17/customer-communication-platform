@@ -36,7 +36,6 @@ export function ChannelComposer({
   teamMembers,
   onOptimisticAdd,
   onOptimisticFail,
-  onOptimisticRemove,
 }: {
   channelId: string;
   channelName: string;

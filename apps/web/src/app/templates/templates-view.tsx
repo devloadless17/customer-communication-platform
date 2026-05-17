@@ -45,7 +45,6 @@ export function TemplatesView({
   fieldDefinitions,
   connected,
   hasWabaId,
-  hasAppId,
 }: {
   initialTemplates: TemplateDto[];
   fieldDefinitions: ContactFieldDefinition[];

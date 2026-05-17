@@ -7,7 +7,6 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 
@@ -29,8 +28,6 @@ import type {
 
 @Injectable()
 export class WorkflowsService {
-  private readonly logger = new Logger(WorkflowsService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly bus: EventBus,

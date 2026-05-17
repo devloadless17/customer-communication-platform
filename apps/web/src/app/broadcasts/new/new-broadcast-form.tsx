@@ -13,10 +13,8 @@ import {
   RefreshCw,
   Search,
   Send,
-  Sparkles,
   Users,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,10 +47,6 @@ import { TokenHighlightInput } from "@/features/templates/components/token-highl
  *   3. Variables: fill {{N}} placeholders (same for all recipients in v1)
  *   4. Review + Send
  */
-
-type Step = "audience" | "template" | "variables" | "review";
-
-const STEP_ORDER: Step[] = ["audience", "template", "variables", "review"];
 
 export function NewBroadcastForm({
   totalContactCount,
