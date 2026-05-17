@@ -8,12 +8,28 @@ import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
 /**
- * Owns the Socket.io gateway, presence + typing state, the typed emitter,
- * the handshake auth helper, and the bus-subscribed fanout service.
+ * SOCKET.IO realtime layer. Owns the gateway, presence + typing state,
+ * the typed emitter, the handshake auth helper, and the bus-subscribed
+ * fanout service.
  *
- * Global so feature modules (Phase 3+) can inject `RealtimeEmitter`
- * directly to push room-targeted emits when needed (e.g. forwarded webhook
- * outputs in /v1/external).
+ * Boundary against the events module:
+ *
+ *   apps/api/src/events/   → in-process pub/sub bus (DomainEvent values).
+ *                            Pure domain — nothing here is socket-aware.
+ *   apps/api/src/realtime/ → THIS module. Socket.io gateway +
+ *                            RealtimeEmitter + RealtimeFanoutService.
+ *                            RealtimeFanoutService is the ONLY component
+ *                            that should ever cross from the bus into a
+ *                            socket emit.
+ *
+ * Rule of thumb: if you're tempted to `bus.subscribe(...)` from a
+ * feature module to push something at clients, you actually want
+ * RealtimeFanoutService to grow a new subscriber instead — keeps the
+ * cross-cutting "events → sockets" translation in one place.
+ *
+ * Global so feature modules can inject `RealtimeEmitter` directly to
+ * push room-targeted emits when needed (e.g. forwarded webhook outputs
+ * in /v1/external).
  */
 @Global()
 @Module({
