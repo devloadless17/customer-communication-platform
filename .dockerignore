@@ -1,5 +1,12 @@
 node_modules
+**/node_modules
 .next
+**/.next
+dist
+**/dist
+.turbo
+**/.turbo
+**/tsconfig.tsbuildinfo
 .git
 .gitignore
 README.md
@@ -12,3 +19,5 @@ npm-debug.log*
 .idea
 *.log
 coverage
+# Legacy npm lockfile — pnpm-lock.yaml is the source of truth now.
+package-lock.json

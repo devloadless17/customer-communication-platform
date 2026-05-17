@@ -41,10 +41,13 @@ services:
       retries: 10
 
   app:
-    # Prod pulls :latest; `docker compose up --build` builds locally with the same tag.
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest
+    # Prod pulls :latest-web; `docker compose up --build` builds locally with
+    # the same tag. The `web` target in the Dockerfile carries the Next.js
+    # build output + the `next start` entrypoint.
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-web
     build:
       context: .
+      target: web
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
@@ -96,13 +99,15 @@ services:
   # routes `/api/*`, `/socket.io/*`, `/webhooks/*` here; `/`, `/_next/*`,
   # `/api/auth/*` go to `app`.
   #
-  # Same image as `app` — no extra Docker build. Only the CMD differs.
-  # Owns: REST, Socket.io, Meta webhooks, BullMQ workers, audit/analytics
-  # event subscribers, workflow dispatcher.
+  # Different target of the same Dockerfile — every layer up through the
+  # builder stage is shared with `app`, so the second image only adds the
+  # alternate entrypoint. Owns: REST, Socket.io, Meta webhooks, BullMQ
+  # workers, audit/analytics event subscribers, workflow dispatcher.
   api:
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-api
     build:
       context: .
+      target: api
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
@@ -142,19 +147,10 @@ services:
     ports:
       # Loopback-only — Caddy is the public ingress (same posture as `app`).
       - "127.0.0.1:${API_PORT:-4000}:4000"
-    # @swc-node/register transpiles .ts on require with proper decorator
-    # metadata (which esbuild — tsx's backend — explicitly does not emit).
-    # SWC_NODE_PROJECT tells it to read apps/api/tsconfig.json so
-    # experimentalDecorators + emitDecoratorMetadata get picked up. Without
-    # this NestJS DI silently passes undefined to every constructor.
-    #
-    # --conditions=react-server matters because many shared lib/ files use
-    # `import "server-only"` which throws by default; under react-server it
-    # resolves to a no-op (the same way Next.js handles it).
-    #
-    # Phase 6+: switch to `nest build` + `node dist/main.js` for faster cold
-    # start once the controller surface stabilizes.
-    command: ["sh", "-c", "SWC_NODE_PROJECT=apps/api/tsconfig.json NODE_OPTIONS='--conditions=react-server --max-old-space-size=4096' node -r @swc-node/register apps/api/src/main.ts"]
+    # CMD lives in the Dockerfile's `api` target — defers to apps/api's
+    # `start` script (@swc-node/register + SWC_NODE_PROJECT + the entry
+    # point). Override here only if a future scaling cliff demands a
+    # worker-only variant.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1"]
       interval: 10s
