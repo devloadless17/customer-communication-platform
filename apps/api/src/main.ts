@@ -82,12 +82,23 @@ async function bootstrap(): Promise<void> {
 
   // CORS: in dev the browser hits Next.js on :3000 and NestJS on :4000 from
   // different origins; in prod Caddy makes them same-origin and CORS is a
-  // no-op. The credentials flag is required for the session cookie to ride
-  // along on cross-origin XHRs in dev.
+  // no-op (the browser never sends an Origin that differs from the page).
+  // The credentials flag is required for the session cookie to ride along
+  // on cross-origin XHRs in dev.
+  //
+  // Production pins the allow-list to APP_PUBLIC_URL instead of `true`
+  // (which would echo back whatever Origin the client claimed). Same-origin
+  // requests don't hit CORS at all, so this is strictly tighter — and the
+  // day someone deploys api on a separate subdomain, the misconfig fails
+  // loudly instead of silently accepting anyone-with-credentials.
+  const productionOrigin = process.env.APP_PUBLIC_URL;
   app.enableCors({
-    origin: process.env.NODE_ENV === "production"
-      ? true
-      : ["http://localhost:3000", "http://127.0.0.1:3000"],
+    origin:
+      process.env.NODE_ENV === "production"
+        ? productionOrigin
+          ? [productionOrigin]
+          : false
+        : ["http://localhost:3000", "http://127.0.0.1:3000"],
     credentials: true,
   });
 

@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   type OnModuleInit,
 } from "@nestjs/common";
@@ -17,6 +18,8 @@ import type { CreateBroadcastInput } from "./broadcasts.schemas";
 
 @Injectable()
 export class BroadcastsService implements OnModuleInit {
+  private readonly logger = new Logger(BroadcastsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -30,7 +33,7 @@ export class BroadcastsService implements OnModuleInit {
     try {
       await reconcileOrphanedBroadcasts();
     } catch (err) {
-      console.error("[broadcasts] orphan reconciler failed on boot", err);
+      this.logger.error("orphan reconciler failed on boot", err);
     }
   }
 
