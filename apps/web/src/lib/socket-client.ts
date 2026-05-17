@@ -64,6 +64,26 @@ export function getClientSocket(): ClientSocket {
     withCredentials: true,
   });
 
+  // One-shot DX guard. The most common dev misconfig is "Next.js and NestJS
+  // running on different ports without NEXT_PUBLIC_API_URL set" — the
+  // socket falls back to same-origin (current page) where there's nothing
+  // listening on /socket.io/, so the user sees "Reconnecting…" forever
+  // with no obvious cause. Logging once on the first failed attempt makes
+  // the cause discoverable from the browser console.
+  let warned = false;
+  socket.on("connect_error", (err) => {
+    if (warned || teardown) return;
+    warned = true;
+    const target = apiUrl || `${window.location.origin} (same-origin fallback)`;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[socket] connect_error against ${target}: ${err.message}. ` +
+        (apiUrl
+          ? "Verify the api process is running and reachable from the browser."
+          : "Set NEXT_PUBLIC_API_URL to the NestJS api URL if running web + api on different ports in dev."),
+    );
+  });
+
   return socket;
 }
 
