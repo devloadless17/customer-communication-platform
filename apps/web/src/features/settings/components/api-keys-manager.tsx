@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/lib/toast";
-import { formatLocaleDate, formatLocaleString } from "@ccp/shared/utils";
 
 interface ApiKey {
   id: string;
@@ -182,12 +181,12 @@ export function ApiKeysManager({ initialKeys }: Props) {
                   <div className="mt-0.5 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
                     <code className="font-mono">{k.tokenPrefix}…</code>
                     <span>
-                      created <LocalTime iso={k.createdAt} format={formatLocaleDate} />
+                      created <LocalTime iso={k.createdAt} format="localeDate" />
                     </span>
                     <span>
                       last used{" "}
                       {k.lastUsedAt ? (
-                        <LocalTime iso={k.lastUsedAt} format={formatLocaleString} />
+                        <LocalTime iso={k.lastUsedAt} format="localeString" />
                       ) : (
                         "never"
                       )}

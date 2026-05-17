@@ -1,13 +1,14 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useActionState, useEffect, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
+import { cn } from "@ccp/shared/utils";
 
 import { registerAction, type RegisterState } from "./actions";
 
@@ -38,6 +39,7 @@ export function RegisterForm() {
           required
           autoFocus
           placeholder="Acme Co."
+          defaultValue={state.values?.orgName ?? ""}
         />
       </div>
 
@@ -45,7 +47,13 @@ export function RegisterForm() {
         <label htmlFor="name" className="text-xs font-medium text-foreground">
           Your name
         </label>
-        <Input id="name" name="name" required placeholder="Ada Lovelace" />
+        <Input
+          id="name"
+          name="name"
+          required
+          placeholder="Ada Lovelace"
+          defaultValue={state.values?.name ?? ""}
+        />
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -59,23 +67,27 @@ export function RegisterForm() {
           autoComplete="email"
           required
           placeholder="you@company.com"
+          defaultValue={state.values?.email ?? ""}
         />
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="password" className="text-xs font-medium text-foreground">
-          Password
-        </label>
-        <Input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
-          required
-          minLength={MIN_PASSWORD_LENGTH}
-          placeholder={`${MIN_PASSWORD_LENGTH}+ characters`}
-        />
-      </div>
+      <PasswordField
+        id="password"
+        name="password"
+        label="Password"
+        autoComplete="new-password"
+        placeholder={`${MIN_PASSWORD_LENGTH}+ characters`}
+        minLength={MIN_PASSWORD_LENGTH}
+      />
+
+      <PasswordField
+        id="confirmPassword"
+        name="confirmPassword"
+        label="Confirm password"
+        autoComplete="new-password"
+        placeholder="Re-enter your password"
+        minLength={MIN_PASSWORD_LENGTH}
+      />
 
       {state.error && (
         <div
@@ -88,6 +100,53 @@ export function RegisterForm() {
 
       <SubmitButton />
     </form>
+  );
+}
+
+function PasswordField({
+  id,
+  name,
+  label,
+  autoComplete,
+  placeholder,
+  minLength,
+}: {
+  id: string;
+  name: string;
+  label: string;
+  autoComplete: string;
+  placeholder: string;
+  minLength: number;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-xs font-medium text-foreground">
+        {label}
+      </label>
+      <div className="relative">
+        <Input
+          id={id}
+          name={name}
+          type={visible ? "text" : "password"}
+          autoComplete={autoComplete}
+          required
+          minLength={minLength}
+          placeholder={placeholder}
+          className={cn("pr-10")}
+        />
+        <button
+          type="button"
+          aria-label={visible ? "Hide password" : "Show password"}
+          aria-pressed={visible}
+          onClick={() => setVisible((v) => !v)}
+          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-r-md"
+          tabIndex={-1}
+        >
+          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </button>
+      </div>
+    </div>
   );
 }
 

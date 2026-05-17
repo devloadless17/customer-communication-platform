@@ -4,7 +4,6 @@ import { Megaphone, Plus } from "lucide-react";
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { listBroadcasts } from "@/lib/api/queries";
-import { formatListTime } from "@ccp/shared/utils";
 
 import { BroadcastStatusBadge } from "./broadcast-status-badge";
 import { BroadcastDeleteButton } from "./broadcast-delete-button";
@@ -98,7 +97,7 @@ export default async function BroadcastsPage() {
                     />
                   </td>
                   <td className="px-4 py-3 text-[12px] text-muted-foreground">
-                    <LocalTime iso={b.createdAt} format={formatListTime} />
+                    <LocalTime iso={b.createdAt} format="listTime" />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <BroadcastDeleteButton

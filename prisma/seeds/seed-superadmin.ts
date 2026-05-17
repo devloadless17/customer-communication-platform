@@ -51,6 +51,15 @@ async function main() {
     update: { password: passwordHash, userId: user.id },
   });
 
+  // Default #general channel. The schema documents this as auto-created at
+  // team setup, and /team redirects to it on first login; without this row
+  // the team-chat surface lands on the "No channels yet" dead-end.
+  await db.teamChannel.upsert({
+    where: { teamId_name: { teamId: team.id, name: "general" } },
+    create: { teamId: team.id, name: "general", isDefault: true, createdById: user.id },
+    update: {},
+  });
+
   console.log(`✓ superAdmin ready: ${user.email} / ${PASSWORD}`);
 }
 

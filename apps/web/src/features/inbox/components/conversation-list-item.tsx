@@ -6,7 +6,7 @@ import { Loader2 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
-import { cn, formatListTime, initials } from "@ccp/shared/utils";
+import { cn, initials } from "@ccp/shared/utils";
 import type { Contact, Conversation, User } from "@ccp/shared/types";
 
 /**
@@ -80,7 +80,7 @@ function ConversationListItemImpl({
           </span>
           <LocalTime
             iso={conversation.lastMessageAt}
-            format={formatListTime}
+            format="listTime"
             className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground"
           />
         </div>

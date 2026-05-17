@@ -3,7 +3,7 @@
 import { AlertCircle, Check, CheckCheck, Clock } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
-import { cn, formatMessageTime } from "@ccp/shared/utils";
+import { cn } from "@ccp/shared/utils";
 import type { Message, User } from "@ccp/shared/types";
 
 export function BubbleMeta({
@@ -22,7 +22,7 @@ export function BubbleMeta({
         isOut ? "flex-row-reverse" : "flex-row",
       )}
     >
-      <LocalTime iso={message.timestamp} format={formatMessageTime} />
+      <LocalTime iso={message.timestamp} format="messageTime" />
       {isOut && sender && (
         <>
           <span className="opacity-50">·</span>

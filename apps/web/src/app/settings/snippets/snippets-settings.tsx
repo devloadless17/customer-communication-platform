@@ -357,7 +357,7 @@ function SnippetEditor({
           {!isNew && snippet.createdByName && (
             <div className="mt-0.5 text-[11px] text-muted-foreground">
               Created by {snippet.createdByName} · last updated{" "}
-              <LocalTime iso={snippet.updatedAt} format={formatDate} />
+              <LocalTime iso={snippet.updatedAt} format="localeDate" />
             </div>
           )}
         </div>
@@ -500,10 +500,3 @@ function Field({
   );
 }
 
-function formatDate(iso: string, tz?: string): string {
-  try {
-    return new Date(iso).toLocaleDateString(undefined, { timeZone: tz });
-  } catch {
-    return iso;
-  }
-}

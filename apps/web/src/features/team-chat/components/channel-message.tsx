@@ -31,7 +31,7 @@ import { canEditMessage } from "@ccp/shared/team-chat/permissions";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import { LocalTime } from "@/components/local-time";
 import type { User } from "@ccp/shared/types";
-import { cn, formatMessageTime, initials } from "@ccp/shared/utils";
+import { cn, initials } from "@ccp/shared/utils";
 
 import { BodyRenderer } from "./body-renderer";
 import { ReactionPicker } from "./reaction-picker";
@@ -175,7 +175,7 @@ function ChannelMessageImpl({
           <span className="text-sm font-semibold">{authorName}</span>
           <LocalTime
             iso={message.createdAt}
-            format={formatMessageTime}
+            format="messageTime"
             className="text-[11px] text-muted-foreground"
           />
           {message.editedAt && (

@@ -5,7 +5,7 @@ import { StickyNote, Trash2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
-import { formatMessageTime, initials } from "@ccp/shared/utils";
+import { initials } from "@ccp/shared/utils";
 import type { InternalNote as InternalNoteType, User } from "@ccp/shared/types";
 
 function InternalNoteImpl({
@@ -31,7 +31,7 @@ function InternalNoteImpl({
               </Avatar>
               <span>{author.name}</span>
               <span className="opacity-60">·</span>
-              <LocalTime iso={note.timestamp} format={formatMessageTime} />
+              <LocalTime iso={note.timestamp} format="messageTime" />
             </span>
           </div>
           <p className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed">{note.body}</p>

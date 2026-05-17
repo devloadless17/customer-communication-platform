@@ -3,7 +3,7 @@ import { Building2, CheckCircle2, ChevronRight, Phone, X } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { listAllTeamsForSuperAdmin } from "@/lib/api/queries";
-import { formatListTime, formatPhone } from "@ccp/shared/utils";
+import { formatPhone } from "@ccp/shared/utils";
 
 export const metadata = { title: "Organizations · Admin" };
 export const dynamic = "force-dynamic";
@@ -104,7 +104,7 @@ export default async function AdminOrganizationsPage() {
                     {t.broadcastCount}
                   </td>
                   <td className="px-4 py-3 text-[12px] text-muted-foreground">
-                    <LocalTime iso={t.createdAt} format={formatListTime} />
+                    <LocalTime iso={t.createdAt} format="listTime" />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <Link

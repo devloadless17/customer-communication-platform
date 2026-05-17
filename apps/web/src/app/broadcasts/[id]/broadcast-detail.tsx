@@ -13,7 +13,7 @@ import { motion } from "framer-motion";
 
 import { LocalTime } from "@/components/local-time";
 import { getClientSocket } from "@/lib/socket-client";
-import { cn, formatListTime, formatPhone } from "@ccp/shared/utils";
+import { cn, formatPhone } from "@ccp/shared/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
 
 /**
@@ -202,11 +202,11 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           <span>·</span>
           <span>By {data.createdByName}</span>
           <span>·</span>
-          <LocalTime iso={data.createdAt} format={formatListTime} />
+          <LocalTime iso={data.createdAt} format="listTime" />
           {data.completedAt && (
             <>
               <span>·</span>
-              <span>Finished <LocalTime iso={data.completedAt} format={formatListTime} /></span>
+              <span>Finished <LocalTime iso={data.completedAt} format="listTime" /></span>
             </>
           )}
         </div>
@@ -334,7 +334,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                     <RecipientStatusPill recipient={r} />
                   </td>
                   <td className="px-4 py-2.5 text-[12px] text-muted-foreground">
-                    {r.sentAt ? <LocalTime iso={r.sentAt} format={formatListTime} /> : "—"}
+                    {r.sentAt ? <LocalTime iso={r.sentAt} format="listTime" /> : "—"}
                   </td>
                   <td className="px-4 py-2.5 text-right">
                     {r.conversationId ? (

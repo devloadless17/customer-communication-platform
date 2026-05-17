@@ -25,7 +25,7 @@ import { Input } from "@/components/ui/input";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
-import { cn, formatListTime, formatPhone, initials } from "@ccp/shared/utils";
+import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
@@ -668,7 +668,7 @@ function ContactRow({
         {lastMessageAt && (
           <LocalTime
             iso={lastMessageAt}
-            format={formatListTime}
+            format="listTime"
             className="hidden tabular-nums lg:inline"
           />
         )}

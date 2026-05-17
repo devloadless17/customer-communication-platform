@@ -24,7 +24,7 @@ import { VariableBindingsEditor } from "@/features/templates/components/variable
 import type { ContactFieldDefinition, TemplateDto } from "@ccp/shared/types";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { parseVariableBindings, type VariableBindings } from "@ccp/shared/template-bindings";
-import { cn, formatLocaleString } from "@ccp/shared/utils";
+import { cn } from "@ccp/shared/utils";
 
 /**
  * Templates index UI. Three pieces:
@@ -565,7 +565,7 @@ function DetailDrawer({
               )}
               <div className="flex items-center justify-between gap-3">
                 <span className="text-[11px] text-muted-foreground">
-                  Last synced <LocalTime iso={template.syncedAt} format={formatLocaleString} />
+                  Last synced <LocalTime iso={template.syncedAt} format="localeString" />
                 </span>
                 <div className="flex items-center gap-2">
                   <Button

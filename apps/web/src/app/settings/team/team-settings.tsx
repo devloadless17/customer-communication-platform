@@ -28,7 +28,7 @@ import {
   roleLabel,
 } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
-import { formatLocaleDate, initials } from "@ccp/shared/utils";
+import { initials } from "@ccp/shared/utils";
 import { LocalTime } from "@/components/local-time";
 
 export interface TeamUserRow {
@@ -548,7 +548,7 @@ function InviteLinkCard({
           <div className="text-sm font-medium text-foreground">Invite ready</div>
           <div className="mt-0.5 text-[11px] text-muted-foreground">
             Share this link with <span className="font-medium">{invite.email}</span>. It expires{" "}
-            <LocalTime iso={invite.expiresAt} format={formatLocaleDate} />.
+            <LocalTime iso={invite.expiresAt} format="localeDate" />.
           </div>
         </div>
         <button
@@ -615,7 +615,7 @@ function PendingInvitesCard({
               </div>
               <div className="text-[11px] text-muted-foreground">
                 Invited by {inv.createdByName} · expires{" "}
-                <LocalTime iso={inv.expiresAt} format={formatLocaleDate} />
+                <LocalTime iso={inv.expiresAt} format="localeDate" />
               </div>
             </div>
             <Button

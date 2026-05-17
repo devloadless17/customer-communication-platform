@@ -46,15 +46,6 @@ interface PanelProps {
   tagCatalog: Tag[];
 }
 
-function formatShortDate(iso: string, tz?: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: tz,
-  });
-}
-
 export function ContactPanel({
   data,
   fieldDefinitions,
@@ -375,7 +366,7 @@ export function ContactPanel({
             label="First contacted"
             value={
               messages[0] ? (
-                <LocalTime iso={messages[0].timestamp} format={formatShortDate} />
+                <LocalTime iso={messages[0].timestamp} format="shortDate" />
               ) : (
                 "—"
               )

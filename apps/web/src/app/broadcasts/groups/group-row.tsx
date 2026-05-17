@@ -6,7 +6,6 @@ import { ChevronRight } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { TagChip } from "@/features/tags/components/tag-chip";
-import { formatListTime } from "@ccp/shared/utils";
 import type { Tag } from "@ccp/shared/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
 
@@ -62,7 +61,7 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
       </td>
       <td className="px-4 py-3 text-right font-medium tabular-nums">{group.memberCount}</td>
       <td className="px-4 py-3 text-[12px] text-muted-foreground">
-        <LocalTime iso={group.updatedAt} format={formatListTime} />
+        <LocalTime iso={group.updatedAt} format="listTime" />
       </td>
       <td className="px-4 py-3 text-right">
         <ChevronRight className="ml-auto size-4 text-muted-foreground" />

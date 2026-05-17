@@ -80,6 +80,16 @@ export function formatLocaleDate(iso: string, tz?: string): string {
   return new Date(iso).toLocaleDateString(undefined, { timeZone: tz });
 }
 
+/** Long-form short date with year, e.g. "Mar 4, 2026". Used by the contact panel. */
+export function formatShortDate(iso: string, tz?: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: tz,
+  });
+}
+
 /** Day separator label used between message clusters. */
 export function formatDaySeparator(iso: string, tz?: string, now?: number): string {
   const then = new Date(iso);

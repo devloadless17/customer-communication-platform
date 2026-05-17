@@ -22,6 +22,16 @@ export interface RegisterState {
   error: string | null;
   /** Destination for the client to navigate to after a successful signup. */
   redirectTo?: string;
+  /**
+   * Form values echoed back on validation / API error so the form can repopulate.
+   * Password fields are intentionally NOT echoed — re-prefilling a password
+   * the user typed wrong defeats the confirm-password check.
+   */
+  values?: {
+    orgName?: string;
+    name?: string;
+    email?: string;
+  };
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -34,13 +44,18 @@ export async function registerAction(
   const name = String(formData.get("name") ?? "").trim();
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
+  const confirmPassword = String(formData.get("confirmPassword") ?? "");
 
-  if (!orgName) return { error: "Organization name is required." };
-  if (!name) return { error: "Your name is required." };
-  if (!EMAIL_RE.test(email)) return { error: "Enter a valid email." };
+  const values = { orgName, name, email };
+  const fail = (error: string): RegisterState => ({ error, values });
+
+  if (!orgName) return fail("Organization name is required.");
+  if (!name) return fail("Your name is required.");
+  if (!EMAIL_RE.test(email)) return fail("Enter a valid email.");
 
   const policyError = validatePasswordStructure(password);
-  if (policyError) return { error: policyError };
+  if (policyError) return fail(policyError);
+  if (password !== confirmPassword) return fail("Passwords do not match.");
 
   try {
     await api<{ ok: true; email: string; teamId: string }>("/api/register", {
@@ -51,11 +66,11 @@ export async function registerAction(
   } catch (err) {
     if (err instanceof ApiError) {
       const body = err.body as { error?: string; detail?: string } | undefined;
-      if (body?.error === "email_taken") return { error: "That email is already in use." };
-      if (body?.detail) return { error: body.detail };
+      if (body?.error === "email_taken") return fail("That email is already in use.");
+      if (body?.detail) return fail(body.detail);
     }
     console.error("[register] failed", err);
-    return { error: "Something went wrong creating your account." };
+    return fail("Something went wrong creating your account.");
   }
 
   // Sign the user in with the password they just set. Goes through the same

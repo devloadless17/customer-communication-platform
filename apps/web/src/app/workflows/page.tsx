@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/current-user";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { listWorkflows } from "@/lib/api/queries";
-import { formatListTime } from "@ccp/shared/utils";
 
 export const metadata = { title: "Workflows" };
 export const dynamic = "force-dynamic";
@@ -90,7 +89,7 @@ export default async function WorkflowsPage() {
                 </div>
                 <div className="hidden flex-col items-end gap-0.5 text-right text-[11px] text-muted-foreground sm:flex">
                   <div>{r.runCount} run{r.runCount === 1 ? "" : "s"}</div>
-                  <div><LocalTime iso={r.createdAt} format={formatListTime} /></div>
+                  <div><LocalTime iso={r.createdAt} format="listTime" /></div>
                 </div>
               </Link>
             );
