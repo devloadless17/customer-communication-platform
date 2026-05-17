@@ -43,11 +43,20 @@ async function bootstrap(): Promise<void> {
   // single whitespace mismatch fail verification. We keep the raw bytes on
   // `req.rawBody` and still let downstream controllers consume the parsed
   // JSON via the standard @Body() decorator.
+  //
+  // The verify callback runs on every parsed JSON request, but only webhook
+  // paths actually need the raw bytes — copying the buffer for internal REST
+  // calls is pure waste. Scoping the Buffer.from() to /webhooks/* keeps a
+  // ~5kb allocation off the hot path of every other API request while
+  // preserving HMAC integrity where it matters.
   app.use(
     bodyParser.json({
       limit: "2mb",
       verify: (req, _res, buf) => {
-        (req as unknown as { rawBody: Buffer }).rawBody = Buffer.from(buf);
+        const url = (req as unknown as { url?: string }).url;
+        if (url && url.startsWith("/webhooks/")) {
+          (req as unknown as { rawBody: Buffer }).rawBody = Buffer.from(buf);
+        }
       },
     }),
   );
