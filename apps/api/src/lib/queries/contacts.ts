@@ -1,7 +1,6 @@
 import "server-only";
 
 import { Prisma } from "@prisma/client";
-import { unstable_cache } from "next/cache";
 
 import { db } from "@/lib/db";
 import type { ListContactsOpts } from "@ccp/shared/queries";
@@ -229,27 +228,22 @@ export async function listContacts(
 /**
  * Team-wide contact field definitions. Returned in render order so the panel
  * can iterate without re-sorting.
- *
- * Cached: see the rationale on `listTeamMembers`. Field schemas change rarely
- * (an admin editing the contact form), so the 60s revalidation is fine.
  */
-export const listContactFieldDefinitions = unstable_cache(
-  async (teamId: string): Promise<ContactFieldDefinition[]> => {
-    const rows = await db.contactFieldDefinition.findMany({
-      where: { teamId },
-      orderBy: [{ order: "asc" }, { createdAt: "asc" }],
-    });
-    return rows.map((r) => ({
-      id: r.id,
-      teamId: r.teamId,
-      key: r.key,
-      label: r.label,
-      order: r.order,
-    }));
-  },
-  ["listContactFieldDefinitions"],
-  { revalidate: 60, tags: ["contact-field-definitions"] },
-);
+export async function listContactFieldDefinitions(
+  teamId: string,
+): Promise<ContactFieldDefinition[]> {
+  const rows = await db.contactFieldDefinition.findMany({
+    where: { teamId },
+    orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    teamId: r.teamId,
+    key: r.key,
+    label: r.label,
+    order: r.order,
+  }));
+}
 
 /** Total number of contacts in a team. */
 export async function countContacts(teamId: string): Promise<number> {

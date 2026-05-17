@@ -11,31 +11,47 @@ A web platform where multiple internal agents collaborate on WhatsApp conversati
 - Building on the **official Meta WhatsApp Cloud API**. Evolution / Baileys / unofficial bridges have been removed from this project on purpose — the ban risk for self-hosted bridges isn't acceptable for a SaaS.
 
 ## Stack
-- **Frontend:** Next.js (App Router)
-- **Backend:** Next.js API routes + custom server for Socket.io
-- **Database:** PostgreSQL (via Prisma)
-- **Realtime:** Socket.io (rejected managed alternatives — I want to learn this)
-- **Auth:** Better Auth (DB-backed sessions, custom bcrypt hasher, see [lib/auth/better-auth.ts](lib/auth/better-auth.ts))
+- **Frontend:** Next.js (App Router, RSC, Zustand) — **owns rendering + auth pages only** post-migration.
+- **Backend:** **NestJS** (HTTP + Socket.io gateway + webhook ingest + BullMQ workers + workflow engine). Currently mid-migration from Next.js API routes. Until migration completes both processes run side-by-side behind Caddy.
+- **Database:** PostgreSQL (via Prisma). One `PrismaService` shared between Next.js (auth + RSC reads) and NestJS (everything else).
+- **Realtime:** Socket.io. Browser connects via Caddy → NestJS gateway (single-process with the event sources = zero cross-process emit latency).
+- **Auth:** Better Auth — **stays in Next.js** (login/logout/signup pages, session cookie issuance). NestJS validates the session cookie via a guard that hits the Better Auth session table directly through Prisma.
 - **WhatsApp provider:** Meta WhatsApp Cloud API (only)
-- **Infra:** Docker Compose, single VPS for MVP
+- **Infra:** Docker Compose, single VPS. Two app containers: `web` (Next.js, 3000) + `api` (NestJS, 4000). Caddy routes `/`, `/_next/*`, `/api/auth/*` → web; `/api/*`, `/socket.io/*`, `/webhooks/*` → api.
 
-## Architecture
+## Architecture (target — post NestJS migration)
 
 ```
-Customer's WhatsApp
-    ↓
-Meta WhatsApp Cloud API
-    ↓ HTTPS webhook (X-Hub-Signature-256 verified)
-Next.js API route (/api/webhooks/meta)
-    ↓
-Provider adapter → normalize → dedupe → save to Postgres
-    ↓
-Socket.io emit to subscribed clients
-    ↓
-Browser updates in realtime
+                           ┌──────────────────────────────────────┐
+                           │   Caddy (HTTPS + WS upgrade)         │
+                           └──┬───────────────────┬───────────────┘
+                              │ /, /_next/*       │ /api/*
+                              │ /api/auth/*       │ /socket.io/*
+                              │                   │ /webhooks/*
+                       ┌──────┴────────┐   ┌──────┴──────────────┐
+                       │ Next.js :3000 │   │ NestJS :4000        │
+                       │ - RSC pages   │   │ - HTTP controllers  │
+                       │ - Better Auth │   │ - Socket.io gateway │
+                       │   pages       │   │ - Webhook ingest    │
+                       │ - Frontend    │   │ - Workflow engine   │
+                       │   bundles     │   │ - BullMQ workers    │
+                       └──────┬────────┘   └──────┬──────────────┘
+                              │                   │
+                              └───────┬───────────┘
+                                      │
+                              ┌───────┴───────┐
+                              │ Postgres │ Redis │
+                              └───────────────┘
+
+Inbound: Meta → Caddy → NestJS WebhooksController → HMAC verify (guard) →
+         MetaProvider.parse → dedupe (compound unique on teamId+provider+externalId) →
+         Prisma upsert → publish DomainEvent → in-process Socket.io fanout → browser.
+
+Outbound: Browser → NestJS REST → MessagingService.sendText → Meta API →
+          publish message.sent → in-process Socket.io fanout → browser.
 ```
 
-Browsers connect Socket.io to my app server. Meta NEVER talks to browsers directly. WhatsApp protocol details are hidden behind a `MessagingProvider` interface so a future channel (SMS via Twilio, Instagram DM, etc.) can plug in without touching ingest or routes.
+NestJS owns every backend concern that isn't auth pages. Socket.io lives in the same process as REST + workflows + webhooks, so domain-event → emit is in-process with zero pub/sub hop. Meta NEVER talks to browsers directly. Provider details hidden behind `MessagingProvider` interface so a future channel (SMS / IG DM) plugs in without touching ingest or controllers.
 
 ## Critical architectural rules (don't violate these)
 
@@ -115,7 +131,7 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 - **Multi-channel (Instagram / FB Messenger / SMS / Email / etc.).** Provider interface is ready, don't add one until a pilot actively asks and WhatsApp depth is done. Resisting this is the single biggest scope discipline call on the project.
 
 **Deferred indefinitely (no clear trigger yet):**
-- Analytics dashboards, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, NestJS, voice/calling, native CRM integrations (Salesforce/HubSpot — n8n via the external API covers this).
+- Analytics dashboards, per-agent unread, advanced permissions, audit log UI, billing, Redis pub/sub for Socket.io scaling, voice/calling, native CRM integrations (Salesforce/HubSpot — n8n via the external API covers this).
 
 > Note: tags, labels, template send/manage, bulk send, BullMQ, and media send/receive were on this list at MVP-start but are now shipped — see [audit on 2026-05-16]. The three "depth pass" workstreams above are the active expansion; treat them as in-flight, not deferred.
 
@@ -163,49 +179,82 @@ This is a `tsx watch` artifact, NOT a memory leak in our code. Don't chase phant
 
 ## What I'm working on right now
 
-The 4-week MVP is shipped — inbox, realtime, templates, broadcasts, contacts (with tags / stages / custom fields / audience groups), media send+receive, snippets, internal notes, forwarding, external API, and a multi-step **workflow engine + React Flow canvas** ([lib/workflows/](lib/workflows/), [/workflows](app/workflows/)) are all live. Next two workstreams, in this order:
+**Active and only workstream: NestJS migration — code-complete, smoke-booted, awaiting dev soak + deploy sign-off.** Everything else (AI agents, outbound webhooks, scoped API keys, round-robin assignment) is paused until the deploy lands.
 
-### 1. Workflow engine — depth pass
+The 4-week MVP plus the workflow / external API / team-chat depth passes are all already shipped — inbox, realtime, templates, broadcasts, contacts (tags / stages / custom fields / audience groups), media send+receive, snippets, internal notes, forwarding, external API, workflow engine + React Flow canvas, team chat with channels / mentions / reactions / pins / threads.
 
-The engine is a respond.io-style multi-step DAG builder. Trigger → optional conditions → graph of steps with branch / wait / jump control flow. State lives on `WorkflowRun` (status, currentStepId, jumpsUsed, stepLog); waits resume via BullMQ delayed jobs. Round 1 single-action "Automations" were migrated into single-step Workflows by [migrations/20260516180000_workflows](prisma/migrations/20260516180000_workflows/migration.sql).
+### Migration state — complete
 
-What's shipped (Round 2a+2b):
-- **11 triggers**: `message_received`, `conversation_created`/`_opened`/`_closed`/`_assigned`/`_status_changed`, `contact_field_updated`, `contact_tag_updated`, `contact_lifecycle_updated`, `manual_trigger`, `incoming_webhook` (HMAC-signed per-workflow URL).
-- **16 step types**: `send_message`, `send_template`, `add_comment`, `assign_to`, `set_status`, `open_conversation`, `close_conversation`, `add_tag`, `remove_tag`, `update_field`, `update_lifecycle`, `branch` (AND/OR/nested), `wait` (BullMQ delayed), `jump_to_step` (with max-jump counter), `http_request`, `trigger_workflow`. Adding a step type = a handler module + a registry entry + a per-step editor; no engine changes.
-- **Conversation analytics**: `firstAssignedAt`, `firstResponseAt`, `closedAt`, `assignmentsCount`, `incomingMessagesCount`, `outgoingMessagesCount`, `responsesCount` columns populated by [lib/conversations/analytics.ts](lib/conversations/analytics.ts) — feeds the workflow conversation_closed payload's many variables.
-- **React Flow canvas** ([components/workflows/builder/](components/workflows/builder/)) with palette + trigger card + step nodes + branch nodes (true/false handles) + run history.
-- **Trigger-once-per-contact** dedupe via `WorkflowContactState`.
+Phases 1–5 all landed. Both typechecks green; both processes (Next.js + NestJS) boot cleanly in dev with `/api/health` returning healthy.
 
-What's deferred to Round 2c (when pilot pulls these forward):
-- **Ask a Question** step (stateful: pauses run until matching inbound). Requires resume-on-message-received wiring.
-- **Date & Time / Business Hours** branch — needs a Team business-hours model.
-- **Round-robin assignment** + **AI assignment** (`assign_to.mode = "round_robin"` / `"ai"`).
-- **Platform integrations** as steps: Meta CAPI / TikTok Events / Google Sheets row (each is its own multi-day OAuth + API integration).
-- **AI Objective** (Legacy) — pairs with workstream 2 (AI agents).
-- **Outbound-from-step `$var.body.*` token resolution** for incoming_webhook payloads.
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | NestJS scaffold (`apps/api/`) — guards, pipes, Prisma module, BullMQ, Socket.io gateway, health endpoint | ✅ |
+| 2 | Realtime + ingest — full Socket.io gateway port, `RealtimeFanoutService` bus subscriber, Meta webhook controller (HMAC verify + 2-phase inbound media), frontend `NEXT_PUBLIC_API_URL` flag | ✅ |
+| 3a | Catalog REST: tags / snippets / stages / contact-fields / audience-groups / api-keys / team-chat channels / WhatsApp settings + templates | ✅ |
+| 3b | Inbox REST: conversations (full) + notes + contacts (full CRUD + bulk + import + lookup/count/preview/export/tags) + messages (text + template + **media + forward**) | ✅ |
+| 3c | Admin REST: invites + users + admin/teams + team root + change-password + workflows (all 8 routes incl. public HMAC incoming-webhook) | ✅ |
+| 3d | Broadcasts: create + list + get + delete + media/[messageId]. Runner stays in [lib/broadcast-runner.ts](lib/broadcast-runner.ts) (framework-agnostic). | ✅ |
+| 3e | External `/v1` API: all 6 endpoints | ✅ |
+| 4 | Workflow engine in NestJS: `WorkflowWorkerService`, `WorkflowSubscribersService`, `WorkflowDispatcherService`. Engine in [lib/workflows/](lib/workflows/). | ✅ |
+| 5 | Cleanup: ~82 files deleted (server.ts, worker.ts, lib/socket/server.ts, lib/events/redis-bridge.ts, lib/api/*, lib/events/subscribers/{socket-fanout,index}.ts, every migrated `app/api/**/route.ts`). New `instrumentation.ts` registers cache-revalidate on Next.js boot. Dev tool ported to NestJS as `DevEmitController`. | ✅ |
 
-### 2. AI agents — auto-reply, lead qualify, multilingual
+**Runtime stack** — `@swc-node/register` powers `api:dev` / `api:start` (NOT `tsx`; see lessons below). Next.js dev/start use `next dev` / `next start` — no more custom `server.ts`.
 
-The data layer is already there: [app/api/conversations/[id]/messages/context/route.ts](app/api/conversations/%5Bid%5D/messages/context/route.ts) loads the message window. No LLM calls wired yet. Approach:
+### Bus events introduced for the cleanup
 
-- Start with **suggested replies** (agent-in-the-loop) before autonomous send — lower trust bar, faster to ship, gives us prompt-quality signal
-- Then **auto-reply when no human is online** with a configurable "handoff" trigger (keyword or AI confidence threshold flips conversation to `pending` + assigns to a human)
-- **Lead qualification** = a workflow step that runs an LLM classifier on the conversation and writes to contact custom fields / stage / tags. Reuses workstream 1's plumbing — that's why workflows come first.
-- **Multilingual** is mostly free if we use a frontier model; the work is detection + per-team language preferences, not translation
-- Provider: Claude API ([claude-opus-4-7] for reasoning-heavy, [claude-haiku-4-5-20251001] for classification), with prompt caching on the system prompt + conversation history
-- Per-team `aiEnabled` flag + per-team prompt overrides on the `Team` table. Per-team API keys later if cost shaping is needed.
-- Guardrails: never auto-send a template (cost + Meta policy), never auto-send outside the 24h window, hard cap on auto-replies per conversation per hour.
+Direct `emitToTeam` calls in lib/ couldn't survive Phase 5 because the Socket.io singleton moved to NestJS. Three new event types added to keep emit-from-lib working from any process WITHOUT triggering audit/analytics/workflows when that's not the intent:
 
-### 3. External API for integrations — depth pass
+- `broadcast.recipient_message_sent` + `broadcast.conversation_reopened` — broadcast runner uses these instead of `message.sent` / `conversation.status_changed`. Only socket-fanout subscribes; analytics + audit are structurally excluded (a 1k-recipient broadcast must not bump counters or write 1k timeline rows).
+- `conversation.event_recorded` — `lib/inbox/events.ts` (called from the audit subscriber) publishes this instead of direct-emitting `conversation:event`. NestJS realtime-fanout subscribes.
 
-Today's [app/api/external/v1/](app/api/external/v1/) routes are Bearer-auth'd via `TeamApiKey` and cover contacts + conversations + messages + notes — enough for n8n today, not enough for a real integrations story. Goal is to make this the public API a customer (or Zapier/Make/n8n template) can build on without us hand-holding.
+### Remaining non-migrated routes (intentional, post-Phase-5)
 
-- **Outbound webhooks (we POST out)**: subscribe per-team to events — `message.received`, `message.sent`, `conversation.assigned`, `conversation.status_changed`, `contact.created`, `contact.updated`, `workflow.run`. Signed payloads (HMAC), retries with backoff, delivery log. This is what closes the loop with n8n/Zapier without them polling.
-- **Coverage gaps in inbound API**: tags CRUD, snippets, audience groups, broadcasts (create + status), templates list, workflows list. Anything an admin can do in the UI should be doable via API.
-- **Auth hygiene**: scoped API keys (read-only vs read-write vs admin), rotation, IP allowlists optional. Today's keys are full-access.
-- **Versioned + documented**: keep `/v1/`, write a minimal OpenAPI spec, ship a Postman collection. Don't build a full docs site yet — README + spec is enough for pilot-era.
-- **Rate limiting**: per-key, sliding window. Pick numbers when we have one external integration actually live.
+| Route | Reason |
+|---|---|
+| `app/api/auth/[...all]` | Better Auth catch-all — must stay on Next.js (Caddy routes `/api/auth/*` here) |
+| `app/api/health` | Different URL space (`/api/health` vs NestJS `/health`); kept for backwards-compat probes |
+| `app/api/webhooks/meta/[teamId]` | Legacy Meta-dashboard URL; NestJS serves `/webhooks/meta/[teamId]` at the new path. Drop after Meta dashboards re-point. |
+| `app/api/webhooks/[provider]/[teamId]` | Generic dispatcher shim; only routes to Meta today, so porting before a second provider arrives would be ceremony |
 
-### Why this order
+### Cutover playbook (dev → prod)
 
-Workflows are the runway. AI agents plug in as new step types and reuse the trigger / conditions / dispatcher machinery — building AI first means rebuilding it on top of a shallow engine, then doing the deep pass anyway. External API webhooks pair naturally with the workflow triggers (same event taxonomy on both sides — internal workflows *and* outbound webhooks fire from the same dispatcher). Pilot customer feedback still trumps the roadmap; if they ask for analytics first, that jumps the queue.
+The pre-cutover env-flag dance (`SKIP_SOCKET_FANOUT`, `BUS_REDIS_BRIDGE`, `SKIP_WORKFLOW_DISPATCH`, `RUN_WORKER_INLINE` on Next.js) is gone — those env vars no longer exist in [docker-compose.yml](docker-compose.yml). Ownership is now structural (Next.js: pages + auth; NestJS: everything else).
+
+Remaining steps for the actual deploy:
+
+1. **Dev smoke** (one-time before each deploy):
+   ```bash
+   npm install
+   npm run typecheck && npm run api:typecheck
+   npm run dev       # Next.js on :3000
+   npm run api:dev   # NestJS on :4000
+   ```
+   `.env` should set `NEXT_PUBLIC_API_URL=http://localhost:4000` so the browser Socket.io client points at NestJS.
+
+2. **Caddy routing**: `/`, `/_next/*`, `/api/auth/*` → Next.js. Everything else (`/api/*`, `/socket.io/*`, `/webhooks/*`) → NestJS. **Caveat**: `/api/auth/change-password` was deleted on Next.js and only exists on NestJS now — Caddy needs an explicit `handle_path /api/auth/change-password*` → NestJS BEFORE the `/api/auth/*` → Next.js wildcard, or change-password 404s.
+
+3. **Meta webhook URL flip**: update the Meta App dashboard to point at `/webhooks/meta/{teamId}` (the new NestJS path). Until then, Caddy keeps routing `/api/webhooks/meta/*` to the legacy Next.js route.
+
+### Architectural calls (locked, do not re-litigate)
+
+- **Socket.io lives in NestJS, not Next.js.** Same process as REST + webhooks + workflows = in-process emit, zero pub/sub hop.
+- **Better Auth stays in Next.js.** Moving it costs ~2 weeks of risk for zero functional benefit. NestJS guard reads `better-auth.session_token` cookie + hits the session table via Prisma. ~1ms overhead per request.
+- **Existing service modules** ([lib/messaging/](lib/messaging/), [lib/conversations/](lib/conversations/), [lib/contacts/](lib/contacts/), [lib/workflows/](lib/workflows/), [lib/providers/](lib/providers/)) stay where they are — framework-agnostic; NestJS wraps them as Nest providers.
+- **Zod everywhere.** `zBody / zQuery / zParam` pipes at [apps/api/src/common/zod-validation.pipe.ts](apps/api/src/common/zod-validation.pipe.ts) reuse the schemas already written for Next.js routes. No class-validator / class-transformer.
+- **Prisma stays.** One `PrismaModule` in NestJS, the existing `lib/db.ts` singleton in Next.js. Same `DATABASE_URL`, separate connection pools per process.
+- **Workers run in-process by default.** `RUN_WORKER_INLINE=1` (default on the api container) keeps BullMQ processors inside the NestJS app. The standalone `worker` docker service was removed post-Phase-5; add it back only if scaling forces a split.
+- **Two processes total**, single VPS, single docker-compose. No microservices.
+
+### Runtime + DI lessons (load-bearing)
+
+- **NestJS DI requires `emitDecoratorMetadata`. `tsx` (esbuild backend) does NOT emit it.** This was a pre-existing latent bug — typecheck stayed green forever but `OnModuleInit` hooks crashed on first injection. We switched the api scripts + docker `command` to `@swc-node/register` with `SWC_NODE_PROJECT=apps/api/tsconfig.json` so SWC picks up `experimentalDecorators` + `emitDecoratorMetadata` from the right tsconfig.
+- **`--conditions=react-server` is required** on the NestJS node invocation. Many shared `lib/` files do `import "server-only"` which throws unless that condition picks `server-only`'s `empty.js` no-op variant. Both `api:dev` and `api:start` already set this; the Next.js side gets it automatically.
+- **Next.js needs [instrumentation.ts](instrumentation.ts) for boot-time wiring.** The old `server.ts` called `registerAllSubscribers` directly; with `next start` replacing it, the standard Next.js `register()` hook handles cache-revalidate registration. `NEXT_RUNTIME === "nodejs"` guard is there because instrumentation also fires in edge — where Prisma + bus would crash.
+
+### Paused workstreams (resume after deploy sign-off)
+
+- **AI agents** (suggested replies → auto-reply → lead qualification). Plugs in as new step types in the workflow registry + an `AiModule` in NestJS.
+- **Outbound webhooks**. A subscriber on the event bus + a `webhook:deliver` BullMQ queue. Natural fit for NestJS now that the bus lives inside it.
+- **Scoped API keys, IP allowlists, OpenAPI spec.** Pair naturally with the external-v1 controller migration.
+- **Workflow Round 2c**: Ask-a-Question step, business-hours branch, round-robin assignment, platform integrations as steps.

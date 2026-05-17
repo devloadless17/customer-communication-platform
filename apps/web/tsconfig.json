@@ -3,7 +3,8 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@ccp/shared/*": ["../../packages/shared/src/*"]
     },
     "incremental": true
   },

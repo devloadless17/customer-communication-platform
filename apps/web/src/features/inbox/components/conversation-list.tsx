@@ -1,0 +1,459 @@
+"use client";
+
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import { useVirtualizer } from "@tanstack/react-virtual";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { cn } from "@ccp/shared/utils";
+import type {
+  ContactStage,
+  ConversationWithRefs,
+  User,
+} from "@ccp/shared/types";
+import { ConversationListItem } from "./conversation-list-item";
+import type { Filter, PresetFilterId } from "./inbox-controls";
+
+const PRESET_LABELS: Record<PresetFilterId, string> = {
+  all: "All open",
+  mine: "Assigned to me",
+  unassigned: "Unassigned",
+  closed: "Closed",
+};
+
+export function ConversationList({
+  currentUser,
+  conversations,
+  stages,
+  filter,
+  search,
+  onSearchChange,
+  searching = false,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  activeConversationId,
+  pendingConversationId,
+  onOpenConversation,
+  onPrefetchConversation,
+}: {
+  currentUser: User;
+  conversations: ConversationWithRefs[];
+  stages: ContactStage[];
+  filter: Filter;
+  search: string;
+  onSearchChange: (s: string) => void;
+  /** True while a debounced server search is in flight. Drives the spinner
+   *  in the search box; the listed rows are still the previous results until
+   *  the new ones arrive. */
+  searching?: boolean;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  /** Id of the conversation the shell is currently showing. Drives the
+   *  highlighted-row style. */
+  activeConversationId: string | null;
+  /** Set to the id of a chat the agent just clicked while its data is being
+   *  fetched from /api/inbox/conversation/<id>. Lets the row render an
+   *  immediate "I heard you" state without waiting for the network. */
+  pendingConversationId: string | null;
+  /** Open a conversation in the workspace. The shell handles cache + URL
+   *  sync — this list just dispatches. */
+  onOpenConversation: (conversationId: string) => void;
+  /** Warm the workspace cache for a conversation the agent is likely about
+   *  to click. Idempotent and cheap — fires on hover/focus, no-ops if the
+   *  row is already cached or in flight. */
+  onPrefetchConversation: (conversationId: string) => void;
+}) {
+  const { confirm, alert, confirmDialog } = useConfirm();
+  // "selection mode": clicking a row toggles its checkbox instead of opening
+  // the chat. Toggled by the toolbar button or auto-engaged when the agent
+  // checks the first row. Esc / Clear exits.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    if (selectionMode) return;
+    setSelectedIds(new Set());
+  }, [selectionMode]);
+
+  // Hover-prefetch debounce. Without this, scrolling through 20 rows fires
+  // 20 fetches in ~200ms — those evict useful entries from the LRU before
+  // the agent has a chance to click anything. 150ms is long enough to weed
+  // out drive-by mouse paths but short enough that an intentional hover
+  // before a click still warms the cache.
+  const hoverTimerRef = useRef<number | null>(null);
+  const cancelHoverPrefetch = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
+  const scheduleHoverPrefetch = (conversationId: string) => {
+    cancelHoverPrefetch();
+    hoverTimerRef.current = window.setTimeout(() => {
+      hoverTimerRef.current = null;
+      onPrefetchConversation(conversationId);
+    }, 150);
+  };
+  useEffect(() => cancelHoverPrefetch, []);
+
+  // Entrance-animation gating — same pattern as MessageThread. Without this
+  // every row had `animate-enter` unconditionally, so a hard refresh played
+  // a 140ms fade+slideUp on the entire conversation list. Rows the user has
+  // already seen shouldn't re-animate; only genuinely-new rows (a fresh
+  // inbound that pushed a conversation to the top) should. Same trick:
+  // first render mountedRef is false → no animations; after commit we
+  // record the current set of ids; from then on, only ids that weren't in
+  // the previous snapshot get the class.
+  const animateMountedRef = useRef(false);
+  const seenIdsRef = useRef<Set<string>>(new Set());
+
+  function toggle(id: string) {
+
+    setSelectedIds((prev) => {
+      const copy = new Set(prev);
+      if (copy.has(id)) copy.delete(id);
+      else copy.add(id);
+      return copy;
+    });
+  }
+
+  async function bulkDelete() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const ok = await confirm({
+      title: `Delete ${ids.length} chat${ids.length === 1 ? "" : "s"}?`,
+      description:
+        "Removes all messages and notes from these threads. The contacts stay. This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      const res = await fetch("/api/conversations/bulk", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ conversationIds: ids }),
+      });
+      if (!res.ok) {
+        await alert("Couldn't delete chats", "Please try again.");
+        return;
+      }
+      // Server emits conversation:deleted per id; the list state will
+      // reconcile through the team-events hook.
+      setSelectionMode(false);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    return conversations.filter(({ conversation: c, contact }) => {
+      if (filter.kind === "preset") {
+        if (filter.id === "mine" && c.assignedUserId !== currentUser.id) return false;
+        if (filter.id === "unassigned" && c.assignedUserId !== null) return false;
+        if (filter.id === "closed" && c.status !== "closed") return false;
+        if (filter.id === "all" && c.status === "closed") return false;
+      } else {
+        // Stage view mirrors "All": skip closed threads so the visible set
+        // matches what the user expects when they click into a stage.
+        if (c.status === "closed") return false;
+        if (contact.stageId !== filter.stageId) return false;
+      }
+
+      if (q) {
+        const haystack =
+          `${contact.name} ${contact.phoneNumber} ${c.lastMessagePreview}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [conversations, currentUser.id, filter, search]);
+
+  // Record what's currently visible AFTER each render so the next render can
+  // tell which rows are genuinely new and worth animating. No dependency
+  // array — runs every commit, matches MessageThread's pattern.
+  useEffect(() => {
+    animateMountedRef.current = true;
+    seenIdsRef.current = new Set(visible.map((v) => v.conversation.id));
+  });
+
+  const headerTitle = useMemo(() => {
+    if (filter.kind === "preset") {
+      return PRESET_LABELS[filter.id];
+    }
+    const stage = stages.find((s) => s.id === filter.stageId);
+    return stage ? `Stage · ${stage.name}` : "Stage";
+  }, [filter, stages]);
+
+  // ---- Virtualization wiring ----------------------------------------------
+  //
+  // The Radix ScrollArea renders its actual scroll surface as a child
+  // `[data-radix-scroll-area-viewport]` div. We resolve that element on
+  // mount via a ref + post-render walk, and feed it into the virtualizer.
+  //
+  // Why virtualize: load-more grows `visible` to 100-250 rows in regular
+  // pilot use. Each row's memoized DOM is ~10 nodes → 2000-2500 nodes total,
+  // measurable layout cost on every socket event despite per-row memo.
+  // Virtualization caps the rendered set to viewport + small overscan
+  // (typically 15-30 rows) regardless of list length. Same UX, ~90% DOM
+  // reduction on large lists.
+  const scrollRootRef = useRef<HTMLDivElement>(null);
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+
+  // useLayoutEffect (not useEffect) so the virtualizer sees the scroll
+  // element on its second render, before the browser paints — otherwise
+  // the user briefly sees an empty list while the virtualizer waits for
+  // the scrollElement to arrive.
+  useLayoutEffect(() => {
+    const root = scrollRootRef.current;
+    if (!root) return;
+    const viewport = root.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]",
+    );
+    setScrollEl(viewport ?? root);
+  }, []);
+
+  // Row height: each ConversationListItem is ~76px (avatar + 3 stacked lines
+  // with some padding). `measureElement` adapts if a row turns out taller
+  // (long names wrap, etc.); the estimate just bootstraps the layout.
+  const rowVirtualizer = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scrollEl,
+    estimateSize: () => 76,
+    overscan: 8,
+    getItemKey: (idx) => visible[idx]!.conversation.id,
+  });
+
+  // Infinite-scroll trigger. Instead of an IntersectionObserver on a
+  // sentinel div (which doesn't exist inside the virtualized container in a
+  // measurable position), we watch `rowVirtualizer.getVirtualItems()` —
+  // when the last rendered virtual item is at-or-past the end of `visible`,
+  // we're near the bottom of the loaded set and it's time to fetch more.
+  const onLoadMoreRef = useRef(onLoadMore);
+  useEffect(() => {
+    onLoadMoreRef.current = onLoadMore;
+  }, [onLoadMore]);
+
+  const lastVirtualIndex =
+    rowVirtualizer.getVirtualItems().at(-1)?.index ?? -1;
+
+  useEffect(() => {
+    if (!hasMore || loadingMore) return;
+    if (lastVirtualIndex < 0) return;
+    // Trigger when the rendered range gets within 5 rows of the end of the
+    // currently-loaded slice. Mirrors the prior `rootMargin: 200px` feel.
+    if (lastVirtualIndex >= visible.length - 5) {
+      onLoadMoreRef.current();
+    }
+  }, [lastVirtualIndex, hasMore, loadingMore, visible.length]);
+
+  return (
+    <div className="flex h-full w-95 shrink-0 flex-col bg-background">
+      <header className="flex items-center justify-between gap-2 border-b border-border px-4 pt-4 pb-3">
+        <div>
+          <h1 className="text-base font-semibold leading-tight">{headerTitle}</h1>
+          <p className="text-xs text-muted-foreground">
+            {selectionMode && selectedIds.size > 0
+              ? `${selectedIds.size} selected`
+              : `${visible.length} ${visible.length === 1 ? "conversation" : "conversations"}`}
+          </p>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setSelectionMode((v) => !v)}
+            title={selectionMode ? "Exit selection mode" : "Select multiple"}
+            className={cn(
+              "flex size-8 items-center justify-center rounded-md transition-colors",
+              selectionMode
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+            aria-label={selectionMode ? "Exit selection mode" : "Select multiple"}
+          >
+            <CheckSquare className="size-4" />
+          </button>
+          {/* Sort & filter — not yet implemented. Removed until it does
+              something; the current Filter chips below already cover most use
+              cases (All / Mine / Unassigned). */}
+        </div>
+      </header>
+
+      <div className="px-3 pt-3 pb-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search name, phone, or message…"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="h-9 pl-8 pr-8"
+          />
+          {searching && (
+            <Loader2
+              className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground"
+              aria-label="Searching"
+            />
+          )}
+        </div>
+      </div>
+
+      <ScrollArea ref={scrollRootRef} className="flex-1">
+        {visible.length === 0 ? (
+          <div className="px-3 py-12 text-center text-xs text-muted-foreground">
+            No conversations match.
+          </div>
+        ) : (
+          // Virtualized list. The outer div has the full estimated height
+          // (sum of all row sizes) so the scrollbar's drag handle reflects
+          // the true list length, NOT the rendered subset. Each row is
+          // absolutely positioned at its computed offset. Two-CSS rule
+          // keeps virtualization invisible to row markup — the row's own
+          // styles never know it's being windowed.
+          <div
+            className="relative w-full px-1.5 pb-3"
+            style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+          >
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const item = visible[virtualRow.index]!;
+              const { conversation, contact, assignedUser } = item;
+              const checked = selectedIds.has(conversation.id);
+              // Animate only NEW rows after first mount. On initial paint
+              // (mountedRef=false) and for rows already in the seen set, no
+              // animation. With virtualization, a row scrolling INTO the
+              // rendered window for the first time would otherwise replay
+              // its enter animation — the seenIdsRef guard prevents that
+              // because the id is recorded after every commit.
+              const animateIn =
+                animateMountedRef.current &&
+                !seenIdsRef.current.has(conversation.id);
+              return (
+                <div
+                  key={virtualRow.key}
+                  ref={rowVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  className={cn("absolute left-0 top-0 w-full", animateIn && "animate-enter")}
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  {selectionMode ? (
+                    // <label> wrapping the checkbox is the canonical way to
+                    // make the whole row a toggle target — valid HTML, native
+                    // keyboard support, no onClick+stopPropagation dance.
+                    <label
+                      className={cn(
+                        "flex w-full cursor-pointer items-center gap-2 pl-2",
+                        checked && "rounded-md bg-primary/5",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        className="size-4 cursor-pointer accent-primary"
+                        checked={checked}
+                        onChange={() => toggle(conversation.id)}
+                        aria-label={`Select ${contact.name}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <ConversationListItem
+                          conversation={conversation}
+                          contact={contact}
+                          assignedUser={assignedUser}
+                          active={false}
+                          pending={false}
+                        />
+                      </div>
+                    </label>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onOpenConversation(conversation.id)}
+                      onMouseEnter={() => scheduleHoverPrefetch(conversation.id)}
+                      onMouseLeave={cancelHoverPrefetch}
+                      onFocus={() => onPrefetchConversation(conversation.id)}
+                      className="block w-full text-left"
+                    >
+                      <ConversationListItem
+                        conversation={conversation}
+                        contact={contact}
+                        assignedUser={assignedUser}
+                        active={activeConversationId === conversation.id}
+                        pending={pendingConversationId === conversation.id}
+                      />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {hasMore && (
+          <div className="flex items-center justify-center px-3 py-4 text-[11px] text-muted-foreground">
+            {loadingMore ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Loader2 className="size-3 animate-spin" />
+                Loading more…
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="hover:text-foreground"
+                onClick={() => onLoadMore()}
+              >
+                Load older conversations
+              </button>
+            )}
+          </div>
+        )}
+      </ScrollArea>
+
+      <AnimatePresence>
+        {selectionMode && selectedIds.size > 0 && (
+          <motion.div
+            initial={{ y: 60, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 60, opacity: 0 }}
+            transition={{ type: "spring", duration: 0.3, bounce: 0.2 }}
+            className="flex items-center gap-2 border-t border-border bg-popover px-3 py-2 shadow-lg"
+          >
+            <span className="inline-flex h-7 items-center rounded-full bg-primary/10 px-2.5 text-[11px] font-medium text-primary tabular-nums">
+              {selectedIds.size} selected
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              onClick={bulkDelete}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="size-3.5" />
+              )}
+              Delete
+            </Button>
+            <button
+              type="button"
+              onClick={() => setSelectionMode(false)}
+              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="Cancel"
+            >
+              <X className="size-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {confirmDialog}
+    </div>
+  );
+}
+

@@ -1,0 +1,389 @@
+import { Prisma } from "@prisma/client";
+import {
+  BadGatewayException,
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  UnprocessableEntityException,
+} from "@nestjs/common";
+
+import {
+  toExternalContact,
+  toExternalConversation,
+  toExternalMessage,
+} from "@/lib/external-shapes";
+import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import { getMetaProvider } from "@/lib/providers";
+import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { normalizeMetaSendError } from "@/lib/providers/meta";
+import type { Message, User } from "@ccp/shared/types";
+import { computeWindowStatus } from "@ccp/shared/utils/window";
+import { workflowContactSnapshot } from "@/lib/workflows/events";
+
+import { EventBus } from "../../events/event-bus.module";
+import { PrismaService } from "../../prisma/prisma.service";
+import type {
+  ExternalAssignInput,
+  ExternalNoteInput,
+  ExternalSendMessageInput,
+  ExternalStatusInput,
+  ListConversationsQueryInput,
+  ListMessagesQueryInput,
+} from "./external-v1.schemas";
+
+/**
+ * External API service. Routes are parallel to the internal ones but
+ * scoped by `teamId` from the API key, and `changedByUserId / senderUserId`
+ * is always null (the API key is an org-level credential, not a person).
+ *
+ * Each operation publishes the SAME domain event the internal route does —
+ * downstream subscribers (socket fanout, audit, analytics, workflow
+ * dispatch, future outbound webhooks) can't tell which entry point fired.
+ */
+@Injectable()
+export class ExternalV1Service {
+  private readonly logger = new Logger(ExternalV1Service.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly bus: EventBus,
+  ) {}
+
+  // ---- Contacts ---------------------------------------------------------
+
+  async getContact(teamId: string, id: string) {
+    const row = await this.prisma.contact.findFirst({ where: { id, teamId } });
+    if (!row) throw new NotFoundException({ error: "contact not found" });
+    return toExternalContact(row);
+  }
+
+  // ---- Conversations ----------------------------------------------------
+
+  async listConversations(teamId: string, q: ListConversationsQueryInput) {
+    const rows = await this.prisma.conversation.findMany({
+      where: {
+        teamId,
+        ...(q.status ? { status: q.status } : {}),
+        ...(q.phone ? { contact: { phoneNumber: q.phone } } : {}),
+      },
+      orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
+      take: q.limit + 1, // peek ahead for nextCursor
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+    const items = rows.slice(0, q.limit).map(toExternalConversation);
+    const lastItem = items[items.length - 1];
+    const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
+    return { items, nextCursor };
+  }
+
+  async getConversation(teamId: string, id: string) {
+    const row = await this.prisma.conversation.findFirst({
+      where: { id, teamId },
+      include: { contact: true },
+    });
+    if (!row) throw new NotFoundException({ error: "conversation not found" });
+    return {
+      conversation: toExternalConversation(row),
+      contact: toExternalContact(row.contact),
+    };
+  }
+
+  async assign(teamId: string, conversationId: string, input: ExternalAssignInput) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: {
+        id: true,
+        assignedUserId: true,
+        contact: { include: { tags: { select: { id: true } } } },
+      },
+    });
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+
+    if (input.assignedUserId !== null) {
+      const member = await this.prisma.user.findFirst({
+        where: { id: input.assignedUserId, teamId },
+        select: { id: true },
+      });
+      if (!member) throw new BadRequestException({ error: "user not in team" });
+    }
+
+    const updated = await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: input.assignedUserId },
+      include: { assignedUser: true },
+    });
+
+    const assignedUser: User | null = updated.assignedUser
+      ? {
+          id: updated.assignedUser.id,
+          teamId: updated.assignedUser.teamId,
+          role: updated.assignedUser.role,
+          name: updated.assignedUser.name,
+          email: updated.assignedUser.email,
+          avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
+          isActive: updated.assignedUser.deactivatedAt === null,
+        }
+      : null;
+
+    await this.bus.publish({
+      type: "conversation.assigned",
+      teamId,
+      conversationId,
+      assignedUser,
+      previousAssignedUserId: conversation.assignedUserId,
+      newAssignedUserId: input.assignedUserId,
+      // External API: no acting user.
+      changedByUserId: null,
+      contact: workflowContactSnapshot(conversation.contact),
+    });
+  }
+
+  async setStatus(teamId: string, conversationId: string, input: ExternalStatusInput) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      include: { contact: { include: { tags: { select: { id: true } } } } },
+    });
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    const previousStatus = conversation.status;
+
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { status: input.status },
+    });
+
+    await this.bus.publish({
+      type: "conversation.status_changed",
+      teamId,
+      conversationId,
+      previousStatus,
+      newStatus: input.status,
+      changedByUserId: null,
+      contact: workflowContactSnapshot(conversation.contact),
+    });
+  }
+
+  // ---- Messages ---------------------------------------------------------
+
+  async listMessages(
+    teamId: string,
+    conversationId: string,
+    q: ListMessagesQueryInput,
+  ) {
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: { id: true },
+    });
+    if (!conv) throw new NotFoundException({ error: "conversation not found" });
+
+    const rows = await this.prisma.message.findMany({
+      where: { conversationId },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: q.limit + 1,
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+    const items = rows.slice(0, q.limit).map(toExternalMessage);
+    const lastItem = items[items.length - 1];
+    const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
+    return { items, nextCursor };
+  }
+
+  async sendMessage(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalSendMessageInput,
+  ) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      include: { contact: true },
+    });
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+
+    // 24h window — surface the constraint before Meta so n8n flows can
+    // branch to template-send cleanly. Meta returns 131047 otherwise.
+    const lastInbound = await this.prisma.message.findFirst({
+      where: { conversationId, direction: "in" },
+      orderBy: { timestamp: "desc" },
+      select: { timestamp: true },
+    });
+    const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+    if (win.state === "closed" || win.state === "never") {
+      throw new UnprocessableEntityException({
+        error: "outside_24h_window",
+        detail:
+          "free-form messages are only allowed within 24h of the contact's last inbound. " +
+          "use a pre-approved template for cold outbound (not yet exposed via the external API).",
+        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+      });
+    }
+
+    let replyToMessageId: string | null = null;
+    let replyToExternalId: string | undefined;
+    if (input.replyToMessageId) {
+      const replyRow = await this.prisma.message.findFirst({
+        where: { id: input.replyToMessageId, conversationId, teamId },
+        select: { id: true, externalId: true },
+      });
+      if (replyRow) {
+        replyToMessageId = replyRow.id;
+        if (!replyRow.externalId.startsWith("tmp_")) {
+          replyToExternalId = replyRow.externalId;
+        }
+      }
+    }
+
+    if (!conversation.contact.phoneNumber) {
+      throw new BadRequestException({
+        error: "contact_has_no_phone",
+        detail: "This contact has no WhatsApp number.",
+      });
+    }
+
+    let send;
+    try {
+      const config = await getMetaSendConfig(teamId);
+      send = await getMetaProvider().sendText(
+        {
+          to: conversation.contact.phoneNumber,
+          body: input.body,
+          ...(replyToExternalId ? { replyToExternalId } : {}),
+        },
+        config,
+      );
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) {
+        throw new ConflictException({
+          error: "whatsapp_not_connected",
+          detail: err.message,
+        });
+      }
+      const normalized = normalizeMetaSendError(err);
+      if (normalized) {
+        throw new UnprocessableEntityException({
+          error: normalized.code,
+          message: normalized.message,
+          status: normalized.httpStatus,
+          detail: normalized.detail,
+        });
+      }
+      this.logger.error("external sendText failed", err);
+      throw new BadGatewayException({
+        error: "send_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const created = await createOutboundMessageIdempotent({
+      teamId,
+      conversationId,
+      externalId: send.externalId,
+      senderUserId: null, // No human author for external API sends.
+      body: input.body,
+      direction: "out",
+      provider: "meta_cloud",
+      status: "sent",
+      rawPayload: { sentVia: "api/external/v1", apiKeyId } as Prisma.InputJsonValue,
+      timestamp: send.timestamp,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    });
+
+    const preview = input.body.slice(0, 200);
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
+    });
+
+    const message: Message = {
+      id: created.id,
+      teamId,
+      conversationId,
+      externalId: send.externalId,
+      senderUserId: null,
+      body: input.body,
+      direction: "out",
+      provider: "meta_cloud",
+      status: "sent",
+      rawPayload: { sentVia: "api/external/v1", apiKeyId },
+      timestamp: send.timestamp.toISOString(),
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    };
+
+    await this.bus.publish({
+      type: "message.sent",
+      teamId,
+      conversationId,
+      message,
+      preview,
+      lastMessageAt: send.timestamp.toISOString(),
+      unreadDelta: 0,
+      senderUserId: null,
+    });
+
+    return { message: toExternalMessage(created) };
+  }
+
+  // ---- Notes ------------------------------------------------------------
+
+  async createNote(
+    teamId: string,
+    conversationId: string,
+    input: ExternalNoteInput,
+  ) {
+    const conv = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: { id: true },
+    });
+    if (!conv) throw new NotFoundException({ error: "conversation not found" });
+
+    let authorUserId: string | null = null;
+    if (input.authorUserId) {
+      const u = await this.prisma.user.findFirst({
+        where: { id: input.authorUserId, teamId },
+        select: { id: true },
+      });
+      if (!u) {
+        throw new BadRequestException({
+          error: "authorUserId is not a member of this team",
+        });
+      }
+      authorUserId = u.id;
+    }
+    if (!authorUserId) {
+      // Fallback to oldest admin — InternalNote.authorUserId is non-nullable.
+      const fallback = await this.prisma.user.findFirst({
+        where: { teamId, role: { in: ["admin", "superAdmin"] } },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      });
+      if (!fallback) {
+        throw new ConflictException({
+          error: "team has no admin to attribute the note to",
+        });
+      }
+      authorUserId = fallback.id;
+    }
+
+    const note = await this.prisma.internalNote.create({
+      data: { conversationId, authorUserId, body: input.body },
+    });
+
+    const notePayload = {
+      id: note.id,
+      conversationId,
+      authorUserId,
+      body: input.body,
+      timestamp: note.timestamp.toISOString(),
+    };
+
+    await this.bus.publish({
+      type: "note.created",
+      teamId,
+      conversationId,
+      note: notePayload,
+    });
+
+    return { note: notePayload };
+  }
+}

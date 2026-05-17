@@ -1,0 +1,4 @@
+
+> @ccp/api@0.0.0 typecheck /home/aliubuntu/projects/loadless_projects/customer-communication-platform/apps/api
+> tsc --noEmit
+

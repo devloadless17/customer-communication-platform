@@ -1,0 +1,15 @@
+{
+  "extends": "@ccp/tsconfig/nest.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "../..",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ccp/shared/*": ["../../packages/shared/src/*"]
+    },
+    "incremental": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

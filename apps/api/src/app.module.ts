@@ -1,0 +1,65 @@
+import { Module } from "@nestjs/common";
+
+import { AdminModule } from "./admin/admin.module";
+import { AuthModule } from "./auth/auth.module";
+import { BroadcastsModule } from "./broadcasts/broadcasts.module";
+import { BullMQModule } from "./bullmq/bullmq.module";
+import { CommonModule } from "./common/common.module";
+import { ContactsModule } from "./contacts/contacts.module";
+import { ConversationsModule } from "./conversations/conversations.module";
+import { DevModule } from "./dev/dev.module";
+import { EventBusModule } from "./events/event-bus.module";
+import { ExternalV1Module } from "./external/v1/external-v1.module";
+import { HealthModule } from "./health/health.module";
+import { InvitesModule } from "./invites/invites.module";
+import { MediaModule } from "./media/media.module";
+import { MessagesModule } from "./messages/messages.module";
+import { NotesModule } from "./notes/notes.module";
+import { PrismaModule } from "./prisma/prisma.module";
+import { RealtimeModule } from "./realtime/realtime.module";
+import { TeamModule } from "./team/team.module";
+import { TeamChatModule } from "./team-chat/team-chat.module";
+import { TeamsModule } from "./teams/teams.module";
+import { UsersModule } from "./users/users.module";
+import { WebhooksModule } from "./webhooks/webhooks.module";
+import { WorkflowsModule } from "./workflows/workflows.module";
+
+/**
+ * Root module. Wires every feature area in. Module order here is purely
+ * cosmetic; Nest resolves dependencies via the graph, not source order.
+ *
+ * Phase 3 adds the REST controllers; each domain ships as its own module
+ * under `./<domain>/`. The catalog modules (tags, snippets, stages, etc.)
+ * are nested under TeamModule.
+ */
+@Module({
+  imports: [
+    // Infrastructure
+    PrismaModule,
+    CommonModule,
+    EventBusModule,
+    BullMQModule,
+    AuthModule,
+    RealtimeModule,
+    WebhooksModule,
+    WorkflowsModule,
+    // Feature modules
+    TeamModule,
+    TeamsModule,
+    InvitesModule,
+    UsersModule,
+    AdminModule,
+    ConversationsModule,
+    NotesModule,
+    ContactsModule,
+    BroadcastsModule,
+    TeamChatModule,
+    MessagesModule,
+    MediaModule,
+    ExternalV1Module,
+    DevModule,
+    // Smoke
+    HealthModule,
+  ],
+})
+export class AppModule {}

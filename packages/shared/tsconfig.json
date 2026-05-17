@@ -1,0 +1,10 @@
+{
+  "extends": "@ccp/tsconfig/base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "./src",
+    "baseUrl": "."
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}
