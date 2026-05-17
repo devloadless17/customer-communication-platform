@@ -1,16 +1,19 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { PrismaClient } from "@prisma/client";
 
+import { setSharedDb } from "@/lib/db";
+
 /**
- * Nest-managed Prisma client.
+ * Nest-managed Prisma client — the SINGLE source of truth for the api
+ * process's database pool.
  *
- * Separate from `lib/db.ts` on purpose: that singleton lives in the Next.js
- * process and owns its own pool (RSC reads, Better Auth, server actions).
- * This one owns the NestJS process's pool. Each process gets its own
- * `connection_limit` budget against the same Postgres.
- *
- * Pool sizing happens via DATABASE_URL `?connection_limit=` (see
- * docker-compose `api` service).
+ * The framework-agnostic helpers under `apps/api/src/lib/` still import
+ * `{ db }` from `@/lib/db` (a Proxy that delegates here). On boot we call
+ * `setSharedDb(this)` so every path — DI-injected services, module-load
+ * Better Auth, BullMQ worker callbacks, sweepers — uses ONE PrismaClient and
+ * ONE connection pool. See `apps/api/src/lib/db.ts` for the rationale on
+ * keeping the Proxy indirection instead of fully parameterising every lib
+ * function (deferred refactor).
  */
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
@@ -23,6 +26,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   async onModuleInit(): Promise<void> {
+    setSharedDb(this);
     await this.$connect();
     this.logger.log("Prisma connected");
   }
