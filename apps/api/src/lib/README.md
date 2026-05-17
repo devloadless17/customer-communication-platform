@@ -7,7 +7,7 @@ module that can be called from:
 - NestJS services / controllers (they `import` and call directly),
 - BullMQ worker callbacks running detached from a request,
 - Module-load contexts (e.g. the Better Auth singleton at `apps/api/src/auth/better-auth.ts` calls `prismaAdapter(db, …)` at import time),
-- Standalone scripts (`prisma/seed*.ts`).
+- Standalone scripts (`prisma/seeds/*.ts`).
 
 NestJS code lives one level up — at `apps/api/src/{conversations,messages,…}`,
 one folder per HTTP module, each holding the `*.controller.ts`, `*.service.ts`,

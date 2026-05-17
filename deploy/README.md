@@ -174,7 +174,7 @@ UPLOADTHING_TOKEN     (from UploadThing dashboard)
 ```
 
 12 secrets. The superAdmin login is **not** in GitHub Secrets — it's seeded
-manually by running `prisma/seed-superadmin.ts` once after the first deploy.
+manually by running `prisma/seeds/seed-superadmin.ts` once after the first deploy.
 See "First-time superAdmin seed" below.
 
 ### One-shot to set them all (after you have the values)
@@ -216,7 +216,7 @@ ssh deploy@central.loadless.site
 docker exec -it $(docker ps -q --filter "name=app") npm run db:seed:superadmin
 ```
 
-Credentials are hardcoded in `prisma/seed-superadmin.ts` (currently
+Credentials are hardcoded in `prisma/seeds/seed-superadmin.ts` (currently
 `ali@loadless.ai` / `loadless`). Change them in the UI after first login.
 Re-running the seed is idempotent (upsert) — won't break anything but will
 reset the password back to what's in the file.

@@ -18,6 +18,6 @@ if (existsSync(".env")) {
 
 export default defineConfig({
   migrations: {
-    seed: "tsx prisma/seed.ts",
+    seed: "tsx prisma/seeds/seed.ts",
   },
 });

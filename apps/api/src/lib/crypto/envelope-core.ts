@@ -2,9 +2,9 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 /**
  * Envelope encryption primitives — no `server-only` guard so this module is
- * importable from plain Node scripts (scripts/encrypt-legacy-secrets.ts).
- * Application code should import from `./envelope` instead, which re-exports
- * these with the client-leak guard.
+ * importable from plain Node scripts under prisma/seeds/ when they need to
+ * write encrypted rows. Application code should import from `./envelope`
+ * instead, which re-exports these with the client-leak guard.
  */
 
 const VERSION_PREFIX = "enc:v1:";

@@ -19,11 +19,11 @@ import "server-only";
  * legacy row) and pass it through unchanged. That tolerance is intentional:
  * existing pilots and the dev DB hold plaintext today; flipping to strict
  * decrypt would break the very moment this code ships. Re-saving credentials
- * (or running scripts/encrypt-legacy-secrets.ts) rewrites them as ciphertext.
+ * via the UI rewrites them as ciphertext.
  *
- * The implementation lives in ./envelope-core (no `server-only` guard) so the
- * one-shot migration script can import it from plain Node. Application code
- * should keep importing from this file.
+ * The implementation lives in ./envelope-core (no `server-only` guard) so
+ * standalone scripts under prisma/seeds/ can import it from plain Node.
+ * Application code should keep importing from this file.
  */
 
 export { encryptSecret, decryptSecret, isEncrypted } from "./envelope-core";
