@@ -19,5 +19,3 @@ npm-debug.log*
 .idea
 *.log
 coverage
-# Legacy npm lockfile — pnpm-lock.yaml is the source of truth now.
-package-lock.json
