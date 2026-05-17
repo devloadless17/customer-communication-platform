@@ -4,13 +4,13 @@ import { db } from "@/lib/db";
 import type {
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
-} from "@ccp/shared/queries";
+} from "@ccp/shared/dtos";
 
 // superAdmin: cross-team browsing. These queries are the ONLY ones that
 // legitimately ignore the team scope — all callers must be gated through
 // requireSuperAdmin in auth-helpers.
 
-// DTO shapes live in @ccp/shared/queries — single source for the wire shape.
+// DTO shapes live in @ccp/shared/dtos — single source for the wire shape.
 export type { SuperAdminTeamDetail, SuperAdminTeamRow };
 
 /**

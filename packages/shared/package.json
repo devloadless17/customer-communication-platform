@@ -6,7 +6,7 @@
   "sideEffects": false,
   "exports": {
     "./types": "./src/types.ts",
-    "./queries": "./src/queries.ts",
+    "./dtos": "./src/dtos.ts",
     "./socket/events": "./src/socket/events.ts",
     "./auth/permissions": "./src/auth/permissions.ts",
     "./providers/types": "./src/providers/types.ts",

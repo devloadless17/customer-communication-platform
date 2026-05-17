@@ -3,7 +3,7 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import type { AudienceGroupDto } from "@ccp/shared/queries";
+import type { AudienceGroupDto } from "@ccp/shared/dtos";
 import type { Tag, TagColor } from "@ccp/shared/types";
 
 // Audience groups: saved named lists of contacts. Hybrid composition —
@@ -12,7 +12,7 @@ import type { Tag, TagColor } from "@ccp/shared/types";
 // group right now"; both the audience-groups API and the broadcast runner
 // call it.
 
-// DTO shape lives in @ccp/shared/queries so client components in apps/web
+// DTO shape lives in @ccp/shared/dtos so client components in apps/web
 // can name it without reaching across the package boundary.
 export type { AudienceGroupDto };
 

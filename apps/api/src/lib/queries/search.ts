@@ -1,13 +1,13 @@
 import "server-only";
 
 import { db } from "@/lib/db";
-import type { MessageSearchHit, MessageSearchPage } from "@ccp/shared/queries";
+import type { MessageSearchHit, MessageSearchPage } from "@ccp/shared/dtos";
 import type { MediaKind, Message, MessageDirection } from "@ccp/shared/types";
 
 import { clampTake, mapMessage, REPLY_TO_INCLUDE } from "./_shared";
 import { encodeMessageCursor, parseMessageCursor } from "./_cursors";
 
-// DTO shapes live in @ccp/shared/queries.
+// DTO shapes live in @ccp/shared/dtos.
 export type { MessageSearchHit, MessageSearchPage };
 
 // In-conversation message search. ILIKE against `body` + `mediaCaption`,

@@ -22,7 +22,7 @@ import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
-import type { AudienceGroupDto } from "@ccp/shared/queries";
+import type { AudienceGroupDto } from "@ccp/shared/dtos";
 import {
   findUnknownTokens,
   resolveFieldTokens,

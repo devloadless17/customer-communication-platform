@@ -10,7 +10,7 @@ import type {
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
   WhatsappConfigView,
-} from "@ccp/shared/queries";
+} from "@ccp/shared/dtos";
 import type {
   ChannelMessagesPage,
   ChannelPinDto,

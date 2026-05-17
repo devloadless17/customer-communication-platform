@@ -26,7 +26,7 @@ import {
   MissingAppIdError,
   MissingWabaIdError,
 } from "@/lib/providers/meta";
-import type { WhatsappConfigView } from "@ccp/shared/queries";
+import type { WhatsappConfigView } from "@ccp/shared/dtos";
 import type {
   ProviderTemplate,
   TemplateCategory,

@@ -8,7 +8,7 @@ import { LocalTime } from "@/components/local-time";
 import { TagChip } from "@/features/tags/components/tag-chip";
 import { formatListTime } from "@ccp/shared/utils";
 import type { Tag } from "@ccp/shared/types";
-import type { AudienceGroupDto } from "@ccp/shared/queries";
+import type { AudienceGroupDto } from "@ccp/shared/dtos";
 
 /**
  * One row in the audience-groups table. The whole row is clickable — pressing

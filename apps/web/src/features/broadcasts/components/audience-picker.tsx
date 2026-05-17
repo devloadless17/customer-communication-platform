@@ -9,7 +9,7 @@ import { TagFilterControl } from "@/features/contacts/components/contact-browser
 import { ContactMultiSelectField } from "@/features/contacts/components/contact-multi-select-field";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
-import type { AudienceGroupDto } from "@ccp/shared/queries";
+import type { AudienceGroupDto } from "@ccp/shared/dtos";
 
 /**
  * Audience picker for the broadcast wizard. Four modes:

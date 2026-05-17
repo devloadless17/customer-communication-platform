@@ -25,7 +25,7 @@ import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipi
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
-import type { AudienceGroupDto } from "@ccp/shared/queries";
+import type { AudienceGroupDto } from "@ccp/shared/dtos";
 
 /**
  * Reusable form for creating or editing an audience group.

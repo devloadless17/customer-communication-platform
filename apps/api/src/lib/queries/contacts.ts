@@ -3,7 +3,7 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import type { ListContactsOpts } from "@ccp/shared/queries";
+import type { ListContactsOpts } from "@ccp/shared/dtos";
 import type {
   ContactFieldDefinition,
   ContactListItem,
@@ -15,7 +15,7 @@ import { encodeContactCursor, parseContactCursor } from "./_cursors";
 
 export const CONTACTS_PAGE = 50;
 
-// Options shape lives in @ccp/shared/queries.
+// Options shape lives in @ccp/shared/dtos.
 export type { ListContactsOpts };
 
 /**
