@@ -212,10 +212,11 @@ Direct `emitToTeam` calls in lib/ couldn't survive Phase 5 because the Socket.io
 
 | Route | Reason |
 |---|---|
-| `app/api/auth/[...all]` | Better Auth catch-all — must stay on Next.js (Caddy routes `/api/auth/*` here) |
-| `app/api/health` | Different URL space (`/api/health` vs NestJS `/health`); kept for backwards-compat probes |
-| `app/api/webhooks/meta/[teamId]` | Legacy Meta-dashboard URL; NestJS serves `/webhooks/meta/[teamId]` at the new path. Drop after Meta dashboards re-point. |
-| `app/api/webhooks/[provider]/[teamId]` | Generic dispatcher shim; only routes to Meta today, so porting before a second provider arrives would be ceremony |
+| `apps/web/src/app/api/auth/[...all]` | Better Auth catch-all — must stay on Next.js (Caddy routes `/api/auth/*` here, EXCEPT `/api/auth/change-password` which lives on NestJS — see Cutover step 2 below) |
+| `apps/web/src/app/api/health` | Different URL space (`/api/health` vs NestJS `/health`); kept for backwards-compat probes |
+| `apps/web/src/app/api/webhooks/meta/[teamId]` | Server-side proxy to `/webhooks/meta/{teamId}` on NestJS. Forwards raw bytes verbatim so HMAC verification still passes. Insurance for Meta subscriptions still pointing at the old URL; delete this file once every subscription has been updated. |
+
+The generic `app/api/webhooks/[provider]/[teamId]` dispatcher shim was removed in Phase 5 and not re-added — there's only one provider (Meta) today, so a generic dispatcher buys nothing.
 
 ### Cutover playbook (dev → prod)
 
@@ -232,9 +233,12 @@ Remaining steps for the actual deploy:
    ```
    `.env` should set `NEXT_PUBLIC_API_URL=http://localhost:4000` so the browser Socket.io client points at NestJS.
 
-2. **Caddy routing**: `/`, `/_next/*`, `/api/auth/*` → Next.js. Everything else (`/api/*`, `/socket.io/*`, `/webhooks/*`) → NestJS. **Caveat**: `/api/auth/change-password` was deleted on Next.js and only exists on NestJS now — Caddy needs an explicit `handle_path /api/auth/change-password*` → NestJS BEFORE the `/api/auth/*` → Next.js wildcard, or change-password 404s.
+2. **Caddy routing**: see [deploy/Caddyfile.example](deploy/Caddyfile.example) — commit-controlled config so the rule ordering doesn't live only in this prose. The non-obvious lines:
+   - `/api/auth/change-password` → NestJS (moved off Better Auth). Must come BEFORE the `/api/auth/*` → Next.js wildcard or change-password 404s.
+   - `/api/webhooks/meta/*` → Next.js (the legacy URL is handled by the proxy at [apps/web/src/app/api/webhooks/meta/[teamId]/route.ts](apps/web/src/app/api/webhooks/meta/[teamId]/route.ts) which forwards bytes verbatim to NestJS so HMAC integrity is preserved).
+   - Default for everything else: `/`, `/_next/*`, `/api/auth/*` → Next.js; `/api/*`, `/socket.io/*`, `/webhooks/*` → NestJS.
 
-3. **Meta webhook URL flip**: update the Meta App dashboard to point at `/webhooks/meta/{teamId}` (the new NestJS path). Until then, Caddy keeps routing `/api/webhooks/meta/*` to the legacy Next.js route.
+3. **Meta webhook URL flip (pre-deploy)**: update the Meta App Dashboard to point at the canonical `https://<host>/webhooks/meta/{teamId}` path (NestJS). The legacy proxy at `/api/webhooks/meta/{teamId}` keeps existing subscriptions alive during cutover, but it's insurance — not a permanent design. Once every subscription is on the new URL, delete `apps/web/src/app/api/webhooks/meta/[teamId]/route.ts`.
 
 ### Architectural calls (locked, do not re-litigate)
 
@@ -242,7 +246,7 @@ Remaining steps for the actual deploy:
 - **Better Auth stays in Next.js.** Moving it costs ~2 weeks of risk for zero functional benefit. NestJS guard reads `better-auth.session_token` cookie + hits the session table via Prisma. ~1ms overhead per request.
 - **Existing service modules** ([lib/messaging/](lib/messaging/), [lib/conversations/](lib/conversations/), [lib/contacts/](lib/contacts/), [lib/workflows/](lib/workflows/), [lib/providers/](lib/providers/)) stay where they are — framework-agnostic; NestJS wraps them as Nest providers.
 - **Zod everywhere.** `zBody / zQuery / zParam` pipes at [apps/api/src/common/zod-validation.pipe.ts](apps/api/src/common/zod-validation.pipe.ts) reuse the schemas already written for Next.js routes. No class-validator / class-transformer.
-- **Prisma stays.** One `PrismaModule` in NestJS, the existing `lib/db.ts` singleton in Next.js. Same `DATABASE_URL`, separate connection pools per process.
+- **Prisma stays.** One `PrismaModule` in NestJS (the `PrismaService` instance is the canonical client; `apps/api/src/lib/db.ts` is a Proxy that delegates to it so framework-agnostic helpers + module-load Better Auth + worker callbacks all share the same pool — see the `setSharedDb` wiring). The existing `lib/db.ts` singleton lives in Next.js. Same `DATABASE_URL`, one pool per process.
 - **Workers run in-process by default.** `RUN_WORKER_INLINE=1` (default on the api container) keeps BullMQ processors inside the NestJS app. The standalone `worker` docker service was removed post-Phase-5; add it back only if scaling forces a split.
 - **Two processes total**, single VPS, single docker-compose. No microservices.
 
