@@ -23,7 +23,7 @@ import type { User } from "@ccp/shared/types";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type {
   AssignConversationInput,
   BulkDeleteConversationsInput,
@@ -35,7 +35,7 @@ export class ConversationsService {
   private readonly logger = new Logger(ConversationsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -116,7 +116,7 @@ export class ConversationsService {
     userId: string,
     input: BulkDeleteConversationsInput,
   ): Promise<{ count: number }> {
-    const owned = await this.prisma.conversation.findMany({
+    const owned = await this.db.conversation.findMany({
       where: { teamId, id: { in: input.conversationIds } },
       select: {
         id: true,
@@ -135,7 +135,7 @@ export class ConversationsService {
       .map((m) => m.mediaKey)
       .filter((k): k is string => Boolean(k));
 
-    await this.prisma.conversation.deleteMany({
+    await this.db.conversation.deleteMany({
       where: { teamId, id: { in: ownedIds } },
     });
 
@@ -170,7 +170,7 @@ export class ConversationsService {
     conversationId: string,
     input: AssignConversationInput,
   ): Promise<void> {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: {
         id: true,
@@ -184,7 +184,7 @@ export class ConversationsService {
     const { assignedUserId } = input;
 
     if (assignedUserId !== null) {
-      const member = await this.prisma.user.findFirst({
+      const member = await this.db.user.findFirst({
         where: { id: assignedUserId, teamId },
         select: { id: true },
       });
@@ -193,7 +193,7 @@ export class ConversationsService {
 
     let updated;
     try {
-      updated = await this.prisma.conversation.update({
+      updated = await this.db.conversation.update({
         where: {
           id: conversationId,
           teamId,
@@ -243,7 +243,7 @@ export class ConversationsService {
     conversationId: string,
     input: SetConversationStatusInput,
   ): Promise<void> {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: { include: { tags: { select: { id: true } } } } },
     });
@@ -251,7 +251,7 @@ export class ConversationsService {
     const previousStatus = conversation.status;
 
     try {
-      await this.prisma.conversation.update({
+      await this.db.conversation.update({
         where: { id: conversationId, teamId, status: previousStatus },
         data: { status: input.status },
       });
@@ -280,7 +280,7 @@ export class ConversationsService {
    * API). Contact row is preserved.
    */
   async remove(teamId: string, actorUserId: string, conversationId: string): Promise<void> {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: {
         id: true,
@@ -296,7 +296,7 @@ export class ConversationsService {
       .map((m) => m.mediaKey)
       .filter((k): k is string => Boolean(k));
 
-    await this.prisma.conversation.delete({ where: { id: conversationId } });
+    await this.db.conversation.delete({ where: { id: conversationId } });
 
     if (mediaKeys.length > 0) {
       await blobStorage.delete(mediaKeys);
@@ -317,7 +317,7 @@ export class ConversationsService {
    * the next message:received re-syncs the badge.
    */
   async markRead(teamId: string, userId: string, conversationId: string): Promise<void> {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: { id: true, unreadCount: true, lastMessageAt: true },
     });
@@ -325,7 +325,7 @@ export class ConversationsService {
 
     // Per-agent receipt (idempotent upsert). Sidebar's per-me badge reads
     // against this row, not the team-wide counter.
-    await this.prisma.conversationReadReceipt.upsert({
+    await this.db.conversationReadReceipt.upsert({
       where: { userId_conversationId: { userId, conversationId } },
       create: { userId, conversationId, lastReadAt: conversation.lastMessageAt },
       update: { lastReadAt: conversation.lastMessageAt },
@@ -333,14 +333,14 @@ export class ConversationsService {
 
     // Always look up the latest inbound — a teammate may have local-marked
     // without notifying Meta. Skip only when there's no inbound at all.
-    const latestInbound = await this.prisma.message.findFirst({
+    const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
       select: { externalId: true, provider: true },
     });
 
     if (conversation.unreadCount > 0) {
-      const result = await this.prisma.conversation.updateMany({
+      const result = await this.db.conversation.updateMany({
         where: { id: conversationId, teamId, unreadCount: conversation.unreadCount },
         data: { unreadCount: 0 },
       });
@@ -369,13 +369,13 @@ export class ConversationsService {
     teamId: string,
     conversationId: string,
   ): Promise<{ ok: true; skipped?: string }> {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const latestInbound = await this.prisma.message.findFirst({
+    const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
       select: { externalId: true, provider: true },

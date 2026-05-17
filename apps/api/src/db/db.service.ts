@@ -16,8 +16,8 @@ import { setSharedDb } from "@/lib/db";
  * function (deferred refactor).
  */
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(PrismaService.name);
+export class DbService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(DbService.name);
 
   constructor() {
     super({

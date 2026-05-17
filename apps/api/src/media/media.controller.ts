@@ -13,7 +13,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 
 /**
  * GET /api/media/:messageId
@@ -34,7 +34,7 @@ import { PrismaService } from "../prisma/prisma.service";
 @Controller("api/media")
 @UseGuards(SessionGuard)
 export class MediaController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   @Get(":messageId")
   async get(
@@ -42,7 +42,7 @@ export class MediaController {
     @Param("messageId") messageId: string,
     @Res() res: Response,
   ): Promise<void> {
-    const message = await this.prisma.message.findFirst({
+    const message = await this.db.message.findFirst({
       where: { id: messageId, teamId: session.teamId },
       select: { mediaUrl: true, mediaKind: true },
     });

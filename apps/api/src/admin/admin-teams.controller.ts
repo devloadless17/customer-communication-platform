@@ -15,7 +15,7 @@ import {
 import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { TeamRootService } from "../team/team-root.service";
 
 /**
@@ -32,7 +32,7 @@ import { TeamRootService } from "../team/team-root.service";
 @RequireRole("superAdmin")
 export class AdminTeamsController {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly teamRoot: TeamRootService,
   ) {}
 
@@ -59,7 +59,7 @@ export class AdminTeamsController {
         error: "use /api/team to delete your own organization",
       });
     }
-    const team = await this.prisma.team.findUnique({
+    const team = await this.db.team.findUnique({
       where: { id: teamId },
       select: { id: true },
     });

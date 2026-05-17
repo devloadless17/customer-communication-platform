@@ -10,7 +10,7 @@ import { canManageStages } from "@ccp/shared/auth/permissions";
 import { TAG_COLORS, type ContactStage, type Role, type TagColor } from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   CreateStageInput,
   ReorderStagesInput,
@@ -22,13 +22,13 @@ const MAX_STAGES_PER_TEAM = 30;
 @Injectable()
 export class StagesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
   /** Any signed-in user can read the catalog (contact panel + table need it). */
   async list(teamId: string): Promise<ContactStage[]> {
-    const rows = await this.prisma.contactStage.findMany({
+    const rows = await this.db.contactStage.findMany({
       where: { teamId },
       orderBy: [{ position: "asc" }, { createdAt: "asc" }],
     });
@@ -43,7 +43,7 @@ export class StagesService {
   async counts(
     teamId: string,
   ): Promise<{ countsByStageId: Record<string, number>; unassignedCount: number }> {
-    const rows = await this.prisma.contact.groupBy({
+    const rows = await this.db.contact.groupBy({
       by: ["stageId"],
       where: { teamId },
       _count: { _all: true },
@@ -67,7 +67,7 @@ export class StagesService {
     const color = pickColor(input.color);
 
     // Single read to learn count + next position + whether a default exists.
-    const existing = await this.prisma.contactStage.findMany({
+    const existing = await this.db.contactStage.findMany({
       where: { teamId },
       select: { id: true, position: true, isDefault: true },
       orderBy: { position: "desc" },
@@ -81,7 +81,7 @@ export class StagesService {
     const isDefault = existing.length === 0;
 
     try {
-      const created = await this.prisma.contactStage.create({
+      const created = await this.db.contactStage.create({
         data: { teamId, name: input.name, color, position: nextPosition, isDefault },
       });
       await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
@@ -100,7 +100,7 @@ export class StagesService {
   ): Promise<ContactStage> {
     requireManage(role);
 
-    const existing = await this.prisma.contactStage.findFirst({
+    const existing = await this.db.contactStage.findFirst({
       where: { id, teamId },
       select: { id: true, isDefault: true },
     });
@@ -119,7 +119,7 @@ export class StagesService {
       // Promoting one stage to default requires demoting the previous in
       // the same transaction; otherwise two defaults could coexist for a
       // round-trip and a concurrent create could pick the wrong one.
-      const updated = await this.prisma.$transaction(async (tx) => {
+      const updated = await this.db.$transaction(async (tx) => {
         if (input.isDefault === true && !existing.isDefault) {
           await tx.contactStage.updateMany({
             where: { teamId, isDefault: true },
@@ -139,7 +139,7 @@ export class StagesService {
   async remove(teamId: string, role: Role, id: string): Promise<void> {
     requireManage(role);
 
-    const stage = await this.prisma.contactStage.findFirst({
+    const stage = await this.db.contactStage.findFirst({
       where: { id, teamId },
       select: { id: true, isDefault: true },
     });
@@ -147,7 +147,7 @@ export class StagesService {
 
     // Refuse delete-while-in-use; carry the count back so the UI can
     // render "12 contacts still here — move them first".
-    const contactCount = await this.prisma.contact.count({
+    const contactCount = await this.db.contact.count({
       where: { teamId, stageId: id },
     });
     if (contactCount > 0) {
@@ -162,7 +162,7 @@ export class StagesService {
     // promote one first. Deleting the LAST stage is allowed (ensureDefaultStage
     // re-creates one on next contact create).
     if (stage.isDefault) {
-      const otherCount = await this.prisma.contactStage.count({
+      const otherCount = await this.db.contactStage.count({
         where: { teamId, NOT: { id } },
       });
       if (otherCount > 0) {
@@ -173,7 +173,7 @@ export class StagesService {
       }
     }
 
-    await this.prisma.contactStage.delete({ where: { id } });
+    await this.db.contactStage.delete({ where: { id } });
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
   }
 
@@ -194,7 +194,7 @@ export class StagesService {
     // Cross-tenant guard: every id must belong to this team or the whole
     // request rejects. Without this a malicious client could rewrite
     // positions on another tenant's stages.
-    const owned = await this.prisma.contactStage.findMany({
+    const owned = await this.db.contactStage.findMany({
       where: { teamId, id: { in: ids } },
       select: { id: true },
     });
@@ -202,9 +202,9 @@ export class StagesService {
       throw new BadRequestException({ error: "one or more ids are not in this team" });
     }
 
-    await this.prisma.$transaction(
+    await this.db.$transaction(
       ids.map((id, index) =>
-        this.prisma.contactStage.update({ where: { id }, data: { position: index } }),
+        this.db.contactStage.update({ where: { id }, data: { position: index } }),
       ),
     );
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });

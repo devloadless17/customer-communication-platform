@@ -16,7 +16,7 @@ import {
 } from "@/auth/password";
 
 import { zBody } from "../common/zod-validation.pipe";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { CurrentSession } from "./current-session.decorator";
 import { SessionGuard } from "./session.guard";
 import type { ApiSession } from "./session.guard";
@@ -45,7 +45,7 @@ type Input = z.infer<typeof BodySchema>;
 @Controller("api/auth/change-password")
 @UseGuards(SessionGuard)
 export class ChangePasswordController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   @Post()
   @HttpCode(200)
@@ -60,7 +60,7 @@ export class ChangePasswordController {
       throw new BadRequestException({ error: policyError });
     }
 
-    const user = await this.prisma.user.findUnique({ where: { id: session.userId } });
+    const user = await this.db.user.findUnique({ where: { id: session.userId } });
     if (!user || !user.passwordHash) {
       throw new BadRequestException({ error: "no password set" });
     }
@@ -79,12 +79,12 @@ export class ChangePasswordController {
     }
 
     const newHash = await hashPassword(newPassword);
-    await this.prisma.$transaction([
-      this.prisma.user.update({
+    await this.db.$transaction([
+      this.db.user.update({
         where: { id: user.id },
         data: { passwordHash: newHash },
       }),
-      this.prisma.account.updateMany({
+      this.db.account.updateMany({
         where: { userId: user.id, providerId: "credential" },
         data: { password: newHash },
       }),

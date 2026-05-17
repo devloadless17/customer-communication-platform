@@ -2,7 +2,7 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 
 import { generateApiKey } from "@/auth/api-key";
 
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type { CreateApiKeyInput } from "./api-keys.schemas";
 
 export interface ApiKeyListDto {
@@ -25,10 +25,10 @@ export interface ApiKeyCreateDto {
 
 @Injectable()
 export class ApiKeysService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   async list(teamId: string): Promise<ApiKeyListDto[]> {
-    const keys = await this.prisma.teamApiKey.findMany({
+    const keys = await this.db.teamApiKey.findMany({
       where: { teamId },
       orderBy: { createdAt: "desc" },
       select: {
@@ -56,7 +56,7 @@ export class ApiKeysService {
     input: CreateApiKeyInput,
   ): Promise<ApiKeyCreateDto> {
     const generated = generateApiKey();
-    const row = await this.prisma.teamApiKey.create({
+    const row = await this.db.teamApiKey.create({
       data: {
         teamId,
         name: input.name,
@@ -83,13 +83,13 @@ export class ApiKeysService {
    * guard rejects further requests.
    */
   async revoke(teamId: string, id: string): Promise<void> {
-    const key = await this.prisma.teamApiKey.findFirst({
+    const key = await this.db.teamApiKey.findFirst({
       where: { id, teamId },
       select: { id: true, revokedAt: true },
     });
     if (!key) throw new NotFoundException({ error: "key not found" });
     if (key.revokedAt) return; // Idempotent — revoking twice is fine.
-    await this.prisma.teamApiKey.update({
+    await this.db.teamApiKey.update({
       where: { id },
       data: { revokedAt: new Date() },
     });

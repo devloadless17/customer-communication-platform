@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 /**
  * Shared Prisma client handle.
  *
- * The NestJS api process owns ONE Prisma pool. PrismaService extends
+ * The NestJS api process owns ONE Prisma pool. DbService extends
  * PrismaClient and is the canonical instance; it calls `setSharedDb(this)` in
  * `onModuleInit` so this module's `db` export resolves to the same instance
  * the DI graph uses.
@@ -20,7 +20,7 @@ import { PrismaClient } from "@prisma/client";
  * is that all paths share one pool.
  *
  * The `Proxy` indirection enforces "set before use" — if any code path
- * imports `db` and uses it before PrismaService has booted, we throw with a
+ * imports `db` and uses it before DbService has booted, we throw with a
  * clear message instead of silently creating a second pool.
  *
  * NOTE: a follow-up refactor can incrementally promote individual lib
@@ -38,9 +38,9 @@ export function setSharedDb(client: PrismaClient): void {
 function resolveDb(): PrismaClient {
   if (!shared) {
     throw new Error(
-      "lib/db.ts accessed before PrismaService booted. Did a module-load " +
+      "lib/db.ts accessed before DbService booted. Did a module-load " +
         "import trigger before NestFactory.create()? See " +
-        "apps/api/src/prisma/prisma.module.ts.",
+        "apps/api/src/db/db.module.ts.",
     );
   }
   return shared;
@@ -49,7 +49,7 @@ function resolveDb(): PrismaClient {
 /**
  * `db` mirrors the singleton API of the previous file so existing callers
  * (`db.contact.findUnique(...)` etc.) keep working unchanged. The Proxy
- * forwards property access to the shared PrismaService instance.
+ * forwards property access to the shared DbService instance.
  */
 export const db: PrismaClient = new Proxy({} as PrismaClient, {
   get(_target, prop, receiver) {

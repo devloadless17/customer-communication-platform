@@ -7,7 +7,7 @@ import {
 import { getAudienceGroup, listAudienceGroups } from "@/lib/queries";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   CreateAudienceGroupInput,
   UpdateAudienceGroupInput,
@@ -16,7 +16,7 @@ import type {
 @Injectable()
 export class AudienceGroupsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -41,7 +41,7 @@ export class AudienceGroupsService {
     ]);
 
     try {
-      const created = await this.prisma.audienceGroup.create({
+      const created = await this.db.audienceGroup.create({
         data: {
           teamId,
           createdById: userId,
@@ -66,7 +66,7 @@ export class AudienceGroupsService {
   }
 
   async update(teamId: string, id: string, input: UpdateAudienceGroupInput) {
-    const existing = await this.prisma.audienceGroup.findFirst({ where: { id, teamId } });
+    const existing = await this.db.audienceGroup.findFirst({ where: { id, teamId } });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
     // Build the update payload incrementally so unset fields stay untouched.
@@ -90,7 +90,7 @@ export class AudienceGroupsService {
     }
 
     try {
-      await this.prisma.audienceGroup.update({ where: { id }, data });
+      await this.db.audienceGroup.update({ where: { id }, data });
       const updated = await getAudienceGroup(teamId, id);
       await this.bus.publish({
         type: "team.catalog_changed",
@@ -105,11 +105,11 @@ export class AudienceGroupsService {
   }
 
   async remove(teamId: string, id: string): Promise<void> {
-    const existing = await this.prisma.audienceGroup.findFirst({ where: { id, teamId } });
+    const existing = await this.db.audienceGroup.findFirst({ where: { id, teamId } });
     if (!existing) throw new NotFoundException({ error: "not found" });
     // Broadcasts that referenced this group keep their `audienceGroupName`
     // snapshot for the audit trail — only the join row goes.
-    await this.prisma.audienceGroup.delete({ where: { id } });
+    await this.db.audienceGroup.delete({ where: { id } });
     await this.bus.publish({
       type: "team.catalog_changed",
       teamId,
@@ -119,7 +119,7 @@ export class AudienceGroupsService {
 
   private async ownedTagIds(teamId: string, ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
-    const rows = await this.prisma.tag.findMany({
+    const rows = await this.db.tag.findMany({
       where: { teamId, id: { in: ids } },
       select: { id: true },
     });
@@ -128,7 +128,7 @@ export class AudienceGroupsService {
 
   private async ownedContactIds(teamId: string, ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
-    const rows = await this.prisma.contact.findMany({
+    const rows = await this.db.contact.findMany({
       where: { teamId, id: { in: ids } },
       select: { id: true },
     });

@@ -10,7 +10,7 @@ import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
 import type { Role, User } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import type { UpdateUserInput } from "./users.schemas";
 
@@ -19,7 +19,7 @@ export class UsersService {
   private readonly logger = new Logger(UsersService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
     private readonly realtime: RealtimeGateway,
   ) {}
@@ -33,7 +33,7 @@ export class UsersService {
    * shape so the post-Step-7b switch is a wire-shape no-op.
    */
   async list(teamId: string): Promise<User[]> {
-    const rows = await this.prisma.user.findMany({
+    const rows = await this.db.user.findMany({
       where: { teamId },
       orderBy: { name: "asc" },
     });
@@ -63,7 +63,7 @@ export class UsersService {
     targetId: string,
     input: UpdateUserInput,
   ) {
-    const target = await this.prisma.user.findFirst({
+    const target = await this.db.user.findFirst({
       where: { id: targetId, teamId },
       select: { id: true, role: true, deactivatedAt: true },
     });
@@ -104,7 +104,7 @@ export class UsersService {
       (target.role === "admin" || target.role === "superAdmin") &&
       !target.deactivatedAt;
     if (willLoseManagerPowers && targetCurrentlyManages) {
-      const otherManagers = await this.prisma.user.count({
+      const otherManagers = await this.db.user.count({
         where: {
           teamId,
           role: { in: ["admin", "superAdmin"] },
@@ -117,7 +117,7 @@ export class UsersService {
       }
     }
 
-    const updated = await this.prisma.user.update({
+    const updated = await this.db.user.update({
       where: { id: targetId },
       data,
       select: {
@@ -133,7 +133,7 @@ export class UsersService {
     // Deactivation: drop Session rows + kick live sockets. Without this an
     // already-connected socket keeps receiving team events until next reload.
     if (data.deactivatedAt) {
-      await this.prisma.session.deleteMany({ where: { userId: targetId } });
+      await this.db.session.deleteMany({ where: { userId: targetId } });
       const dropped = this.realtime.disconnectUserSockets(targetId);
       if (dropped > 0) {
         this.logger.log(`deactivate: dropped ${dropped} live socket(s) for user=${targetId}`);
@@ -156,7 +156,7 @@ export class UsersService {
     actorUserId: string,
     targetId: string,
   ): Promise<void> {
-    const target = await this.prisma.user.findFirst({
+    const target = await this.db.user.findFirst({
       where: { id: targetId, teamId },
       select: { id: true, role: true, deactivatedAt: true },
     });
@@ -173,7 +173,7 @@ export class UsersService {
       (target.role === "admin" || target.role === "superAdmin") &&
       !target.deactivatedAt;
     if (targetCurrentlyManages) {
-      const otherManagers = await this.prisma.user.count({
+      const otherManagers = await this.db.user.count({
         where: {
           teamId,
           role: { in: ["admin", "superAdmin"] },
@@ -186,7 +186,7 @@ export class UsersService {
       }
     }
 
-    await this.prisma.user.delete({ where: { id: targetId } });
+    await this.db.user.delete({ where: { id: targetId } });
     const dropped = this.realtime.disconnectUserSockets(targetId);
     if (dropped > 0) {
       this.logger.log(`delete: dropped ${dropped} live socket(s) for user=${targetId}`);

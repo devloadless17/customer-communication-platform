@@ -16,7 +16,7 @@ import type {
   ServerToClientEvents,
 } from "@ccp/shared/socket/events";
 
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
 import {
@@ -51,7 +51,7 @@ export class RealtimeGateway
   server!: TypedIO;
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly auth: SocketAuthService,
     private readonly presence: PresenceService,
     private readonly typing: TypingService,
@@ -173,7 +173,7 @@ export class RealtimeGateway
     if (client.rooms.has(room)) return;
 
     try {
-      const owns = await this.prisma.conversation.findFirst({
+      const owns = await this.db.conversation.findFirst({
         where: { id: body.conversationId, teamId },
         select: { id: true },
       });
@@ -256,7 +256,7 @@ export class RealtimeGateway
     const room = channelRoom(body.channelId);
     if (client.rooms.has(room)) return;
     try {
-      const owns = await this.prisma.teamChannel.findFirst({
+      const owns = await this.db.teamChannel.findFirst({
         where: { id: body.channelId, teamId },
         select: { id: true },
       });

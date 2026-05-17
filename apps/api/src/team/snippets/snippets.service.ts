@@ -5,7 +5,7 @@ import {
 } from "@nestjs/common";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   CreateSnippetInput,
   UpdateSnippetInput,
@@ -24,13 +24,13 @@ export interface SnippetDto {
 @Injectable()
 export class SnippetsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
   async list(teamId: string): Promise<SnippetDto[]> {
     // No pagination — small N, the picker needs the full set on first open.
-    const rows = await this.prisma.snippet.findMany({
+    const rows = await this.db.snippet.findMany({
       where: { teamId },
       orderBy: [{ label: "asc" }],
       include: { createdBy: { select: { id: true, name: true } } },
@@ -52,7 +52,7 @@ export class SnippetsService {
     input: CreateSnippetInput,
   ): Promise<{ id: string }> {
     try {
-      const created = await this.prisma.snippet.create({
+      const created = await this.db.snippet.create({
         data: { teamId, createdById: userId, ...input },
       });
       await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "snippets" });
@@ -69,7 +69,7 @@ export class SnippetsService {
     input: UpdateSnippetInput,
   ): Promise<void> {
     try {
-      const result = await this.prisma.snippet.updateMany({
+      const result = await this.db.snippet.updateMany({
         where: { id, teamId },
         data: input,
       });
@@ -85,7 +85,7 @@ export class SnippetsService {
   }
 
   async remove(teamId: string, id: string): Promise<void> {
-    const result = await this.prisma.snippet.deleteMany({ where: { id, teamId } });
+    const result = await this.db.snippet.deleteMany({ where: { id, teamId } });
     if (result.count === 0) {
       throw new NotFoundException({ error: "snippet not found" });
     }

@@ -2,7 +2,7 @@ import { Controller, Get, Inject } from "@nestjs/common";
 import type { Redis } from "ioredis";
 
 import { BULLMQ_REDIS } from "../bullmq/bullmq.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 
 interface HealthReport {
   ok: boolean;
@@ -23,7 +23,7 @@ interface HealthReport {
 @Controller("health")
 export class HealthController {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     @Inject(BULLMQ_REDIS) private readonly redis: Redis,
   ) {}
 
@@ -40,7 +40,7 @@ export class HealthController {
 
   private async pingDb(): Promise<boolean> {
     try {
-      await this.prisma.$queryRaw`SELECT 1`;
+      await this.db.$queryRaw`SELECT 1`;
       return true;
     } catch {
       return false;

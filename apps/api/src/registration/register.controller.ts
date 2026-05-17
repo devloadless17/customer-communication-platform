@@ -5,7 +5,7 @@ import { z } from "zod";
 import { hashPassword, isPasswordBreached } from "@/auth/password";
 
 import { zBody } from "../common/zod-validation.pipe";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 
 /**
  * Public org self-signup — replaces the inline `db.$transaction` from
@@ -32,7 +32,7 @@ type RegisterInput = z.infer<typeof RegisterSchema>;
 
 @Controller("api/register")
 export class RegisterController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   @Post()
   async register(@Body(zBody(RegisterSchema)) body: RegisterInput) {
@@ -47,7 +47,7 @@ export class RegisterController {
     const passwordHash = await hashPassword(body.password);
 
     try {
-      const result = await this.prisma.$transaction(async (tx) => {
+      const result = await this.db.$transaction(async (tx) => {
         const team = await tx.team.create({ data: { name: body.orgName } });
         const user = await tx.user.create({
           data: {

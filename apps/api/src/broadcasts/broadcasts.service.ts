@@ -13,14 +13,14 @@ import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type { CreateBroadcastInput } from "./broadcasts.schemas";
 
 @Injectable()
 export class BroadcastsService implements OnModuleInit {
   private readonly logger = new Logger(BroadcastsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   /**
    * Boot-time crash recovery. Any broadcast row still in `running` status
@@ -58,7 +58,7 @@ export class BroadcastsService implements OnModuleInit {
   ): Promise<{ broadcastId: string; totalCount: number }> {
     const { templateId, audience, variables } = input;
 
-    const template = await this.prisma.messageTemplate.findFirst({
+    const template = await this.db.messageTemplate.findFirst({
       where: { id: templateId, teamId },
     });
     if (!template) throw new NotFoundException({ error: "template not found" });
@@ -102,7 +102,7 @@ export class BroadcastsService implements OnModuleInit {
 
     if (audience.mode === "all") {
       recipientIds = (
-        await this.prisma.contact.findMany({
+        await this.db.contact.findMany({
           where: { teamId },
           select: { id: true },
         })
@@ -116,7 +116,7 @@ export class BroadcastsService implements OnModuleInit {
       }
       // Validate tag ownership before the contact lookup — a foreign-team
       // id would silently yield zero recipients otherwise.
-      const tagRows = await this.prisma.tag.findMany({
+      const tagRows = await this.db.tag.findMany({
         where: { teamId, id: { in: audience.tagIds } },
         select: { id: true },
       });
@@ -127,7 +127,7 @@ export class BroadcastsService implements OnModuleInit {
           detail: "None of the selected tags belong to this team.",
         });
       }
-      const taggedContacts = await this.prisma.contact.findMany({
+      const taggedContacts = await this.db.contact.findMany({
         where: { teamId, tags: { some: { id: { in: validatedTagIds } } } },
         select: { id: true },
       });
@@ -139,7 +139,7 @@ export class BroadcastsService implements OnModuleInit {
           detail: "Pick a saved group.",
         });
       }
-      const group = await this.prisma.audienceGroup.findFirst({
+      const group = await this.db.audienceGroup.findFirst({
         where: { id: audience.groupId, teamId },
         include: {
           tags: { select: { id: true } },
@@ -166,7 +166,7 @@ export class BroadcastsService implements OnModuleInit {
       recipientIds = Array.from(
         new Set(
           (
-            await this.prisma.contact.findMany({
+            await this.db.contact.findMany({
               where: { teamId, id: { in: audience.contactIds } },
               select: { id: true },
             })
@@ -183,7 +183,7 @@ export class BroadcastsService implements OnModuleInit {
       });
     }
 
-    const broadcast = await this.prisma.broadcast.create({
+    const broadcast = await this.db.broadcast.create({
       data: {
         teamId,
         createdById: userId,
@@ -212,7 +212,7 @@ export class BroadcastsService implements OnModuleInit {
   }
 
   async list(teamId: string) {
-    const rows = await this.prisma.broadcast.findMany({
+    const rows = await this.db.broadcast.findMany({
       where: { teamId },
       orderBy: { createdAt: "desc" },
       take: 100,
@@ -236,7 +236,7 @@ export class BroadcastsService implements OnModuleInit {
   }
 
   async get(teamId: string, id: string) {
-    const row = await this.prisma.broadcast.findFirst({
+    const row = await this.db.broadcast.findFirst({
       where: { id, teamId },
       include: {
         createdBy: { select: { id: true, name: true } },
@@ -287,7 +287,7 @@ export class BroadcastsService implements OnModuleInit {
    * missing parent. Real WhatsApp messages already sent stay in the inbox.
    */
   async remove(teamId: string, id: string): Promise<void> {
-    const row = await this.prisma.broadcast.findFirst({
+    const row = await this.db.broadcast.findFirst({
       where: { id, teamId },
       select: { id: true, status: true },
     });
@@ -298,6 +298,6 @@ export class BroadcastsService implements OnModuleInit {
         detail: "Wait for the broadcast to finish before deleting it.",
       });
     }
-    await this.prisma.broadcast.delete({ where: { id } });
+    await this.db.broadcast.delete({ where: { id } });
   }
 }

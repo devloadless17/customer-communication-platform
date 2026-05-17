@@ -36,7 +36,7 @@ import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type {
   ForwardMessagesInput,
   SendMediaFormInput,
@@ -49,7 +49,7 @@ export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -74,12 +74,12 @@ export class MessagesService {
 
     // Phase A — parallel pre-flight reads.
     const [conversation, replyToRow, configOrErr, lastInbound] = await Promise.all([
-      this.prisma.conversation.findFirst({
+      this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
         select: { id: true, contact: { select: { phoneNumber: true } } },
       }),
       replyToMessageIdRaw
-        ? this.prisma.message.findFirst({
+        ? this.db.message.findFirst({
             where: { id: replyToMessageIdRaw, conversationId, teamId },
             select: { id: true, externalId: true },
           })
@@ -88,7 +88,7 @@ export class MessagesService {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
       }),
-      this.prisma.message.findFirst({
+      this.db.message.findFirst({
         where: { conversationId, direction: "in" },
         orderBy: { timestamp: "desc" },
         select: { timestamp: true },
@@ -217,7 +217,7 @@ export class MessagesService {
 
     // Bump conversation's lastMessageAt/preview for the next cold load.
     // Fire-and-forget — live clients already have it from the socket emit.
-    void this.prisma.conversation
+    void this.db.conversation
       .update({
         where: { id: conversationId },
         data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
@@ -256,14 +256,14 @@ export class MessagesService {
     const receivedAt = new Date();
     const { conversationId, caption, clientTempId, replyToMessageId: replyToMessageIdRaw } = form;
 
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
     // 24h window — media (like free-form text) is template-only outside it.
-    const lastInbound = await this.prisma.message.findFirst({
+    const lastInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
       select: { timestamp: true },
@@ -281,7 +281,7 @@ export class MessagesService {
     let replyToMessageId: string | null = null;
     let replyToExternalId: string | undefined;
     if (replyToMessageIdRaw) {
-      const replyToRow = await this.prisma.message.findFirst({
+      const replyToRow = await this.db.message.findFirst({
         where: { id: replyToMessageIdRaw, conversationId, teamId },
         select: { id: true, externalId: true },
       });
@@ -332,7 +332,7 @@ export class MessagesService {
     // functions of `bytes`. The team lookup that the blob context needs
     // also kicks off concurrently so it doesn't serialize the upload.
     const blobLabelId = clientTempId ?? randomUUID();
-    const teamRowPromise = this.prisma.team
+    const teamRowPromise = this.db.team
       .findUnique({ where: { id: teamId }, select: { name: true } })
       .catch(() => null);
 
@@ -478,7 +478,7 @@ export class MessagesService {
 
     // Conversation summary bump — fire-and-forget. The socket emit below
     // already carries everything an active client needs.
-    void this.prisma.conversation
+    void this.db.conversation
       .update({
         where: { id: conversationId },
         data: { lastMessageAt: send.timestamp, lastMessagePreview: previewBody },
@@ -592,7 +592,7 @@ export class MessagesService {
 
     // Source messages, team-scoped, oldest-first so order is preserved at
     // the destination. Drop failed rows (no real wamid / never delivered).
-    const sourceRows = await this.prisma.message.findMany({
+    const sourceRows = await this.db.message.findMany({
       where: { id: { in: messageIds }, teamId, status: { not: "failed" } },
       orderBy: { timestamp: "asc" },
     });
@@ -615,7 +615,7 @@ export class MessagesService {
       throw err;
     }
 
-    const contacts = await this.prisma.contact.findMany({
+    const contacts = await this.db.contact.findMany({
       where: { id: { in: contactIds }, teamId },
       include: { tags: { select: { id: true } } },
     });
@@ -657,7 +657,7 @@ export class MessagesService {
       return entry;
     };
 
-    const teamRow = await this.prisma.team.findUnique({
+    const teamRow = await this.db.team.findUnique({
       where: { id: teamId },
       select: { name: true },
     });
@@ -680,12 +680,12 @@ export class MessagesService {
 
       // One-contact-one-conversation invariant. Closed → pending (same
       // semantics as webhook ingest + broadcast runner reopen-on-send).
-      const existing = await this.prisma.conversation.findFirst({
+      const existing = await this.db.conversation.findFirst({
         where: { teamId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
       const conversation = !existing
-        ? await this.prisma.conversation.create({
+        ? await this.db.conversation.create({
             data: {
               teamId,
               contactId: contact.id,
@@ -694,7 +694,7 @@ export class MessagesService {
             },
           })
         : existing.status === "closed"
-          ? await this.prisma.conversation.update({
+          ? await this.db.conversation.update({
               where: { id: existing.id },
               data: { status: "pending" },
             })
@@ -851,7 +851,7 @@ export class MessagesService {
               continue;
             }
 
-            void this.prisma.conversation
+            void this.db.conversation
               .update({
                 where: { id: conversation.id },
                 data: {
@@ -940,7 +940,7 @@ export class MessagesService {
             }
 
             const preview = body.slice(0, 200);
-            void this.prisma.conversation
+            void this.db.conversation
               .update({
                 where: { id: conversation.id },
                 data: {

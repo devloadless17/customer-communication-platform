@@ -23,7 +23,7 @@ import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   ExternalAssignInput,
   ExternalNoteInput,
@@ -47,14 +47,14 @@ export class ExternalV1Service {
   private readonly logger = new Logger(ExternalV1Service.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
   // ---- Contacts ---------------------------------------------------------
 
   async getContact(teamId: string, id: string) {
-    const row = await this.prisma.contact.findFirst({ where: { id, teamId } });
+    const row = await this.db.contact.findFirst({ where: { id, teamId } });
     if (!row) throw new NotFoundException({ error: "contact not found" });
     return toExternalContact(row);
   }
@@ -62,7 +62,7 @@ export class ExternalV1Service {
   // ---- Conversations ----------------------------------------------------
 
   async listConversations(teamId: string, q: ListConversationsQueryInput) {
-    const rows = await this.prisma.conversation.findMany({
+    const rows = await this.db.conversation.findMany({
       where: {
         teamId,
         ...(q.status ? { status: q.status } : {}),
@@ -79,7 +79,7 @@ export class ExternalV1Service {
   }
 
   async getConversation(teamId: string, id: string) {
-    const row = await this.prisma.conversation.findFirst({
+    const row = await this.db.conversation.findFirst({
       where: { id, teamId },
       include: { contact: true },
     });
@@ -91,7 +91,7 @@ export class ExternalV1Service {
   }
 
   async assign(teamId: string, conversationId: string, input: ExternalAssignInput) {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: {
         id: true,
@@ -102,14 +102,14 @@ export class ExternalV1Service {
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
     if (input.assignedUserId !== null) {
-      const member = await this.prisma.user.findFirst({
+      const member = await this.db.user.findFirst({
         where: { id: input.assignedUserId, teamId },
         select: { id: true },
       });
       if (!member) throw new BadRequestException({ error: "user not in team" });
     }
 
-    const updated = await this.prisma.conversation.update({
+    const updated = await this.db.conversation.update({
       where: { id: conversationId },
       data: { assignedUserId: input.assignedUserId },
       include: { assignedUser: true },
@@ -141,14 +141,14 @@ export class ExternalV1Service {
   }
 
   async setStatus(teamId: string, conversationId: string, input: ExternalStatusInput) {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: { include: { tags: { select: { id: true } } } } },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
     const previousStatus = conversation.status;
 
-    await this.prisma.conversation.update({
+    await this.db.conversation.update({
       where: { id: conversationId },
       data: { status: input.status },
     });
@@ -171,13 +171,13 @@ export class ExternalV1Service {
     conversationId: string,
     q: ListMessagesQueryInput,
   ) {
-    const conv = await this.prisma.conversation.findFirst({
+    const conv = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: { id: true },
     });
     if (!conv) throw new NotFoundException({ error: "conversation not found" });
 
-    const rows = await this.prisma.message.findMany({
+    const rows = await this.db.message.findMany({
       where: { conversationId },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: q.limit + 1,
@@ -195,7 +195,7 @@ export class ExternalV1Service {
     conversationId: string,
     input: ExternalSendMessageInput,
   ) {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: true },
     });
@@ -203,7 +203,7 @@ export class ExternalV1Service {
 
     // 24h window — surface the constraint before Meta so n8n flows can
     // branch to template-send cleanly. Meta returns 131047 otherwise.
-    const lastInbound = await this.prisma.message.findFirst({
+    const lastInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
       select: { timestamp: true },
@@ -222,7 +222,7 @@ export class ExternalV1Service {
     let replyToMessageId: string | null = null;
     let replyToExternalId: string | undefined;
     if (input.replyToMessageId) {
-      const replyRow = await this.prisma.message.findFirst({
+      const replyRow = await this.db.message.findFirst({
         where: { id: input.replyToMessageId, conversationId, teamId },
         select: { id: true, externalId: true },
       });
@@ -290,7 +290,7 @@ export class ExternalV1Service {
     });
 
     const preview = input.body.slice(0, 200);
-    await this.prisma.conversation.update({
+    await this.db.conversation.update({
       where: { id: conversationId },
       data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
     });
@@ -331,7 +331,7 @@ export class ExternalV1Service {
     conversationId: string,
     input: ExternalNoteInput,
   ) {
-    const conv = await this.prisma.conversation.findFirst({
+    const conv = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: { id: true },
     });
@@ -339,7 +339,7 @@ export class ExternalV1Service {
 
     let authorUserId: string | null = null;
     if (input.authorUserId) {
-      const u = await this.prisma.user.findFirst({
+      const u = await this.db.user.findFirst({
         where: { id: input.authorUserId, teamId },
         select: { id: true },
       });
@@ -352,7 +352,7 @@ export class ExternalV1Service {
     }
     if (!authorUserId) {
       // Fallback to oldest admin — InternalNote.authorUserId is non-nullable.
-      const fallback = await this.prisma.user.findFirst({
+      const fallback = await this.db.user.findFirst({
         where: { teamId, role: { in: ["admin", "superAdmin"] } },
         orderBy: { createdAt: "asc" },
         select: { id: true },
@@ -365,7 +365,7 @@ export class ExternalV1Service {
       authorUserId = fallback.id;
     }
 
-    const note = await this.prisma.internalNote.create({
+    const note = await this.db.internalNote.create({
       data: { conversationId, authorUserId, body: input.body },
     });
 

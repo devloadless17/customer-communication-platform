@@ -37,7 +37,7 @@ import {
 import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type {
   CreateChannelInput,
   EditChannelMessageInput,
@@ -51,7 +51,7 @@ export class ChannelsService {
   private readonly logger = new Logger(ChannelsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -108,7 +108,7 @@ export class ChannelsService {
     const description = input.description?.length ? input.description : null;
 
     try {
-      const created = await this.prisma.teamChannel.create({
+      const created = await this.db.teamChannel.create({
         data: { teamId, name, description, createdById: userId },
       });
       await this.bus.publish({
@@ -138,7 +138,7 @@ export class ChannelsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
-    const existing = await this.prisma.teamChannel.findFirst({
+    const existing = await this.db.teamChannel.findFirst({
       where: { id: channelId, teamId },
     });
     if (!existing) throw new NotFoundException({ error: "channel not found" });
@@ -169,7 +169,7 @@ export class ChannelsService {
 
     let updated;
     try {
-      updated = await this.prisma.teamChannel.update({ where: { id: channelId }, data });
+      updated = await this.db.teamChannel.update({ where: { id: channelId }, data });
     } catch (err) {
       if (isP2002(err)) throw new ConflictException({ error: "name_taken" });
       throw err;
@@ -186,7 +186,7 @@ export class ChannelsService {
   async remove(teamId: string, role: Role, channelId: string): Promise<void> {
     if (!canDeleteChannel(role)) throw new ForbiddenException({ error: "forbidden" });
 
-    const existing = await this.prisma.teamChannel.findFirst({
+    const existing = await this.db.teamChannel.findFirst({
       where: { id: channelId, teamId },
     });
     if (!existing) throw new NotFoundException({ error: "channel not found" });
@@ -199,7 +199,7 @@ export class ChannelsService {
     }
     // FK cascades take care of messages / mentions / reactions / pins /
     // receipts in one shot — single DELETE.
-    await this.prisma.teamChannel.delete({ where: { id: channelId } });
+    await this.db.teamChannel.delete({ where: { id: channelId } });
     await this.bus.publish({
       type: "team.catalog_changed",
       teamId,
@@ -249,7 +249,7 @@ export class ChannelsService {
     const validMentionIds = await this.validateMentions(teamId, input.body);
 
     const preview = buildMessagePreview(input.body, false);
-    const created = await this.prisma.$transaction(async (tx) => {
+    const created = await this.db.$transaction(async (tx) => {
       const msg = await tx.teamChannelMessage.create({
         data: {
           channelId,
@@ -303,7 +303,7 @@ export class ChannelsService {
     messageId: string,
     input: EditChannelMessageInput,
   ) {
-    const existing = await this.prisma.teamChannelMessage.findFirst({
+    const existing = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: {
         id: true,
@@ -328,15 +328,15 @@ export class ChannelsService {
     const validMentionIds = await this.validateMentions(teamId, input.body);
     const editedAt = new Date();
 
-    await this.prisma.$transaction([
-      this.prisma.teamChannelMessage.update({
+    await this.db.$transaction([
+      this.db.teamChannelMessage.update({
         where: { id: messageId },
         data: { body: input.body, editedAt },
       }),
-      this.prisma.teamChannelMention.deleteMany({ where: { messageId } }),
+      this.db.teamChannelMention.deleteMany({ where: { messageId } }),
       ...(validMentionIds.length > 0
         ? [
-            this.prisma.teamChannelMention.createMany({
+            this.db.teamChannelMention.createMany({
               data: validMentionIds.map((uid) => ({
                 messageId,
                 mentionedUserId: uid,
@@ -350,13 +350,13 @@ export class ChannelsService {
     // Refresh channel preview if this is the latest top-level message.
     // Thread replies don't surface in the preview.
     if (existing.threadRootId === null) {
-      const latest = await this.prisma.teamChannelMessage.findFirst({
+      const latest = await this.db.teamChannelMessage.findFirst({
         where: { channelId, threadRootId: null },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { id: true, body: true, mediaKind: true },
       });
       if (latest?.id === messageId) {
-        await this.prisma.teamChannel.update({
+        await this.db.teamChannel.update({
           where: { id: channelId },
           data: {
             lastMessagePreview: buildMessagePreview(input.body, !!existing.mediaKind),
@@ -384,7 +384,7 @@ export class ChannelsService {
     channelId: string,
     messageId: string,
   ): Promise<void> {
-    const existing = await this.prisma.teamChannelMessage.findFirst({
+    const existing = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: { id: true, authorUserId: true, threadRootId: true },
     });
@@ -394,11 +394,11 @@ export class ChannelsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
-    await this.prisma.teamChannelMessage.delete({ where: { id: messageId } });
+    await this.db.teamChannelMessage.delete({ where: { id: messageId } });
 
     if (existing.threadRootId) {
       // Reply delete → decrement root's counter so the "X replies" pill stays honest.
-      await this.prisma.teamChannelMessage
+      await this.db.teamChannelMessage
         .update({
           where: { id: existing.threadRootId },
           data: { threadReplyCount: { decrement: 1 } },
@@ -408,12 +408,12 @@ export class ChannelsService {
         );
     } else {
       // Top-level delete → refresh channel preview to whatever's now latest.
-      const latest = await this.prisma.teamChannelMessage.findFirst({
+      const latest = await this.db.teamChannelMessage.findFirst({
         where: { channelId, threadRootId: null },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { body: true, mediaKind: true, createdAt: true },
       });
-      await this.prisma.teamChannel.update({
+      await this.db.teamChannel.update({
         where: { id: channelId },
         data: latest
           ? {
@@ -444,7 +444,7 @@ export class ChannelsService {
   ): Promise<void> {
     if (!canPinMessage(role)) throw new ForbiddenException({ error: "forbidden" });
 
-    const msg = await this.prisma.teamChannelMessage.findFirst({
+    const msg = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: { id: true, threadRootId: true },
     });
@@ -457,7 +457,7 @@ export class ChannelsService {
     }
 
     try {
-      await this.prisma.teamChannelPin.create({
+      await this.db.teamChannelPin.create({
         data: { channelId, messageId, pinnedById: userId },
       });
     } catch (err) {
@@ -483,13 +483,13 @@ export class ChannelsService {
 
     // Tenant guard via the message — keeps unpin from teaching the caller
     // about another team's message ids.
-    const msg = await this.prisma.teamChannelMessage.findFirst({
+    const msg = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: { id: true },
     });
     if (!msg) throw new NotFoundException({ error: "message not found" });
 
-    await this.prisma.teamChannelPin.deleteMany({ where: { messageId } });
+    await this.db.teamChannelPin.deleteMany({ where: { messageId } });
     await this.bus.publish({
       type: "team_channel.pin_changed",
       teamId,
@@ -508,23 +508,23 @@ export class ChannelsService {
     messageId: string,
     input: ToggleReactionInput,
   ): Promise<{ emoji: string; userIds: string[] }> {
-    const message = await this.prisma.teamChannelMessage.findFirst({
+    const message = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: { id: true },
     });
     if (!message) throw new NotFoundException({ error: "message not found" });
 
     const { emoji } = input;
-    const existing = await this.prisma.teamChannelReaction.findUnique({
+    const existing = await this.db.teamChannelReaction.findUnique({
       where: { messageId_userId_emoji: { messageId, userId, emoji } },
       select: { id: true },
     });
 
     if (existing) {
-      await this.prisma.teamChannelReaction.delete({ where: { id: existing.id } });
+      await this.db.teamChannelReaction.delete({ where: { id: existing.id } });
     } else {
       try {
-        await this.prisma.teamChannelReaction.create({
+        await this.db.teamChannelReaction.create({
           data: { messageId, userId, emoji },
         });
       } catch (err) {
@@ -534,7 +534,7 @@ export class ChannelsService {
     }
 
     // Full snapshot per emoji — receivers don't need a delta reducer.
-    const reactions = await this.prisma.teamChannelReaction.findMany({
+    const reactions = await this.db.teamChannelReaction.findMany({
       where: { messageId, emoji },
       select: { userId: true },
     });
@@ -556,7 +556,7 @@ export class ChannelsService {
 
   /** Throw 404 if the channel doesn't exist in this team. */
   private async requireChannelOwnership(teamId: string, channelId: string): Promise<void> {
-    const channel = await this.prisma.teamChannel.findFirst({
+    const channel = await this.db.teamChannel.findFirst({
       where: { id: channelId, teamId },
       select: { id: true },
     });
@@ -568,7 +568,7 @@ export class ChannelsService {
     const parsed = parseMentions(body);
     const ids = Array.from(new Set(parsed.map((m) => m.userId)));
     if (ids.length === 0) return [];
-    const members = await this.prisma.user.findMany({
+    const members = await this.db.user.findMany({
       where: { teamId, id: { in: ids } },
       select: { id: true },
     });

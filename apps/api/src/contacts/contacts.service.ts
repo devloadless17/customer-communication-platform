@@ -21,7 +21,7 @@ import type { Contact } from "@ccp/shared/types";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type {
   AudienceCountInput,
   AudiencePreviewInput,
@@ -53,7 +53,7 @@ export interface ImportResult {
 @Injectable()
 export class ContactsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -111,7 +111,7 @@ export class ContactsService {
     const stageId = await ensureDefaultStage(teamId);
 
     try {
-      const created = await this.prisma.contact.create({
+      const created = await this.db.contact.create({
         data: {
           teamId,
           phoneNumber: phone,
@@ -182,7 +182,7 @@ export class ContactsService {
     // Validate stage ownership when set to a concrete id — done here (not in
     // the schema) because it requires a DB hit against the team scope.
     if (typeof stageId === "string") {
-      const ok = await this.prisma.contactStage.findFirst({
+      const ok = await this.db.contactStage.findFirst({
         where: { id: stageId, teamId },
         select: { id: true },
       });
@@ -191,7 +191,7 @@ export class ContactsService {
       }
     }
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.db.$transaction(async (tx) => {
       const existing = await tx.contact.findFirst({
         where: { id: contactId, teamId },
         include: { tags: { select: { id: true } } },
@@ -269,7 +269,7 @@ export class ContactsService {
    * preferable to a half-committed delete.
    */
   async remove(teamId: string, userId: string, contactId: string): Promise<void> {
-    const contact = await this.prisma.contact.findFirst({
+    const contact = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
       select: {
         id: true,
@@ -292,7 +292,7 @@ export class ContactsService {
       .filter((k): k is string => Boolean(k));
     const conversationIds = contact.conversations.map((c) => c.id);
 
-    await this.prisma.contact.delete({ where: { id: contactId } });
+    await this.db.contact.delete({ where: { id: contactId } });
 
     if (mediaKeys.length > 0) {
       await blobStorage.delete(mediaKeys);
@@ -330,7 +330,7 @@ export class ContactsService {
     // Scope to actually-owned rows. Downstream calls already filter by
     // teamId, but doing it explicitly lets us emit accurate per-id events
     // and refuse client-supplied ids that aren't ours.
-    const ownContacts = await this.prisma.contact.findMany({
+    const ownContacts = await this.db.contact.findMany({
       where: { teamId, id: { in: input.contactIds } },
       select: { id: true },
     });
@@ -342,7 +342,7 @@ export class ContactsService {
     }
 
     if (input.action === "delete") {
-      const conversationsWithMedia = await this.prisma.conversation.findMany({
+      const conversationsWithMedia = await this.db.conversation.findMany({
         where: { teamId, contactId: { in: ownedIds } },
         select: {
           id: true,
@@ -367,7 +367,7 @@ export class ContactsService {
         conversationsByContact.set(c.contactId, list);
       }
 
-      await this.prisma.contact.deleteMany({
+      await this.db.contact.deleteMany({
         where: { teamId, id: { in: ownedIds } },
       });
 
@@ -392,13 +392,13 @@ export class ContactsService {
 
     // ---- tag-add / tag-remove ----------------------------------------------
     const { action, tagId } = input;
-    const tag = await this.prisma.tag.findFirst({ where: { id: tagId, teamId } });
+    const tag = await this.db.tag.findFirst({ where: { id: tagId, teamId } });
     if (!tag) throw new NotFoundException({ error: "tag not found" });
 
     // Pre-snapshot so the per-contact tagChanges payload reflects the actual
     // membership delta, not the requested intent (a tag-add of a tag the
     // contact already had → no diff → no workflow trigger).
-    const beforeRows = await this.prisma.contact.findMany({
+    const beforeRows = await this.db.contact.findMany({
       where: { teamId, id: { in: ownedIds } },
       select: { id: true, tags: { select: { id: true } } },
     });
@@ -409,7 +409,7 @@ export class ContactsService {
     const op = action === "tag-add" ? "connect" : "disconnect";
     const results = await Promise.allSettled(
       ownedIds.map((id) =>
-        this.prisma.contact.update({
+        this.db.contact.update({
           where: { id, teamId },
           data: { tags: { [op]: { id: tagId } } },
         }),
@@ -429,7 +429,7 @@ export class ContactsService {
 
     // Reload ALL ownedIds (not just succeeded) — emitting the current truth
     // for a failed update is harmless and keeps the socket payload simple.
-    const updated = await this.prisma.contact.findMany({
+    const updated = await this.db.contact.findMany({
       where: { teamId, id: { in: ownedIds } },
       include: { tags: { select: { id: true } } },
     });
@@ -516,7 +516,7 @@ export class ContactsService {
       });
     }
 
-    const fieldDefs = await this.prisma.contactFieldDefinition.findMany({
+    const fieldDefs = await this.db.contactFieldDefinition.findMany({
       where: { teamId },
       select: { key: true, label: true },
     });
@@ -625,7 +625,7 @@ export class ContactsService {
       });
     }
 
-    const existing = await this.prisma.contact.findMany({
+    const existing = await this.db.contact.findMany({
       where: { teamId, phoneNumber: { in: pending.map((p) => p.phoneNumber) } },
       select: { phoneNumber: true },
     });
@@ -639,7 +639,7 @@ export class ContactsService {
       // Default stage looked up once for the whole batch — every row lands
       // in the same place, no per-row roundtrip needed.
       const defaultStageId = await ensureDefaultStage(teamId);
-      const result = await this.prisma.contact.createMany({
+      const result = await this.db.contact.createMany({
         data: toCreate.map((p) => ({
           teamId,
           phoneNumber: p.phoneNumber,
@@ -695,7 +695,7 @@ export class ContactsService {
     contactId: string,
     input: SetContactTagsInput,
   ): Promise<{ tagIds: string[] }> {
-    const contact = await this.prisma.contact.findFirst({
+    const contact = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
       include: { tags: { select: { id: true } } },
     });
@@ -706,7 +706,7 @@ export class ContactsService {
       input.tagIds.length === 0
         ? []
         : (
-            await this.prisma.tag.findMany({
+            await this.db.tag.findMany({
               where: { teamId, id: { in: input.tagIds } },
               select: { id: true },
             })
@@ -717,7 +717,7 @@ export class ContactsService {
     const added = validIds.filter((tagId) => !previousIds.has(tagId));
     const removed = [...previousIds].filter((tagId) => !nextIds.has(tagId));
 
-    const updated = await this.prisma.contact.update({
+    const updated = await this.db.contact.update({
       where: { id: contactId },
       data: { tags: { set: validIds.map((tagId) => ({ id: tagId })) } },
       include: { tags: { select: { id: true } } },
@@ -761,11 +761,11 @@ export class ContactsService {
    */
   async exportCsv(teamId: string): Promise<{ csv: string; filename: string }> {
     const [contacts, fieldDefs] = await Promise.all([
-      this.prisma.contact.findMany({
+      this.db.contact.findMany({
         where: { teamId },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       }),
-      this.prisma.contactFieldDefinition.findMany({
+      this.db.contactFieldDefinition.findMany({
         where: { teamId },
         orderBy: [{ order: "asc" }, { createdAt: "asc" }],
       }),

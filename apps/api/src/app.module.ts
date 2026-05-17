@@ -15,7 +15,7 @@ import { InvitesModule } from "./invites/invites.module";
 import { MediaModule } from "./media/media.module";
 import { MessagesModule } from "./messages/messages.module";
 import { NotesModule } from "./notes/notes.module";
-import { PrismaModule } from "./prisma/prisma.module";
+import { DbModule } from "./db/db.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { TeamModule } from "./team/team.module";
 import { TeamChatModule } from "./team-chat/team-chat.module";
@@ -35,7 +35,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
 @Module({
   imports: [
     // Infrastructure
-    PrismaModule,
+    DbModule,
     CommonModule,
     EventBusModule,
     BullMQModule,

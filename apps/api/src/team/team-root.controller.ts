@@ -4,7 +4,7 @@ import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { TeamRootService } from "./team-root.service";
 
 /**
@@ -22,12 +22,12 @@ import { TeamRootService } from "./team-root.service";
 export class TeamRootController {
   constructor(
     private readonly teamRoot: TeamRootService,
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
   ) {}
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
-    const team = await this.prisma.team.findUnique({
+    const team = await this.db.team.findUnique({
       where: { id: session.teamId },
       select: { id: true, name: true },
     });

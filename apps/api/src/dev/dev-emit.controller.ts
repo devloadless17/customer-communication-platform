@@ -10,7 +10,7 @@ import {
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { RealtimeEmitter } from "../realtime/emitter.service";
 import type {
   ConversationStatus,
@@ -85,7 +85,7 @@ function devToolsEnabled(): boolean {
 @UseGuards(SessionGuard)
 export class DevEmitController {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly emitter: RealtimeEmitter,
   ) {}
 
@@ -121,7 +121,7 @@ export class DevEmitController {
   // -------------------------------------------------------------------------
 
   private async loadOwnedConversation(conversationId: string, teamId: string) {
-    return this.prisma.conversation.findFirst({
+    return this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
     });
   }
@@ -136,7 +136,7 @@ export class DevEmitController {
     const externalId = `fake_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date();
 
-    const created = await this.prisma.message.create({
+    const created = await this.db.message.create({
       data: {
         teamId,
         conversationId,
@@ -150,7 +150,7 @@ export class DevEmitController {
       },
     });
 
-    await this.prisma.conversation.update({
+    await this.db.conversation.update({
       where: { id: conversationId },
       data: {
         lastMessageAt: now,
@@ -194,7 +194,7 @@ export class DevEmitController {
     const convo = await this.loadOwnedConversation(conversationId, teamId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
-    const lastOutbound = await this.prisma.message.findFirst({
+    const lastOutbound = await this.db.message.findFirst({
       where: { conversationId, teamId, direction: "out" },
       orderBy: { timestamp: "desc" },
     });
@@ -208,7 +208,7 @@ export class DevEmitController {
           ? "read"
           : "read";
 
-    await this.prisma.message.update({
+    await this.db.message.update({
       where: { id: lastOutbound.id },
       data: { status: next },
     });
@@ -231,7 +231,7 @@ export class DevEmitController {
     const convo = await this.loadOwnedConversation(conversationId, teamId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
-    const created = await this.prisma.internalNote.create({
+    const created = await this.db.internalNote.create({
       // Always attribute to the calling user — the request body has no say.
       data: { conversationId, authorUserId: userId, body },
     });
@@ -260,7 +260,7 @@ export class DevEmitController {
     const convo = await this.loadOwnedConversation(conversationId, teamId);
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
-    await this.prisma.conversation.update({
+    await this.db.conversation.update({
       where: { id: conversationId },
       data: { status },
     });
@@ -282,7 +282,7 @@ export class DevEmitController {
     if (!convo) throw new NotFoundException({ error: "conversation not found" });
 
     if (assignedUserId) {
-      const assignee = await this.prisma.user.findFirst({
+      const assignee = await this.db.user.findFirst({
         where: { id: assignedUserId, teamId },
         select: { id: true },
       });
@@ -291,7 +291,7 @@ export class DevEmitController {
       }
     }
 
-    const updated = await this.prisma.conversation.update({
+    const updated = await this.db.conversation.update({
       where: { id: conversationId },
       data: { assignedUserId },
       include: { assignedUser: true },

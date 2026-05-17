@@ -10,7 +10,7 @@ import { canManageContactFields } from "@ccp/shared/auth/permissions";
 import type { ContactFieldDefinition, Role } from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   CreateContactFieldInput,
   UpdateContactFieldInput,
@@ -21,12 +21,12 @@ const MAX_FIELDS_PER_TEAM = 50;
 @Injectable()
 export class ContactFieldsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
   async list(teamId: string): Promise<ContactFieldDefinition[]> {
-    const rows = await this.prisma.contactFieldDefinition.findMany({
+    const rows = await this.db.contactFieldDefinition.findMany({
       where: { teamId },
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
     });
@@ -42,7 +42,7 @@ export class ContactFieldsService {
 
     // Cap definitions so a runaway client can't bloat the panel + the JSONB
     // column on every contact (every key gets rendered + serialized).
-    const existing = await this.prisma.contactFieldDefinition.findMany({
+    const existing = await this.db.contactFieldDefinition.findMany({
       where: { teamId },
       select: { key: true, order: true },
       orderBy: { order: "desc" },
@@ -71,7 +71,7 @@ export class ContactFieldsService {
     const nextOrder = (existing[0]?.order ?? -1) + 1;
 
     try {
-      const created = await this.prisma.contactFieldDefinition.create({
+      const created = await this.db.contactFieldDefinition.create({
         data: { teamId, key, label: input.label, order: nextOrder },
       });
       await this.bus.publish({
@@ -94,13 +94,13 @@ export class ContactFieldsService {
   ): Promise<ContactFieldDefinition> {
     requireManage(role);
 
-    const existing = await this.prisma.contactFieldDefinition.findFirst({
+    const existing = await this.db.contactFieldDefinition.findFirst({
       where: { id, teamId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
-    const updated = await this.prisma.contactFieldDefinition.update({
+    const updated = await this.db.contactFieldDefinition.update({
       where: { id },
       data: input,
     });
@@ -115,7 +115,7 @@ export class ContactFieldsService {
   async remove(teamId: string, role: Role, id: string): Promise<void> {
     requireManage(role);
 
-    const def = await this.prisma.contactFieldDefinition.findFirst({
+    const def = await this.db.contactFieldDefinition.findFirst({
       where: { id, teamId },
     });
     if (!def) throw new NotFoundException({ error: "not found" });
@@ -127,14 +127,14 @@ export class ContactFieldsService {
     // Postgres `-` operator is the right tool here; Prisma doesn't expose
     // it typed so we drop to $executeRaw. The `?` (key existence) on the
     // WHERE keeps the indexable teamId predicate first for the bulk path.
-    await this.prisma.$transaction([
-      this.prisma.$executeRaw`
+    await this.db.$transaction([
+      this.db.$executeRaw`
         UPDATE "Contact"
         SET "customFields" = "customFields" - ${def.key}
         WHERE "teamId" = ${teamId}
           AND "customFields" ? ${def.key}
       `,
-      this.prisma.contactFieldDefinition.delete({ where: { id } }),
+      this.db.contactFieldDefinition.delete({ where: { id } }),
     ]);
 
     await this.bus.publish({

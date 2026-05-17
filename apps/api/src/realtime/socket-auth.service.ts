@@ -4,7 +4,7 @@ import type { Socket } from "socket.io";
 import { auth } from "@/auth/better-auth";
 import type { Role } from "@ccp/shared/types";
 
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 
 export interface SocketIdentity {
   userId: string;
@@ -30,7 +30,7 @@ export interface SocketIdentity {
 export class SocketAuthService {
   private readonly logger = new Logger(SocketAuthService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   async authenticate(socket: Socket): Promise<SocketIdentity | null> {
     try {
@@ -44,7 +44,7 @@ export class SocketAuthService {
       const role = (session?.user as { role?: Role } | undefined)?.role;
       if (!userId || !teamId || !role) return null;
 
-      const dbUser = await this.prisma.user.findUnique({
+      const dbUser = await this.db.user.findUnique({
         where: { id: userId },
         select: { deactivatedAt: true },
       });

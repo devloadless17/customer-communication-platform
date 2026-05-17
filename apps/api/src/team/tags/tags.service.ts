@@ -7,7 +7,7 @@ import {
 import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type { CreateTagInput, UpdateTagInput } from "./tags.schemas";
 
 /**
@@ -26,7 +26,7 @@ import type { CreateTagInput, UpdateTagInput } from "./tags.schemas";
 @Injectable()
 export class TagsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -36,7 +36,7 @@ export class TagsService {
    * One aggregate query so 100 tags don't fan into 100 SELECTs.
    */
   async usage(teamId: string): Promise<Record<string, number>> {
-    const rows = await this.prisma.tag.findMany({
+    const rows = await this.db.tag.findMany({
       where: { teamId },
       select: { id: true, _count: { select: { contacts: true } } },
     });
@@ -46,7 +46,7 @@ export class TagsService {
   }
 
   async list(teamId: string): Promise<Tag[]> {
-    const rows = await this.prisma.tag.findMany({
+    const rows = await this.db.tag.findMany({
       where: { teamId },
       orderBy: { name: "asc" },
     });
@@ -61,7 +61,7 @@ export class TagsService {
   async create(teamId: string, input: CreateTagInput): Promise<Tag> {
     const color = normalizeColor(input.color);
     try {
-      const created = await this.prisma.tag.create({
+      const created = await this.db.tag.create({
         data: { teamId, name: input.name, color },
       });
       await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
@@ -78,11 +78,11 @@ export class TagsService {
   }
 
   async update(teamId: string, id: string, input: UpdateTagInput): Promise<Tag> {
-    const existing = await this.prisma.tag.findFirst({ where: { id, teamId } });
+    const existing = await this.db.tag.findFirst({ where: { id, teamId } });
     if (!existing) throw new NotFoundException({ error: "tag not found" });
 
     try {
-      const updated = await this.prisma.tag.update({ where: { id }, data: input });
+      const updated = await this.db.tag.update({ where: { id }, data: input });
       await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
       return {
         id: updated.id,
@@ -97,10 +97,10 @@ export class TagsService {
   }
 
   async remove(teamId: string, id: string): Promise<void> {
-    const existing = await this.prisma.tag.findFirst({ where: { id, teamId } });
+    const existing = await this.db.tag.findFirst({ where: { id, teamId } });
     if (!existing) throw new NotFoundException({ error: "tag not found" });
     // Implicit M2M join rows go with the delete — contacts simply lose this tag.
-    await this.prisma.tag.delete({ where: { id } });
+    await this.db.tag.delete({ where: { id } });
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
   }
 }

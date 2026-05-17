@@ -23,7 +23,7 @@ import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config"
 import { ingestEvents } from "@/lib/providers/ingest";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 
 /**
  * Per-team Meta WhatsApp Cloud API webhook.
@@ -46,7 +46,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 export class MetaWebhookController {
   private readonly logger = new Logger(MetaWebhookController.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   @Get(":teamId")
   async verify(
@@ -140,7 +140,7 @@ export class MetaWebhookController {
     if (mediaEvents.length === 0) return;
 
     const externalIds = mediaEvents.map((e) => e.externalId);
-    const rows = await this.prisma.message.findMany({
+    const rows = await this.db.message.findMany({
       where: { teamId, externalId: { in: externalIds } },
       select: { id: true, externalId: true, conversationId: true, mediaUrl: true },
     });
@@ -166,7 +166,7 @@ export class MetaWebhookController {
       return;
     }
 
-    const team = await this.prisma.team.findUnique({
+    const team = await this.db.team.findUnique({
       where: { id: teamId },
       select: { name: true },
     });
@@ -205,7 +205,7 @@ export class MetaWebhookController {
           },
         });
 
-        await this.prisma.message.update({
+        await this.db.message.update({
           where: { id: row.id },
           data: {
             mediaKey: saved.key,
@@ -243,7 +243,7 @@ export class MetaWebhookController {
     conversationId: string,
   ): Promise<void> {
     try {
-      await this.prisma.message.update({
+      await this.db.message.update({
         where: { id: messageId },
         data: {
           mediaKind: null,

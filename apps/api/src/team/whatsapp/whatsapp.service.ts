@@ -35,7 +35,7 @@ import type {
 import type { TemplateDto } from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   UpdateTemplateBindingsInput,
   UpdateWhatsappConfigInput,
@@ -57,7 +57,7 @@ export class WhatsappService {
   private readonly logger = new Logger(WhatsappService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -78,7 +78,7 @@ export class WhatsappService {
    * which is why the envelope key no longer needs to live in the web image.
    */
   async getConfig(teamId: string): Promise<WhatsappConfigView> {
-    const team = await this.prisma.team.findUnique({
+    const team = await this.db.team.findUnique({
       where: { id: teamId },
       select: {
         metaPhoneNumberId: true,
@@ -189,7 +189,7 @@ export class WhatsappService {
     const verifyToken = input.verifyToken || randomBytes(24).toString("hex");
 
     try {
-      await this.prisma.team.update({
+      await this.db.team.update({
         where: { id: teamId },
         data: {
           metaPhoneNumberId: phoneNumberId,
@@ -240,7 +240,7 @@ export class WhatsappService {
    * rule #2 — integration toggles must not erase audit trail).
    */
   async disconnect(teamId: string): Promise<void> {
-    await this.prisma.team.update({
+    await this.db.team.update({
       where: { id: teamId },
       data: {
         metaPhoneNumberId: null,
@@ -271,11 +271,11 @@ export class WhatsappService {
     connected: boolean;
   }> {
     const [rows, team] = await Promise.all([
-      this.prisma.messageTemplate.findMany({
+      this.db.messageTemplate.findMany({
         where: { teamId },
         orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
       }),
-      this.prisma.team.findUnique({
+      this.db.team.findUnique({
         where: { id: teamId },
         select: { metaWabaId: true, metaAppId: true, metaPhoneNumberId: true },
       }),
@@ -321,9 +321,9 @@ export class WhatsappService {
     }
 
     const now = new Date();
-    await this.prisma.$transaction(
+    await this.db.$transaction(
       fetched.map((t) =>
-        this.prisma.messageTemplate.upsert({
+        this.db.messageTemplate.upsert({
           where: {
             teamId_name_language: { teamId, name: t.name, language: t.language },
           },
@@ -350,7 +350,7 @@ export class WhatsappService {
       ),
     );
 
-    const rows = await this.prisma.messageTemplate.findMany({
+    const rows = await this.db.messageTemplate.findMany({
       where: { teamId },
       orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
     });
@@ -449,7 +449,7 @@ export class WhatsappService {
     }
 
     const now = new Date();
-    const saved = await this.prisma.messageTemplate.upsert({
+    const saved = await this.db.messageTemplate.upsert({
       where: { teamId_name_language: { teamId, name, language } },
       create: {
         teamId,
@@ -491,7 +491,7 @@ export class WhatsappService {
    * re-deleting an already-gone template still cleans up locally.
    */
   async deleteTemplate(teamId: string, id: string): Promise<void> {
-    const template = await this.prisma.messageTemplate.findFirst({
+    const template = await this.db.messageTemplate.findFirst({
       where: { id, teamId },
     });
     if (!template) throw new NotFoundException({ error: "template not found" });
@@ -523,7 +523,7 @@ export class WhatsappService {
       });
     }
 
-    await this.prisma.messageTemplate.delete({ where: { id: template.id } });
+    await this.db.messageTemplate.delete({ where: { id: template.id } });
     await this.bus.publish({
       type: "team.catalog_changed",
       teamId,
@@ -537,7 +537,7 @@ export class WhatsappService {
     id: string,
     input: UpdateTemplateBindingsInput,
   ): Promise<void> {
-    const updated = await this.prisma.messageTemplate.updateMany({
+    const updated = await this.db.messageTemplate.updateMany({
       where: { id, teamId },
       data: {
         variableBindings: input.variableBindings as Prisma.InputJsonValue,

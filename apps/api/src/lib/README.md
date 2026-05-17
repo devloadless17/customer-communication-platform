@@ -51,7 +51,7 @@ branching.
 | `team-chat/queries.ts` | Reads for the internal team-chat channels feature | TeamChatChannelsService |
 | `workflows/` | The workflow engine: graph parser, DAG runner, step handlers, BullMQ queue + worker bootstrap, event-to-trigger dispatcher | `WorkflowWorkerService`, `WorkflowDispatcherService`, `WorkflowSubscribersService` |
 | `csv.ts` | papaparse wrapper for contact import/export | ContactsService |
-| `db.ts` | Lazy Proxy over `PrismaService`. See the file header — one pool per process, populated by `PrismaModule.onModuleInit` | every file here that touches Postgres |
+| `db.ts` | Lazy Proxy over `DbService`. See the file header — one pool per process, populated by `DbModule.onModuleInit` | every file here that touches Postgres |
 | `env.ts` | Boot-time required/optional env var validation | `main.ts` (or a future PreBootGuard) |
 | `external-shapes.ts` | API-shape mappers for the public `/v1` API. Quarantined here so `/v1` response shapes can't accidentally drift with internal type changes | `ExternalV1Service` |
 | `media-storage.ts` | Helper bridge between MediaKind/MimeType and the blob-storage provider | messaging + ingest |
@@ -64,7 +64,7 @@ branching.
    manage. If you find yourself wanting a constructor injection, the
    abstraction belongs upstairs in a NestJS service, not here.
 2. **`db` comes from `@/lib/db`** — the Proxy that resolves to the shared
-   PrismaService instance after boot. Don't `new PrismaClient()` anywhere
+   DbService instance after boot. Don't `new PrismaClient()` anywhere
    else in this tree; it would re-introduce the dual-pool bug the Proxy
    exists to prevent.
 3. **No `console.log/.error`.** Use `console.warn` for the boot-only worker

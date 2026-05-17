@@ -13,7 +13,7 @@ import { assignableRoles } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type { AcceptInviteInput, CreateInviteInput } from "./invites.schemas";
 
 export interface InviteListDto {
@@ -34,13 +34,13 @@ export interface InviteCreateDto {
 @Injectable()
 export class InvitesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
   /** List PENDING (un-accepted, un-expired) invites for the team. */
   async list(teamId: string): Promise<InviteListDto[]> {
-    const rows = await this.prisma.invite.findMany({
+    const rows = await this.db.invite.findMany({
       where: {
         teamId,
         acceptedAt: null,
@@ -85,7 +85,7 @@ export class InvitesService {
 
     // User.email is globally unique — friendly error before we create an
     // invite that could never be accepted anyway.
-    const existingUser = await this.prisma.user.findUnique({ where: { email: input.email } });
+    const existingUser = await this.db.user.findUnique({ where: { email: input.email } });
     if (existingUser) {
       throw new ConflictException({ error: "email already in use" });
     }
@@ -94,7 +94,7 @@ export class InvitesService {
     // is the only valid one (re-invite UX). Opportunistically drop EXPIRED
     // invites for this team in the same query — keeps the table clean
     // without a cron.
-    await this.prisma.invite.deleteMany({
+    await this.db.invite.deleteMany({
       where: {
         teamId,
         acceptedAt: null,
@@ -104,7 +104,7 @@ export class InvitesService {
 
     const token = generateInviteToken();
     const tokenHash = hashInviteToken(token);
-    const invite = await this.prisma.invite.create({
+    const invite = await this.db.invite.create({
       data: {
         teamId,
         email: input.email,
@@ -134,7 +134,7 @@ export class InvitesService {
    * match and an already-accepted invite is treated as "not found".
    */
   async revoke(teamId: string, id: string): Promise<void> {
-    const result = await this.prisma.invite.deleteMany({
+    const result = await this.db.invite.deleteMany({
       where: { id, teamId, acceptedAt: null },
     });
     if (result.count === 0) throw new NotFoundException({ error: "invite not found" });
@@ -152,7 +152,7 @@ export class InvitesService {
     invite: { email: string; role: Role; teamName: string } | null;
   }> {
     const tokenHash = hashInviteToken(token);
-    const invite = await this.prisma.invite.findUnique({
+    const invite = await this.db.invite.findUnique({
       where: { tokenHash },
       select: {
         email: true,
@@ -223,7 +223,7 @@ export class InvitesService {
 
     let result: { email: string; teamId: string };
     try {
-      result = await this.prisma.$transaction(async (tx) => {
+      result = await this.db.$transaction(async (tx) => {
         const invite = await tx.invite.findUnique({ where: { tokenHash } });
         if (!invite) throw new InviteAcceptError("invite_invalid", "This invite link is invalid.");
         if (invite.acceptedAt) {

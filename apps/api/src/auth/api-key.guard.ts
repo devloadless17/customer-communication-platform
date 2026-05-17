@@ -8,7 +8,7 @@ import {
 } from "@nestjs/common";
 import type { Request } from "express";
 
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 
 /**
  * Shape attached to req.apiKey on success. Used by /external/v1/* controllers
@@ -40,7 +40,7 @@ declare module "express-serve-static-core" {
  */
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<Request>();
@@ -52,7 +52,7 @@ export class ApiKeyGuard implements CanActivate {
     if (!token) throw new UnauthorizedException("empty bearer token");
 
     const tokenHash = createHash("sha256").update(token).digest("hex");
-    const row = await this.prisma.teamApiKey.findUnique({
+    const row = await this.db.teamApiKey.findUnique({
       where: { tokenHash },
       select: { id: true, teamId: true, revokedAt: true },
     });
@@ -63,7 +63,7 @@ export class ApiKeyGuard implements CanActivate {
     // Stamp lastUsedAt async — failing this should NOT fail the request.
     // BullMQ / Prisma update under load occasionally throws on connection
     // pool exhaustion; the API call itself doesn't need to wait or care.
-    this.prisma.teamApiKey
+    this.db.teamApiKey
       .update({ where: { id: row.id }, data: { lastUsedAt: new Date() } })
       .catch(() => {});
 

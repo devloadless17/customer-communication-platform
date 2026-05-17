@@ -3,7 +3,7 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 import type { InternalNote } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import type { CreateNoteInput } from "./notes.schemas";
 
 /**
@@ -13,7 +13,7 @@ import type { CreateNoteInput } from "./notes.schemas";
 @Injectable()
 export class NotesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -22,13 +22,13 @@ export class NotesService {
     authorUserId: string,
     input: CreateNoteInput,
   ): Promise<{ noteId: string }> {
-    const conversation = await this.prisma.conversation.findFirst({
+    const conversation = await this.db.conversation.findFirst({
       where: { id: input.conversationId, teamId },
       select: { id: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const created = await this.prisma.internalNote.create({
+    const created = await this.db.internalNote.create({
       data: {
         conversationId: input.conversationId,
         authorUserId,
@@ -57,13 +57,13 @@ export class NotesService {
   async remove(teamId: string, id: string): Promise<void> {
     // Team scope via the parent conversation — defends against id-stuffing
     // across tenants without joining at the note level (which lacks teamId).
-    const note = await this.prisma.internalNote.findFirst({
+    const note = await this.db.internalNote.findFirst({
       where: { id, conversation: { teamId } },
       select: { id: true, conversationId: true },
     });
     if (!note) throw new NotFoundException({ error: "note not found" });
 
-    await this.prisma.internalNote.delete({ where: { id } });
+    await this.db.internalNote.delete({ where: { id } });
 
     await this.bus.publish({
       type: "note.deleted",

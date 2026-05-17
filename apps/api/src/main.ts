@@ -24,7 +24,7 @@ import { WsAdapter } from "./realtime/ws-adapter";
 async function bootstrap(): Promise<void> {
   // Validate environment BEFORE constructing the DI graph — if a required env
   // var is missing, fail loudly here rather than crashing midway through
-  // PrismaService.onModuleInit or similar with an obscure stack trace.
+  // DbService.onModuleInit or similar with an obscure stack trace.
   validateEnv("api");
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {

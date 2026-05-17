@@ -10,7 +10,7 @@ import type { Request } from "express";
 import { auth } from "@/auth/better-auth";
 import type { Role } from "@ccp/shared/types";
 
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 
 /**
  * Shape attached to req.session on success. Mirrors `ApiSession` from
@@ -47,11 +47,11 @@ declare module "express-serve-static-core" {
 export class SessionGuard implements CanActivate {
   private readonly logger = new Logger(SessionGuard.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<Request>();
-    const session = await resolveSession(req, this.prisma, this.logger);
+    const session = await resolveSession(req, this.db, this.logger);
     if (!session) throw new UnauthorizedException("unauthorized");
     req.session = session;
     return true;
@@ -65,7 +65,7 @@ export class SessionGuard implements CanActivate {
  */
 export async function resolveSession(
   req: Request,
-  prisma: PrismaService,
+  prisma: DbService,
   logger: Logger,
 ): Promise<ApiSession | null> {
   // Forward the incoming Express headers to Better Auth. It only needs

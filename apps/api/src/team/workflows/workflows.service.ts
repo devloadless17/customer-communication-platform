@@ -20,7 +20,7 @@ import {
 import { enqueueWorkflowRun } from "@/lib/workflows/queue";
 
 import { EventBus } from "../../events/event-bus.module";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DbService } from "../../db/db.service";
 import type {
   ManualTriggerInput,
   TestWorkflowInput,
@@ -29,7 +29,7 @@ import type {
 @Injectable()
 export class WorkflowsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
 
@@ -43,7 +43,7 @@ export class WorkflowsService {
    * what each workflow does without opening it.
    */
   async list(teamId: string) {
-    const rows = await this.prisma.workflow.findMany({
+    const rows = await this.db.workflow.findMany({
       where: { teamId },
       orderBy: { createdAt: "desc" },
       select: {
@@ -103,7 +103,7 @@ export class WorkflowsService {
     }
 
     try {
-      const created = await this.prisma.workflow.create({
+      const created = await this.db.workflow.create({
         data: {
           teamId,
           name: parsed.name,
@@ -125,7 +125,7 @@ export class WorkflowsService {
   }
 
   async get(teamId: string, id: string) {
-    const row = await this.prisma.workflow.findFirst({
+    const row = await this.db.workflow.findFirst({
       where: { id, teamId },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
@@ -142,7 +142,7 @@ export class WorkflowsService {
    * node id when the incoming payload omits them.
    */
   async update(teamId: string, id: string, raw: unknown) {
-    const existing = await this.prisma.workflow.findFirst({
+    const existing = await this.db.workflow.findFirst({
       where: { id, teamId },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
@@ -198,7 +198,7 @@ export class WorkflowsService {
     }
 
     try {
-      const updated = await this.prisma.workflow.update({
+      const updated = await this.db.workflow.update({
         where: { id },
         data: {
           name: parsed.name,
@@ -219,13 +219,13 @@ export class WorkflowsService {
   }
 
   async remove(teamId: string, id: string): Promise<void> {
-    const existing = await this.prisma.workflow.findFirst({
+    const existing = await this.db.workflow.findFirst({
       where: { id, teamId },
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
 
-    await this.prisma.workflow.delete({ where: { id } });
+    await this.db.workflow.delete({ where: { id } });
     await this.publishCatalogChange(teamId);
   }
 
@@ -240,7 +240,7 @@ export class WorkflowsService {
     id: string,
     publishFlag: boolean,
   ): Promise<{ published: boolean }> {
-    const existing = await this.prisma.workflow.findFirst({
+    const existing = await this.db.workflow.findFirst({
       where: { id, teamId },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
@@ -267,7 +267,7 @@ export class WorkflowsService {
       }
     }
 
-    await this.prisma.workflow.update({
+    await this.db.workflow.update({
       where: { id },
       data: { published: publishFlag },
     });
@@ -291,7 +291,7 @@ export class WorkflowsService {
     id: string,
     input: ManualTriggerInput,
   ): Promise<{ runId: string }> {
-    const wf = await this.prisma.workflow.findFirst({
+    const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
       select: { id: true, trigger: true, enabled: true, published: true },
     });
@@ -335,7 +335,7 @@ export class WorkflowsService {
     id: string,
     input: TestWorkflowInput,
   ): Promise<{ runId: string; jobId: string | null }> {
-    const wf = await this.prisma.workflow.findFirst({
+    const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
       select: { id: true, trigger: true, enabled: true },
     });
@@ -352,12 +352,12 @@ export class WorkflowsService {
     let eventPayload: unknown;
     if (contactId) {
       const [contact, conversation] = await Promise.all([
-        this.prisma.contact.findFirst({
+        this.db.contact.findFirst({
           where: { id: contactId, teamId },
           include: { tags: { select: { id: true } } },
         }),
         conversationId
-          ? this.prisma.conversation.findFirst({
+          ? this.db.conversation.findFirst({
               where: { id: conversationId, teamId },
             })
           : Promise.resolve(null),
@@ -413,7 +413,7 @@ export class WorkflowsService {
       };
     }
 
-    const run = await this.prisma.workflowRun.create({
+    const run = await this.db.workflowRun.create({
       data: {
         workflowId: wf.id,
         teamId,
@@ -449,7 +449,7 @@ export class WorkflowsService {
     signatureHeader: string,
     headers: Record<string, string>,
   ): Promise<{ runId: string }> {
-    const wf = await this.prisma.workflow.findFirst({
+    const wf = await this.db.workflow.findFirst({
       where: { id },
       select: {
         id: true,
@@ -514,7 +514,7 @@ export class WorkflowsService {
       headers: passthroughHeaders,
     };
 
-    const run = await this.prisma.workflowRun.create({
+    const run = await this.db.workflowRun.create({
       data: {
         workflowId: wf.id,
         teamId: wf.teamId,
@@ -535,13 +535,13 @@ export class WorkflowsService {
   // -------------------------------------------------------------------------
 
   async listRuns(teamId: string, id: string) {
-    const wf = await this.prisma.workflow.findFirst({
+    const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
       select: { id: true },
     });
     if (!wf) throw new NotFoundException({ error: "not found" });
 
-    const rows = await this.prisma.workflowRun.findMany({
+    const rows = await this.db.workflowRun.findMany({
       where: { workflowId: id },
       orderBy: { startedAt: "desc" },
       take: 50,
@@ -575,7 +575,7 @@ export class WorkflowsService {
   }
 
   async getRun(teamId: string, id: string, runId: string) {
-    const run = await this.prisma.workflowRun.findFirst({
+    const run = await this.db.workflowRun.findFirst({
       where: { id: runId, workflowId: id, teamId },
     });
     if (!run) throw new NotFoundException({ error: "not found" });

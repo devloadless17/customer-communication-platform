@@ -3,7 +3,7 @@ import { Injectable, InternalServerErrorException, Logger } from "@nestjs/common
 import { blobStorage } from "@/lib/blob-storage";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 
-import { PrismaService } from "../prisma/prisma.service";
+import { DbService } from "../db/db.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 
 /**
@@ -24,7 +24,7 @@ export class TeamRootService {
   private readonly logger = new Logger(TeamRootService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly realtime: RealtimeGateway,
   ) {}
 
@@ -34,18 +34,18 @@ export class TeamRootService {
     // socket kick (the cascade clears their Session rows but already-
     // connected sockets stay live until kicked).
     const [blobKeyRows, teamMembers] = await Promise.all([
-      this.prisma.message.findMany({
+      this.db.message.findMany({
         where: { teamId, mediaKey: { not: null } },
         select: { mediaKey: true },
       }),
-      this.prisma.user.findMany({ where: { teamId }, select: { id: true } }),
+      this.db.user.findMany({ where: { teamId }, select: { id: true } }),
     ]);
     const blobKeys = blobKeyRows
       .map((r) => r.mediaKey)
       .filter((k): k is string => Boolean(k));
 
     try {
-      await this.prisma.team.delete({ where: { id: teamId } });
+      await this.db.team.delete({ where: { id: teamId } });
     } catch (err) {
       this.logger.error(`[${label}] cascade delete failed`, err);
       throw new InternalServerErrorException({
