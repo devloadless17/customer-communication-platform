@@ -13,10 +13,13 @@
  * not the app.
  */
 
+import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { Pool } from "pg";
 
-const db = new PrismaClient();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const db = new PrismaClient({ adapter: new PrismaPg(pool) });
 
 if (process.env.NODE_ENV === "production") {
   // Belt-and-braces: prisma config + the package.json script run this only
@@ -282,9 +285,11 @@ main()
   .then(async () => {
     console.log("✓ seed complete");
     await db.$disconnect();
+    await pool.end();
   })
   .catch(async (err) => {
     console.error(err);
     await db.$disconnect();
+    await pool.end();
     process.exit(1);
   });

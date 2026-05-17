@@ -15,10 +15,12 @@ const isProd = process.env.NODE_ENV === "production";
  *     navigation, but keep the origin for same-origin requests.
  *   - Permissions-Policy: deny browser capabilities we never use.
  *
- * CSP intentionally omitted for now — Next.js inline runtime scripts/styles
- * require nonce wiring through every page, which is its own work item. The
- * frame-ancestors directive above is the only CSP piece we need today
- * (clickjacking).
+ * The CSP header here is the minimal clickjacking backstop applied to
+ * static assets and non-page responses that bypass the proxy matcher
+ * (`_next/static`, `_next/image`, favicons, paths with a dot). Page
+ * routes get the full nonce-based CSP from `src/proxy.ts`; browsers
+ * intersect multiple CSP headers so both restrictions are enforced
+ * on those — there's no conflict, the dynamic CSP is just stricter.
  */
 const securityHeaders = [
   ...(isProd

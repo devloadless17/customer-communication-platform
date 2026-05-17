@@ -42,6 +42,14 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
     {
       connection: connectionOptions(),
       concurrency: concurrency(),
+      // BullMQ's default lock (30s) is shorter than our slowest step. A
+      // `http_request` step allowed up to 60s would lose its lock mid-flight,
+      // get re-delivered, and execute twice — bad for `tag`/`update-field`/
+      // `set-status` which mutate without an idempotency key. 90s comfortably
+      // exceeds the slowest step we permit. `lockRenewTime` halves that so a
+      // step that's still alive renews before the lock can expire.
+      lockDuration: 90_000,
+      lockRenewTime: 45_000,
     },
   );
 

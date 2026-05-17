@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
+import { Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/lib/toast";
 import { formatLocaleDate, formatLocaleString } from "@ccp/shared/utils";
 
 interface ApiKey {
@@ -28,7 +29,6 @@ export function ApiKeysManager({ initialKeys }: Props) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<{ id: string; token: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
 
   async function createKey(e: React.FormEvent) {
@@ -85,20 +85,21 @@ export function ApiKeysManager({ initialKeys }: Props) {
     if (!ok) return;
     const res = await fetch(`/api/team/api-keys/${key.id}`, { method: "DELETE" });
     if (!res.ok) {
-      setError(`revoke failed: ${res.status}`);
+      toast.error("Revoke failed", { description: `HTTP ${res.status}` });
       return;
     }
     setKeys((prev) =>
       prev.map((k) => (k.id === key.id ? { ...k, revokedAt: new Date().toISOString() } : k)),
     );
+    toast.success(`Revoked "${key.name}"`);
   }
 
   function copyRevealed() {
     if (!revealed) return;
-    void navigator.clipboard.writeText(revealed.token).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+    void navigator.clipboard.writeText(revealed.token).then(
+      () => toast.success("Copied to clipboard"),
+      () => toast.error("Couldn't access clipboard"),
+    );
   }
 
   return (
@@ -139,8 +140,8 @@ export function ApiKeysManager({ initialKeys }: Props) {
                   {revealed.token}
                 </code>
                 <Button type="button" size="sm" variant="outline" onClick={copyRevealed}>
-                  {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
-                  {copied ? "Copied" : "Copy"}
+                  <Copy className="size-3.5" />
+                  Copy
                 </Button>
               </div>
               <button

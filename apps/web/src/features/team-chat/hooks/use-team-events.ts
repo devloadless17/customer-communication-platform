@@ -39,12 +39,21 @@ export function useTeamEvents(
   const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  // Re-seed when the server hands us a different initial list (e.g. after
-  // navigation to /inbox from another route).
+  // Re-seed when the server hands us a MEANINGFULLY different initial list.
+  // Gating on raw array identity blew away every realtime update on any
+  // `router.refresh()` (notably TimezoneProvider's first-visit refresh) —
+  // a fresh server render produces a new array reference even when the
+  // underlying data is unchanged. Compare by team + the set of conversation
+  // ids instead: only re-seed when the team switches or the served list
+  // actually changes.
+  const lastSeedKeyRef = useRef<string>("");
   useEffect(() => {
+    const key = `${teamId}|${initialConversations.map((c) => c.conversation.id).join(",")}|${initialNextCursor ?? ""}`;
+    if (key === lastSeedKeyRef.current) return;
+    lastSeedKeyRef.current = key;
     setConversations(initialConversations);
     setNextCursor(initialNextCursor);
-  }, [initialConversations, initialNextCursor]);
+  }, [teamId, initialConversations, initialNextCursor]);
 
   // loadMore is stable across renders — useCallback so the component can put
   // it in an effect dep array without re-running on every paint.

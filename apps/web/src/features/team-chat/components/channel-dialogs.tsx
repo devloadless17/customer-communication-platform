@@ -4,9 +4,11 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { toast } from "@/lib/toast";
 import {
   isValidChannelName,
   normalizeChannelName,
@@ -201,16 +203,27 @@ export function EditChannelDialog({
 
 export function useDeleteChannel() {
   const router = useRouter();
-  return async (channelId: string, fallbackHref: string) => {
-    if (!confirm("Delete this channel? All its messages will be lost.")) return;
+  const { confirm, confirmDialog } = useConfirm();
+  const deleteChannel = async (channelId: string, fallbackHref: string) => {
+    const ok = await confirm({
+      title: "Delete this channel?",
+      description: "All its messages will be lost. This can't be undone.",
+      confirmLabel: "Delete channel",
+      destructive: true,
+    });
+    if (!ok) return;
     const res = await fetchWithSessionGuard(`/api/team/channels/${channelId}`, {
       method: "DELETE",
     });
     if (res.ok) {
+      toast.success("Channel deleted");
       router.push(fallbackHref);
     } else {
       const json = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
-      alert(json.detail ?? json.error ?? "Failed to delete channel.");
+      toast.error("Couldn't delete channel", {
+        description: json.detail ?? json.error ?? `HTTP ${res.status}`,
+      });
     }
   };
+  return { deleteChannel, confirmDialog };
 }

@@ -13,6 +13,6 @@ export type CreateInviteInput = z.infer<typeof CreateInviteSchema>;
 export const AcceptInviteSchema = z.object({
   token: z.string().min(1, "token required"),
   name: z.string().trim().min(1, "name required").max(200),
-  password: z.string().min(12).max(200),
+  password: z.string().min(6).max(200),
 });
 export type AcceptInviteInput = z.infer<typeof AcceptInviteSchema>;

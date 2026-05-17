@@ -88,7 +88,17 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
   // worker if a stale waiting run woke into a tight loop.
   let executedThisPickup = 0;
 
-  while (currentStepId && stepLog.length < MAX_STEPS_PER_RUN && executedThisPickup < MAX_STEPS_PER_RUN) {
+  // For the global ceiling we count DISTINCT steps that reached a terminal
+  // outcome (success / waiting / permanently failed), not raw log length.
+  // Transient failures (BullMQ retry path) append a `failed` entry per
+  // attempt — without this filter, three retries of a single flapping
+  // step burn three slots against the 100-step cap and a long workflow
+  // hits the ceiling prematurely.
+  function progressCount(log: StepLogEntry[]): number {
+    return new Set(log.map((e) => e.stepId)).size;
+  }
+
+  while (currentStepId && progressCount(stepLog) < MAX_STEPS_PER_RUN && executedThisPickup < MAX_STEPS_PER_RUN) {
     const node = graph.nodes.find((n) => n.id === currentStepId);
     if (!node) {
       stepLog.push({
@@ -235,7 +245,7 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
   }
 
   // Loop guard hit — record + fail the run.
-  if (stepLog.length >= MAX_STEPS_PER_RUN) {
+  if (progressCount(stepLog) >= MAX_STEPS_PER_RUN) {
     await db.workflowRun.update({
       where: { id: run.id },
       data: {

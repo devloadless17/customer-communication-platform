@@ -217,9 +217,12 @@ export class MessagesService {
 
     // Bump conversation's lastMessageAt/preview for the next cold load.
     // Fire-and-forget — live clients already have it from the socket emit.
+    // CAS on lastMessageAt: { lte } so a slower-arriving older send can't
+    // overwrite a newer one's preview/timestamp (race observed in rapid
+    // out-of-order arrivals).
     void this.db.conversation
-      .update({
-        where: { id: conversationId },
+      .updateMany({
+        where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
         data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
       })
       .catch((err) =>
@@ -477,10 +480,12 @@ export class MessagesService {
     const createdId = created.id;
 
     // Conversation summary bump — fire-and-forget. The socket emit below
-    // already carries everything an active client needs.
+    // already carries everything an active client needs. CAS on
+    // lastMessageAt: { lte } so an out-of-order older send doesn't
+    // overwrite a newer one's summary.
     void this.db.conversation
-      .update({
-        where: { id: conversationId },
+      .updateMany({
+        where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
         data: { lastMessageAt: send.timestamp, lastMessagePreview: previewBody },
       })
       .catch((err) =>
@@ -592,9 +597,13 @@ export class MessagesService {
 
     // Source messages, team-scoped, oldest-first so order is preserved at
     // the destination. Drop failed rows (no real wamid / never delivered).
+    // `omit: rawPayload` because forward only needs body + media metadata;
+    // pulling the full Meta webhook payload (5-20 KB each) for N×M forward
+    // wastes a lot of wire bytes.
     const sourceRows = await this.db.message.findMany({
       where: { id: { in: messageIds }, teamId, status: { not: "failed" } },
       orderBy: { timestamp: "asc" },
+      omit: { rawPayload: true },
     });
     if (sourceRows.length === 0) {
       throw new BadRequestException({
@@ -852,8 +861,8 @@ export class MessagesService {
             }
 
             void this.db.conversation
-              .update({
-                where: { id: conversation.id },
+              .updateMany({
+                where: { id: conversation.id, lastMessageAt: { lte: send.timestamp } },
                 data: {
                   lastMessageAt: send.timestamp,
                   lastMessagePreview: previewBody,
@@ -941,8 +950,8 @@ export class MessagesService {
 
             const preview = body.slice(0, 200);
             void this.db.conversation
-              .update({
-                where: { id: conversation.id },
+              .updateMany({
+                where: { id: conversation.id, lastMessageAt: { lte: send.timestamp } },
                 data: {
                   lastMessageAt: send.timestamp,
                   lastMessagePreview: preview,

@@ -9,7 +9,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +562,13 @@ model Conversation {
   // (open / pending / closed) but doesn't help the unfiltered list — the
   // planner needs status to participate in WHERE for that one to be useful.
   @@index([teamId, lastMessageAt(sort: Desc), id(sort: Desc)])
+  // Per-recipient broadcast lookup + per-contact navigation: the broadcast
+  // runner does `findFirst({ where: { teamId, contactId } })` once per
+  // recipient, and contact-detail pages list a contact's conversations.
+  // Without this the planner falls back to the (teamId, status, ...) index
+  // and filters contactId in the heap — fine at <1k conversations per team,
+  // a seq-scan-per-recipient at 50k.
+  @@index([teamId, contactId])
 }
 
 model Message {
@@ -619,10 +625,10 @@ model Message {
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
-  // NOTE: a partial index on inbound-only messages also exists in the DB
-  // (see migration add_chat_perf_indexes). Prisma can't express partial
-  // indexes in `@@index`, so it's declared in raw SQL. It powers the
-  // "what was the contact's last inbound?" lookups (24h-window UI +
+  // NOTE: a partial index on inbound-only messages also exists in the DB —
+  // declared in raw SQL (see migration `20260517_perf_indexes`) because
+  // Prisma can't express `WHERE direction = 'in'` via `@@index`. It powers
+  // the "what was the contact's last inbound?" lookups (24h-window UI +
   // getConversationWithRefs.lastInboundAt) without scanning outbound rows.
 
   @@unique([teamId, provider, externalId])
@@ -1294,3 +1300,23 @@ model TeamChannelReadReceipt {
   @@unique([userId, channelId])
   @@index([channelId])
 }
+
+// Persistent login-attempt counters. Replaces the in-process Map in
+// apps/web/src/lib/rate-limit.ts so brute-force history survives process
+// restarts (deploys, OOM, systemd Restart=on-failure). Keyed by lowercased
+// email — login attempts happen before we know the team, so this lives at
+// the platform layer, not team-scoped.
+//
+// Lifecycle: incremented on failed login, cleared (deleted) on success.
+// `lockedUntil` is set when failedCount crosses the threshold; the gate
+// reads `lockedUntil > now()` to refuse without consulting the counter,
+// so a successful guess after lockout doesn't quietly let the attacker in.
+model LoginAttempt {
+  email        String   @id
+  failedCount  Int      @default(0)
+  lockedUntil  DateTime?
+  lastFailedAt DateTime @default(now())
+
+  @@index([lockedUntil])
+}
+

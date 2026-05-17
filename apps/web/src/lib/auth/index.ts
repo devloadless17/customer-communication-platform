@@ -4,7 +4,7 @@ import { headers } from "next/headers";
 
 import { db } from "@/lib/db";
 import { auth } from "@/lib/auth/better-auth";
-import { clearFailures, isLockedOut, recordFailure } from "@/lib/rate-limit";
+import { clearFailures, isLockedOut, recordFailure } from "@/lib/auth/lockout";
 
 /**
  * Server-side auth surface. Wraps Better Auth so the rest of the app keeps
@@ -17,11 +17,6 @@ import { clearFailures, isLockedOut, recordFailure } from "@/lib/rate-limit";
  * check + every signout going through one bookkeeping point. A future swap
  * to magic-link / SSO / SAML lands here, not scattered across actions.
  */
-
-/** Lock an account after this many failed password attempts within the window. */
-const LOCKOUT_LIMIT = 5;
-/** Lockout window — failed attempts within this duration count toward the limit. */
-const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
 
 export interface SignInResult {
   ok: boolean;
@@ -54,8 +49,7 @@ export async function signInWithCredentials(
   const email = rawEmail.trim().toLowerCase();
   if (!email || !password) return { ok: false, error: "Invalid email or password." };
 
-  const lockoutKey = `auth:account:${email}`;
-  if (isLockedOut(lockoutKey, LOCKOUT_LIMIT)) {
+  if (await isLockedOut(email)) {
     // Don't surface "locked out" — return the same message as bad-password
     // so an attacker can't tell whether they tripped the limit or just got
     // a wrong password.
@@ -67,7 +61,7 @@ export async function signInWithCredentials(
     select: { id: true, deactivatedAt: true },
   });
   if (!user) {
-    recordFailure(lockoutKey, LOCKOUT_WINDOW_MS);
+    await recordFailure(email);
     return { ok: false, error: "Invalid email or password." };
   }
 
@@ -86,11 +80,11 @@ export async function signInWithCredentials(
     // Better Auth throws APIError on bad credentials. Treat any throw as
     // "wrong password" — the framework already returns generic errors so
     // we don't leak which factor failed.
-    recordFailure(lockoutKey, LOCKOUT_WINDOW_MS);
+    await recordFailure(email);
     return { ok: false, error: "Invalid email or password." };
   }
 
-  clearFailures(lockoutKey);
+  await clearFailures(email);
   return { ok: true };
 }
 

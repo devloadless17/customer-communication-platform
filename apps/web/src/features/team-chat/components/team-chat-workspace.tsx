@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { usePresence } from "@/hooks/use-presence";
 import { useTeamChannelEvents } from "@/features/team-chat/hooks/use-team-channel-events";
 import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
+import { toast } from "@/lib/toast";
 import { canPinMessage } from "@ccp/shared/team-chat/permissions";
 import type {
   ChannelPinDto,
@@ -75,7 +76,7 @@ export function TeamChatWorkspace({
   const [thread, setThread] = useState<TeamChannelMessageDto | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
-  const deleteChannel = useDeleteChannel();
+  const { deleteChannel, confirmDialog: deleteChannelDialog } = useDeleteChannel();
 
   const namesById = useMemo(
     () => new Map(teamMembers.map((u) => [u.id, u.name])),
@@ -174,12 +175,14 @@ export function TeamChatWorkspace({
         <EditChannelDialog
           channel={initialChannel}
           onClose={() => setShowEdit(false)}
-          onUpdated={() => {
+          onUpdated={(ch) => {
             setShowEdit(false);
+            toast.success(`Saved #${ch.name}`);
             router.refresh();
           }}
         />
       )}
+      {deleteChannelDialog}
     </div>
   );
 }

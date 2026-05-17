@@ -19,9 +19,9 @@ export function verifyPassword(plain: string, hash: string): Promise<boolean> {
 /**
  * Minimum password length. Modern guidance (NIST SP 800-63B) favours length
  * over arbitrary complexity rules; combined with the breach check below,
- * 12 chars without forced symbol/digit classes is the sweet spot.
+ * this is the floor we enforce. Bump back up if compliance ever requires it.
  */
-export const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 6;
 
 /**
  * Validate a candidate password against the local policy. Returns an error

@@ -291,15 +291,22 @@ export class RealtimeGateway
     }
   }
 
-  // Thread side-panel rooms — no team-ownership check here; the channel-room
-  // subscribe gates the parent, and emitters into this room already verify
-  // ownership at write time. Keeping this cheap (subscribed often, drops
-  // unauthorized clients silently since no events ever target their room).
+  // Thread side-panel rooms — verify ownership of the root message before
+  // joining. Originally relied on "no emitter targets a stranger's thread
+  // room" as the gate, but any future code path that emits to
+  // channelThreadRoom(id) without re-checking team would leak across
+  // tenants. Cheap DB lookup (PK + teamId) once per subscribe.
   @SubscribeMessage("subscribe:channel-thread")
-  onSubscribeChannelThread(
+  async onSubscribeChannelThread(
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { rootMessageId: string },
-  ): void {
+  ): Promise<void> {
+    const teamId = client.data.teamId as string;
+    const root = await this.db.teamChannelMessage.findFirst({
+      where: { id: body.rootMessageId, teamId },
+      select: { id: true },
+    });
+    if (!root) return;
     client.join(channelThreadRoom(body.rootMessageId));
   }
 

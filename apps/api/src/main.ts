@@ -9,7 +9,6 @@ import { NestExpressApplication } from "@nestjs/platform-express";
 import { validateEnv } from "@ccp/config";
 
 import { AppModule } from "./app.module";
-import { PrismaExceptionFilter } from "./common/prisma-exception.filter";
 import { WsAdapter } from "./realtime/ws-adapter";
 
 /**
@@ -88,11 +87,9 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  // Safety net for Prisma errors that escape a service's explicit catch.
-  // P2025 → 404, P2002/P2003/P2014 → 409, P2024 → 503; rest stay 500. The
-  // filter logs full error context (including Prisma `meta`) server-side
-  // while keeping response bodies free of potentially-sensitive details.
-  app.useGlobalFilters(new PrismaExceptionFilter());
+  // PrismaExceptionFilter is registered via APP_FILTER in CommonModule
+  // (P2025 → 404, P2002/P2003/P2014 → 409, P2024 → 503; rest stay 500) so
+  // it's visible to DI and to test bootstraps that build via Test.createTestingModule.
 
   // CORS: in dev the browser hits Next.js on :3000 and NestJS on :4000 from
   // different origins; in prod Caddy makes them same-origin and CORS is a

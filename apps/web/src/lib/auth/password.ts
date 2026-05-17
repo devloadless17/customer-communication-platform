@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 
 import bcrypt from "bcryptjs";
 
+import { MIN_PASSWORD_LENGTH } from "./password-policy";
+
 // 10 rounds: ~100ms on dev hardware. Higher hardens against offline attacks
 // at the cost of login latency; 10 is the standard sweet spot for B2B apps.
 const COST = 10;
@@ -17,11 +19,11 @@ export function verifyPassword(plain: string, hash: string): Promise<boolean> {
 }
 
 /**
- * Minimum password length. Modern guidance (NIST SP 800-63B) favours length
- * over arbitrary complexity rules; combined with the breach check below,
- * 12 chars without forced symbol/digit classes is the sweet spot.
+ * Re-export the policy constant so server code keeps a single import path.
+ * The source of truth lives in `password-policy.ts` (no `server-only`) so
+ * client forms can render the same minLength the server enforces.
  */
-export const MIN_PASSWORD_LENGTH = 12;
+export { MIN_PASSWORD_LENGTH };
 
 /**
  * Validate a candidate password against the local policy. Returns an error

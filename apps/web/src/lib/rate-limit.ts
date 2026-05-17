@@ -1,13 +1,17 @@
 /**
- * Minimal in-process fixed-window rate limiter.
+ * Minimal in-process fixed-window rate limiter for IP-based gates.
  *
  * Keyed by an arbitrary string (we use `route:ip`). Single instance only —
  * the counter lives in this process's memory, which is correct for the MVP's
  * one-VPS deployment. When a second app instance shows up this moves to Redis
  * alongside the Socket.io adapter (the planned trigger for adding Redis).
  *
- * Deliberately not `server-only`: imported from middleware, which runs in the
+ * Deliberately not `server-only`: imported from proxy.ts, which runs in the
  * Edge runtime where module-level state still persists per isolate.
+ *
+ * Account-level lockout used to live here too; it moved to
+ * `lib/auth/lockout.ts` (DB-backed, server-only) so it survives process
+ * restarts. This file is now strictly IP rate limiting.
  */
 
 interface Bucket {
@@ -38,11 +42,9 @@ export interface RateLimitResult {
  * sliding — good enough to blunt credential stuffing without the bookkeeping
  * of a token bucket.
  *
- * Counts EVERY call, so it's right for things like "max N requests per
- * IP". For "max N FAILED attempts on this account" use the lockout pair
- * (`isLockedOut` + `recordFailure` + `clearFailures`) instead — those only
- * count failures, so a legit user with the wrong password once doesn't lock
- * themselves out by retrying successfully.
+ * Counts EVERY call, so it's right for things like "max N requests per IP".
+ * For per-account "max N FAILED attempts" semantics use the DB-backed
+ * lockout in `lib/auth/lockout.ts`.
  */
 export function rateLimit(key: string, limit: number, windowMs: number): RateLimitResult {
   const now = Date.now();
@@ -59,36 +61,4 @@ export function rateLimit(key: string, limit: number, windowMs: number): RateLim
     return { ok: false, retryAfter: Math.ceil((existing.resetAt - now) / 1000) };
   }
   return { ok: true, retryAfter: 0 };
-}
-
-/**
- * Account-level lockout. Used by the Credentials authorize() to block further
- * password tries after N failures on the same email — defends against
- * distributed credential stuffing (many IPs, one account) that the IP-based
- * limiter in middleware can't catch.
- *
- * Pattern:
- *   if (isLockedOut(key, 5)) return null;
- *   const ok = await verifyPassword(...);
- *   if (!ok) { recordFailure(key, 15 * 60_000); return null; }
- *   clearFailures(key);
- */
-export function isLockedOut(key: string, limit: number): boolean {
-  const bucket = buckets.get(key);
-  if (!bucket || bucket.resetAt <= Date.now()) return false;
-  return bucket.count >= limit;
-}
-
-export function recordFailure(key: string, windowMs: number): void {
-  const now = Date.now();
-  const existing = buckets.get(key);
-  if (!existing || existing.resetAt <= now) {
-    buckets.set(key, { count: 1, resetAt: now + windowMs });
-    return;
-  }
-  existing.count += 1;
-}
-
-export function clearFailures(key: string): void {
-  buckets.delete(key);
 }

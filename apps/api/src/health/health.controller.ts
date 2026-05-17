@@ -1,8 +1,7 @@
-import { Controller, Get, Inject } from "@nestjs/common";
-import type { Redis } from "ioredis";
+import { Controller, Get } from "@nestjs/common";
 
-import { BULLMQ_REDIS } from "../bullmq/bullmq.module";
 import { DbService } from "../db/db.service";
+import { getRedisConnection } from "../lib/workflows/queue";
 
 interface HealthReport {
   ok: boolean;
@@ -22,10 +21,7 @@ interface HealthReport {
  */
 @Controller("health")
 export class HealthController {
-  constructor(
-    private readonly db: DbService,
-    @Inject(BULLMQ_REDIS) private readonly redis: Redis,
-  ) {}
+  constructor(private readonly db: DbService) {}
 
   @Get()
   async check(): Promise<HealthReport> {
@@ -49,7 +45,7 @@ export class HealthController {
 
   private async pingRedis(): Promise<boolean> {
     try {
-      const reply = await this.redis.ping();
+      const reply = await getRedisConnection().ping();
       return reply === "PONG";
     } catch {
       return false;

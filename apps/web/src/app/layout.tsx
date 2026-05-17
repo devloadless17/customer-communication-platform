@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
+import { headers } from "next/headers";
 
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TimezoneProvider } from "@/providers/tz-provider";
+import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getServerTimezone } from "@/lib/server-tz";
 
@@ -47,6 +49,11 @@ export default async function RootLayout({
 }) {
   const tz = await getServerTimezone();
   const serverNow = Date.now();
+  // CSP nonce is stamped onto the request by src/proxy.ts. Pass it to
+  // next-themes so the inline FOUC-prevention script executes under the
+  // page's `script-src 'nonce-...'`. Missing nonce (e.g. during static
+  // prerendering with no proxy on the path) falls through as undefined.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <html
       lang="en"
@@ -54,9 +61,16 @@ export default async function RootLayout({
       className={`${inter.variable} ${jetbrainsMono.variable}`}
     >
       <body className="font-sans">
-        <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="light"
+          enableSystem
+          disableTransitionOnChange
+          nonce={nonce}
+        >
           <TimezoneProvider tz={tz} serverNow={serverNow}>
             <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
+            <Toaster />
           </TimezoneProvider>
         </ThemeProvider>
       </body>

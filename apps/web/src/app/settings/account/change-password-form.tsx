@@ -5,6 +5,7 @@ import { Loader2, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 
 export function ChangePasswordForm() {
   const [pending, startTransition] = useTransition();
@@ -50,9 +51,9 @@ export function ChangePasswordForm() {
         <Input
           name="newPassword"
           type="password"
-          placeholder="New password (8+ chars)"
+          placeholder={`New password (${MIN_PASSWORD_LENGTH}+ chars)`}
           autoComplete="new-password"
-          minLength={8}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
       </div>

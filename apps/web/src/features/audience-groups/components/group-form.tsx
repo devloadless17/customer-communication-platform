@@ -23,6 +23,7 @@ import { ContactMultiSelectField } from "@/features/contacts/components/contact-
 import { TagFilterControl } from "@/features/contacts/components/contact-browser";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/lib/toast";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
@@ -158,6 +159,7 @@ export function GroupForm({
         );
         return;
       }
+      toast.success(initial ? `Saved "${name.trim()}"` : `Created "${name.trim()}"`);
       router.push(redirectTo);
       router.refresh();
     } finally {
@@ -202,6 +204,7 @@ export function GroupForm({
         setError(data.error ?? `HTTP ${res.status}`);
         return;
       }
+      toast.success(`Deleted "${initial.name}"`);
       router.push("/broadcasts/groups");
       router.refresh();
     } finally {

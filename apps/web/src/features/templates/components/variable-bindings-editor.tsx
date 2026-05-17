@@ -211,7 +211,7 @@ function BindingRow({
           value={binding.label}
           onChange={(e) => onLabelChange(e.target.value)}
           placeholder="label (e.g. first_name)"
-          className="h-7 max-w-[180px] text-[12px]"
+          className="h-7 max-w-45 text-[12px]"
         />
       </div>
 

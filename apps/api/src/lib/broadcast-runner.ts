@@ -102,19 +102,12 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
 }
 
 async function runBroadcast(broadcastId: string): Promise<void> {
-  // Read the broadcast (without claiming yet) so we can validate the template
-  // shape before flipping it to `running`. A validation failure should leave
-  // the row as `queued` so the user can edit + retry.
+  // Read the broadcast metadata WITHOUT loading recipients — for a 10k
+  // broadcast the include + contact + customFields JSONB used to land
+  // ~20MB on the heap before the cap check even ran. Recipients are
+  // page-loaded below via cursor instead.
   const broadcast = await db.broadcast.findUnique({
     where: { id: broadcastId },
-    include: {
-      recipients: {
-        where: { status: "queued" },
-        // Stable order so re-runs would process consistently. Mostly cosmetic.
-        orderBy: { id: "asc" },
-        include: { contact: true },
-      },
-    },
   });
 
   if (!broadcast) {
@@ -128,10 +121,15 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
-  if (broadcast.recipients.length > MAX_RECIPIENTS_IN_PROCESS) {
+  // Cap-check via count — bound the broadcast's blast radius before any
+  // recipient row is loaded. count() is cheap (index scan).
+  const queuedCount = await db.broadcastRecipient.count({
+    where: { broadcastId: broadcast.id, status: "queued" },
+  });
+  if (queuedCount > MAX_RECIPIENTS_IN_PROCESS) {
     await fail(
       broadcast.id,
-      `Broadcast too large for in-process send: ${broadcast.recipients.length} recipients (cap ${MAX_RECIPIENTS_IN_PROCESS}). Split the audience or move to a worker.`,
+      `Broadcast too large for in-process send: ${queuedCount} recipients (cap ${MAX_RECIPIENTS_IN_PROCESS}). Split the audience or move to a worker.`,
     );
     return;
   }
@@ -190,22 +188,62 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     status: "running",
   });
 
-  // Worker-pool: SEND_CONCURRENCY workers pull from one shared queue. Each
-  // worker waits SEND_GAP_MS after its own send before grabbing the next
-  // recipient, so global throughput is bounded by (workers ÷ gap) and Meta
-  // never sees a thundering herd from a single broadcast.
+  // Worker-pool: SEND_CONCURRENCY workers pull from a single in-memory
+  // queue that's continuously refilled from a paginated DB cursor. Page
+  // size is small (PAGE_SIZE) so peak heap stays bounded even on a 10k
+  // broadcast — only ~PAGE_SIZE * 2 contact rows live in memory at any
+  // moment (current page + a refill prefetch). Each worker waits
+  // SEND_GAP_MS after its own send before grabbing the next, so global
+  // throughput is bounded by (workers ÷ gap) and Meta never sees a
+  // thundering herd from a single broadcast.
   //
   // Counter bumps inside processOneRecipient fire-and-forget so the DB
   // roundtrip doesn't serialize with the next recipient's send. We track
   // their promises in `pendingBumps` so we can drain them before flipping
   // the broadcast to `completed` — otherwise a UI watching for the status
   // change can briefly observe sentCount + failedCount < totalCount.
+  const PAGE_SIZE = 100;
+  const broadcastId_ = broadcast.id; // capture for the refill closure (TS can't
+  // narrow `broadcast` through the closure boundary).
+  type Recipient = Awaited<
+    ReturnType<typeof db.broadcastRecipient.findMany<{
+      where: { broadcastId: string; status: "queued" };
+      include: { contact: true };
+      orderBy: { id: "asc" };
+      take: typeof PAGE_SIZE;
+    }>>
+  >[number];
   const pendingBumps = new Set<Promise<unknown>>();
-  const queue = broadcast.recipients.slice();
+  const queue: Recipient[] = [];
+  let cursorId: string | undefined;
+  let exhausted = false;
+
+  async function refill(): Promise<void> {
+    if (exhausted) return;
+    const page = await db.broadcastRecipient.findMany({
+      where: { broadcastId: broadcastId_, status: "queued" },
+      include: { contact: true },
+      orderBy: { id: "asc" },
+      take: PAGE_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    });
+    if (page.length === 0) {
+      exhausted = true;
+      return;
+    }
+    cursorId = page[page.length - 1]!.id;
+    queue.push(...page);
+  }
+
+  await refill();
   const lanes = Math.min(SEND_CONCURRENCY, queue.length);
   await Promise.all(
     Array.from({ length: lanes }, async () => {
-      while (queue.length > 0) {
+      while (true) {
+        if (queue.length === 0) {
+          await refill();
+          if (queue.length === 0) return;
+        }
         const recipient = queue.shift();
         if (!recipient) return;
         await processOneRecipient(
@@ -228,6 +266,20 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // want to wait for resolution, not surface the errors twice.
   if (pendingBumps.size > 0) {
     await Promise.allSettled(pendingBumps);
+  }
+
+  // Flush any pending throttled progress emit + drop the throttle entry so
+  // the Map doesn't grow unbounded across many broadcasts. Without this the
+  // UI might miss the final progress emit (if the trailing timer hadn't
+  // fired by the time we mark completed).
+  const throttle = progressThrottles.get(broadcast.id);
+  if (throttle) {
+    if (throttle.pendingTimer) {
+      clearTimeout(throttle.pendingTimer);
+      throttle.pendingTimer = null;
+    }
+    emitProgress(broadcast.id, throttle.latest);
+    progressThrottles.delete(broadcast.id);
   }
 
   await db.broadcast.update({
@@ -424,8 +476,11 @@ async function processOneRecipient(
         timestamp: send.timestamp,
       });
 
-      await db.conversation.update({
-        where: { id: conversationId },
+      // CAS on lastMessageAt — a broadcast running concurrent with an
+      // inbound from the same contact must not overwrite the inbound's
+      // newer summary with the broadcast's outbound timestamp.
+      await db.conversation.updateMany({
+        where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
         data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
       });
 
@@ -469,6 +524,65 @@ async function markRecipientFailed(recipientId: string, message: string): Promis
   });
 }
 
+/**
+ * Per-broadcast throttle state. We emit `broadcast.progress` at most once
+ * every PROGRESS_EMIT_INTERVAL_MS so a 25 msg/sec broadcast doesn't spam
+ * 25 socket emits/sec at every team-watching tab. The DB increment is
+ * NOT throttled — counters stay authoritative; only the live emit is
+ * coalesced. The trailing emit fires with the latest counts so the UI
+ * always converges to the true final state.
+ */
+const PROGRESS_EMIT_INTERVAL_MS = 500;
+interface ProgressThrottle {
+  lastEmitAt: number;
+  pendingTimer: NodeJS.Timeout | null;
+  latest: { sentCount: number; failedCount: number; totalCount: number; teamId: string };
+}
+const progressThrottles = new Map<string, ProgressThrottle>();
+
+function emitProgress(broadcastId: string, state: ProgressThrottle["latest"]): void {
+  void publish({
+    type: "broadcast.progress",
+    teamId: state.teamId,
+    broadcastId,
+    sentCount: state.sentCount,
+    failedCount: state.failedCount,
+    totalCount: state.totalCount,
+  });
+}
+
+function scheduleProgress(
+  broadcastId: string,
+  state: ProgressThrottle["latest"],
+): void {
+  const now = Date.now();
+  const existing = progressThrottles.get(broadcastId);
+  if (!existing) {
+    progressThrottles.set(broadcastId, { lastEmitAt: now, pendingTimer: null, latest: state });
+    emitProgress(broadcastId, state);
+    return;
+  }
+  existing.latest = state;
+  if (now - existing.lastEmitAt >= PROGRESS_EMIT_INTERVAL_MS) {
+    existing.lastEmitAt = now;
+    if (existing.pendingTimer) {
+      clearTimeout(existing.pendingTimer);
+      existing.pendingTimer = null;
+    }
+    emitProgress(broadcastId, state);
+    return;
+  }
+  if (existing.pendingTimer) return; // trailing emit already scheduled
+  const delay = PROGRESS_EMIT_INTERVAL_MS - (now - existing.lastEmitAt);
+  existing.pendingTimer = setTimeout(() => {
+    const cur = progressThrottles.get(broadcastId);
+    if (!cur) return;
+    cur.lastEmitAt = Date.now();
+    cur.pendingTimer = null;
+    emitProgress(broadcastId, cur.latest);
+  }, delay);
+}
+
 async function bumpCounters(
   broadcastId: string,
   teamId: string,
@@ -482,13 +596,10 @@ async function bumpCounters(
     },
     select: { sentCount: true, failedCount: true, totalCount: true },
   });
-  // Live progress: each step publishes the new counters so a detail page
-  // that's watching this broadcast doesn't need to poll. The fire-and-forget
-  // wrapper above means this `await` doesn't serialize the next send.
-  await publish({
-    type: "broadcast.progress",
+  // Throttled emit (see scheduleProgress). DB write is authoritative and
+  // unthrottled; the wire-level emit is coalesced.
+  scheduleProgress(broadcastId, {
     teamId,
-    broadcastId,
     sentCount: updated.sentCount,
     failedCount: updated.failedCount,
     totalCount: updated.totalCount,
@@ -526,6 +637,13 @@ function bumpCountersFireAndForget(
 }
 
 async function fail(broadcastId: string, message: string): Promise<void> {
+  // Drop any pending throttled progress emit — the broadcast is failing,
+  // there's no further state to converge to and we'd rather not deliver
+  // a stale "progress" after the "failed" status.
+  const throttle = progressThrottles.get(broadcastId);
+  if (throttle?.pendingTimer) clearTimeout(throttle.pendingTimer);
+  progressThrottles.delete(broadcastId);
+
   const row = await db.broadcast.update({
     where: { id: broadcastId },
     data: {

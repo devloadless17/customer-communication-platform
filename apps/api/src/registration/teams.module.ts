@@ -1,12 +1,18 @@
 import { Module } from "@nestjs/common";
 
 import { RegisterController } from "./register.controller";
-import { TeamsController } from "./teams.controller";
-import { TeamsService } from "./teams.service";
 
+/**
+ * Registration surface — `POST /api/register` only.
+ *
+ * The old `POST /api/teams` controller + TeamsService were removed: they
+ * were internet-reachable, unauthenticated, and dead code (the register
+ * controller already creates Team + User + Account + initial stages
+ * atomically in one transaction). The module name stays "Teams" to avoid
+ * an app-wide rename churn; consider renaming to `RegistrationModule` in
+ * a follow-up sweep.
+ */
 @Module({
-  controllers: [TeamsController, RegisterController],
-  providers: [TeamsService],
-  exports: [TeamsService],
+  controllers: [RegisterController],
 })
 export class TeamsModule {}

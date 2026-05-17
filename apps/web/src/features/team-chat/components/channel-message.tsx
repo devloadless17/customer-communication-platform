@@ -15,6 +15,7 @@ import {
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,6 +26,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { toast } from "@/lib/toast";
 import { canEditMessage } from "@ccp/shared/team-chat/permissions";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import { LocalTime } from "@/components/local-time";
@@ -75,6 +77,7 @@ function ChannelMessageImpl({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.body);
   const [busy, setBusy] = useState(false);
+  const { confirm, confirmDialog } = useConfirm();
 
   const canEdit = canEditMessage(message.authorUserId, currentUser.id, message.createdAt);
   const isOwn = message.authorUserId === currentUser.id;
@@ -106,13 +109,24 @@ function ChannelMessageImpl({
   };
 
   const submitDelete = async () => {
-    if (!confirm("Delete this message?")) return;
+    const ok = await confirm({
+      title: "Delete this message?",
+      description: "This can't be undone. Teammates will stop seeing it on their next refresh.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setBusy(true);
     try {
-      await fetchWithSessionGuard(
+      const res = await fetchWithSessionGuard(
         `/api/team/channels/${channelId}/messages/${message.id}`,
         { method: "DELETE" },
       );
+      if (!res.ok) {
+        toast.error("Couldn't delete message", { description: `HTTP ${res.status}` });
+      }
+    } catch {
+      toast.error("Couldn't delete message", { description: "Network error" });
     } finally {
       setBusy(false);
     }
@@ -354,6 +368,7 @@ function ChannelMessageImpl({
           </DropdownMenu>
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

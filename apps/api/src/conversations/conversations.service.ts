@@ -184,8 +184,10 @@ export class ConversationsService {
     const { assignedUserId } = input;
 
     if (assignedUserId !== null) {
+      // Reject deactivated assignees — a soft-deleted agent shouldn't be
+      // assigned new work even if their User row still exists for history.
       const member = await this.db.user.findFirst({
-        where: { id: assignedUserId, teamId },
+        where: { id: assignedUserId, teamId, deactivatedAt: null },
         select: { id: true },
       });
       if (!member) throw new BadRequestException({ error: "user not in team" });

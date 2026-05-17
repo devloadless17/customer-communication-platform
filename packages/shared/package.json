@@ -9,6 +9,7 @@
     "./dtos": "./src/dtos.ts",
     "./socket/events": "./src/socket/events.ts",
     "./auth/permissions": "./src/auth/permissions.ts",
+    "./auth/better-auth-config": "./src/auth/better-auth-config.ts",
     "./providers/types": "./src/providers/types.ts",
     "./team-chat/types": "./src/team-chat/types.ts",
     "./team-chat/permissions": "./src/team-chat/permissions.ts",
@@ -24,14 +25,15 @@
     "./utils/window": "./src/utils/window.ts"
   },
   "dependencies": {
+    "better-auth": "^1.6.11",
     "clsx": "^2.1.1",
     "libphonenumber-js": "^1.12.43",
-    "tailwind-merge": "^2.5.5",
-    "zod": "^3.24.1"
+    "tailwind-merge": "^3.6.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@ccp/tsconfig": "workspace:*",
-    "@prisma/client": "^6.2.1",
-    "typescript": "^5.7.2"
+    "@prisma/client": "^7.8.0",
+    "typescript": "^6.0.3"
   }
 }

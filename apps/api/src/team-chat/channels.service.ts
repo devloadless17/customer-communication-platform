@@ -328,12 +328,18 @@ export class ChannelsService {
     const validMentionIds = await this.validateMentions(teamId, input.body);
     const editedAt = new Date();
 
+    // Defense-in-depth: teamId is added to every mutate WHERE even though
+    // the `findFirst` above already verified ownership. updateMany/deleteMany
+    // because `id` alone is the unique key; compound predicates on
+    // .update/.delete need a compound unique.
     await this.db.$transaction([
-      this.db.teamChannelMessage.update({
-        where: { id: messageId },
+      this.db.teamChannelMessage.updateMany({
+        where: { id: messageId, teamId },
         data: { body: input.body, editedAt },
       }),
-      this.db.teamChannelMention.deleteMany({ where: { messageId } }),
+      this.db.teamChannelMention.deleteMany({
+        where: { messageId, message: { teamId } },
+      }),
       ...(validMentionIds.length > 0
         ? [
             this.db.teamChannelMention.createMany({
@@ -394,13 +400,18 @@ export class ChannelsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
-    await this.db.teamChannelMessage.delete({ where: { id: messageId } });
+    // Defense-in-depth: teamId in every mutate WHERE even though the
+    // findFirst above already verified ownership. deleteMany/updateMany
+    // because id alone is the unique key.
+    await this.db.teamChannelMessage.deleteMany({
+      where: { id: messageId, teamId },
+    });
 
     if (existing.threadRootId) {
       // Reply delete → decrement root's counter so the "X replies" pill stays honest.
       await this.db.teamChannelMessage
-        .update({
-          where: { id: existing.threadRootId },
+        .updateMany({
+          where: { id: existing.threadRootId, teamId },
           data: { threadReplyCount: { decrement: 1 } },
         })
         .catch((err) =>
@@ -409,12 +420,12 @@ export class ChannelsService {
     } else {
       // Top-level delete → refresh channel preview to whatever's now latest.
       const latest = await this.db.teamChannelMessage.findFirst({
-        where: { channelId, threadRootId: null },
+        where: { channelId, teamId, threadRootId: null },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { body: true, mediaKind: true, createdAt: true },
       });
-      await this.db.teamChannel.update({
-        where: { id: channelId },
+      await this.db.teamChannel.updateMany({
+        where: { id: channelId, teamId },
         data: latest
           ? {
               lastMessageAt: latest.createdAt,
@@ -568,8 +579,13 @@ export class ChannelsService {
     const parsed = parseMentions(body);
     const ids = Array.from(new Set(parsed.map((m) => m.userId)));
     if (ids.length === 0) return [];
+    // Drop deactivated members — they shouldn't receive a new mention row
+    // (no notification, no unread bump) even if their User row exists for
+    // history. Rendered messages still show their @handle as a static
+    // span via the mention parser; only the side-effect-y mention rows
+    // get filtered out here.
     const members = await this.db.user.findMany({
-      where: { teamId, id: { in: ids } },
+      where: { teamId, id: { in: ids }, deactivatedAt: null },
       select: { id: true },
     });
     return members.map((u) => u.id);

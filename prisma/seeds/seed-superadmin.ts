@@ -1,11 +1,14 @@
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { Pool } from "pg";
 
 const EMAIL = "ali@loadless.ai";
 const PASSWORD = "loadless";
 const NAME = "Ali";
 
-const db = new PrismaClient();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const db = new PrismaClient({ adapter: new PrismaPg(pool) });
 
 async function main() {
   const team = await db.team.upsert({
@@ -52,9 +55,13 @@ async function main() {
 }
 
 main()
-  .then(() => db.$disconnect())
+  .then(async () => {
+    await db.$disconnect();
+    await pool.end();
+  })
   .catch(async (err) => {
     console.error(err);
     await db.$disconnect();
+    await pool.end();
     process.exit(1);
   });

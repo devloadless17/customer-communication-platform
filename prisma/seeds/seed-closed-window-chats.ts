@@ -13,9 +13,12 @@
  * for the same team just refreshes timestamps.
  */
 
+import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { Pool } from "pg";
 
-const db = new PrismaClient();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const db = new PrismaClient({ adapter: new PrismaPg(pool) });
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -214,9 +217,11 @@ async function main() {
 main()
   .then(async () => {
     await db.$disconnect();
+    await pool.end();
   })
   .catch(async (err) => {
     console.error(err);
     await db.$disconnect();
+    await pool.end();
     process.exit(1);
   });

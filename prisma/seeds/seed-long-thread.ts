@@ -11,9 +11,12 @@
  * re-running just refreshes content without duplicating.
  */
 
+import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { Pool } from "pg";
 
-const db = new PrismaClient();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const db = new PrismaClient({ adapter: new PrismaPg(pool) });
 
 const COUNT = (() => {
   const arg = process.argv[2];
@@ -138,9 +141,11 @@ async function main() {
 main()
   .then(async () => {
     await db.$disconnect();
+    await pool.end();
   })
   .catch(async (err) => {
     console.error(err);
     await db.$disconnect();
+    await pool.end();
     process.exit(1);
   });

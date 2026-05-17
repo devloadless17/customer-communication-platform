@@ -1,14 +1,17 @@
 import { Module } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
+
+import { PrismaExceptionFilter } from "./prisma-exception.filter";
 
 /**
- * Cross-cutting utilities. Intentionally light — most of what feature
- * modules need is the ZodValidationPipe, which is instantiated per-route
- * with a schema rather than injected, so there's nothing to provide here
- * yet. The module exists so we have one place to add app-wide interceptors
- * (timing, error normalization) when needed.
+ * Cross-cutting utilities. The Prisma exception filter is registered via
+ * `APP_FILTER` (not `app.useGlobalFilters` in main.ts) so DI sees it —
+ * Test.createTestingModule(...) builds in tests would otherwise miss it.
+ *
+ * `ZodValidationPipe` stays per-route (it's instantiated with a schema, not
+ * injected), so it has no entry here.
  */
 @Module({
-  providers: [],
-  exports: [],
+  providers: [{ provide: APP_FILTER, useClass: PrismaExceptionFilter }],
 })
 export class CommonModule {}

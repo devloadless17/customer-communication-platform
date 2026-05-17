@@ -42,12 +42,12 @@ services:
 
   app:
     # Prod pulls :latest-web; `docker compose up --build` builds locally with
-    # the same tag. The `web` target in the Dockerfile carries the Next.js
-    # build output + the `next start` entrypoint.
+    # the same tag. apps/web/Dockerfile carries the Next.js build output +
+    # the `next start` entrypoint.
     image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-web
     build:
       context: .
-      target: web
+      dockerfile: apps/web/Dockerfile
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
@@ -99,15 +99,16 @@ services:
   # routes `/api/*`, `/socket.io/*`, `/webhooks/*` here; `/`, `/_next/*`,
   # `/api/auth/*` go to `app`.
   #
-  # Different target of the same Dockerfile — every layer up through the
-  # builder stage is shared with `app`, so the second image only adds the
-  # alternate entrypoint. Owns: REST, Socket.io, Meta webhooks, BullMQ
-  # workers, audit/analytics event subscribers, workflow dispatcher.
+  # Separate Dockerfile from `app` (apps/api/Dockerfile vs apps/web/
+  # Dockerfile) so CI builds both images in parallel and the api image
+  # doesn't ship the Next.js bundle it never runs. Owns: REST, Socket.io,
+  # Meta webhooks, BullMQ workers, audit/analytics event subscribers,
+  # workflow dispatcher.
   api:
     image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-api
     build:
       context: .
-      target: api
+      dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
@@ -143,7 +144,6 @@ services:
       # post-Phase-5 cleanup).
       RUN_WORKER_INLINE: ${API_RUN_WORKER_INLINE:-1}
       WORKFLOW_WORKER_CONCURRENCY: ${WORKFLOW_WORKER_CONCURRENCY:-5}
-      AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
     ports:
       # Loopback-only — Caddy is the public ingress (same posture as `app`).
       - "127.0.0.1:${API_PORT:-4000}:4000"

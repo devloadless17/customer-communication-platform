@@ -15,7 +15,7 @@ import { DbService } from "../db/db.service";
  * runs Better Auth's signInEmail() to set the session cookie.
  *
  * No SessionGuard — the visitor doesn't have a session yet by definition.
- * Password policy is enforced via zod's min(12) plus a HIBP breach lookup
+ * Password policy is enforced via zod's min() plus a HIBP breach lookup
  * before we ever touch the DB.
  *
  * Mirrors the password hashing strategy used by acceptInvite (bcryptjs cost
@@ -26,7 +26,7 @@ const RegisterSchema = z.object({
   orgName: z.string().trim().min(1).max(200),
   name: z.string().trim().min(1).max(200),
   email: z.string().trim().toLowerCase().email(),
-  password: z.string().min(12).max(200),
+  password: z.string().min(6).max(200),
 });
 type RegisterInput = z.infer<typeof RegisterSchema>;
 

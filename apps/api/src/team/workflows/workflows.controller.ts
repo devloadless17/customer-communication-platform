@@ -54,6 +54,13 @@ export class WorkflowsController {
   @Post()
   @RequireRole("admin")
   async create(@CurrentSession() session: ApiSession, @Body() body: unknown) {
+    // Body is intentionally `unknown` — the workflow document is too
+    // recursive (nodes / edges / per-step config) to express cleanly in
+    // Zod here. parseWorkflowBody in lib/workflows/parse.ts owns the deep
+    // validation and the service throws BadRequestException with
+    // `{ error, details, stepErrors }`. Note: the error envelope differs
+    // from zBody's `{ error, issues }` — clients of this endpoint must
+    // read `details` rather than `issues`.
     return this.workflows.create(session.teamId, body);
   }
 
@@ -143,6 +150,8 @@ export class WorkflowsController {
     @Param("id") id: string,
     @Body() body: unknown,
   ) {
+    // Same `unknown` rationale as create() above — parseWorkflowBody owns
+    // the deep validation; errors come back as `{ details, stepErrors }`.
     return this.workflows.update(session.teamId, id, body);
   }
 

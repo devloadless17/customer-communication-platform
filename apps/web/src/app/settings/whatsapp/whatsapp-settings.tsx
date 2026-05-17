@@ -6,7 +6,7 @@ import {
   AlertTriangle,
   Check,
   Copy,
-  Facebook,
+  ExternalLink,
   Loader2,
   PlugZap,
   Unplug,
@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { toast } from "@/lib/toast";
 import { formatPhone } from "@ccp/shared/utils";
 
 export interface WhatsappCurrent {
@@ -132,7 +133,7 @@ export function WhatsappSettings({
       {/* Embedded Signup placeholder — Tech Provider review pending. */}
       <div className="rounded-xl border border-dashed border-border bg-muted/30 p-5">
         <div className="flex items-start gap-3">
-          <Facebook className="mt-0.5 size-5 text-muted-foreground" />
+          <ExternalLink className="mt-0.5 size-5 text-muted-foreground" />
           <div className="flex-1">
             <div className="text-sm font-medium">Connect with Facebook</div>
             <p className="mt-1 text-[11px] text-muted-foreground">
@@ -425,15 +426,13 @@ function ReadonlyField({
   value: string;
   disabled?: boolean;
 }) {
-  const [copied, setCopied] = useState(false);
   async function copy() {
     if (disabled) return;
     try {
       await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      toast.success(`Copied ${label.toLowerCase()}`);
     } catch {
-      // ignore — old browser, user can copy manually.
+      toast.error("Couldn't copy", { description: "Select the value above and copy it manually." });
     }
   }
   return (
@@ -446,7 +445,7 @@ function ReadonlyField({
           className={`font-mono text-xs ${disabled ? "opacity-60" : ""}`}
         />
         <Button type="button" variant="outline" onClick={copy} disabled={disabled}>
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          <Copy className="size-3.5" />
         </Button>
       </div>
     </div>

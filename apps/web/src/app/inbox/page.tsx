@@ -23,7 +23,7 @@ import type { User } from "@ccp/shared/types";
  * server round-trip, no loading skeleton. Direct URL hits and hard refreshes
  * still SSR the picked thread (below) so the first paint isn't blank.
  *
- * The /inbox/[conversationId] route still exists as a 301 redirect to keep
+ * The /inbox/[conversationId] route still exists as a 307 redirect to keep
  * old links / bookmarks / external referrers working; everything inside the
  * app already routes here.
  */

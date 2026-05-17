@@ -4,9 +4,13 @@ import { getSessionCookie } from "better-auth/cookies";
 import { rateLimit } from "@/lib/rate-limit";
 
 /**
- * Edge middleware. Two jobs:
+ * Edge proxy (formerly `middleware.ts`; renamed in Next 16). Three jobs:
  *   1. Rate-limit the unauthenticated POSTs that get hammered (login + register)
  *   2. Gate every other route on session-cookie presence
+ *   3. Generate a per-request CSP nonce and attach it as both a request
+ *      header (consumed by `app/layout.tsx`) and a response header (the
+ *      enforcing CSP), so page-served inline scripts execute under
+ *      `script-src 'nonce-...'` instead of needing `'unsafe-inline'`.
  *
  * Why cookie presence and not full session validation: doing a DB lookup on
  * every request from every route is the wrong place to pay for it.
@@ -41,6 +45,53 @@ const TRUSTED_PROXY_HOPS = Math.max(
   0,
   Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? "1", 10) || 0,
 );
+
+/**
+ * Per-request CSP. The nonce slot is filled at request time.
+ *
+ * Notes:
+ *   - `script-src 'nonce-X' 'strict-dynamic'`: only inline scripts carrying
+ *     the per-request nonce execute, and scripts they load may execute too.
+ *     This is the modern hardening pattern — it lets Next.js inject its
+ *     hydration / chunk-loader bootstrap (nonce'd by the framework) without
+ *     forcing `'unsafe-inline'` or maintaining a hash allowlist.
+ *   - `style-src 'self' 'unsafe-inline'`: framer-motion, next-themes, and
+ *     Tailwind's runtime utilities all inject inline `<style>` and `style`
+ *     attributes. CSP3's `style-src-attr` separation isn't universal enough
+ *     to drop this yet; revisit when we phase out framer-motion (we already
+ *     migrated several components to CSS-only animations — see globals.css).
+ *   - `img-src 'self' data: blob: https:`: avatars from arbitrary HTTPS hosts
+ *     (contact-supplied URLs, Gravatar fallbacks), local blobs for media
+ *     previews, base64 placeholders.
+ *   - `connect-src` defaults to `'self'` which covers the same-origin
+ *     Socket.io WebSocket upgrade; no need to spell out `ws:`/`wss:`.
+ *   - `frame-ancestors 'none'`: clickjacking defense, replaces the static
+ *     CSP header that previously lived in `next.config.ts`.
+ */
+function buildCsp(nonce: string): string {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "media-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "upgrade-insecure-requests",
+  ].join("; ");
+}
+
+function generateNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return btoa(bin);
+}
 
 function clientIp(req: NextRequest): string {
   if (TRUSTED_PROXY_HOPS > 0) {
@@ -81,8 +132,33 @@ function clientIp(req: NextRequest): string {
  * Everything else requires a session cookie. Unauthenticated page requests
  * get redirected to /login?next=<path>; API requests get a JSON 401.
  */
-export default function middleware(req: NextRequest): NextResponse {
+export default function proxy(req: NextRequest): NextResponse {
   const { pathname, search } = req.nextUrl;
+  const isApiPath = pathname.startsWith("/api/");
+
+  // Page routes get a per-request CSP nonce; API routes don't render HTML
+  // and skip the work. The nonce is set on:
+  //   - the request headers (read by app/layout.tsx via headers().get())
+  //   - the response Content-Security-Policy (the enforcing header)
+  const nonce = isApiPath ? null : generateNonce();
+  const csp = nonce ? buildCsp(nonce) : null;
+  const stampCsp = (res: NextResponse): NextResponse => {
+    if (csp) res.headers.set("Content-Security-Policy", csp);
+    return res;
+  };
+  const passthroughPage = (): NextResponse => {
+    if (!nonce || !csp) return NextResponse.next();
+    const reqHeaders = new Headers(req.headers);
+    reqHeaders.set("x-nonce", nonce);
+    // Next.js looks for `Content-Security-Policy` on the REQUEST headers; when
+    // present, it auto-applies the nonce to its hydration / chunk-loader
+    // inline scripts. Without this the framework's own scripts would be
+    // blocked by `script-src 'nonce-X' 'strict-dynamic'`.
+    reqHeaders.set("Content-Security-Policy", csp);
+    const res = NextResponse.next({ request: { headers: reqHeaders } });
+    res.headers.set("Content-Security-Policy", csp);
+    return res;
+  };
 
   // Block Better Auth's public credential endpoints. They're mounted by the
   // catch-all in app/api/auth/[...all]/route.ts but our login/register/invite
@@ -103,6 +179,26 @@ export default function middleware(req: NextRequest): NextResponse {
   if (req.method === "POST" && pathname in RATE_LIMITED_POSTS) {
     const limit = RATE_LIMITED_POSTS[pathname]!;
     const { ok, retryAfter } = rateLimit(`${pathname}:${clientIp(req)}`, limit, RATE_WINDOW_MS);
+    if (!ok) {
+      return NextResponse.json(
+        { error: "too many requests, slow down" },
+        { status: 429, headers: { "retry-after": String(retryAfter) } },
+      );
+    }
+  }
+
+  // Catch-all for the Better Auth endpoints we don't explicitly block above.
+  // /api/auth/sign-in/email and /sign-up/email are 404'd outright; everything
+  // else (forget-password, reset-password, verify-email, etc.) gets a per-IP
+  // rate limit so email-spray attacks land in 429s. This is defense in depth
+  // — even when those flows aren't enabled today, leaving them unrate-limited
+  // is a latent footgun if the feature gets flipped on later.
+  if (req.method === "POST" && pathname.startsWith("/api/auth/")) {
+    const { ok, retryAfter } = rateLimit(
+      `auth-misc:${clientIp(req)}`,
+      30,
+      RATE_WINDOW_MS,
+    );
     if (!ok) {
       return NextResponse.json(
         { error: "too many requests, slow down" },
@@ -148,21 +244,21 @@ export default function middleware(req: NextRequest): NextResponse {
     // Bonus: if a signed-in user hits /login or /register, bounce them home.
     // The DB recheck on /inbox will catch the stale-cookie case if any.
     if (hasCookie && (pathname === "/login" || pathname === "/register")) {
-      return NextResponse.redirect(new URL("/inbox", redirectBase));
+      return stampCsp(NextResponse.redirect(new URL("/inbox", redirectBase)));
     }
-    return NextResponse.next();
+    return isApiPath ? NextResponse.next() : passthroughPage();
   }
 
   if (!hasCookie) {
-    if (pathname.startsWith("/api/")) {
+    if (isApiPath) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
     const url = new URL("/login", redirectBase);
     url.searchParams.set("next", pathname + search);
-    return NextResponse.redirect(url);
+    return stampCsp(NextResponse.redirect(url));
   }
 
-  return NextResponse.next();
+  return isApiPath ? NextResponse.next() : passthroughPage();
 }
 
 export const config = {

@@ -7,6 +7,7 @@ import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 
 import { registerAction, type RegisterState } from "./actions";
 
@@ -71,8 +72,8 @@ export function RegisterForm() {
           type="password"
           autoComplete="new-password"
           required
-          minLength={8}
-          placeholder="8+ characters"
+          minLength={MIN_PASSWORD_LENGTH}
+          placeholder={`${MIN_PASSWORD_LENGTH}+ characters`}
         />
       </div>
 

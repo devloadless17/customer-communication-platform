@@ -37,6 +37,12 @@ export function getClientSocket(): ClientSocket {
   }
   if (socket) return socket;
 
+  // Recreating the socket means we're past the previous teardown — clear the
+  // flag so the connection-status banner can show again on the new session.
+  // Without this, signing back in within the same SPA session leaves the
+  // banner permanently suppressed.
+  teardown = false;
+
   // Optional cross-origin target. When the NestJS api process owns Socket.io
   // (Phase 2+ of the migration), point the browser at it via
   // `NEXT_PUBLIC_API_URL=http://localhost:4000` in dev, or leave unset in
@@ -82,6 +88,13 @@ export function getClientSocket(): ClientSocket {
           ? "Verify the api process is running and reachable from the browser."
           : "Set NEXT_PUBLIC_API_URL to the NestJS api URL if running web + api on different ports in dev."),
     );
+  });
+
+  // Reset the one-shot warning on every successful (re)connect so a "worked,
+  // dropped, came back, dropped again" sequence logs each new outage instead
+  // of going silent after the first failure.
+  socket.on("connect", () => {
+    warned = false;
   });
 
   return socket;

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   CanActivate,
   ExecutionContext,
+  HttpException,
   Injectable,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -24,6 +25,42 @@ declare module "express-serve-static-core" {
   interface Request {
     apiKey?: ApiKeyContext;
   }
+}
+
+/**
+ * Per-key token bucket. In-memory only — single-process pilot deploy, no
+ * cross-instance scaling yet. Each key gets `RATE_LIMIT_PER_MIN` requests
+ * per rolling 60-second window. When a second app instance shows up this
+ * moves to Redis (same trigger as everything else in-process).
+ *
+ * Chose token bucket over fixed window so a key that bursts at second 59
+ * doesn't immediately get fresh budget at second 60. `lastRefill` is a
+ * millisecond timestamp; budget refills continuously.
+ */
+const RATE_LIMIT_PER_MIN = 60;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+interface KeyBucket {
+  tokens: number;
+  lastRefill: number;
+}
+const keyBuckets = new Map<string, KeyBucket>();
+
+function consumeToken(apiKeyId: string): { ok: true } | { ok: false; retryAfter: number } {
+  const now = Date.now();
+  const refillRate = RATE_LIMIT_PER_MIN / RATE_LIMIT_WINDOW_MS;
+  const bucket = keyBuckets.get(apiKeyId);
+  if (!bucket) {
+    keyBuckets.set(apiKeyId, { tokens: RATE_LIMIT_PER_MIN - 1, lastRefill: now });
+    return { ok: true };
+  }
+  const elapsed = now - bucket.lastRefill;
+  bucket.tokens = Math.min(RATE_LIMIT_PER_MIN, bucket.tokens + elapsed * refillRate);
+  bucket.lastRefill = now;
+  if (bucket.tokens < 1) {
+    return { ok: false, retryAfter: Math.ceil((1 - bucket.tokens) / refillRate / 1000) };
+  }
+  bucket.tokens -= 1;
+  return { ok: true };
 }
 
 /**
@@ -57,6 +94,17 @@ export class ApiKeyGuard implements CanActivate {
       select: { id: true, teamId: true, revokedAt: true },
     });
     if (!row || row.revokedAt) throw new UnauthorizedException("invalid api key");
+
+    // Per-key rate limit — bounds cost on a leaked/abused key. Each request
+    // hits Meta's Cloud API and counts against the team's quality rating,
+    // so unbounded request rates are a real bill + reputation risk.
+    const rate = consumeToken(row.id);
+    if (!rate.ok) {
+      throw new HttpException(
+        { error: "rate_limited", detail: `${RATE_LIMIT_PER_MIN} req/min` },
+        429,
+      );
+    }
 
     req.apiKey = { teamId: row.teamId, apiKeyId: row.id };
 

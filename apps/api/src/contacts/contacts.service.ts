@@ -406,25 +406,23 @@ export class ContactsService {
       beforeRows.map((r) => [r.id, r.tags.some((t) => t.id === tagId)]),
     );
 
-    const op = action === "tag-add" ? "connect" : "disconnect";
-    const results = await Promise.allSettled(
-      ownedIds.map((id) =>
-        this.db.contact.update({
-          where: { id, teamId },
-          data: { tags: { [op]: { id: tagId } } },
-        }),
-      ),
-    );
-    const succeeded = results.filter((r) => r.status === "fulfilled").length;
-    const failed = results.length - succeeded;
-    if (failed > 0) {
-      const firstReason = results.find(
-        (r): r is PromiseRejectedResult => r.status === "rejected",
-      )?.reason;
-      console.error(
-        `[contacts/bulk] ${action} partial failure: ${failed}/${results.length} contacts. First error:`,
-        firstReason instanceof Error ? firstReason.message : firstReason,
-      );
+    // Single round-trip via the implicit `_ContactToTag` join table — was
+    // N updates fired in parallel, which drained the connection pool on
+    // any 100+ contact bulk-tag and blocked unrelated requests for ~1s.
+    // ownedIds is already team-scoped (validated above), so a raw INSERT/
+    // DELETE bounded by that list can't escape the tenant.
+    if (action === "tag-add") {
+      await this.db.$executeRaw`
+        INSERT INTO "_ContactToTag" ("A", "B")
+        SELECT id, ${tagId} FROM "Contact"
+        WHERE id = ANY(${ownedIds}::text[]) AND "teamId" = ${teamId}
+        ON CONFLICT DO NOTHING
+      `;
+    } else {
+      await this.db.$executeRaw`
+        DELETE FROM "_ContactToTag"
+        WHERE "A" = ANY(${ownedIds}::text[]) AND "B" = ${tagId}
+      `;
     }
 
     // Reload ALL ownedIds (not just succeeded) — emitting the current truth
@@ -472,11 +470,12 @@ export class ContactsService {
       }),
     );
 
+    // After the join-table rewrite, the operation is one statement — either
+    // it succeeded for every owned id or it threw. No partial-failure path.
     return {
-      ok: failed === 0,
-      count: succeeded,
+      ok: true,
+      count: ownedIds.length,
       action,
-      ...(failed > 0 ? { failed } : {}),
     };
   }
 

@@ -205,8 +205,15 @@ export class MetaWebhookController {
           },
         });
 
-        await this.db.message.update({
-          where: { id: row.id },
+        // CAS on mediaUrl: null. Without this, a Meta webhook retry that
+        // races the original (or the inbound-media sweeper running at the
+        // same time) can both pass the !mediaUrl check at line 150, both
+        // upload to blob storage, and both emit `message.media_ready` —
+        // leaving the second blob orphaned and clients receiving a duplicate
+        // event. updateMany with a column predicate ensures only one writer
+        // wins; the loser deletes the just-uploaded blob.
+        const updated = await this.db.message.updateMany({
+          where: { id: row.id, mediaUrl: null },
           data: {
             mediaKey: saved.key,
             mediaUrl: saved.url,
@@ -214,6 +221,17 @@ export class MetaWebhookController {
             mediaMimeType: fetched.mimeType,
           },
         });
+        if (updated.count === 0) {
+          // Another writer won — delete our orphan blob. Best-effort; if
+          // blob deletion fails the storage backend keeps the bytes but
+          // they're unreferenced and a future GC pass can sweep them.
+          await blobStorage.delete(saved.key).catch((err) => {
+            this.logger.warn(
+              `[${teamId}] failed to delete orphan blob ${saved.key}: ${err}`,
+            );
+          });
+          return;
+        }
 
         await publish({
           type: "message.media_ready",

@@ -3,7 +3,6 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Check,
   Copy,
   Loader2,
   Mail,
@@ -21,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { closeClientSocket } from "@/lib/socket-client";
+import { toast } from "@/lib/toast";
 import {
   assignableRoles,
   canManageUsers,
@@ -531,15 +531,13 @@ function InviteLinkCard({
   invite: InviteResult;
   onClose: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-
   async function copy() {
     try {
       await navigator.clipboard.writeText(invite.url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      toast.success("Invite link copied");
     } catch {
       // Older browsers / non-https — user can copy manually from the input.
+      toast.error("Couldn't copy", { description: "Use the input field above to copy manually." });
     }
   }
 
@@ -564,17 +562,8 @@ function InviteLinkCard({
       <div className="flex gap-2">
         <Input readOnly value={invite.url} className="font-mono text-xs" />
         <Button type="button" variant="outline" onClick={copy}>
-          {copied ? (
-            <>
-              <Check className="size-3.5" />
-              Copied
-            </>
-          ) : (
-            <>
-              <Copy className="size-3.5" />
-              Copy
-            </>
-          )}
+          <Copy className="size-3.5" />
+          Copy
         </Button>
       </div>
     </div>

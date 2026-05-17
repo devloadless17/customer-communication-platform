@@ -13,6 +13,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import type {
   Contact,
@@ -583,7 +584,11 @@ export function ReplyBox({
           if (!res.ok) throw new Error(await safeReadError(res));
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "failed to send");
+        const message = err instanceof Error ? err.message : "failed to send";
+        setError(message);
+        toast.error(isNote ? "Couldn't save note" : "Couldn't send message", {
+          description: message,
+        });
         if (!isNote) onOptimisticFail?.(clientTempId);
         // Restore the user's text (only if they haven't started typing again).
         // Read the live value via ref instead of a setValue updater — putting
