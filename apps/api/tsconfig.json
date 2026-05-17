@@ -5,6 +5,7 @@
     "rootDir": "../..",
     "paths": {
       "@/*": ["./src/*"],
+      "@ccp/config": ["../../packages/config/src/index.ts"],
       "@ccp/shared/*": ["../../packages/shared/src/*"]
     },
     "incremental": true

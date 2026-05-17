@@ -6,6 +6,8 @@ import { NestFactory } from "@nestjs/core";
 import { Logger, ValidationPipe } from "@nestjs/common";
 import { NestExpressApplication } from "@nestjs/platform-express";
 
+import { validateEnv } from "@ccp/config";
+
 import { AppModule } from "./app.module";
 import { WsAdapter } from "./realtime/ws-adapter";
 
@@ -19,6 +21,11 @@ import { WsAdapter } from "./realtime/ws-adapter";
  * process just sits idle until Phase 2 starts moving traffic to it.
  */
 async function bootstrap(): Promise<void> {
+  // Validate environment BEFORE constructing the DI graph — if a required env
+  // var is missing, fail loudly here rather than crashing midway through
+  // PrismaService.onModuleInit or similar with an obscure stack trace.
+  validateEnv("api");
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Match the existing Next.js logging tone — warn + error in prod, info+ in dev.
     logger:

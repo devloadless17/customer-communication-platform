@@ -1,10 +1,10 @@
 /**
- * Fail-fast environment validation. Runs once at boot from server.ts.
+ * Fail-fast environment validation, shared between the api and web processes.
  *
- * Three categories:
- *   - required:    missing → exit(1). The app physically can't function.
+ * Three categories of env var:
+ *   - required:    missing → exit(1). The process physically can't function.
  *   - prodRequired: missing in production → exit(1); warn in development.
- *   - recommended: missing → warn in production. App boots but features degrade.
+ *   - recommended: missing → warn in production. Boots but features degrade.
  *
  * Rationale: it's cheaper to crash at boot with a clear message than to start
  * up "successfully" and 500 on the first request that hits an unconfigured
@@ -14,6 +14,10 @@
  * Meta WhatsApp credentials are NOT validated here. CLAUDE.md rule #6 — they
  * live on the Team row, not in env vars. Send routes fail clearly when the
  * team hasn't been connected; no boot-time check would help.
+ *
+ * Called from:
+ *   - apps/api/src/main.ts          (before NestFactory.create)
+ *   - apps/web/instrumentation.ts   (Next.js boot hook, nodejs runtime only)
  */
 
 const PROD = process.env.NODE_ENV === "production";
@@ -32,7 +36,7 @@ const required: Check[] = [
   },
   {
     name: "REDIS_URL",
-    hint: "BullMQ broker (automations queue). See docker-compose.yml.",
+    hint: "BullMQ broker (workflow queue). See docker-compose.yml.",
   },
   {
     name: "BETTER_AUTH_SECRET",
@@ -58,7 +62,7 @@ const prodRequired: Check[] = [
   },
   {
     name: "APP_PUBLIC_URL",
-    hint: "Public URL embedded in outgoing automation webhooks (_links.*).",
+    hint: "Public URL embedded in outgoing webhook payloads (_links.*).",
   },
 ];
 
@@ -80,10 +84,15 @@ function describe(c: Check): string {
 }
 
 /**
- * Validate environment. Returns void on success, exits the process on
- * fatal misconfiguration. Idempotent — safe to call multiple times.
+ * Validate environment. Returns void on success, exits the process on fatal
+ * misconfiguration. Idempotent — safe to call multiple times (both api and
+ * web call this on their respective boots).
+ *
+ * The `label` prefix is used in console output so the operator can tell
+ * which process is shouting about a missing var when both boot at once.
  */
-export function validateEnv(): void {
+export function validateEnv(label: "api" | "web" = "api"): void {
+  const tag = `[${label}:env]`;
   const missingRequired = required.filter((c) => !present(c));
   const missingProdRequired = prodRequired.filter((c) => !present(c));
   const missingRecommended = recommended.filter((c) => !present(c));
@@ -94,21 +103,21 @@ export function validateEnv(): void {
   ];
 
   if (fatals.length > 0) {
-    console.error("[env] fatal: missing required environment variable(s):");
+    console.error(`${tag} fatal: missing required environment variable(s):`);
     for (const c of fatals) console.error(`  - ${describe(c)}`);
-    console.error("[env] aborting boot. Set the variables above and restart.");
+    console.error(`${tag} aborting boot. Set the variables above and restart.`);
     process.exit(1);
   }
 
   if (!PROD && missingProdRequired.length > 0) {
     for (const c of missingProdRequired) {
-      console.warn(`[env] dev warning: ${describe(c)} (required in production)`);
+      console.warn(`${tag} dev warning: ${describe(c)} (required in production)`);
     }
   }
 
   if (PROD && missingRecommended.length > 0) {
     for (const c of missingRecommended) {
-      console.warn(`[env] warning: ${describe(c)}`);
+      console.warn(`${tag} warning: ${describe(c)}`);
     }
   }
 
@@ -117,7 +126,7 @@ export function validateEnv(): void {
   // to log in, by which point it's already embarrassing.
   if (PROD && process.env.BETTER_AUTH_URL?.includes("localhost")) {
     console.warn(
-      "[env] warning: BETTER_AUTH_URL points at localhost in production. " +
+      `${tag} warning: BETTER_AUTH_URL points at localhost in production. ` +
         "Auth callbacks will fail for real users.",
     );
   }

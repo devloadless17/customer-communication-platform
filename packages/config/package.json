@@ -1,0 +1,14 @@
+{
+  "name": "@ccp/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@ccp/tsconfig": "workspace:*",
+    "typescript": "^5.7.2"
+  }
+}
