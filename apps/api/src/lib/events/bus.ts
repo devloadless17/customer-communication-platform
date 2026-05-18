@@ -9,6 +9,11 @@ import type {
 } from "@ccp/shared/events/types";
 
 import { withCorrelation } from "@/common/correlation";
+import {
+  markFailed as markOutboxFailed,
+  markPublished as markOutboxPublished,
+  persistOutboxRow,
+} from "@/lib/events/outbox";
 
 /**
  * Typed in-process event bus, optionally bridged across processes via Redis
@@ -31,8 +36,12 @@ import { withCorrelation } from "@/common/correlation";
  *                            `any`-mode socket-fanout receives it and emits
  *                            to connected clients.
  *
- * Order matters within each mode: registration order is fire order. See
- * lib/events/subscribers/index.ts for the canonical order rationale.
+ * Subscribers run in PARALLEL (Promise.allSettled). Each handler is
+ * functionally independent — own table writes, own socket emit, own HTTP
+ * RTT — and sequencing them earlier was paying the sum of per-subscriber
+ * latency on every publish. If two subscribers ever need to order against
+ * each other, model that explicitly in their own state, not through bus
+ * registration order.
  *
  * Bridge wiring lives in lib/events/redis-bridge.ts. Without a bridge
  * (default), publish() is purely in-process and `mode` has no behavioral
@@ -98,17 +107,64 @@ export function subscribe<K extends DomainEventType>(
 /**
  * Publish a locally-originated domain event.
  *
- * Runs every subscriber (regardless of `mode`) in registration order. Each
- * subscriber gets its own try/catch so a broken one can't cascade. After
- * local fan-out, forwards to the cross-process bridge if one's enabled.
+ * Writes a row to the transactional outbox FIRST (durable audit trail),
+ * then runs every subscriber (regardless of `mode`) in registration order.
+ * Each subscriber gets its own try/catch so a broken one can't cascade.
+ * After local fan-out, forwards to the cross-process bridge if one's
+ * enabled. On the way out, marks the outbox row published (or failed).
  *
  * Most callers should `await`. The webhook hot path uses `void publish(...)`
  * + `.catch(...)` to avoid blocking Meta's 200.
+ *
+ * For publishes that must commit atomically with an entity write, use
+ * `publishInTx(tx, event)` from `@/lib/events/outbox` instead. That path
+ * skips the synchronous subscriber run and lets the drainer dispatch
+ * once the caller's transaction commits — closes the lost-event window
+ * between the entity write and bus.publish.
+ *
+ * Outbox-write failures (Postgres down) are swallowed and logged — the
+ * subscribers still run. The choice is: better to lose the audit row
+ * than to lose the realtime emit. Operators see the gap via missing
+ * outbox rows.
  */
 export async function publish<K extends DomainEventType>(
   event: DomainEventOf<K>,
 ): Promise<void> {
-  await runSubscribers(event, false);
+  let outboxId: string | null = null;
+  try {
+    outboxId = await persistOutboxRow(event);
+  } catch (err) {
+    console.error(
+      withCorrelation(`[bus] outbox persist for "${event.type}" failed:`),
+      err instanceof Error ? err.message : err,
+    );
+    // Continue — better stale audit than dropped fanout.
+  }
+
+  let dispatchError: unknown = null;
+  try {
+    await runSubscribers(event, false);
+  } catch (err) {
+    dispatchError = err;
+  }
+
+  if (outboxId) {
+    try {
+      if (dispatchError) {
+        await markOutboxFailed(
+          outboxId,
+          dispatchError instanceof Error ? dispatchError.message : String(dispatchError),
+        );
+      } else {
+        await markOutboxPublished(outboxId);
+      }
+    } catch (err) {
+      console.error(
+        withCorrelation(`[bus] outbox status-mark for "${event.type}" failed:`),
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 
   const forwarder = state.redisForwarder;
   if (forwarder) {
@@ -137,26 +193,54 @@ export async function publishForwarded<K extends DomainEventType>(
   await runSubscribers(event, true);
 }
 
+/**
+ * Dispatch a row that was already written to the outbox via
+ * `publishInTx`. Runs ALL subscribers (same as `publish`) but does NOT
+ * write another outbox row — the row already exists; the drainer is
+ * responsible for marking it `publishedAt`. Internal API; only the
+ * OutboxDrainerService should call this.
+ */
+export async function dispatchPersistedEvent<K extends DomainEventType>(
+  event: DomainEventOf<K>,
+): Promise<void> {
+  await runSubscribers(event, false);
+}
+
 async function runSubscribers<K extends DomainEventType>(
   event: DomainEventOf<K>,
   forwardedOnly: boolean,
 ): Promise<void> {
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
-  for (let i = 0; i < list.length; i++) {
-    const sub = list[i]!;
-    if (forwardedOnly && sub.mode === "local") continue;
-    try {
-      await sub.handler(event as DomainEventOf<DomainEventType>);
-    } catch (err) {
-      console.error(
-        withCorrelation(
-          `[bus] subscriber #${i} for "${event.type}" threw${forwardedOnly ? " (forwarded)" : ""}:`,
-        ),
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
+
+  // Run subscribers in parallel. They're functionally independent (each one
+  // writes its own table or fires its own emit), so the prior sequential
+  // `await` chain was paying the SUM of per-subscriber latencies on every
+  // publish — e.g. on `message.received` that was socket-fanout + audit DB
+  // write + analytics DB write + workflow-dispatch (DB lookup + per-trigger
+  // enqueue) + web-cache-revalidate (HTTP RTT to Next.js). On a team with
+  // workflows wired to inbound messages, the floor was hundreds of
+  // milliseconds before publish() returned to the webhook handler. Going
+  // parallel collapses that to the slowest single subscriber.
+  //
+  // Each handler still gets its own try/catch so a broken subscriber can't
+  // poison the others; allSettled keeps that guarantee at the Promise layer
+  // (we never throw from this function, matching the prior contract).
+  await Promise.allSettled(
+    list.map(async (sub, i) => {
+      if (forwardedOnly && sub.mode === "local") return;
+      try {
+        await sub.handler(event as DomainEventOf<DomainEventType>);
+      } catch (err) {
+        console.error(
+          withCorrelation(
+            `[bus] subscriber #${i} for "${event.type}" threw${forwardedOnly ? " (forwarded)" : ""}:`,
+          ),
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }),
+  );
 }
 
 /**

@@ -27,6 +27,12 @@ import type {
   TestWorkflowInput,
 } from "./workflows.schemas";
 
+// Dedupe the timestamp-missing deprecation warning to one log per workflow
+// per process. A hot legacy caller (think: n8n cron pinging every 30s) would
+// otherwise flood the api log with the same line forever. Once the operator
+// has seen it once they have what they need to migrate the caller.
+const loggedLegacyTimestampWarn = new Set<string>();
+
 @Injectable()
 export class WorkflowsService {
   constructor(
@@ -114,7 +120,7 @@ export class WorkflowsService {
           triggerConfig: encryptTriggerConfigSecret(parsed.triggerConfig),
           triggerConditions: parsed.triggerConditions as Prisma.InputJsonValue,
           triggerOncePerContact: parsed.triggerOncePerContact,
-          graph: parsed.graph as unknown as Prisma.InputJsonValue,
+          graph: encryptGraphStepSecrets(parsed.graph),
         },
       });
       await this.publishCatalogChange(teamId);
@@ -208,7 +214,7 @@ export class WorkflowsService {
           triggerConfig: encryptTriggerConfigSecret(parsed.triggerConfig),
           triggerConditions: parsed.triggerConditions as Prisma.InputJsonValue,
           triggerOncePerContact: parsed.triggerOncePerContact,
-          graph: parsed.graph as unknown as Prisma.InputJsonValue,
+          graph: encryptGraphStepSecrets(parsed.graph),
         },
       });
       await this.publishCatalogChange(teamId);
@@ -266,6 +272,25 @@ export class WorkflowsService {
           stepErrors: validated.stepErrors,
         });
       }
+      // Cross-team reference validation: every step that names a tag /
+      // field / stage / user / template / workflow id must resolve to a
+      // row that ACTUALLY belongs to this team. parseWorkflowBody only
+      // checks shape — without this check, an admin could publish a graph
+      // whose every run silently 404s on the first action (the step
+      // handlers return advanceWithError(404) and the run advances past
+      // the broken step). Catching it at publish time keeps the dispatcher
+      // from ever picking up a workflow that's structurally broken.
+      const refErrors = await this.validateGraphReferences(
+        teamId,
+        existing.id,
+        existing.graph as unknown,
+      );
+      if (refErrors.length > 0) {
+        throw new BadRequestException({
+          error: "cannot publish — referenced resources missing or in another team",
+          details: refErrors,
+        });
+      }
     }
 
     await this.db.workflow.update({
@@ -274,6 +299,138 @@ export class WorkflowsService {
     });
     await this.publishCatalogChange(teamId);
     return { published: publishFlag };
+  }
+
+  /**
+   * Cross-team reference validator for the publish gate. Collects every
+   * id/key the graph names, batch-loads them in six parallel queries
+   * (one per resource type), and returns a list of human-readable errors
+   * for any missing reference.
+   *
+   * Returns [] when the graph is reference-clean. Self is allowed as a
+   * `trigger_workflow.workflowId` target (no infinite-recursion check
+   * here — that lives in the runtime depth guard).
+   */
+  private async validateGraphReferences(
+    teamId: string,
+    selfWorkflowId: string,
+    rawGraph: unknown,
+  ): Promise<string[]> {
+    const g = (rawGraph ?? {}) as {
+      nodes?: Array<{ id: string; type: string; config: unknown }>;
+    };
+    if (!Array.isArray(g.nodes)) return [];
+
+    const tagIds = new Set<string>();
+    const fieldKeys = new Set<string>();
+    const stageIds = new Set<string>();
+    const userIds = new Set<string>();
+    const templateIds = new Set<string>();
+    const workflowIds = new Set<string>();
+
+    for (const node of g.nodes) {
+      if (!node.config || typeof node.config !== "object") continue;
+      const cfg = node.config as Record<string, unknown>;
+      switch (node.type) {
+        case "add_tag":
+        case "remove_tag":
+          if (typeof cfg.tagId === "string") tagIds.add(cfg.tagId);
+          break;
+        case "update_field":
+          if (typeof cfg.fieldKey === "string") fieldKeys.add(cfg.fieldKey);
+          break;
+        case "update_lifecycle":
+          if (typeof cfg.stageId === "string") stageIds.add(cfg.stageId);
+          break;
+        case "assign_to":
+          if (cfg.mode === "user" && typeof cfg.userId === "string") {
+            userIds.add(cfg.userId);
+          }
+          break;
+        case "send_template":
+          if (typeof cfg.templateId === "string") templateIds.add(cfg.templateId);
+          break;
+        case "trigger_workflow":
+          if (
+            typeof cfg.workflowId === "string" &&
+            cfg.workflowId !== selfWorkflowId
+          ) {
+            workflowIds.add(cfg.workflowId);
+          }
+          break;
+        // No other step types reference team-scoped resources.
+        default:
+          break;
+      }
+    }
+
+    const [foundTags, foundFields, foundStages, foundUsers, foundTemplates, foundWorkflows] =
+      await Promise.all([
+        tagIds.size > 0
+          ? this.db.tag.findMany({
+              where: { id: { in: [...tagIds] }, teamId },
+              select: { id: true },
+            })
+          : Promise.resolve([] as { id: string }[]),
+        fieldKeys.size > 0
+          ? this.db.contactFieldDefinition.findMany({
+              where: { key: { in: [...fieldKeys] }, teamId },
+              select: { key: true },
+            })
+          : Promise.resolve([] as { key: string }[]),
+        stageIds.size > 0
+          ? this.db.contactStage.findMany({
+              where: { id: { in: [...stageIds] }, teamId },
+              select: { id: true },
+            })
+          : Promise.resolve([] as { id: string }[]),
+        userIds.size > 0
+          ? this.db.user.findMany({
+              where: { id: { in: [...userIds] }, teamId, deactivatedAt: null },
+              select: { id: true },
+            })
+          : Promise.resolve([] as { id: string }[]),
+        templateIds.size > 0
+          ? this.db.messageTemplate.findMany({
+              where: { id: { in: [...templateIds] }, teamId },
+              select: { id: true },
+            })
+          : Promise.resolve([] as { id: string }[]),
+        workflowIds.size > 0
+          ? this.db.workflow.findMany({
+              where: { id: { in: [...workflowIds] }, teamId },
+              select: { id: true },
+            })
+          : Promise.resolve([] as { id: string }[]),
+      ]);
+
+    const errors: string[] = [];
+    const haveTag = new Set(foundTags.map((r) => r.id));
+    const haveField = new Set(foundFields.map((r) => r.key));
+    const haveStage = new Set(foundStages.map((r) => r.id));
+    const haveUser = new Set(foundUsers.map((r) => r.id));
+    const haveTemplate = new Set(foundTemplates.map((r) => r.id));
+    const haveWorkflow = new Set(foundWorkflows.map((r) => r.id));
+
+    for (const id of tagIds) {
+      if (!haveTag.has(id)) errors.push(`tag ${id} not found (deleted or in another team)`);
+    }
+    for (const key of fieldKeys) {
+      if (!haveField.has(key)) errors.push(`contact field "${key}" not defined for this team`);
+    }
+    for (const id of stageIds) {
+      if (!haveStage.has(id)) errors.push(`stage ${id} not found (deleted or in another team)`);
+    }
+    for (const id of userIds) {
+      if (!haveUser.has(id)) errors.push(`user ${id} not found, deactivated, or in another team`);
+    }
+    for (const id of templateIds) {
+      if (!haveTemplate.has(id)) errors.push(`template ${id} not found in this team`);
+    }
+    for (const id of workflowIds) {
+      if (!haveWorkflow.has(id)) errors.push(`workflow ${id} not found in this team`);
+    }
+    return errors;
   }
 
   // -------------------------------------------------------------------------
@@ -448,6 +605,7 @@ export class WorkflowsService {
     id: string,
     rawBody: string,
     signatureHeader: string,
+    timestampHeader: string | undefined,
     headers: Record<string, string>,
   ): Promise<{ runId: string }> {
     const wf = await this.db.workflow.findFirst({
@@ -491,12 +649,50 @@ export class WorkflowsService {
       });
     }
 
+    // Replay protection. Senders include `X-Workflow-Timestamp: <unix-ms>`
+    // and HMAC `${timestamp}.${rawBody}`. We reject requests outside the
+    // ±5min skew window so a captured request can't be replayed forever.
+    //
+    // Legacy compatibility: if the header is absent we fall back to signing
+    // raw body only and log a one-line deprecation. New integrations MUST
+    // use the timestamped scheme.
+    const REPLAY_WINDOW_MS = 5 * 60_000;
+    let payload: string;
+    if (timestampHeader) {
+      const ts = Number.parseInt(timestampHeader, 10);
+      if (!Number.isFinite(ts)) {
+        throw new ForbiddenException({ error: "invalid timestamp" });
+      }
+      // Accept timestamps in either seconds or milliseconds.
+      const tsMs = ts > 1e12 ? ts : ts * 1000;
+      const skew = Math.abs(Date.now() - tsMs);
+      if (skew > REPLAY_WINDOW_MS) {
+        throw new ForbiddenException({
+          error: "timestamp outside the ±5min replay window",
+        });
+      }
+      payload = `${timestampHeader}.${rawBody}`;
+    } else {
+      if (process.env.WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP === "1") {
+        throw new ForbiddenException({
+          error: "X-Workflow-Timestamp header required",
+        });
+      }
+      if (!loggedLegacyTimestampWarn.has(id)) {
+        loggedLegacyTimestampWarn.add(id);
+        console.warn(
+          `[workflow-webhook] workflow ${id} called without X-Workflow-Timestamp ` +
+            `— replay protection disabled. Migrate the caller; this will become required. ` +
+            `(further occurrences for this workflow are suppressed)`,
+        );
+      }
+      payload = rawBody;
+    }
+
     // Compute the expected hex digest. We accept the header as either bare
-    // hex or with a `sha256=` prefix (the common conventions) and decode
-    // both into raw bytes before the timing-safe compare. Comparing the
-    // hex strings as utf-8 buffers is technically constant-time-ish too,
-    // but bytewise on the decoded digest is the textbook-correct approach.
-    const expectedHex = createHmac("sha256", secret).update(rawBody).digest("hex");
+    // hex or with a `sha256=` prefix and decode both into raw bytes before
+    // the timing-safe compare.
+    const expectedHex = createHmac("sha256", secret).update(payload).digest("hex");
     const receivedHex = signatureHeader.startsWith("sha256=")
       ? signatureHeader.slice("sha256=".length)
       : signatureHeader;
@@ -705,5 +901,40 @@ function encryptTriggerConfigSecret(
     ...cfg,
     secret: encryptSecret(secret),
   } as Prisma.InputJsonValue;
+}
+
+/**
+ * Mirror of `encryptTriggerConfigSecret` for step-config secrets stored
+ * inside the workflow graph JSONB. Today only `http_request.bearerToken`
+ * qualifies — extend the dispatch table if a future step type ships a new
+ * one (e.g. an API-key field on a third-party integration step).
+ *
+ * Returns a shallow-cloned graph so the caller's `parsed.graph` reference
+ * stays untouched and the original is safe to inspect/log.
+ */
+function encryptGraphStepSecrets(
+  graph: unknown,
+): Prisma.InputJsonValue {
+  if (!graph || typeof graph !== "object") {
+    return graph as Prisma.InputJsonValue;
+  }
+  const g = graph as { nodes?: Array<{ id: string; type: string; config: unknown }> };
+  if (!Array.isArray(g.nodes)) return graph as Prisma.InputJsonValue;
+
+  const nodes = g.nodes.map((node) => {
+    if (!node.config || typeof node.config !== "object") return node;
+    const cfg = { ...(node.config as Record<string, unknown>) };
+    let mutated = false;
+    if (node.type === "http_request") {
+      const t = cfg.bearerToken;
+      if (typeof t === "string" && t.length > 0 && !isEncrypted(t)) {
+        cfg.bearerToken = encryptSecret(t);
+        mutated = true;
+      }
+    }
+    return mutated ? { ...node, config: cfg } : node;
+  });
+
+  return { ...g, nodes } as Prisma.InputJsonValue;
 }
 

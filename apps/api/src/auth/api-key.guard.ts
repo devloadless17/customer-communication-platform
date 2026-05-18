@@ -16,10 +16,16 @@ import { looksLikeApiKey } from "./api-key";
  * Shape attached to req.apiKey on success. Used by /external/v1/* controllers
  * after Phase 3 migration. Same teamId scoping as the session guard so
  * downstream services don't have to branch on auth method.
+ *
+ * `scopes` lists every capability granted to this key. The wildcard `"*"`
+ * grants everything; specific entries grant only that capability. The
+ * ScopeGuard at route level enforces required scopes — handlers should NOT
+ * re-check scopes themselves, that's a layering violation.
  */
 export interface ApiKeyContext {
   teamId: string;
   apiKeyId: string;
+  scopes: readonly string[];
 }
 
 declare module "express-serve-static-core" {
@@ -126,7 +132,7 @@ export class ApiKeyGuard implements CanActivate {
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const row = await this.db.teamApiKey.findUnique({
       where: { tokenHash },
-      select: { id: true, teamId: true, revokedAt: true },
+      select: { id: true, teamId: true, revokedAt: true, scopes: true },
     });
     if (!row || row.revokedAt) throw new UnauthorizedException("invalid api key");
 
@@ -141,7 +147,7 @@ export class ApiKeyGuard implements CanActivate {
       );
     }
 
-    req.apiKey = { teamId: row.teamId, apiKeyId: row.id };
+    req.apiKey = { teamId: row.teamId, apiKeyId: row.id, scopes: row.scopes };
 
     // Stamp lastUsedAt async — failing this should NOT fail the request.
     // BullMQ / Prisma update under load occasionally throws on connection

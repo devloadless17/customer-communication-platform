@@ -41,13 +41,15 @@ export const uploadthingProvider: BlobStorageProvider = {
 
   async upload(input: UploadInput): Promise<UploadResult> {
     const filename = buildFilename(input);
-    // Copy into a tight ArrayBuffer — Uint8Array<ArrayBufferLike> isn't
-    // assignable to BlobPart on some Node+TS combinations because of the
-    // SharedArrayBuffer branch on `Uint8Array.buffer`. The byte copy is
-    // negligible compared to the upload itself.
-    const buf = new ArrayBuffer(input.bytes.byteLength);
-    new Uint8Array(buf).set(input.bytes);
-    const file = new UTFile([buf], filename, {
+    // Pass the Uint8Array straight to UTFile — Node 20+'s undici-backed Blob
+    // accepts Uint8Array as a BlobPart at runtime, and the TS-cast pattern
+    // mirrors the one in providers/meta.ts:475. The previous `new
+    // ArrayBuffer(len) + .set()` copy doubled peak RAM transient for the
+    // upload (one copy of the source bytes + the ArrayBuffer + UTFile's
+    // internal Blob clone); on a 100 MB document send that was a real OOM
+    // risk on the 4 GB heap. Eliminating it brings UT in line with the
+    // direct-pass approach Meta's media path already uses.
+    const file = new UTFile([input.bytes as Uint8Array<ArrayBuffer>], filename, {
       // `type` is on the standard BlobPropertyBag in DOM lib types, but the
       // Node/NestJS tsconfig (lib: ES2022 only) sees the Node global Blob
       // whose property-bag drops it. Double-cast keeps the runtime pass-through.

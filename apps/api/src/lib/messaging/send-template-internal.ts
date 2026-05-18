@@ -41,6 +41,12 @@ export interface SendTemplateInternalArgs {
   };
   /** Null for system / automation sends. */
   senderUserId: string | null;
+  /**
+   * Set on /v1 external-API template sends so the message.sent event +
+   * audit timeline attribute the send to the API key instead of a real
+   * user. Mutually exclusive with senderUserId in practice.
+   */
+  senderApiKeyId?: string | null;
   /** Provenance label for raw_payload.sentVia. e.g. "automation/<automationId>". */
   sentVia: string;
 }
@@ -248,6 +254,7 @@ export async function sendTemplateInternal(
     lastMessageAt: send.timestamp.toISOString(),
     unreadDelta: 0,
     senderUserId: args.senderUserId,
+    ...(args.senderApiKeyId ? { senderApiKeyId: args.senderApiKeyId } : {}),
   });
 
   return {

@@ -97,6 +97,40 @@ export interface MessageStatusChangedEvent {
   status: MessageStatus;
 }
 
+/**
+ * Outbound send failed inside the background `message-sends` queue worker
+ * (introduced for S1 — moving Meta sends off the HTTP critical path).
+ * Used by socket-fanout to emit `message:failed` to the originating client
+ * so the optimistic bubble flips from `pending` to `failed`, mirroring the
+ * pre-queue UX where a 4xx HTTP response had the reply-box surface the
+ * error inline.
+ *
+ *   clientTempId — set when the originating POST carried one; the frontend
+ *                  reducer keys off this to mark the right optimistic row.
+ *                  Absent for system-initiated sends (workflow-step retries
+ *                  etc. — not yet in scope, but the field is here so the
+ *                  contract doesn't churn when they land).
+ *   reason       — short machine code (`outside_24h_window`, `auth_expired`,
+ *                  `rate_limited`, `send_failed`) the frontend can map to
+ *                  a localized message.
+ *   detail       — free-text human description for the toast / tooltip.
+ *
+ * Note: only socket-fanout subscribes. Audit + analytics + workflow dispatch
+ * deliberately stay quiet — a failed send isn't a real outbound message,
+ * shouldn't fire firstResponseAt, shouldn't be logged on the conversation
+ * timeline (the agent's bubble already shows the failure inline), and
+ * shouldn't trigger any `message_sent` workflows.
+ */
+export interface MessageSendFailedEvent {
+  teamId: string;
+  conversationId: string;
+  /** null on system-initiated sends. */
+  senderUserId: string | null;
+  clientTempId?: string;
+  reason: string;
+  detail?: string;
+}
+
 export interface ConversationAssignedEvent {
   teamId: string;
   conversationId: string;
@@ -159,6 +193,15 @@ export interface ContactUpdatedEvent {
   tagChanges?: { added: string[]; removed: string[] };
   /** null when triggered by the external API (no acting session). */
   changedByUserId: string | null;
+  /** Set on /v1 external-API mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
+  /**
+   * Discriminates a brand-new contact from a mutation of an existing row.
+   * Lets outbound-webhook subscribers fan out to `contact.created` vs
+   * `contact.updated` subscriptions without us needing a second event type.
+   * Optional for source-compat; treat absent as `"updated"`.
+   */
+  kind?: "created" | "updated";
   /** Pre-update WorkflowContactSnapshot used as `previous` if downstream wants it. */
   workflowContact: WorkflowContactSnapshot;
   /** Workflow steps set this to skip chain-trigger dispatch. See ConversationAssignedEvent.silent. */
@@ -192,6 +235,8 @@ export interface ContactBulkUpdatedEvent {
   changeKind: "tags" | "stage" | "fields" | "mixed";
   /** null when triggered by the external API. */
   changedByUserId: string | null;
+  /** Set on /v1 external-API mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
 }
 
 export interface ContactFieldChange {
@@ -205,7 +250,91 @@ export interface ContactDeletedEvent {
   contactId: string;
   /** Cascaded conversation ids — fanout emits `conversation:deleted` for each. */
   conversationIds: string[];
-  deletedByUserId: string;
+  /** null when triggered by the external API. */
+  deletedByUserId: string | null;
+  /** Set on /v1 external-API deletes for audit attribution. */
+  deletedByApiKeyId?: string | null;
+}
+
+/**
+ * A brand-new contact row landed. Distinct from `contact.updated` so the
+ * "On Contact created" webhook trigger has a clean signal — receivers
+ * subscribing to "created" don't get every name edit too. Fired BEFORE
+ * `message.received` on the inbound first-message path so a "Contact
+ * created → Send welcome" n8n flow sees the contact existed first.
+ *
+ * `source` discriminates HOW the contact landed:
+ *   - "inbound" — first WhatsApp message from a new number (webhook ingest)
+ *   - "api"     — POST /v1/contacts or /v1/contacts/upsert (n8n / partners)
+ *   - "manual"  — agent added via the New Contact dialog in the inbox
+ *   - "import"  — CSV/bulk import flow
+ */
+export interface ContactCreatedEvent {
+  teamId: string;
+  contact: Contact;
+  source: "inbound" | "api" | "manual" | "import";
+  /** null when the source is "inbound" (no acting human) or "api". */
+  createdByUserId: string | null;
+  /** Set on /v1 create paths for audit attribution. */
+  createdByApiKeyId?: string | null;
+}
+
+/**
+ * Tag membership on a contact changed (added OR removed, single OR bulk).
+ * Distinct from `contact.updated` so n8n flows triggered on "On Contact Tag
+ * updated" don't fire for unrelated edits (name, email, custom fields).
+ *
+ * Bulk paths emit one of these per affected contact AND publish one
+ * `contact.bulk_updated` for socket fanout coalescing.
+ */
+export interface ContactTagChangedEvent {
+  teamId: string;
+  contactId: string;
+  before: { tagIds: string[] };
+  after: { tagIds: string[] };
+  added: string[];
+  removed: string[];
+  /** null when triggered by the external API. */
+  changedByUserId: string | null;
+  /** Set on /v1 mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
+}
+
+/**
+ * Contact lifecycle stage changed. We call it "stage" internally; the public
+ * event uses "lifecycle" to match respond.io's terminology so n8n users
+ * coming over recognize the trigger.
+ */
+export interface ContactLifecycleChangedEvent {
+  teamId: string;
+  contactId: string;
+  before: { stageId: string | null };
+  after: { stageId: string | null };
+  /** null when triggered by the external API. */
+  changedByUserId: string | null;
+  /** Set on /v1 mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
+}
+
+/**
+ * Account-manager assignment on the contact (cross-thread) changed.
+ * Distinct from `conversation.assigned` — that's per-thread assignment;
+ * this is "who owns this person at the team level."
+ *
+ * `afterUser` is the hydrated User row for the new assignee (when set).
+ * Lets the webhook subscriber populate `assignee: { type, id, name, email }`
+ * without an extra query.
+ */
+export interface ContactAssigneeChangedEvent {
+  teamId: string;
+  contactId: string;
+  before: { assignedUserId: string | null };
+  after: { assignedUserId: string | null };
+  afterUser: User | null;
+  /** null when triggered by the external API. */
+  changedByUserId: string | null;
+  /** Set on /v1 mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
 }
 
 export interface NoteCreatedEvent {
@@ -424,6 +553,23 @@ export interface TeamChannelReadEvent {
 }
 
 /**
+ * An outbound-webhook subscription was auto-disabled by the circuit breaker
+ * after N consecutive failures. Carries the webhook id + a short human-
+ * readable reason so the settings UI can toast the team in real time
+ * ("Webhook 'CRM sync' was auto-disabled after 20 consecutive failures").
+ *
+ * Internal-only event: NOT published to outbound webhooks (we'd just fail
+ * to deliver it through the very subscription that just died). The
+ * dedicated socket-fanout subscriber emits a `webhook:subscription_disabled`
+ * frame to the team room.
+ */
+export interface WebhookSubscriptionDisabledEvent {
+  teamId: string;
+  webhookId: string;
+  reason: string;
+}
+
+/**
  * A team-scoped catalog row was created / updated / deleted / reordered.
  *
  * Two subscribers ride on this during the NestJS migration:
@@ -448,7 +594,37 @@ export interface TeamCatalogChangedEvent {
     | "audience-groups"
     | "whatsapp-templates"
     | "invites"
+    | "api-keys"
     | "team-channels";
+}
+
+/**
+ * A WorkflowRun transitioned through one of its terminal statuses (or kicked
+ * off as `running`). Fired once per status change — NOT per step-log append,
+ * so the wire stays quiet for long-running workflows. The runs-detail page
+ * uses this to advance its lifecycle pill without polling; the runs-list
+ * page can use it to flip a row from "queued" → "completed" live.
+ *
+ * Note: `running` fires on every worker pickup (including retries from
+ * BullMQ) so a row can flicker queued → running → waiting → running →
+ * completed on a wait-resume sequence. Consumers should treat it as a
+ * "latest known status" signal, not a state machine to validate.
+ */
+export interface WorkflowRunUpdatedEvent {
+  teamId: string;
+  workflowId: string;
+  runId: string;
+  /**
+   * Mirrors the Prisma enum exactly; "queued" is omitted because the runner
+   * never writes that — it's the initial state set by the dispatcher.
+   */
+  status: "running" | "waiting" | "completed" | "failed" | "skipped";
+  /** The node that will execute on next pickup. null on terminal statuses. */
+  currentStepId: string | null;
+  /** Wall-clock the transition was persisted. */
+  at: string;
+  /** Operator-visible reason. Set for `failed` / `skipped`; null otherwise. */
+  errorMessage: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,13 +635,18 @@ export interface TeamCatalogChangedEvent {
 export interface DomainEventMap {
   "message.received": MessageReceivedEvent;
   "message.sent": MessageSentEvent;
+  "message.send_failed": MessageSendFailedEvent;
   "message.status_changed": MessageStatusChangedEvent;
   "message.media_ready": MessageMediaReadyEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;
   "conversation.deleted": ConversationDeletedEvent;
   "conversation.read": ConversationReadEvent;
+  "contact.created": ContactCreatedEvent;
   "contact.updated": ContactUpdatedEvent;
+  "contact.tag_changed": ContactTagChangedEvent;
+  "contact.lifecycle_changed": ContactLifecycleChangedEvent;
+  "contact.assignee_changed": ContactAssigneeChangedEvent;
   "contact.bulk_updated": ContactBulkUpdatedEvent;
   "contact.deleted": ContactDeletedEvent;
   "note.created": NoteCreatedEvent;
@@ -482,6 +663,8 @@ export interface DomainEventMap {
   "team_channel.pin_changed": TeamChannelPinChangedEvent;
   "team_channel.read": TeamChannelReadEvent;
   "team.catalog_changed": TeamCatalogChangedEvent;
+  "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
+  "workflow.run_updated": WorkflowRunUpdatedEvent;
 }
 
 export type DomainEventType = keyof DomainEventMap;

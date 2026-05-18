@@ -4,15 +4,19 @@ import { AlertCircle, Check, CheckCheck, Clock } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { cn } from "@ccp/shared/utils";
-import type { Message, User } from "@ccp/shared/types";
+import type { Message } from "@ccp/shared/types";
 
 export function BubbleMeta({
   message,
-  sender,
+  senderName,
   isOut,
 }: {
   message: Message;
-  sender: User | null;
+  // Primitive — passing the whole User object made `MessageBubble`'s
+  // React.memo shallow-equality miss whenever the team's User map identity
+  // changed (e.g. a teammate's presence flipped). Now memo can short-circuit
+  // unchanged bubbles even on team-roster updates.
+  senderName: string | null;
   isOut: boolean;
 }) {
   return (
@@ -23,10 +27,10 @@ export function BubbleMeta({
       )}
     >
       <LocalTime iso={message.timestamp} format="messageTime" />
-      {isOut && sender && (
+      {isOut && senderName && (
         <>
           <span className="opacity-50">·</span>
-          <span>via @{sender.name}</span>
+          <span>via @{senderName}</span>
         </>
       )}
       {isOut && <StatusTicks message={message} />}

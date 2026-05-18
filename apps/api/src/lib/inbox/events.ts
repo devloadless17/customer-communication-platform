@@ -62,7 +62,23 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
           })
         : null;
 
-    await publish({
+    // Detach the inner publish so we don't tie up the outer subscriber's
+    // call frame.
+    //
+    // recordConversationEvent is most commonly invoked from the audit bus
+    // subscriber (audit.ts), which itself runs INSIDE an outer `publish()`
+    // call frame (the conversation.assigned/status_changed/note.* event).
+    // The bus runs subscribers serially with `await`, so a synchronous
+    // `await publish(conversation.event_recorded)` here delays every
+    // subsequent subscriber of the outer event — analytics + workflow-
+    // dispatch + outbound-webhooks all wait on the nested DB write +
+    // socket emit chain finishing first.
+    //
+    // Fire-and-forget is safe: the DB row has been committed above, so the
+    // history panel re-fetches the row on next render even if the realtime
+    // emit gets lost. The publish itself never throws (bus catches inside
+    // the subscriber loop) — the `.catch` is belt-and-braces logging only.
+    void publish({
       type: "conversation.event_recorded",
       teamId: args.teamId,
       conversationId: args.conversationId,
@@ -75,6 +91,12 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
         after: created.after,
         at: created.at.toISOString(),
       },
+    }).catch((err) => {
+      console.warn("[recordConversationEvent] inner publish failed", {
+        conversationId: args.conversationId,
+        eventId: created.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
     });
   } catch (err) {
     console.warn("[recordConversationEvent] failed", {

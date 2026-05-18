@@ -44,15 +44,23 @@ jobs:
       REDIS_URL: redis://localhost:6379
       BETTER_AUTH_SECRET: ci-placeholder
       BETTER_AUTH_URL: http://localhost:3000
+      ENCRYPTION_KEY: ci-placeholder-32-bytes-padding!!
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      # pnpm to match what the Dockerfiles + workspace use. Mixing npm here
+      # produced a different node_modules layout than the image build (npm
+      # hoists differently than pnpm), so "passes CI, breaks build" was a
+      # latent risk. setup-node's pnpm cache key uses pnpm-lock.yaml.
+      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d  # v4.1.0
+        with:
+          version: 10.33.3
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: '22'
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npx prisma generate
-      - run: npm run typecheck
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec prisma generate
+      - run: pnpm run typecheck
 
   changes:
     if: github.event_name != 'pull_request'
@@ -67,7 +75,7 @@ jobs:
     steps:
       # fetch-depth: 2 gives paths-filter the parent commit it diffs against
       # on push events. PRs use the merge base via GH API and don't need it.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
         with:
           fetch-depth: 2
 
@@ -104,7 +112,7 @@ jobs:
           fi
           echo "✓ all required GH secrets present"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -132,7 +140,7 @@ jobs:
       # changes (deps, prisma, configs, the workflow itself, the
       # docker-compose file, etc.).
       - id: filter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
         with:
           filters: |
             web:
@@ -202,15 +210,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build + push web image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: apps/web/Dockerfile
@@ -222,21 +230,36 @@ jobs:
             type=gha,scope=buildkit-web
           cache-to: type=gha,mode=max,scope=${{ needs.changes.outputs.scope }}-web
 
+      # CVE scan — only HIGH/CRITICAL with a fix available block the build.
+      # Anything else lands in the action log for triage without breaking
+      # deploys on transitively-deep CVEs that have no upstream patch.
+      # `ignore-unfixed: true` is the key knob; without it noise drowns
+      # signal and the team stops reading the report.
+      - name: Trivy scan — web image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-web
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+
   build-api:
     if: needs.changes.outputs.api == 'true'
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build + push api image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: apps/api/Dockerfile
@@ -247,6 +270,19 @@ jobs:
             type=gha,scope=${{ needs.changes.outputs.prev }}-api
             type=gha,scope=buildkit-api
           cache-to: type=gha,mode=max,scope=${{ needs.changes.outputs.scope }}-api
+
+      # Same CVE policy as build-web: only HIGH/CRITICAL with an upstream
+      # fix block. See the rationale on the web side for why unfixed is
+      # ignored.
+      - name: Trivy scan — api image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-api
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
 
   smoke:
     # Run if at least one image was rebuilt and neither build failed.
@@ -263,28 +299,56 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Stage deploy artifacts (env + compose + caddy + systemd)
+      - name: Render config bundle (NO SECRETS — artifact is repo-readable)
+        env:
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
+        run: |
+          set -euo pipefail
+          # Fail-fast: every secret listed in the `ship` job's env block
+          # must already be present here (validated by the `changes` step),
+          # but INTERNAL_BUS_SECRET is the one that's easy to forget on a
+          # fresh repo setup — calling out explicitly.
+          : "${INTERNAL_BUS_SECRET:?INTERNAL_BUS_SECRET secret is required — generate with: openssl rand -base64 32}"
+          mkdir -p _deploy
+          sed -e "s|__DOMAIN__|${APP_DOMAIN}|g" \
+              -e "s|__ADMIN_EMAIL__|${ADMIN_EMAIL}|g" \
+              deploy/Caddyfile.template > _deploy/Caddyfile
+          grep -q '__DOMAIN__\|__ADMIN_EMAIL__' _deploy/Caddyfile && { echo "✗ unrendered placeholders"; exit 1; } || true
+          cp docker-compose.yml _deploy/docker-compose.yml
+          cp deploy/ccp.service _deploy/ccp.service
+          # NO .env in the artifact — uploaded artifacts are downloadable
+          # by anyone with repo read access for the retention window. The
+          # real /opt/ccp/.env is rendered ON THE VPS in the ship job
+          # below, with secrets travelling over the encrypted SSH channel
+          # and never touching CI-side disk.
+          tar -czf ccp-deploy.tar.gz -C _deploy .
+
+      # Smoke test still needs an .env to boot the prod-shaped stack. This
+      # file lives ONLY inside the GHA runner — never in the artifact, never
+      # uploaded. Real secrets are used so the smoke test catches any value-
+      # specific issues (encryption-key length, malformed JWT signing key, …).
+      - name: Write smoke .env (runner-local only)
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
           POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
-          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
         run: |
           set -euo pipefail
-          : "${INTERNAL_BUS_SECRET:?INTERNAL_BUS_SECRET secret is required — generate with: openssl rand -base64 32}"
-          mkdir -p _deploy
+          umask 077
           cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
           APP_IMAGE_NAME=${APP_IMAGE_NAME}
@@ -297,29 +361,11 @@ jobs:
           APP_PUBLIC_URL=https://${APP_DOMAIN}
           BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
           ENCRYPTION_KEY=${ENCRYPTION_KEY}
-          # Shared secret for the cross-process cache-revalidate bridge —
-          # NestJS POSTs to /api/internal/revalidate on Next.js when a
-          # catalog mutates; the endpoint requires this exact value.
-          # validateEnv refuses to boot prod without it.
           INTERNAL_BUS_SECRET=${INTERNAL_BUS_SECRET}
-          AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0
-          # NEXT_PUBLIC_API_URL is intentionally LEFT EMPTY. In prod Caddy
-          # fronts both processes on a single origin (https://${APP_DOMAIN})
-          # so the browser's Socket.io client falls back to window.location.
-          # Setting it to the public URL would also work, but the empty path
-          # avoids baking a build-time URL into the bundle and re-deploying
-          # when the domain changes. The dev override is in .env, not here.
           NEXT_PUBLIC_API_URL=
           EOF
-          sed -e "s|__DOMAIN__|${APP_DOMAIN}|g" \
-              -e "s|__ADMIN_EMAIL__|${ADMIN_EMAIL}|g" \
-              deploy/Caddyfile.template > _deploy/Caddyfile
-          grep -q '__DOMAIN__\|__ADMIN_EMAIL__' _deploy/Caddyfile && { echo "✗ unrendered placeholders"; exit 1; } || true
-          cp docker-compose.yml _deploy/docker-compose.yml
-          cp deploy/ccp.service _deploy/ccp.service
-          tar -czf ccp-deploy.tar.gz -C _deploy .
 
       # Prove the EXACT images + env + compose we're about to ship can boot
       # together. `pull` grabs both images from the registry — when only
@@ -333,8 +379,11 @@ jobs:
           docker compose --env-file .env pull
           echo "==> Booting CI stack"
           docker compose --env-file .env up -d
-          echo "==> Waiting for app container to be healthy (≤90s)"
-          deadline=$((SECONDS + 90))
+          echo "==> Waiting for app container to be healthy (≤120s)"
+          # 120s because web's HEALTHCHECK start-period is 120s (covers
+          # `prisma migrate deploy` against a fresh DB which can rebuild
+          # a new index in 30-60s).
+          deadline=$((SECONDS + 120))
           while [ $SECONDS -lt $deadline ]; do
             app_id=$(docker compose --env-file .env ps -q app)
             if [ -z "$app_id" ]; then
@@ -351,20 +400,58 @@ jobs:
             fi
             if [ "$health" = "healthy" ]; then
               echo "✓ app healthy after ${SECONDS}s"
-              exit 0
+              break
             fi
             sleep 2
           done
-          echo "✗ app never reported healthy in 90s"
-          docker compose --env-file .env logs app
-          exit 1
+          if [ "$health" != "healthy" ]; then
+            echo "✗ app never reported healthy in 120s"
+            docker compose --env-file .env logs app
+            exit 1
+          fi
+
+          # Deep probe — the Docker HEALTHCHECK only checks HTTP 200 via
+          # wget, which means an api that returns `{ ok: false, db: false }`
+          # would still flip healthy. Parse the api /health JSON to confirm
+          # postgres + redis are genuinely reachable from the api process.
+          # This is what catches "image boots but can't talk to its data
+          # plane" — exactly the regression a healthcheck-only smoke misses.
+          echo "==> Deep probe: api /health must report ok:true"
+          api_id=$(docker compose --env-file .env ps -q api)
+          if [ -z "$api_id" ]; then
+            echo "✗ api container missing"
+            docker compose --env-file .env logs
+            exit 1
+          fi
+          # Wait up to 30s for api to be healthy too (web is independent).
+          for i in $(seq 1 15); do
+            api_health=$(docker inspect --format '{{.State.Health.Status}}' "$api_id" 2>/dev/null || echo "none")
+            [ "$api_health" = "healthy" ] && break
+            sleep 2
+          done
+          if [ "$api_health" != "healthy" ]; then
+            echo "✗ api never reported healthy in 30s (state=$api_health)"
+            docker compose --env-file .env logs api
+            exit 1
+          fi
+          # Hit /health via docker exec so we don't need a published port.
+          # jq isn't installed on the runner by default; use grep against
+          # the canonical "ok":true substring instead.
+          health_json=$(docker exec "$api_id" wget -qO- http://127.0.0.1:4000/health || true)
+          echo "api /health: $health_json"
+          echo "$health_json" | grep -q '"ok":true' || {
+            echo "✗ api /health returned non-ok body"
+            docker compose --env-file .env logs api
+            exit 1
+          }
+          echo "✓ smoke passed: api ↔ postgres ↔ redis all reachable"
 
       - name: Tear down CI stack
         if: always()
         working-directory: _deploy
         run: docker compose --env-file .env down -v || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: deploy-bundle
           path: ccp-deploy.tar.gz
@@ -381,11 +468,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: deploy-bundle
 
-      - uses: appleboy/scp-action@v0.1.7
+      - uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634  # v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -394,25 +481,70 @@ jobs:
           target: /tmp/
           overwrite: true
 
-      - uses: appleboy/ssh-action@v1.0.3
+      - uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
         env:
+          # Non-secret config — propagated via SSH env channel so the script
+          # can substitute them into the rendered /opt/ccp/.env. Same
+          # channel as DOCKER_USERNAME below, just split for readability.
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          # Secrets — travel encrypted over the SSH tunnel from GH Actions
+          # to the VPS, never written to a file in the CI runner, never
+          # uploaded as an artifact. `cat > /opt/ccp/.env` on the VPS is
+          # the only on-disk write.
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
+          UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DOCKER_USERNAME,DOCKER_PASSWORD
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,UPLOADTHING_TOKEN,DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
             mkdir -p /tmp/ccp-deploy
             tar -xzf /tmp/ccp-deploy.tar.gz -C /tmp/ccp-deploy
-            # deploy-owned app config
-            mv /tmp/ccp-deploy/.env              /opt/ccp/.env
-            mv /tmp/ccp-deploy/docker-compose.yml /opt/ccp/docker-compose.yml
+
+            # Render /opt/ccp/.env DIRECTLY on the VPS from secrets passed
+            # over the SSH env channel. Secrets never touched CI-side disk
+            # and were never in the uploaded artifact — this `cat` is the
+            # only on-disk materialization.
+            umask 077
+            cat > /opt/ccp/.env <<EOF
+            DOCKER_USERNAME=${DOCKER_USERNAME}
+            APP_IMAGE_NAME=customer-communication-platform
+            POSTGRES_DB=${POSTGRES_DB}
+            POSTGRES_USER=${POSTGRES_USER}
+            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            NODE_ENV=production
+            APP_PORT=3000
+            BETTER_AUTH_URL=https://${APP_DOMAIN}
+            APP_PUBLIC_URL=https://${APP_DOMAIN}
+            BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+            ENCRYPTION_KEY=${ENCRYPTION_KEY}
+            # Shared secret for the cross-process cache-revalidate bridge —
+            # NestJS POSTs to /api/internal/revalidate on Next.js when a
+            # catalog mutates; the endpoint requires this exact value.
+            # validateEnv refuses to boot prod without it.
+            INTERNAL_BUS_SECRET=${INTERNAL_BUS_SECRET}
+            UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
+            META_GRAPH_VERSION=v25.0
+            # NEXT_PUBLIC_API_URL intentionally empty — Caddy fronts both
+            # processes on a single origin so the browser falls back to
+            # window.location for Socket.io.
+            NEXT_PUBLIC_API_URL=
+            EOF
             chmod 600 /opt/ccp/.env
-            # root-owned system config
+
+            # Non-secret config files travel via the artifact (no secrets
+            # inside them post-restructure).
+            mv /tmp/ccp-deploy/docker-compose.yml /opt/ccp/docker-compose.yml
             sudo mv /tmp/ccp-deploy/Caddyfile    /etc/caddy/Caddyfile
             sudo mv /tmp/ccp-deploy/ccp.service  /etc/systemd/system/ccp.service
             rm -f /tmp/ccp-deploy.tar.gz
@@ -478,7 +610,7 @@ jobs:
       # Reads SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD from the VPS .env.
       - name: Bootstrap superadmin (idempotent)
         if: success()
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -494,7 +626,7 @@ jobs:
               echo "⚠ no app container running — skipping superadmin seed"
               exit 0
             fi
-            docker exec "$app_id" npm run db:seed:superadmin
+            docker exec "$app_id" pnpm run db:seed:superadmin
             echo "✓ superadmin seed complete"
 
       # Only fires if external health failed (not earlier steps), so we
@@ -503,7 +635,7 @@ jobs:
       # restarts ccp. Site is back on last-good image pair in ~30s.
       - name: Auto-rollback on health failure
         if: always() && steps.health.outcome == 'failure'
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}

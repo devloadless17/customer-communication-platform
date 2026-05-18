@@ -1,0 +1,81 @@
+import { db } from "@/lib/db";
+
+/**
+ * Nightly cleanup for `OutboundWebhookDelivery` rows.
+ *
+ * Every delivery — successful, failed, retried — persists a row so the
+ * settings UI can render the per-webhook delivery log + the "Retry" button
+ * has something to re-fire. Without a TTL the table grows unbounded: a busy
+ * team at ~10k message events / month × N webhooks × 4 retries-worst-case
+ * adds up to millions of rows over a year. Most of those are unread debug
+ * artifacts a week after they landed.
+ *
+ * Cadence: 24h, with self-disable after a quiet week (no deletions). Same
+ * shape as the contact-drift sweeper so an operator who's read one has
+ * read both.
+ *
+ * Retention: 30 days. Longer than Stripe's 30-day "Events" tab is fine if
+ * a partner asks, but most debugging happens within hours of the failure.
+ * Override via `WEBHOOK_DELIVERY_RETENTION_DAYS` if a customer asks.
+ */
+
+const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const INITIAL_DELAY_MS = 10 * 60 * 1000; // 10min after boot so workflow + drift sweepers don't dogpile
+const QUIET_DAYS_BEFORE_SELF_DISABLE = 7;
+
+function retentionDays(): number {
+  const raw = Number.parseInt(process.env.WEBHOOK_DELIVERY_RETENTION_DAYS ?? "30", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 365 ? raw : 30;
+}
+
+let timer: NodeJS.Timeout | null = null;
+let initialTimer: NodeJS.Timeout | null = null;
+let consecutiveQuietDays = 0;
+
+export function startOutboundWebhookDeliveryCleanup(): void {
+  if (timer || initialTimer) return;
+  initialTimer = setTimeout(() => {
+    initialTimer = null;
+    void sweepOnce().catch((err) =>
+      console.error("[sweeper.webhook-delivery-cleanup] initial sweep failed", err),
+    );
+    timer = setInterval(() => {
+      void sweepOnce().catch((err) =>
+        console.error("[sweeper.webhook-delivery-cleanup] sweep failed", err),
+      );
+    }, SWEEP_INTERVAL_MS);
+    timer.unref?.();
+  }, INITIAL_DELAY_MS);
+  initialTimer.unref?.();
+}
+
+export function stopOutboundWebhookDeliveryCleanup(): void {
+  if (initialTimer) {
+    clearTimeout(initialTimer);
+    initialTimer = null;
+  }
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+async function sweepOnce(): Promise<void> {
+  if (consecutiveQuietDays >= QUIET_DAYS_BEFORE_SELF_DISABLE) {
+    return;
+  }
+
+  const cutoff = new Date(Date.now() - retentionDays() * 24 * 60 * 60 * 1000);
+  const { count } = await db.outboundWebhookDelivery.deleteMany({
+    where: { createdAt: { lt: cutoff } },
+  });
+
+  if (count === 0) {
+    consecutiveQuietDays++;
+    return;
+  }
+  consecutiveQuietDays = 0;
+  console.log(
+    `[sweeper.webhook-delivery-cleanup] removed ${count} rows older than ${retentionDays()}d`,
+  );
+}

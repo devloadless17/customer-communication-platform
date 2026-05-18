@@ -3,6 +3,7 @@ import {
   ArrowRight,
   KeyRound,
   MessageSquare,
+  Plug,
   UserCircle2,
   Users,
   type LucideIcon,
@@ -52,6 +53,13 @@ export default async function WorkspaceSettingsIndex() {
             icon: KeyRound,
             title: "API keys",
             description: "Bearer tokens for the external /api/external/v1 endpoints.",
+          } satisfies Card,
+          {
+            href: "/settings/integrations",
+            icon: Plug,
+            title: "Integrations",
+            description:
+              "n8n, webhooks, Make, Zapier — connect external tools to this workspace.",
           } satisfies Card,
         ]
       : []),

@@ -25,9 +25,24 @@ export interface ExternalContact {
   phoneNumber: string | null;
   identityProvider: "meta_cloud" | null;
   externalContactId: string | null;
+  /** Canonical display name. Derived from firstName + lastName when both set. */
   name: string;
+  /** Split off `name` on first space at create/migration time. */
+  firstName: string | null;
+  lastName: string | null;
+  /** BCP-47 tag, e.g. "ar", "en". Used by template-language selection. */
+  language: string | null;
+  /** ISO 3166-1 alpha-2, derived from phone number on inbound + /v1 writes. */
+  countryCode: string | null;
+  /** Account-manager (cross-thread). Distinct from per-thread Conversation assignee. */
+  assignedUserId: string | null;
+  /** Avatar URL — usually null today; populated when an avatar is uploaded. */
+  avatarUrl: string | null;
   email: string | null;
+  location: string | null;
   customFields: Record<string, string>;
+  stageId: string | null;
+  tagIds: string[];
   createdAt: string;
 }
 
@@ -54,15 +69,27 @@ export interface ExternalMessage {
   mediaCaption: string | null;
 }
 
-export function toExternalContact(c: DbContact): ExternalContact {
+export function toExternalContact(
+  c: DbContact,
+  tagIds: string[] = [],
+): ExternalContact {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
     identityProvider: c.identityProvider,
     externalContactId: c.externalContactId,
     name: c.name,
+    firstName: c.firstName ?? null,
+    lastName: c.lastName ?? null,
+    language: c.language ?? null,
+    countryCode: c.countryCode ?? null,
+    assignedUserId: c.assignedUserId ?? null,
+    avatarUrl: c.avatarUrl ?? null,
     email: c.email ?? null,
+    location: c.location ?? null,
     customFields: normalizeCustomFields(c.customFields),
+    stageId: c.stageId,
+    tagIds,
     createdAt: c.createdAt.toISOString(),
   };
 }

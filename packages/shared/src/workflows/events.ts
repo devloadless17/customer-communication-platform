@@ -62,4 +62,15 @@ export interface WorkflowContactSnapshot {
   stageId: string | null;
   tagIds: string[];
   customFields: Record<string, string>;
+  // Additive fields — populated where the snapshot builder has the data;
+  // legacy callers leave them undefined. The outbound-webhooks mapper reads
+  // these via cast in `contactFromSnapshot`.
+  firstName?: string | null;
+  lastName?: string | null;
+  language?: string | null;
+  countryCode?: string | null;
+  avatarUrl?: string | null;
+  location?: string | null;
+  assignedUserId?: string | null;
+  createdAt?: string;
 }

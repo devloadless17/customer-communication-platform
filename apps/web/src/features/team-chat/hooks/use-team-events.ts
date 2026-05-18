@@ -289,12 +289,48 @@ export function useTeamEvents(
       });
     };
 
+    // Coalesced bulk version. Server fires this from bulk-tag / bulk-stage /
+    // bulk-field operations to bound socket bandwidth (1 frame per N
+    // contacts instead of N). The payload carries only ids — fetch the
+    // fresh contact rows once and patch every affected conversation in a
+    // single setConversations call.
+    const onContactsBulkUpdated: Parameters<
+      typeof socket.on<"contacts:bulk_updated">
+    >[1] = ({ contactIds }) => {
+      if (!contactIds?.length) return;
+      const ids = contactIds.join(",");
+      void fetchWithSessionGuard(
+        `/api/contacts/lookup?ids=${encodeURIComponent(ids)}`,
+      )
+        .then((r) => (r.ok ? (r.json() as Promise<{ contacts: typeof initialConversations[number]["contact"][] }>) : null))
+        .then((body) => {
+          if (!body?.contacts?.length) return;
+          const byId = new Map(body.contacts.map((c) => [c.id, c]));
+          setConversations((prev) => {
+            let changed = false;
+            const next = prev.map((c) => {
+              const fresh = byId.get(c.contact.id);
+              if (!fresh) return c;
+              changed = true;
+              return { ...c, contact: fresh };
+            });
+            return changed ? next : prev;
+          });
+        })
+        .catch(() => {
+          // Swallow — stale embedded contact is recoverable on next chat
+          // switch (the cached thread is also evicted by inbox-shell's
+          // bulk handler). No need to surface this transient miss.
+        });
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
     socket.on("conversation:read", onRead);
     socket.on("conversation:deleted", onConversationDeleted);
     socket.on("contact:updated", onContactUpdated);
+    socket.on("contacts:bulk_updated", onContactsBulkUpdated);
 
     return () => {
       socket.off("connect", onConnect);
@@ -304,6 +340,7 @@ export function useTeamEvents(
       socket.off("conversation:read", onRead);
       socket.off("conversation:deleted", onConversationDeleted);
       socket.off("contact:updated", onContactUpdated);
+      socket.off("contacts:bulk_updated", onContactsBulkUpdated);
     };
   }, [teamId]);
 

@@ -17,7 +17,16 @@ EnvironmentFile=/opt/ccp/.env
 
 ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull --quiet
 ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up
-ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml down
+# ExecStop only stops the app containers — postgres + redis stay running
+# across `systemctl restart ccp`. Bouncing the stateful services means a
+# cold postgres shared_buffers + page cache and a re-handshake for every
+# Redis connection; the first 30-60s of inbox queries after restart are
+# measurably slow. App-only restart keeps the data plane warm and turns
+# a deploy into "swap the app processes" instead of "reboot the stack."
+# When the unit itself is stopped (systemctl stop ccp), systemd still
+# sends SIGTERM to the compose process from ExecStart, which then takes
+# everything down cleanly via its own SIGTERM-fanout to each container.
+ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml stop app api
 TimeoutStartSec=180
 # Must exceed BullMQ lockDuration (90s, see lib/workflows/worker.ts) plus a
 # safety margin for the sweeper-stop → queue-close tail. Lower than ~100s and

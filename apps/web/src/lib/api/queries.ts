@@ -408,6 +408,33 @@ export async function listApiKeys(): Promise<ApiKeyListItem[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Outbound webhooks
+// ---------------------------------------------------------------------------
+
+export interface OutboundWebhookListItem {
+  id: string;
+  name: string;
+  url: string;
+  eventTypes: string[];
+  enabled: boolean;
+  consecutiveFailures: number;
+  createdAt: string;
+  lastDeliveredAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+  /** Audit trail for auto-disabled subscriptions — null on manual disable. */
+  disabledAt: string | null;
+  disabledReason: string | null;
+}
+
+export async function listOutboundWebhooks(): Promise<OutboundWebhookListItem[]> {
+  const { webhooks } = await api<{ webhooks: OutboundWebhookListItem[] }>(
+    "/api/team/outbound-webhooks",
+  );
+  return webhooks;
+}
+
+// ---------------------------------------------------------------------------
 // Workflows
 // ---------------------------------------------------------------------------
 

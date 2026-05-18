@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
 
 import { Prisma } from "@prisma/client";
 import {
@@ -43,6 +44,8 @@ import type {
   SendTemplateInput,
   SendTextInput,
 } from "./messages.schemas";
+import { runWithSendIdempotency } from "./send-idempotency";
+import { enqueueMessageSend } from "./send-queue";
 
 @Injectable()
 export class MessagesService {
@@ -54,22 +57,176 @@ export class MessagesService {
   ) {}
 
   /**
-   * Free-form text send. Mirrors /api/messages POST exactly. Phases:
+   * Free-form text send — public HTTP entry point.
    *
-   *   A. Parallel pre-flight reads (conversation, replyTo, send config, last inbound).
-   *   B. Meta sendText (200–800ms hop). Reply-snapshot prefetch in parallel.
-   *   C. Idempotent DB insert + snapshot finalize.
-   *   D. Publish `message.sent` (awaited so socket emit reaches clients before
-   *      we return — preserves the sender-bubble swap UX).
+   * Two-phase contract introduced in S1 (audit follow-up):
+   *
+   *   1. Synchronous preflight — light parallel reads to surface 4xx-class
+   *      errors inline (conversation not found, contact missing phone,
+   *      24-hour window closed, reply target gone, WhatsApp not connected).
+   *      The agent sees these in the same response shape as before.
+   *
+   *   2. Enqueue + return — the actual Meta send (~200-800ms) runs in the
+   *      background `message-sends` worker. The HTTP response returns in
+   *      ~5ms with `{ ok: true, clientTempId }`. The originating client's
+   *      optimistic bubble already paints by clientTempId; the worker's
+   *      `message.sent` publish reconciles it. On failure, the worker
+   *      publishes `message.send_failed` which fans out as `message:failed`
+   *      so the optimistic row flips to error state — mirrors the
+   *      pre-queue inline-throw UX.
+   *
+   * `runWithSendIdempotency` still dedupes double-click / network-retry
+   * before the enqueue; BullMQ's jobId on clientTempId is a second layer.
    */
   async sendText(
     teamId: string,
     userId: string,
     input: SendTextInput,
+  ): Promise<{ ok: true; clientTempId?: string }> {
+    return runWithSendIdempotency(
+      {
+        teamId,
+        userId,
+        conversationId: input.conversationId,
+        clientTempId: input.clientTempId,
+      },
+      async () => {
+        const pre = await this.preflightTextSend(teamId, input);
+        await enqueueMessageSend({
+          kind: "text",
+          teamId,
+          userId,
+          conversationId: input.conversationId,
+          body: input.body,
+          replyToMessageId: pre.replyToMessageId,
+          replyToExternalId: pre.replyToExternalId,
+          clientTempId: input.clientTempId,
+          receivedAt: new Date().toISOString(),
+        });
+        return {
+          ok: true as const,
+          ...(input.clientTempId ? { clientTempId: input.clientTempId } : {}),
+        };
+      },
+    );
+  }
+
+  /**
+   * Synchronous preflight for sendText. Surfaces deterministic 4xx errors
+   * so the agent doesn't see the optimistic bubble paint then collapse to
+   * failed 500ms later for cases we can detect up front (window closed,
+   * missing phone, reply-target gone, WhatsApp unconfigured).
+   *
+   * Returns resolved reply-target ids — passed straight through the queue
+   * payload so the worker doesn't re-query.
+   */
+  private async preflightTextSend(
+    teamId: string,
+    input: SendTextInput,
+  ): Promise<{
+    replyToMessageId: string | null;
+    replyToExternalId?: string;
+  }> {
+    const { conversationId, replyToMessageId: replyToMessageIdRaw } = input;
+    const [conversation, replyToRow, configOrErr, lastInbound] = await Promise.all([
+      this.db.conversation.findFirst({
+        where: { id: conversationId, teamId },
+        select: { id: true, contact: { select: { phoneNumber: true } } },
+      }),
+      replyToMessageIdRaw
+        ? this.db.message.findFirst({
+            where: { id: replyToMessageIdRaw, conversationId, teamId },
+            select: { id: true, externalId: true },
+          })
+        : Promise.resolve(null),
+      getMetaSendConfig(teamId).catch((err: unknown) => {
+        if (err instanceof ProviderNotConfiguredError) return err;
+        throw err;
+      }),
+      this.db.message.findFirst({
+        where: { conversationId, direction: "in" },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      }),
+    ]);
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (configOrErr instanceof ProviderNotConfiguredError) {
+      throw new ConflictException({
+        error: "whatsapp_not_connected",
+        detail: configOrErr.message,
+      });
+    }
+    if (!conversation.contact.phoneNumber) {
+      throw new BadRequestException({
+        error: "contact_has_no_phone",
+        detail: "This contact has no WhatsApp number.",
+      });
+    }
+    const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+    if (win.state === "closed" || win.state === "never") {
+      throw new UnprocessableEntityException({
+        error: "outside_24h_window",
+        detail: "24-hour window closed — send an approved template to re-engage this contact.",
+        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+      });
+    }
+    let replyToMessageId: string | null = null;
+    let replyToExternalId: string | undefined;
+    if (replyToMessageIdRaw) {
+      if (!replyToRow) {
+        throw new BadRequestException({
+          error: "reply_target_not_found",
+          detail: "The message you're replying to no longer exists in this conversation.",
+        });
+      }
+      replyToMessageId = replyToRow.id;
+      if (!replyToRow.externalId.startsWith("tmp_")) {
+        replyToExternalId = replyToRow.externalId;
+      }
+    }
+    return { replyToMessageId, ...(replyToExternalId ? { replyToExternalId } : {}) };
+  }
+
+  /**
+   * Internal worker-callable executor. Lifted from the previous public
+   * sendText body — same Meta send + DB + bus publish sequence, just
+   * invoked from the BullMQ worker instead of the HTTP request. Throws
+   * on Meta or DB failure; the worker catches + publishes
+   * `message.send_failed` so the optimistic bubble flips to failed.
+   *
+   * `receivedAt` is threaded from the original HTTP request so the
+   * message's `timestamp` column reflects the agent's intent, not the
+   * worker's pickup time (matters when the worker is briefly backed up
+   * — the conversation reorder must match send order).
+   */
+  async executeTextSendJob(data: import("./send-queue").SendTextJobData): Promise<void> {
+    await this.sendTextInner(
+      data.teamId,
+      data.userId,
+      {
+        conversationId: data.conversationId,
+        body: data.body,
+        ...(data.clientTempId ? { clientTempId: data.clientTempId } : {}),
+        ...(data.replyToMessageId
+          ? { replyToMessageId: data.replyToMessageId }
+          : {}),
+      },
+      new Date(data.receivedAt),
+    );
+  }
+
+  private async sendTextInner(
+    teamId: string,
+    userId: string,
+    input: SendTextInput,
+    receivedAtOverride?: Date,
   ): Promise<{ messageId: string }> {
-    // Stamp logical send time at request arrival (not at Meta's response)
-    // — preserves the user's actual send sequence on reloads.
-    const receivedAt = new Date();
+    // Stamp logical send time at HTTP arrival (not at Meta's response or
+    // worker pickup) — preserves the user's actual send sequence on reloads
+    // even when the background worker has a brief backlog. The HTTP path
+    // passes `receivedAtOverride` from the queue payload; legacy direct
+    // callers (none post-S1, but kept for safety) get a fresh stamp.
+    const receivedAt = receivedAtOverride ?? new Date();
     const { conversationId, body, clientTempId, replyToMessageId: replyToMessageIdRaw } = input;
 
     // Phase A — parallel pre-flight reads.
@@ -211,19 +368,29 @@ export class MessagesService {
         : {}),
     };
 
-    // Phase D — publish. Awaited so socket emit reaches active clients
-    // before the response, preserving the sender's bubble-swap UX.
-    await this.bus.publish({
-      type: "message.sent",
-      teamId,
-      conversationId,
-      message,
-      preview,
-      lastMessageAt: send.timestamp.toISOString(),
-      unreadDelta: 0,
-      senderUserId: userId,
-      ...(clientTempId ? { clientTempId } : {}),
-    });
+    // Phase D — publish. Fire-and-forget so HTTP returns to the sender
+    // without waiting on the bus fanout chain (socket-fanout is microseconds
+    // but workflow-dispatch hits Pg + Redis, which on a degraded backend
+    // could add hundreds of ms to the perceived send latency). The sender's
+    // optimistic bubble already reconciles by clientTempId regardless of
+    // whether the socket frame arrives before or after the HTTP response.
+    void this.bus
+      .publish({
+        type: "message.sent",
+        teamId,
+        conversationId,
+        message,
+        preview,
+        lastMessageAt: send.timestamp.toISOString(),
+        unreadDelta: 0,
+        senderUserId: userId,
+        ...(clientTempId ? { clientTempId } : {}),
+      })
+      .catch((err) =>
+        this.logger.error(
+          `sendText publish failed: ${err instanceof Error ? err.message : err}`,
+        ),
+      );
 
     // Bump conversation's lastMessageAt/preview for the next cold load.
     // Fire-and-forget — live clients already have it from the socket emit.
@@ -261,6 +428,49 @@ export class MessagesService {
    * agent so they know NOT to retry (which would double-send).
    */
   async sendMedia(
+    teamId: string,
+    userId: string,
+    form: SendMediaFormInput,
+    file: Express.Multer.File,
+  ): Promise<{ messageId: string | null; warning?: string }> {
+    return runWithSendIdempotency(
+      {
+        teamId,
+        userId,
+        conversationId: form.conversationId,
+        clientTempId: form.clientTempId,
+      },
+      () => this.sendMediaInner(teamId, userId, form, file),
+    );
+  }
+
+  private async sendMediaInner(
+    teamId: string,
+    userId: string,
+    form: SendMediaFormInput,
+    file: Express.Multer.File,
+  ): Promise<{ messageId: string | null; warning?: string }> {
+    try {
+      return await this.sendMediaWithTempFile(teamId, userId, form, file);
+    } finally {
+      // Disk-backed multer wrote the multipart payload to file.path. Whether
+      // the send succeeded, threw mid-flight, or the agent disconnected,
+      // unlink the temp file so we don't accumulate orphan blobs in /tmp
+      // (a steady 100 MB/upload leak over a shift on a small VPS).
+      // Best-effort: ENOENT (already-removed) and EACCES are non-fatal here.
+      if (file.path) {
+        unlink(file.path).catch((err) => {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+            this.logger.warn(
+              `tempfile cleanup failed for ${file.path}: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        });
+      }
+    }
+  }
+
+  private async sendMediaWithTempFile(
     teamId: string,
     userId: string,
     form: SendMediaFormInput,
@@ -327,7 +537,16 @@ export class MessagesService {
       });
     }
 
-    const bytes = new Uint8Array(file.buffer);
+    // Read the disk-backed multer temp file ONCE into a single Buffer that
+    // both Meta upload + blob-storage upload share. file.buffer is empty
+    // under diskStorage; file.path is the temp location set by the
+    // controller's diskStorage config. The previous memoryStorage code
+    // path pinned ~3x file size in V8 heap during the parallel uploads
+    // (multer buffer + Meta Blob copy + blob-storage Blob copy); reading
+    // once here + reusing the buffer drops peak to ~1x while the two
+    // providers run, since both internal Blobs copy from the same source
+    // synchronously per provider but the source itself is shared.
+    const bytes = new Uint8Array(await readFile(file.path));
     const filename = file.originalname || "upload";
 
     if (!conversation.contact.phoneNumber) {
@@ -550,22 +769,30 @@ export class MessagesService {
     };
 
     // Publish through the bus — socket-fanout pushes the bubble AND analytics
-    // stamps firstResponseAt / bumps outgoingMessagesCount. Note: pre-migration
+    // stamps firstResponseAt / bumps outgoingMessagesCount. Fire-and-forget so
+    // the HTTP response to the agent doesn't wait on the bus fanout chain
+    // (workflow-dispatch in particular hits Pg + Redis). Note: pre-migration
     // direct-emit path skipped analytics; this migration starts counting media
     // sends as outbound for response-time + counter metrics, which is the
     // correct behavior (a media send is an outbound message for every other
     // purpose).
-    await this.bus.publish({
-      type: "message.sent",
-      teamId,
-      conversationId,
-      message,
-      preview: previewBody,
-      lastMessageAt: send.timestamp.toISOString(),
-      unreadDelta: 0,
-      senderUserId: userId,
-      ...(clientTempId ? { clientTempId } : {}),
-    });
+    void this.bus
+      .publish({
+        type: "message.sent",
+        teamId,
+        conversationId,
+        message,
+        preview: previewBody,
+        lastMessageAt: send.timestamp.toISOString(),
+        unreadDelta: 0,
+        senderUserId: userId,
+        ...(clientTempId ? { clientTempId } : {}),
+      })
+      .catch((err) =>
+        this.logger.error(
+          `sendMedia publish failed: ${err instanceof Error ? err.message : err}`,
+        ),
+      );
 
     return {
       messageId: createdId,
@@ -1040,6 +1267,22 @@ export class MessagesService {
    * the workflow path produce identical message rows.
    */
   async sendTemplate(
+    teamId: string,
+    userId: string,
+    input: SendTemplateInput,
+  ): Promise<{ messageId: string }> {
+    return runWithSendIdempotency(
+      {
+        teamId,
+        userId,
+        conversationId: input.conversationId,
+        clientTempId: input.clientTempId,
+      },
+      () => this.sendTemplateInner(teamId, userId, input),
+    );
+  }
+
+  private async sendTemplateInner(
     teamId: string,
     userId: string,
     input: SendTemplateInput,

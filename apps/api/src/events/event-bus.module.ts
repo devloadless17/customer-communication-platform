@@ -1,14 +1,14 @@
-import { Global, Injectable, Module } from "@nestjs/common";
+import { Global, Module } from "@nestjs/common";
 
-import {
-  publish as busPublish,
-  publishForwarded as busPublishForwarded,
-  subscribe as busSubscribe,
-} from "@/lib/events/bus";
-import type {
-  DomainEventOf,
-  DomainEventType,
-} from "@ccp/shared/events/types";
+import { EventBus } from "./event-bus.service";
+import { OutboxDrainerService } from "./outbox-drainer.service";
+
+// Re-export so existing call sites that import `EventBus` from
+// "@/events/event-bus.module" keep working. The class itself lives in
+// event-bus.service.ts to break a circular import: OutboxDrainerService
+// imports EventBus, this module file imports OutboxDrainerService, and
+// before the split the import order hit a TDZ on the EventBus class.
+export { EventBus };
 
 /**
  * In-process DOMAIN event bus. This is the seam every service publishes
@@ -42,42 +42,9 @@ import type {
  * publishers from another.
  */
 
-type Mode = "local" | "any";
-
-@Injectable()
-export class EventBus {
-  /** Publish a locally-originated event to all subscribers. */
-  publish<K extends DomainEventType>(event: DomainEventOf<K>): Promise<void> {
-    return busPublish(event);
-  }
-
-  /**
-   * Publish an event that originated in another process (the cross-process
-   * Redis bridge calls this). Skips `local`-mode subscribers AND does not
-   * re-forward. Most code should never call this directly.
-   */
-  publishForwarded<K extends DomainEventType>(
-    event: DomainEventOf<K>,
-  ): Promise<void> {
-    return busPublishForwarded(event);
-  }
-
-  /**
-   * Register a subscriber. Returns an unsubscribe function — useful in
-   * `OnModuleDestroy` hooks for clean shutdown.
-   */
-  subscribe<K extends DomainEventType>(
-    type: K,
-    handler: (event: DomainEventOf<K>) => void | Promise<void>,
-    options: { mode?: Mode } = {},
-  ): () => void {
-    return busSubscribe(type, handler, options);
-  }
-}
-
 @Global()
 @Module({
-  providers: [EventBus],
+  providers: [EventBus, OutboxDrainerService],
   exports: [EventBus],
 })
 export class EventBusModule {}

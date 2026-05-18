@@ -15,7 +15,7 @@ export function RouteShellSkeleton({
   withSidebarRail = true,
   bodyLines = 6,
 }: {
-  /** Show the slim app-sidebar column on the left. */
+  /** Show the slim AppRail column on the left. */
   withSidebarRail?: boolean;
   /** Number of placeholder body rows. */
   bodyLines?: number;
@@ -27,7 +27,7 @@ export function RouteShellSkeleton({
       className="flex h-svh w-full overflow-hidden bg-background text-foreground"
     >
       {withSidebarRail && (
-        <div className="hidden h-full w-16 shrink-0 border-r border-border bg-muted/30 md:block" />
+        <div className="hidden h-full w-14 shrink-0 border-r border-border bg-muted/30 md:block" />
       )}
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-3 border-b border-border px-6 py-4">

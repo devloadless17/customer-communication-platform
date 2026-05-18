@@ -40,25 +40,26 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
 # is NOT copied; nothing in the NestJS process imports from it. No build
 # step — `pnpm --filter @ccp/api start` defers to @swc-node/register +
 # SWC_NODE_PROJECT wired up in apps/api/package.json.
+#
+# `prisma generate` already ran in the deps stage via root `postinstall`,
+# and the schema in the source copy below is identical to the one the deps
+# stage saw — no re-generate needed.
 # -----------------------------------------------------------------------------
 FROM deps AS runtime
 COPY apps/api ./apps/api
 COPY packages ./packages
 COPY prisma ./prisma
 COPY tsconfig.json prisma.config.ts ./
-# `prisma generate` only reads the schema + emits client code — no DB
-# connection is opened — but Prisma 7's config validates DATABASE_URL
-# eagerly when `prisma.config.ts` is loaded. Pass a placeholder URL just
-# for this step; the real value comes from compose at runtime.
-RUN DATABASE_URL="postgresql://placeholder:placeholder@placeholder:5432/placeholder" \
-    pnpm exec prisma generate
 
 ENV NODE_ENV=production \
     NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server"
 USER node
 EXPOSE 4000
+# wget is already installed at the base layer for compose's probes; reusing
+# it here avoids spinning a fresh Node process every 10s (which would burn
+# ~50-100 MB allocated-then-freed RSS on each probe).
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
-  CMD node --eval "fetch('http://127.0.0.1:4000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+  CMD wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1
 # Defers to the package's `start` script — keeps SWC_NODE_PROJECT +
 # NODE_OPTIONS + the entry point in one place (apps/api/package.json).
 CMD ["pnpm", "--filter", "@ccp/api", "start"]

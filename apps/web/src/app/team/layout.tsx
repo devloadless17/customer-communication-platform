@@ -1,14 +1,15 @@
 import { getSession } from "@/lib/auth/current-user";
-import { getCurrentTeam, listTeamMembers } from "@/lib/api/queries";
+import { getCurrentTeam } from "@/lib/api/queries";
 
-import { AppSidebar } from "@/components/layouts/app-sidebar";
+import { AppRail } from "@/components/layouts/app-rail";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 
 /**
- * Sidebar shell for /team. Mirrors /contacts/layout.tsx so the chrome looks
- * identical across non-inbox routes. The team-chat-specific sidebar (the
- * channel list) lives inside `app/team/[channelId]/page.tsx` — putting it
- * here would force every channel switch to re-fetch the layout's data.
+ * Team chat shell — just the AppRail. The channel list (the contextual
+ * sub-sidebar for this section) is owned by `TeamChatWorkspace` because it
+ * carries live socket state (unread badges, member presence). Putting a
+ * second channel list in the layout would either duplicate the data or
+ * force the workspace to refetch on every channel switch.
  */
 export default async function TeamLayout({
   children,
@@ -16,20 +17,12 @@ export default async function TeamLayout({
   children: React.ReactNode;
 }) {
   const { user } = await getSession();
-
-  const [team, teammates] = await Promise.all([
-    getCurrentTeam(),
-    listTeamMembers(),
-  ]);
+  const team = await getCurrentTeam();
 
   return (
     <CatalogSyncBoundary>
       <div className="flex min-h-svh bg-background text-foreground">
-        <AppSidebar
-          currentUser={user}
-          team={{ id: team.id, name: team.name }}
-          teammates={teammates}
-        />
+        <AppRail currentUser={user} team={{ id: team.id, name: team.name }} />
         <main className="flex-1 min-w-0">{children}</main>
       </div>
     </CatalogSyncBoundary>

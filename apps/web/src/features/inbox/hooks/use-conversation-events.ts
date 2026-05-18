@@ -450,9 +450,32 @@ export function useConversationEvents(
       }
     };
 
+    // Status events arrive sent → delivered → read in tight succession (often
+    // 100-500ms apart, sometimes back-to-back inside one tick). Each one is
+    // its own React render of the thread, so on a fresh send to a 500-msg
+    // thread the user sees three renders for one bubble. Coalesce: keep the
+    // latest status per messageId in a ref and flush them in one setData on
+    // the next animation frame. The reducer is already monotonic (delivered
+    // < read), so dropping intermediate states is safe.
+    const pendingStatuses = new Map<string, Parameters<typeof applyMessageStatus>[1]>();
+    let statusFlushRaf: number | null = null;
+    const flushStatuses = () => {
+      statusFlushRaf = null;
+      if (pendingStatuses.size === 0) return;
+      const batch = Array.from(pendingStatuses.values());
+      pendingStatuses.clear();
+      setData((prev) => {
+        let next = prev;
+        for (const p of batch) next = applyMessageStatus(next, p);
+        return next;
+      });
+    };
     const onMessageStatus: Parameters<typeof socket.on<"message:status">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setData((prev) => applyMessageStatus(prev, payload));
+      pendingStatuses.set(payload.messageId, payload);
+      if (statusFlushRaf === null) {
+        statusFlushRaf = requestAnimationFrame(flushStatuses);
+      }
     };
 
     // Inbound media finished downloading in the background. Swap the
@@ -519,8 +542,26 @@ export function useConversationEvents(
       });
     };
 
+    // Background send-worker reported a failure. Map to the same
+    // markOptimisticFailed reducer the pre-S1 inline HTTP-error path used,
+    // so the bubble flips from `pending` to `failed` with a Retry button.
+    // The toast lives in reply-box (HTTP-side); we just update the bubble.
+    const onMessageFailed: Parameters<typeof socket.on<"message:failed">>[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      if (!payload.clientTempId) return; // nothing to match against
+      setData((prev) => ({
+        ...prev,
+        messages: prev.messages.map((m) =>
+          m.clientTempId === payload.clientTempId && m.pending
+            ? { ...m, pending: false, failed: true }
+            : m,
+        ),
+      }));
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("message:status", onMessageStatus);
+    socket.on("message:failed", onMessageFailed);
     socket.on("message:media:ready", onMessageMediaReady);
     socket.on("note:new", onNoteNew);
     socket.on("conversation:assigned", onAssigned);
@@ -531,10 +572,18 @@ export function useConversationEvents(
     socket.on("contact:updated", onContactUpdated);
 
     return () => {
+      // Drop any pending coalesced status flush — the next mount will
+      // backfill anything we missed via the `?after=...` GET.
+      if (statusFlushRaf !== null) {
+        cancelAnimationFrame(statusFlushRaf);
+        statusFlushRaf = null;
+      }
+      pendingStatuses.clear();
       socket.emit("unsubscribe:conversation", { conversationId });
       socket.off("connect", onConnect);
       socket.off("message:new", onMessageNew);
       socket.off("message:status", onMessageStatus);
+      socket.off("message:failed", onMessageFailed);
       socket.off("message:media:ready", onMessageMediaReady);
       socket.off("note:new", onNoteNew);
       socket.off("conversation:assigned", onAssigned);
@@ -588,10 +637,28 @@ export function useConversationEvents(
   }, []);
 
   const removeOptimistic = useCallback((clientTempId: string) => {
-    setData((prev) => ({
-      ...prev,
-      messages: prev.messages.filter((m) => m.clientTempId !== clientTempId),
-    }));
+    setData((prev) => {
+      // Free any blob: URL attached to the optimistic media before dropping
+      // the row. createObjectURL'd URLs persist until revokeObjectURL is
+      // called or the document is unloaded — without this revoke, dismissing
+      // a failed 100MB video send and clicking Retry would leak the file
+      // bytes for the lifetime of the tab. Net change is zero when the row
+      // had no media or wasn't a blob: URL (e.g. an already-reconciled real
+      // /api/media path).
+      const toDrop = prev.messages.find((m) => m.clientTempId === clientTempId);
+      const mediaUrl = toDrop?.media?.url;
+      if (mediaUrl && mediaUrl.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(mediaUrl);
+        } catch {
+          // Ignore — already-revoked URLs throw, which is fine.
+        }
+      }
+      return {
+        ...prev,
+        messages: prev.messages.filter((m) => m.clientTempId !== clientTempId),
+      };
+    });
   }, []);
 
   const replaceWithContext = useCallback(

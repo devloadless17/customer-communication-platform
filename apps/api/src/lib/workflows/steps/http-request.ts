@@ -1,9 +1,13 @@
 import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
 
+import { decryptSecret } from "@/lib/crypto/envelope";
+import { safeFetch, SsrfBlockedError, readLimitedBody } from "@/lib/http/safe-fetch";
+
 import {
   type StepHandler,
   type StepResult,
   StepConfigError,
+  advanceWithError,
   envelopeContact,
   truncateBody,
 } from "./types";
@@ -61,9 +65,14 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
     return `POST ${c.url}`;
   },
   async run(envelope, config): Promise<StepResult> {
-    const timeout = config.timeoutMs ?? 8000;
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), timeout);
+    // 30s default. Real customer APIs (CRMs, billing systems, data
+    // enrichment) routinely take 5-20s on cold paths. The previous 8s
+    // default tripped legitimate slow endpoints into BullMQ retries, and
+    // retry on a slow-but-working endpoint is a poor outcome (it can
+    // double-post side effects on the customer side). Per-step config can
+    // still cap lower for endpoints known to be fast (validated <= 60s in
+    // the parseConfig above).
+    const timeout = config.timeoutMs ?? 30_000;
 
     const envC = envelopeContact(envelope);
     const contact: ContactLike = envC
@@ -77,8 +86,22 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
       : { name: "", phoneNumber: null, email: null, location: null, customFields: {} };
 
     const resolvedUrl = resolveFieldTokens(config.url, contact);
-    const resolvedToken = config.bearerToken
-      ? resolveFieldTokens(config.bearerToken, contact)
+    // bearerToken is envelope-encrypted at rest (workflows.service ->
+    // encryptGraphStepSecrets). decryptSecret() is a no-op for plaintext
+    // so legacy graphs from before this rollout keep working unchanged.
+    let plaintextToken: string | undefined;
+    if (config.bearerToken) {
+      try {
+        plaintextToken = decryptSecret(config.bearerToken);
+      } catch {
+        return advanceWithError(
+          500,
+          "http_request bearerToken could not be decrypted (key rotated?)",
+        );
+      }
+    }
+    const resolvedToken = plaintextToken
+      ? resolveFieldTokens(plaintextToken, contact)
       : undefined;
     const resolvedHeaders = config.customHeaders
       ? Object.fromEntries(
@@ -88,7 +111,7 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
 
     let res: Response;
     try {
-      res = await fetch(resolvedUrl, {
+      res = await safeFetch(resolvedUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -97,16 +120,21 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
           ...(resolvedHeaders ?? {}),
         },
         body: JSON.stringify(envelope),
-        signal: controller.signal,
+        timeoutMs: timeout,
       });
     } catch (err) {
-      clearTimeout(t);
+      if (err instanceof SsrfBlockedError) {
+        // Permanent — don't retry. Treat like a 4xx so the run advances past
+        // this step with the error logged, rather than burning BullMQ
+        // backoff cycles on an address that won't resolve any differently
+        // next attempt.
+        return advanceWithError(400, "http_request blocked", err.reason);
+      }
       // Network / timeout — throw so BullMQ retries with backoff.
       throw new Error(`http_request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    clearTimeout(t);
 
-    const raw = await res.text();
+    const raw = (await readLimitedBody(res, 16_384)) ?? "";
     const body = truncateBody(raw);
 
     if (res.status >= 500) {

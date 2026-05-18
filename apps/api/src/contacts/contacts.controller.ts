@@ -80,7 +80,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateContactSchema)) body: CreateContactInput,
   ) {
-    const contact = await this.contacts.create(session.teamId, body);
+    const contact = await this.contacts.create(session.teamId, session.userId, body);
     return { contact };
   }
 

@@ -674,9 +674,9 @@ function MessageThreadImpl({
                   {entry.kind === "message" ? (
                     <MessageBubble
                       message={entry.data}
-                      sender={
+                      senderName={
                         entry.data.senderUserId
-                          ? memberById.get(entry.data.senderUserId) ?? null
+                          ? memberById.get(entry.data.senderUserId)?.name ?? null
                           : null
                       }
                       contactName={contact.name}

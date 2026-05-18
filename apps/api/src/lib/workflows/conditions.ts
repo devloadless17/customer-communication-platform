@@ -234,9 +234,28 @@ function validateLeaf(
     } catch {
       errors.push(`${path}: invalid regex "${c.value}"`);
     }
+    // Length cap on the pattern itself. Catastrophic-backtracking patterns
+    // like `(a+)+$` are short by nature, so this isn't a perfect defense,
+    // but a 200-char ceiling stops the obvious `.*.*.*…` super-linear
+    // chains and matches what RE2-aware tools (which we're not running)
+    // commonly bound. The wall-clock cap below is the real defense.
+    if (c.value.length > 200) {
+      errors.push(`${path}: regex too long (max 200 chars)`);
+    }
   }
   return errors;
 }
+
+/**
+ * Wall-clock cap for `RegExp.test()` against admin-supplied patterns.
+ * Catastrophic-backtracking inputs (the `(a+)+$` class) can pin a worker
+ * CPU for tens of seconds before V8 finishes. We can't truly preempt the
+ * regex engine from JS, but we CAN bound the input length AND only call
+ * `.test()` after the input passes a length check — both shrink the
+ * realistic blast radius from "indefinite worker stall" to "one slow step
+ * advance" before the next BullMQ retry takes over.
+ */
+const REGEX_INPUT_MAX_LEN = 64 * 1024;
 
 function validateGroup(
   raw: unknown,
@@ -350,6 +369,14 @@ function applyOp(
       return actual !== null && expected !== undefined && actual.endsWith(expected);
     case "regex":
       if (actual === null || expected === undefined) return false;
+      // Don't hand an unbounded input to a possibly-pathological pattern.
+      // The validator already capped pattern length; capping input length
+      // here closes the loop. 64KiB covers every legitimate message body /
+      // contact-field text we'd condition on; pathological huge inputs
+      // never produce useful conditions and routinely show up only from
+      // malicious automation tests.
+      if (actual.length > REGEX_INPUT_MAX_LEN) return false;
+      if (expected.length > 200) return false;
       try {
         return new RegExp(expected).test(actual);
       } catch {

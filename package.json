@@ -32,20 +32,22 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "bcrypt": "^6.0.0",
-    "pg": "^8.13.0"
+    "pg": "^8.13.0",
+    "prisma": "^7.8.0",
+    "tsx": "^4.19.2"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/node": "^24",
     "@types/pg": "^8.11.10",
-    "prisma": "^7.8.0",
-    "tsx": "^4.19.2",
     "turbo": "^2.3.0",
     "typescript": "^6.0.3"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "bcrypt"
+      "bcrypt",
+      "@ffmpeg-installer/ffmpeg",
+      "@ffmpeg-installer/linux-x64"
     ]
   }
 }

@@ -71,6 +71,12 @@ async function runTagMutation(
     include: { tags: { select: { id: true } } },
   });
 
+  const newTagIds = updated.tags.map((t) => t.id);
+  const previousTagIds =
+    kind === "add"
+      ? newTagIds.filter((id) => id !== tag.id)
+      : [...newTagIds, tag.id];
+
   const payload: Contact = {
     id: updated.id,
     teamId: updated.teamId,
@@ -78,13 +84,19 @@ async function runTagMutation(
     identityProvider: updated.identityProvider,
     externalContactId: updated.externalContactId,
     name: updated.name,
+    firstName: updated.firstName,
+    lastName: updated.lastName,
+    language: updated.language,
+    countryCode: updated.countryCode,
+    assignedUserId: updated.assignedUserId,
     avatarUrl: updated.avatarUrl ?? undefined,
     email: updated.email ?? undefined,
     location: updated.location ?? undefined,
     customFields: normalizeStringMap(updated.customFields),
     source: updated.source,
     stageId: updated.stageId,
-    tagIds: updated.tags.map((t) => t.id),
+    tagIds: newTagIds,
+    createdAt: updated.createdAt.toISOString(),
   };
 
   // `silent: true` so workflow-dispatch skips chain-trigger — a step inside
@@ -100,6 +112,20 @@ async function runTagMutation(
     changedByUserId: null,
     workflowContact: workflowContactSnapshot(updated),
     silent: true,
+  });
+  // Narrow event for outbound webhooks. Same rationale as update-lifecycle.ts:
+  // workflow-dispatch reads `silent` on the catch-all to skip chain triggers;
+  // the outbound-webhook subscriber doesn't — partners subscribed to
+  // "On Contact Tag updated" want to see step-driven changes too.
+  await publish({
+    type: "contact.tag_changed",
+    teamId: ctx.teamId,
+    contactId: updated.id,
+    before: { tagIds: previousTagIds },
+    after: { tagIds: newTagIds },
+    added: kind === "add" ? [tag.id] : [],
+    removed: kind === "remove" ? [tag.id] : [],
+    changedByUserId: null,
   });
 
   return advance({ contactId, tagId: tag.id, kind, tagIds: payload.tagIds });

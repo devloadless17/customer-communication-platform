@@ -88,12 +88,18 @@ export function mapContact(c: PrismaContact): Contact {
     identityProvider: c.identityProvider as ProviderName | null,
     externalContactId: c.externalContactId,
     name: c.name,
+    firstName: c.firstName,
+    lastName: c.lastName,
+    language: c.language,
+    countryCode: c.countryCode,
+    assignedUserId: c.assignedUserId,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,
     customFields: normalizeCustomFields(c.customFields),
     source: c.source,
     stageId: c.stageId,
+    createdAt: c.createdAt.toISOString(),
   };
 }
 
@@ -118,12 +124,18 @@ export function mapContactListItem(c: PrismaContactListItem): Contact {
     identityProvider: c.identityProvider as ProviderName | null,
     externalContactId: c.externalContactId,
     name: c.name,
+    firstName: c.firstName,
+    lastName: c.lastName,
+    language: c.language,
+    countryCode: c.countryCode,
+    assignedUserId: c.assignedUserId,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,
     customFields: {},
     source: c.source,
     stageId: c.stageId,
+    createdAt: c.createdAt.toISOString(),
   };
 }
 
@@ -194,6 +206,13 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
             ...(m.mediaCaption ? { caption: m.mediaCaption } : {}),
             ...(m.mediaFilename ? { filename: m.mediaFilename } : {}),
             ...(m.mediaDurationMs != null ? { durationMs: m.mediaDurationMs } : {}),
+            // Video poster — only set when the inbound ingest extracted +
+            // uploaded a first-frame JPEG via ffmpeg. Older rows + outbound
+            // video sends leave mediaThumbnailUrl NULL; the VideoBlock
+            // gracefully falls back to bg-black when thumbnailUrl is absent.
+            ...(m.mediaThumbnailUrl
+              ? { thumbnailUrl: `/api/media/${m.id}/thumb` }
+              : {}),
           },
           // Row was inserted before the binary finished downloading — the
           // bubble renders a placeholder until the message:media:ready event

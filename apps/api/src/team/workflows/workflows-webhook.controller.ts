@@ -5,20 +5,28 @@ import {
   Param,
   Post,
   Req,
+  UseGuards,
 } from "@nestjs/common";
 import type { Request } from "express";
+
+import { WorkflowWebhookRateLimitGuard } from "@/webhooks/webhook-rate-limit.guard";
 
 import { WorkflowsService } from "./workflows.service";
 
 /**
  * Per-workflow incoming webhook — public endpoint, HMAC-SHA256 over the
- * raw body in `X-Workflow-Signature` is the only gate.
+ * raw body in `X-Workflow-Signature` is the only authentication gate.
  *
- * Separate controller (no guards) so the rest of /api/team/workflows can
- * keep its admin/session guards. The raw body lives on `req.rawBody`
+ * `WorkflowWebhookRateLimitGuard` runs ahead of the HMAC check so a
+ * leaked-secret flood (or signature-fuzz attack) is bucket-limited before
+ * it hits Prisma + the envelope-decrypt. Per-workflow + per-IP buckets.
+ *
+ * Separate controller (no session guard) so the rest of /api/team/workflows
+ * can keep its admin/session guards. The raw body lives on `req.rawBody`
  * thanks to main.ts's bodyParser.verify capture hook.
  */
 @Controller("api/team/workflows")
+@UseGuards(WorkflowWebhookRateLimitGuard)
 export class WorkflowsIncomingWebhookController {
   constructor(private readonly workflows: WorkflowsService) {}
 
@@ -27,6 +35,7 @@ export class WorkflowsIncomingWebhookController {
   async incoming(
     @Param("id") id: string,
     @Headers("x-workflow-signature") signature: string | undefined,
+    @Headers("x-workflow-timestamp") timestamp: string | undefined,
     @Req() req: Request,
   ) {
     const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
@@ -44,6 +53,7 @@ export class WorkflowsIncomingWebhookController {
       id,
       rawBodyStr,
       signature ?? "",
+      timestamp,
       headers,
     );
     return { ok: true, ...out };

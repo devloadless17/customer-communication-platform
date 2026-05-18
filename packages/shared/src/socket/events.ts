@@ -56,6 +56,21 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Outbound send failed inside the background `message-sends` queue worker.
+   * Frontend reducer flips the optimistic bubble (matched by clientTempId)
+   * from `pending` to `failed` so the user sees the same error UX as the
+   * pre-queue inline 4xx path. See `MessageSendFailedEvent` for why only
+   * socket-fanout subscribes to the underlying domain event.
+   */
+  "message:failed": (payload: {
+    teamId: string;
+    conversationId: string;
+    clientTempId?: string;
+    reason: string;
+    detail?: string;
+  }) => void;
+
+  /**
    * Inbound media finished downloading (or failed). Fired after `message:new`
    * (which carries `mediaPending: true`) when the webhook's background
    * download + blob upload completes.
@@ -307,12 +322,27 @@ export interface ServerToClientEvents {
       // revoke, and accept so admin tabs viewing /settings/team see the
       // "Pending invites" panel update without a manual refresh.
       | "invites"
+      // Team-scoped API keys. Fires on create + revoke so a second admin
+      // tab viewing /settings/api-keys updates without a manual refresh.
+      | "api-keys"
       // Workflow definitions — fires on workflow create / publish / disable
       // so the /automations list updates across open tabs.
       | "workflows"
       // Team chat channels. Fires on channel create / rename / delete so
       // every agent's sidebar refreshes without a page reload.
       | "team-channels";
+  }) => void;
+
+  /**
+   * An outbound webhook subscription was auto-disabled by the circuit
+   * breaker after N consecutive failures. The settings page listens to
+   * this and refreshes the subscription list + toasts the admin so they
+   * know the integration just went silent.
+   */
+  "webhook:subscription_disabled": (payload: {
+    teamId: string;
+    webhookId: string;
+    reason: string;
   }) => void;
 
   // -------------------------------------------------------------------------
@@ -421,6 +451,23 @@ export interface ServerToClientEvents {
   "team:channel:typing:update": (payload: {
     channelId: string;
     typingUserIds: string[];
+  }) => void;
+
+  /**
+   * A WorkflowRun's status changed (running / waiting / completed / failed /
+   * skipped). Emitted by the runner at each terminal transition so a
+   * "Run detail" page or the runs list can advance its lifecycle pill
+   * without polling. Per-step state lives only in the DB (stepLog JSONB)
+   * to keep wire frames bounded — open the run to fetch full detail.
+   */
+  "workflow:run:updated": (payload: {
+    teamId: string;
+    workflowId: string;
+    runId: string;
+    status: "running" | "waiting" | "completed" | "failed" | "skipped";
+    currentStepId: string | null;
+    at: string;
+    errorMessage: string | null;
   }) => void;
 }
 

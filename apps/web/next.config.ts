@@ -38,9 +38,24 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  // Custom server (server.ts) replaces Next's default server, so the
-  // standalone output pattern from slice 1 is dropped.
+  // Standalone output — emits `.next/standalone/` with a tree-shaken
+  // node_modules + self-contained `server.js`. The Dockerfile copies ONLY
+  // standalone/ + static/ + public/ into the runtime image, which is
+  // hundreds of MB lighter than shipping the whole pnpm store and boots
+  // noticeably faster than `next start` against a full deps tree.
   //
+  // (The earlier custom-server.ts pattern from slice 1 is gone — Phase 5
+  // removed it. `next start` is the entrypoint now, which is exactly what
+  // standalone is designed for.)
+  output: "standalone",
+  // Standalone in a workspace setup needs outputFileTracingRoot pointed
+  // at the monorepo root — without this, Next.js's file tracer only
+  // walks apps/web/node_modules and misses the hoisted pnpm packages
+  // under <root>/node_modules/.pnpm, producing a runtime that
+  // immediately MODULE_NOT_FOUND on framer-motion, lucide-react, etc.
+  // path.join keeps this portable across the dev tree and the Docker
+  // build context (both resolve to the same monorepo root).
+  outputFileTracingRoot: require("path").join(__dirname, "../../"),
   // Router cache: keep dynamic segments (e.g. /inbox/[conversationId]) in the
   // client-side router cache for 60s. Re-clicking a recently-viewed chat is
   // then instant — no Postgres round trip, no loading skeleton — because the

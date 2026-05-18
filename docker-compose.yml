@@ -17,6 +17,55 @@ services:
     # tuning guides recommend for a ≥2GB-RAM Postgres. Safe to keep even on
     # small VPS since shm is allocated on-demand from page cache.
     shm_size: 256mb
+    # On an 8GB VPS, Postgres + Redis + web + api can theoretically over-
+    # subscribe RAM (web/api each carry --max-old-space-size=4096). Caps
+    # turn a runaway process into a contained OOMKilled signal instead of
+    # taking the whole VPS down. Numbers reflect the actual budget — bump
+    # for any service that hits its cap legitimately in production.
+    mem_limit: 1500m
+    mem_reservation: 512m
+    # Tuning for the 8GB-VPS pilot scale. Defaults (shared_buffers=128MB,
+    # work_mem=4MB, effective_cache_size=4GB) are too conservative for the
+    # mem_limit above and leave perf on the table once 20-30 agents are
+    # querying the inbox list concurrently. Numbers below are tuned to:
+    #   - shared_buffers: ~25% of mem_limit — Postgres community guidance
+    #   - effective_cache_size: 50-75% — what the planner assumes the OS
+    #     page cache will give it; conservative to avoid over-estimation
+    #   - work_mem: per sort/hash, not per query — multiplied by parallel
+    #     workers × concurrent connections; 8MB × 35 pool slots = 280MB
+    #     worst case, well inside the cap
+    #   - max_connections: 120, leaves headroom past the 60 the two pools
+    #     reserve so a one-off psql or `prisma migrate deploy` doesn't
+    #     hit the cap
+    # log_min_duration_statement = 250ms surfaces slow queries to docker
+    # logs without flooding on normal traffic.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=384MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=120
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - log_min_duration_statement=250
+      - -c
+      - log_lock_waits=on
+    # Cap docker's json-file driver so a chatty `log_min_duration_statement`
+    # day can't fill the disk. 3 files × 50MB = 150MB ceiling per service.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ccp}
       POSTGRES_USER: ${POSTGRES_USER:-app}
@@ -45,6 +94,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # BullMQ working set is tiny — workflow jobs are pointers, not bulk
+    # data. 256MB is well above what Redis ever uses for the pilot scale;
+    # the cap mostly catches a runaway pub/sub or a stuck stream.
+    mem_limit: 256m
+    mem_reservation: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   app:
     # Prod pulls :latest-web; `docker compose up --build` builds locally with
@@ -82,11 +141,10 @@ services:
       TRUSTED_PROXY_HOPS: "1"
       UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
-      # Browser Socket.io target. Caddy on the host fronts both processes
-      # and routes `/socket.io/*` to the api on :4000, so the browser uses
-      # the public origin (same host as the page). In dev, app and api run
-      # on different ports — set this to the api's URL there.
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+      # NEXT_PUBLIC_API_URL is intentionally NOT set at runtime. Next.js
+      # inlines NEXT_PUBLIC_* into the client bundle at `next build` (see
+      # the `args:` block above) — setting it here at runtime would do
+      # nothing for the browser and just adds noise to docker inspect.
       # Server-side target for RSC fetches + server actions. apps/web calls
       # apps/api over this URL to read pages + run state mutations. Distinct
       # from NEXT_PUBLIC_API_URL because the browser uses the public origin
@@ -109,6 +167,20 @@ services:
       # (no TLS, no security headers, no rate limit on a real proxy hop).
       # Postgres and Redis above already follow this pattern.
       - "127.0.0.1:${APP_PORT:-3000}:3000"
+    # Next.js + Prisma. --max-old-space-size=4096 is the heap ceiling;
+    # 2GB mem_limit is conservative because RSS exceeds heap (native
+    # bindings, buffers, V8 metadata). Bump if next start ever OOM-kills
+    # in steady state.
+    mem_limit: 2g
+    mem_reservation: 768m
+    # Cap docker's json-file driver — 3 files × 100MB = 300MB ceiling per
+    # service. Web tends to log more than the api (RSC server logs +
+    # Better Auth request logs) so size is higher than the others.
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
 
   # ---- NestJS API ---------------------------------------------------------
   # Sits next to `app` (Next.js) on a different port. Caddy on the host
@@ -186,6 +258,24 @@ services:
       timeout: 3s
       retries: 5
       start_period: 20s
+    # Higher than `app` because the api carries the workflow runner,
+    # BullMQ worker, Socket.io fanout, and audit/analytics subscribers
+    # on top of REST. 3GB tracks --max-old-space-size=4096 with margin
+    # for native bindings + socket buffers under fan-out load.
+    mem_limit: 3g
+    mem_reservation: 1g
+    # Must exceed BullMQ lockDuration (90s, see lib/workflows/worker.ts)
+    # plus a tail for sweeper stop + queue close. Docker's default 10s
+    # would SIGKILL the api mid-job, Redis would release the lock 90s
+    # later, and the next process would re-execute the same workflow
+    # step. systemd's TimeoutStopSec=120 (deploy/ccp.service) plus this
+    # makes the whole graceful-shutdown chain hold together end-to-end.
+    stop_grace_period: 100s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
 
   # NOTE: The standalone `worker` service was removed post-Phase-5 cleanup.
   # `worker.ts` is gone; the NestJS `api` container owns BullMQ workers

@@ -13,6 +13,13 @@ README.md
 .env
 .env.local
 .env.*.local
+# Also match nested .env (e.g. apps/web/.env which is a dev-mode symlink
+# pointing at the workspace-root .env). Without `**/`, BuildKit tries to
+# follow the symlink, fails to resolve its target outside the build
+# context, and aborts with `invalid file request apps/web/.env`.
+**/.env
+**/.env.local
+**/.env.*.local
 npm-debug.log*
 .DS_Store
 .vscode

@@ -24,6 +24,14 @@ import {
   startWorkflowWaitingSweeper,
   stopWorkflowWaitingSweeper,
 } from "@/lib/sweepers/workflow-waiting";
+import {
+  startOutboundWebhookDeliveryCleanup,
+  stopOutboundWebhookDeliveryCleanup,
+} from "@/lib/sweepers/outbound-webhook-delivery-cleanup";
+import {
+  startApiIdempotencyCleanupSweeper,
+  stopApiIdempotencyCleanupSweeper,
+} from "@/lib/sweepers/api-idempotency-cleanup";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -55,6 +63,8 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private mediaSweeperStarted = false;
   private waitingSweeperStarted = false;
   private contactDriftSweeperStarted = false;
+  private webhookDeliveryCleanupStarted = false;
+  private apiIdempotencyCleanupStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -97,9 +107,38 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start contact-drift sweeper", err);
     }
+    try {
+      // Nightly TTL on OutboundWebhookDelivery rows (default 30d). Self-
+      // disables after a week of nothing to delete.
+      startOutboundWebhookDeliveryCleanup();
+      this.webhookDeliveryCleanupStarted = true;
+      this.logger.log("Outbound webhook delivery cleanup sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start webhook-delivery cleanup sweeper", err);
+    }
+    try {
+      // Hourly TTL on ApiIdempotencyKey rows. Bounded — the index on
+      // expiresAt makes the delete cheap and the per-tick MAX prevents a
+      // long-paused sweeper from locking the table on first wake.
+      startApiIdempotencyCleanupSweeper();
+      this.apiIdempotencyCleanupStarted = true;
+      this.logger.log("API idempotency-key cleanup sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start api-idempotency cleanup sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.apiIdempotencyCleanupStarted) stopApiIdempotencyCleanupSweeper();
+    } catch (err) {
+      this.logger.warn(`stopApiIdempotencyCleanupSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.webhookDeliveryCleanupStarted) stopOutboundWebhookDeliveryCleanup();
+    } catch (err) {
+      this.logger.warn(`stopOutboundWebhookDeliveryCleanup threw: ${err instanceof Error ? err.message : err}`);
+    }
     try {
       if (this.contactDriftSweeperStarted) stopContactDriftSweeper();
     } catch (err) {

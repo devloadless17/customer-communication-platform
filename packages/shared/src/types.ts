@@ -59,7 +59,21 @@ export interface Contact {
    */
   identityProvider?: ProviderName | null;
   externalContactId?: string | null;
+  /**
+   * Canonical display name. Derived from `firstName + lastName` when both
+   * are set; otherwise it's whatever the create path (inbound webhook,
+   * manual UI, CSV import, /v1 POST) stored. Single source of truth for
+   * the inbox + every list rendering.
+   */
   name: string;
+  /** First name, split off `name` on first space at migration time + maintained at write time. */
+  firstName?: string | null;
+  /** Last name (rest of the original `name` after the first space). */
+  lastName?: string | null;
+  /** BCP-47 language tag — e.g. `"ar"`, `"en"`. Used for WhatsApp template selection. */
+  language?: string | null;
+  /** ISO 3166-1 alpha-2 country code derived from `phoneNumber` via libphonenumber. */
+  countryCode?: string | null;
   avatarUrl?: string;
   email?: string;
   location?: string;
@@ -81,6 +95,15 @@ export interface Contact {
    * later deleted; the UI renders an "Unassigned" pill in that case.
    */
   stageId?: string | null;
+  /**
+   * Account-manager: who owns this contact across all their conversations.
+   * Distinct from `Conversation.assignedUserId` (per-thread). Null when
+   * unassigned. Adding an AI agent assignee in the future will add a
+   * parallel `assignedAiAgentId` field with a CHECK that exactly one is set.
+   */
+  assignedUserId?: string | null;
+  /** ISO row-creation timestamp. Exposed for webhook payloads and the /v1 contact GET. */
+  createdAt?: string;
 }
 
 /**
@@ -200,6 +223,14 @@ export interface MediaAttachment {
   filename?: string;
   /** Audio + video only. */
   durationMs?: number;
+  /**
+   * Video-only — server-generated first-frame JPEG used as the `poster`
+   * attribute on `<video>`. Absent on outbound video (the agent's player
+   * picks its own frame) and on inbound rows that predate the M8 audit
+   * (graceful: VideoBlock falls back to bg-black). Served through the
+   * same auth-redirect path as the main media URL.
+   */
+  thumbnailUrl?: string;
 }
 
 /**

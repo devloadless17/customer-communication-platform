@@ -1,13 +1,18 @@
 import { getSession } from "@/lib/auth/current-user";
-import { getCurrentTeam, listTeamMembers } from "@/lib/api/queries";
+import {
+  getCurrentTeam,
+  listAudienceGroups,
+  listContactStages,
+} from "@/lib/api/queries";
 
-import { AppSidebar } from "@/components/layouts/app-sidebar";
+import { AppRail } from "@/components/layouts/app-rail";
+import { ContactsSubSidebar } from "@/components/layouts/contacts-sub-sidebar";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 
 /**
- * Sidebar shell for /contacts. Server component — gates the session and
- * seeds the sidebar with team + teammates so the nav looks the same
- * everywhere in the app.
+ * Contacts shell — AppRail + ContactsSubSidebar (lifecycle stages + audience
+ * groups) + the contacts table. Stages and audience groups are SSR-seeded
+ * so the sub-sidebar paints with real data on first load.
  */
 export default async function ContactsLayout({
   children,
@@ -15,20 +20,17 @@ export default async function ContactsLayout({
   children: React.ReactNode;
 }) {
   const { user } = await getSession();
-
-  const [team, teammates] = await Promise.all([
+  const [team, stages, audienceGroups] = await Promise.all([
     getCurrentTeam(),
-    listTeamMembers(),
+    listContactStages(),
+    listAudienceGroups(),
   ]);
 
   return (
     <CatalogSyncBoundary>
       <div className="flex min-h-svh bg-background text-foreground">
-        <AppSidebar
-          currentUser={user}
-          team={{ id: team.id, name: team.name }}
-          teammates={teammates}
-        />
+        <AppRail currentUser={user} team={{ id: team.id, name: team.name }} />
+        <ContactsSubSidebar stages={stages} audienceGroups={audienceGroups} />
         <main className="flex-1 overflow-y-auto">{children}</main>
       </div>
     </CatalogSyncBoundary>

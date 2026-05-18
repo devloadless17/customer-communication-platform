@@ -132,6 +132,25 @@ export function formatPhone(raw: string | null | undefined): string {
 }
 
 /**
+ * Derive a contact's ISO 3166-1 alpha-2 country code from their phone number
+ * via libphonenumber-js. Returns null when the input is missing/unparseable.
+ *
+ * Used at write time on new contacts (inbound webhook ingest + /v1 POST/PATCH)
+ * so the outbound webhook payload's `country_code` is populated without a
+ * lookup table maintained in app code. Pure function — safe to call on the
+ * hot path; libphonenumber's /min metadata bundle is already in our bundle
+ * via `formatPhone`.
+ */
+export function getCountryFromPhone(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const withPlus = trimmed.startsWith("+") ? trimmed : `+${trimmed.replace(/[^\d]/g, "")}`;
+  const parsed = parsePhoneNumberFromString(withPlus);
+  return parsed?.country ?? null;
+}
+
+/**
  * Display string for a contact's natural identity:
  *   - Phone number when set (WhatsApp/SMS contacts).
  *   - "instagram:<id>", "telegram:<id>", … for channel-native identities.

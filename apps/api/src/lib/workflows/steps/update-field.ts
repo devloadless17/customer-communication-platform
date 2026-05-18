@@ -97,6 +97,11 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       identityProvider: updated.identityProvider,
       externalContactId: updated.externalContactId,
       name: updated.name,
+      firstName: updated.firstName,
+      lastName: updated.lastName,
+      language: updated.language,
+      countryCode: updated.countryCode,
+      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,
@@ -104,6 +109,7 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       source: updated.source,
       stageId: updated.stageId,
       tagIds: updated.tags.map((t) => t.id),
+      createdAt: updated.createdAt.toISOString(),
     };
 
     // `silent: true` — step-driven mutations don't re-trigger workflows.

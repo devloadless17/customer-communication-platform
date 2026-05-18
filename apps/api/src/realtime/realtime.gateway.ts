@@ -203,29 +203,41 @@ export class RealtimeGateway
     if (!teamId || !userId) return;
     const room = conversationRoom(body.conversationId);
 
-    // Idempotency: skip the DB ownership check + emit when the socket is
-    // already in the room. useConversationEvents re-emits this on every
-    // reconnect; without the guard a long-lived session burns N DB calls
-    // for the same id.
-    if (client.rooms.has(room)) return;
+    // Idempotency split: re-subscribe of an already-joined room (the common
+    // reconnect path when socket.io's connectionStateRecovery restored the
+    // room membership) skips the DB ownership check + the team-broadcast
+    // but STILL re-emits fresh typing + viewer snapshots to this socket.
+    // Without the snapshot re-emit, a long reconnect (>2 min, or a
+    // suspended laptop) would leave the client showing stale presence/
+    // typing pills until the next change ticked — the audit called this
+    // out as a desync window. Cheap fix: emit always; the snapshots are
+    // O(viewers) and capped by team size.
+    const alreadyJoined = client.rooms.has(room);
 
-    try {
-      const owns = await this.db.conversation.findFirst({
-        where: { id: body.conversationId, teamId },
-        select: { id: true },
-      });
-      if (!owns) return; // silently drop — same posture as pre-migration
-    } catch (err) {
-      this.logger.error(`subscribe:conversation lookup failed: ${err}`);
-      return;
+    if (!alreadyJoined) {
+      try {
+        const owns = await this.db.conversation.findFirst({
+          where: { id: body.conversationId, teamId },
+          select: { id: true },
+        });
+        if (!owns) return; // silently drop — same posture as pre-migration
+      } catch (err) {
+        this.logger.error(`subscribe:conversation lookup failed: ${err}`);
+        return;
+      }
+      client.join(room);
     }
-    client.join(room);
+
+    // Always re-emit typing snapshot — handles both first-subscribe and
+    // re-subscribe after a long reconnect.
     client.emit("typing:update", {
       conversationId: body.conversationId,
       typingUserIds: this.typing.snapshotConv(body.conversationId),
     });
 
-    // Register as a viewer. Track on the socket so disconnect cleans up.
+    // Register as a viewer (idempotent at the presence layer — add is a
+    // no-op when this socketId is already in the set). Track on the socket
+    // so disconnect cleans up.
     const viewing = client.data.viewingConversations as Set<string>;
     viewing.add(body.conversationId);
     const startedViewing = this.presence.addViewer(
@@ -234,7 +246,8 @@ export class RealtimeGateway
       client.id,
     );
     // Snapshot to THIS socket immediately so the pill paints without
-    // waiting for the next change — same posture as team presence.
+    // waiting for the next change — same posture as team presence. Fires
+    // on every (re-)subscribe so a long reconnect catches a fresh snapshot.
     client.emit("conversation:viewers", {
       conversationId: body.conversationId,
       viewerUserIds: this.presence.snapshotViewers(body.conversationId),

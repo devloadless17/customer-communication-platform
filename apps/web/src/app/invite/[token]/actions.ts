@@ -6,13 +6,7 @@ import { signInWithCredentials } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api-client";
 import { validatePasswordStructure } from "@/lib/auth/password";
 
-/**
- * Cookie marker so the auto-revalidated invite page can tell "this browser
- * just accepted" from "stale visitor on a used link" — without depending on
- * getCurrentSession() during revalidation, which sees the *original*
- * request headers (no cookie) and so always reports anonymous.
- */
-export const INVITE_JUST_ACCEPTED_COOKIE = "invite-just-accepted";
+import { INVITE_JUST_ACCEPTED_COOKIE } from "./constants";
 
 /**
  * Accept an invite. Delegates the User + Account + invite-accept transaction

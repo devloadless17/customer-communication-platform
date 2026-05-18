@@ -8,6 +8,7 @@ import {
 import { blobStorage } from "@/lib/blob-storage";
 import { serializeCsv, parseCsv } from "@/lib/csv";
 import type { ContactFieldChange } from "@ccp/shared/events/types";
+import { getCountryFromPhone } from "@ccp/shared/utils";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import {
   countAudienceContacts,
@@ -85,8 +86,16 @@ export class ContactsService {
    * Manual contact create. Phone normalization + the team default-stage
    * fallback both live here so the controller stays declarative. Duplicate
    * phone (P2002) surfaces as 409 with a copy-paste-friendly message.
+   *
+   * Publishes `contact.created` AFTER the row commits so n8n flows on
+   * "On Contact created" fire for human-driven creates. (Inbound + /v1
+   * paths fire the same event from their own create sites.)
    */
-  async create(teamId: string, input: CreateContactInput): Promise<Contact> {
+  async create(
+    teamId: string,
+    userId: string,
+    input: CreateContactInput,
+  ): Promise<Contact> {
     const phone = normalizePhoneE164(input.phoneNumber);
     if (!phone) {
       throw new BadRequestException({
@@ -95,27 +104,52 @@ export class ContactsService {
       });
     }
 
-    // Default the name to the phone number — matches the inbound webhook
-    // path (ingest does the same when Meta hasn't given a profile name).
+    // Name resolution mirrors the /v1 path: explicit `name` wins; else
+    // derive from first + last; else fall back to phone.
+    const trimmedFirst = trimOrNull(input.firstName);
+    const trimmedLast = trimOrNull(input.lastName);
     const name =
       input.name && input.name.trim().length > 0
         ? input.name.trim().slice(0, MAX_TEXT)
+        : trimmedFirst || trimmedLast
+        ? `${trimmedFirst ?? ""}${trimmedFirst && trimmedLast ? " " : ""}${trimmedLast ?? ""}`.trim().slice(0, MAX_TEXT)
         : phone;
 
     const email = trimOrNull(input.email);
     const location = trimOrNull(input.location);
+    const language = trimOrNull(input.language);
+    const countryCode = input.countryCode ?? getCountryFromPhone(phone);
     const customFields = normalizeCreateCustomFields(input.customFields ?? {});
+
+    // Account-manager validation — must be an active User on this team.
+    let assignedUserId: string | null = null;
+    if (input.assignedUserId) {
+      const user = await this.db.user.findFirst({
+        where: { id: input.assignedUserId, teamId, deactivatedAt: null },
+        select: { id: true },
+      });
+      if (!user) {
+        throw new BadRequestException({ error: "assignedUserId not a member of this team" });
+      }
+      assignedUserId = user.id;
+    }
 
     // Every contact lands in the team's default stage on create — lazy-init
     // covers older teams + admins who deleted the seeded default.
     const stageId = await ensureDefaultStage(teamId);
 
+    let created;
     try {
-      const created = await this.db.contact.create({
+      created = await this.db.contact.create({
         data: {
           teamId,
           phoneNumber: phone,
           name,
+          firstName: trimmedFirst,
+          lastName: trimmedLast,
+          language,
+          countryCode,
+          assignedUserId,
           email: email ?? undefined,
           location: location ?? undefined,
           customFields,
@@ -125,21 +159,6 @@ export class ContactsService {
           source: "manual",
         },
       });
-
-      return {
-        id: created.id,
-        teamId: created.teamId,
-        phoneNumber: created.phoneNumber,
-        identityProvider: created.identityProvider,
-        externalContactId: created.externalContactId,
-        name: created.name,
-        avatarUrl: created.avatarUrl ?? undefined,
-        email: created.email ?? undefined,
-        location: created.location ?? undefined,
-        customFields: normalizeStringMap(created.customFields),
-        source: created.source,
-        stageId: created.stageId,
-      };
     } catch (err) {
       if (
         typeof err === "object" &&
@@ -153,6 +172,38 @@ export class ContactsService {
       }
       throw err;
     }
+
+    const contact: Contact = {
+      id: created.id,
+      teamId: created.teamId,
+      phoneNumber: created.phoneNumber,
+      identityProvider: created.identityProvider,
+      externalContactId: created.externalContactId,
+      name: created.name,
+      firstName: created.firstName,
+      lastName: created.lastName,
+      language: created.language,
+      countryCode: created.countryCode,
+      assignedUserId: created.assignedUserId,
+      avatarUrl: created.avatarUrl ?? undefined,
+      email: created.email ?? undefined,
+      location: created.location ?? undefined,
+      customFields: normalizeStringMap(created.customFields),
+      source: created.source,
+      stageId: created.stageId,
+      tagIds: [],
+      createdAt: created.createdAt.toISOString(),
+    };
+
+    await this.bus.publish({
+      type: "contact.created",
+      teamId,
+      contact,
+      source: "manual",
+      createdByUserId: userId,
+    });
+
+    return contact;
   }
 
   /**
@@ -173,6 +224,11 @@ export class ContactsService {
   ): Promise<Contact> {
     const {
       name,
+      firstName,
+      lastName,
+      language,
+      countryCode,
+      assignedUserId,
       email,
       location,
       customFields: customFieldsPatch,
@@ -191,6 +247,38 @@ export class ContactsService {
       }
     }
 
+    // Hydrate the new assignee (if set) up-front so the contact.assignee_changed
+    // event payload carries a fully-typed User row for webhook receivers.
+    type AssigneeSelect = {
+      id: string;
+      teamId: string;
+      role: import("@prisma/client").Role;
+      name: string;
+      email: string;
+      avatarUrl: string | null;
+      createdAt: Date;
+      deactivatedAt: Date | null;
+    };
+    let afterAssignee: AssigneeSelect | null = null;
+    if (typeof assignedUserId === "string") {
+      afterAssignee = await this.db.user.findFirst({
+        where: { id: assignedUserId, teamId, deactivatedAt: null },
+        select: {
+          id: true,
+          teamId: true,
+          role: true,
+          name: true,
+          email: true,
+          avatarUrl: true,
+          createdAt: true,
+          deactivatedAt: true,
+        },
+      });
+      if (!afterAssignee) {
+        throw new BadRequestException({ error: "assignedUserId not a member of this team" });
+      }
+    }
+
     const result = await this.db.$transaction(async (tx) => {
       const existing = await tx.contact.findFirst({
         where: { id: contactId, teamId },
@@ -205,10 +293,26 @@ export class ContactsService {
           )
         : undefined;
 
+      // When firstName or lastName changes (and `name` wasn't in the same
+      // patch), recompute `name` to keep the canonical display in lockstep —
+      // mirrors the /v1 update path so both entry points converge.
+      let derivedName: string | undefined;
+      if (name === undefined && (firstName !== undefined || lastName !== undefined)) {
+        const nextFirst = firstName !== undefined ? firstName ?? "" : existing.firstName ?? "";
+        const nextLast = lastName !== undefined ? lastName ?? "" : existing.lastName ?? "";
+        const combined = `${nextFirst}${nextFirst && nextLast ? " " : ""}${nextLast}`.trim();
+        if (combined.length > 0) derivedName = combined.slice(0, MAX_TEXT);
+      }
+
       const updated = await tx.contact.update({
         where: { id: contactId },
         data: {
-          ...(name !== undefined ? { name } : {}),
+          ...(name !== undefined ? { name } : derivedName !== undefined ? { name: derivedName } : {}),
+          ...(firstName !== undefined ? { firstName } : {}),
+          ...(lastName !== undefined ? { lastName } : {}),
+          ...(language !== undefined ? { language } : {}),
+          ...(countryCode !== undefined ? { countryCode } : {}),
+          ...(assignedUserId !== undefined ? { assignedUserId } : {}),
           ...(email !== undefined ? { email } : {}),
           ...(location !== undefined ? { location } : {}),
           ...(stageId !== undefined ? { stageId } : {}),
@@ -230,6 +334,11 @@ export class ContactsService {
       identityProvider: updated.identityProvider,
       externalContactId: updated.externalContactId,
       name: updated.name,
+      firstName: updated.firstName,
+      lastName: updated.lastName,
+      language: updated.language,
+      countryCode: updated.countryCode,
+      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,
@@ -237,6 +346,7 @@ export class ContactsService {
       source: updated.source,
       stageId: updated.stageId,
       tagIds,
+      createdAt: updated.createdAt.toISOString(),
     };
 
     const oldCustom = normalizeStringMap(existing.customFields);
@@ -249,6 +359,8 @@ export class ContactsService {
       if (prev !== next) fieldChanges.push({ key, previous: prev, next });
     }
 
+    // Catch-all `contact.updated` for legacy subscribers (workflow dispatch,
+    // socket fanout, audit, web cache revalidate).
     await this.bus.publish({
       type: "contact.updated",
       teamId,
@@ -258,6 +370,43 @@ export class ContactsService {
       changedByUserId: userId,
       workflowContact: workflowContactSnapshot(updated),
     });
+
+    // Narrow first-class events for the n8n "On Contact Lifecycle/Assignee
+    // updated" triggers — only fire when the relevant field actually changed.
+    if (existing.stageId !== updated.stageId) {
+      await this.bus.publish({
+        type: "contact.lifecycle_changed",
+        teamId,
+        contactId: updated.id,
+        before: { stageId: existing.stageId },
+        after: { stageId: updated.stageId },
+        changedByUserId: userId,
+      });
+    }
+    if (existing.assignedUserId !== updated.assignedUserId) {
+      await this.bus.publish({
+        type: "contact.assignee_changed",
+        teamId,
+        contactId: updated.id,
+        before: { assignedUserId: existing.assignedUserId },
+        after: { assignedUserId: updated.assignedUserId },
+        afterUser: afterAssignee
+          ? {
+              id: afterAssignee.id,
+              teamId: afterAssignee.teamId,
+              role: afterAssignee.role,
+              name: afterAssignee.name,
+              email: afterAssignee.email,
+              ...(afterAssignee.avatarUrl ? { avatarUrl: afterAssignee.avatarUrl } : {}),
+              ...(afterAssignee.createdAt
+                ? { createdAt: afterAssignee.createdAt.toISOString() }
+                : {}),
+              isActive: afterAssignee.deactivatedAt === null,
+            }
+          : null,
+        changedByUserId: userId,
+      });
+    }
 
     return contact;
   }
@@ -436,7 +585,7 @@ export class ContactsService {
     // socket emit — the coalesced `contact.bulk_updated` below carries
     // the whole id set in one frame instead.
     await Promise.all(
-      updated.map((c) => {
+      updated.map(async (c) => {
         const tagIds = c.tags.map((t) => t.id);
         const payload: Contact = {
           id: c.id,
@@ -445,6 +594,11 @@ export class ContactsService {
           identityProvider: c.identityProvider,
           externalContactId: c.externalContactId,
           name: c.name,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          language: c.language,
+          countryCode: c.countryCode,
+          assignedUserId: c.assignedUserId,
           avatarUrl: c.avatarUrl ?? undefined,
           email: c.email ?? undefined,
           location: c.location ?? undefined,
@@ -452,16 +606,18 @@ export class ContactsService {
           source: c.source,
           stageId: c.stageId,
           tagIds,
+          createdAt: c.createdAt.toISOString(),
         };
         const before = hadTag.get(c.id) ?? false;
         const now = tagIds.includes(tagId);
-        const tagChanges =
-          before === now
-            ? { added: [], removed: [] }
-            : action === "tag-add"
-              ? { added: [tagId], removed: [] }
-              : { added: [], removed: [tagId] };
-        return this.bus.publish({
+        const actuallyChanged = before !== now;
+        const tagChanges = actuallyChanged
+          ? action === "tag-add"
+            ? { added: [tagId], removed: [] }
+            : { added: [], removed: [tagId] }
+          : { added: [], removed: [] };
+
+        await this.bus.publish({
           type: "contact.updated",
           teamId,
           contact: payload,
@@ -472,6 +628,25 @@ export class ContactsService {
           workflowContact: workflowContactSnapshot(c),
           suppressSocketFanout: true,
         });
+
+        // Narrow `contact.tag_changed` only when membership actually shifted.
+        if (actuallyChanged) {
+          await this.bus.publish({
+            type: "contact.tag_changed",
+            teamId,
+            contactId: c.id,
+            before: {
+              tagIds:
+                action === "tag-add"
+                  ? tagIds.filter((id) => id !== tagId)
+                  : [...tagIds, tagId],
+            },
+            after: { tagIds },
+            added: tagChanges.added,
+            removed: tagChanges.removed,
+            changedByUserId: userId,
+          });
+        }
       }),
     );
 
@@ -744,6 +919,11 @@ export class ContactsService {
       identityProvider: updated.identityProvider,
       externalContactId: updated.externalContactId,
       name: updated.name,
+      firstName: updated.firstName,
+      lastName: updated.lastName,
+      language: updated.language,
+      countryCode: updated.countryCode,
+      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,
@@ -751,6 +931,7 @@ export class ContactsService {
       source: updated.source,
       stageId: updated.stageId,
       tagIds: validIds,
+      createdAt: updated.createdAt.toISOString(),
     };
 
     await this.bus.publish({
@@ -763,6 +944,19 @@ export class ContactsService {
       changedByUserId: actorUserId,
       workflowContact: workflowContactSnapshot(updated),
     });
+
+    if (added.length > 0 || removed.length > 0) {
+      await this.bus.publish({
+        type: "contact.tag_changed",
+        teamId,
+        contactId: updated.id,
+        before: { tagIds: [...previousIds] },
+        after: { tagIds: validIds },
+        added,
+        removed,
+        changedByUserId: actorUserId,
+      });
+    }
 
     return { tagIds: validIds };
   }

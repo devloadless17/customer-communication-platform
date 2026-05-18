@@ -2,7 +2,9 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
+import { publishInTx } from "@/lib/events/outbox";
 import { ensureDefaultStage } from "@/lib/queries";
+import { getRedisConnection } from "@/lib/workflows/queue";
 import type {
   WorkflowContactSnapshot,
   WorkflowConversationSnapshot,
@@ -23,6 +25,7 @@ import type {
   ProviderName,
   ReplySnapshot,
 } from "@ccp/shared/types";
+import { getCountryFromPhone } from "@ccp/shared/utils";
 
 /**
  * Provider-agnostic ingest pipeline.
@@ -109,19 +112,28 @@ async function ingestStatusUpdate(
   });
   // Status arriving for an unknown message: classic race where Meta delivers
   // `sent`/`delivered`/`read` for an outbound BEFORE our create-message path
-  // has committed the row. Park the status in a short-TTL replay map; when
+  // has committed the row. Park the status in Redis with a short TTL; when
   // the message row is created (`createOutboundMessageIdempotent` below)
   // it drains the parked status and applies it. After TTL we drop — at that
   // point either the create failed permanently or Meta's clock is way off.
   if (!existing) {
-    parkUnknownWamidStatus(teamId, provider, evt.externalId, evt.status);
+    await parkUnknownWamidStatus(teamId, provider, evt.externalId, evt.status);
     return;
   }
 
-  // `failed` is terminal and must transition from ANY non-failed state —
-  // Meta can deliver a failure async after a `delivered`/`read`. The
-  // monotonic rank-guard below was silently dropping these and leaving
-  // the agent unaware the send actually broke.
+  // `failed` is terminal in BOTH directions:
+  //   - As target: it transitions from ANY non-failed state. Meta can
+  //     deliver a failure async after a `delivered`/`read` and the agent
+  //     must see it (silent drops were the original bug).
+  //   - As source: once a message is `failed`, late `delivered`/`read`
+  //     retries from Meta must NOT overwrite it back to a green status.
+  //     Without this guard, the rank-only check below allowed
+  //     `failed → delivered` because rank(delivered)=1 > rank(failed)=-1.
+  if (existing.status === "failed" && evt.status !== "failed") {
+    return;
+  }
+  // Monotonic rank guard for the non-terminal transitions
+  // (sent → delivered → read).
   if (
     evt.status !== "failed" &&
     statusRank(evt.status) <= statusRank(existing.status as Message["status"])
@@ -145,62 +157,65 @@ async function ingestStatusUpdate(
 
 /**
  * Park-and-replay table for status updates that arrived before the message
- * row was committed. Keyed by `(teamId|provider|externalId)`; entries
- * self-expire after TTL so memory stays bounded even if the create never
- * happens. Bounded LRU-ish via insertion-order eviction on cap.
+ * row was committed. Keyed by `(teamId|provider|externalId)` and stored in
+ * Redis with a 15-minute TTL so:
+ *   - state survives process restart (deploys + crashes)
+ *   - two api processes can park on A and drain on B without losing replay
+ *   - memory is Redis's problem, not the Node heap's
  *
- * Process-local — fine for a single api container. If we ever run two
- * api processes, an outbound created on instance A whose status webhook
- * lands on instance B would lose the replay; revisit when that's a real
- * possibility (move to Redis).
+ * The TTL is intentionally generous (15min vs the prior 5min in-mem cap) so
+ * a longer-than-expected outbound create — DB hiccup, Meta send hanging
+ * pre-row — still drains its status when the row finally lands. `failed`
+ * always wins (terminal); other transitions only upgrade by rank. Race
+ * between two simultaneous parks for the same wamid is accepted (Meta sends
+ * status updates ~1/sec/message at most; converges on the next event).
  */
-const UNKNOWN_WAMID_TTL_MS = 5 * 60_000;
-const UNKNOWN_WAMID_MAX = 1_000;
-const unknownWamidStatuses = new Map<
-  string,
-  { status: Message["status"]; exp: number }
->();
+const UNKNOWN_WAMID_TTL_MS = 15 * 60_000;
 
 function parkKey(
   teamId: string,
   provider: ProviderName,
   externalId: string,
 ): string {
-  return `${teamId}|${provider}|${externalId}`;
+  return `ccp:parked-status:${teamId}|${provider}|${externalId}`;
 }
 
-function parkUnknownWamidStatus(
+async function parkUnknownWamidStatus(
   teamId: string,
   provider: ProviderName,
   externalId: string,
   status: Message["status"],
-): void {
-  const now = Date.now();
-  // Opportunistic eviction of expired entries.
-  if (unknownWamidStatuses.size >= UNKNOWN_WAMID_MAX) {
-    for (const [k, v] of unknownWamidStatuses) {
-      if (v.exp <= now) unknownWamidStatuses.delete(k);
-    }
-    // If still over cap, drop oldest.
-    if (unknownWamidStatuses.size >= UNKNOWN_WAMID_MAX) {
-      const oldest = unknownWamidStatuses.keys().next().value;
-      if (oldest !== undefined) unknownWamidStatuses.delete(oldest);
-    }
-  }
+): Promise<void> {
   const key = parkKey(teamId, provider, externalId);
-  const existing = unknownWamidStatuses.get(key);
-  // If a higher-rank status is already parked, keep it — except `failed`
-  // which always wins (terminal). Mirrors the live status guard above.
-  if (existing && status !== "failed") {
-    if (statusRank(status) <= statusRank(existing.status)) return;
+  const redis = getRedisConnection();
+  try {
+    if (status === "failed") {
+      // Terminal — overwrite anything already parked.
+      await redis.set(key, status, "PX", UNKNOWN_WAMID_TTL_MS);
+      return;
+    }
+    const existing = await redis.get(key);
+    if (existing) {
+      // Don't downgrade — `failed` stays put, lower ranks lose to higher.
+      if (existing === "failed") return;
+      if (statusRank(status) <= statusRank(existing as Message["status"])) return;
+    }
+    await redis.set(key, status, "PX", UNKNOWN_WAMID_TTL_MS);
+  } catch (err) {
+    // Redis hiccup must not abort the webhook 200. Losing one parked status
+    // is recoverable — Meta typically resends the next-rank event soon after.
+    console.error(
+      `[ingest] parkUnknownWamidStatus failed for ${key}: ${err instanceof Error ? err.message : err}`,
+    );
   }
-  unknownWamidStatuses.set(key, { status, exp: now + UNKNOWN_WAMID_TTL_MS });
 }
 
 /**
  * Called from the outbound create path immediately after the Message row
  * commits. If a status update arrived for this wamid before us, apply it
- * now so the row isn't stuck at the create-time default.
+ * now so the row isn't stuck at the create-time default. Uses GETDEL so the
+ * read-and-clear is atomic — two near-simultaneous create paths can't both
+ * apply the same parked status.
  */
 export async function drainParkedStatus(
   teamId: string,
@@ -210,20 +225,28 @@ export async function drainParkedStatus(
   conversationId: string,
 ): Promise<void> {
   const key = parkKey(teamId, provider, externalId);
-  const parked = unknownWamidStatuses.get(key);
+  const redis = getRedisConnection();
+  let parked: Message["status"] | null = null;
+  try {
+    const raw = await redis.getdel(key);
+    parked = raw as Message["status"] | null;
+  } catch (err) {
+    console.error(
+      `[ingest] drainParkedStatus(${key}) failed: ${err instanceof Error ? err.message : err}`,
+    );
+    return;
+  }
   if (!parked) return;
-  unknownWamidStatuses.delete(key);
-  if (parked.exp <= Date.now()) return;
   await db.message.update({
     where: { id: messageId },
-    data: { status: parked.status },
+    data: { status: parked },
   });
   await publish({
     type: "message.status_changed",
     teamId,
     conversationId,
     messageId,
-    status: parked.status,
+    status: parked,
   });
 }
 
@@ -317,14 +340,39 @@ async function ingestInboundMessage(
   // must be conflict-protected against another tx's create. Postgres returns
   // P2034 (serialization failure) on conflict; we retry once. Two retries is
   // a sensible ceiling — by then the contention is real, not a fluke.
-  const { contact, conversation, isNewConversation, reopened } = await runWithSerializableRetry(
+  const { contact, conversation, isNewContact, isNewConversation, reopened } = await runWithSerializableRetry(
     async () => {
+      // Pre-existence check — the signal "did this inbound just create a
+      // brand-new contact row?" We need it to publish `contact.created`
+      // BEFORE `message.received` so n8n flows triggered on "On Contact
+      // created → Send welcome" see the contact existed first.
+      //
+      // Racy on simultaneous first-inbounds from the same brand-new phone
+      // (two handlers can both read null and both think they created); the
+      // worst-case symptom is one duplicate `contact.created` webhook
+      // delivery. We tolerate that — the upsert itself is correct (one
+      // row, the other handler's upsert turns into an empty update), and
+      // receivers should already dedupe via `event_id`.
+      const existingContact = await db.contact.findUnique({
+        where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
+        select: { id: true },
+      });
+      const isNewContact = !existingContact;
+
+      const { firstName, lastName } = splitContactName(evt.contactName ?? evt.contactPhone);
       const contact = await db.contact.upsert({
         where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
         create: {
           teamId,
           phoneNumber: evt.contactPhone,
           name: evt.contactName ?? evt.contactPhone,
+          // Populate the new webhook-facing fields on create. Splitting the
+          // name + deriving the country code on first contact matches what
+          // the migration does for backfill — both paths converge on the
+          // same shape so webhook receivers don't see partial rows.
+          firstName,
+          lastName,
+          countryCode: getCountryFromPhone(evt.contactPhone),
           stageId: defaultStageId,
         },
         update: {
@@ -371,7 +419,7 @@ async function ingestInboundMessage(
         });
         reopened = true;
       }
-      return { contact, conversation, isNewConversation, reopened };
+      return { contact, conversation, isNewContact, isNewConversation, reopened };
     },
   );
 
@@ -386,74 +434,216 @@ async function ingestInboundMessage(
     evt.media && !(evt.media.storageKey && evt.media.storageUrl),
   );
 
-  let createdId: string;
+  // Atomic landing for the inbound: message + conversation summary +
+  // contact.lastInboundAt + the `message.received` outbox row all commit
+  // together, or none of them do. Previously these ran as a sequential
+  // create + Promise.all UPDATE followed by a fire-and-forget `publish()`;
+  // a crash between the commit and the publish lost the realtime emit
+  // forever (Meta's webhook retry hit the P2002 dedupe and returned
+  // silently, never re-firing the event). Writing the event row inside
+  // the SAME tx via `publishInTx` closes that window — if the tx
+  // commits, the drainer WILL eventually dispatch it; if the tx rolls
+  // back, both the message AND the event vanish together.
   try {
-    const created = await db.message.create({
-      data: {
+    await db.$transaction(async (tx) => {
+      const created = await tx.message.create({
+        data: {
+          teamId,
+          conversationId: conversation.id,
+          externalId: evt.externalId,
+          senderUserId: null,
+          body: evt.body,
+          direction: "in",
+          provider,
+          status: "delivered",
+          rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+          timestamp: evt.timestamp,
+          ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
+          ...(evt.media
+            ? {
+                mediaKind: evt.media.kind,
+                mediaMimeType: evt.media.mimeType,
+                mediaCaption: evt.body || null,
+                mediaFilename: evt.media.filename ?? null,
+                mediaDurationMs: evt.media.durationMs ?? null,
+                ...(evt.media.storageKey && evt.media.storageUrl
+                  ? {
+                      mediaKey: evt.media.storageKey,
+                      mediaUrl: evt.media.storageUrl,
+                      mediaSizeBytes: evt.media.sizeBytes ?? null,
+                    }
+                  : {}),
+                ...(evt.media.thumbnailStorageKey && evt.media.thumbnailStorageUrl
+                  ? {
+                      mediaThumbnailKey: evt.media.thumbnailStorageKey,
+                      mediaThumbnailUrl: evt.media.thumbnailStorageUrl,
+                    }
+                  : {}),
+              }
+            : {}),
+        },
+      });
+
+      // Run the two denorm updates SEQUENTIALLY, not via Promise.all. Prisma
+      // does not serialise parallel queries inside a $transaction — they
+      // ride the same connection but a throw on one isn't guaranteed to
+      // abort the in-flight other before the transaction wrapper sees it.
+      // Sequential write inside the same tx means the rollback boundary is
+      // the only escape: either both denorms commit or neither does.
+      // (Latency cost is one extra round-trip; ~1ms on a local pool.)
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: {
+          lastMessageAt: evt.timestamp,
+          lastMessagePreview: preview,
+          unreadCount: { increment: 1 },
+          incomingMessagesCount: { increment: 1 },
+        },
+      });
+      await tx.contact.updateMany({
+        where: {
+          id: contact.id,
+          OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: evt.timestamp } }],
+        },
+        data: { lastInboundAt: evt.timestamp },
+      });
+
+      // Build the message.received payload inside the tx so all reads
+      // (recentMessages) see the row we just wrote and stay consistent
+      // with what commits. Then write the outbox row so the drainer can
+      // dispatch atomically with the entity write.
+      const messagePayload = buildMessageDomain({
+        createdId: created.id,
         teamId,
+        provider,
+        conversation,
+        evt,
+        replySnapshot,
+        mediaPending,
+      });
+      const newConversation: ConversationWithRefs | undefined = isNewConversation
+        ? {
+            conversation: toDomainConversation({
+              ...conversation,
+              lastMessageAt: evt.timestamp,
+              lastMessagePreview: preview,
+              unreadCount: 1,
+            }),
+            contact: toDomainContact(contact),
+            assignedUser: null,
+            messages: [],
+            notes: [],
+            // The webhook event we're processing IS an inbound, so the 24h
+            // window opens right now.
+            lastInboundAt: evt.timestamp.toISOString(),
+          }
+        : undefined;
+      const conversationSnapshot = toWorkflowConversation({
+        ...conversation,
+        lastMessageAt: evt.timestamp,
+        unreadCount: (conversation.unreadCount ?? 0) + 1,
+      });
+      const contactSnapshot = toWorkflowContact(contact);
+      const workflowMessage = toWorkflowMessage({
+        id: created.id,
         conversationId: conversation.id,
         externalId: evt.externalId,
         senderUserId: null,
         body: evt.body,
         direction: "in",
-        provider,
-        status: "delivered",
-        rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+        mediaKind: evt.media?.kind ?? null,
+        mediaCaption: evt.media && evt.body ? evt.body : null,
         timestamp: evt.timestamp,
-        ...(replySnapshot ? { replyToMessageId: replySnapshot.id } : {}),
-        ...(evt.media
-          ? {
-              mediaKind: evt.media.kind,
-              mediaMimeType: evt.media.mimeType,
-              mediaCaption: evt.body || null,
-              mediaFilename: evt.media.filename ?? null,
-              mediaDurationMs: evt.media.durationMs ?? null,
-              ...(evt.media.storageKey && evt.media.storageUrl
-                ? {
-                    mediaKey: evt.media.storageKey,
-                    mediaUrl: evt.media.storageUrl,
-                    mediaSizeBytes: evt.media.sizeBytes ?? null,
-                  }
-                : {}),
-            }
-          : {}),
-      },
+      });
+      // tx-scoped read so the snapshot sees the just-inserted row's
+      // consistency snapshot, not a global-pool query that might miss
+      // sibling concurrent inserts mid-flight.
+      const recentMessages = await loadRecentForWorkflow(
+        conversation.id,
+        created.id,
+        tx,
+      );
+
+      await publishInTx(tx, {
+        type: "message.received",
+        teamId,
+        conversationId: conversation.id,
+        message: messagePayload,
+        contact: contactSnapshot,
+        conversation: conversationSnapshot,
+        workflowMessage,
+        isNewConversation,
+        reopened,
+        ...(newConversation ? { newConversation } : {}),
+        preview,
+        lastMessageAt: evt.timestamp.toISOString(),
+        unreadDelta: 1,
+        recentMessages,
+      });
+
+      return created.id;
     });
-    createdId = created.id;
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      // Race: another worker won the insert. Drop without side effects.
+      // Race: another worker won the insert. Drop without side effects —
+      // the tx rolled back, so no outbox row was written either. The
+      // winning worker will publish on its own commit.
       return;
     }
     throw err;
   }
 
-  // Two independent post-create writes — issue them in parallel so the
-  // socket-emit (downstream of this function) starts ~20-40ms sooner.
-  //   1. conversation bump (lastMessageAt + preview + unread/incoming counters)
-  //   2. contact.lastInboundAt denorm (read by getConversationWithRefs in the
-  //      thread-open hot path; monotonic guard so a delayed older event can't
-  //      roll the column backwards)
-  await Promise.all([
-    db.conversation.update({
-      where: { id: conversation.id },
-      data: {
-        lastMessageAt: evt.timestamp,
-        lastMessagePreview: preview,
-        unreadCount: { increment: 1 },
-        incomingMessagesCount: { increment: 1 },
-      },
-    }),
-    db.contact.updateMany({
-      where: {
-        id: contact.id,
-        OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: evt.timestamp } }],
-      },
-      data: { lastInboundAt: evt.timestamp },
-    }),
-  ]);
+  // The message.received event was already written to the outbox INSIDE
+  // the tx above — the drainer will dispatch it (~100ms p99).
+  //
+  // `contact.created` stays on the synchronous publish path because the
+  // contact upsert is in a different tx (runWithSerializableRetry above)
+  // that doesn't thread `tx` to its body, so we can't `publishInTx` from
+  // here. Its lost-event window is small in absolute volume (one per new
+  // phone number per team) and downstream receivers are expected to dedupe
+  // by id — acceptable for now; migrate when the contact tx is rewritten.
+  //
+  // Ordering: contact.created dispatches BEFORE message.received because
+  // its synchronous publish fires immediately, and the message.received
+  // outbox row only dispatches after the drainer's next tick (~100ms).
+  // Subscribers (incl. outbound webhook) see contact-then-message order.
+  if (isNewContact) {
+    try {
+      await publish({
+        type: "contact.created",
+        teamId,
+        contact: toDomainContact(contact),
+        source: "inbound",
+        createdByUserId: null,
+      });
+    } catch (err) {
+      console.error(
+        `[ingest] publish(contact.created) failed for team=${teamId} contact=${contact.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+      // The customer-visible message arrival already happened (outbox row
+      // committed); contact.created is the secondary signal here.
+    }
+  }
+}
 
-  const message: Message = {
+/**
+ * Build the domain-shape Message for the inbound `message.received` event.
+ * Pure compute — called from inside the ingest transaction so the payload
+ * stays consistent with what just committed. Extracted so the inline tx
+ * body stays readable.
+ */
+function buildMessageDomain(args: {
+  createdId: string;
+  teamId: string;
+  provider: ProviderName;
+  conversation: { id: string };
+  evt: NormalizedInboundMessage;
+  replySnapshot: ReplySnapshot | null;
+  mediaPending: boolean;
+}): Message {
+  const { createdId, teamId, provider, conversation, evt, replySnapshot, mediaPending } = args;
+  return {
     id: createdId,
     teamId,
     conversationId: conversation.id,
@@ -483,86 +673,16 @@ async function ingestInboundMessage(
             ...(evt.body ? { caption: evt.body } : {}),
             ...(evt.media.filename ? { filename: evt.media.filename } : {}),
             ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+            // Video poster URL — served through the same /api/media/thumb/<id>
+            // auth-redirect path so the team-ownership check still gates it.
+            ...(evt.media.thumbnailStorageUrl
+              ? { thumbnailUrl: `/api/media/${createdId}/thumb` }
+              : {}),
           },
           ...(mediaPending ? { mediaPending: true } : {}),
         }
       : {}),
   };
-
-  // Build the ConversationWithRefs payload only when the convo is brand-new,
-  // so clients that don't yet have it can splice the row in without refetch.
-  const newConversation: ConversationWithRefs | undefined = isNewConversation
-    ? {
-        conversation: toDomainConversation({
-          ...conversation,
-          lastMessageAt: evt.timestamp,
-          lastMessagePreview: preview,
-          unreadCount: 1,
-        }),
-        contact: toDomainContact(contact),
-        assignedUser: null,
-        messages: [],
-        notes: [],
-        // The webhook event we're processing IS an inbound, so the 24h
-        // window opens right now.
-        lastInboundAt: evt.timestamp.toISOString(),
-      }
-    : undefined;
-
-  const conversationSnapshot = toWorkflowConversation({
-    ...conversation,
-    lastMessageAt: evt.timestamp,
-    unreadCount: (conversation.unreadCount ?? 0) + 1,
-  });
-  const contactSnapshot = toWorkflowContact(contact);
-  const workflowMessage = toWorkflowMessage({
-    id: createdId,
-    conversationId: conversation.id,
-    externalId: evt.externalId,
-    senderUserId: null,
-    body: evt.body,
-    direction: "in",
-    mediaKind: evt.media?.kind ?? null,
-    mediaCaption: evt.media && evt.body ? evt.body : null,
-    timestamp: evt.timestamp,
-  });
-  // Recent thread context for the workflow `message_received` trigger.
-  // Loaded HERE (not in the subscriber) so the event payload is complete and
-  // any downstream subscriber — including Phase 3's outbound webhook
-  // deliverer — gets the same context without a second DB round-trip.
-  const recentMessages = await loadRecentForWorkflow(conversation.id, createdId);
-
-  // Single publish — socket fanout, audit, analytics, and workflow dispatch
-  // all run as subscribers in registration order (see lib/events/subscribers).
-  // The `reopened` flag lets socket-fanout emit the secondary
-  // `conversation:status → pending` event that previously lived inline here.
-  //
-  // We deliberately do NOT await: socket-fanout is sync (microseconds) and
-  // fires before the next line; workflow-dispatch hits Pg + Redis, which on
-  // a degraded backend could stall the webhook 200 long enough that Meta
-  // retries the whole batch. Matches the prior code's `void (async () => …)`
-  // semantics — errors are captured per-subscriber inside the bus.
-  void publish({
-    type: "message.received",
-    teamId,
-    conversationId: conversation.id,
-    message,
-    contact: contactSnapshot,
-    conversation: conversationSnapshot,
-    workflowMessage,
-    isNewConversation,
-    reopened,
-    ...(newConversation ? { newConversation } : {}),
-    preview,
-    lastMessageAt: evt.timestamp.toISOString(),
-    unreadDelta: 1,
-    recentMessages,
-  }).catch((err) => {
-    console.error(
-      `[ingest] publish(message.received) failed for team=${teamId} msg=${createdId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +767,17 @@ function toWorkflowContact(c: {
   stageId?: string | null;
   tags?: Array<{ id: string }>;
   customFields?: unknown;
+  // The five new webhook-facing fields. All optional so legacy callers that
+  // hand-roll a contact-shaped object (workflow steps, AI mock harnesses)
+  // don't have to know about them.
+  firstName?: string | null;
+  lastName?: string | null;
+  language?: string | null;
+  countryCode?: string | null;
+  avatarUrl?: string | null;
+  location?: string | null;
+  assignedUserId?: string | null;
+  createdAt?: Date | string | null;
 }): WorkflowContactSnapshot {
   return {
     id: c.id,
@@ -658,6 +789,42 @@ function toWorkflowContact(c: {
     stageId: c.stageId ?? null,
     tagIds: (c.tags ?? []).map((t) => t.id),
     customFields: normalizeCustomFields(c.customFields),
+    firstName: c.firstName ?? null,
+    lastName: c.lastName ?? null,
+    language: c.language ?? null,
+    countryCode: c.countryCode ?? null,
+    avatarUrl: c.avatarUrl ?? null,
+    location: c.location ?? null,
+    assignedUserId: c.assignedUserId ?? null,
+    createdAt:
+      c.createdAt instanceof Date
+        ? c.createdAt.toISOString()
+        : c.createdAt ?? undefined,
+  };
+}
+
+/**
+ * Split a single-line contact name into firstName + lastName at the first
+ * space. Matches the migration's backfill heuristic so the inbound webhook
+ * path and the SQL backfill converge on the same shape.
+ *
+ *   "Mahdi Talal"        → { firstName: "Mahdi", lastName: "Talal" }
+ *   "Mary Anne Smith"    → { firstName: "Mary",  lastName: "Anne Smith" } (lossy)
+ *   "Mahdi"              → { firstName: "Mahdi", lastName: null }
+ *   "" / null / phone    → { firstName: null,    lastName: null } — caller falls
+ *                          back to the literal `name` field.
+ */
+function splitContactName(name: string | null | undefined): {
+  firstName: string | null;
+  lastName: string | null;
+} {
+  const trimmed = name?.trim();
+  if (!trimmed) return { firstName: null, lastName: null };
+  const idx = trimmed.indexOf(" ");
+  if (idx === -1) return { firstName: trimmed, lastName: null };
+  return {
+    firstName: trimmed.slice(0, idx),
+    lastName: trimmed.slice(idx + 1).trim() || null,
   };
 }
 
@@ -667,8 +834,13 @@ function toWorkflowContact(c: {
 async function loadRecentForWorkflow(
   conversationId: string,
   excludeMessageId: string,
+  // Optional tx — pass it when the caller is already inside a $transaction
+  // (e.g. the inbound-ingest atomic block, which writes the outbox row in
+  // the same tx and needs the recentMessages snapshot to be consistent
+  // with what just committed). Without tx, runs on the global pool.
+  client: { message: typeof db.message } = db,
 ): Promise<WorkflowMessageSnapshot[]> {
-  const rows = await db.message.findMany({
+  const rows = await client.message.findMany({
     where: { conversationId, NOT: { id: excludeMessageId } },
     orderBy: { timestamp: "desc" },
     take: 10,
@@ -735,11 +907,17 @@ function toDomainContact(c: {
   identityProvider?: ProviderName | null;
   externalContactId?: string | null;
   name: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  language?: string | null;
+  countryCode?: string | null;
+  assignedUserId?: string | null;
   avatarUrl: string | null;
   email?: string | null;
   location?: string | null;
   customFields?: unknown;
   source?: "inbound" | "manual";
+  createdAt?: Date | string | null;
 }): Contact {
   return {
     id: c.id,
@@ -748,6 +926,11 @@ function toDomainContact(c: {
     identityProvider: c.identityProvider ?? null,
     externalContactId: c.externalContactId ?? null,
     name: c.name,
+    firstName: c.firstName ?? null,
+    lastName: c.lastName ?? null,
+    language: c.language ?? null,
+    countryCode: c.countryCode ?? null,
+    assignedUserId: c.assignedUserId ?? null,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,
@@ -756,6 +939,10 @@ function toDomainContact(c: {
     // we read back may not always include it (legacy callers), so treat
     // missing as inbound.
     source: c.source ?? "inbound",
+    createdAt:
+      c.createdAt instanceof Date
+        ? c.createdAt.toISOString()
+        : c.createdAt ?? undefined,
   };
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   MessageSquare,
   Paperclip,
@@ -241,6 +241,30 @@ export function ReplyBox({
     setSlashRange(range);
   }, [mode, windowClosed]);
 
+  // Debounced variant for the keystroke path. detectSlashQuery scans the
+  // entire textarea on every call; on a fast typist with an 8KB draft that's
+  // ~60 regex scans/sec — measurable jank on low-end mobile. Showing the
+  // popup 50ms after typing stops is imperceptible. Cursor-move paths
+  // (onSelect/onClick) still call updateSlashRange synchronously — those
+  // fire infrequently and the popup must follow the caret without lag.
+  const slashDebounceRef = useRef<number | null>(null);
+  const updateSlashRangeDebounced = useCallback(() => {
+    if (slashDebounceRef.current !== null) {
+      window.clearTimeout(slashDebounceRef.current);
+    }
+    slashDebounceRef.current = window.setTimeout(() => {
+      slashDebounceRef.current = null;
+      updateSlashRange();
+    }, 50);
+  }, [updateSlashRange]);
+  useEffect(() => {
+    return () => {
+      if (slashDebounceRef.current !== null) {
+        window.clearTimeout(slashDebounceRef.current);
+      }
+    };
+  }, []);
+
   // Map the chosen snippet to "splice resolved body into the textarea".
   const onSelectSnippet = useCallback(
     (s: SnippetItem) => {
@@ -432,7 +456,12 @@ export function ReplyBox({
   // have to re-pick. caption from the entry takes precedence over body (the
   // bubble's `body` is the caption for media messages, but if the user
   // already typed something into the composer we honor the prefill order).
-  useEffect(() => {
+  //
+  // useLayoutEffect (not useEffect) so the setValue commits BEFORE the
+  // browser paints — without it, the user sees the empty textarea for one
+  // frame on retry click and then the restored text pops in. Cheaper to do
+  // the sync write than to ship a one-frame flash.
+  useLayoutEffect(() => {
     if (!prefill) return;
     setMode("reply");
     setError(null);
@@ -587,6 +616,17 @@ export function ReplyBox({
             signal: abort.signal,
           });
           if (!res.ok) throw new Error(await safeReadError(res));
+          // Soft-warn the agent when the message went out on WhatsApp but our
+          // local archival failed (saved=null path in messages.service.ts).
+          // The bubble is text-only (caption preserved) — without this toast
+          // the agent has no way to know the file isn't archived locally,
+          // and may try to re-send (which would double-deliver on WA).
+          const parsed = await res.clone().json().catch(() => null);
+          if (parsed && typeof parsed === "object" && "warning" in parsed && parsed.warning) {
+            toast.warning("Message sent — but the file wasn't archived locally", {
+              description: String(parsed.warning),
+            });
+          }
         } else if (trimmed) {
           const url = isNote ? "/api/notes" : "/api/messages";
           const res = await fetch(url, {
@@ -729,9 +769,10 @@ export function ReplyBox({
               } else if (e.target.value.length === 0) {
                 onStopTyping?.();
               }
-              // Re-detect the slash query on every keystroke. Defer so the
-              // textarea's value/selection settles first.
-              requestAnimationFrame(updateSlashRange);
+              // Re-detect the slash query on every keystroke, debounced 50ms
+              // so the popup doesn't refresh at keystroke speed. Cursor-move
+              // paths below stay synchronous — those don't fire per character.
+              updateSlashRangeDebounced();
             }}
             onSelect={updateSlashRange}
             onClick={updateSlashRange}

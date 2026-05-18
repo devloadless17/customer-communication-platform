@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+
 import {
   BadRequestException,
   Body,
@@ -8,6 +10,8 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
+import { randomUUID } from "node:crypto";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -49,8 +53,15 @@ export class MessagesController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(SendTextSchema)) body: SendTextInput,
   ) {
+    // Post-S1: returns `{ ok, queued, clientTempId? }` after preflight +
+    // enqueue (~5 ms typical). The actual Meta send happens in the
+    // `message-sends` BullMQ worker, with success surfaced via the
+    // `message:new` socket event (reconciles the optimistic bubble) and
+    // failure surfaced via `message:failed`. The frontend reply-box does
+    // NOT read `messageId` from this response anymore; the legacy shape
+    // returned a real messageId because the send was synchronous.
     const out = await this.messages.sendText(session.teamId, session.userId, body);
-    return { ok: true, messageId: out.messageId };
+    return { ok: out.ok, queued: true, ...("clientTempId" in out ? { clientTempId: out.clientTempId } : {}) };
   }
 
   /**
@@ -58,10 +69,26 @@ export class MessagesController {
    * applied at the interceptor level (we classify the kind from mime type
    * AFTER multer accepts), so the hard ceiling here is 100 MiB (the largest
    * cap — documents). The service does the per-kind check post-upload.
+   *
+   * `diskStorage` (NOT the default memoryStorage) — multer streams the
+   * incoming multipart body to a temp file during the parse, so peak RAM
+   * during 5+ concurrent 20 MB uploads is ~5×64 KB chunks instead of
+   * ~5×20 MB pinned V8 heap. The service reads the file ONCE post-parse
+   * and shares a single Buffer with both providers (Meta + blob storage);
+   * the temp file is unlinked in a `finally` block regardless of outcome.
    */
   @Post("media")
   @UseInterceptors(
-    FileInterceptor("file", { limits: { fileSize: 100 * 1024 * 1024 } }),
+    FileInterceptor("file", {
+      limits: { fileSize: 100 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        // Name includes a uuid prefix so two concurrent sends from the same
+        // user never collide on the temp filename.
+        filename: (_req, file, cb) =>
+          cb(null, `ccp-upload-${randomUUID()}-${sanitizeOriginalName(file.originalname)}`),
+      }),
+    }),
   )
   async sendMedia(
     @CurrentSession() session: ApiSession,
@@ -102,4 +129,15 @@ export class MessagesController {
   ) {
     return this.messages.forward(session.teamId, session.userId, body);
   }
+}
+
+/**
+ * Strip path separators + truncate so the original filename doesn't smuggle
+ * a relative path into the temp directory. Keeps the suffix readable enough
+ * to identify in ops without trusting client-controlled bytes for layout.
+ */
+function sanitizeOriginalName(name: string | undefined): string {
+  if (!name) return "file";
+  const base = name.replace(/[/\\]/g, "_").replace(/\.+$/g, "");
+  return base.slice(-64) || "file";
 }

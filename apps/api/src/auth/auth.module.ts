@@ -3,6 +3,7 @@ import { Global, Module } from "@nestjs/common";
 import { ApiKeyGuard } from "./api-key.guard";
 import { ChangePasswordController } from "./change-password.controller";
 import { RoleGuard } from "./role.guard";
+import { ScopeGuard } from "./scope.guard";
 import { SessionGuard } from "./session.guard";
 
 /**
@@ -16,7 +17,7 @@ import { SessionGuard } from "./session.guard";
 @Global()
 @Module({
   controllers: [ChangePasswordController],
-  providers: [SessionGuard, ApiKeyGuard, RoleGuard],
-  exports: [SessionGuard, ApiKeyGuard, RoleGuard],
+  providers: [SessionGuard, ApiKeyGuard, RoleGuard, ScopeGuard],
+  exports: [SessionGuard, ApiKeyGuard, RoleGuard, ScopeGuard],
 })
 export class AuthModule {}

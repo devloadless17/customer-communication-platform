@@ -226,11 +226,17 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
       // round-trips through /api/media/<id> just to learn the duration; the
       // user usually never plays most of them. The browser fetches on demand
       // when the user clicks the play control.
+      //
+      // `poster` (when present): server-extracted first-frame JPEG, fetched
+      // through the same auth-redirect path as the video (/api/media/:id/thumb).
+      // Inbound video bubbles get this; outbound + legacy rows leave it
+      // undefined and fall back to the bg-black slot.
+      {...(media.thumbnailUrl ? { poster: media.thumbnailUrl } : {})}
       preload="none"
       onError={() => setErrored(true)}
       // Same fixed-width reasoning as ImageBlock — shrink-to-fit bubble
       // parent collapses w-full to 0 without an intrinsic width source.
-      className="block aspect-4/3 max-h-65 w-80 max-w-full rounded-xl bg-black"
+      className="block aspect-4/3 max-h-65 w-80 max-w-full rounded-xl bg-black object-cover"
     />
   );
 }
@@ -383,6 +389,14 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
           ref={imgRef}
           src={url}
           alt="full size"
+          // `decoding=async` lets the browser decode off the main thread so
+          // the lightbox open animation doesn't stutter on large images;
+          // `fetchPriority=high` jumps the queue past background bubble
+          // thumbnails that may be loading concurrently — rapid lightbox
+          // clicks otherwise serialize behind 10+ thumbnail loads on a
+          // media-heavy thread.
+          decoding="async"
+          fetchPriority="high"
           onError={() => setErrored(true)}
           className="max-h-[90vh] max-w-[90vw] object-contain"
           onClick={(e) => e.stopPropagation()}

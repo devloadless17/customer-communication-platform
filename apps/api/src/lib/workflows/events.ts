@@ -92,6 +92,17 @@ export interface WorkflowContactSnapshot {
   stageId: string | null;
   tagIds: string[];
   customFields: Record<string, string>;
+  // Additive — populated when the snapshot builder has the data on the input
+  // Contact row. Mirrors @ccp/shared/workflows/events so the public outbound-
+  // webhook envelope mapper can read them via the standard snapshot shape.
+  firstName?: string | null;
+  lastName?: string | null;
+  language?: string | null;
+  countryCode?: string | null;
+  avatarUrl?: string | null;
+  location?: string | null;
+  assignedUserId?: string | null;
+  createdAt?: string;
 }
 
 /**
@@ -153,6 +164,14 @@ export function workflowContactSnapshot(c: {
   stageId?: string | null;
   tags?: Array<{ id: string }>;
   customFields?: unknown;
+  firstName?: string | null;
+  lastName?: string | null;
+  language?: string | null;
+  countryCode?: string | null;
+  avatarUrl?: string | null;
+  location?: string | null;
+  assignedUserId?: string | null;
+  createdAt?: Date | string | null;
 }): WorkflowContactSnapshot {
   return {
     id: c.id,
@@ -164,6 +183,17 @@ export function workflowContactSnapshot(c: {
     stageId: c.stageId ?? null,
     tagIds: (c.tags ?? []).map((t) => t.id),
     customFields: normalizeCustomFields(c.customFields),
+    firstName: c.firstName ?? null,
+    lastName: c.lastName ?? null,
+    language: c.language ?? null,
+    countryCode: c.countryCode ?? null,
+    avatarUrl: c.avatarUrl ?? null,
+    location: c.location ?? null,
+    assignedUserId: c.assignedUserId ?? null,
+    createdAt:
+      c.createdAt instanceof Date
+        ? c.createdAt.toISOString()
+        : c.createdAt ?? undefined,
   };
 }
 

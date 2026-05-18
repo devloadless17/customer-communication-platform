@@ -13,7 +13,6 @@ import {
 } from "@/lib/api/queries";
 import { canManageContactFields, canManageStages } from "@ccp/shared/auth/permissions";
 import { InboxShell } from "@/features/inbox/components/inbox-shell";
-import type { User } from "@ccp/shared/types";
 
 /**
  * Single-page inbox workspace.
@@ -79,10 +78,8 @@ export default async function InboxPage({
     redirect("/inbox");
   }
 
-  // `teammates` (active only) drives the sidebar's online dots and presence.
   // `teamMembers` (all incl. deactivated) drives historical message
   // attribution so deactivated agents' past replies still show their name.
-  const teammates: User[] = teamMembers.filter((u) => u.isActive);
 
   const initialActiveConversationId = initialThread ? requestedConversationId ?? null : null;
 
@@ -90,7 +87,6 @@ export default async function InboxPage({
     <InboxShell
       currentUser={user}
       team={team}
-      teammates={teammates}
       teamMembers={teamMembers}
       conversations={conversationsPage.items}
       nextConversationCursor={conversationsPage.nextCursor}

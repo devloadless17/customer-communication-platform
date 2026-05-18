@@ -1,5 +1,11 @@
+-- CreateSchema
+CREATE SCHEMA IF NOT EXISTS "public";
+
 -- CreateExtension
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
+-- CreateExtension
+CREATE EXTENSION IF NOT EXISTS "plpgsql";
 
 -- CreateEnum
 CREATE TYPE "Role" AS ENUM ('superAdmin', 'admin', 'manager', 'agent');
@@ -146,6 +152,11 @@ CREATE TABLE "Contact" (
     "identityProvider" "ProviderName",
     "externalContactId" TEXT,
     "name" TEXT NOT NULL,
+    "firstName" TEXT,
+    "lastName" TEXT,
+    "language" TEXT,
+    "countryCode" TEXT,
+    "assignedUserId" TEXT,
     "avatarUrl" TEXT,
     "email" TEXT,
     "location" TEXT,
@@ -233,6 +244,8 @@ CREATE TABLE "Message" (
     "mediaFilename" TEXT,
     "mediaSizeBytes" INTEGER,
     "mediaDurationMs" INTEGER,
+    "mediaThumbnailKey" TEXT,
+    "mediaThumbnailUrl" TEXT,
     "replyToMessageId" TEXT,
 
     CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
@@ -406,6 +419,7 @@ CREATE TABLE "TeamApiKey" (
     "lastUsedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "revokedAt" TIMESTAMP(3),
+    "scopes" TEXT[] DEFAULT ARRAY['*']::TEXT[],
 
     CONSTRAINT "TeamApiKey_pkey" PRIMARY KEY ("id")
 );
@@ -422,6 +436,44 @@ CREATE TABLE "ApiIdempotencyKey" (
     "expiresAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "ApiIdempotencyKey_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "OutboundWebhook" (
+    "id" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "url" TEXT NOT NULL,
+    "secret" TEXT NOT NULL,
+    "eventTypes" TEXT[],
+    "enabled" BOOLEAN NOT NULL DEFAULT true,
+    "createdById" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lastDeliveredAt" TIMESTAMP(3),
+    "lastErrorAt" TIMESTAMP(3),
+    "lastErrorMessage" TEXT,
+    "consecutiveFailures" INTEGER NOT NULL DEFAULT 0,
+    "disabledAt" TIMESTAMP(3),
+    "disabledReason" TEXT,
+
+    CONSTRAINT "OutboundWebhook_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "OutboundWebhookDelivery" (
+    "id" TEXT NOT NULL,
+    "webhookId" TEXT NOT NULL,
+    "eventType" TEXT NOT NULL,
+    "payload" JSONB NOT NULL,
+    "responseStatus" INTEGER,
+    "responseBody" TEXT,
+    "attemptCount" INTEGER NOT NULL DEFAULT 0,
+    "deliveredAt" TIMESTAMP(3),
+    "failedAt" TIMESTAMP(3),
+    "errorMessage" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "OutboundWebhookDelivery_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -541,6 +593,21 @@ CREATE TABLE "LoginAttempt" (
 );
 
 -- CreateTable
+CREATE TABLE "OutboundEvent" (
+    "id" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
+    "type" TEXT NOT NULL,
+    "payload" JSONB NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "publishedAt" TIMESTAMP(3),
+    "failedAt" TIMESTAMP(3),
+    "lastError" TEXT,
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+
+    CONSTRAINT "OutboundEvent_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "_ContactToTag" (
     "A" TEXT NOT NULL,
     "B" TEXT NOT NULL,
@@ -602,6 +669,9 @@ CREATE INDEX "Contact_teamId_source_idx" ON "Contact"("teamId", "source");
 
 -- CreateIndex
 CREATE INDEX "Contact_teamId_stageId_idx" ON "Contact"("teamId", "stageId");
+
+-- CreateIndex
+CREATE INDEX "Contact_teamId_assignedUserId_idx" ON "Contact"("teamId", "assignedUserId");
 
 -- CreateIndex
 CREATE INDEX "Contact_teamId_lastInboundAt_idx" ON "Contact"("teamId", "lastInboundAt" DESC);
@@ -733,6 +803,15 @@ CREATE INDEX "ApiIdempotencyKey_expiresAt_idx" ON "ApiIdempotencyKey"("expiresAt
 CREATE UNIQUE INDEX "ApiIdempotencyKey_teamId_apiKeyId_key_key" ON "ApiIdempotencyKey"("teamId", "apiKeyId", "key");
 
 -- CreateIndex
+CREATE INDEX "OutboundWebhook_teamId_enabled_idx" ON "OutboundWebhook"("teamId", "enabled");
+
+-- CreateIndex
+CREATE INDEX "OutboundWebhookDelivery_webhookId_createdAt_idx" ON "OutboundWebhookDelivery"("webhookId", "createdAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "OutboundWebhookDelivery_createdAt_idx" ON "OutboundWebhookDelivery"("createdAt");
+
+-- CreateIndex
 CREATE INDEX "ConversationReadReceipt_conversationId_idx" ON "ConversationReadReceipt"("conversationId");
 
 -- CreateIndex
@@ -790,6 +869,9 @@ CREATE UNIQUE INDEX "TeamChannelReadReceipt_userId_channelId_key" ON "TeamChanne
 CREATE INDEX "LoginAttempt_lockedUntil_idx" ON "LoginAttempt"("lockedUntil");
 
 -- CreateIndex
+CREATE INDEX "OutboundEvent_teamId_createdAt_idx" ON "OutboundEvent"("teamId", "createdAt");
+
+-- CreateIndex
 CREATE INDEX "_ContactToTag_B_index" ON "_ContactToTag"("B");
 
 -- CreateIndex
@@ -818,6 +900,9 @@ ALTER TABLE "Contact" ADD CONSTRAINT "Contact_teamId_fkey" FOREIGN KEY ("teamId"
 
 -- AddForeignKey
 ALTER TABLE "Contact" ADD CONSTRAINT "Contact_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "ContactStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Contact" ADD CONSTRAINT "Contact_assignedUserId_fkey" FOREIGN KEY ("assignedUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ContactStage" ADD CONSTRAINT "ContactStage_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -904,6 +989,12 @@ ALTER TABLE "TeamApiKey" ADD CONSTRAINT "TeamApiKey_teamId_fkey" FOREIGN KEY ("t
 ALTER TABLE "ApiIdempotencyKey" ADD CONSTRAINT "ApiIdempotencyKey_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES "TeamApiKey"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "OutboundWebhook" ADD CONSTRAINT "OutboundWebhook_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "OutboundWebhookDelivery" ADD CONSTRAINT "OutboundWebhookDelivery_webhookId_fkey" FOREIGN KEY ("webhookId") REFERENCES "OutboundWebhook"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "ConversationReadReceipt" ADD CONSTRAINT "ConversationReadReceipt_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -967,6 +1058,9 @@ ALTER TABLE "TeamChannelReadReceipt" ADD CONSTRAINT "TeamChannelReadReceipt_user
 ALTER TABLE "TeamChannelReadReceipt" ADD CONSTRAINT "TeamChannelReadReceipt_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "OutboundEvent" ADD CONSTRAINT "OutboundEvent_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "_ContactToTag" ADD CONSTRAINT "_ContactToTag_A_fkey" FOREIGN KEY ("A") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -983,53 +1077,3 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fk
 
 -- AddForeignKey
 ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ===========================================================================
--- CUSTOM SQL — preserved from squashed dev migrations.
--- ---------------------------------------------------------------------------
--- Prisma cannot model these in schema.prisma:
---   * Partial indexes (WHERE clauses) — Postgres-specific feature, no Prisma
---     attribute equivalent. We pay for these specifically: they're 30-50%
---     smaller than the equivalent full index AND let the planner skip
---     filter discards on the hot path.
---   * jsonb_path_ops opclass on a JSONB GIN — Prisma's `raw("jsonb_path_ops")`
---     emitter appends a redundant `ASC` that breaks the syntax (see notes
---     at Contact.customFields in schema.prisma).
---   * Trigram GIN on a function expression (LOWER(col::text)) — Prisma can
---     only declare ops on a column, not an expression.
---
--- DO NOT REMOVE without first updating every query path that depends on them:
---   * Inbound-only Message lookups (24h-window checks, mark-read, send guard)
---   * Contact search by phone or email (workspace search bar)
---   * Top-level channel feed pagination (team chat)
---   * Contact customFields containment (@>) and substring (ILIKE) queries
--- ===========================================================================
-
--- Partial index — inbound-only Message lookups.
-CREATE INDEX "Message_conversationId_inbound_timestamp_idx"
-  ON "Message" ("conversationId", "timestamp" DESC)
-  WHERE "direction" = 'in';
-
--- Partial trigram GIN — Contact.phoneNumber search (channel-aware: only
--- contacts with a phone number get an index entry).
-CREATE INDEX "Contact_phoneNumber_trgm_idx"
-  ON "Contact" USING GIN ("phoneNumber" gin_trgm_ops)
-  WHERE "phoneNumber" IS NOT NULL;
-
--- Partial trigram GIN — Contact.email search.
-CREATE INDEX "Contact_email_trgm_idx"
-  ON "Contact" USING GIN ("email" gin_trgm_ops)
-  WHERE "email" IS NOT NULL;
-
--- Partial keyset index — top-level team-channel feed.
-CREATE INDEX "TeamChannelMessage_channelId_topLevel_createdAt_id_idx"
-  ON "TeamChannelMessage" ("channelId", "createdAt" DESC, "id" DESC)
-  WHERE "threadRootId" IS NULL;
-
--- JSONB containment index — Contact.customFields `@>` queries.
-CREATE INDEX "Contact_customFields_gin_idx"
-  ON "Contact" USING GIN ("customFields" jsonb_path_ops);
-
--- Trigram on LOWER cast — Contact.customFields ILIKE substring search.
-CREATE INDEX "Contact_customFields_trgm_idx"
-  ON "Contact" USING GIN ((LOWER("customFields"::text)) gin_trgm_ops);

@@ -31,6 +31,15 @@ export interface NormalizedMediaRef {
   /** Public CDN URL the browser fetches via /api/media/[id]. */
   storageUrl?: string;
   sizeBytes?: number;
+  /**
+   * Video-only — first-frame poster JPEG. Generated server-side during
+   * inbound media download via ffmpeg + uploaded as a separate blob so the
+   * `<video>` element can render a poster frame instead of a black square
+   * until the user clicks play. Filled in by the webhook route, like the
+   * `storage*` fields above.
+   */
+  thumbnailStorageKey?: string;
+  thumbnailStorageUrl?: string;
 }
 
 export interface NormalizedInboundMessage {

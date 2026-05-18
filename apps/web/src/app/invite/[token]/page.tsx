@@ -5,7 +5,7 @@ import { lookupInvite } from "@/lib/api/queries";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 
 import { AcceptForm } from "./accept-form";
-import { INVITE_JUST_ACCEPTED_COOKIE } from "./actions";
+import { INVITE_JUST_ACCEPTED_COOKIE } from "./constants";
 import { RedirectToInbox } from "./redirect-to-inbox";
 
 export const metadata = {

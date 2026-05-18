@@ -120,41 +120,62 @@ export function registerWorkflowDispatchSubscribers(): void {
     ) {
       return;
     }
+    // Fan out every per-change dispatch in parallel — each one is an
+    // independent `Workflow.findMany` + per-match enqueue, so the prior
+    // sequential `await` chain was paying N round-trip latencies for no
+    // ordering benefit. A bulk-tag operation that changes 5 tags and the
+    // stage on one contact previously serialized into 6× the DB latency
+    // before any workflow could enqueue. `Promise.all` here keeps total
+    // wall-time bounded to the slowest single lookup.
+    const dispatches: Array<Promise<unknown>> = [];
     for (const change of e.fieldChanges) {
-      await dispatch(e.teamId, "contact_field_updated", {
-        contact: e.workflowContact,
-        fieldKey: change.key,
-        previousValue: change.previous,
-        newValue: change.next,
-        changedByUserId: e.changedByUserId,
-      });
+      dispatches.push(
+        dispatch(e.teamId, "contact_field_updated", {
+          contact: e.workflowContact,
+          fieldKey: change.key,
+          previousValue: change.previous,
+          newValue: change.next,
+          changedByUserId: e.changedByUserId,
+        }),
+      );
     }
     if (e.previousStageId !== newStageId) {
-      await dispatch(e.teamId, "contact_lifecycle_updated", {
-        contact: e.workflowContact,
-        previousStageId: e.previousStageId,
-        newStageId,
-        changedByUserId: e.changedByUserId,
-      });
+      dispatches.push(
+        dispatch(e.teamId, "contact_lifecycle_updated", {
+          contact: e.workflowContact,
+          previousStageId: e.previousStageId,
+          newStageId,
+          changedByUserId: e.changedByUserId,
+        }),
+      );
     }
     if (e.tagChanges) {
       for (const tagId of e.tagChanges.added) {
-        await dispatch(e.teamId, "contact_tag_updated", {
-          contact: e.workflowContact,
-          kind: "added",
-          tagId,
-          changedByUserId: e.changedByUserId,
-        });
+        dispatches.push(
+          dispatch(e.teamId, "contact_tag_updated", {
+            contact: e.workflowContact,
+            kind: "added",
+            tagId,
+            changedByUserId: e.changedByUserId,
+          }),
+        );
       }
       for (const tagId of e.tagChanges.removed) {
-        await dispatch(e.teamId, "contact_tag_updated", {
-          contact: e.workflowContact,
-          kind: "removed",
-          tagId,
-          changedByUserId: e.changedByUserId,
-        });
+        dispatches.push(
+          dispatch(e.teamId, "contact_tag_updated", {
+            contact: e.workflowContact,
+            kind: "removed",
+            tagId,
+            changedByUserId: e.changedByUserId,
+          }),
+        );
       }
     }
+    // `allSettled` so one dispatch failure (e.g. a malformed condition on
+    // one workflow) does NOT abort dispatch for the rest. Each failure is
+    // already logged inside `dispatch()` — the rejection here is just the
+    // re-thrown error after that log.
+    if (dispatches.length > 0) await Promise.allSettled(dispatches);
   });
 }
 

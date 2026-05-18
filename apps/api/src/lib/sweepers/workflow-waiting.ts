@@ -63,11 +63,24 @@ async function sweepOnce(): Promise<void> {
   });
   if (stranded.length === 0) return;
 
+  const nowMs = now.getTime();
   for (const run of stranded) {
-    // Delay 0 → resume now. The job-id-based dedupe inside
-    // enqueueWorkflowResume collapses duplicates.
+    // Recompute the remaining delay from waitUntil rather than always
+    // passing 0. Two reasons:
+    //   1. Defensive: if the 30s grace cutoff is ever tightened, or if the
+    //      sweeper picks up a row whose waitUntil is somehow still in the
+    //      future, delay:0 would wake a 1-hour wait instantly.
+    //   2. The BullMQ jobId-based dedupe (resume:${runId}) collapses any
+    //      pre-existing delayed job — but if the runner's own enqueue is
+    //      racing us with a longer delay AND the runner wins the race, we
+    //      don't want the sweeper's delay:0 job to have won the slot.
+    //      Math.max(0, …) preserves "fire now if overdue" semantics for
+    //      the common case while keeping the future-delay case correct.
+    // Non-null: the WHERE clause filters waitUntil <= cutoff, which excludes
+    // NULLs in Postgres — Prisma's projected type doesn't carry that fact.
+    const delayMs = Math.max(0, run.waitUntil!.getTime() - nowMs);
     try {
-      await enqueueWorkflowResume(run.id, 0);
+      await enqueueWorkflowResume(run.id, delayMs);
     } catch (err) {
       console.warn(
         `[workflow-waiting-sweeper] re-enqueue failed for run=${run.id}:`,

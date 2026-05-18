@@ -38,10 +38,11 @@ import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 
 import dynamic from "next/dynamic";
 
-import { AppSidebar } from "@/components/layouts/app-sidebar";
+import { AppRail } from "@/components/layouts/app-rail";
+import { InboxSubSidebar } from "@/components/layouts/inbox-sub-sidebar";
 import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
-import { InboxControls, type Filter } from "./inbox-controls";
+import { type Filter } from "./inbox-controls";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
@@ -109,7 +110,6 @@ const FETCH_TIMEOUT_MS = 30_000;
 export function InboxShell({
   currentUser,
   team,
-  teammates,
   teamMembers,
   conversations: initialConversations,
   nextConversationCursor,
@@ -124,7 +124,6 @@ export function InboxShell({
 }: {
   currentUser: User;
   team: Team;
-  teammates: User[];
   teamMembers: User[];
   conversations: ConversationWithRefs[];
   nextConversationCursor: string | null;
@@ -503,6 +502,11 @@ export function InboxShell({
 
     socket.on("message:new", evictIfBackground);
     socket.on("note:new", evictIfBackground);
+    // Background send failures invalidate the cached snapshot too — if a
+    // teammate's tab is parked on a different conversation when our send
+    // worker reports a failure, the cache should drop its pending-bubble
+    // copy. Active-thread updates happen inside useConversationEvents.
+    socket.on("message:failed", evictIfBackground);
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     socket.on("conversation:deleted", onConversationDeleted);
@@ -516,6 +520,7 @@ export function InboxShell({
     return () => {
       socket.off("message:new", evictIfBackground);
       socket.off("note:new", evictIfBackground);
+      socket.off("message:failed", evictIfBackground);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
@@ -614,21 +619,18 @@ export function InboxShell({
     <SnippetsProvider snippets={snippets}>
       <div className="relative flex h-svh w-full overflow-hidden bg-background text-foreground">
         <ConnectionBanner />
-        <AppSidebar
+        <AppRail
           currentUser={currentUser}
           team={team}
-          teammates={teammates}
           connected={connected}
           onlineUserIds={onlineUserIds}
-          inboxControls={
-            <InboxControls
-              currentUser={currentUser}
-              conversations={live.conversations}
-              stages={stages}
-              filter={filter}
-              onFilterChange={setFilter}
-            />
-          }
+        />
+        <InboxSubSidebar
+          currentUser={currentUser}
+          conversations={live.conversations}
+          stages={stages}
+          filter={filter}
+          onFilterChange={setFilter}
         />
         <div className="flex min-w-0 flex-1">
           <ConversationList

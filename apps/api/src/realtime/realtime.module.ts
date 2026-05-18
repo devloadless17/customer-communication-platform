@@ -41,6 +41,6 @@ import { TypingService } from "./typing.service";
     SocketAuthService,
     RealtimeFanoutService,
   ],
-  exports: [RealtimeGateway, RealtimeEmitter],
+  exports: [RealtimeGateway, RealtimeEmitter, RealtimeFanoutService],
 })
 export class RealtimeModule {}

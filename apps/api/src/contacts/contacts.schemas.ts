@@ -82,12 +82,28 @@ const CustomFieldsPatchSchema = z
 // at the service layer (the schema accepts any string so the normalizer can
 // produce a precise error message). Pre-migration behavior matched exactly.
 // ---------------------------------------------------------------------------
+// Shared validators for the new webhook-facing contact fields. Same shapes as
+// the /v1 schemas (external-v1.schemas.ts) so both entry points converge.
+const LanguageSchema = z.string().trim().min(2).max(12);
+const CountryCodeSchema = z
+  .string()
+  .trim()
+  .length(2)
+  .regex(/^[A-Za-z]{2}$/)
+  .transform((v) => v.toUpperCase());
+
 export const CreateContactSchema = z.object({
   name: z.string().trim().max(MAX_TEXT).optional(),
+  firstName: z.string().trim().max(MAX_TEXT).optional(),
+  lastName: z.string().trim().max(MAX_TEXT).optional(),
+  language: LanguageSchema.optional(),
+  countryCode: CountryCodeSchema.optional(),
   phoneNumber: z.string().min(1),
   email: z.string().trim().max(MAX_TEXT).optional(),
   location: z.string().trim().max(MAX_TEXT).optional(),
   customFields: CustomFieldsCreateSchema.optional(),
+  /** Account-manager — must be a member of the team. Validated at the service. */
+  assignedUserId: z.string().min(1).optional(),
 });
 export type CreateContactInput = z.infer<typeof CreateContactSchema>;
 
@@ -106,6 +122,16 @@ export type CreateContactInput = z.infer<typeof CreateContactSchema>;
 export const UpdateContactSchema = z
   .object({
     name: z.string().trim().min(1).max(MAX_TEXT).optional(),
+    firstName: z
+      .union([z.string().trim().max(MAX_TEXT), z.null()])
+      .transform((v) => (typeof v === "string" && v.length === 0 ? null : v))
+      .optional(),
+    lastName: z
+      .union([z.string().trim().max(MAX_TEXT), z.null()])
+      .transform((v) => (typeof v === "string" && v.length === 0 ? null : v))
+      .optional(),
+    language: z.union([LanguageSchema, z.null()]).optional(),
+    countryCode: z.union([CountryCodeSchema, z.null()]).optional(),
     email: z
       .union([z.string().trim().max(MAX_TEXT), z.null()])
       .transform((v) => (typeof v === "string" && v.length === 0 ? null : v))
@@ -116,6 +142,8 @@ export const UpdateContactSchema = z
       .optional(),
     customFields: CustomFieldsPatchSchema.optional(),
     stageId: z.union([z.string().min(1), z.null()]).optional(),
+    /** Account-manager. `null` clears, cuid sets. Member of the team. */
+    assignedUserId: z.union([z.string().min(1), z.null()]).optional(),
   })
   .passthrough();
 export type UpdateContactInput = z.infer<typeof UpdateContactSchema>;

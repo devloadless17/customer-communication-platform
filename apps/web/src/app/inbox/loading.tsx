@@ -5,8 +5,8 @@
  * is ready, which on a hard refresh is the felt latency that drove the
  * "list flashes empty" perf finding.
  *
- * The skeleton mirrors the real inbox layout (AppSidebar column,
- * conversation list column, thread workspace pane) at fixed widths so
+ * The skeleton mirrors the real inbox layout (AppRail column, InboxSubSidebar
+ * column, conversation list column, thread workspace pane) at fixed widths so
  * when the real shell mounts there's no layout shift.
  */
 export default function Loading() {
@@ -16,8 +16,10 @@ export default function Loading() {
       aria-label="Loading inbox"
       className="flex h-svh w-full overflow-hidden bg-background text-foreground"
     >
-      {/* AppSidebar column — 64px chrome */}
-      <div className="hidden h-full w-16 shrink-0 border-r border-border bg-muted/30 md:block" />
+      {/* AppRail column — 56px chrome */}
+      <div className="hidden h-full w-14 shrink-0 border-r border-border bg-muted/30 md:block" />
+      {/* InboxSubSidebar column — 256px */}
+      <div className="hidden h-full w-64 shrink-0 border-r border-border bg-muted/20 md:block" />
 
       {/* Conversation list column — `w-95` (~380px) matches the real list
           in conversation-list.tsx exactly so there's no horizontal jump

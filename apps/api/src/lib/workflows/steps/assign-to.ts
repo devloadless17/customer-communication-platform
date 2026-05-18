@@ -74,10 +74,17 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
 
     if (targetUserId !== null) {
       const member = await db.user.findFirst({
-        where: { id: targetUserId, teamId: ctx.teamId },
+        // Refuse to assign to a deactivated user — they're no longer
+        // routing tickets and the resulting conversation would sit
+        // stranded with no human owner. Surfacing this as a 400 lets the
+        // operator see the failure on the runs page; the workflow advances
+        // past the step so any downstream branch still runs.
+        where: { id: targetUserId, teamId: ctx.teamId, deactivatedAt: null },
         select: { id: true },
       });
-      if (!member) return advanceWithError(400, "configured user not in team");
+      if (!member) {
+        return advanceWithError(400, "configured user not in team or deactivated");
+      }
     }
 
     if (conversation.assignedUserId === targetUserId) {
