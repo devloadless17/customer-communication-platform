@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * `conversationsService` — public surface of the conversations domain.
  *

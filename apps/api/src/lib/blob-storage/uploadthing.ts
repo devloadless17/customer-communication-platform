@@ -1,5 +1,3 @@
-import "server-only";
-
 import { UTApi, UTFile } from "uploadthing/server";
 
 import { extFromMime } from "@/lib/media-storage";

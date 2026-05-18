@@ -1,5 +1,3 @@
-import "server-only";
-
 import { db } from "@/lib/db";
 import type { User } from "@ccp/shared/types";
 

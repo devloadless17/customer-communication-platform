@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Envelope encryption for the per-team Meta secrets stored on the Team row
  * (CLAUDE.md rule #6 reminder + the schema TODO at metaAccessToken). The DB

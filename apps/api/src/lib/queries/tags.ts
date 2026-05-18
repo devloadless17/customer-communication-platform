@@ -1,5 +1,3 @@
-import "server-only";
-
 import { db } from "@/lib/db";
 import type { Tag, TagColor } from "@ccp/shared/types";
 

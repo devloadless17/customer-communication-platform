@@ -1,5 +1,3 @@
-import "server-only";
-
 import { subscribe } from "@/lib/events/bus";
 import type { TeamCatalogChangedEvent } from "@ccp/shared/events/types";
 

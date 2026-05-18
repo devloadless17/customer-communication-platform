@@ -1,5 +1,3 @@
-import "server-only";
-
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 

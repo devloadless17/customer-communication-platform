@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -14,14 +13,22 @@ import {
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { zBody } from "../common/zod-validation.pipe";
+import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { ConversationsService } from "./conversations.service";
 import {
   AssignConversationSchema,
   BulkDeleteConversationsSchema,
+  ListConversationsQuerySchema,
+  ListMessagesQuerySchema,
+  MessageContextQuerySchema,
+  SearchMessagesQuerySchema,
   SetConversationStatusSchema,
   type AssignConversationInput,
   type BulkDeleteConversationsInput,
+  type ListConversationsQuery,
+  type ListMessagesQuery,
+  type MessageContextQuery,
+  type SearchMessagesQuery,
   type SetConversationStatusInput,
 } from "./conversations.schemas";
 
@@ -42,15 +49,12 @@ export class ConversationsController {
   @Get()
   async list(
     @CurrentSession() session: ApiSession,
-    @Query("cursor") cursor?: string,
-    @Query("take") takeRaw?: string,
-    @Query("search") search?: string,
+    @Query(zQuery(ListConversationsQuerySchema)) query: ListConversationsQuery,
   ) {
-    const take = takeRaw ? Number.parseInt(takeRaw, 10) : undefined;
     return this.conversations.list(session.teamId, session.userId, {
-      take,
-      cursor: cursor ?? null,
-      search,
+      take: query.take,
+      cursor: query.cursor ?? null,
+      search: query.search,
     });
   }
 
@@ -67,15 +71,12 @@ export class ConversationsController {
   async listMessages(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("before") before?: string,
-    @Query("after") after?: string,
-    @Query("take") takeRaw?: string,
+    @Query(zQuery(ListMessagesQuerySchema)) query: ListMessagesQuery,
   ) {
-    const take = takeRaw ? Number.parseInt(takeRaw, 10) : undefined;
     return this.conversations.listMessages(session.teamId, id, {
-      before: before ?? null,
-      after: after ?? null,
-      take,
+      before: query.before ?? null,
+      after: query.after ?? null,
+      take: query.take,
     });
   }
 
@@ -83,22 +84,16 @@ export class ConversationsController {
   async searchMessages(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("q") qRaw?: string,
-    @Query("cursor") cursor?: string,
-    @Query("take") takeRaw?: string,
+    @Query(zQuery(SearchMessagesQuerySchema)) query: SearchMessagesQuery,
   ) {
-    const query = (qRaw ?? "").trim();
-    if (query.length === 0) {
+    const q = (query.q ?? "").trim();
+    if (q.length === 0) {
       return { items: [], nextCursor: null, totalMatched: 0 };
     }
-    if (query.length > 200) {
-      throw new BadRequestException({ error: "query too long" });
-    }
-    const take = takeRaw ? Number.parseInt(takeRaw, 10) : undefined;
     return this.conversations.searchMessages(session.teamId, id, {
-      query,
-      take,
-      cursor,
+      query: q,
+      take: query.take,
+      cursor: query.cursor,
     });
   }
 
@@ -106,23 +101,12 @@ export class ConversationsController {
   async messageContext(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("messageId") messageId?: string,
-    @Query("before") beforeRaw?: string,
-    @Query("after") afterRaw?: string,
+    @Query(zQuery(MessageContextQuerySchema)) query: MessageContextQuery,
   ) {
-    if (!messageId) throw new BadRequestException({ error: "messageId required" });
-    // Cap window dimensions so a malformed client can't request a 20k-msg slice.
-    const CONTEXT_WINDOW_MAX = 100;
-    const parseClamped = (raw: string | undefined): number | undefined => {
-      if (raw === undefined) return undefined;
-      const parsed = Number.parseInt(raw, 10);
-      if (!Number.isFinite(parsed) || parsed < 0) return undefined;
-      return Math.min(parsed, CONTEXT_WINDOW_MAX);
-    };
     return this.conversations.messageContext(session.teamId, id, {
-      messageId,
-      before: parseClamped(beforeRaw),
-      after: parseClamped(afterRaw),
+      messageId: query.messageId,
+      before: query.before,
+      after: query.after,
     });
   }
 

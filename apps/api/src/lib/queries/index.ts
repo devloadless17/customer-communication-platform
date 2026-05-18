@@ -1,5 +1,3 @@
-import "server-only";
-
 // Barrel for `@/lib/queries`. Splits live under this directory by domain so
 // edits land in the smallest file possible; the public surface here is
 // preserved so import sites don't churn.

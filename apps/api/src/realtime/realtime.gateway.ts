@@ -78,6 +78,11 @@ export class RealtimeGateway
     client.data.role = identity.role;
     client.data.typingIn = new Set<string>();
     client.data.typingInChannel = new Set<string>();
+    // Per-socket set of conversations this socket has joined as a viewer.
+    // Used by disconnect to release the viewer slot without forcing the
+    // client to send unsubscribe:conversation on tab close (browsers don't
+    // reliably get a chance to send anything in beforeunload).
+    client.data.viewingConversations = new Set<string>();
 
     // Auto-join the team room on connect. Previously some code paths
     // forgot the explicit subscribe:team emit and silently received zero
@@ -138,6 +143,28 @@ export class RealtimeGateway
       typingInChannel.clear();
     }
 
+    // Release viewer slots for every conversation this socket was viewing.
+    // Only re-broadcast when the LAST tab from this user dropped (the
+    // user-level 1→0 transition), so a multi-tab agent staying open in
+    // another tab doesn't flicker off the viewer pill.
+    const viewing = client.data.viewingConversations as Set<string> | undefined;
+    if (viewing) {
+      for (const conversationId of viewing) {
+        const userLeft = this.presence.removeViewer(
+          conversationId,
+          userId,
+          client.id,
+        );
+        if (userLeft) {
+          this.server.to(conversationRoom(conversationId)).emit("conversation:viewers", {
+            conversationId,
+            viewerUserIds: this.presence.snapshotViewers(conversationId),
+          });
+        }
+      }
+      viewing.clear();
+    }
+
     const wentOffline = this.presence.remove(teamId, userId, client.id);
     if (wentOffline) {
       this.server.to(teamRoom(teamId)).emit("presence:update", {
@@ -172,7 +199,8 @@ export class RealtimeGateway
     @MessageBody() body: { conversationId: string },
   ): Promise<void> {
     const teamId = client.data.teamId as string | undefined;
-    if (!teamId) return;
+    const userId = client.data.userId as string | undefined;
+    if (!teamId || !userId) return;
     const room = conversationRoom(body.conversationId);
 
     // Idempotency: skip the DB ownership check + emit when the socket is
@@ -196,6 +224,30 @@ export class RealtimeGateway
       conversationId: body.conversationId,
       typingUserIds: this.typing.snapshotConv(body.conversationId),
     });
+
+    // Register as a viewer. Track on the socket so disconnect cleans up.
+    const viewing = client.data.viewingConversations as Set<string>;
+    viewing.add(body.conversationId);
+    const startedViewing = this.presence.addViewer(
+      body.conversationId,
+      userId,
+      client.id,
+    );
+    // Snapshot to THIS socket immediately so the pill paints without
+    // waiting for the next change — same posture as team presence.
+    client.emit("conversation:viewers", {
+      conversationId: body.conversationId,
+      viewerUserIds: this.presence.snapshotViewers(body.conversationId),
+    });
+    // Broadcast a fresh snapshot to the rest of the room only when this
+    // user crossed 0→1 sockets. Multiple tabs from the same user must not
+    // re-spam the team or the pill will flicker on every Caddy bounce.
+    if (startedViewing) {
+      this.server.to(room).emit("conversation:viewers", {
+        conversationId: body.conversationId,
+        viewerUserIds: this.presence.snapshotViewers(body.conversationId),
+      });
+    }
   }
 
   @SubscribeMessage("unsubscribe:conversation")
@@ -214,6 +266,25 @@ export class RealtimeGateway
           conversationId: body.conversationId,
           typingUserIds: this.typing.snapshotConv(body.conversationId),
         });
+    }
+
+    // Release viewer slot. Broadcast only when the user crossed 1→0 — a
+    // second tab still viewing keeps the user on the pill.
+    const viewing = client.data.viewingConversations as Set<string> | undefined;
+    if (viewing?.delete(body.conversationId)) {
+      const userLeft = this.presence.removeViewer(
+        body.conversationId,
+        userId,
+        client.id,
+      );
+      if (userLeft) {
+        this.server
+          .to(conversationRoom(body.conversationId))
+          .emit("conversation:viewers", {
+            conversationId: body.conversationId,
+            viewerUserIds: this.presence.snapshotViewers(body.conversationId),
+          });
+      }
     }
   }
 

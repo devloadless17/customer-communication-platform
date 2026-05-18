@@ -1,5 +1,3 @@
-import "server-only";
-
 import type { ProviderName } from "@prisma/client";
 
 import type { NormalizedEvent } from "@ccp/shared/providers/types";

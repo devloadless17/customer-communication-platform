@@ -1,5 +1,3 @@
-import "server-only";
-
 // Cursors are base64-url JSON — opaque to clients but easy to debug, no extra
 // dependency, and the size is fine for two fields.
 

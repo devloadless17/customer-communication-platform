@@ -12,7 +12,9 @@ import {
   Query,
   Req,
   Res,
+  ServiceUnavailableException,
 } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import type { Request, Response } from "express";
 
 import { blobStorage } from "@/lib/blob-storage";
@@ -122,8 +124,34 @@ export class MetaWebhookController {
     try {
       await ingestEvents(teamId, "meta_cloud", events);
     } catch (err) {
-      this.logger.error(`[${teamId}] ingest failed`, err);
-      throw new HttpException("ingest failed", 500);
+      // Meta retries on any non-2xx. Map error classes to the response that
+      // actually matches the intent:
+      //   - Transient DB pressure (pool timeout / serialization) → 503 so
+      //     Meta retries the same batch after backoff. Re-ingest is safe
+      //     because every event is deduped on (teamId, provider, externalId).
+      //   - Anything else (parse drift, invariant violations) → 200 with
+      //     `dropped`. Meta retrying a permanently-bad payload forever
+      //     drains both our and their resources; logging + swallowing here
+      //     leaves the row dropped, recoverable by replaying the raw payload
+      //     manually if it matters.
+      const code =
+        err instanceof Prisma.PrismaClientKnownRequestError ? err.code : null;
+      const transient =
+        code === "P2024" /* pool timeout */ ||
+        code === "P1001" /* server unreachable */ ||
+        code === "P1002" /* connection timeout */ ||
+        code === "P1008" /* operation timeout */;
+      if (transient) {
+        this.logger.warn(
+          `[${teamId}] transient ingest failure (${code}); asking Meta to retry`,
+        );
+        throw new ServiceUnavailableException("transient ingest failure");
+      }
+      this.logger.error(
+        `[${teamId}] permanent ingest failure; dropping batch of ${events.length}`,
+        err,
+      );
+      return { ok: true, ingested: 0, dropped: "ingest_failed" };
     }
 
     if (!downloadDone) {

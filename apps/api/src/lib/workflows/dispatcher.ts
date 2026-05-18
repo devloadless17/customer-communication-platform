@@ -1,5 +1,3 @@
-import "server-only";
-
 import { Prisma, type WorkflowTriggerEvent } from "@prisma/client";
 
 import { db } from "@/lib/db";

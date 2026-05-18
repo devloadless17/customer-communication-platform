@@ -1,5 +1,3 @@
-import "server-only";
-
 /**
  * Cross-provider blob storage interface. CLAUDE.md rule #1 applied to media:
  * the app talks to this interface, never directly to UploadThing's API shape,

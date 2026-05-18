@@ -73,6 +73,24 @@ __DOMAIN__ {
 		format json
 	}
 
+	# Rate limiting is NOT enabled at the Caddy layer here. The standard
+	# Caddy build doesn't ship the `rate_limit` directive — it requires
+	# the github.com/mholt/caddy-ratelimit plugin compiled in via xcaddy.
+	# Today the app handles per-user (300/min) and per-API-key (60/min)
+	# throttling in-process (apps/api/src/common/rate-limit.guard.ts,
+	# apps/api/src/auth/api-key.guard.ts) which covers correctness for the
+	# pilot scale.
+	#
+	# Add a proxy-layer cap when one of these triggers:
+	#   - a single bad client at the /webhooks/meta/* path saturates the
+	#     api process before the app-layer guard can throttle
+	#   - we add multi-tenant Meta webhooks and need per-team caps that
+	#     the in-process limiter (which keys on session.userId) can't
+	#     enforce for unauthenticated requests
+	# Upgrade path: rebuild Caddy with `xcaddy build --with github.com/
+	# mholt/caddy-ratelimit`, swap the systemd-managed `caddy` package for
+	# the custom binary, then add rate_limit blocks here.
+
 	# -------------------------------------------------------------------------
 	# Routing — order matters. See header comment for the rationale on the
 	# change-password and legacy-meta-webhook blocks.

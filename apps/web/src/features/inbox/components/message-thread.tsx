@@ -18,6 +18,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 import { useConversationEvents } from "@/features/inbox/hooks/use-conversation-events";
+import { useConversationViewers } from "@/features/inbox/hooks/use-conversation-viewers";
 import { useTyping } from "@/features/inbox/hooks/use-typing";
 import { useMessageSelection } from "@/features/inbox/hooks/use-message-selection";
 import { useChatScroll } from "@/features/inbox/hooks/use-chat-scroll";
@@ -87,6 +88,20 @@ function MessageThreadImpl({
   const memberById = useMemo(() => {
     return new Map(teamMembers.map((u) => [u.id, u]));
   }, [teamMembers]);
+
+  // Live list of OTHER teammates with this conversation open. Drives the
+  // "Maria is also viewing" pill in the header so two agents don't double-
+  // handle a chat. Empty list = no pill rendered.
+  const otherViewerIds = useConversationViewers(conversation.id, currentUser.id);
+  const otherViewers = useMemo(() => {
+    if (otherViewerIds.length === 0) return [];
+    const out: User[] = [];
+    for (const id of otherViewerIds) {
+      const u = memberById.get(id);
+      if (u) out.push(u);
+    }
+    return out;
+  }, [otherViewerIds, memberById]);
 
   // The 24h window is driven by the server-provided lastInboundAt — it's
   // contact-level and may predate the loaded message slice.
@@ -550,6 +565,7 @@ function MessageThreadImpl({
         assignedUserId={assignedUser?.id ?? null}
         assignedUserName={assignedUser?.name ?? null}
         teamMembers={teamMembers}
+        otherViewers={otherViewers}
         onAlert={alert}
         onOpenSearch={openSearch}
         stageCatalog={stageCatalog}

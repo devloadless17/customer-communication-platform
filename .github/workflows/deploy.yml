@@ -442,6 +442,61 @@ jobs:
           echo "✗ health never green in 60s"
           exit 1
 
+      # Warm-up the public origin via the api path through Caddy. The
+      # `Wait for health` step above hits HEALTHCHECK_URL (whatever the
+      # operator configured — possibly an internal probe). This step
+      # explicitly hits the api `/health` endpoint over the public domain
+      # so we know Caddy's TLS terminator is fully provisioned before the
+      # very first Meta webhook lands — first request after a fresh deploy
+      # can otherwise race ACME challenge resolution on a brand-new cert.
+      - name: Warm up public origin
+        if: success()
+        env:
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+        run: |
+          if [ -z "$APP_DOMAIN" ]; then
+            echo "APP_DOMAIN secret not set — skipping warm-up"
+            exit 0
+          fi
+          for i in $(seq 1 20); do
+            if curl -fsS -m 5 "https://$APP_DOMAIN/api/health" > /dev/null; then
+              echo "✓ public origin warm after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 3
+          done
+          # Soft-fail: the deploy is still healthy per HEALTH_URL above.
+          # Cert provisioning sometimes takes >60s on first request to a new
+          # domain; better to log + continue than block the deploy.
+          echo "⚠ public origin not yet warm — Caddy may still be provisioning TLS"
+
+      # Superadmin seed is idempotent (upsert in seeds/seed-superadmin.ts).
+      # Running it on every deploy is the safest posture: first deploy
+      # bootstraps the row, subsequent deploys are no-ops. The previous
+      # "manual SSH and remember" flow failed once already (auto-memory:
+      # "Superadmin seed is manual"); automating closes that footgun.
+      # Reads SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD from the VPS .env.
+      - name: Bootstrap superadmin (idempotent)
+        if: success()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/ccp
+            # Use the `app` container's node — it already has @prisma/client
+            # generated and the seed script. The container's CMD only runs
+            # next start; one-off exec doesn't disturb it.
+            app_id=$(docker compose ps -q app)
+            if [ -z "$app_id" ]; then
+              echo "⚠ no app container running — skipping superadmin seed"
+              exit 0
+            fi
+            docker exec "$app_id" npm run db:seed:superadmin
+            echo "✓ superadmin seed complete"
+
       # Only fires if external health failed (not earlier steps), so we
       # don't try to rollback when the VPS was never touched. Retags both
       # :previous-{web,api} → :latest-{web,api} locally on the VPS, then

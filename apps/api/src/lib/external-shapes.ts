@@ -1,5 +1,3 @@
-import "server-only";
-
 import type {
   Contact as DbContact,
   Conversation as DbConversation,

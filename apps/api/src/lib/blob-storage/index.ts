@@ -1,5 +1,3 @@
-import "server-only";
-
 import { uploadthingProvider } from "./uploadthing";
 import type { BlobStorageProvider } from "./types";
 

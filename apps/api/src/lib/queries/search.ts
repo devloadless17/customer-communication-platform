@@ -1,5 +1,3 @@
-import "server-only";
-
 import { db } from "@/lib/db";
 import type { MessageSearchHit, MessageSearchPage } from "@ccp/shared/dtos";
 import type { MediaKind, Message, MessageDirection } from "@ccp/shared/types";

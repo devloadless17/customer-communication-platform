@@ -217,6 +217,29 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Snapshot of which teammates currently have this conversation OPEN in
+   * their inbox UI. Different from `typing:update` — that fires on every
+   * keystroke transition; this fires on subscribe/unsubscribe.
+   *
+   * The whole point of a shared inbox is that the team avoids double-
+   * handling. A viewer pill in the thread header ("Maria is also viewing
+   * this chat") lets agents see the collision before both of them type
+   * replies. Reuses the existing per-conversation socket room so the
+   * fanout cost is one frame per join/leave instead of N team-wide
+   * emits.
+   *
+   * Server-side state: per-conversation Set<userId> in PresenceService.
+   * The set is snapshotted to the joining socket immediately (so the
+   * pill paints without waiting for the next change) and broadcast to
+   * the room only when the set transitions on the user level — multiple
+   * tabs from the same agent are one viewer, not several.
+   */
+  "conversation:viewers": (payload: {
+    conversationId: string;
+    viewerUserIds: string[];
+  }) => void;
+
+  /**
    * Broadcast lifecycle: `queued` → `running` → `completed` | `failed`. Fired
    * by the broadcast runner so the detail page can update without polling
    * (polling is still in place as a fallback for clients off the socket).
@@ -495,6 +518,12 @@ export interface SocketData {
   typingIn?: Set<string>;
   /** Channels (team chat) this socket is currently flagged as typing in. */
   typingInChannel?: Set<string>;
+  /**
+   * Conversations this socket has joined as a viewer. Tracked so disconnect
+   * can release viewer slots without depending on the client managing to
+   * send unsubscribe:conversation on tab close.
+   */
+  viewingConversations?: Set<string>;
 }
 
 /** Path Socket.io binds to. Kept here so client and server cannot drift. */

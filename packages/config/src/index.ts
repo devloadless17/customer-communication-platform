@@ -71,6 +71,15 @@ const prodRequired: Check[] = [
       "calls /api/internal/revalidate on Next.js when catalogs mutate; this " +
       "endpoint requires the same value. Generate with: openssl rand -base64 32.",
   },
+  {
+    name: "TRUSTED_PROXY_HOPS",
+    hint:
+      "Number of trusted reverse-proxy hops in front of the app (Caddy = 1). " +
+      "Used by the rate limiter + IP detection to pick the correct " +
+      "X-Forwarded-For entry. Wrong value silently breaks per-IP limiting " +
+      "(either trusts spoofed IPs or collapses every request onto Caddy's " +
+      "loopback bucket). Set to '1' for the default single-Caddy topology.",
+  },
 ];
 
 const recommended: Check[] = [

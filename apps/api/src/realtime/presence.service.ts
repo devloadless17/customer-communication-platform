@@ -14,6 +14,15 @@ import { Injectable } from "@nestjs/common";
 export class PresenceService {
   private readonly byTeam = new Map<string, Map<string, Set<string>>>();
 
+  // Per-conversation viewer set: conversationId → userId → socketIds.
+  // Same shape as the team map; the extra layer lets us count tabs per
+  // user so closing one tab doesn't flip "viewing" off while another is
+  // still open. Same 0→1 / 1→0 transition gates as team presence.
+  private readonly byConversation = new Map<
+    string,
+    Map<string, Set<string>>
+  >();
+
   /**
    * Returns true iff this add transitioned the user from 0 → 1 socket (i.e.
    * "came online"). Callers use it to skip a redundant team-wide presence
@@ -64,5 +73,44 @@ export class PresenceService {
       for (const id of sockets) out.push(id);
     }
     return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Conversation viewers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Returns true iff this add transitioned the user from 0 → 1 socket in
+   * this conversation (i.e. "started viewing"). Multiple tabs from the
+   * same agent count as one viewer.
+   */
+  addViewer(conversationId: string, userId: string, socketId: string): boolean {
+    const conv = this.byConversation.get(conversationId) ?? new Map<string, Set<string>>();
+    const sockets = conv.get(userId) ?? new Set<string>();
+    const wasEmpty = sockets.size === 0;
+    sockets.add(socketId);
+    conv.set(userId, sockets);
+    this.byConversation.set(conversationId, conv);
+    return wasEmpty;
+  }
+
+  /** Returns true iff this removal took the user out of the viewer set. */
+  removeViewer(conversationId: string, userId: string, socketId: string): boolean {
+    const conv = this.byConversation.get(conversationId);
+    if (!conv) return false;
+    const sockets = conv.get(userId);
+    if (!sockets) return false;
+    sockets.delete(socketId);
+    if (sockets.size === 0) {
+      conv.delete(userId);
+      if (conv.size === 0) this.byConversation.delete(conversationId);
+      return true;
+    }
+    return false;
+  }
+
+  snapshotViewers(conversationId: string): string[] {
+    const conv = this.byConversation.get(conversationId);
+    return conv ? [...conv.keys()] : [];
   }
 }

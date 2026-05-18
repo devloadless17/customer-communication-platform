@@ -37,6 +37,26 @@ const STATUS_LABEL: Record<ConversationStatus, string> = {
   closed: "Closed",
 };
 
+/** Shallow string-record equality used to compare customField maps. */
+function shallowJsonEqual(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+/** Order-insensitive array equality used to compare tagIds. */
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(a);
+  for (const x of b) if (!seen.has(x)) return false;
+  return true;
+}
+
 interface PanelProps {
   data: ConversationWithRefs;
   fieldDefinitions: ContactFieldDefinition[];
@@ -173,14 +193,56 @@ export function ContactPanel({
     setTags(tagCatalog);
   }, [tagCatalog]);
 
-  // Live merge of teammate edits to this contact. ContactPanel is a sibling
-  // of MessageThread and doesn't share its useConversationEvents state, so
-  // we listen directly. Re-seeds every local mirror in one shot — the
-  // semantic is "last write wins", same as the server's DB write. If the
-  // current user happens to be mid-typing into a field, their in-progress
-  // text is overwritten — matches the conflict resolution the backend
-  // would apply if both saves landed anyway, and avoids the alternative
-  // of silently dropping the teammate's update.
+  // Server snapshot we last seeded local state from. Used to tell whether the
+  // user has unsaved local edits — anything local that differs from the
+  // snapshot is "dirty." On a teammate update we use this to decide between:
+  //   - silent live-apply  (no dirty fields → no conflict)
+  //   - banner + park       (dirty fields the teammate's update would change)
+  const serverSnapshotRef = useRef({
+    name: contact.name,
+    email: contact.email ?? "",
+    location: contact.location ?? "",
+    customFields: contact.customFields ?? {},
+    tagIds: contact.tagIds ?? [],
+  });
+  useEffect(() => {
+    serverSnapshotRef.current = {
+      name: contact.name,
+      email: contact.email ?? "",
+      location: contact.location ?? "",
+      customFields: contact.customFields ?? {},
+      tagIds: contact.tagIds ?? [],
+    };
+  }, [
+    contact.id,
+    contact.name,
+    contact.email,
+    contact.location,
+    contact.customFields,
+    contact.tagIds,
+  ]);
+
+  // Parked teammate update. Set when we DETECTED in-progress local edits a
+  // socket event would overwrite. Cleared on Reload (apply the teammate's
+  // changes) or Dismiss (keep mine — server already has the teammate's
+  // values, our save will overwrite them which matches last-write-wins).
+  const [pendingRemote, setPendingRemote] = useState<{
+    name: string;
+    email: string;
+    location: string;
+    customFields: Record<string, string>;
+    tagIds: string[];
+  } | null>(null);
+
+  // Live merge of teammate edits. ContactPanel is a sibling of MessageThread
+  // and doesn't share its useConversationEvents state, so we listen directly.
+  //
+  // Conflict policy: when the incoming snapshot differs from what we'd write
+  // for any locally-dirty field, park it and show a banner so the agent
+  // knows their in-progress edits are about to lose to a teammate's save.
+  // Previously (auto-memory: "Contact field edit race") this overwrote
+  // silently — documented as intentional last-write-wins, but the user has
+  // no warning that their typing just got eaten.
   useEffect(() => {
     const socket = getClientSocket();
     const contactId = contact.id;
@@ -188,17 +250,70 @@ export function ContactPanel({
       payload,
     ) => {
       if (payload.contact.id !== contactId) return;
-      setName(payload.contact.name);
-      setEmail(payload.contact.email ?? "");
-      setLocation(payload.contact.location ?? "");
-      setCustomFields(payload.contact.customFields ?? {});
-      setTagIds(payload.contact.tagIds ?? []);
+      const incoming = {
+        name: payload.contact.name,
+        email: payload.contact.email ?? "",
+        location: payload.contact.location ?? "",
+        customFields: payload.contact.customFields ?? {},
+        tagIds: payload.contact.tagIds ?? [],
+      };
+      const snapshot = serverSnapshotRef.current;
+      const dirty =
+        name !== snapshot.name ||
+        email !== snapshot.email ||
+        location !== snapshot.location ||
+        !shallowJsonEqual(customFields, snapshot.customFields) ||
+        !arraysEqual(tagIds, snapshot.tagIds);
+      if (!dirty) {
+        // Common path: live-collab. Apply silently + re-seed snapshot so the
+        // panel stays in sync with the rest of the team without any banner.
+        setName(incoming.name);
+        setEmail(incoming.email);
+        setLocation(incoming.location);
+        setCustomFields(incoming.customFields);
+        setTagIds(incoming.tagIds);
+        serverSnapshotRef.current = incoming;
+        return;
+      }
+      // Dirty + incoming matches what we'd save anyway → echo of our own
+      // round-trip. Just re-seed the snapshot so we stop being "dirty"
+      // without spamming a banner.
+      const wouldOverwrite =
+        incoming.name !== name ||
+        incoming.email !== email ||
+        incoming.location !== location ||
+        !shallowJsonEqual(incoming.customFields, customFields) ||
+        !arraysEqual(incoming.tagIds, tagIds);
+      if (!wouldOverwrite) {
+        serverSnapshotRef.current = incoming;
+        return;
+      }
+      // Dirty + would actually overwrite → park + banner.
+      setPendingRemote(incoming);
     };
     socket.on("contact:updated", onContactUpdated);
     return () => {
       socket.off("contact:updated", onContactUpdated);
     };
-  }, [contact.id]);
+  }, [contact.id, name, email, location, customFields, tagIds]);
+
+  function acceptPendingRemote() {
+    if (!pendingRemote) return;
+    setName(pendingRemote.name);
+    setEmail(pendingRemote.email);
+    setLocation(pendingRemote.location);
+    setCustomFields(pendingRemote.customFields);
+    setTagIds(pendingRemote.tagIds);
+    serverSnapshotRef.current = pendingRemote;
+    setPendingRemote(null);
+  }
+  function dismissPendingRemote() {
+    // Keep local edits. The serverSnapshotRef stays on the OLD snapshot so
+    // the next save still shows as "user-initiated" rather than instantly
+    // re-banner-ing. The next contact.updated echo of OUR save will re-seed
+    // it naturally.
+    setPendingRemote(null);
+  }
 
   // Close the picker when the user clicks outside.
   useEffect(() => {
@@ -275,6 +390,34 @@ export function ContactPanel({
 
   return (
     <aside className="hidden h-full w-[320px] shrink-0 flex-col border-l border-border bg-sidebar text-sidebar-foreground lg:flex">
+      {pendingRemote ? (
+        <div className="flex items-start gap-2 border-b border-amber-300/40 bg-amber-50 px-4 py-2 text-[12px] text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
+          <span className="mt-px inline-block size-1.5 shrink-0 rounded-full bg-amber-500" />
+          <div className="min-w-0 flex-1">
+            <div className="font-medium">A teammate just updated this contact</div>
+            <div className="opacity-80">
+              Your in-progress edits would be overwritten. Reload to see
+              their changes, or keep editing and your save will win.
+            </div>
+            <div className="mt-1.5 flex gap-1.5">
+              <button
+                type="button"
+                onClick={acceptPendingRemote}
+                className="rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-amber-700"
+              >
+                Reload
+              </button>
+              <button
+                type="button"
+                onClick={dismissPendingRemote}
+                className="rounded-md border border-amber-400/60 px-2 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-800/30"
+              >
+                Keep mine
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <ScrollArea className="flex-1">
         <div className="flex flex-col items-center px-5 pt-6 pb-4">
           <Avatar className="size-16">

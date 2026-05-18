@@ -1,5 +1,3 @@
-import "server-only";
-
 import { type ConversationEventKind, Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";

@@ -19,7 +19,12 @@ ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull --quiet
 ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up
 ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml down
 TimeoutStartSec=180
-TimeoutStopSec=60
+# Must exceed BullMQ lockDuration (90s, see lib/workflows/worker.ts) plus a
+# safety margin for the sweeper-stop → queue-close tail. Lower than ~100s and
+# a SIGKILL can land while a step is still draining — Redis releases the lock
+# 90s later and the next process re-executes the job (irreversible Meta sends
+# double-fire). Don't reduce this without first lowering lockDuration in code.
+TimeoutStopSec=120
 
 # `always` matches operational intent — "if the process is gone, bring it
 # back" — and survives the (rare) clean-exit case. NestJS/Next.js never

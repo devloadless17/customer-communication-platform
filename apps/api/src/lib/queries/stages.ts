@@ -1,5 +1,3 @@
-import "server-only";
-
 import { db } from "@/lib/db";
 import type { ContactStage, TagColor } from "@ccp/shared/types";
 

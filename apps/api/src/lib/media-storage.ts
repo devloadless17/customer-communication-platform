@@ -1,5 +1,3 @@
-import "server-only";
-
 import type { MediaKind } from "@ccp/shared/types";
 
 /**

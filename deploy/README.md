@@ -337,25 +337,90 @@ bad, or for non-urgent rollbacks.
 2. `npm run prod:local` — verify nothing broke.
 3. Open a PR to `main`, merge.
 
-# Security note: deploy user + sudo
+# Pre-pilot hardening (DO BEFORE accepting real traffic)
 
-The workflow SSHes as `deploy`, which is in the `docker` group and has
-passwordless sudo (`NOPASSWD: ALL` in `/etc/sudoers.d/deploy`). The
-systemd unit runs as `deploy` too. Trade-off: a leaked `VPS_SSH_KEY`
-still gets full root via the NOPASSWD sudo — the real protection here
-is the SSH key, not the sudo restriction.
+Two items that are intentionally not in the deploy workflow because they
+need exactly-once VPS-side installation. Don't ship a customer pilot
+without both.
 
-If you ever add collaborators with deploy-user access, replace
-`NOPASSWD: ALL` with an allowlist:
+## 1. Postgres backups
 
+Without this, a VPS-level failure (Hostinger disk corruption, accidental
+`docker compose down -v`, ransomware) loses every conversation. The
+script in `deploy/scripts/backup.sh` does a daily `pg_dump | gzip` with
+atomic rename + 7-day local retention. Install:
+
+```bash
+# On the VPS, as deploy user
+mkdir -p /opt/ccp/scripts
+# Either scp the file from your dev machine, or pull from the repo:
+curl -fsSL https://raw.githubusercontent.com/devloadless17/customer-communication-platform/main/deploy/scripts/backup.sh \
+  -o /opt/ccp/scripts/backup.sh
+chmod +x /opt/ccp/scripts/backup.sh
+
+# Log dir
+sudo mkdir -p /var/log/ccp /var/backups/ccp
+sudo chown deploy:deploy /var/log/ccp /var/backups/ccp
+
+# Daily at 02:00 UTC
+( crontab -l 2>/dev/null; echo "0 2 * * * /opt/ccp/scripts/backup.sh >> /var/log/ccp/backup.log 2>&1" ) | crontab -
+
+# Verify by running once manually
+/opt/ccp/scripts/backup.sh
+ls -lh /var/backups/ccp/
 ```
-deploy ALL=(root) NOPASSWD: /usr/bin/mv, /usr/bin/mkdir, /usr/bin/chown, /usr/bin/caddy, /usr/bin/systemctl
+
+**Off-host copy is still your job.** Local-only dumps don't survive a VPS
+loss. Pick one:
+- **Hostinger snapshots** — enable in the Hostinger control panel, set
+  frequency to daily. Cheapest, no scripting.
+- **S3/B2/etc.** — extend `backup.sh` to `aws s3 cp` the rotated dumps
+  to durable object storage. ~5 lines added at the bottom.
+- **restic** — incremental backups to any storage backend with
+  deduplication. Best technical solution, more setup.
+
+Restore one-liner is in the script header.
+
+## 2. Tighten sudo allowlist
+
+The deploy user has `NOPASSWD: ALL` by default — a leaked `VPS_SSH_KEY`
+plus this sudoers entry equals immediate full root. The SSH key is your
+real protection, but defense-in-depth is cheap. Replace the open entry
+with the exact-binary allowlist the workflow needs:
+
+```bash
+# On the VPS, as root
+cat > /etc/sudoers.d/deploy <<'EOF'
+# Deploy user — minimum-needed sudo for the GitHub Actions deploy job.
+# See .github/workflows/deploy.yml for the exact invocations.
+deploy ALL=(root) NOPASSWD: \
+  /usr/bin/mv /tmp/ccp-deploy/Caddyfile /etc/caddy/Caddyfile, \
+  /usr/bin/mv /tmp/ccp-deploy/ccp.service /etc/systemd/system/ccp.service, \
+  /usr/bin/mkdir -p /var/log/caddy, \
+  /usr/bin/chown -R caddy\:caddy /var/log/caddy, \
+  /usr/bin/caddy validate --config /etc/caddy/Caddyfile, \
+  /bin/systemctl daemon-reload, \
+  /bin/systemctl enable --now ccp, \
+  /bin/systemctl restart ccp, \
+  /bin/systemctl reload-or-restart caddy
+EOF
+chmod 440 /etc/sudoers.d/deploy
+visudo -c   # syntax check — refuses to commit if invalid
 ```
 
-The workflow only needs those five binaries with sudo.
+If you ever add or remove a `sudo` call in `deploy.yml`, update this file
+in lockstep — the deploy will fail with `a password is required` until
+the allowlist matches.
 
 # Things to set up later (with trigger conditions)
 
-- **Database backups** — Hostinger snapshots + a daily `pg_dump | gzip` cron.
 - **Uptime monitoring** — UptimeRobot or BetterStack on `/api/health`.
+  Hostinger sends an email when the VPS reboots; not enough on its own.
 - **Docker Hub image scanning** — Hub's built-in scan, or Trivy in CI before push.
+- **Centralized log aggregation** — `journalctl -u ccp` is fine for one
+  VPS; Loki / CloudWatch / Better Stack become worth it when you can't
+  ssh in fast enough to read logs during an incident.
+- **Caddy proxy-layer rate limit** — requires `xcaddy build --with
+  github.com/mholt/caddy-ratelimit`. Add when a bad client at
+  `/webhooks/meta/*` saturates the api process before the in-app guards
+  (300/min/user, 60/min/api-key) can catch up.
