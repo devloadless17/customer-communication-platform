@@ -128,10 +128,13 @@ export class MessagesService {
     replyToExternalId?: string;
   }> {
     const { conversationId, replyToMessageId: replyToMessageIdRaw } = input;
-    const [conversation, replyToRow, configOrErr, lastInbound] = await Promise.all([
+    const [conversation, replyToRow, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
-        select: { id: true, contact: { select: { phoneNumber: true } } },
+        select: {
+          id: true,
+          contact: { select: { phoneNumber: true, lastInboundAt: true } },
+        },
       }),
       replyToMessageIdRaw
         ? this.db.message.findFirst({
@@ -142,11 +145,6 @@ export class MessagesService {
       getMetaSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
-      }),
-      this.db.message.findFirst({
-        where: { conversationId, direction: "in" },
-        orderBy: { timestamp: "desc" },
-        select: { timestamp: true },
       }),
     ]);
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
@@ -162,12 +160,13 @@ export class MessagesService {
         detail: "This contact has no WhatsApp number.",
       });
     }
-    const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+    const win = computeWindowStatus(lastInboundAt);
     if (win.state === "closed" || win.state === "never") {
       throw new UnprocessableEntityException({
         error: "outside_24h_window",
         detail: "24-hour window closed — send an approved template to re-engage this contact.",
-        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+        lastInboundAt,
       });
     }
     let replyToMessageId: string | null = null;
@@ -230,10 +229,13 @@ export class MessagesService {
     const { conversationId, body, clientTempId, replyToMessageId: replyToMessageIdRaw } = input;
 
     // Phase A — parallel pre-flight reads.
-    const [conversation, replyToRow, configOrErr, lastInbound] = await Promise.all([
+    const [conversation, replyToRow, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
-        select: { id: true, contact: { select: { phoneNumber: true } } },
+        select: {
+          id: true,
+          contact: { select: { phoneNumber: true, lastInboundAt: true } },
+        },
       }),
       replyToMessageIdRaw
         ? this.db.message.findFirst({
@@ -244,11 +246,6 @@ export class MessagesService {
       getMetaSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
-      }),
-      this.db.message.findFirst({
-        where: { conversationId, direction: "in" },
-        orderBy: { timestamp: "desc" },
-        select: { timestamp: true },
       }),
     ]);
 
@@ -262,12 +259,13 @@ export class MessagesService {
     const config = configOrErr;
 
     // 24h customer service window — outbound text is illegal outside it.
-    const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+    const win = computeWindowStatus(lastInboundAt);
     if (win.state === "closed" || win.state === "never") {
       throw new UnprocessableEntityException({
         error: "outside_24h_window",
         detail: "24-hour window closed — send an approved template to re-engage this contact.",
-        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+        lastInboundAt,
       });
     }
 
@@ -481,23 +479,24 @@ export class MessagesService {
 
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      include: { contact: true },
+      select: {
+        id: true,
+        contact: {
+          select: { phoneNumber: true, name: true, lastInboundAt: true },
+        },
+      },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
     // 24h window — media (like free-form text) is template-only outside it.
-    const lastInbound = await this.db.message.findFirst({
-      where: { conversationId, direction: "in" },
-      orderBy: { timestamp: "desc" },
-      select: { timestamp: true },
-    });
-    const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+    const win = computeWindowStatus(lastInboundAt);
     if (win.state === "closed" || win.state === "never") {
       throw new UnprocessableEntityException({
         error: "outside_24h_window",
         detail:
           "24-hour window closed — media can't be sent freely. Use an approved template to re-engage.",
-        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+        lastInboundAt,
       });
     }
 

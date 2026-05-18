@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import { ensureDefaultStage } from "@/lib/queries";
+import { mapReplySnapshot, REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
 import { getRedisConnection } from "@/lib/workflows/queue";
 import type {
   WorkflowContactSnapshot,
@@ -20,7 +21,6 @@ import type {
   Conversation,
   ConversationStatus,
   ConversationWithRefs,
-  MediaKind,
   Message,
   ProviderName,
   ReplySnapshot,
@@ -975,9 +975,9 @@ export async function loadReplySnapshotByExternalId(
         externalId,
       },
     },
-    select: replySnapshotSelect,
+    select: REPLY_TO_INCLUDE.select,
   });
-  return row ? toReplySnapshot(row) : null;
+  return mapReplySnapshot(row);
 }
 
 export async function loadReplySnapshotById(
@@ -985,34 +985,9 @@ export async function loadReplySnapshotById(
 ): Promise<ReplySnapshot | null> {
   const row = await db.message.findUnique({
     where: { id },
-    select: replySnapshotSelect,
+    select: REPLY_TO_INCLUDE.select,
   });
-  return row ? toReplySnapshot(row) : null;
-}
-
-const replySnapshotSelect = {
-  id: true,
-  body: true,
-  direction: true,
-  mediaKind: true,
-  sender: { select: { name: true } },
-} as const;
-
-function toReplySnapshot(row: {
-  id: string;
-  body: string;
-  direction: string;
-  mediaKind: string | null;
-  sender: { name: string } | null;
-}): ReplySnapshot {
-  return {
-    id: row.id,
-    // Truncate so a giant pasted body doesn't bloat every reply emission.
-    body: row.body.slice(0, 200),
-    direction: row.direction as ReplySnapshot["direction"],
-    senderName: row.sender?.name ?? null,
-    ...(row.mediaKind ? { mediaKind: row.mediaKind as MediaKind } : {}),
-  };
+  return mapReplySnapshot(row);
 }
 
 /**

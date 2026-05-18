@@ -70,7 +70,10 @@ export async function sendTextInternal(
 
   const conversation = await db.conversation.findFirst({
     where: { id: args.conversationId, teamId: args.teamId },
-    select: { id: true, contact: { select: { phoneNumber: true } } },
+    select: {
+      id: true,
+      contact: { select: { phoneNumber: true, lastInboundAt: true } },
+    },
   });
   if (!conversation) {
     throw new SendTextValidationError(
@@ -87,12 +90,8 @@ export async function sendTextInternal(
 
   // 24h window — pre-check on our side so we surface a clean error code
   // instead of letting Meta 422 us with their cryptic body.
-  const lastInbound = await db.message.findFirst({
-    where: { conversationId: args.conversationId, direction: "in" },
-    orderBy: { timestamp: "desc" },
-    select: { timestamp: true },
-  });
-  const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+  const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+  const win = computeWindowStatus(lastInboundAt);
   if (win.state === "closed" || win.state === "never") {
     throw new SendTextValidationError(
       "outside_24h_window",

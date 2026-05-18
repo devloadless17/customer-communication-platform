@@ -1365,23 +1365,22 @@ export class ExternalV1Service {
 
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      include: { contact: true },
+      select: {
+        id: true,
+        contact: { select: { phoneNumber: true, lastInboundAt: true } },
+      },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const lastInbound = await this.db.message.findFirst({
-      where: { conversationId, direction: "in" },
-      orderBy: { timestamp: "desc" },
-      select: { timestamp: true },
-    });
-    const win = computeWindowStatus(lastInbound?.timestamp.toISOString() ?? null);
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+    const win = computeWindowStatus(lastInboundAt);
     if (win.state === "closed" || win.state === "never") {
       throw new UnprocessableEntityException({
         error: "outside_24h_window",
         detail:
           "free-form messages are only allowed within 24h of the contact's last inbound. " +
           "use a pre-approved template for cold outbound (not yet exposed via the external API).",
-        lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+        lastInboundAt,
       });
     }
 

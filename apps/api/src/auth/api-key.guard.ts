@@ -9,6 +9,7 @@ import {
 } from "@nestjs/common";
 import type { Request } from "express";
 
+import { createTokenBucket } from "../common/token-bucket";
 import { DbService } from "../db/db.service";
 import { looksLikeApiKey } from "./api-key";
 
@@ -34,66 +35,10 @@ declare module "express-serve-static-core" {
   }
 }
 
-/**
- * Per-key token bucket. In-memory only — single-process pilot deploy, no
- * cross-instance scaling yet. Each key gets `RATE_LIMIT_PER_MIN` requests
- * per rolling 60-second window. When a second app instance shows up this
- * moves to Redis (same trigger as everything else in-process).
- *
- * Chose token bucket over fixed window so a key that bursts at second 59
- * doesn't immediately get fresh budget at second 60. `lastRefill` is a
- * millisecond timestamp; budget refills continuously.
- */
-const RATE_LIMIT_PER_MIN = 60;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-// Bound the bucket Map so a revoked / churning set of keys can't grow it
-// without limit across an api process's uptime. 10k entries is comfortably
-// above any reasonable team's key count; oldest entry evicted on overflow.
-// A periodic sweep below also drops idle buckets that haven't been touched
-// for 10 minutes so memory stays bounded even without overflow.
-const BUCKET_MAX = 10_000;
-const BUCKET_IDLE_SWEEP_MS = 10 * 60_000;
-const BUCKET_SWEEP_INTERVAL_MS = 5 * 60_000;
-interface KeyBucket {
-  tokens: number;
-  lastRefill: number;
-}
-const keyBuckets = new Map<string, KeyBucket>();
-
-// Periodic eviction of idle buckets. Module-scope so it runs once per
-// process; the api container is single-process, so this is the right
-// granularity. `unref()` so the timer never holds the event loop open.
-const sweeper = setInterval(() => {
-  const cutoff = Date.now() - BUCKET_IDLE_SWEEP_MS;
-  for (const [id, b] of keyBuckets) {
-    if (b.lastRefill < cutoff) keyBuckets.delete(id);
-  }
-}, BUCKET_SWEEP_INTERVAL_MS);
-sweeper.unref?.();
-
-function consumeToken(apiKeyId: string): { ok: true } | { ok: false; retryAfter: number } {
-  const now = Date.now();
-  const refillRate = RATE_LIMIT_PER_MIN / RATE_LIMIT_WINDOW_MS;
-  const bucket = keyBuckets.get(apiKeyId);
-  if (!bucket) {
-    if (keyBuckets.size >= BUCKET_MAX) {
-      // Map preserves insertion order; first key is oldest. LRU-ish without
-      // pulling in a dependency.
-      const oldest = keyBuckets.keys().next().value;
-      if (oldest !== undefined) keyBuckets.delete(oldest);
-    }
-    keyBuckets.set(apiKeyId, { tokens: RATE_LIMIT_PER_MIN - 1, lastRefill: now });
-    return { ok: true };
-  }
-  const elapsed = now - bucket.lastRefill;
-  bucket.tokens = Math.min(RATE_LIMIT_PER_MIN, bucket.tokens + elapsed * refillRate);
-  bucket.lastRefill = now;
-  if (bucket.tokens < 1) {
-    return { ok: false, retryAfter: Math.ceil((1 - bucket.tokens) / refillRate / 1000) };
-  }
-  bucket.tokens -= 1;
-  return { ok: true };
-}
+// Per-key rate limit: 60 req/min/key. Moves to Redis when a 2nd app
+// instance shows up. Capacity is 10k keys (well above any reasonable
+// team's key count); idle entries are time- and LRU-evicted.
+const apiKeyBucket = createTokenBucket({ perMin: 60, maxKeys: 10_000 });
 
 /**
  * Bearer-token guard for the external API.
@@ -138,10 +83,10 @@ export class ApiKeyGuard implements CanActivate {
     // Per-key rate limit — bounds cost on a leaked/abused key. Each request
     // hits Meta's Cloud API and counts against the team's quality rating,
     // so unbounded request rates are a real bill + reputation risk.
-    const rate = consumeToken(row.id);
+    const rate = apiKeyBucket.consume(row.id);
     if (!rate.ok) {
       throw new HttpException(
-        { error: "rate_limited", detail: `${RATE_LIMIT_PER_MIN} req/min` },
+        { error: "rate_limited", detail: "60 req/min" },
         429,
       );
     }
