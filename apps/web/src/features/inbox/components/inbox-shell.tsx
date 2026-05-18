@@ -20,7 +20,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 import { useTeamEvents } from "@/features/team-chat/hooks/use-team-events";
-import { useSocketStatus } from "@/hooks/use-socket-status";
+import { useConnectionStatus } from "@/hooks/use-connection-status";
 import { usePresence } from "@/hooks/use-presence";
 import { useCatalogSync } from "@/hooks/use-catalog-sync";
 import { useConversationSearch } from "@/features/inbox/hooks/use-conversation-search";
@@ -568,7 +568,7 @@ export function InboxShell({
   const loadingMore = searchState.active ? searchState.loadingMore : live.loadingMore;
   const loadMore = searchState.active ? searchState.loadMore : live.loadMore;
 
-  const { connected } = useSocketStatus();
+  const { connected } = useConnectionStatus();
   const { onlineUserIds } = usePresence(team.id, currentUser.id);
   useCatalogSync();
 

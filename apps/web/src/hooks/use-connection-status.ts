@@ -36,6 +36,10 @@ export interface ConnectionStatus {
    *  cycle for consumers that want a one-shot effect. Use the
    *  `onRecovered` callback for a more ergonomic API. */
   recovered: boolean;
+  /** Raw socket-level signal — true once the Socket.io transport is up.
+   *  Most callers should prefer `state`, which folds in the browser-level
+   *  online/offline state too. */
+  connected: boolean;
 }
 
 /**
@@ -60,6 +64,11 @@ export function useConnectionStatus(opts?: {
     return "online";
   });
   const [recovered, setRecovered] = useState(false);
+  // Always start as `false`. Reading `socket.connected` in the initializer
+  // SSR-renders `false` but the client mount could read `true` — that delta
+  // lights up as a React hydration mismatch. The useEffect below resyncs
+  // the real value on the first post-hydration render.
+  const [connected, setConnected] = useState(false);
 
   // Tracks whether we've ever actually been connected. We only flip to
   // "reconnecting" once we've either had a successful connect (any later
@@ -121,9 +130,13 @@ export function useConnectionStatus(opts?: {
     const onConnect = () => {
       // First successful connect arms the banner for any later drops.
       allowReconnectingBanner.current = true;
+      setConnected(true);
       apply();
     };
-    const onDisconnect = () => apply();
+    const onDisconnect = () => {
+      setConnected(false);
+      apply();
+    };
     const onOnline = () => {
       // Browser regained network — nudge the socket so we don't wait for its
       // backoff to retry. Cheap no-op if already connected.
@@ -147,6 +160,9 @@ export function useConnectionStatus(opts?: {
       }
     }, INITIAL_CONNECT_GRACE_MS);
 
+    // Sync the `connected` state on mount — useState starts false to dodge
+    // a hydration mismatch with the SSR'd output.
+    setConnected(socket.connected);
     // If the socket is already connected by the time this effect runs
     // (e.g. a remount after a soft navigation), arm immediately so a later
     // drop banners without waiting for the grace timer.
@@ -165,5 +181,5 @@ export function useConnectionStatus(opts?: {
     };
   }, []);
 
-  return { state, recovered };
+  return { state, recovered, connected };
 }

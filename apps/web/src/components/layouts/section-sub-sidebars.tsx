@@ -4,13 +4,10 @@ import { usePathname } from "next/navigation";
 import {
   FileText,
   Megaphone,
-  MessageSquareText,
   ShieldCheck,
   Users2,
   Workflow as WorkflowIcon,
 } from "lucide-react";
-
-import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
 
 import {
   SubSidebar,
@@ -84,15 +81,9 @@ export function AdminSubSidebar() {
       <SubSidebarSection>
         <SubSidebarItem
           href="/admin"
-          label="Overview"
+          label="Organizations"
           leading={<ShieldCheck className="size-4" />}
-          active={pathname === "/admin"}
-        />
-        <SubSidebarItem
-          href="/admin/teams"
-          label="Teams"
-          leading={<Users2 className="size-4" />}
-          active={pathname === "/admin/teams" || pathname.startsWith("/admin/teams/")}
+          active={pathname === "/admin" || pathname.startsWith("/admin/teams/")}
         />
       </SubSidebarSection>
     </SubSidebar>
@@ -106,41 +97,3 @@ export function AdminSubSidebar() {
  * shown when the workspace hasn't mounted yet (loading + sub-routes without
  * a selected channel).
  */
-export function TeamChatSubSidebar({
-  channels,
-  activeChannelId,
-}: {
-  channels: TeamChannelListItemDto[];
-  activeChannelId?: string;
-}) {
-  return (
-    <SubSidebar title="Team chat" subtitle={`${channels.length} channel${channels.length === 1 ? "" : "s"}`}>
-      <SubSidebarSection>
-        {channels.map((c) => {
-          const active = c.id === activeChannelId;
-          return (
-            <SubSidebarItem
-              key={c.id}
-              href={`/team/${c.id}`}
-              label={c.name}
-              leading={<MessageSquareText className="size-3.5" />}
-              active={active}
-              trailing={
-                c.unreadMentionCount > 0 ? (
-                  <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground tabular-nums">
-                    {c.unreadMentionCount}
-                  </span>
-                ) : c.unreadForMe ? (
-                  <span
-                    className="size-1.5 rounded-full bg-primary"
-                    aria-label="Unread"
-                  />
-                ) : null
-              }
-            />
-          );
-        })}
-      </SubSidebarSection>
-    </SubSidebar>
-  );
-}
