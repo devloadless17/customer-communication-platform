@@ -34,12 +34,6 @@ import type { Message } from "@ccp/shared/types";
  *      stay out: a 1k-recipient broadcast must not bump outgoing-message
  *      counters or write 1k timeline rows. Only socket-fanout subscribes to
  *      these two types — suppression is structural, not a runtime flag.
- *
- * Phase 5 prerequisite: when the broadcast runner moves into the NestJS
- * process, the previous direct `emitToTeam` calls would have silently
- * dropped because lib/socket/server.ts's IO singleton lives in Next.js.
- * Routing through publish() means the NestJS realtime-fanout subscriber
- * fires the wire emit instead — same behavior, right process.
  */
 
 /**

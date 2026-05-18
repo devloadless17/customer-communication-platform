@@ -3,7 +3,6 @@ import { Injectable } from "@nestjs/common";
 import {
   dispatchPersistedEvent as busDispatchPersistedEvent,
   publish as busPublish,
-  publishForwarded as busPublishForwarded,
   subscribe as busSubscribe,
 } from "@/lib/events/bus";
 import type {
@@ -22,25 +21,11 @@ import type {
  * not from `event-bus.module`. The module file re-exports `EventBus` for
  * backwards compatibility with existing call sites.
  */
-
-type Mode = "local" | "any";
-
 @Injectable()
 export class EventBus {
-  /** Publish a locally-originated event to all subscribers. */
+  /** Publish an event to all subscribers. */
   publish<K extends DomainEventType>(event: DomainEventOf<K>): Promise<void> {
     return busPublish(event);
-  }
-
-  /**
-   * Publish an event that originated in another process (the cross-process
-   * Redis bridge calls this). Skips `local`-mode subscribers AND does not
-   * re-forward. Most code should never call this directly.
-   */
-  publishForwarded<K extends DomainEventType>(
-    event: DomainEventOf<K>,
-  ): Promise<void> {
-    return busPublishForwarded(event);
   }
 
   /**
@@ -50,9 +35,8 @@ export class EventBus {
   subscribe<K extends DomainEventType>(
     type: K,
     handler: (event: DomainEventOf<K>) => void | Promise<void>,
-    options: { mode?: Mode } = {},
   ): () => void {
-    return busSubscribe(type, handler, options);
+    return busSubscribe(type, handler);
   }
 
   /**

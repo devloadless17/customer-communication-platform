@@ -47,9 +47,8 @@ export class BroadcastsService implements OnModuleInit {
    * affect an already-queued broadcast.
    *
    * Runner kickoff is `setImmediate` inside startBroadcast — the HTTP
-   * response returns before any Meta sends happen. After Phase 5 the runner
-   * lives in this same NestJS process; the publish() events it fires reach
-   * the realtime-fanout subscriber with zero pub/sub hop.
+   * response returns before any Meta sends happen. The runner publish()
+   * events reach realtime-fanout in this same process with zero pub/sub hop.
    */
   async create(
     teamId: string,

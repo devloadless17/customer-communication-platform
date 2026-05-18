@@ -25,11 +25,8 @@ export type TypedIO = Server<
 /**
  * Typed emit helpers — the only place app code reaches when fanning out a
  * server-originated event. The gateway sets `server` on init; until then,
- * emits warn-and-drop (same fail-soft posture as the pre-migration code so
- * a webhook arriving during boot doesn't 500 and trigger a Meta retry).
- *
- * Migrated from lib/socket/server.ts `emitTo*` helpers. Same names so a
- * grep for emit sites lands on this file post-cutover.
+ * emits warn-and-drop so a webhook arriving during boot doesn't 500 and
+ * trigger a Meta retry.
  */
 @Injectable()
 export class RealtimeEmitter {
@@ -39,10 +36,6 @@ export class RealtimeEmitter {
   /** Called by RealtimeGateway in afterInit to publish the live IO server. */
   bind(server: TypedIO): void {
     this.server = server;
-  }
-
-  getServerOrNull(): TypedIO | null {
-    return this.server;
   }
 
   emitToTeam<E extends keyof ServerToClientEvents>(
@@ -101,12 +94,5 @@ export class RealtimeEmitter {
       return;
     }
     io.to(channelThreadRoom(rootMessageId)).emit(event, ...args);
-  }
-
-  emitCatalogChange(
-    teamId: string,
-    scope: Parameters<ServerToClientEvents["team:catalog:changed"]>[0]["scope"],
-  ): void {
-    this.emitToTeam(teamId, "team:catalog:changed", { teamId, scope });
   }
 }

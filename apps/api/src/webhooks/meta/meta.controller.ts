@@ -56,12 +56,8 @@ import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
  *   GET  /webhooks/meta/:teamId   → one-time subscription verify challenge
  *   POST /webhooks/meta/:teamId   → real events; HMAC over the raw body
  *
- * Ported from
- * [app/api/webhooks/meta/[teamId]/route.ts](../../../../../../app/api/webhooks/meta/%5BteamId%5D/route.ts) —
- * same shape, same fail-soft posture (malformed payloads still return 200 so
- * Meta doesn't retry-storm). Caddy will start routing `/webhooks/*` to this
- * controller as part of the Phase 2 cutover; the Next.js route stays in
- * place until that flip so a misconfigured Caddy isn't a webhook outage.
+ * Fail-soft posture: malformed payloads still return 200 so Meta doesn't
+ * retry-storm.
  *
  * Multi-tenancy: `teamId` in the path is a routing signal, NOT proof of
  * origin. The HMAC against the team's per-tenant `metaAppSecret` is the

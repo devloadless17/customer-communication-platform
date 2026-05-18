@@ -74,8 +74,8 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
     });
 
     // Publish `note.created` — socket fanout emits the live update;
-    // outbound-webhooks (Phase 3) subscriber will pick this up later for
-    // free. No workflow trigger exists for notes, so no `silent` needed.
+    // outbound-webhooks subscriber forwards to integrators. No workflow
+    // trigger exists for notes, so no `silent` needed.
     await publish({
       type: "note.created",
       teamId: ctx.teamId,

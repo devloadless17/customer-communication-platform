@@ -11,10 +11,8 @@ import type { NextFunction, Request, Response } from "express";
  * Wiring:
  *   - HTTP: `correlationMiddleware` installed in main.ts BEFORE bodyParser
  *     so the context is established before any body-parsing async work.
- *   - BullMQ workers: opt-in via `runWithCorrelation(jobId, fn)` — not
- *     wired automatically since most worker code paths use NestJS's
- *     `Logger` (which already carries the module context).
- *   - Socket.io: opt-in similarly per emitted event if useful.
+ *   - BullMQ workers: rely on NestJS's `Logger` module context (no ALS).
+ *   - Socket.io: rely on the gateway's logger module context.
  *
  * Trust model: `X-Request-Id` from the client is accepted as the correlation
  * ID only when it looks like a plausible UUID/short string. Anything else
@@ -70,12 +68,3 @@ export function correlationMiddleware() {
   };
 }
 
-/**
- * Bind a synchronous or async fn to a fresh correlation scope. Use for
- * background jobs (BullMQ workers, scheduled sweepers, broadcast iterations)
- * where logs from a single job should group together but there's no HTTP
- * request to inherit from.
- */
-export function runWithCorrelation<T>(id: string, fn: () => T): T {
-  return als.run(id, fn);
-}

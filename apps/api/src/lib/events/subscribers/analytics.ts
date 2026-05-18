@@ -9,23 +9,23 @@
  * response to domain events. Drives the workflow `conversation_closed`
  * trigger's exposed variables.
  *
- * Order in the subscriber chain: AFTER socket-fanout, BEFORE
- * workflow-dispatch. The workflow snapshot must see the analytics-updated
- * row, so this subscriber commits FIRST.
- *
- * Every helper inside `conversationsService` is fire-and-forget at the
- * function level (errors logged, never thrown), so a degraded analytics
- * path can never block a primary state mutation. We still `await` here so
- * the workflow-dispatch subscriber that follows reads fresh state.
+ * Every track* helper is fire-and-forget at the function level (errors
+ * logged, never thrown), so a degraded analytics path can never block a
+ * primary state mutation. We still `await` so the workflow-dispatch
+ * subscriber that follows reads fresh state.
  */
 
 import { subscribe } from "@/lib/events/bus";
-import { conversationsService } from "@/lib/conversations";
+import {
+  trackOnAssigned,
+  trackOnStatusChanged,
+  trackOnOutboundMessage,
+} from "@/lib/conversations/analytics";
 
 export function registerAnalyticsSubscribers(): void {
   subscribe("conversation.assigned", async (e) => {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
-    await conversationsService.trackOnAssigned({
+    await trackOnAssigned({
       conversationId: e.conversationId,
       teamId: e.teamId,
       assignedUserId: e.newAssignedUserId,
@@ -35,7 +35,7 @@ export function registerAnalyticsSubscribers(): void {
 
   subscribe("conversation.status_changed", async (e) => {
     if (e.previousStatus === e.newStatus) return;
-    await conversationsService.trackOnStatusChanged({
+    await trackOnStatusChanged({
       conversationId: e.conversationId,
       teamId: e.teamId,
       previousStatus: e.previousStatus,
@@ -55,7 +55,7 @@ export function registerAnalyticsSubscribers(): void {
     // First-response stamping happens here — trackOnOutboundMessage detects
     // whether this is the first outbound since the last inbound and only
     // then bumps firstResponseAt. Bumps outgoingMessagesCount unconditionally.
-    await conversationsService.trackOnOutboundMessage({
+    await trackOnOutboundMessage({
       conversationId: e.conversationId,
       teamId: e.teamId,
       senderUserId: e.senderUserId,

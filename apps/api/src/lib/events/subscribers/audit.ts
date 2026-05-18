@@ -58,12 +58,11 @@ export function registerAuditSubscribers(): void {
     });
   });
 
-  // Note added / deleted — pre-migration the audit timeline carried these so
-  // an admin could trace who added/removed a teammate's note. The note bodies
-  // themselves stay off the audit row (the row may outlive the note via
-  // retention policy); we keep just the noteId + a short body excerpt so the
-  // history-panel entry is readable without forcing a join into a deleted
-  // table.
+  // Note added / deleted — audit so an admin can trace who added/removed a
+  // teammate's note. Note bodies themselves stay off the audit row (the row
+  // may outlive the note via retention policy); we keep just the noteId + a
+  // short body excerpt so the history-panel entry is readable without
+  // forcing a join into a deleted table.
   subscribe("note.created", async (e) => {
     await recordConversationEvent({
       conversationId: e.conversationId,

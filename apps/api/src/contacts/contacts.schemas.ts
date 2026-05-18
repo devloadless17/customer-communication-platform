@@ -25,10 +25,8 @@ export type AudiencePreviewInput = z.infer<typeof AudiencePreviewSchema>;
 
 // ---------------------------------------------------------------------------
 // List query — drives GET /api/contacts. Each filter is optional; the
-// `source`/`window` enums silently drop unknown values to match the
-// pre-migration Next.js behavior (`source === "inbound" || === "manual" ?
-// source : undefined`). `.catch(undefined)` is the Zod way to spell that:
-// a parse failure on this branch becomes `undefined`, not a 400.
+// `source`/`window` enums silently drop unknown values via `.catch(undefined)`
+// so a parse failure on this branch becomes `undefined`, not a 400.
 // ---------------------------------------------------------------------------
 export const ListContactsQuerySchema = z.object({
   search: z.string().optional(),
@@ -40,7 +38,7 @@ export const ListContactsQuerySchema = z.object({
   tagIds: z.string().optional(),
   window: z.enum(["open", "closed"]).optional().catch(undefined),
   /** Either a stage cuid OR the literal "none" (filter to no-stage). Empty
-   *  strings dropped to mirror the pre-migration `&& length > 0` check. */
+   *  strings are dropped (`min(1)` enforces non-empty). */
   stageId: z
     .string()
     .min(1)

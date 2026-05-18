@@ -23,17 +23,14 @@ import { TagsService } from "./tags.service";
 
 /**
  * Team-wide tag catalog. Any signed-in user can list + create; mutations of
- * an existing tag are also allowed for any agent (write access matches the
- * pre-migration Next.js routes exactly — admin gate is per-team, not
- * per-catalog-row).
+ * an existing tag are also allowed for any agent (admin gate is per-team,
+ * not per-catalog-row).
  *
  * Route shape (relative to api root):
  *   GET    /api/team/tags
  *   POST   /api/team/tags
  *   PATCH  /api/team/tags/:id
  *   DELETE /api/team/tags/:id
- *
- * Caddy will route `/api/team/*` to the api process as Phase 3a flips.
  */
 @Controller("api/team/tags")
 @UseGuards(SessionGuard)

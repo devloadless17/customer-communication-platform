@@ -28,7 +28,7 @@ export const CurrentSession = createParamDecorator(
 
 /**
  * Param decorator that pulls the API key context attached by ApiKeyGuard.
- * Used by /external/v1/* controllers after Phase 3 migration.
+ * Used by /external/v1/* controllers.
  */
 export const CurrentApiKey = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): ApiKeyContext => {

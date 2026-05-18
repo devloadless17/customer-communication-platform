@@ -106,9 +106,3 @@ export async function enqueueMessageSend(data: MessageSendJobData): Promise<void
   );
 }
 
-export async function closeMessageSendQueue(): Promise<void> {
-  if (state.queue) {
-    await state.queue.close();
-    state.queue = undefined;
-  }
-}

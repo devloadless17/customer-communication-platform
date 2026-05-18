@@ -771,11 +771,9 @@ export class MessagesService {
     // Publish through the bus — socket-fanout pushes the bubble AND analytics
     // stamps firstResponseAt / bumps outgoingMessagesCount. Fire-and-forget so
     // the HTTP response to the agent doesn't wait on the bus fanout chain
-    // (workflow-dispatch in particular hits Pg + Redis). Note: pre-migration
-    // direct-emit path skipped analytics; this migration starts counting media
-    // sends as outbound for response-time + counter metrics, which is the
-    // correct behavior (a media send is an outbound message for every other
-    // purpose).
+    // (workflow-dispatch in particular hits Pg + Redis). Media sends count
+    // as outbound messages for response-time + counter metrics — they're an
+    // outbound message for every other purpose, so they should be here too.
     void this.bus
       .publish({
         type: "message.sent",
@@ -819,11 +817,9 @@ export class MessagesService {
    *      error 131047), break THIS contact's loop — every later send would
    *      fail the same way.
    *
-   * Behavior change vs the pre-migration direct-emit path: forwards now
-   * flow through the analytics subscriber, so each forwarded message counts
-   * toward outgoingMessagesCount + stamps firstResponseAt when prior
-   * inbound exists. That matches text-send semantics; the prior path
-   * silently skipped analytics, which was an oversight.
+   * Forwards flow through the analytics subscriber, so each forwarded
+   * message counts toward outgoingMessagesCount + stamps firstResponseAt
+   * when prior inbound exists — matches text-send semantics.
    *
    * Per-send error scopes:
    *   - PRE-send (Meta upload + Meta send): throw → recipient failed.

@@ -99,25 +99,6 @@ export async function trackOnStatusChanged(args: OnStatusChangedArgs): Promise<v
   }
 }
 
-interface OnInboundMessageArgs {
-  conversationId: string;
-  teamId: string;
-}
-
-export async function trackOnInboundMessage(args: OnInboundMessageArgs): Promise<void> {
-  try {
-    await db.conversation.update({
-      where: { id: args.conversationId, teamId: args.teamId },
-      data: { incomingMessagesCount: { increment: 1 } },
-    });
-  } catch (err) {
-    console.error(
-      `[conversations/analytics] trackOnInboundMessage conversation=${args.conversationId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
-}
-
 interface OnOutboundMessageArgs {
   conversationId: string;
   teamId: string;

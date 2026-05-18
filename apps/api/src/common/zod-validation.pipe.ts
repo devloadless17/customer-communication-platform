@@ -46,6 +46,3 @@ export const zBody = <T extends ZodTypeAny>(schema: T) =>
 /** Sugar for query strings. */
 export const zQuery = <T extends ZodTypeAny>(schema: T) =>
   new ZodValidationPipe(schema);
-/** Sugar for path params. */
-export const zParam = <T extends ZodTypeAny>(schema: T) =>
-  new ZodValidationPipe(schema);

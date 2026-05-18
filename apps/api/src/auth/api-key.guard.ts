@@ -13,9 +13,9 @@ import { DbService } from "../db/db.service";
 import { looksLikeApiKey } from "./api-key";
 
 /**
- * Shape attached to req.apiKey on success. Used by /external/v1/* controllers
- * after Phase 3 migration. Same teamId scoping as the session guard so
- * downstream services don't have to branch on auth method.
+ * Shape attached to req.apiKey on success. Used by /external/v1/* controllers.
+ * Same teamId scoping as the session guard so downstream services don't have
+ * to branch on auth method.
  *
  * `scopes` lists every capability granted to this key. The wildcard `"*"`
  * grants everything; specific entries grant only that capability. The
@@ -96,8 +96,7 @@ function consumeToken(apiKeyId: string): { ok: true } | { ok: false; retryAfter:
 }
 
 /**
- * Bearer-token guard for the external API. Replaces the pre-migration
- * `authenticateApiKey()` helper:
+ * Bearer-token guard for the external API.
  *
  *   - Read `Authorization: Bearer <token>` header
  *   - Hash with SHA-256 (same as token generation in ./api-key.ts)

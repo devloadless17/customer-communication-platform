@@ -5,12 +5,10 @@ import { ServerOptions } from "socket.io";
 import { SOCKET_PATH } from "@ccp/shared/socket/events";
 
 /**
- * IoAdapter subclass that injects the exact Socket.io server tuning the
- * Next.js side used to set inline (`lib/socket/server.ts`). Keeping these in
- * one place means a misconfiguration is one file to grep for, not a five-
- * field hunt.
+ * IoAdapter subclass that centralizes Socket.io server tuning. One file to
+ * grep for, not a five-field hunt across the codebase.
  *
- * Notable choices (preserved from pre-migration):
+ * Notable choices:
  *   - `path` MUST match the client (`SOCKET_PATH = "/api/socket"`).
  *   - `connectionStateRecovery` replays missed events for up to 2 min so a
  *     tab-sleep or wifi blip doesn't leave the inbox stale.

@@ -3,9 +3,8 @@ import { z } from "zod";
 import { TAG_COLORS } from "@ccp/shared/types";
 
 /**
- * Shared zod schemas for the tag catalog routes. Same shapes as the
- * pre-migration Next.js routes — schemas are the contract clients depend
- * on, do not loosen.
+ * Shared zod schemas for the tag catalog routes. Schemas are the contract
+ * clients depend on — do not loosen.
  */
 
 export const CreateTagSchema = z.object({

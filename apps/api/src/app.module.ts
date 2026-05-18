@@ -28,9 +28,8 @@ import { WorkflowsModule } from "./workflows/workflows.module";
  * Root module. Wires every feature area in. Module order here is purely
  * cosmetic; Nest resolves dependencies via the graph, not source order.
  *
- * Phase 3 adds the REST controllers; each domain ships as its own module
- * under `./<domain>/`. The catalog modules (tags, snippets, stages, etc.)
- * are nested under TeamModule.
+ * Each domain ships as its own module under `./<domain>/`. The catalog
+ * modules (tags, snippets, stages, etc.) are nested under TeamModule.
  */
 @Module({
   imports: [

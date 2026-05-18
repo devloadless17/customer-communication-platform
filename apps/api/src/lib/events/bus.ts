@@ -3,7 +3,6 @@
 // as lib/socket/server.ts and lib/workflows/queue.ts.
 
 import type {
-  DomainEvent,
   DomainEventOf,
   DomainEventType,
 } from "@ccp/shared/events/types";
@@ -16,25 +15,10 @@ import {
 } from "@/lib/events/outbox";
 
 /**
- * Typed in-process event bus, optionally bridged across processes via Redis
- * pub/sub.
+ * Typed in-process event bus.
  *
  * Routes / ingest publish a `DomainEvent`; subscribers (socket fanout, audit
  * log, analytics, workflow dispatcher, outbound webhooks) react to it.
- *
- * Two subscriber modes:
- *   - `"local"` (default) — fires only when the event was published in THIS
- *                            process. Right for DB writes (audit, analytics,
- *                            workflow dispatch) — those side effects belong
- *                            to the origin process and would double-execute
- *                            if run on a forwarded event.
- *   - `"any"`             — fires on both local AND forwarded events. Right
- *                            for socket fanout, which can only emit from the
- *                            process that owns the IO singleton (the web
- *                            server). A worker-side publish of e.g.
- *                            `contact.updated` forwards over Redis; the web's
- *                            `any`-mode socket-fanout receives it and emits
- *                            to connected clients.
  *
  * Subscribers run in PARALLEL (Promise.allSettled). Each handler is
  * functionally independent — own table writes, own socket emit, own HTTP
@@ -42,58 +26,31 @@ import {
  * latency on every publish. If two subscribers ever need to order against
  * each other, model that explicitly in their own state, not through bus
  * registration order.
- *
- * Bridge wiring lives in lib/events/redis-bridge.ts. Without a bridge
- * (default), publish() is purely in-process and `mode` has no behavioral
- * effect — every subscriber fires on every event regardless.
  */
 
-type Mode = "local" | "any";
 type Handler<K extends DomainEventType> = (
   event: DomainEventOf<K>,
 ) => void | Promise<void>;
 
-interface SubscriberRecord {
-  handler: Handler<DomainEventType>;
-  mode: Mode;
-}
-
 interface BusState {
-  handlers: Map<DomainEventType, SubscriberRecord[]>;
-  /**
-   * Redis pub/sub forwarder. Set by `enableRedisBridge()` when the cross-
-   * process bridge is wired in. Left null for the single-process default
-   * path — no overhead when not in use.
-   */
-  redisForwarder: ((event: DomainEvent) => void) | null;
+  handlers: Map<DomainEventType, Handler<DomainEventType>[]>;
 }
 
 const g = globalThis as unknown as { __ccpEventBus?: BusState };
 const state: BusState = (g.__ccpEventBus ??= {
   handlers: new Map(),
-  redisForwarder: null,
 });
 
 /**
- * Register a subscriber for a single event type.
- *
- * `options.mode` defaults to `"local"`. Use `"any"` for subscribers that
- * should react regardless of which process published the event (typically
- * socket fanout).
- *
- * Returns an unsubscribe function — handy for tests, not used in normal app
- * code.
+ * Register a subscriber for a single event type. Returns an unsubscribe
+ * function — handy for tests, not used in normal app code.
  */
 export function subscribe<K extends DomainEventType>(
   type: K,
   handler: Handler<K>,
-  options: { mode?: Mode } = {},
 ): () => void {
-  const record: SubscriberRecord = {
-    handler: handler as Handler<DomainEventType>,
-    mode: options.mode ?? "local",
-  };
   const list = state.handlers.get(type) ?? [];
+  const record = handler as Handler<DomainEventType>;
   list.push(record);
   state.handlers.set(type, list);
   return () => {
@@ -105,13 +62,12 @@ export function subscribe<K extends DomainEventType>(
 }
 
 /**
- * Publish a locally-originated domain event.
+ * Publish a domain event.
  *
  * Writes a row to the transactional outbox FIRST (durable audit trail),
- * then runs every subscriber (regardless of `mode`) in registration order.
- * Each subscriber gets its own try/catch so a broken one can't cascade.
- * After local fan-out, forwards to the cross-process bridge if one's
- * enabled. On the way out, marks the outbox row published (or failed).
+ * then runs every subscriber in parallel. Each subscriber gets its own
+ * try/catch so a broken one can't cascade. On the way out, marks the
+ * outbox row published (or failed).
  *
  * Most callers should `await`. The webhook hot path uses `void publish(...)`
  * + `.catch(...)` to avoid blocking Meta's 200.
@@ -143,7 +99,7 @@ export async function publish<K extends DomainEventType>(
 
   let dispatchError: unknown = null;
   try {
-    await runSubscribers(event, false);
+    await runSubscribers(event);
   } catch (err) {
     dispatchError = err;
   }
@@ -165,50 +121,22 @@ export async function publish<K extends DomainEventType>(
       );
     }
   }
-
-  const forwarder = state.redisForwarder;
-  if (forwarder) {
-    try {
-      forwarder(event as DomainEvent);
-    } catch (err) {
-      console.error(
-        withCorrelation(`[bus] redis forward for "${event.type}" failed:`),
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-}
-
-/**
- * Internal entry point used by the Redis bridge when an event arrives from
- * another process. Runs ONLY `mode: "any"` subscribers (skips `local`) AND
- * does NOT re-forward (which would create an infinite loop).
- *
- * Exported so lib/events/redis-bridge.ts can invoke it; callers outside
- * the bridge should always use `publish` instead.
- */
-export async function publishForwarded<K extends DomainEventType>(
-  event: DomainEventOf<K>,
-): Promise<void> {
-  await runSubscribers(event, true);
 }
 
 /**
  * Dispatch a row that was already written to the outbox via
- * `publishInTx`. Runs ALL subscribers (same as `publish`) but does NOT
- * write another outbox row — the row already exists; the drainer is
- * responsible for marking it `publishedAt`. Internal API; only the
- * OutboxDrainerService should call this.
+ * `publishInTx`. Runs subscribers but does NOT write another outbox row —
+ * the row already exists; the drainer is responsible for marking it
+ * `publishedAt`. Internal API; only the OutboxDrainerService should call.
  */
 export async function dispatchPersistedEvent<K extends DomainEventType>(
   event: DomainEventOf<K>,
 ): Promise<void> {
-  await runSubscribers(event, false);
+  await runSubscribers(event);
 }
 
 async function runSubscribers<K extends DomainEventType>(
   event: DomainEventOf<K>,
-  forwardedOnly: boolean,
 ): Promise<void> {
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
@@ -217,56 +145,21 @@ async function runSubscribers<K extends DomainEventType>(
   // writes its own table or fires its own emit), so the prior sequential
   // `await` chain was paying the SUM of per-subscriber latencies on every
   // publish — e.g. on `message.received` that was socket-fanout + audit DB
-  // write + analytics DB write + workflow-dispatch (DB lookup + per-trigger
-  // enqueue) + web-cache-revalidate (HTTP RTT to Next.js). On a team with
-  // workflows wired to inbound messages, the floor was hundreds of
-  // milliseconds before publish() returned to the webhook handler. Going
-  // parallel collapses that to the slowest single subscriber.
+  // write + analytics DB write + workflow-dispatch + web-cache-revalidate.
+  // Going parallel collapses that to the slowest single subscriber.
   //
   // Each handler still gets its own try/catch so a broken subscriber can't
-  // poison the others; allSettled keeps that guarantee at the Promise layer
-  // (we never throw from this function, matching the prior contract).
+  // poison the others.
   await Promise.allSettled(
-    list.map(async (sub, i) => {
-      if (forwardedOnly && sub.mode === "local") return;
+    list.map(async (handler, i) => {
       try {
-        await sub.handler(event as DomainEventOf<DomainEventType>);
+        await handler(event as DomainEventOf<DomainEventType>);
       } catch (err) {
         console.error(
-          withCorrelation(
-            `[bus] subscriber #${i} for "${event.type}" threw${forwardedOnly ? " (forwarded)" : ""}:`,
-          ),
+          withCorrelation(`[bus] subscriber #${i} for "${event.type}" threw:`),
           err instanceof Error ? err.message : err,
         );
       }
     }),
   );
-}
-
-/**
- * Install a cross-process forwarder. Called once per process by the Redis
- * bridge module. After this, every locally-published event is also handed
- * to the forwarder for cross-process delivery.
- *
- * Single-process MVP leaves this unset — the bus is purely in-process and
- * there's zero overhead.
- */
-export function enableRedisBridge(forwarder: (event: DomainEvent) => void): void {
-  state.redisForwarder = forwarder;
-}
-
-/**
- * Disable the bridge. Used by graceful shutdown so in-flight publishes
- * don't try to forward into a closing Redis connection.
- */
-export function disableRedisBridge(): void {
-  state.redisForwarder = null;
-}
-
-/**
- * Test/teardown helper: drop all subscribers + bridge. NOT used in app code.
- */
-export function __resetBusForTests(): void {
-  state.handlers.clear();
-  state.redisForwarder = null;
 }

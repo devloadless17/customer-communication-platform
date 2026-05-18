@@ -34,7 +34,7 @@ import { StagesService } from "./stages.service";
  *   PATCH  /api/team/stages/reorder      — admin / manager / superAdmin
  *
  * The write gate is enforced in StagesService via `canManageStages(role)`
- * — keeps the policy in one place, identical to the pre-migration routes.
+ * — keeps the policy in one place.
  */
 @Controller("api/team/stages")
 @UseGuards(SessionGuard)

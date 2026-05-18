@@ -4,8 +4,7 @@ import { z } from "zod";
  * Broadcast create body. Audience is a discriminated union over `mode`;
  * mode-specific fields are required only on their branch. Each branch is
  * tolerant of extra unused fields (e.g. a UI that always sends contactIds=[]
- * for the "all" mode won't 400) — that mirrors the pre-migration parseAudience
- * helper which silently ignored irrelevant fields.
+ * for the "all" mode won't 400) — irrelevant fields are silently ignored.
  */
 
 const AudienceAllSchema = z.object({

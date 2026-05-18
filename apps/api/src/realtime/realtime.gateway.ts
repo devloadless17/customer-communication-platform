@@ -29,11 +29,9 @@ import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
 /**
- * Full Socket.io gateway. Faithfully ports the pre-migration custom-server
- * gateway in [lib/socket/server.ts](../../../../../lib/socket/server.ts) —
- * same room topology, same handshake, same idempotent subscribe semantics,
- * same multi-tenant ownership checks on conversation and channel joins,
- * same auto-team-join on connect.
+ * Full Socket.io gateway. Owns room topology, handshake auth, idempotent
+ * subscribe semantics, multi-tenant ownership checks on conversation and
+ * channel joins, and auto-team-join on connect.
  *
  * `@WebSocketGateway` options are intentionally minimal here — the real
  * Socket.io tuning (path, CORS, connection-state-recovery, pingTimeout,
@@ -220,7 +218,7 @@ export class RealtimeGateway
           where: { id: body.conversationId, teamId },
           select: { id: true },
         });
-        if (!owns) return; // silently drop — same posture as pre-migration
+        if (!owns) return; // silently drop — fail-soft posture
       } catch (err) {
         this.logger.error(`subscribe:conversation lookup failed: ${err}`);
         return;

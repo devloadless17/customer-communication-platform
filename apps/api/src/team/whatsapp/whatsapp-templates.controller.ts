@@ -33,9 +33,9 @@ import { WhatsappService } from "./whatsapp.service";
  *   DELETE /api/team/whatsapp/templates/:id            — remove (Meta first, then local)
  *   PATCH  /api/team/whatsapp/templates/:id            — update variableBindings only
  *
- * Routes intentionally NOT admin-gated — pre-migration behavior matched
- * the team-scoped session lookup (a contact on team A can never see team
- * B's templates). Tighten to admin-only later if/when roles harden.
+ * Routes intentionally NOT admin-gated — team-scoped session lookup is
+ * sufficient (a contact on team A can never see team B's templates).
+ * Tighten to admin-only later if/when roles harden.
  *
  * Route order: static paths (`create`, `upload-media`) MUST precede `:id`
  * — Express matches in registration order.

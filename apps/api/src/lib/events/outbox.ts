@@ -151,22 +151,3 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   return rows;
 }
 
-/**
- * Test/diagnostic helper. Returns the oldest pending rows WITHOUT marking
- * them — for the operator-facing "stuck events" UI.
- */
-export async function peekPending(limit: number): Promise<OutboxRow[]> {
-  return db.outboundEvent.findMany({
-    where: { publishedAt: null, failedAt: null },
-    orderBy: { createdAt: "asc" },
-    take: limit,
-    select: {
-      id: true,
-      teamId: true,
-      type: true,
-      payload: true,
-      createdAt: true,
-      attempts: true,
-    },
-  });
-}

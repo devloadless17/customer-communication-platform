@@ -4,8 +4,7 @@ import { z } from "zod";
  * POST /api/team/workflows/:id/publish — `{ publish: boolean }`.
  *
  * Defaults to publish=true so an empty body OR `{ publish: true }` both
- * mean "publish" (mirrors the pre-migration `raw.publish !== false`
- * truthy semantics).
+ * mean "publish".
  */
 export const PublishWorkflowSchema = z.object({
   publish: z.boolean().default(true),

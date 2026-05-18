@@ -44,17 +44,9 @@ import {
  *   - "0"                   → expect an external dedicated worker container;
  *                              the api process serves HTTP + Socket.io only.
  *
- * During the migration window:
- *   - app  (Next.js) defaults to `RUN_WORKER_INLINE=0` after Phase 4 cutover
- *     so the Next.js side stops running the worker.
- *   - api  (NestJS)  defaults to `RUN_WORKER_INLINE=1` so the worker runs here.
- *   - worker container (separate) still works for horizontal scaling.
- *
- * Workflow step handlers that publish bus events (e.g. message.sent) work
- * fine here — the RealtimeFanout service in this process emits to clients.
- * Workflow step handlers that call lib/socket/server's emitToTeam directly
- * (broadcast-runner is the only remaining caller) won't work in this
- * process and need to be migrated to publish().
+ * Workflow step handlers publish via bus events — RealtimeFanout in this
+ * process emits to clients, so steps that produce realtime updates work
+ * regardless of which process the worker runs in.
  */
 @Injectable()
 export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
@@ -160,8 +152,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`stopWorkflowWorker threw: ${err instanceof Error ? err.message : err}`);
     }
     // ALWAYS close the queue — both this process's worker AND any HTTP
-    // dispatcher path opens it via getWorkflowQueue. Symmetric with what
-    // server.ts's shutdown did pre-migration.
+    // dispatcher path opens it via getWorkflowQueue.
     try {
       await closeWorkflowQueue();
     } catch (err) {

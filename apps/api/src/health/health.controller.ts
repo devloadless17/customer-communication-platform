@@ -12,7 +12,7 @@ interface HealthReport {
 
 /**
  * Public health endpoint — no auth. Used by:
- *   - Docker compose healthcheck (Phase 1 wires this in next pass)
+ *   - Docker compose healthcheck
  *   - Caddy upstream availability check
  *   - Manual smoke during deploys
  *

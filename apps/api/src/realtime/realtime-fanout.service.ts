@@ -7,21 +7,11 @@ import { FANOUT_RULES } from "./fanout-rules";
 /**
  * Subscribes the bus → wire-emit rules to the domain event bus.
  *
- * Subscriber-registration is EXPLICIT (called from
- * `EventSubscribersOrchestrator.onModuleInit`) rather than driven by Nest
- * `OnModuleInit` topology. Reason: the documented canonical fire order is
- *   socket-fanout → audit → analytics → workflow-dispatch → cache-revalidate
- *                → outbound-webhooks
- * and the bus fires subscribers in REGISTRATION order. Nest topology
- * doesn't guarantee inter-module init ordering, so relying on
- * `OnModuleInit` here would silently let audit fire before socket-fanout
- * on the day someone adds a `forwardRef` — agents would see timeline rows
- * appear in another tab before the broadcast frame arrived. The single
- * registration site below pins the order.
- *
- * Subscription mode is `"any"` so events forwarded from another process
- * (via the Redis bus bridge) still reach connected browsers. With no
- * bridge today, `"any"` collapses to `"local"` automatically.
+ * Subscribers run in parallel (Promise.allSettled), so registration order
+ * does not affect observability — each handler owns its own table writes
+ * or socket emits and any two-subscriber ordering would need to be modeled
+ * explicitly in their state. Central registration here just keeps wire-
+ * emit rules together in one greppable place.
  */
 @Injectable()
 export class RealtimeFanoutService {
@@ -38,7 +28,6 @@ export class RealtimeFanoutService {
       this.bus.subscribe(
         rule.type,
         (e) => (rule.handle as (e: unknown, emitter: RealtimeEmitter) => void)(e, this.emitter),
-        { mode: "any" },
       );
     }
   }
