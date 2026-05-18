@@ -1,5 +1,11 @@
+-- CreateExtension
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
 -- CreateEnum
 CREATE TYPE "Role" AS ENUM ('superAdmin', 'admin', 'manager', 'agent');
+
+-- CreateEnum
+CREATE TYPE "Plan" AS ENUM ('free', 'starter', 'advanced', 'enterprise');
 
 -- CreateEnum
 CREATE TYPE "ConversationStatus" AS ENUM ('open', 'pending', 'closed');
@@ -20,7 +26,7 @@ CREATE TYPE "TemplateStatus" AS ENUM ('approved', 'pending', 'rejected', 'paused
 CREATE TYPE "TemplateCategory" AS ENUM ('marketing', 'utility', 'authentication');
 
 -- CreateEnum
-CREATE TYPE "BroadcastStatus" AS ENUM ('queued', 'running', 'completed', 'failed');
+CREATE TYPE "BroadcastStatus" AS ENUM ('queued', 'running', 'completed', 'failed', 'canceled');
 
 -- CreateEnum
 CREATE TYPE "BroadcastRecipientStatus" AS ENUM ('queued', 'sent', 'failed');
@@ -29,7 +35,7 @@ CREATE TYPE "BroadcastRecipientStatus" AS ENUM ('queued', 'sent', 'failed');
 CREATE TYPE "ContactSource" AS ENUM ('inbound', 'manual');
 
 -- CreateEnum
-CREATE TYPE "ConversationEventKind" AS ENUM ('assigned', 'status_changed', 'tag_added', 'tag_removed');
+CREATE TYPE "ConversationEventKind" AS ENUM ('assigned', 'status_changed', 'tag_added', 'tag_removed', 'note_added', 'note_deleted');
 
 -- CreateEnum
 CREATE TYPE "WorkflowTriggerEvent" AS ENUM ('message_received', 'conversation_created', 'conversation_opened', 'conversation_closed', 'conversation_assigned', 'conversation_status_changed', 'contact_field_updated', 'contact_tag_updated', 'contact_lifecycle_updated', 'manual_trigger', 'incoming_webhook');
@@ -45,6 +51,7 @@ CREATE TABLE "Team" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "plan" "Plan" NOT NULL DEFAULT 'starter',
     "metaPhoneNumberId" TEXT,
     "metaDisplayPhoneNumber" TEXT,
     "metaWabaId" TEXT,
@@ -65,7 +72,6 @@ CREATE TABLE "User" (
     "email" TEXT NOT NULL,
     "emailVerified" BOOLEAN NOT NULL DEFAULT true,
     "avatarUrl" TEXT,
-    "passwordHash" TEXT,
     "deactivatedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -147,6 +153,7 @@ CREATE TABLE "Contact" (
     "stageId" TEXT,
     "source" "ContactSource" NOT NULL DEFAULT 'inbound',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lastInboundAt" TIMESTAMP(3),
 
     CONSTRAINT "Contact_pkey" PRIMARY KEY ("id")
 );
@@ -404,6 +411,20 @@ CREATE TABLE "TeamApiKey" (
 );
 
 -- CreateTable
+CREATE TABLE "ApiIdempotencyKey" (
+    "id" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
+    "apiKeyId" TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    "responseBody" JSONB NOT NULL,
+    "responseStatus" INTEGER NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "ApiIdempotencyKey_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "ConversationReadReceipt" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
@@ -419,6 +440,7 @@ CREATE TABLE "ConversationEvent" (
     "conversationId" TEXT NOT NULL,
     "teamId" TEXT NOT NULL,
     "userId" TEXT,
+    "apiKeyId" TEXT,
     "kind" "ConversationEventKind" NOT NULL,
     "before" JSONB,
     "after" JSONB,
@@ -509,6 +531,16 @@ CREATE TABLE "TeamChannelReadReceipt" (
 );
 
 -- CreateTable
+CREATE TABLE "LoginAttempt" (
+    "email" TEXT NOT NULL,
+    "failedCount" INTEGER NOT NULL DEFAULT 0,
+    "lockedUntil" TIMESTAMP(3),
+    "lastFailedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "LoginAttempt_pkey" PRIMARY KEY ("email")
+);
+
+-- CreateTable
 CREATE TABLE "_ContactToTag" (
     "A" TEXT NOT NULL,
     "B" TEXT NOT NULL,
@@ -572,6 +604,12 @@ CREATE INDEX "Contact_teamId_source_idx" ON "Contact"("teamId", "source");
 CREATE INDEX "Contact_teamId_stageId_idx" ON "Contact"("teamId", "stageId");
 
 -- CreateIndex
+CREATE INDEX "Contact_teamId_lastInboundAt_idx" ON "Contact"("teamId", "lastInboundAt" DESC);
+
+-- CreateIndex
+CREATE INDEX "Contact_name_trgm_idx" ON "Contact" USING GIN ("name" gin_trgm_ops);
+
+-- CreateIndex
 CREATE UNIQUE INDEX "Contact_teamId_phoneNumber_key" ON "Contact"("teamId", "phoneNumber");
 
 -- CreateIndex
@@ -597,6 +635,12 @@ CREATE INDEX "Conversation_teamId_assignedUserId_idx" ON "Conversation"("teamId"
 
 -- CreateIndex
 CREATE INDEX "Conversation_teamId_lastMessageAt_id_idx" ON "Conversation"("teamId", "lastMessageAt" DESC, "id" DESC);
+
+-- CreateIndex
+CREATE INDEX "Conversation_teamId_contactId_idx" ON "Conversation"("teamId", "contactId");
+
+-- CreateIndex
+CREATE INDEX "Conversation_lastMessagePreview_trgm_idx" ON "Conversation" USING GIN ("lastMessagePreview" gin_trgm_ops);
 
 -- CreateIndex
 CREATE INDEX "Message_conversationId_timestamp_idx" ON "Message"("conversationId", "timestamp");
@@ -683,6 +727,12 @@ CREATE UNIQUE INDEX "TeamApiKey_tokenHash_key" ON "TeamApiKey"("tokenHash");
 CREATE INDEX "TeamApiKey_teamId_revokedAt_idx" ON "TeamApiKey"("teamId", "revokedAt");
 
 -- CreateIndex
+CREATE INDEX "ApiIdempotencyKey_expiresAt_idx" ON "ApiIdempotencyKey"("expiresAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ApiIdempotencyKey_teamId_apiKeyId_key_key" ON "ApiIdempotencyKey"("teamId", "apiKeyId", "key");
+
+-- CreateIndex
 CREATE INDEX "ConversationReadReceipt_conversationId_idx" ON "ConversationReadReceipt"("conversationId");
 
 -- CreateIndex
@@ -710,6 +760,9 @@ CREATE INDEX "TeamChannelMessage_threadRootId_createdAt_idx" ON "TeamChannelMess
 CREATE INDEX "TeamChannelMessage_teamId_idx" ON "TeamChannelMessage"("teamId");
 
 -- CreateIndex
+CREATE INDEX "TeamChannelMessage_body_trgm_idx" ON "TeamChannelMessage" USING GIN ("body" gin_trgm_ops);
+
+-- CreateIndex
 CREATE INDEX "TeamChannelMention_mentionedUserId_idx" ON "TeamChannelMention"("mentionedUserId");
 
 -- CreateIndex
@@ -732,6 +785,9 @@ CREATE INDEX "TeamChannelReadReceipt_channelId_idx" ON "TeamChannelReadReceipt"(
 
 -- CreateIndex
 CREATE UNIQUE INDEX "TeamChannelReadReceipt_userId_channelId_key" ON "TeamChannelReadReceipt"("userId", "channelId");
+
+-- CreateIndex
+CREATE INDEX "LoginAttempt_lockedUntil_idx" ON "LoginAttempt"("lockedUntil");
 
 -- CreateIndex
 CREATE INDEX "_ContactToTag_B_index" ON "_ContactToTag"("B");
@@ -845,6 +901,9 @@ ALTER TABLE "WorkflowContactState" ADD CONSTRAINT "WorkflowContactState_teamId_f
 ALTER TABLE "TeamApiKey" ADD CONSTRAINT "TeamApiKey_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "ApiIdempotencyKey" ADD CONSTRAINT "ApiIdempotencyKey_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES "TeamApiKey"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "ConversationReadReceipt" ADD CONSTRAINT "ConversationReadReceipt_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -858,6 +917,9 @@ ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_teamId_fkey" F
 
 -- AddForeignKey
 ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES "TeamApiKey"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "TeamChannel" ADD CONSTRAINT "TeamChannel_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -922,44 +984,52 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fk
 -- AddForeignKey
 ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- ============================================================================
--- Trigram GIN indexes for team-wide ILIKE search paths.
+-- ===========================================================================
+-- CUSTOM SQL — preserved from squashed dev migrations.
+-- ---------------------------------------------------------------------------
+-- Prisma cannot model these in schema.prisma:
+--   * Partial indexes (WHERE clauses) — Postgres-specific feature, no Prisma
+--     attribute equivalent. We pay for these specifically: they're 30-50%
+--     smaller than the equivalent full index AND let the planner skip
+--     filter discards on the hot path.
+--   * jsonb_path_ops opclass on a JSONB GIN — Prisma's `raw("jsonb_path_ops")`
+--     emitter appends a redundant `ASC` that breaks the syntax (see notes
+--     at Contact.customFields in schema.prisma).
+--   * Trigram GIN on a function expression (LOWER(col::text)) — Prisma can
+--     only declare ops on a column, not an expression.
 --
--- These indexes can't be declared in schema.prisma (Prisma's schema language
--- doesn't natively support `USING GIN (col gin_trgm_ops)`), so they're
--- appended here so the squashed-init migration remains a single file.
---
--- Affected query sites:
---   * lib/queries/conversations.ts:80-90  — inbox sidebar search
---     (contact.name, contact.phoneNumber, conversation.lastMessagePreview)
---   * lib/queries/contacts.ts:140-160     — contacts page search
---     (contact.name, contact.phoneNumber, contact.email)
---
--- NOT indexed (deliberately):
---   * Message.body / Message.mediaCaption — in-thread search already filters
---     on conversationId first; the (conversationId, timestamp DESC, id DESC)
---     index + a residual ILIKE is sub-100ms. Adding trigrams would
---     write-amplify every inbound/outbound message for a read path that
---     isn't hot.
---   * Contact.customFields::text — JSONB::text trigram is heavy and the
---     usage is uncommon enough that the seq scan is fine.
---
--- pg_trgm ships with PostgreSQL contrib; the db owner has CREATE on its own
--- database so IF NOT EXISTS is safe to apply repeatedly.
--- ============================================================================
+-- DO NOT REMOVE without first updating every query path that depends on them:
+--   * Inbound-only Message lookups (24h-window checks, mark-read, send guard)
+--   * Contact search by phone or email (workspace search bar)
+--   * Top-level channel feed pagination (team chat)
+--   * Contact customFields containment (@>) and substring (ILIKE) queries
+-- ===========================================================================
 
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- Partial index — inbound-only Message lookups.
+CREATE INDEX "Message_conversationId_inbound_timestamp_idx"
+  ON "Message" ("conversationId", "timestamp" DESC)
+  WHERE "direction" = 'in';
 
-CREATE INDEX "Contact_name_trgm_idx"
-  ON "Contact" USING GIN ("name" gin_trgm_ops);
-
+-- Partial trigram GIN — Contact.phoneNumber search (channel-aware: only
+-- contacts with a phone number get an index entry).
 CREATE INDEX "Contact_phoneNumber_trgm_idx"
   ON "Contact" USING GIN ("phoneNumber" gin_trgm_ops)
   WHERE "phoneNumber" IS NOT NULL;
 
+-- Partial trigram GIN — Contact.email search.
 CREATE INDEX "Contact_email_trgm_idx"
   ON "Contact" USING GIN ("email" gin_trgm_ops)
   WHERE "email" IS NOT NULL;
 
-CREATE INDEX "Conversation_lastMessagePreview_trgm_idx"
-  ON "Conversation" USING GIN ("lastMessagePreview" gin_trgm_ops);
+-- Partial keyset index — top-level team-channel feed.
+CREATE INDEX "TeamChannelMessage_channelId_topLevel_createdAt_id_idx"
+  ON "TeamChannelMessage" ("channelId", "createdAt" DESC, "id" DESC)
+  WHERE "threadRootId" IS NULL;
+
+-- JSONB containment index — Contact.customFields `@>` queries.
+CREATE INDEX "Contact_customFields_gin_idx"
+  ON "Contact" USING GIN ("customFields" jsonb_path_ops);
+
+-- Trigram on LOWER cast — Contact.customFields ILIKE substring search.
+CREATE INDEX "Contact_customFields_trgm_idx"
+  ON "Contact" USING GIN ((LOWER("customFields"::text)) gin_trgm_ops);

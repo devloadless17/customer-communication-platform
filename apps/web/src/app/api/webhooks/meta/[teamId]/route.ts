@@ -46,6 +46,22 @@ function buildForwardHeaders(incoming: Headers): Headers {
   return out;
 }
 
+/**
+ * Mirror the request-side allowlist for the upstream response. Without this
+ * a `content-encoding` or `transfer-encoding` set by upstream gets forwarded
+ * to Meta while Node's `fetch` has already decoded the body — Meta then
+ * sees a header/body mismatch and treats the delivery as malformed.
+ */
+function buildResponseHeaders(upstream: Headers): Headers {
+  const out = new Headers();
+  upstream.forEach((value, key) => {
+    if (!HOP_BY_HOP.has(key.toLowerCase()) && key.toLowerCase() !== "content-encoding") {
+      out.set(key, value);
+    }
+  });
+  return out;
+}
+
 async function forward(
   req: Request,
   teamId: string,
@@ -72,11 +88,14 @@ async function forward(
       cache: "no-store",
     });
 
-    // Stream the upstream response back verbatim — status, headers, body.
+    // Stream the upstream response back. Strip hop-by-hop +
+    // content-encoding from the response side so Meta doesn't see a
+    // header/body encoding mismatch (Node's fetch has already decoded
+    // the body by the time we pipe it back).
     return new NextResponse(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: upstream.headers,
+      headers: buildResponseHeaders(upstream.headers),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

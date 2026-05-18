@@ -8,6 +8,8 @@ import type {
   DomainEventType,
 } from "@ccp/shared/events/types";
 
+import { withCorrelation } from "@/common/correlation";
+
 /**
  * Typed in-process event bus, optionally bridged across processes via Redis
  * pub/sub.
@@ -114,7 +116,7 @@ export async function publish<K extends DomainEventType>(
       forwarder(event as DomainEvent);
     } catch (err) {
       console.error(
-        `[bus] redis forward for "${event.type}" failed:`,
+        withCorrelation(`[bus] redis forward for "${event.type}" failed:`),
         err instanceof Error ? err.message : err,
       );
     }
@@ -148,7 +150,9 @@ async function runSubscribers<K extends DomainEventType>(
       await sub.handler(event as DomainEventOf<DomainEventType>);
     } catch (err) {
       console.error(
-        `[bus] subscriber #${i} for "${event.type}" threw${forwardedOnly ? " (forwarded)" : ""}:`,
+        withCorrelation(
+          `[bus] subscriber #${i} for "${event.type}" threw${forwardedOnly ? " (forwarded)" : ""}:`,
+        ),
         err instanceof Error ? err.message : err,
       );
     }

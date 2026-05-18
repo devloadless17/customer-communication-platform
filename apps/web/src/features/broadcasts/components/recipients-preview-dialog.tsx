@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Loader2, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -38,6 +40,10 @@ export function RecipientsPreviewDialog({
   const [data, setData] = useState<PreviewResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
+  useModalOverlay(dialogRef, open, onClose);
 
   useEffect(() => {
     if (!open || !payload) return;
@@ -66,15 +72,6 @@ export function RecipientsPreviewDialog({
     };
   }, [open, payload]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   const hidden = data ? Math.max(0, data.total - data.sample.length) : 0;
@@ -89,7 +86,10 @@ export function RecipientsPreviewDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-lg border border-border bg-card text-card-foreground shadow-lg">
+      <div
+        ref={dialogRef}
+        className="flex max-h-[80vh] w-full max-w-md flex-col rounded-lg border border-border bg-card text-card-foreground shadow-lg"
+      >
         <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
             <h2 className="flex items-center gap-1.5 text-base font-semibold">

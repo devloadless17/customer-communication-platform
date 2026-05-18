@@ -65,10 +65,35 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
  * adapter — until then a Map is correct and simpler.
  */
 const CONFIG_TTL_MS = 60_000;
+// Bound the per-team caches so a multi-tenant scale-up doesn't grow them
+// unboundedly. 10k teams is comfortably above the documented "~5 tenants"
+// trigger threshold from CLAUDE.md — entries past that get LRU-evicted
+// on insert. Periodic sweep drops expired entries on top of that so
+// memory stays bounded even before the cap kicks in.
+const CONFIG_CACHE_MAX = 10_000;
+const CONFIG_SWEEP_INTERVAL_MS = 5 * 60_000;
 
 type CachedSend = { value: MetaSendConfig } | { error: ProviderNotConfiguredError };
 const sendCache = new Map<string, { entry: CachedSend; exp: number }>();
 const webhookCache = new Map<string, { value: MetaWebhookConfig | null; exp: number }>();
+
+function evictExpired<V extends { exp: number }>(map: Map<string, V>): void {
+  const now = Date.now();
+  for (const [k, v] of map) {
+    if (v.exp <= now) map.delete(k);
+  }
+}
+function evictOldestIfOverCap<V>(map: Map<string, V>, max: number): void {
+  if (map.size < max) return;
+  const oldest = map.keys().next().value;
+  if (oldest !== undefined) map.delete(oldest);
+}
+
+const configSweeper = setInterval(() => {
+  evictExpired(sendCache);
+  evictExpired(webhookCache);
+}, CONFIG_SWEEP_INTERVAL_MS);
+configSweeper.unref?.();
 
 /** Drop cached credentials for a team. Call after the settings page writes. */
 export function invalidateProviderConfig(teamId: string): void {
@@ -133,10 +158,12 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
   }
   try {
     const value = await loadMetaSendConfig(teamId);
+    evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
     sendCache.set(teamId, { entry: { value }, exp: Date.now() + CONFIG_TTL_MS });
     return value;
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
+      evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
       sendCache.set(teamId, { entry: { error: err }, exp: Date.now() + CONFIG_TTL_MS });
     }
     throw err;
@@ -182,6 +209,7 @@ export async function getMetaWebhookConfig(
       value = null;
     }
   }
+  evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
   webhookCache.set(teamId, { value, exp: Date.now() + CONFIG_TTL_MS });
   return value;
 }

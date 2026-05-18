@@ -3,6 +3,10 @@ import "server-only";
 import { Prisma, type Message } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import type { ProviderName } from "@ccp/shared/types";
+
+import { getCorrelationId } from "@/common/correlation";
+import { drainParkedStatus } from "@/lib/providers/ingest";
 
 /**
  * CLAUDE.md rule #3: every write of a Meta wamid (`externalId`) must be
@@ -32,7 +36,39 @@ export async function createOutboundMessageIdempotent(
   let lastErr: unknown;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      return await db.message.create({ data });
+      const created = await db.message.create({ data });
+      // Race: Meta can deliver `sent`/`delivered`/`read` for the wamid
+      // BEFORE this row commits. The status webhook handler parks the
+      // status for ~5min; drain it here so a fast-arriving status isn't
+      // dropped silently. Fire-and-forget so we don't slow the happy path.
+      if (created.externalId && created.provider) {
+        void drainParkedStatus(
+          created.teamId,
+          created.provider as ProviderName,
+          created.externalId,
+          created.id,
+          created.conversationId,
+        ).catch((err) => {
+          // Failure here means a status that arrived BEFORE we committed
+          // the row is now lost (we already deleted the parked entry).
+          // Logging is the only recovery signal — without it the message
+          // is stuck at its create-time status with no operator clue.
+          console.error(
+            JSON.stringify({
+              event: "drainParkedStatus.failed",
+              severity: "error",
+              correlationId: getCorrelationId() ?? null,
+              teamId: created.teamId,
+              provider: created.provider,
+              externalId: created.externalId,
+              messageId: created.id,
+              message: err instanceof Error ? err.message : String(err),
+              stack: err instanceof Error ? err.stack : undefined,
+            }),
+          );
+        });
+      }
+      return created;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError) {
         // P2002: duplicate externalId — legitimate, return existing row.

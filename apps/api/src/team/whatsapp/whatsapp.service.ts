@@ -111,12 +111,42 @@ export class WhatsappService {
     const credentialsUndecryptable =
       (team.metaAccessToken != null && accessToken === null) ||
       (team.metaAppSecret != null && appSecret === null);
+
+    // Pre-mint a verify token on first read so the onboarding UI can show
+    // "Step 1 — paste this into Meta" before any credentials are saved.
+    // Race-safe via `metaVerifyToken: null` predicate — a concurrent first
+    // load becomes a no-op write. Failure degrades to "shown next load",
+    // not a page error.
+    let verifyToken = team.metaVerifyToken;
+    if (verifyToken == null) {
+      const minted = randomBytes(24).toString("hex");
+      try {
+        const res = await this.db.team.updateMany({
+          where: { id: teamId, metaVerifyToken: null },
+          data: { metaVerifyToken: minted },
+        });
+        if (res.count > 0) {
+          verifyToken = minted;
+        } else {
+          const refreshed = await this.db.team.findUnique({
+            where: { id: teamId },
+            select: { metaVerifyToken: true },
+          });
+          verifyToken = refreshed?.metaVerifyToken ?? minted;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `could not pre-mint verify token: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     return {
       phoneNumberId: team.metaPhoneNumberId,
       displayPhoneNumber: team.metaDisplayPhoneNumber,
       wabaId: team.metaWabaId,
       appId: team.metaAppId,
-      verifyToken: team.metaVerifyToken,
+      verifyToken,
       accessToken,
       appSecret,
       credentialsUndecryptable,
@@ -186,7 +216,22 @@ export class WhatsappService {
       });
     }
 
-    const verifyToken = input.verifyToken || randomBytes(24).toString("hex");
+    // Verify-token resolution order:
+    //   1. Explicit value from input (legacy callers / future re-rotate UI).
+    //   2. Existing team row value (pre-minted by getConfig on first load,
+    //      or set on a prior save). Stable across re-saves — critical so
+    //      Meta's stored verify token stays valid when an admin clicks
+    //      "Validate & save" again.
+    //   3. Fresh random (defensive — getConfig pre-mints, so this branch
+    //      shouldn't fire in practice).
+    let verifyToken = input.verifyToken;
+    if (!verifyToken) {
+      const existing = await this.db.team.findUnique({
+        where: { id: teamId },
+        select: { metaVerifyToken: true },
+      });
+      verifyToken = existing?.metaVerifyToken ?? randomBytes(24).toString("hex");
+    }
 
     try {
       await this.db.team.update({

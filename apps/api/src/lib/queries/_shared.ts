@@ -100,6 +100,36 @@ export function mapContact(c: PrismaContact): Contact {
 }
 
 /**
+ * Narrower mapper for the inbox list. The conversation list row only renders
+ * `name` + the avatar gradient + stage chip + tag chip filter — it never
+ * surfaces customFields / email / location. Dropping `customFields` from the
+ * SELECT removes the JSONB column read from every list page; the rest stay
+ * because they're cheap VARCHARs.
+ *
+ * Returns a full `Contact` so downstream UI types don't have to branch — the
+ * dropped JSONB is synthesized as `{}`. When the agent opens a thread the
+ * full record is re-fetched via the per-conversation query which DOES select
+ * customFields.
+ */
+type PrismaContactListItem = Omit<PrismaContact, "customFields">;
+export function mapContactListItem(c: PrismaContactListItem): Contact {
+  return {
+    id: c.id,
+    teamId: c.teamId,
+    phoneNumber: c.phoneNumber,
+    identityProvider: c.identityProvider as ProviderName | null,
+    externalContactId: c.externalContactId,
+    name: c.name,
+    avatarUrl: c.avatarUrl ?? undefined,
+    email: c.email ?? undefined,
+    location: c.location ?? undefined,
+    customFields: {},
+    source: c.source,
+    stageId: c.stageId,
+  };
+}
+
+/**
  * The customFields column is `Json` so Prisma types it as `JsonValue`.
  * Coerce to a flat string-map at this boundary so the rest of the app can
  * just do `contact.customFields[key]` without runtime checks. Anything

@@ -237,9 +237,33 @@ async function runBroadcast(broadcastId: string): Promise<void> {
 
   await refill();
   const lanes = Math.min(SEND_CONCURRENCY, queue.length);
+
+  // Cooperative cancel — operators flip the broadcast row to `canceled`
+  // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
+  // top of every iteration (cheap: one indexed `select` per recipient).
+  // Recipients already sent stay sent (Meta can't be unsent); the loop
+  // simply stops pulling more queued rows.
+  //
+  // The status check is co-located with the queue refill so a long-running
+  // broadcast picks up cancellation between pages rather than waiting until
+  // a lane idles.
+  let canceled = false;
+  async function checkCanceled(): Promise<boolean> {
+    if (canceled) return true;
+    const row = await db.broadcast.findUnique({
+      where: { id: broadcastId_ },
+      select: { status: true },
+    });
+    if (row?.status === "canceled") {
+      canceled = true;
+    }
+    return canceled;
+  }
+
   await Promise.all(
     Array.from({ length: lanes }, async () => {
       while (true) {
+        if (await checkCanceled()) return;
         if (queue.length === 0) {
           await refill();
           if (queue.length === 0) return;
@@ -282,16 +306,22 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     progressThrottles.delete(broadcast.id);
   }
 
-  await db.broadcast.update({
-    where: { id: broadcast.id },
-    data: { status: "completed", completedAt: new Date() },
-  });
-  await publish({
-    type: "broadcast.status_changed",
-    teamId: broadcast.teamId,
-    broadcastId: broadcast.id,
-    status: "completed",
-  });
+  // Skip the completed transition if the operator already flipped the row
+  // to `canceled` mid-flight — the cancel endpoint will (or already did)
+  // publish its own `broadcast.status_changed`. updateMany scoped to
+  // status="running" keeps this race-safe even without the if-guard.
+  if (!canceled) {
+    await db.broadcast.updateMany({
+      where: { id: broadcast.id, status: "running" },
+      data: { status: "completed", completedAt: new Date() },
+    });
+    await publish({
+      type: "broadcast.status_changed",
+      teamId: broadcast.teamId,
+      broadcastId: broadcast.id,
+      status: "completed",
+    });
+  }
 }
 
 /**
@@ -417,9 +447,49 @@ async function processOneRecipient(
         config,
       );
     } catch (err) {
-      await markRecipientFailed(recipient.id, errorDetail(err));
-      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
-      return;
+      // Meta rate-limit handling: a flagged number / rapid burst can produce
+      // a 4/80007 response. Without a backoff, the entire broadcast becomes
+      // a wall of "rate_limited"-failed recipients — and Meta charges
+      // quality score for it. One sleep+retry is the cheapest mitigation:
+      // we wait for ~3s of cooldown then send the same recipient again.
+      // Only ONE retry — a permanently-flagged number shouldn't loop.
+      if (normalizeMetaSendError(err)?.code === "rate_limited") {
+        await sleep(3_000 + Math.floor(Math.random() * 1_000));
+        try {
+          send = await provider.sendTemplate(
+            {
+              to: toPhone,
+              name: broadcast.templateName,
+              language: broadcast.templateLanguage,
+              variables: {
+                body: perRecipientVars.body,
+                ...(perRecipientVars.header
+                  ? { header: perRecipientVars.header }
+                  : {}),
+              },
+            },
+            config,
+          );
+        } catch (retryErr) {
+          await markRecipientFailed(recipient.id, errorDetail(retryErr));
+          bumpCountersFireAndForget(
+            broadcast.id,
+            broadcast.teamId,
+            { failed: 1 },
+            pendingBumps,
+          );
+          return;
+        }
+      } else {
+        await markRecipientFailed(recipient.id, errorDetail(err));
+        bumpCountersFireAndForget(
+          broadcast.id,
+          broadcast.teamId,
+          { failed: 1 },
+          pendingBumps,
+        );
+        return;
+      }
     }
 
     // Send SUCCEEDED. Lock in the recipient as `sent` BEFORE doing any
@@ -670,10 +740,47 @@ async function fail(broadcastId: string, message: string): Promise<void> {
  * Recipients aren't touched: they only have queued/sent/failed (no running
  * state — the CAS at send time goes queued→sent atomically), so a recipient
  * stuck at `queued` under an orphaned broadcast just stays orphaned. We
- * don't resume because in-flight Meta sends from the dead process aren't
- * idempotent on this end — we don't know which ones landed.
+ * don't auto-resume because in-flight Meta sends from the dead process
+ * aren't idempotent on this end — we don't know which ones landed.
  *
  * Called from BroadcastsService.onModuleInit so it fires once per boot.
+ *
+ * ─── OPS RUNBOOK: recovering a crashed mid-flight broadcast ─────────────
+ *
+ * Symptoms after a crash + restart:
+ *   - One or more rows in `Broadcast` now show `status = "failed"` with
+ *     `lastError = "process restarted mid-broadcast; resume not supported"`.
+ *   - `BroadcastRecipient` rows for these broadcasts split into:
+ *       sent     — message already went out on Meta (irreversible).
+ *       queued   — never attempted; safe to re-send.
+ *       failed   — attempted but Meta rejected; re-sending may or may not
+ *                  succeed depending on the failure code.
+ *
+ * Recommended manual recovery:
+ *
+ *   1. Identify the crashed broadcast(s) — query above.
+ *
+ *   2. Decide whether to retry. If the `queued` set is small (<50) and
+ *      time-sensitive, manually create a new broadcast targeted at JUST
+ *      those contacts:
+ *
+ *        SELECT "contactId" FROM "BroadcastRecipient"
+ *        WHERE "broadcastId" = '<crashed-id>' AND status = 'queued';
+ *
+ *      Pipe the result into the contactIds field of a new broadcast via
+ *      the UI's "send to specific contacts" path. Use the same template,
+ *      audience-substitute with these ids only.
+ *
+ *   3. For `failed` recipients, investigate per-row `errorDetail`. Most
+ *      common: 24h window closed (template was used outside the window)
+ *      or contact's phone became invalid. These usually shouldn't be
+ *      retried automatically.
+ *
+ * Future-proof: a proper resume button would need each recipient to
+ * record `attemptedAt` BEFORE the Meta call so a recovery can ask Meta
+ * (GET /v?/messages?fields=) whether the message ID exists. Out of
+ * scope for pilot; documented here for whoever picks it up.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 export async function reconcileOrphanedBroadcasts(): Promise<void> {
   const orphans = await db.broadcast.findMany({

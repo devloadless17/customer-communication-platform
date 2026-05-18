@@ -123,6 +123,76 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
     }
 
     const startedAt = new Date();
+
+    // Orphan-detect: if a PRIOR attempt left an `in_progress` entry for
+    // this exact step without a matching terminal entry, the previous
+    // worker died mid-side-effect. We CAN'T know whether the side effect
+    // (sendText / template / assign / tag / update_field) actually fired,
+    // so we presume YES and advance without re-running. Better one missed
+    // workflow than a double-charged WhatsApp send. The
+    // `skipped_after_crash` entry is what an admin checks to reconcile.
+    const orphanInProgress = stepLog.find(
+      (e) =>
+        e.stepId === node.id &&
+        e.status === "in_progress" &&
+        !stepLog.some(
+          (later) =>
+            later.stepId === node.id &&
+            later !== e &&
+            (later.status === "success" ||
+              later.status === "failed" ||
+              later.status === "skipped_after_crash"),
+        ),
+    );
+    if (orphanInProgress && hasSideEffect(node.type)) {
+      stepLog.push({
+        stepId: node.id,
+        type: node.type,
+        status: "skipped_after_crash",
+        attempt: input.attempt,
+        startedAt: startedAt.toISOString(),
+        finishedAt: new Date().toISOString(),
+        errorMessage:
+          "Previous attempt died mid-step. Side effect (e.g. Meta send) " +
+          "may have completed. Advancing without re-running to avoid duplicates.",
+      });
+      const nextStepId = findNextStep(graph, node.id);
+      currentStepId = nextStepId;
+      executedThisPickup += 1;
+      await db.workflowRun.update({
+        where: { id: run.id },
+        data: {
+          currentStepId,
+          stepLog: stepLog as unknown as Prisma.InputJsonValue,
+          jumpsUsed,
+        },
+      });
+      continue;
+    }
+
+    // For side-effect steps, journal an `in_progress` entry BEFORE the
+    // call. If the worker crashes between this write and the side-effect
+    // returning, the orphan-detect above will catch it on retry. For
+    // pure-compute steps (branch / wait config / jump_to) we skip the
+    // pre-write since there's no irreversible side effect to lose.
+    let inProgressIdx = -1;
+    if (hasSideEffect(node.type)) {
+      stepLog.push({
+        stepId: node.id,
+        type: node.type,
+        status: "in_progress",
+        attempt: input.attempt,
+        startedAt: startedAt.toISOString(),
+      });
+      inProgressIdx = stepLog.length - 1;
+      await db.workflowRun.update({
+        where: { id: run.id },
+        data: {
+          stepLog: stepLog as unknown as Prisma.InputJsonValue,
+        },
+      });
+    }
+
     let result: StepResult;
     try {
       const handler = getStepHandler(node.type);
@@ -136,7 +206,12 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         stepId: node.id,
         graph,
       });
+      // Strip the in-progress sentinel — the success/failed entry below
+      // is the canonical record. Leaving the in_progress in place would
+      // make the orphan-detect on a LATER step think this one crashed.
+      if (inProgressIdx >= 0) stepLog.splice(inProgressIdx, 1);
     } catch (err) {
+      if (inProgressIdx >= 0) stepLog.splice(inProgressIdx, 1);
       // Two flavors of throw:
       //   - UnknownStepTypeError / StepConfigError → permanent (don't retry)
       //   - everything else (network, DB transient) → throw so BullMQ retries
@@ -276,13 +351,53 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
 interface StepLogEntry {
   stepId: string;
   type: string;
-  status: "success" | "failed" | "waiting";
+  /**
+   * `in_progress` is written BEFORE the side effect runs (sendText / template /
+   * assign / tag / update_field) and replaced with `success` / `failed` after.
+   * If the worker process dies mid-step, the next retry sees the orphaned
+   * `in_progress` entry and ADVANCES the step without re-running — accepts
+   * "presumed sent, manual reconcile if needed" over "double-sent to Meta".
+   *
+   * `skipped_after_crash` is the terminal status the retry writes when it
+   * encounters such an orphan; surfaces in the runs UI so an admin can
+   * verify whether the side effect actually happened.
+   */
+  status: "in_progress" | "success" | "failed" | "waiting" | "skipped_after_crash";
+  /** Attempt counter (1-based) of the run pickup that wrote this entry. */
+  attempt?: number;
   startedAt: string;
-  finishedAt: string;
+  finishedAt?: string;
   responseStatus?: number;
   responseBody?: string;
   errorMessage?: string;
   nextStepId?: string | null;
+}
+
+/**
+ * Step types whose execution has an irreversible side effect (Meta send,
+ * DB mutation visible to other observers). For these the runner journals
+ * an `in_progress` entry BEFORE invoking the handler so a crashed retry
+ * can detect the orphan and SKIP without re-running.
+ *
+ * Pure-compute / control-flow steps (branch / wait / jump / http_request —
+ * the latter is at-least-once by HTTP semantics anyway and its callee is
+ * expected to dedupe) are excluded so the stepLog stays focused.
+ */
+function hasSideEffect(type: string): boolean {
+  return (
+    type === "send_message" ||
+    type === "send_template" ||
+    type === "assign_to" ||
+    type === "set_status" ||
+    type === "open_conversation" ||
+    type === "close_conversation" ||
+    type === "add_tag" ||
+    type === "remove_tag" ||
+    type === "update_field" ||
+    type === "update_lifecycle" ||
+    type === "add_comment" ||
+    type === "trigger_workflow"
+  );
 }
 
 function buildEnvelope(

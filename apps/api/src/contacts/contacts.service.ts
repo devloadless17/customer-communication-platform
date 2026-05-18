@@ -431,6 +431,10 @@ export class ContactsService {
       where: { teamId, id: { in: ownedIds } },
       include: { tags: { select: { id: true } } },
     });
+    // Per-contact events for workflow + audit subscribers (granular
+    // trigger dispatch). `suppressSocketFanout: true` skips the per-contact
+    // socket emit — the coalesced `contact.bulk_updated` below carries
+    // the whole id set in one frame instead.
     await Promise.all(
       updated.map((c) => {
         const tagIds = c.tags.map((t) => t.id);
@@ -466,9 +470,20 @@ export class ContactsService {
           tagChanges,
           changedByUserId: userId,
           workflowContact: workflowContactSnapshot(c),
+          suppressSocketFanout: true,
         });
       }),
     );
+
+    // One coalesced socket frame for the whole batch. At 25 agents online
+    // a 500-contact bulk-tag drops from ~12,500 socket frames to 25.
+    await this.bus.publish({
+      type: "contact.bulk_updated",
+      teamId,
+      contactIds: ownedIds,
+      changeKind: "tags",
+      changedByUserId: userId,
+    });
 
     // After the join-table rewrite, the operation is one statement — either
     // it succeeded for every owned id or it threw. No partial-failure path.

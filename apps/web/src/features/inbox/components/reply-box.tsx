@@ -28,8 +28,16 @@ import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
 
+import dynamic from "next/dynamic";
+
 import { WindowBadgeFromStatus } from "./window-badge";
-import { TemplatePicker } from "./template-picker";
+// Lazy-load the template picker — it ships its own framer-motion +
+// list/fill subviews and only mounts when the user explicitly opens it
+// from the composer. SSR-disabled because it's strictly interactive.
+const TemplatePicker = dynamic(
+  () => import("./template-picker").then((m) => m.TemplatePicker),
+  { ssr: false },
+);
 import { SnippetPopup } from "./snippet-popup";
 import { useSnippets } from "./snippets-context";
 
@@ -545,6 +553,16 @@ export function ReplyBox({
     }
 
     void (async () => {
+      // 30s hard cap on the request. Without this, a lost response (mobile
+      // network blip, Caddy 502 mid-flight, browser sleep) leaves the
+      // bubble in `pending: true` forever — the user wonders if it sent.
+      // AbortController + signal aborts the fetch; the catch below surfaces
+      // a "failed" bubble + Retry button, same flow as a real error.
+      // Media uploads need a generous cap because the body itself may be
+      // up to 16 MB — bump to 90s for those.
+      const timeoutMs = file ? 90_000 : 30_000;
+      const abort = new AbortController();
+      const timeoutId = window.setTimeout(() => abort.abort(), timeoutMs);
       try {
         // Fast-fail when the browser knows we're offline. fetch() against a
         // dead connection takes 30-90s to time out — the bubble would sit
@@ -563,7 +581,11 @@ export function ReplyBox({
           if (trimmed) fd.append("caption", trimmed);
           fd.append("clientTempId", clientTempId);
           if (replyToMessageId) fd.append("replyToMessageId", replyToMessageId);
-          const res = await fetch("/api/messages/media", { method: "POST", body: fd });
+          const res = await fetch("/api/messages/media", {
+            method: "POST",
+            body: fd,
+            signal: abort.signal,
+          });
           if (!res.ok) throw new Error(await safeReadError(res));
         } else if (trimmed) {
           const url = isNote ? "/api/notes" : "/api/messages";
@@ -580,10 +602,18 @@ export function ReplyBox({
                     ...(replyToMessageId ? { replyToMessageId } : {}),
                   },
             ),
+            signal: abort.signal,
           });
           if (!res.ok) throw new Error(await safeReadError(res));
         }
       } catch (err) {
+        // Normalize the AbortError so the toast doesn't say "The user aborted
+        // a request" — it wasn't the user, it was our timeout.
+        if (err instanceof Error && err.name === "AbortError") {
+          err = new Error(
+            "send timed out — the server didn't respond in time. Tap Retry.",
+          );
+        }
         const message = err instanceof Error ? err.message : "failed to send";
         setError(message);
         toast.error(isNote ? "Couldn't save note" : "Couldn't send message", {
@@ -600,6 +630,10 @@ export function ReplyBox({
           setValue(snapshotValue);
         }
       } finally {
+        // Always clear the timeout — fetch resolved OK, errored, or
+        // aborted; either way the timer would otherwise leak until it
+        // fires harmlessly later.
+        window.clearTimeout(timeoutId);
         // Release the idempotency lock — the next Enter / click can now
         // start a fresh send. Doing this in finally (not after setValue)
         // makes sure a thrown setError or unexpected error path can't

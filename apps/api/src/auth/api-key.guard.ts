@@ -10,6 +10,7 @@ import {
 import type { Request } from "express";
 
 import { DbService } from "../db/db.service";
+import { looksLikeApiKey } from "./api-key";
 
 /**
  * Shape attached to req.apiKey on success. Used by /external/v1/* controllers
@@ -39,17 +40,42 @@ declare module "express-serve-static-core" {
  */
 const RATE_LIMIT_PER_MIN = 60;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+// Bound the bucket Map so a revoked / churning set of keys can't grow it
+// without limit across an api process's uptime. 10k entries is comfortably
+// above any reasonable team's key count; oldest entry evicted on overflow.
+// A periodic sweep below also drops idle buckets that haven't been touched
+// for 10 minutes so memory stays bounded even without overflow.
+const BUCKET_MAX = 10_000;
+const BUCKET_IDLE_SWEEP_MS = 10 * 60_000;
+const BUCKET_SWEEP_INTERVAL_MS = 5 * 60_000;
 interface KeyBucket {
   tokens: number;
   lastRefill: number;
 }
 const keyBuckets = new Map<string, KeyBucket>();
 
+// Periodic eviction of idle buckets. Module-scope so it runs once per
+// process; the api container is single-process, so this is the right
+// granularity. `unref()` so the timer never holds the event loop open.
+const sweeper = setInterval(() => {
+  const cutoff = Date.now() - BUCKET_IDLE_SWEEP_MS;
+  for (const [id, b] of keyBuckets) {
+    if (b.lastRefill < cutoff) keyBuckets.delete(id);
+  }
+}, BUCKET_SWEEP_INTERVAL_MS);
+sweeper.unref?.();
+
 function consumeToken(apiKeyId: string): { ok: true } | { ok: false; retryAfter: number } {
   const now = Date.now();
   const refillRate = RATE_LIMIT_PER_MIN / RATE_LIMIT_WINDOW_MS;
   const bucket = keyBuckets.get(apiKeyId);
   if (!bucket) {
+    if (keyBuckets.size >= BUCKET_MAX) {
+      // Map preserves insertion order; first key is oldest. LRU-ish without
+      // pulling in a dependency.
+      const oldest = keyBuckets.keys().next().value;
+      if (oldest !== undefined) keyBuckets.delete(oldest);
+    }
     keyBuckets.set(apiKeyId, { tokens: RATE_LIMIT_PER_MIN - 1, lastRefill: now });
     return { ok: true };
   }
@@ -64,11 +90,11 @@ function consumeToken(apiKeyId: string): { ok: true } | { ok: false; retryAfter:
 }
 
 /**
- * Bearer-token guard for the external API. Mirrors `authenticateApiKey()`
- * in [lib/auth/external.ts](../../../../../lib/auth/external.ts):
+ * Bearer-token guard for the external API. Replaces the pre-migration
+ * `authenticateApiKey()` helper:
  *
  *   - Read `Authorization: Bearer <token>` header
- *   - Hash with SHA-256 (same as token generation)
+ *   - Hash with SHA-256 (same as token generation in ./api-key.ts)
  *   - Look up `TeamApiKey` by tokenHash
  *   - Reject if revoked
  *   - Stamp lastUsedAt (best-effort, non-blocking)
@@ -87,6 +113,15 @@ export class ApiKeyGuard implements CanActivate {
     }
     const token = header.slice("Bearer ".length).trim();
     if (!token) throw new UnauthorizedException("empty bearer token");
+
+    // Shape gate before DB lookup. Equalizes timing for "garbage in the
+    // header" vs "valid-shape but wrong token" — both now take the fast
+    // path. Without this, an attacker could distinguish "we ran a DB
+    // query for you" (longer response) from "we didn't" (shorter), which
+    // leaks the token's expected shape.
+    if (!looksLikeApiKey(token)) {
+      throw new UnauthorizedException("invalid api key");
+    }
 
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const row = await this.db.teamApiKey.findUnique({

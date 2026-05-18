@@ -1,6 +1,6 @@
 "use client";
 
-import { Hash, Pencil, Trash2, Users } from "lucide-react";
+import { Hash, Pencil, Search, Trash2, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +32,7 @@ export function ChannelHeader({
   teamMemberNameById,
   onEdit,
   onDelete,
+  onOpenSearch,
 }: {
   channel: TeamChannelDto;
   currentRole: Role;
@@ -40,6 +41,7 @@ export function ChannelHeader({
   teamMemberNameById: Map<string, string>;
   onEdit: () => void;
   onDelete: () => void;
+  onOpenSearch: () => void;
 }) {
   const canEdit = canManageChannel(currentRole);
   const canDelete = canDeleteChannel(currentRole) && !channel.isDefault;
@@ -64,6 +66,20 @@ export function ChannelHeader({
         )}
       </div>
       <TypingIndicator userIds={typingUserIds} namesById={teamMemberNameById} />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-8"
+            onClick={onOpenSearch}
+            aria-label="Search this channel"
+          >
+            <Search className="size-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Search channel</TooltipContent>
+      </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
           <div className="flex items-center gap-1 text-xs text-muted-foreground">

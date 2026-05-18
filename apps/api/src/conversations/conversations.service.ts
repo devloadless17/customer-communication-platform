@@ -362,6 +362,35 @@ export class ConversationsService {
   }
 
   /**
+   * Mark a conversation as unread for the team. Inverse of markRead: bumps
+   * `unreadCount` from 0 → 1 so the conversation list re-surfaces the row
+   * with an unread badge even though every existing inbound has technically
+   * been seen. Does NOT touch the per-agent ConversationReadReceipt — those
+   * already correctly reflect when each agent last opened the thread; this
+   * is a team-level "needs another look" signal, mirroring WhatsApp Web's
+   * Mark as unread right-click action.
+   *
+   * No-op when unreadCount is already > 0 (real unread already exists).
+   * Doesn't call Meta — there's no "mark unread" in the Cloud API; the
+   * customer's blue tick stays as-is.
+   */
+  async markUnread(teamId: string, conversationId: string): Promise<void> {
+    const conversation = await this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      select: { id: true, unreadCount: true },
+    });
+    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (conversation.unreadCount > 0) return;
+
+    // CAS so a concurrent inbound that already bumped the counter doesn't
+    // get clobbered back down.
+    await this.db.conversation.updateMany({
+      where: { id: conversationId, teamId, unreadCount: 0 },
+      data: { unreadCount: 1 },
+    });
+  }
+
+  /**
    * Forward a "typing" indicator to Meta. Meta piggybacks the indicator on
    * the read-receipt endpoint: marks the latest inbound as read AND shows
    * the customer a typing bubble for up to 25s. No "stop typing" exists.

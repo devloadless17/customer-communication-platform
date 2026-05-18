@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Loader2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -22,11 +22,23 @@ import { useTyping } from "@/features/inbox/hooks/use-typing";
 import { useMessageSelection } from "@/features/inbox/hooks/use-message-selection";
 import { useChatScroll } from "@/features/inbox/hooks/use-chat-scroll";
 
+import dynamic from "next/dynamic";
+
 import { MessageBubble } from "./message-bubble";
 import { InternalNote as InternalNoteCard } from "./internal-note";
 import { ReplyBox } from "./reply-box";
-import { ForwardDialog } from "./forward-dialog";
-import { MessageSearch, type SearchHit } from "./message-search";
+// Forward dialog + in-thread search — both rarely opened, so defer them
+// out of the critical thread bundle. SSR-disabled because they're
+// interaction-only (no SEO/render-without-JS concern).
+const ForwardDialog = dynamic(
+  () => import("./forward-dialog").then((m) => m.ForwardDialog),
+  { ssr: false },
+);
+const MessageSearch = dynamic(
+  () => import("./message-search").then((m) => m.MessageSearch),
+  { ssr: false },
+);
+import type { SearchHit } from "./message-search";
 
 import { SelectionBar } from "./message-thread/selection-bar";
 import { ThreadHeader } from "./message-thread/thread-header";
@@ -37,7 +49,7 @@ type TimelineEntry =
   | { kind: "message"; data: Message }
   | { kind: "note"; data: InternalNote };
 
-export function MessageThread({
+function MessageThreadImpl({
   data: initialData,
   teamMembers,
   currentUser,
@@ -155,11 +167,19 @@ export function MessageThread({
     setForwardOpen(true);
   }, []);
 
+  // Read `selection.selectedIds` through a ref so `forwardSelection` stays
+  // identity-stable across selection toggles. Otherwise every checkbox
+  // click rebuilds the callback → `MessageBubble`'s memo (which receives
+  // `onForward` as a prop) sees a fresh function → every bubble re-renders.
+  // At 500 loaded messages that's a visible jank on every toggle.
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
   const forwardSelection = useCallback(() => {
-    if (selection.count === 0) return;
-    setForwardIds([...selection.selectedIds]);
+    const s = selectionRef.current;
+    if (s.count === 0) return;
+    setForwardIds([...s.selectedIds]);
     setForwardOpen(true);
-  }, [selection.count, selection.selectedIds]);
+  }, []);
 
   const startSelect = useCallback(
     (msg: Message) => selection.start(msg.id),
@@ -217,6 +237,16 @@ export function MessageThread({
     [removeOptimistic],
   );
 
+  // Ref-tracked so rapid reply-jumps cancel the prior fade instead of
+  // stomping classNames mid-transition; cleared on unmount.
+  const replyJumpTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (replyJumpTimerRef.current !== null) {
+        window.clearTimeout(replyJumpTimerRef.current);
+      }
+    };
+  }, []);
   const jumpToOriginal = useCallback((originalId: string) => {
     const el = document.querySelector<HTMLElement>(
       `[data-message-id="${originalId}"]`,
@@ -227,9 +257,13 @@ export function MessageThread({
     // PERSISTENT amber ring on the bubble itself (see MessageBubble's
     // `isActiveSearchMatch`), since the user is actively navigating
     // through matches and the ring needs to stay until they move on.
+    if (replyJumpTimerRef.current !== null) {
+      window.clearTimeout(replyJumpTimerRef.current);
+    }
     el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
-    setTimeout(() => {
+    replyJumpTimerRef.current = window.setTimeout(() => {
       el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2");
+      replyJumpTimerRef.current = null;
     }, 1500);
   }, []);
 
@@ -753,3 +787,11 @@ export function MessageThread({
     </section>
   );
 }
+
+/**
+ * Memoized so the inbox shell can re-render for unrelated state changes
+ * (conversation list patches, composer state in OTHER threads, etc.)
+ * without re-running this thread's timeline build + bubble walk. Parent
+ * passes stable refs for arrays and useCallback'd handlers.
+ */
+export const MessageThread = memo(MessageThreadImpl);

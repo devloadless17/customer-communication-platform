@@ -1,13 +1,16 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useState } from "react";
 import { useFormStatus } from "react-dom";
-import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
+import {
+  AuthRedirectFallback,
+  useAuthRedirect,
+} from "@/hooks/use-auth-redirect";
 import { cn } from "@ccp/shared/utils";
 
 import { registerAction, type RegisterState } from "./actions";
@@ -15,17 +18,14 @@ import { registerAction, type RegisterState } from "./actions";
 const INITIAL: RegisterState = { error: null };
 
 export function RegisterForm() {
-  const [state, action] = useActionState(registerAction, INITIAL);
-  const router = useRouter();
+  const { state, action, isRedirecting } = useAuthRedirect(
+    registerAction,
+    INITIAL,
+  );
 
-  // Navigate after the action lands. Doing the navigation client-side
-  // sidesteps the cookie-commit + action-redirect race that broke the
-  // login flow (see app/login/actions.ts comment for the full story).
-  useEffect(() => {
-    if (state.redirectTo) {
-      router.replace(state.redirectTo);
-    }
-  }, [state.redirectTo, router]);
+  if (isRedirecting) {
+    return <AuthRedirectFallback minHeightClass="min-h-65" />;
+  }
 
   return (
     <form action={action} className="flex flex-col gap-4">

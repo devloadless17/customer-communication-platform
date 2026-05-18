@@ -5,11 +5,13 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { stripMentionMarkup } from "@ccp/shared/team-chat/mentions";
 import type {
+  ChannelMessagesAroundPage,
   ChannelMessagesPage,
   ChannelPinDto,
   TeamChannelDto,
   TeamChannelListItemDto,
   TeamChannelMessageDto,
+  WorkspaceSearchPage,
 } from "@ccp/shared/team-chat/types";
 
 /**
@@ -18,7 +20,7 @@ import type {
  * happens here so SSR and socket emits go through the same code path.
  */
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 100;
 
 // Shape we always pull for messages — keeps the include cost predictable.
@@ -291,13 +293,110 @@ export async function listChannelMessages(
   return { items, nextCursor };
 }
 
-/** Fetch new messages strictly after `after`. Used by reconnect-backfill. */
+/**
+ * Context-window fetch around an anchor message. Used by jump-to-message
+ * from search results when the anchor isn't in the caller's loaded slice.
+ * Returns up to `take/2` messages strictly older + the anchor + up to
+ * `take/2` messages strictly newer, all oldest-first.
+ *
+ * Three queries in parallel (anchor + older + newer) because they're
+ * independent — sequential awaits would triple the latency on a "Jump to"
+ * click. Anchor is fetched separately (not derivable from a single keyset
+ * scan in either direction).
+ */
+export async function listChannelMessagesAround(
+  channelId: string,
+  teamId: string,
+  anchorMessageId: string,
+  take = PAGE_SIZE,
+): Promise<ChannelMessagesAroundPage | null> {
+  const capped = Math.min(take, MAX_PAGE_SIZE);
+  const half = Math.floor(capped / 2);
+
+  // Tenant guard + cursor anchor — refuse foreign-team ids or replies (they
+  // aren't on the channel feed, jump-to wouldn't land on a visible row).
+  const anchor = await db.teamChannelMessage.findFirst({
+    where: { id: anchorMessageId, channelId, teamId, threadRootId: null },
+    select: { id: true, createdAt: true },
+  });
+  if (!anchor) return null;
+
+  const [olderRows, anchorRow, newerRows] = await Promise.all([
+    db.teamChannelMessage.findMany({
+      where: {
+        channelId,
+        teamId,
+        threadRootId: null,
+        OR: [
+          { createdAt: { lt: anchor.createdAt } },
+          { createdAt: anchor.createdAt, id: { lt: anchor.id } },
+        ],
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: half + 1, // +1 lookahead for hasMoreBefore
+      include: MESSAGE_INCLUDE,
+    }),
+    db.teamChannelMessage.findUnique({
+      where: { id: anchor.id },
+      include: MESSAGE_INCLUDE,
+    }),
+    db.teamChannelMessage.findMany({
+      where: {
+        channelId,
+        teamId,
+        threadRootId: null,
+        OR: [
+          { createdAt: { gt: anchor.createdAt } },
+          { createdAt: anchor.createdAt, id: { gt: anchor.id } },
+        ],
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: half + 1,
+      include: MESSAGE_INCLUDE,
+    }),
+  ]);
+  if (!anchorRow) return null;
+
+  const hasMoreBefore = olderRows.length > half;
+  const hasMoreAfter = newerRows.length > half;
+  const olderSlice = hasMoreBefore ? olderRows.slice(0, half) : olderRows;
+  const newerSlice = hasMoreAfter ? newerRows.slice(0, half) : newerRows;
+
+  // Reverse older (was DESC for keyset) so the final array is asc.
+  const items = [
+    ...olderSlice.map(mapMessage).reverse(),
+    mapMessage(anchorRow),
+    ...newerSlice.map(mapMessage),
+  ];
+
+  // Cursors are AT the boundary of the loaded slice so the next paginate
+  // call will exclude what we already have.
+  const oldestLoaded = items[0]!;
+  const newestLoaded = items[items.length - 1]!;
+  return {
+    items,
+    hasMoreBefore,
+    hasMoreAfter,
+    beforeCursor: hasMoreBefore ? encodeCursor(oldestLoaded.createdAt, oldestLoaded.id) : null,
+    afterCursor: hasMoreAfter ? encodeCursor(newestLoaded.createdAt, newestLoaded.id) : null,
+  };
+}
+
+/**
+ * Fetch new messages strictly after `after`. Used by reconnect-backfill +
+ * the anchored-mode "load newer" path. Returns the same `{ items, nextCursor }`
+ * envelope as `listChannelMessages` so callers don't have to guess at the
+ * page boundary from `items.length`. `nextCursor` is the timestamp of the
+ * newest row in the slice when more remains, else null.
+ */
 export async function listChannelMessagesAfter(
   channelId: string,
   teamId: string,
   after: string,
   take = PAGE_SIZE,
-): Promise<TeamChannelMessageDto[]> {
+): Promise<{ items: TeamChannelMessageDto[]; nextCursor: string | null }> {
+  const limit = Math.min(take, MAX_PAGE_SIZE);
+  // +1 lookahead matches the keyset pattern in `listChannelMessages`.
   const rows = await db.teamChannelMessage.findMany({
     where: {
       channelId,
@@ -306,27 +405,117 @@ export async function listChannelMessagesAfter(
       createdAt: { gt: new Date(after) },
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    take: Math.min(take, MAX_PAGE_SIZE),
+    take: limit + 1,
     include: MESSAGE_INCLUDE,
   });
-  return rows.map(mapMessage);
+  const hasMore = rows.length > limit;
+  const slice = hasMore ? rows.slice(0, limit) : rows;
+  const items = slice.map(mapMessage);
+  const nextCursor =
+    hasMore && slice.length > 0
+      ? slice[slice.length - 1]!.createdAt.toISOString()
+      : null;
+  return { items, nextCursor };
 }
 
 /**
- * Thread replies for a root message. Chronological ascending — threads are
- * short enough in practice that we always render the whole list. Add
- * pagination if a thread ever crosses ~500 replies (defer).
+ * Thread replies for a root message. Keyset-paginated ascending — when an
+ * `after` cursor is supplied, we return replies strictly newer than it. The
+ * full thread covered by the `(threadRootId, createdAt)` index is cheap up to
+ * a few hundred rows; pagination kicks in at 500+ replies so a 5k-reply mega-
+ * thread doesn't ship 5k DTOs to the panel on open.
+ *
+ * No `before` cursor — threads are ascending and replies are read forward.
+ * "Load older" doesn't apply.
  */
 export async function listThreadReplies(
   rootMessageId: string,
   teamId: string,
-): Promise<TeamChannelMessageDto[]> {
+  opts: { take?: number; after?: { createdAt: string; id: string } | null } = {},
+): Promise<{ items: TeamChannelMessageDto[]; nextCursor: string | null }> {
+  const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
   const rows = await db.teamChannelMessage.findMany({
-    where: { threadRootId: rootMessageId, teamId },
+    where: {
+      threadRootId: rootMessageId,
+      teamId,
+      ...(opts.after
+        ? {
+            OR: [
+              { createdAt: { gt: new Date(opts.after.createdAt) } },
+              {
+                createdAt: new Date(opts.after.createdAt),
+                id: { gt: opts.after.id },
+              },
+            ],
+          }
+        : {}),
+    },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: take + 1,
     include: MESSAGE_INCLUDE,
   });
-  return rows.map(mapMessage);
+  const hasMore = rows.length > take;
+  const slice = hasMore ? rows.slice(0, take) : rows;
+  const items = slice.map(mapMessage);
+  const nextCursor =
+    hasMore && slice.length > 0
+      ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
+      : null;
+  return { items, nextCursor };
+}
+
+/**
+ * Substring/case-insensitive search inside a single channel's top-level
+ * messages. Backed by the `pg_trgm` GIN index on `body` — see the migration
+ * `20260518000000_team_chat_search_and_partial_index`. ILIKE patterns shorter
+ * than 3 chars hit the index only for prefix matches; the controller refuses
+ * those upstream so we never sequential-scan from a 1-char query.
+ *
+ * Keyset-paginated by `(createdAt DESC, id DESC)` — the same shape as the
+ * main feed, so the UI can paginate results with familiar semantics.
+ * Thread replies are excluded because the search surfaces "messages I can
+ * jump to in this channel"; replies are accessed via their thread panel.
+ */
+export async function searchChannelMessages(
+  channelId: string,
+  teamId: string,
+  q: string,
+  opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
+): Promise<ChannelMessagesPage> {
+  const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
+  const rows = await db.teamChannelMessage.findMany({
+    where: {
+      channelId,
+      teamId,
+      threadRootId: null,
+      body: { contains: q, mode: "insensitive" },
+      ...(opts.before
+        ? {
+            OR: [
+              { createdAt: { lt: new Date(opts.before.createdAt) } },
+              {
+                createdAt: new Date(opts.before.createdAt),
+                id: { lt: opts.before.id },
+              },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: take + 1,
+    include: MESSAGE_INCLUDE,
+  });
+  const hasMore = rows.length > take;
+  const slice = hasMore ? rows.slice(0, take) : rows;
+  // Keep search results newest-first — different from the main feed (which
+  // reverses to oldest-first for ascending render). Search UX surfaces the
+  // most-recent match at the top of the list.
+  const items = slice.map(mapMessage);
+  const nextCursor =
+    hasMore && slice.length > 0
+      ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
+      : null;
+  return { items, nextCursor };
 }
 
 export async function getMessageById(
@@ -334,6 +523,59 @@ export async function getMessageById(
   teamId: string,
 ): Promise<TeamChannelMessageDto | null> {
   return loadMessageForEmit(messageId, teamId);
+}
+
+/**
+ * Workspace-wide search across every channel in the team. Same trigram index
+ * powers it; the WHERE drops the per-channel filter and joins the channel row
+ * to expose `channelName` on each hit so the result row can show context.
+ *
+ * Cursor shape is identical to `searchChannelMessages` so the frontend reuses
+ * the same encode/decode helpers. The pg_trgm index dominates the predicate;
+ * the planner bitmap-ANDs with the team filter on the channel side via the
+ * `teamId` column denormalized on TeamChannelMessage.
+ */
+export async function searchAllChannels(
+  teamId: string,
+  q: string,
+  opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
+): Promise<WorkspaceSearchPage> {
+  const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
+  const rows = await db.teamChannelMessage.findMany({
+    where: {
+      teamId,
+      threadRootId: null,
+      body: { contains: q, mode: "insensitive" },
+      ...(opts.before
+        ? {
+            OR: [
+              { createdAt: { lt: new Date(opts.before.createdAt) } },
+              {
+                createdAt: new Date(opts.before.createdAt),
+                id: { lt: opts.before.id },
+              },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: take + 1,
+    include: {
+      ...MESSAGE_INCLUDE,
+      channel: { select: { name: true } },
+    },
+  });
+  const hasMore = rows.length > take;
+  const slice = hasMore ? rows.slice(0, take) : rows;
+  const items = slice.map((row) => ({
+    message: mapMessage(row),
+    channelName: row.channel.name,
+  }));
+  const nextCursor =
+    hasMore && slice.length > 0
+      ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
+      : null;
+  return { items, nextCursor };
 }
 
 // ===========================================================================

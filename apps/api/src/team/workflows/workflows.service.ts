@@ -10,6 +10,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
+import { decryptSecret, encryptSecret, isEncrypted } from "@/lib/crypto/envelope";
 import { describeStep } from "@/lib/workflows/steps";
 import { dispatchManualTrigger } from "@/lib/workflows/dispatcher";
 import {
@@ -110,7 +111,7 @@ export class WorkflowsService {
           enabled: parsed.enabled,
           published: false,
           trigger: parsed.trigger,
-          triggerConfig: parsed.triggerConfig as Prisma.InputJsonValue,
+          triggerConfig: encryptTriggerConfigSecret(parsed.triggerConfig),
           triggerConditions: parsed.triggerConditions as Prisma.InputJsonValue,
           triggerOncePerContact: parsed.triggerOncePerContact,
           graph: parsed.graph as unknown as Prisma.InputJsonValue,
@@ -204,7 +205,7 @@ export class WorkflowsService {
           name: parsed.name,
           enabled: parsed.enabled,
           trigger: parsed.trigger,
-          triggerConfig: parsed.triggerConfig as Prisma.InputJsonValue,
+          triggerConfig: encryptTriggerConfigSecret(parsed.triggerConfig),
           triggerConditions: parsed.triggerConditions as Prisma.InputJsonValue,
           triggerOncePerContact: parsed.triggerOncePerContact,
           graph: parsed.graph as unknown as Prisma.InputJsonValue,
@@ -472,25 +473,50 @@ export class WorkflowsService {
       });
     }
 
-    const secret = (wf.triggerConfig as { secret?: string })?.secret;
-    if (!secret) {
+    const storedSecret = (wf.triggerConfig as { secret?: string })?.secret;
+    if (!storedSecret) {
       throw new InternalServerErrorException({
         error: "workflow not configured with a signature secret",
       });
     }
+    // The secret is stored envelope-encrypted at rest (see updateConfig
+    // below). decryptSecret() passes legacy plaintext through unchanged so
+    // the rollout is non-breaking; new writes go through encryptSecret().
+    let secret: string;
+    try {
+      secret = decryptSecret(storedSecret);
+    } catch {
+      throw new InternalServerErrorException({
+        error: "workflow signature secret could not be decrypted (key rotated?)",
+      });
+    }
 
-    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-    if (signatureHeader.length !== expected.length) {
+    // Compute the expected hex digest. We accept the header as either bare
+    // hex or with a `sha256=` prefix (the common conventions) and decode
+    // both into raw bytes before the timing-safe compare. Comparing the
+    // hex strings as utf-8 buffers is technically constant-time-ish too,
+    // but bytewise on the decoded digest is the textbook-correct approach.
+    const expectedHex = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const receivedHex = signatureHeader.startsWith("sha256=")
+      ? signatureHeader.slice("sha256=".length)
+      : signatureHeader;
+    if (receivedHex.length !== expectedHex.length) {
       throw new ForbiddenException({ error: "invalid signature" });
     }
+    let expectedBuf: Buffer;
+    let receivedBuf: Buffer;
     try {
-      const a = Buffer.from(signatureHeader, "utf8");
-      const b = Buffer.from(expected, "utf8");
-      if (!timingSafeEqual(a, b)) {
-        throw new ForbiddenException({ error: "invalid signature" });
-      }
-    } catch (err) {
-      if (err instanceof ForbiddenException) throw err;
+      expectedBuf = Buffer.from(expectedHex, "hex");
+      receivedBuf = Buffer.from(receivedHex, "hex");
+    } catch {
+      throw new ForbiddenException({ error: "invalid signature" });
+    }
+    // Non-hex characters silently produce a shorter buffer — re-check.
+    if (
+      expectedBuf.length === 0 ||
+      expectedBuf.length !== receivedBuf.length ||
+      !timingSafeEqual(expectedBuf, receivedBuf)
+    ) {
       throw new ForbiddenException({ error: "invalid signature" });
     }
 
@@ -650,5 +676,34 @@ export class WorkflowsService {
       scope: "workflows",
     });
   }
+}
+
+/**
+ * Envelope-encrypt `triggerConfig.secret` if present, idempotently. Same
+ * tolerance pattern as the per-team Meta secrets: legacy plaintext rows
+ * decrypt unchanged on read, new writes go through ciphertext. Other
+ * fields in triggerConfig pass through untouched.
+ *
+ * Idempotency: if the value already carries the `enc:v1:` prefix we leave
+ * it alone — otherwise re-saving an existing row would double-encrypt and
+ * the verifySignature decrypt path would yield ciphertext-as-plaintext.
+ *
+ * Returns `Prisma.InputJsonValue` so the caller can assign directly.
+ */
+function encryptTriggerConfigSecret(
+  triggerConfig: unknown,
+): Prisma.InputJsonValue {
+  if (!triggerConfig || typeof triggerConfig !== "object") {
+    return triggerConfig as Prisma.InputJsonValue;
+  }
+  const cfg = triggerConfig as Record<string, unknown>;
+  const secret = cfg.secret;
+  if (typeof secret !== "string" || secret.length === 0 || isEncrypted(secret)) {
+    return triggerConfig as Prisma.InputJsonValue;
+  }
+  return {
+    ...cfg,
+    secret: encryptSecret(secret),
+  } as Prisma.InputJsonValue;
 }
 

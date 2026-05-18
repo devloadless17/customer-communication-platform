@@ -15,7 +15,7 @@
 
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { Pool } from "pg";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -188,19 +188,16 @@ async function main() {
       where: { id: u.id },
       create: {
         id: u.id, teamId: TEAM.id, role: u.role, name: u.name, email: u.email,
-        passwordHash: DEV_PASSWORD_HASH,
       },
       update: {
         teamId: TEAM.id, role: u.role, name: u.name, email: u.email,
-        // Reset password on every reseed so dev never gets locked out.
-        passwordHash: DEV_PASSWORD_HASH,
         // Re-enable any previously deactivated seeded user.
         deactivatedAt: null,
       },
     });
     // Better Auth verifies signin against Account.password (providerId
-    // "credential", accountId = email), NOT User.passwordHash. Without this
-    // row the seeded user fails login with "Credential account not found".
+    // "credential", accountId = email). Re-upserted every reseed so dev never
+    // gets locked out from a hash that no longer matches the policy.
     await db.account.upsert({
       where: { providerId_accountId: { providerId: "credential", accountId: u.email } },
       create: {

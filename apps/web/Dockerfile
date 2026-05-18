@@ -82,8 +82,12 @@ ENV NODE_ENV=production \
     NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server"
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 \
   CMD node --eval "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+# start-period generous (120s) because CMD runs `prisma migrate deploy`
+# before `next start` — a migration that builds a new index on a hot
+# table can easily eat 30-60s on the VPS and would otherwise trip the
+# healthcheck → 502 from Caddy before the app finishes booting.
 # Migrations run from the web side only. Prisma migrate deploy is idempotent
 # but running it from both services races for the schema lock and wastes
 # startup time. The api service waits on db: { healthy }, not on web.

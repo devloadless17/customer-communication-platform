@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   Check,
@@ -47,14 +47,18 @@ export function WhatsappSettings({
   canManage: boolean;
 }) {
   const router = useRouter();
+  const params = useSearchParams();
+  const expandAdvanced = params.get("expand") === "advanced";
   const { confirm, confirmDialog } = useConfirm();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   // Open the form by default when there are no creds yet, OR when the stored
-  // creds couldn't be decrypted (key rotated / different env) — the admin
-  // needs to re-paste in both cases.
+  // creds couldn't be decrypted (key rotated / different env), OR when
+  // ?expand=advanced sent us here from the templates page.
   const [showForm, setShowForm] = useState(
-    !current.connected || Boolean(current.credentialsUndecryptable),
+    !current.connected ||
+      Boolean(current.credentialsUndecryptable) ||
+      expandAdvanced,
   );
 
   // Canonical post-migration path. NestJS owns `/webhooks/*` directly; the
@@ -69,8 +73,9 @@ export function WhatsappSettings({
       phoneNumberId: form.get("phoneNumberId"),
       accessToken: form.get("accessToken"),
       appSecret: form.get("appSecret"),
-      verifyToken: form.get("verifyToken") || undefined,
-      // Pass through even when empty so the server can clear a stale id.
+      // verifyToken is owned by the server — pre-minted on first GET and
+      // surfaced in WebhookConfigCard. The form no longer claims ownership.
+      // Pass through wabaId/appId even when empty so the server can clear a stale id.
       wabaId: form.get("wabaId") ?? "",
       appId: form.get("appId") ?? "",
     };
@@ -112,8 +117,8 @@ export function WhatsappSettings({
     setShowForm(true);
   }
 
-  return (
-    <div className="flex flex-col gap-8">
+  const header = (
+    <>
       <div>
         <h1 className="text-xl font-semibold tracking-tight">WhatsApp connection</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -131,33 +136,91 @@ export function WhatsappSettings({
           <div className="wrap-break-word">{error}</div>
         </div>
       )}
+    </>
+  );
 
-      <ConnectionStatus current={current} />
-
-      {/* Embedded Signup placeholder — Tech Provider review pending. */}
-      <div className="rounded-xl border border-dashed border-border bg-muted/30 p-5">
-        <div className="flex items-start gap-3">
-          <ExternalLink className="mt-0.5 size-5 text-muted-foreground" />
-          <div className="flex-1">
-            <div className="text-sm font-medium">Connect with Facebook</div>
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              One-click WhatsApp Embedded Signup. Enabled once Meta approves Loadless as
-              a Tech Provider (business verification + app review). Until then, use
-              manual setup below.
-            </p>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            disabled
-            title="Available once Meta approves the Tech Provider application"
-          >
-            Coming soon
-          </Button>
+  const embeddedSignupCard = (
+    <div className="rounded-xl border border-dashed border-border bg-muted/30 p-5">
+      <div className="flex items-start gap-3">
+        <ExternalLink className="mt-0.5 size-5 text-muted-foreground" />
+        <div className="flex-1">
+          <div className="text-sm font-medium">Connect with Facebook</div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            One-click WhatsApp Embedded Signup. Enabled once Meta approves Loadless as
+            a Tech Provider (business verification + app review). Until then, use
+            manual setup above.
+          </p>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          disabled
+          title="Available once Meta approves the Tech Provider application"
+        >
+          Coming soon
+        </Button>
       </div>
+    </div>
+  );
 
-      {canManage && current.connected && !showForm && (
+  // Disconnected layout: ordered Step 1 → Step 2 sequence so the admin
+  // sets up the Meta side BEFORE pasting creds. Step 3 is implied by the
+  // post-save connected layout (router.refresh flips us over).
+  if (!current.connected) {
+    return (
+      <div className="flex flex-col gap-8">
+        {header}
+        <ConnectionStatus current={current} />
+
+        {canManage && (
+          <WebhookConfigCard
+            webhookUrl={webhookUrl}
+            verifyToken={current.verifyToken}
+            connected={false}
+            stepLabel="Step 1 of 3 · Configure Meta's webhook"
+            stepDescription="In Meta Business Suite → WhatsApp → Configuration → Webhook, paste the Callback URL and Verify token below. Subscribe to the messages field. Then come back here."
+          />
+        )}
+
+        {canManage && (
+          <ManualForm
+            pending={pending}
+            current={current}
+            stepLabel="Step 2 of 3 · Paste credentials"
+            defaultExpandAdvanced={expandAdvanced}
+            onSubmit={(form) =>
+              startTransition(async () => {
+                const ok = await save(form);
+                if (ok) {
+                  setShowForm(false);
+                  router.refresh();
+                }
+              })
+            }
+          />
+        )}
+
+        {!canManage && (
+          <p className="text-xs text-muted-foreground">
+            Only admins can change the WhatsApp connection.
+          </p>
+        )}
+
+        {embeddedSignupCard}
+        {confirmDialog}
+      </div>
+    );
+  }
+
+  // Connected layout: today's ordering preserved so returning admins land
+  // on the familiar page. ConnectionStatus picks up an extra one-line
+  // reminder to confirm the webhook subscription.
+  return (
+    <div className="flex flex-col gap-8">
+      {header}
+      <ConnectionStatus current={current} showFinalStepHint />
+
+      {canManage && !showForm && (
         <div className="flex gap-2">
           <Button type="button" variant="outline" onClick={() => setShowForm(true)}>
             <PlugZap className="size-4" />
@@ -174,7 +237,8 @@ export function WhatsappSettings({
         <ManualForm
           pending={pending}
           current={current}
-          onCancel={current.connected ? () => setShowForm(false) : undefined}
+          defaultExpandAdvanced={expandAdvanced}
+          onCancel={() => setShowForm(false)}
           onSubmit={(form) =>
             startTransition(async () => {
               const ok = await save(form);
@@ -191,7 +255,7 @@ export function WhatsappSettings({
         <WebhookConfigCard
           webhookUrl={webhookUrl}
           verifyToken={current.verifyToken}
-          connected={current.connected}
+          connected
         />
       )}
 
@@ -200,12 +264,20 @@ export function WhatsappSettings({
           Only admins can change the WhatsApp connection.
         </p>
       )}
+
+      {embeddedSignupCard}
       {confirmDialog}
     </div>
   );
 }
 
-function ConnectionStatus({ current }: { current: WhatsappCurrent }) {
+function ConnectionStatus({
+  current,
+  showFinalStepHint,
+}: {
+  current: WhatsappCurrent;
+  showFinalStepHint?: boolean;
+}) {
   if (!current.connected) {
     return (
       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs">
@@ -213,7 +285,7 @@ function ConnectionStatus({ current }: { current: WhatsappCurrent }) {
           Not connected
         </div>
         <div className="mt-0.5 text-muted-foreground">
-          Paste your Meta credentials below to start sending and receiving messages.
+          Follow the two steps below to connect your WhatsApp Business number.
         </div>
       </div>
     );
@@ -248,6 +320,13 @@ function ConnectionStatus({ current }: { current: WhatsappCurrent }) {
           </>
         )}
       </dl>
+      {showFinalStepHint && (
+        <p className="mt-3 border-t border-emerald-500/20 pt-2 text-[11px] text-muted-foreground">
+          Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
+          to the <span className="font-mono">messages</span> field. Without it, no
+          incoming messages will arrive.
+        </p>
+      )}
     </div>
   );
 }
@@ -257,12 +336,18 @@ function ManualForm({
   current,
   onSubmit,
   onCancel,
+  stepLabel,
+  defaultExpandAdvanced,
 }: {
   pending: boolean;
   current: WhatsappCurrent;
   onSubmit: (form: FormData) => void;
   onCancel?: () => void;
+  stepLabel?: string;
+  defaultExpandAdvanced?: boolean;
 }) {
+  const advancedOpen =
+    Boolean(current.wabaId || current.appId) || Boolean(defaultExpandAdvanced);
   return (
     <form
       onSubmit={(e) => {
@@ -272,22 +357,18 @@ function ManualForm({
       className="rounded-xl border border-border bg-card p-5"
     >
       <div className="mb-4">
+        {stepLabel && (
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+            {stepLabel}
+          </div>
+        )}
         <div className="text-sm font-medium">
-          {current.connected ? "Update credentials" : "Manual setup"}
+          {current.connected ? "Update credentials" : "Paste credentials"}
         </div>
         <p className="mt-1 text-[11px] text-muted-foreground">
           {current.connected
             ? "Edit any field and save. Unchanged fields keep their current value."
-            : "From Meta’s Business dashboard → WhatsApp → API Setup."}{" "}
-          <a
-            className="text-primary hover:underline"
-            href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Meta&apos;s guide
-          </a>
-          .
+            : "From Meta’s Business dashboard → WhatsApp → API Setup."}
         </p>
       </div>
       <div className="flex flex-col gap-3">
@@ -297,6 +378,7 @@ function ManualForm({
           placeholder="e.g. 1083229888211508"
           required
           defaultValue={current.phoneNumberId ?? ""}
+          hint="Meta Business Suite → WhatsApp → API Setup → Phone numbers table → Phone number ID column. 15–16 digit number."
         />
         <Field
           name="accessToken"
@@ -305,6 +387,7 @@ function ManualForm({
           required
           mono
           defaultValue={current.accessToken ?? ""}
+          hint="Meta Business Suite → WhatsApp → API Setup → Temporary access token (for testing) OR Business Settings → Users → System users to generate a permanent System User token."
         />
         <Field
           name="appSecret"
@@ -313,31 +396,39 @@ function ManualForm({
           required
           mono
           defaultValue={current.appSecret ?? ""}
+          hint="Meta Developers → My Apps → [your app] → App Settings → Basic → App secret, click Show."
         />
-        <Field
-          name="wabaId"
-          label="WhatsApp Business Account ID (optional — needed for templates)"
-          placeholder="e.g. 102290016451234"
-          mono
-          defaultValue={current.wabaId ?? ""}
-        />
-        <Field
-          name="appId"
-          label="Meta App ID (optional — needed to upload media template headers)"
-          placeholder="e.g. 1234567890123456"
-          mono
-          defaultValue={current.appId ?? ""}
-        />
-        <Field
-          name="verifyToken"
-          label={
-            current.connected
-              ? "Verify token"
-              : "Verify token (optional — auto-generated if blank)"
-          }
-          placeholder={current.connected ? "" : "Leave blank to auto-generate"}
-          defaultValue={current.verifyToken ?? ""}
-        />
+        <details
+          open={advancedOpen}
+          className="mt-3 rounded-md border border-dashed border-border bg-muted/20 p-3 [&_summary::-webkit-details-marker]:hidden"
+        >
+          <summary className="cursor-pointer text-xs font-medium">
+            Templates &amp; advanced (optional)
+          </summary>
+          <p className="mt-1 mb-3 text-[11px] text-muted-foreground">
+            WhatsApp Business Account ID is required to load templates. Meta App ID is
+            required to upload template header media. Skip both unless you plan to
+            use templates.
+          </p>
+          <div className="flex flex-col gap-3">
+            <Field
+              name="wabaId"
+              label="WhatsApp Business Account ID"
+              placeholder="e.g. 102290016451234"
+              mono
+              defaultValue={current.wabaId ?? ""}
+              hint="Meta Business Suite → WhatsApp → API Setup → WhatsApp Business Account section → ID under the account name."
+            />
+            <Field
+              name="appId"
+              label="Meta App ID"
+              placeholder="e.g. 1234567890123456"
+              mono
+              defaultValue={current.appId ?? ""}
+              hint="Meta Developers → My Apps → [your app] → top of the dashboard, under the app name."
+            />
+          </div>
+        </details>
       </div>
       <div className="mt-5 flex items-center gap-2">
         <Button type="submit" disabled={pending}>
@@ -365,6 +456,7 @@ function Field({
   required,
   mono,
   defaultValue,
+  hint,
 }: {
   name: string;
   label: string;
@@ -372,6 +464,7 @@ function Field({
   required?: boolean;
   mono?: boolean;
   defaultValue?: string;
+  hint?: string;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -386,6 +479,14 @@ function Field({
         defaultValue={defaultValue}
         className={mono ? "font-mono text-xs" : ""}
       />
+      {hint && (
+        <details className="[&_summary::-webkit-details-marker]:hidden">
+          <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
+            Where do I find this?
+          </summary>
+          <p className="mt-1 text-[11px] text-muted-foreground">{hint}</p>
+        </details>
+      )}
     </div>
   );
 }
@@ -394,26 +495,36 @@ function WebhookConfigCard({
   webhookUrl,
   verifyToken,
   connected,
+  stepLabel,
+  stepDescription,
 }: {
   webhookUrl: string;
   verifyToken: string | null;
   connected: boolean;
+  stepLabel?: string;
+  stepDescription?: string;
 }) {
+  const description =
+    stepDescription ??
+    (connected
+      ? "Paste these values into Meta → WhatsApp → Configuration → Webhook. Then subscribe to the messages field."
+      : "After saving credentials, paste these values into Meta’s webhook configuration.");
   return (
     <div className="rounded-xl border border-border bg-card p-5">
       <div className="mb-3">
+        {stepLabel && (
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+            {stepLabel}
+          </div>
+        )}
         <div className="text-sm font-medium">Configure Meta&apos;s webhook</div>
-        <p className="mt-1 text-[11px] text-muted-foreground">
-          {connected
-            ? "Paste these values into Meta → WhatsApp → Configuration → Webhook. Then subscribe to the messages field."
-            : "After saving credentials, paste these values into Meta&apos;s webhook configuration."}
-        </p>
+        <p className="mt-1 text-[11px] text-muted-foreground">{description}</p>
       </div>
       <div className="flex flex-col gap-3">
         <ReadonlyField label="Callback URL" value={webhookUrl} />
         <ReadonlyField
           label="Verify token"
-          value={verifyToken ?? "— save credentials first —"}
+          value={verifyToken ?? "— reload to generate —"}
           disabled={!verifyToken}
         />
       </div>

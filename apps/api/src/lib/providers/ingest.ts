@@ -61,9 +61,24 @@ export async function ingestEvents(
           await ingestStatusUpdate(teamId, provider, evt);
         }
       } catch (err) {
+        // Structured log — fields chosen so a flood of identical errors is
+        // greppable as a single event in ops (key = teamId+kind+code).
+        // Stack included so a real bug isn't hidden, but never the raw
+        // body / phone number (those live in `rawPayload` on the message
+        // row for forensic queries that go through DB, not log search).
+        const externalId =
+          "externalId" in evt ? evt.externalId : undefined;
         console.error(
-          `[ingest] event failed (kind=${evt.kind} externalId=${"externalId" in evt ? evt.externalId : "?"}):`,
-          err instanceof Error ? err.message : err,
+          JSON.stringify({
+            event: "ingest.event_failed",
+            severity: "error",
+            teamId,
+            provider,
+            kind: evt.kind,
+            externalId,
+            message: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack : undefined,
+          }),
         );
         // Swallow — Meta retries the whole batch on a non-200, and the
         // unique-index gate makes successful sibling events safe to re-run.
@@ -94,23 +109,25 @@ async function ingestStatusUpdate(
     },
     select: { id: true, teamId: true, conversationId: true, status: true },
   });
-  // Status arriving for an unknown message can be normal in dev (DB wiped
-  // but Meta still has the wamid). In production it usually means a race:
-  // Meta is delivering the `delivered`/`read` for an outbound BEFORE our
-  // create-message path has committed the row. Without a log this is
-  // invisible — the message stays stuck at `sent` forever with no signal.
-  // Log so ops can grep for it; we still drop because there's no row to
-  // update and Meta won't redeliver the status.
+  // Status arriving for an unknown message: classic race where Meta delivers
+  // `sent`/`delivered`/`read` for an outbound BEFORE our create-message path
+  // has committed the row. Park the status in a short-TTL replay map; when
+  // the message row is created (`createOutboundMessageIdempotent` below)
+  // it drains the parked status and applies it. After TTL we drop — at that
+  // point either the create failed permanently or Meta's clock is way off.
   if (!existing) {
-    console.warn(
-      `[ingest] status update for unknown message (teamId=${teamId} provider=${provider} externalId=${evt.externalId} status=${evt.status}) — message row missing, status discarded`,
-    );
+    parkUnknownWamidStatus(teamId, provider, evt.externalId, evt.status);
     return;
   }
 
-  // Don't downgrade — Meta sometimes delivers `sent` after `delivered`/`read`
-  // due to per-recipient-device fan-out.
-  if (statusRank(evt.status) <= statusRank(existing.status as Message["status"])) {
+  // `failed` is terminal and must transition from ANY non-failed state —
+  // Meta can deliver a failure async after a `delivered`/`read`. The
+  // monotonic rank-guard below was silently dropping these and leaving
+  // the agent unaware the send actually broke.
+  if (
+    evt.status !== "failed" &&
+    statusRank(evt.status) <= statusRank(existing.status as Message["status"])
+  ) {
     return;
   }
 
@@ -125,6 +142,90 @@ async function ingestStatusUpdate(
     conversationId: existing.conversationId,
     messageId: existing.id,
     status: evt.status,
+  });
+}
+
+/**
+ * Park-and-replay table for status updates that arrived before the message
+ * row was committed. Keyed by `(teamId|provider|externalId)`; entries
+ * self-expire after TTL so memory stays bounded even if the create never
+ * happens. Bounded LRU-ish via insertion-order eviction on cap.
+ *
+ * Process-local — fine for a single api container. If we ever run two
+ * api processes, an outbound created on instance A whose status webhook
+ * lands on instance B would lose the replay; revisit when that's a real
+ * possibility (move to Redis).
+ */
+const UNKNOWN_WAMID_TTL_MS = 5 * 60_000;
+const UNKNOWN_WAMID_MAX = 1_000;
+const unknownWamidStatuses = new Map<
+  string,
+  { status: Message["status"]; exp: number }
+>();
+
+function parkKey(
+  teamId: string,
+  provider: ProviderName,
+  externalId: string,
+): string {
+  return `${teamId}|${provider}|${externalId}`;
+}
+
+function parkUnknownWamidStatus(
+  teamId: string,
+  provider: ProviderName,
+  externalId: string,
+  status: Message["status"],
+): void {
+  const now = Date.now();
+  // Opportunistic eviction of expired entries.
+  if (unknownWamidStatuses.size >= UNKNOWN_WAMID_MAX) {
+    for (const [k, v] of unknownWamidStatuses) {
+      if (v.exp <= now) unknownWamidStatuses.delete(k);
+    }
+    // If still over cap, drop oldest.
+    if (unknownWamidStatuses.size >= UNKNOWN_WAMID_MAX) {
+      const oldest = unknownWamidStatuses.keys().next().value;
+      if (oldest !== undefined) unknownWamidStatuses.delete(oldest);
+    }
+  }
+  const key = parkKey(teamId, provider, externalId);
+  const existing = unknownWamidStatuses.get(key);
+  // If a higher-rank status is already parked, keep it — except `failed`
+  // which always wins (terminal). Mirrors the live status guard above.
+  if (existing && status !== "failed") {
+    if (statusRank(status) <= statusRank(existing.status)) return;
+  }
+  unknownWamidStatuses.set(key, { status, exp: now + UNKNOWN_WAMID_TTL_MS });
+}
+
+/**
+ * Called from the outbound create path immediately after the Message row
+ * commits. If a status update arrived for this wamid before us, apply it
+ * now so the row isn't stuck at the create-time default.
+ */
+export async function drainParkedStatus(
+  teamId: string,
+  provider: ProviderName,
+  externalId: string,
+  messageId: string,
+  conversationId: string,
+): Promise<void> {
+  const key = parkKey(teamId, provider, externalId);
+  const parked = unknownWamidStatuses.get(key);
+  if (!parked) return;
+  unknownWamidStatuses.delete(key);
+  if (parked.exp <= Date.now()) return;
+  await db.message.update({
+    where: { id: messageId },
+    data: { status: parked.status },
+  });
+  await publish({
+    type: "message.status_changed",
+    teamId,
+    conversationId,
+    messageId,
+    status: parked.status,
   });
 }
 
@@ -329,15 +430,30 @@ async function ingestInboundMessage(
     throw err;
   }
 
-  await db.conversation.update({
-    where: { id: conversation.id },
-    data: {
-      lastMessageAt: evt.timestamp,
-      lastMessagePreview: preview,
-      unreadCount: { increment: 1 },
-      incomingMessagesCount: { increment: 1 },
-    },
-  });
+  // Two independent post-create writes — issue them in parallel so the
+  // socket-emit (downstream of this function) starts ~20-40ms sooner.
+  //   1. conversation bump (lastMessageAt + preview + unread/incoming counters)
+  //   2. contact.lastInboundAt denorm (read by getConversationWithRefs in the
+  //      thread-open hot path; monotonic guard so a delayed older event can't
+  //      roll the column backwards)
+  await Promise.all([
+    db.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        lastMessageAt: evt.timestamp,
+        lastMessagePreview: preview,
+        unreadCount: { increment: 1 },
+        incomingMessagesCount: { increment: 1 },
+      },
+    }),
+    db.contact.updateMany({
+      where: {
+        id: contact.id,
+        OR: [{ lastInboundAt: null }, { lastInboundAt: { lt: evt.timestamp } }],
+      },
+      data: { lastInboundAt: evt.timestamp },
+    }),
+  ]);
 
   const message: Message = {
     id: createdId,

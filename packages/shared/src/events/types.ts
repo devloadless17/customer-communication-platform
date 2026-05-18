@@ -76,6 +76,12 @@ export interface MessageSentEvent {
   /** null for system/automation sends (workflow steps); user id for agent sends. */
   senderUserId: string | null;
   /**
+   * Set on /v1 external-API sends so the audit timeline can attribute the
+   * message to the API key, not a real user. Mutually exclusive with
+   * `senderUserId` in practice — a partner integration has no human author.
+   */
+  senderApiKeyId?: string | null;
+  /**
    * Set only when this outbound send opened a brand-new conversation (e.g.
    * forward to a contact that's never been messaged). Carries the full
    * ConversationWithRefs so inbox lists can splice the row in without a
@@ -100,6 +106,8 @@ export interface ConversationAssignedEvent {
   newAssignedUserId: string | null;
   /** null when triggered by the external API (no acting session). */
   changedByUserId: string | null;
+  /** Set on /v1 external-API mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
   /** Contact attached to the conversation, for workflow snapshot. */
   contact: WorkflowContactSnapshot;
   /**
@@ -119,6 +127,8 @@ export interface ConversationStatusChangedEvent {
   newStatus: ConversationStatus;
   /** null when status changed by the system (e.g. reopen on inbound). */
   changedByUserId: string | null;
+  /** Set on /v1 external-API mutations for audit attribution. */
+  changedByApiKeyId?: string | null;
   contact: WorkflowContactSnapshot;
   /**
    * Step-driven closures (workflow `close_conversation` config) can carry
@@ -153,6 +163,35 @@ export interface ContactUpdatedEvent {
   workflowContact: WorkflowContactSnapshot;
   /** Workflow steps set this to skip chain-trigger dispatch. See ConversationAssignedEvent.silent. */
   silent?: boolean;
+  /**
+   * Bulk paths set this so the realtime fanout subscriber SKIPS the per-contact
+   * socket emit — the bulk-path also publishes one `contact.bulk_updated` that
+   * carries the whole id set, and that's what fans out to clients. Workflow +
+   * audit subscribers don't read this flag (they want per-contact granularity).
+   * Bounds socket-frame volume on a 500-contact bulk-tag from 500×N agents
+   * down to 1×N.
+   */
+  suppressSocketFanout?: boolean;
+}
+
+/**
+ * Coalesced bulk-update notification for the socket layer. Bulk paths
+ * (contacts bulk-tag, future bulk-stage, future bulk-update-field) publish
+ * one of these AFTER firing per-contact `contact.updated` events with
+ * `suppressSocketFanout: true`. Realtime fanout emits one
+ * `contacts:bulk_updated` socket frame; clients invalidate the affected
+ * rows in one query instead of receiving N separate patches.
+ *
+ * Workflow + audit subscribers do NOT subscribe to this — they read per-
+ * contact `contact.updated` events for granular trigger dispatch.
+ */
+export interface ContactBulkUpdatedEvent {
+  teamId: string;
+  contactIds: string[];
+  /** What changed — frontend uses this to decide which caches to invalidate. */
+  changeKind: "tags" | "stage" | "fields" | "mixed";
+  /** null when triggered by the external API. */
+  changedByUserId: string | null;
 }
 
 export interface ContactFieldChange {
@@ -199,13 +238,15 @@ export interface MessageMediaReadyEvent {
 }
 
 /**
- * Broadcast lifecycle: queued → running → completed | failed.
+ * Broadcast lifecycle: queued → running → completed | failed | canceled.
+ * `canceled` is operator-initiated via POST /api/broadcasts/:id/cancel —
+ * runner sees the flipped status between recipients and bails.
  * Emitted by the broadcast runner at each phase transition.
  */
 export interface BroadcastStatusChangedEvent {
   teamId: string;
   broadcastId: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "canceled";
   error?: string;
 }
 
@@ -358,6 +399,14 @@ export interface TeamChannelReactionChangedEvent {
   emoji: string;
   /** Full set of user ids reacting with `emoji` on this message AFTER the change. */
   userIds: string[];
+  /**
+   * Monotonic per-(message,emoji) version derived from `TeamChannelReaction.updatedAt`
+   * (ms since epoch). The client compares incoming versions and DISCARDS any
+   * event with `version <= lastSeenVersion` for that key — without this,
+   * two near-simultaneous toggles can produce stale-but-different userIds
+   * snapshots and the one that lands last wins regardless of real DB order.
+   */
+  version: number;
 }
 
 export interface TeamChannelPinChangedEvent {
@@ -417,6 +466,7 @@ export interface DomainEventMap {
   "conversation.deleted": ConversationDeletedEvent;
   "conversation.read": ConversationReadEvent;
   "contact.updated": ContactUpdatedEvent;
+  "contact.bulk_updated": ContactBulkUpdatedEvent;
   "contact.deleted": ContactDeletedEvent;
   "note.created": NoteCreatedEvent;
   "note.deleted": NoteDeletedEvent;

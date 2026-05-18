@@ -1,8 +1,9 @@
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 
 import { buildSharedAuthOptions } from "@ccp/shared/auth/better-auth-config";
+import { BCRYPT_COST } from "@ccp/shared/auth/password-policy";
 
 import { db } from "@/lib/db";
 
@@ -41,7 +42,7 @@ export const auth = betterAuth({
     secret: readSecret(),
     baseURL: process.env.BETTER_AUTH_URL,
     isProd,
-    passwordHash: (password) => bcrypt.hash(password, 10),
+    passwordHash: (password) => bcrypt.hash(password, BCRYPT_COST),
     passwordVerify: ({ password, hash }) => bcrypt.compare(password, hash),
   }),
 

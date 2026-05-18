@@ -67,6 +67,13 @@ export function useConnectionStatus(opts?: {
   // (something is wrong with the server / network — surface it).
   const allowReconnectingBanner = useRef(false);
   const everDisconnected = useRef(false);
+  // Mirror of `state` for comparison from event handlers — reading the
+  // useState value inside `apply` would close over a stale snapshot, and
+  // doing the prev→next comparison inside setState's updater is what
+  // triggered the "setState during render of ConnectionBanner" warning
+  // (the recovery callback calls router.refresh(), which is a setState on
+  // Router). Keeping the diff in plain handler scope avoids that entirely.
+  const prevStateRef = useRef<ConnectionState>(state);
   const onRecoveredRef = useRef(opts?.onRecovered);
   useEffect(() => {
     onRecoveredRef.current = opts?.onRecovered;
@@ -90,21 +97,25 @@ export function useConnectionStatus(opts?: {
 
     const apply = () => {
       const next = compute();
-      setState((prev) => {
-        if (prev === next) return prev;
-        if (prev !== "online" && next === "online" && everDisconnected.current) {
-          // Real recovery — arm the flag and fire the callback once.
-          setRecovered(true);
-          onRecoveredRef.current?.();
-          // Drop the flag on the next tick so consumers can use it in a
-          // useEffect without it sticking around.
-          queueMicrotask(() => setRecovered(false));
-        }
-        if (next !== "online") {
-          everDisconnected.current = true;
-        }
-        return next;
-      });
+      const prev = prevStateRef.current;
+      if (prev === next) return;
+      prevStateRef.current = next;
+
+      if (prev !== "online" && next === "online" && everDisconnected.current) {
+        // Real recovery — arm the flag and fire the callback once. Both side
+        // effects live in plain handler scope (NOT inside a setState
+        // updater) so router.refresh() inside onRecovered doesn't trip
+        // React's "setState during render" warning.
+        setRecovered(true);
+        onRecoveredRef.current?.();
+        // Drop the flag on the next tick so consumers can use it in a
+        // useEffect without it sticking around.
+        queueMicrotask(() => setRecovered(false));
+      }
+      if (next !== "online") {
+        everDisconnected.current = true;
+      }
+      setState(next);
     };
 
     const onConnect = () => {

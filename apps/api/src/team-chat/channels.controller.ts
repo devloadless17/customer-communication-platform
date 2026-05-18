@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -8,8 +9,11 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -43,9 +47,13 @@ import {
  *   POST   /api/team/channels/:id/messages/:mid/pin        — pin (admin/manager)
  *   DELETE /api/team/channels/:id/messages/:mid/pin        — unpin
  *   POST   /api/team/channels/:id/messages/:mid/reactions  — toggle reaction
- *
- * Thread replies, media uploads, mark-read, and pins-list are not in this
- * batch — they're separate routes that follow the same delegation pattern.
+ *   POST   /api/team/channels/:id/read                     — stamp read receipt
+ *   GET    /api/team/channels/:id/messages/:mid/thread     — list thread replies (keyset asc, ?after / ?take)
+ *   POST   /api/team/channels/:id/messages/:mid/thread     — post a thread reply
+ *   GET    /api/team/channels/:id/messages/search          — ?q substring search (keyset desc, ?before / ?take)
+ *   GET    /api/team/channels/:id/messages/around          — ?messageId context window (jump-to-message)
+ *   GET    /api/team/channels/search                       — ?q workspace-wide substring search
+ *   POST   /api/team/channels/:id/media                    — upload file (multipart)
  */
 @Controller("api/team/channels")
 @UseGuards(SessionGuard)
@@ -58,12 +66,32 @@ export class ChannelsController {
     return { items };
   }
 
-  // `default` is a static segment — must come before any `:id` route below
-  // so Express doesn't match it as a channel id.
+  // `default` and `search` are static segments — must come before any `:id`
+  // route below so Express doesn't match them as a channel id. The
+  // `RESERVED_NAMES` set in shared/team-chat/types.ts refuses channel
+  // creation with these slugs as defense in depth.
   @Get("default")
   async getDefault(@CurrentSession() session: ApiSession) {
     const channel = await this.channels.getDefault(session.teamId);
     return { channel };
+  }
+
+  /**
+   * Workspace-wide substring search across every channel in the team. Same
+   * `pg_trgm` index as the per-channel search; each hit carries `channelName`
+   * so the result row can render context. Cmd+K-style search modal hits this.
+   */
+  @Get("search")
+  async searchAll(
+    @CurrentSession() session: ApiSession,
+    @Query("q") q?: string,
+    @Query("before") before?: string,
+    @Query("take") take?: string,
+  ) {
+    return this.channels.searchAllMessages(session.teamId, q ?? "", {
+      before,
+      take: take ? Number.parseInt(take, 10) : undefined,
+    });
   }
 
   @Get(":id")
@@ -134,7 +162,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Body(zBody(PostChannelMessageSchema)) body: PostChannelMessageInput,
   ) {
-    const out = await this.channels.postMessage(session.teamId, session.userId, id, body);
+    const out = await this.channels.postMessage(session, id, body);
     return { ok: true, ...out };
   }
 
@@ -193,6 +221,122 @@ export class ChannelsController {
     @Body(zBody(ToggleReactionSchema)) body: ToggleReactionInput,
   ) {
     const out = await this.channels.toggleReaction(session.teamId, session.userId, id, mid, body);
+    return { ok: true, ...out };
+  }
+
+  @Post(":id/read")
+  async markRead(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const out = await this.channels.markRead(session.teamId, session.userId, id);
+    return { ok: true, ...out };
+  }
+
+  @Get(":id/messages/:mid/thread")
+  async listThread(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("mid") mid: string,
+    @Query("after") after?: string,
+    @Query("take") take?: string,
+  ) {
+    return this.channels.listThreadReplies(session.teamId, id, mid, {
+      after,
+      take: take ? Number.parseInt(take, 10) : undefined,
+    });
+  }
+
+  /**
+   * Channel-scoped substring search. Returns the same `ChannelMessagesPage`
+   * shape as the feed list so the frontend reuses the message DTO + cursor.
+   * Backed by the pg_trgm GIN index on body; the service refuses 1-char
+   * queries upstream so we don't degenerate into a sequential scan.
+   */
+  @Get(":id/messages/search")
+  async searchMessages(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query("q") q?: string,
+    @Query("before") before?: string,
+    @Query("take") take?: string,
+  ) {
+    return this.channels.searchMessages(session.teamId, id, q ?? "", {
+      before,
+      take: take ? Number.parseInt(take, 10) : undefined,
+    });
+  }
+
+  /**
+   * Context window around an anchor message. Used by search jump-to when the
+   * target message isn't in the user's currently-loaded slice. Returns
+   * `~take/2` messages on each side of the anchor plus the anchor itself,
+   * with hasMore flags + cursors for paginating outward.
+   */
+  @Get(":id/messages/around")
+  async getMessagesAround(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query("messageId") messageId?: string,
+    @Query("take") take?: string,
+  ) {
+    if (!messageId) {
+      throw new BadRequestException({ error: "messageId required" });
+    }
+    return this.channels.getMessagesAround(session.teamId, id, messageId, {
+      take: take ? Number.parseInt(take, 10) : undefined,
+    });
+  }
+
+  @Post(":id/messages/:mid/thread")
+  async postThread(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("mid") mid: string,
+    @Body(zBody(PostChannelMessageSchema)) body: PostChannelMessageInput,
+  ) {
+    const out = await this.channels.postThreadReply(session, id, mid, body);
+    return { ok: true, ...out };
+  }
+
+  /**
+   * Multipart `file` + optional `body` (caption) + `clientTempId` + `threadRootId`.
+   * Cap mirrors apps/api/src/messages/messages.controller.ts:sendMedia — multer
+   * enforces a hard 100 MiB ceiling (the largest per-kind cap); the service
+   * tightens per-kind once it classifies from the mime type.
+   */
+  @Post(":id/media")
+  @UseInterceptors(
+    FileInterceptor("file", { limits: { fileSize: 100 * 1024 * 1024 } }),
+  )
+  async uploadMedia(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() form: Record<string, string>,
+  ) {
+    if (!file) throw new BadRequestException({ error: "file required" });
+    const body = (form.body ?? "").trim().slice(0, 4000);
+    const clientTempId =
+      typeof form.clientTempId === "string" && form.clientTempId
+        ? form.clientTempId
+        : undefined;
+    const threadRootId =
+      typeof form.threadRootId === "string" && form.threadRootId
+        ? form.threadRootId
+        : null;
+
+    const out = await this.channels.uploadMedia(session.teamId, session.userId, id, {
+      file: {
+        bytes: new Uint8Array(file.buffer),
+        mimeType: file.mimetype || "application/octet-stream",
+        filename: file.originalname || "upload",
+        size: file.size,
+      },
+      body,
+      clientTempId,
+      threadRootId,
+    });
     return { ok: true, ...out };
   }
 }

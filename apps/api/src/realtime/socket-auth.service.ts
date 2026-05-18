@@ -5,6 +5,7 @@ import { auth } from "@/auth/better-auth";
 import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
+import { sessionCacheGet, sessionCacheSet } from "../auth/session.guard";
 
 export interface SocketIdentity {
   userId: string;
@@ -44,13 +45,37 @@ export class SocketAuthService {
       const role = (session?.user as { role?: Role } | undefined)?.role;
       if (!userId || !teamId || !role) return null;
 
+      // After a Caddy bounce / deploy a whole team's tabs reconnect within
+      // seconds; without the cache, every handshake paid an independent
+      // `user.findUnique` deactivation check. The HTTP SessionGuard
+      // already maintains a 15s per-userId snapshot; reuse it so socket
+      // handshakes get the same single-DB-hit-per-window economics.
+      const cached = sessionCacheGet(userId);
+      if (cached) {
+        return { userId, teamId: cached.teamId, role: cached.role };
+      }
       const dbUser = await this.db.user.findUnique({
         where: { id: userId },
-        select: { deactivatedAt: true },
+        select: {
+          id: true,
+          teamId: true,
+          role: true,
+          name: true,
+          email: true,
+          avatarUrl: true,
+          deactivatedAt: true,
+        },
       });
       if (!dbUser || dbUser.deactivatedAt) return null;
-
-      return { userId, teamId, role };
+      sessionCacheSet(userId, {
+        userId: dbUser.id,
+        teamId: dbUser.teamId,
+        role: dbUser.role as Role,
+        name: dbUser.name,
+        email: dbUser.email,
+        avatarUrl: dbUser.avatarUrl ?? null,
+      });
+      return { userId, teamId: dbUser.teamId, role: dbUser.role as Role };
     } catch (err) {
       this.logger.warn(
         `socket auth threw: ${err instanceof Error ? err.message : err}`,

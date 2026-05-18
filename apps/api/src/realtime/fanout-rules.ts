@@ -132,9 +132,24 @@ export const FANOUT_RULES: FanoutRule[] = [
 
   // ---- contacts ---------------------------------------------------------
   defineRule("contact.updated", (e, emitter) => {
+    // Bulk paths suppress the per-contact frame and rely on the coalesced
+    // `contact.bulk_updated` rule below. Workflow + audit subscribers still
+    // see the per-contact event for granular dispatch (they don't read this
+    // flag) — only socket fanout is short-circuited.
+    if (e.suppressSocketFanout) return;
     emitter.emitToTeam(e.teamId, "contact:updated", {
       teamId: e.teamId,
       contact: e.contact,
+    });
+  }),
+
+  // One socket frame for an N-contact bulk mutation. Frontend invalidates
+  // the affected rows in one query rather than receiving N patches.
+  defineRule("contact.bulk_updated", (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "contacts:bulk_updated", {
+      teamId: e.teamId,
+      contactIds: e.contactIds,
+      changeKind: e.changeKind,
     });
   }),
 
@@ -266,6 +281,7 @@ export const FANOUT_RULES: FanoutRule[] = [
       messageId: e.messageId,
       emoji: e.emoji,
       userIds: e.userIds,
+      version: e.version,
     });
   }),
 

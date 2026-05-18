@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+
+import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Loader2, Trash2, X } from "lucide-react";
 
 import {
@@ -60,16 +62,15 @@ export function EditContactDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
+  useModalOverlay(dialogRef, true, onClose);
 
   useEffect(() => {
     nameRef.current?.focus();
     nameRef.current?.select();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   async function submit() {
     setError(null);
@@ -148,7 +149,10 @@ export function EditContactDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-lg">
+      <div
+        ref={dialogRef}
+        className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-lg"
+      >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 id="edit-contact-title" className="text-base font-semibold">
             Edit contact

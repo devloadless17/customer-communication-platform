@@ -110,6 +110,16 @@ __DOMAIN__ {
 		}
 	}
 
+	# (4b) /api/internal/* → web (Next.js). Internal cache-revalidate
+	#      bridge called by NestJS via shared INTERNAL_BUS_SECRET. The
+	#      endpoint lives on Next.js because revalidateTag() is only
+	#      available there. MUST come before the /api/* → api wildcard.
+	handle /api/internal/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
 	# (5) /api/*, /webhooks/*, /socket.io/* → api (NestJS).
 	#     Socket.io heartbeats need long-lived connection support.
 	@apiBackend {

@@ -80,7 +80,14 @@ export async function enqueueWorkflowRun(runId: string): Promise<string> {
 }
 
 /**
- * Enqueue with a delay — used by `wait` steps to schedule resumption.
+ * Enqueue with a delay — used by `wait` steps to schedule resumption AND
+ * by the waiting-runs sweeper to re-enqueue stranded waits.
+ *
+ * jobId is the runId — BullMQ skips an add() whose jobId already exists,
+ * so the sweeper's re-enqueue is a no-op when the original job is still
+ * delayed. A run only ever has ONE in-flight wait (workflows are serial),
+ * so this is the right uniqueness contract.
+ *
  * delayMs is clamped at 1ms to keep BullMQ happy (zero would mean "now,"
  * which we'd express via enqueueWorkflowRun anyway).
  */
@@ -89,7 +96,11 @@ export async function enqueueWorkflowResume(
   delayMs: number,
 ): Promise<string> {
   const q = getWorkflowQueue();
-  const job = await q.add("run", { runId }, { delay: Math.max(1, delayMs) });
+  const job = await q.add(
+    "run",
+    { runId },
+    { delay: Math.max(1, delayMs), jobId: `resume:${runId}` },
+  );
   return job.id as string;
 }
 

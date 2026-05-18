@@ -121,7 +121,6 @@ export function InboxShell({
   canManageContactFields,
   initialActiveConversationId,
   initialThread,
-  nonce,
 }: {
   currentUser: User;
   team: Team;
@@ -137,11 +136,6 @@ export function InboxShell({
   canManageContactFields: boolean;
   initialActiveConversationId: string | null;
   initialThread: CachedThread | null;
-  // CSP nonce read at request time from x-nonce by the page's RSC; threaded
-  // here so ThreadWorkspace can attach it to the SSR scroll-init <script>.
-  // Optional: missing nonce (older proxy / direct prerender) degrades to
-  // useChatScroll's hydration-time snap, which is functional but flickers.
-  nonce?: string;
 }) {
   const [filter, setFilter] = useState<Filter>({ kind: "preset", id: "all" });
   const [search, setSearch] = useState("");
@@ -432,6 +426,21 @@ export function InboxShell({
         }
       }
     };
+    // Coalesced bulk version — same cache-eviction logic across N contactIds
+    // in one walk. Server fires this from bulk-tag etc. instead of N
+    // per-contact frames to bound socket bandwidth on big batches.
+    const onContactsBulkUpdated = (payload: { contactIds: string[] }) => {
+      if (!payload?.contactIds?.length) return;
+      const affected = new Set(payload.contactIds);
+      for (const c of conversationsByIdRef.current.values()) {
+        const id = c.conversation.id;
+        if (id === displayedIdRef.current) continue;
+        const cached = cache.peek(id);
+        if (cached && affected.has(cached.data.contact.id)) {
+          cache.delete(id);
+        }
+      }
+    };
     const onConversationDeleted = (payload: { conversationId: string }) => {
       if (!payload?.conversationId) return;
       cache.delete(payload.conversationId);
@@ -482,14 +491,20 @@ export function InboxShell({
     // conversation:read covers the teammate case. Our own mark-read path
     // is already patched via handleMarkRead → onMarkRead; this patch is
     // idempotent so the duplicate event from our own POST is a no-op.
+    //
+    // Payload is forwarded into the reducer for consistency with the other
+    // handlers in this block — `applyConversationRead` ignores it today,
+    // but if the payload ever grows (e.g. per-user read receipts), this
+    // call site stays correct without a follow-up edit.
     const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = (payload) => {
       if (!payload?.conversationId) return;
-      patchData(payload.conversationId, applyConversationRead);
+      patchData(payload.conversationId, (d) => applyConversationRead(d, payload));
     };
 
     socket.on("message:new", evictIfBackground);
     socket.on("note:new", evictIfBackground);
     socket.on("contact:updated", onContactUpdated);
+    socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     socket.on("conversation:deleted", onConversationDeleted);
     socket.on("conversation:status", onStatus);
     socket.on("conversation:assigned", onAssigned);
@@ -502,6 +517,7 @@ export function InboxShell({
       socket.off("message:new", evictIfBackground);
       socket.off("note:new", evictIfBackground);
       socket.off("contact:updated", onContactUpdated);
+      socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
       socket.off("conversation:status", onStatus);
       socket.off("conversation:assigned", onAssigned);
@@ -646,7 +662,6 @@ export function InboxShell({
                 canManageContactFields={canManageContactFields}
                 tags={tags}
                 onMarkRead={handleMarkRead}
-                nonce={nonce}
               />
             ) : activeId && skeletonContact ? (
               <ChatSkeleton contact={skeletonContact} />
@@ -677,7 +692,6 @@ function ThreadWorkspace({
   canManageContactFields,
   tags,
   onMarkRead,
-  nonce,
 }: {
   thread: CachedThread;
   teamMembers: User[];
@@ -688,7 +702,6 @@ function ThreadWorkspace({
   canManageContactFields: boolean;
   tags: Tag[];
   onMarkRead: (conversationId: string) => void;
-  nonce?: string;
 }) {
   return (
     <>
@@ -707,41 +720,22 @@ function ThreadWorkspace({
         canManageFields={canManageContactFields}
         tagCatalog={tags}
       />
-      {/* SSR bottom-snap. Runs synchronously during HTML parse, AFTER both
-          MessageThread AND ContactPanel have been parsed and laid out — so
-          the flex row's widths are final and the message bubbles have
-          already wrapped at the correct width. The script queries for the
-          thread's scroll area (marked with data-thread-scroll-root) and
-          slams its Radix viewport's scrollTop to scrollHeight. Forces a
-          synchronous layout, then the very first paint already shows the
-          bottom of the thread.
-
-          Why HERE and not inside MessageThread: ContactPanel is a
-          w-[320px] right rail rendered as a flex sibling of MessageThread.
-          A script placed inside MessageThread's </section> would run
-          BEFORE ContactPanel had been parsed; MessageThread would be at
-          full workspace width at that moment, bubble wrapping would be
-          wrong, and the computed scrollHeight would be slightly off.
-          Then ContactPanel parses, MessageThread shrinks, bubbles
-          re-wrap, scrollHeight changes — the user sees a one-frame
-          flicker. Placing the script as a SIBLING of ContactPanel
-          guarantees the whole flex row is final.
-
-          After hydration useChatScroll re-snaps (now conditional on
-          !isAtBottom so it's a no-op when this script already nailed it)
-          and takes over for image-decode reflow + ongoing scroll
-          management. On client-side chat switches React's innerHTML path
-          doesn't execute this script — useChatScroll handles those via
-          its conversation-id-dependency useLayoutEffect, which runs
-          synchronously before first paint of the new thread (so client
-          nav is already perfect). */}
-      <script
-        nonce={nonce}
-        dangerouslySetInnerHTML={{
-          __html:
-            "(function(){var sa=document.querySelector('[data-thread-scroll-root]');if(!sa)return;var v=sa.querySelector('[data-radix-scroll-area-viewport]');if(v)v.scrollTop=v.scrollHeight;})()",
-        }}
-      />
+      {/* Previously this slot held an inline `<script>` that ran during
+          HTML parse and slammed `[data-thread-scroll-root]`'s viewport to
+          scrollHeight, so the very first paint already showed the bottom
+          of the thread. React 19's dev mode now warns about ANY `<script>`
+          rendered inside a Client Component (which inbox-shell is) because
+          they only fire on the SSR pass — never on client re-renders. The
+          effect was already redundant with useChatScroll's first
+          useLayoutEffect (keyed on conversationId, runs synchronously
+          BEFORE browser paint on both first mount and chat-switch) — see
+          `apps/web/src/features/inbox/hooks/use-chat-scroll.ts:158-169`.
+          The visible difference is at most a few ms of post-hydration
+          layout time on the very first SSR render; thereafter it's
+          indistinguishable. If a regression appears, the right re-fix is
+          to render an equivalent script from a SERVER component (the
+          inbox page) as a sibling AFTER InboxShell — not to bring back the
+          client-component `<script>` and silence the warning. */}
     </>
   );
 }

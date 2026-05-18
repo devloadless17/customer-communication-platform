@@ -18,6 +18,31 @@ import type {
  * Adding a new socket event that mutates a per-thread field: add one
  * reducer here and call it from both consumers. Don't duplicate the
  * reducer in either site.
+ *
+ * ---------------------------------------------------------------------------
+ * Per-event wiring matrix — keep BOTH sites in sync when adding events
+ * ---------------------------------------------------------------------------
+ *
+ *  Socket event              | Reducer here                  | Live hook       | Cached shell
+ *  --------------------------|-------------------------------|-----------------|-------------------
+ *  conversation:status       | applyConversationStatus       | use-conv...:on  | inbox-shell:on
+ *  conversation:assigned     | applyConversationAssignment   | use-conv...:on  | inbox-shell:on
+ *  conversation:read         | applyConversationRead         | use-conv...:on  | inbox-shell:on
+ *  message:status            | applyMessageStatus            | use-conv...:on  | inbox-shell:on
+ *  message:media:ready       | applyMessageMediaReady        | use-conv...:on  | inbox-shell:on
+ *  note:deleted              | applyNoteDeleted              | use-conv...:on  | inbox-shell:on
+ *
+ *  message:new / note:new    | (no reducer — full append /   | use-conv...:on  | inbox-shell:
+ *                            |  pull via dataRef)            |                 |  evictIfBackground
+ *  contact:updated           | (no reducer — full swap)      | contact-panel +  | inbox-shell:
+ *                            |                                | use-conv...     |   onContactUpdated
+ *  contacts:bulk_updated     | (no reducer — refetch / evict)| contacts-client | inbox-shell
+ *                            |                                |                 |  bulk-evict
+ *
+ * If you add a per-thread field-mutating socket event and skip this matrix,
+ * a chat-switch + back will revert the field to the stale cached value.
+ * See `inbox-shell.tsx` for the cached-side pattern; `useConversationEvents`
+ * for the live-side pattern.
  */
 
 export function applyConversationStatus(
@@ -44,7 +69,13 @@ export function applyConversationAssignment(
   };
 }
 
-export function applyConversationRead(prev: ConversationWithRefs): ConversationWithRefs {
+export function applyConversationRead(
+  prev: ConversationWithRefs,
+  // Reserved for future payload growth (e.g. per-user read receipts). All
+  // callers pass it explicitly so the contract stays consistent across
+  // sibling reducers; the implementation today only needs the prev state.
+  _payload?: { conversationId: string; readByUserId: string; teamId: string },
+): ConversationWithRefs {
   if (prev.conversation.unreadCount === 0) return prev;
   return {
     ...prev,

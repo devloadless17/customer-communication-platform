@@ -2,7 +2,6 @@
 
 import { memo, useState } from "react";
 import {
-  CheckCircle2,
   Edit3,
   MessageSquareText,
   MoreHorizontal,
@@ -55,6 +54,7 @@ function ChannelMessageImpl({
   canDelete,
   isThreadReply,
   onOpenThread,
+  searchQuery,
 }: {
   message: TeamChannelMessageDto;
   currentUser: User;
@@ -72,6 +72,12 @@ function ChannelMessageImpl({
    * wrapper actually skip re-renders for unchanged bubbles.
    */
   onOpenThread?: (rootMessageId: string) => void;
+  /**
+   * Active in-channel search query. When non-null, BodyRenderer highlights
+   * case-insensitive matches inside the bubble with `<mark>`. Null = no
+   * highlight. Pass-through; memo skips on stable-null identity.
+   */
+  searchQuery?: string | null;
 }) {
   const [showReactions, setShowReactions] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -156,10 +162,13 @@ function ChannelMessageImpl({
 
   return (
     <div
+      // Marker for jump-to-message — search results scroll to this attribute.
+      // Pending messages don't have a real id yet, so we use the clientTempId
+      // (which still uniquely identifies the row while it's optimistic).
+      data-message-id={message.id}
       className={cn(
         "group relative flex gap-3 px-4 py-1.5 transition-colors hover:bg-muted/40",
         message.pinned && !isThreadReply && "bg-amber-50/40 dark:bg-amber-950/10",
-        message.pending && "opacity-60",
         message.failed && "bg-red-50 dark:bg-red-950/20",
       )}
     >
@@ -226,7 +235,11 @@ function ChannelMessageImpl({
           </div>
         ) : (
           <div className="mt-0.5">
-            <BodyRenderer body={message.body} highlightUserId={currentUser.id} />
+            <BodyRenderer
+              body={message.body}
+              highlightUserId={currentUser.id}
+              searchQuery={searchQuery}
+            />
             {message.media && <MediaAttachment media={message.media} />}
           </div>
         )}
@@ -274,12 +287,6 @@ function ChannelMessageImpl({
           <div className="mt-1 flex items-center gap-2 text-xs text-red-600">
             <X className="size-3" />
             Failed to send. Try again.
-          </div>
-        )}
-        {message.pending && (
-          <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-            <CheckCircle2 className="size-3 opacity-40" />
-            Sending…
           </div>
         )}
       </div>
@@ -419,7 +426,8 @@ export const ChannelMessage = memo(
       prev.canPin === next.canPin &&
       prev.canDelete === next.canDelete &&
       prev.isThreadReply === next.isThreadReply &&
-      prev.onOpenThread === next.onOpenThread
+      prev.onOpenThread === next.onOpenThread &&
+      prev.searchQuery === next.searchQuery
     ) {
       return true;
     }
@@ -431,7 +439,8 @@ export const ChannelMessage = memo(
       prev.canPin !== next.canPin ||
       prev.canDelete !== next.canDelete ||
       prev.isThreadReply !== next.isThreadReply ||
-      prev.onOpenThread !== next.onOpenThread
+      prev.onOpenThread !== next.onOpenThread ||
+      prev.searchQuery !== next.searchQuery
     ) {
       return false;
     }
@@ -467,6 +476,8 @@ function MediaAttachment({ media }: { media: NonNullable<TeamChannelMessageDto["
         <img
           src={media.url}
           alt={media.caption ?? media.filename ?? "attachment"}
+          loading="lazy"
+          decoding="async"
           className="max-h-64 w-auto object-contain"
         />
       </a>
@@ -474,14 +485,18 @@ function MediaAttachment({ media }: { media: NonNullable<TeamChannelMessageDto["
   }
   if (media.kind === "video") {
     return (
-      <video controls className="mt-1.5 max-h-72 max-w-sm rounded-lg border border-border">
+      <video
+        controls
+        preload="metadata"
+        className="mt-1.5 max-h-72 max-w-sm rounded-lg border border-border"
+      >
         <source src={media.url} type={media.mimeType} />
       </video>
     );
   }
   if (media.kind === "audio") {
     return (
-      <audio controls className="mt-1.5 w-full max-w-sm">
+      <audio controls preload="metadata" className="mt-1.5 w-full max-w-sm">
         <source src={media.url} type={media.mimeType} />
       </audio>
     );

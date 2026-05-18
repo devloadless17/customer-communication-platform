@@ -43,20 +43,12 @@ export async function listContacts(
   const stageFilter = opts.stageId;
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
 
-  // Tag filter: resolve "has ANY of these tags" to a concrete id set up front
-  // (Prisma's typed M2M is clearer than guessing the implicit join table name
-  // in the raw query below). No matches → short-circuit to an empty page.
-  let tagFilteredIds: string[] | null = null;
-  if (tagIds.length > 0) {
-    const matches = await db.contact.findMany({
-      where: { teamId, tags: { some: { id: { in: tagIds } } } },
-      select: { id: true },
-    });
-    tagFilteredIds = matches.map((m) => m.id);
-    if (tagFilteredIds.length === 0) {
-      return { items: [], nextCursor: null };
-    }
-  }
+  // Tag filter is now pushed down as `EXISTS (... _ContactToTag ...)` in
+  // the raw query below. The previous approach pre-resolved every matching
+  // contact id with a separate findMany and spliced it as `c.id IN (...)`,
+  // which returned megabytes of ids at 50k+ tagged contacts and defeated
+  // cursor pruning. Prisma's implicit M2M table for `Contact.tags Tag[]`
+  // is `_ContactToTag(A=Contact.id, B=Tag.id)`.
 
   // Pull contacts with one aggregate join: latest message timestamp + the
   // latest non-closed conversation id. We do this in a single SQL query
@@ -101,7 +93,7 @@ export async function listContacts(
       c."createdAt",
       conv."lastMessageAt"          AS "lastMessageAt",
       conv.id                       AS "activeConversationId",
-      inbound."timestamp"           AS "lastInboundAt"
+      c."lastInboundAt"             AS "lastInboundAt"
     FROM "Contact" c
     LEFT JOIN LATERAL (
       SELECT id, "lastMessageAt"
@@ -111,17 +103,10 @@ export async function listContacts(
       ORDER BY co."lastMessageAt" DESC, co.id DESC
       LIMIT 1
     ) conv ON TRUE
-    -- Latest inbound across ALL conversations (including closed) — the 24h
-    -- window is a contact-level WhatsApp constraint, not a thread-level one.
-    LEFT JOIN LATERAL (
-      SELECT m."timestamp"
-      FROM "Message" m
-      JOIN "Conversation" co2 ON co2.id = m."conversationId"
-      WHERE co2."contactId" = c.id
-        AND m.direction = 'in'
-      ORDER BY m."timestamp" DESC, m.id DESC
-      LIMIT 1
-    ) inbound ON TRUE
+    -- Latest inbound (24h-window basis) read from the denormalized
+    -- Contact.lastInboundAt column maintained by the ingest path. The
+    -- previous LEFT JOIN LATERAL scanned the contact's full message
+    -- history once per row — fine in dev, ugly at scale.
     WHERE c."teamId" = ${teamId}
       ${
         search
@@ -143,14 +128,18 @@ export async function listContacts(
       ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
       ${
         windowFilter === "open"
-          ? Prisma.sql`AND inbound."timestamp" >= now() - interval '24 hours'`
+          ? Prisma.sql`AND c."lastInboundAt" >= now() - interval '24 hours'`
           : windowFilter === "closed"
-            ? Prisma.sql`AND (inbound."timestamp" IS NULL OR inbound."timestamp" < now() - interval '24 hours')`
+            ? Prisma.sql`AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" < now() - interval '24 hours')`
             : Prisma.empty
       }
       ${
-        tagFilteredIds
-          ? Prisma.sql`AND c.id IN (${Prisma.join(tagFilteredIds)})`
+        tagIds.length > 0
+          ? Prisma.sql`AND EXISTS (
+              SELECT 1 FROM "_ContactToTag" cttag
+              WHERE cttag."A" = c.id
+                AND cttag."B" = ANY(${tagIds}::text[])
+            )`
           : Prisma.empty
       }
       ${

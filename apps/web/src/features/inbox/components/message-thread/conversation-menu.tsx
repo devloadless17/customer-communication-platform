@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, MoreHorizontal, Trash2 } from "lucide-react";
+import { CheckCheck, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -25,6 +25,25 @@ export function ConversationMenu({
   const router = useRouter();
   const { confirm, alert, confirmDialog } = useConfirm();
   const [pending, setPending] = useState(false);
+
+  async function markUnread() {
+    setPending(true);
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}/unread`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        await alert("Couldn't mark as unread", "Please try again.");
+        return;
+      }
+      // Pull fresh data through the server component so the conversation list
+      // re-renders with the bumped unreadCount. The conversation list reflects
+      // the change on next SSR pass; meanwhile the user has navigated away.
+      router.push("/inbox");
+    } finally {
+      setPending(false);
+    }
+  }
 
   async function deleteConversation() {
     const ok = await confirm({
@@ -71,6 +90,15 @@ export function ConversationMenu({
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuLabel>Chat actions</DropdownMenuLabel>
           <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault();
+              void markUnread();
+            }}
+          >
+            <CheckCheck className="size-3.5" />
+            Mark as unread
+          </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={(e) => {
               e.preventDefault();

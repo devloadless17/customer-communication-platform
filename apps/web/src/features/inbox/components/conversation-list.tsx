@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -25,7 +25,7 @@ const PRESET_LABELS: Record<PresetFilterId, string> = {
   closed: "Closed",
 };
 
-export function ConversationList({
+function ConversationListImpl({
   currentUser,
   conversations,
   stages,
@@ -226,13 +226,49 @@ export function ConversationList({
   // Row height: each ConversationListItem is ~76px (avatar + 3 stacked lines
   // with some padding). `measureElement` adapts if a row turns out taller
   // (long names wrap, etc.); the estimate just bootstraps the layout.
+  const ROW_HEIGHT = 76;
   const rowVirtualizer = useVirtualizer({
     count: visible.length,
     getScrollElement: () => scrollEl,
-    estimateSize: () => 76,
+    estimateSize: () => ROW_HEIGHT,
     overscan: 8,
     getItemKey: (idx) => visible[idx]!.conversation.id,
   });
+
+  // SSR + the brief client window before useLayoutEffect resolves `scrollEl`
+  // both produce a virtualizer that hasn't measured anything yet, so
+  // `getVirtualItems()` returns []. Without a fallback, the list paints
+  // empty on first hard-refresh (HTML has no rows) until JS hydrates and
+  // the virtualizer kicks in — so the chat workspace renders fully while
+  // the conversation list flashes empty for a beat.
+  //
+  // Fall back to rendering the first ~viewportful of rows at predictable
+  // offsets (index * ROW_HEIGHT — what the virtualizer will eventually
+  // produce from estimateSize). When the virtualizer takes over, the
+  // positions match exactly so there's no visual jump.
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const fallbackRows = 30; // covers ~2x typical viewport height
+  type RenderItem = { key: string; index: number; start: number; measured: boolean };
+  const renderItems: RenderItem[] =
+    virtualItems.length > 0
+      ? virtualItems.map((v) => ({
+          key: String(v.key),
+          index: v.index,
+          start: v.start,
+          measured: true,
+        }))
+      : visible.slice(0, fallbackRows).map((item, idx) => ({
+          key: item.conversation.id,
+          index: idx,
+          start: idx * ROW_HEIGHT,
+          measured: false,
+        }));
+  // Total scroll height: virtualizer's value once measured, otherwise the
+  // estimated total so the scrollbar handle reflects real list length.
+  const totalHeight =
+    virtualItems.length > 0
+      ? rowVirtualizer.getTotalSize()
+      : visible.length * ROW_HEIGHT;
 
   // Infinite-scroll trigger. Instead of an IntersectionObserver on a
   // sentinel div (which doesn't exist inside the virtualized container in a
@@ -321,10 +357,10 @@ export function ConversationList({
           // styles never know it's being windowed.
           <div
             className="relative w-full px-1.5 pb-3"
-            style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+            style={{ height: `${totalHeight}px` }}
           >
-            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const item = visible[virtualRow.index]!;
+            {renderItems.map((row) => {
+              const item = visible[row.index]!;
               const { conversation, contact, assignedUser } = item;
               const checked = selectedIds.has(conversation.id);
               // Animate only NEW rows after first mount. On initial paint
@@ -338,11 +374,14 @@ export function ConversationList({
                 !seenIdsRef.current.has(conversation.id);
               return (
                 <div
-                  key={virtualRow.key}
-                  ref={rowVirtualizer.measureElement}
-                  data-index={virtualRow.index}
+                  key={row.key}
+                  // measureElement only attaches once the virtualizer owns
+                  // the row — fallback rows are at estimated offsets and
+                  // shouldn't feed back into the virtualizer's measurements.
+                  ref={row.measured ? rowVirtualizer.measureElement : undefined}
+                  data-index={row.index}
                   className={cn("absolute left-0 top-0 w-full", animateIn && "animate-enter")}
-                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                  style={{ transform: `translateY(${row.start}px)` }}
                 >
                   {selectionMode ? (
                     // <label> wrapping the checkbox is the canonical way to
@@ -456,4 +495,12 @@ export function ConversationList({
     </div>
   );
 }
+
+/**
+ * Memoized so the inbox shell can re-render for unrelated state changes
+ * (active-thread cache patches, composer state, etc.) without forcing the
+ * whole list to walk its rows. Parent must pass stable refs for arrays /
+ * callbacks; everything currently does via useMemo / useCallback.
+ */
+export const ConversationList = memo(ConversationListImpl);
 

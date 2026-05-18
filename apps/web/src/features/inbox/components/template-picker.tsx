@@ -1,6 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+
+import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import {
   ArrowLeft,
   Loader2,
@@ -99,6 +101,10 @@ function PickerPanel(props: PickerProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
+  useModalOverlay(panelRef, true, onClose);
 
   const selected = useMemo(
     () => templates.find((t) => t.id === selectedId) ?? null,
@@ -120,7 +126,10 @@ function PickerPanel(props: PickerProps) {
   }, [templates, query]);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-popover shadow-2xl">
+    <div
+      ref={panelRef}
+      className="overflow-hidden rounded-xl border border-border bg-popover shadow-2xl"
+    >
       {/* Header */}
       <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-4 py-3">
         {selected ? (

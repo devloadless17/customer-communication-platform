@@ -30,18 +30,41 @@ export async function listContactStages(teamId: string): Promise<ContactStage[]>
  * without going through the migration, so a brand-new tenant would have
  * zero stages. Better to lazily create than to scatter `db.contactStage`
  * writes through every team-creation site.
+ *
+ * Cached by teamId for 5 minutes — this is called on every inbound message
+ * ingest, which previously bought a ~2-5ms findFirst per event. The default
+ * stage id changes ~never (only when an admin promotes a different stage),
+ * so a 5-min TTL trades a tiny invalidation lag for amortized zero-cost
+ * lookups on the webhook hot path. Bust explicitly from the stages admin
+ * service when the default flips.
  */
+const DEFAULT_STAGE_TTL_MS = 5 * 60 * 1000;
+const defaultStageCache = new Map<string, { id: string; exp: number }>();
+
+export function invalidateDefaultStageCache(teamId: string): void {
+  defaultStageCache.delete(teamId);
+}
+
 export async function ensureDefaultStage(teamId: string): Promise<string> {
+  const cached = defaultStageCache.get(teamId);
+  if (cached && cached.exp > Date.now()) return cached.id;
+
   const existingDefault = await db.contactStage.findFirst({
     where: { teamId, isDefault: true },
     select: { id: true },
   });
-  if (existingDefault) return existingDefault.id;
+  if (existingDefault) {
+    defaultStageCache.set(teamId, {
+      id: existingDefault.id,
+      exp: Date.now() + DEFAULT_STAGE_TTL_MS,
+    });
+    return existingDefault.id;
+  }
 
   // No default — promote the lowest-position stage if any exist, otherwise
   // create one from scratch. Done in a transaction so two concurrent calls
   // can't both create a duplicate.
-  return db.$transaction(async (tx) => {
+  const resolvedId = await db.$transaction(async (tx) => {
     const reread = await tx.contactStage.findFirst({
       where: { teamId, isDefault: true },
       select: { id: true },
@@ -73,4 +96,9 @@ export async function ensureDefaultStage(teamId: string): Promise<string> {
     });
     return created.id;
   });
+  defaultStageCache.set(teamId, {
+    id: resolvedId,
+    exp: Date.now() + DEFAULT_STAGE_TTL_MS,
+  });
+  return resolvedId;
 }

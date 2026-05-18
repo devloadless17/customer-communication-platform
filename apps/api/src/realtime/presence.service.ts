@@ -14,12 +14,20 @@ import { Injectable } from "@nestjs/common";
 export class PresenceService {
   private readonly byTeam = new Map<string, Map<string, Set<string>>>();
 
-  add(teamId: string, userId: string, socketId: string): void {
+  /**
+   * Returns true iff this add transitioned the user from 0 → 1 socket (i.e.
+   * "came online"). Callers use it to skip a redundant team-wide presence
+   * broadcast when the same user is just opening another tab — without this
+   * gate, every reconnect / additional tab fans out N team-wide emits.
+   */
+  add(teamId: string, userId: string, socketId: string): boolean {
     const team = this.byTeam.get(teamId) ?? new Map<string, Set<string>>();
     const sockets = team.get(userId) ?? new Set<string>();
+    const wasEmpty = sockets.size === 0;
     sockets.add(socketId);
     team.set(userId, sockets);
     this.byTeam.set(teamId, team);
+    return wasEmpty;
   }
 
   /** Returns true iff this removal took the user offline (last socket closed). */

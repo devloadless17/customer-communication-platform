@@ -97,26 +97,45 @@ export function useTeamEvents(
     // window (or a full server restart). Without this, the inbox list goes
     // silently stale on any non-trivial drop until the user reloads.
     const firstConnectRef = { value: true };
+    /**
+     * Resync the conversation list after a (re)connect with bounded
+     * retries. Without retries a single network blip during reconnect
+     * silently leaves the list stale until the user's next deliberate
+     * navigation; with retries we recover transparently.
+     */
+    async function resyncOnce(): Promise<boolean> {
+      try {
+        const r = await fetchWithSessionGuard(`/api/conversations`);
+        if (!r.ok) return false;
+        const page = (await r.json()) as CursorPage<ConversationWithRefs>;
+        setConversations((prev) => {
+          const freshIds = new Set(page.items.map((c) => c.conversation.id));
+          const tail = prev.filter((c) => !freshIds.has(c.conversation.id));
+          return [...page.items, ...tail];
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    async function resyncWithBackoff(): Promise<void> {
+      const delays = [0, 500, 1500, 4000]; // ~6s total
+      for (const ms of delays) {
+        if (ms > 0) await new Promise((r) => window.setTimeout(r, ms));
+        if (await resyncOnce()) return;
+      }
+      // Bounded — if all retries fail the list is stale until the user
+      // triggers another reconnect or navigates. A nuclear `router.refresh()`
+      // here would also work but feels heavier than warranted.
+    }
+
     const onConnect = () => {
       socket.emit("subscribe:team", { teamId });
       if (firstConnectRef.value) {
         firstConnectRef.value = false;
         return; // initial — server-seeded data is already current
       }
-      // Reconnect: refetch page 1 and merge in. Items in the refetched page
-      // overwrite the equivalent in state; older items not in the refetch
-      // (loaded via loadMore) are kept below in their current order.
-      void fetchWithSessionGuard(`/api/conversations`)
-        .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
-        .then((page) => {
-          if (!page) return;
-          setConversations((prev) => {
-            const freshIds = new Set(page.items.map((c) => c.conversation.id));
-            const tail = prev.filter((c) => !freshIds.has(c.conversation.id));
-            return [...page.items, ...tail];
-          });
-        })
-        .catch((err) => console.warn("[use-team-events] resync failed", err));
+      void resyncWithBackoff();
     };
     socket.on("connect", onConnect);
     if (socket.connected) onConnect();

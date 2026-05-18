@@ -8,14 +8,15 @@ import { clearFailures, isLockedOut, recordFailure } from "@/lib/auth/lockout";
 
 /**
  * Server-side auth surface. Wraps Better Auth so the rest of the app keeps
- * the same call sites (`signInWithCredentials`, `signOutCurrentSession`,
- * `getCurrentSession`) it had with NextAuth. The wrappers also layer the
- * non-framework gates that Better Auth doesn't know about: account-level
- * lockout and the `deactivatedAt` soft-delete.
+ * the same call sites (`signInWithCredentials`, `getCurrentSession`) it had
+ * with NextAuth. The wrappers also layer the non-framework gates that Better
+ * Auth doesn't know about: account-level lockout and the `deactivatedAt`
+ * soft-delete.
  *
- * Why wrap instead of calling Better Auth directly: keeps every credential
- * check + every signout going through one bookkeeping point. A future swap
- * to magic-link / SSO / SAML lands here, not scattered across actions.
+ * Sign-out is NOT wrapped here — it's a route handler at app/logout/route.ts
+ * because pairing Better Auth's cookie mutations with redirect() inside a
+ * server action intermittently broke the Next 15 client runtime. Anything
+ * that needs to sign a user out should navigate to /logout.
  */
 
 export interface SignInResult {
@@ -49,17 +50,24 @@ export async function signInWithCredentials(
   const email = rawEmail.trim().toLowerCase();
   if (!email || !password) return { ok: false, error: "Invalid email or password." };
 
-  if (await isLockedOut(email)) {
+  // The two gate checks (lockout + deactivation) both have to land before
+  // we spend bcrypt CPU. They share no data, so fire them in parallel.
+  // Saves one DB round-trip on every login attempt.
+  const [locked, user] = await Promise.all([
+    isLockedOut(email),
+    db.user.findUnique({
+      where: { email },
+      select: { id: true, deactivatedAt: true },
+    }),
+  ]);
+
+  if (locked) {
     // Don't surface "locked out" — return the same message as bad-password
     // so an attacker can't tell whether they tripped the limit or just got
     // a wrong password.
     return { ok: false, error: "Invalid email or password." };
   }
 
-  const user = await db.user.findUnique({
-    where: { email },
-    select: { id: true, deactivatedAt: true },
-  });
   if (!user) {
     await recordFailure(email);
     return { ok: false, error: "Invalid email or password." };
@@ -84,25 +92,19 @@ export async function signInWithCredentials(
     return { ok: false, error: "Invalid email or password." };
   }
 
-  await clearFailures(email);
+  // Fire-and-forget the lockout reset — caller doesn't depend on it landing
+  // before the response returns. The cookie's already set; the user is
+  // already signed in. A failed delete just leaves a stale (already-passed)
+  // counter that the next attempt either resets or overwrites.
+  clearFailures(email).catch(() => {});
   return { ok: true };
-}
-
-/**
- * Clear the current session. Server actions that call this should follow
- * with a `redirect()` — Better Auth doesn't redirect on its own, and the
- * sidebar's signout flow needs to close the socket FIRST anyway (see
- * components/inbox/sidebar.tsx).
- */
-export async function signOutCurrentSession(): Promise<void> {
-  await auth.api.signOut({ headers: await headers() });
 }
 
 /**
  * Read the current session from cookies. Returns the raw Better Auth
  * payload (`{ session, user }`) or null. Most callers want the higher-level
- * helpers in lib/auth/helpers.ts (API routes) or lib/auth/current-user.ts
- * (server components) — those layer the deactivation recheck on top.
+ * helper in lib/auth/current-user.ts — it layers the deactivation recheck
+ * on top so a deactivated user can't keep navigating on a stale cookie.
  */
 export async function getCurrentSession() {
   return auth.api.getSession({ headers: await headers() });

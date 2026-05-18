@@ -17,6 +17,17 @@
  *
  * `dispatch()` already swallows its own errors and applies retry-with-backoff
  * around the Redis enqueue, so this subscriber doesn't need extra guarding.
+ *
+ * INVARIANT — DO NOT subscribe to `broadcast.*` events here.
+ * --------------------------------------------------------------------------
+ * `broadcast.recipient_message_sent` and `broadcast.conversation_reopened`
+ * are dedicated event types specifically so a 1k-recipient broadcast does
+ * NOT trigger 1k workflow runs. Only socket-fanout subscribes to them. If
+ * you find yourself wanting a workflow-on-broadcast, add a separate, fully-
+ * intentional event type and corresponding subscriber here — do not
+ * shortcut through the existing broadcast.* fanouts. Same isolation logic
+ * exists in `audit.ts` for the same reason (no 1k audit rows per
+ * broadcast). See CLAUDE.md "Bus events introduced for the cleanup".
  */
 
 import { db } from "@/lib/db";

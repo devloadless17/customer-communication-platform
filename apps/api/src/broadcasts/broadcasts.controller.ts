@@ -64,6 +64,15 @@ export class BroadcastsController {
     return { broadcast };
   }
 
+  @Post(":id/cancel")
+  async cancel(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    await this.broadcasts.cancel(session.teamId, id);
+    return { ok: true };
+  }
+
   @Delete(":id")
   async remove(
     @CurrentSession() session: ApiSession,

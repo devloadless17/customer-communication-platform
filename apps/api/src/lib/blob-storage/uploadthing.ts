@@ -61,6 +61,18 @@ export const uploadthingProvider: BlobStorageProvider = {
 
     const res = await getUtApi().uploadFiles(file);
     if (res.error || !res.data) {
+      // `customId` is unique per UploadThing app. A previous attempt that
+      // succeeded at the storage layer but failed before the row write
+      // (network blip mid-batch, process restart, CAS race in the old
+      // 2-phase flow) leaves an orphan blob — re-upload then 409s with a
+      // "File already exists" body, but the error code/shape varies across
+      // SDK versions, so don't gate on it. Same wamid → same bytes, so a
+      // customId-keyed lookup that comes back with a match IS the right
+      // answer regardless of what the upload error said. If the lookup
+      // misses, fall through to throw the original error (genuine upload
+      // failure with no orphan).
+      const existing = await resolveByCustomId(input.context.externalId);
+      if (existing) return { ...existing, sizeBytes: input.bytes.length };
       const detail = res.error?.message ?? "unknown upload error";
       throw new Error(`uploadthing upload failed: ${detail}`);
     }
@@ -193,6 +205,31 @@ function slug(s: string, max: number): string {
 
 function sanitizeExt(ext: string): string {
   return ext.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8).toLowerCase() || "bin";
+}
+
+/**
+ * Look up an UploadThing file by its customId (the wamid we set at upload).
+ * Used to recover from 409 "File already exists" — same wamid means same
+ * bytes, so the existing blob is the correct one to point the message row at.
+ * Returns null when the lookup fails for any reason (rare; surfaces the
+ * original 409 to the caller).
+ */
+async function resolveByCustomId(
+  customId: string,
+): Promise<{ key: string; url: string } | null> {
+  try {
+    const res = await getUtApi().getFileUrls(customId, { keyType: "customId" });
+    const first = res.data?.[0];
+    if (!first?.url || !first.key) return null;
+    return { key: first.key, url: first.url };
+  } catch (err) {
+    console.warn(
+      "[blob-storage/uploadthing] resolveByCustomId failed for",
+      customId,
+      err,
+    );
+    return null;
+  }
 }
 
 /** Exposed for tests. */

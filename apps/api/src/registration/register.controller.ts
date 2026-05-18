@@ -47,10 +47,6 @@ export class RegisterController {
             role: "admin",
             name: body.name,
             email: body.email,
-            // Kept populated alongside Account.password for legacy callers
-            // (seed scripts, ad-hoc maintenance). Better Auth's verify path
-            // reads from Account.password.
-            passwordHash,
           },
         });
         await tx.account.create({

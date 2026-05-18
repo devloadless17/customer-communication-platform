@@ -73,7 +73,7 @@ NestJS owns every backend concern that isn't auth pages. Socket.io lives in the 
 - **24-hour customer service window.** Outbound free-form messages only work to numbers that messaged you within the last 24h. Outside the window: pre-approved templates only. Plan UX around this from the start.
 - **Pre-approved templates.** Required for cold outbound (re-engagement, marketing, notifications, post-24h). Submitted via WhatsApp Manager, reviewed by Meta. Adding template send is its own work item, deferred.
 - **Test numbers vs real business numbers.** While the Meta app is unpublished, only numbers explicitly added as test recipients in the dashboard will receive your sends. Once published + verified, any number works.
-- **Onboarding.** No QR scan. Customers either (a) paste their `META_*` credentials into a settings page, or (b) we build WhatsApp Embedded Signup, which requires Meta Tech Provider review. (b) is the right answer for SaaS scale and is post-MVP.
+- **Onboarding.** No QR scan. Customers either (a) paste their `META_*` credentials into a settings page, or (b) we build WhatsApp Embedded Signup, which requires Meta Tech Provider review. (b) is the right answer for SaaS scale and is post-MVP. Future onboarding (Embedded Signup) playbook — see [docs/onboarding-future.md](docs/onboarding-future.md).
 
 ## Database schema (initial)
 
@@ -141,9 +141,40 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 `package.json` runs both `dev` and `start` with `NODE_OPTIONS=--max-old-space-size=4096`. This is intentional — Node 24 on this WSL2 setup defaults to a ~2GB heap which OOMs `tsx watch` during heavy edit sessions. **Don't strip this flag** thinking it's leftover dev tooling — production needs it too because the broadcast runner + Socket.io fanout occasionally need headroom.
 
 ### Before pilot launch (must-do)
-1. **systemd unit** on the VPS, NOT pm2. Single VPS, no clustering, systemd is already there. Set `Restart=on-failure`, `RestartSec=3`, and pass through `NODE_OPTIONS=--max-old-space-size=4096`. If anything kills the process — OOM, panic, manual bump — it's back in 3s.
+1. **systemd unit** on the VPS, NOT pm2. Single VPS, no clustering, systemd is already there. Set `Restart=on-failure`, `RestartSec=3`, and pass through `NODE_OPTIONS=--max-old-space-size=4096`. If anything kills the process — OOM, panic, manual bump — it's back in 3s. **`TimeoutStopSec=10`** so systemd waits long enough for `app.enableShutdownHooks()` to drain BullMQ workers — see "Graceful shutdown" below.
 2. **Caddy reverse proxy** in front for HTTPS (not nginx — Caddy handles Let's Encrypt automatically and forwards WebSocket upgrade headers by default, which Socket.io needs). Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
 3. **VPS sizing**: ≥4GB RAM for the app, +2GB for Postgres, +headroom. 8GB total is the floor.
+
+### Graceful shutdown — load-bearing for workers
+`apps/api/src/main.ts` calls `app.enableShutdownHooks()`. Without it, NestJS does NOT fire `OnModuleDestroy` on SIGTERM. The `WorkflowWorkerService` lifecycle hook stops the BullMQ worker via `worker.close()` (BullMQ awaits the in-flight job, then releases the Redis lock cleanly), stops the sweepers, and closes the queue. The chain is:
+
+```
+SIGTERM → enableShutdownHooks → OnModuleDestroy hooks fire in reverse-init order →
+  stopContactDriftSweeper → stopWorkflowWaitingSweeper → stopInboundMediaSweeper →
+  stopWorkflowWorker (awaits in-flight job; bounded by BullMQ lockDuration=90s) →
+  closeWorkflowQueue
+```
+
+If you skip `enableShutdownHooks()` (or systemd's `TimeoutStopSec` is too low), the worker dies mid-job, Redis releases the lock after 90s, the new process picks the same job up and re-executes — irreversible Meta sends, tag changes, etc. double-fire. Don't strip the call.
+
+### Per-user rate limiting
+`RateLimitGuard` (in CommonModule, applied globally via `APP_GUARD`) buckets every session-authenticated mutation at **300 req/min per user** by default, with `@RateLimit({ perMinute: 60 })` overriding `MessagesController` (text/media/template/forward share the same bucket so a single user can't multiply quota by hitting different routes). API-key routes have their own per-key limit upstream (`ApiKeyGuard`); guard no-ops on requests without `req.session`. Tune by adding the `@RateLimit` decorator at the controller or handler level. In-memory only — moves to Redis on the same trigger as everything else (second app instance).
+
+### Request correlation IDs
+`apps/api/src/common/correlation.ts` exposes `getCorrelationId()` and `withCorrelation(msg)`. Correlation middleware runs FIRST in main.ts (before bodyParser) so the ALS scope covers the whole request. Echoed back via `X-Request-Id`. For framework-agnostic `lib/` code that doesn't use NestJS's `Logger`, wrap log messages with `withCorrelation(...)` — see `lib/events/bus.ts` for the pattern. NestJS Logger calls inside HTTP handlers carry the ID via the controller's module context plus the surrounding ALS scope.
+
+### Contact.lastInboundAt drift sweeper
+`apps/api/src/lib/sweepers/contact-last-inbound-drift.ts` runs once daily and reconciles `Contact.lastInboundAt` against `MAX(Message.timestamp)` per contact for inbound messages. Self-disables after 7 days of zero drift (re-enables on process restart). The denorm is steady-state correct; this is defense-in-depth against a crash between the Message insert and the Contact bump.
+
+### Realtime cache patch matrix
+When adding a socket event that mutates per-thread state (status, assignment, custom field, tag, note, etc.), wire it in BOTH places:
+1. `apps/web/src/features/inbox/lib/thread-reducers.ts` — pure reducer
+2. `useConversationEvents` AND `inbox-shell.tsx` — both call the same reducer
+
+See the comment block at the top of `thread-reducers.ts` for the full event → reducer → consumer table. Skipping the cached-shell side means a chat-switch + back reverts the field to a stale snapshot.
+
+### Coalesced bulk fanout
+Bulk paths (`/api/contacts/bulk` tag-add/tag-remove today) publish per-contact `contact.updated` events with `suppressSocketFanout: true` (workflow + audit subscribers still fire — they don't read the flag), AND publish one `contact.bulk_updated` event for socket fanout. Clients listening to `contacts:bulk_updated` should invalidate / refetch the affected ids in one query. Bounds a 500-contact × 25-agent bulk operation from ~12,500 socket frames to 25.
 
 ### Dev-environment OOM (`tsx watch` chewing memory) 
 Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `tsx watch` + Next.js dev mode accumulate bundler/AST state across hot-reloads. Fix order:

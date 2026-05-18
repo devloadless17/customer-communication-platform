@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TimezoneProvider } from "@/providers/tz-provider";
+import { ServiceWorkerKillSwitch } from "@/components/service-worker-killswitch";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getServerTimezone } from "@/lib/server-tz";
@@ -61,6 +62,11 @@ export default async function RootLayout({
       className={`${inter.variable} ${jetbrainsMono.variable}`}
     >
       <body className="font-sans">
+        {/* One-shot unregister of any ghost service worker registered by a
+            prior app on this origin. See ServiceWorkerKillSwitch for the
+            full rationale. Client component (no inline-script-with-nonce
+            path → no hydration-mismatch warning on the nonce attribute). */}
+        <ServiceWorkerKillSwitch />
         <ThemeProvider
           attribute="class"
           defaultTheme="light"

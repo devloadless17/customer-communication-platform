@@ -28,22 +28,21 @@ export async function loginAction(
     return { error: result.error ?? "Invalid email or password." };
   }
 
-  // Do NOT call redirect() here. Better Auth's nextCookies plugin commits
-  // the session cookie into the server-action response; redirect() throws
-  // NEXT_REDIRECT in the same call which races the cookie commit on Next
-  // 15 + useActionState and intermittently produces "An unexpected response
-  // was received from the server." Returning the destination lets the
-  // client navigate after the action result lands — the cookie is already
-  // present on the response so the navigation arrives authenticated.
+  // Do NOT call redirect() here. See [hooks/use-auth-redirect.tsx] for the
+  // full rationale — TL;DR Better Auth's nextCookies plugin commits the
+  // session cookie into the action response; redirect() in the same call
+  // throws NEXT_REDIRECT which has historically raced the cookie commit and
+  // produced "An unexpected response was received from the server." Return
+  // a destination and let the client navigate after the action resolves.
   return { error: null, redirectTo: safeNext(next) };
 }
 
 function safeNext(next: string): string {
   if (!next.startsWith("/") || next.startsWith("//")) return "/inbox";
-  // "/" is a server component that itself redirects to /inbox. Chaining an
-  // action-response redirect into an RSC-render redirect produces "An
-  // unexpected response was received from the server" in the Next.js
-  // client runtime. Normalize upstream so the navigation lands directly.
+  // "/" is an RSC that redirects to /inbox. Chaining an action-response
+  // redirect into an RSC-render redirect has produced "An unexpected
+  // response was received from the server" in this codebase before —
+  // normalize here so the navigation lands directly at /inbox.
   if (next === "/") return "/inbox";
   return next;
 }

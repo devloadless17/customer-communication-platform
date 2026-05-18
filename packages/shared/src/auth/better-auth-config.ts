@@ -1,5 +1,7 @@
 import type { BetterAuthOptions } from "better-auth";
 
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "./password-policy";
+
 /**
  * Shared Better Auth configuration. Both apps (Next.js + NestJS) need an
  * identical view of `emailAndPassword`, `user.additionalFields`, session
@@ -16,8 +18,6 @@ export const SESSION_MAX_AGE_S = 90 * 24 * 60 * 60;
 export const SESSION_UPDATE_AGE_S = 24 * 60 * 60;
 export const SESSION_COOKIE_CACHE_MAX_AGE_S = 60;
 export const COOKIE_PREFIX = "ccp";
-export const MIN_PASSWORD_LENGTH = 6;
-export const MAX_PASSWORD_LENGTH = 200;
 
 export interface SharedAuthOptionsParams {
   database: BetterAuthOptions["database"];

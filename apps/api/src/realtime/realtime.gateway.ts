@@ -84,18 +84,27 @@ export class RealtimeGateway
     // team-wide events — that footgun is closed by the auto-join.
     client.join(teamRoom(identity.teamId));
 
-    this.presence.add(identity.teamId, identity.userId, client.id);
+    const cameOnline = this.presence.add(
+      identity.teamId,
+      identity.userId,
+      client.id,
+    );
     // Snapshot to THIS socket immediately so the user's own dot lights up
     // without waiting for the next presence change.
     client.emit("presence:update", {
       teamId: identity.teamId,
       onlineUserIds: this.presence.snapshot(identity.teamId),
     });
-    // Broadcast a fresh snapshot to the rest of the team.
-    this.server.to(teamRoom(identity.teamId)).emit("presence:update", {
-      teamId: identity.teamId,
-      onlineUserIds: this.presence.snapshot(identity.teamId),
-    });
+    // Broadcast a fresh snapshot to the rest of the team ONLY when this
+    // connect transitioned the user from 0→1 sockets. Without the gate
+    // every additional tab / Caddy bounce reconnect spammed a team-wide
+    // emit even though the onlineUserIds list didn't change.
+    if (cameOnline) {
+      this.server.to(teamRoom(identity.teamId)).emit("presence:update", {
+        teamId: identity.teamId,
+        onlineUserIds: this.presence.snapshot(identity.teamId),
+      });
+    }
   }
 
   handleDisconnect(client: Socket): void {
@@ -302,12 +311,18 @@ export class RealtimeGateway
     @MessageBody() body: { rootMessageId: string },
   ): Promise<void> {
     const teamId = client.data.teamId as string;
+    const room = channelThreadRoom(body.rootMessageId);
+    // Idempotency guard — a chatty client (or a reconnect retry) re-emits
+    // subscribe:channel-thread, which would otherwise re-pay the
+    // findFirst on every emit. The room-membership check is O(1) on
+    // the socket's joined-rooms set and short-circuits the DB lookup.
+    if (client.rooms.has(room)) return;
     const root = await this.db.teamChannelMessage.findFirst({
       where: { id: body.rootMessageId, teamId },
       select: { id: true },
     });
     if (!root) return;
-    client.join(channelThreadRoom(body.rootMessageId));
+    client.join(room);
   }
 
   @SubscribeMessage("unsubscribe:channel-thread")

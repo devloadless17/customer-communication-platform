@@ -167,6 +167,16 @@ export class ConversationsController {
     return { ok: true };
   }
 
+  @Post(":id/unread")
+  @HttpCode(200)
+  async markUnread(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    await this.conversations.markUnread(session.teamId, id);
+    return { ok: true };
+  }
+
   @Post(":id/typing")
   @HttpCode(200)
   async typing(

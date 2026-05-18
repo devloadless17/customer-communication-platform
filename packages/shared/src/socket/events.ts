@@ -143,6 +143,23 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * Coalesced "many contacts just changed" notification. Fanned out from
+   * bulk paths (POST /api/contacts/bulk for tag-add/tag-remove today).
+   * Clients should invalidate the contact list query and any open
+   * conversation/contact-panel views for the affected ids — full payloads
+   * are NOT carried (would re-create the per-contact frame storm this
+   * event exists to avoid). Refetch the rows in one query.
+   *
+   * Single-contact PATCH still emits `contact:updated` per row — this
+   * event only fires when the server batched the mutation.
+   */
+  "contacts:bulk_updated": (payload: {
+    teamId: string;
+    contactIds: string[];
+    changeKind: "tags" | "stage" | "fields" | "mixed";
+  }) => void;
+
+  /**
    * Conversation was read — team-wide unread counter resets to 0. Fires when
    * a teammate opens the thread or explicitly marks it read. CLAUDE.md flags
    * per-agent unread as deferred, so this is shared across the team.
@@ -154,17 +171,23 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
-   * New audit row on a conversation (assign / status_changed for now —
-   * tag_added / tag_removed values exist in the enum but no writer fires
-   * them since tags moved back onto Contact). Lets a live history-panel
-   * viewer prepend the entry without a refetch.
+   * New audit row on a conversation. Kinds fired today: assigned,
+   * status_changed, note_added, note_deleted. tag_added / tag_removed exist
+   * in the enum but have no writer (tags moved back onto Contact). Lets a
+   * live history-panel viewer prepend the entry without a refetch.
    */
   "conversation:event": (payload: {
     teamId: string;
     conversationId: string;
     event: {
       id: string;
-      kind: "assigned" | "status_changed" | "tag_added" | "tag_removed";
+      kind:
+        | "assigned"
+        | "status_changed"
+        | "tag_added"
+        | "tag_removed"
+        | "note_added"
+        | "note_deleted";
       userId: string | null;
       userName: string | null;
       before: unknown;
@@ -201,7 +224,7 @@ export interface ServerToClientEvents {
   "broadcast:status": (payload: {
     teamId: string;
     broadcastId: string;
-    status: "queued" | "running" | "completed" | "failed";
+    status: "queued" | "running" | "completed" | "failed" | "canceled";
     error?: string;
   }) => void;
 
@@ -341,6 +364,10 @@ export interface ServerToClientEvents {
     messageId: string;
     emoji: string;
     userIds: string[];
+    /** Monotonic per-(message,emoji) version (ms since epoch from the row's
+     *  `updatedAt`). Older versions are discarded by the client so two
+     *  near-simultaneous toggles can't produce a stale-snapshot-wins race. */
+    version: number;
   }) => void;
 
   /** A message was pinned or unpinned in a channel. */

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
@@ -82,7 +83,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalAssignSchema)) body: ExternalAssignInput,
   ) {
-    await this.api.assign(auth.teamId, id, body);
+    await this.api.assign(auth.teamId, auth.apiKeyId, id, body);
     return { ok: true };
   }
 
@@ -92,7 +93,7 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalStatusSchema)) body: ExternalStatusInput,
   ) {
-    await this.api.setStatus(auth.teamId, id, body);
+    await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body);
     return { ok: true };
   }
 
@@ -112,8 +113,19 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalSendMessageSchema)) body: ExternalSendMessageInput,
+    // Standard Stripe-style idempotency header. When present, the same
+    // value within 24h returns the same response without re-sending to
+    // WhatsApp — the partner's retry-after-5xx flow becomes safe.
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    const out = await this.api.sendMessage(auth.teamId, auth.apiKeyId, id, body);
+    const trimmed = idempotencyKey?.trim();
+    const out = await this.api.sendMessage(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      trimmed && trimmed.length > 0 && trimmed.length <= 255 ? trimmed : undefined,
+    );
     return { ok: true, message: out.message };
   }
 

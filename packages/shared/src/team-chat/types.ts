@@ -31,6 +31,39 @@ export interface ChannelMessagesPage {
   nextCursor: string | null;
 }
 
+/**
+ * A slice of messages centered on an anchor message. Returned by the
+ * `/messages/around` endpoint when a search result points at a message that
+ * isn't in the user's currently-loaded set. `hasMoreBefore` / `hasMoreAfter`
+ * drive subsequent paginate-up / paginate-down behavior in anchored mode.
+ */
+export interface ChannelMessagesAroundPage {
+  items: TeamChannelMessageDto[];
+  /** Whether more older messages exist before `items[0]`. */
+  hasMoreBefore: boolean;
+  /** Whether more newer messages exist after `items[items.length - 1]`. */
+  hasMoreAfter: boolean;
+  /** Cursor for the next paginate-up call (encoded `{createdAt, id}`). */
+  beforeCursor: string | null;
+  /** Cursor for the next paginate-down call (encoded `{createdAt, id}`). */
+  afterCursor: string | null;
+}
+
+/**
+ * Workspace-wide search hit. Like `TeamChannelMessageDto` but enriched with
+ * `channelName` so the result row can render the channel context without a
+ * separate channel lookup. `channelId` is already on the base DTO.
+ */
+export interface WorkspaceSearchHit {
+  message: TeamChannelMessageDto;
+  channelName: string;
+}
+
+export interface WorkspaceSearchPage {
+  items: WorkspaceSearchHit[];
+  nextCursor: string | null;
+}
+
 export interface ChannelPinDto {
   messageId: string;
   pinnedAt: string;
@@ -57,7 +90,17 @@ export type { TeamChannelMessageDto, TeamChannelMediaDto } from "../socket/event
  * Trailing/leading whitespace is trimmed by the caller before calling this.
  */
 const CHANNEL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
-const RESERVED_NAMES = new Set(["new", "settings", "create", "edit"]);
+// `search` and `default` are reserved so a channel named "search" can't
+// shadow the static route segments (`GET /api/team/channels/search`,
+// `GET /api/team/channels/default`).
+const RESERVED_NAMES = new Set([
+  "new",
+  "settings",
+  "create",
+  "edit",
+  "search",
+  "default",
+]);
 
 export function isValidChannelName(name: string): boolean {
   if (!CHANNEL_NAME_PATTERN.test(name)) return false;

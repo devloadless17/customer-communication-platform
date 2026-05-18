@@ -6,19 +6,34 @@ import { db } from "@/lib/db";
 
 /**
  * Per-request loader for the current user, with the deactivation check
- * baked in. Used by both server-component (`getSession`) and API-route
- * (`requireSession`) entry points.
+ * baked in. Used by `getSession()` in lib/auth/current-user.ts to hydrate
+ * the session payload that pages + layouts render against.
  *
- * Why this exists: the JWT is the only thing middleware sees, and it
- * doesn't know about `deactivatedAt`. Without re-checking the DB, an
- * admin who deactivates a user has to wait up to 14 days for the user's
- * cookie to expire. This loader closes that gap.
+ * Why this exists: the signed cookie is the only thing the edge proxy sees,
+ * and it doesn't know about `deactivatedAt`. Without re-checking the DB, an
+ * admin who deactivates a user has to wait up to 90 days for the cookie to
+ * expire. This loader closes that gap.
  *
- * Wrapped in `React.cache` so multiple callers in the same render share
- * one DB hit. Cache resets between requests.
+ * Wrapped in `React.cache` so layouts + pages + nested server components in
+ * the same render share one DB hit. Cache resets between requests.
+ *
+ * Narrow select: only the fields `getSession()` actually returns to the
+ * client tree. Keeps row size predictable and stops a wide `findUnique`
+ * from dragging in any new columns added to the User table later.
  */
 export const loadActiveUser = cache(async (userId: string) => {
-  const user = await db.user.findUnique({ where: { id: userId } });
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      teamId: true,
+      role: true,
+      name: true,
+      email: true,
+      avatarUrl: true,
+      deactivatedAt: true,
+    },
+  });
   if (!user || user.deactivatedAt) return null;
   return user;
 });

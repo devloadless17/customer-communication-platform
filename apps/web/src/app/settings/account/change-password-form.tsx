@@ -21,8 +21,20 @@ export function ChangePasswordForm() {
         const form = new FormData(e.currentTarget);
         const formEl = e.currentTarget;
         startTransition(async () => {
-          const res = await fetch("/api/auth/change-password", {
+          // The change-password controller lives on the NestJS side. In prod,
+          // Caddy routes `/api/auth/change-password*` to api:4000 (the rule
+          // sits BEFORE the `/api/auth/*` → Next.js catch-all). In dev there
+          // is no Caddy — Next.js owns `:3000`, NestJS owns `:4000`, and the
+          // browser must target the api process directly. `NEXT_PUBLIC_API_URL`
+          // is the same dev convention the socket client uses; unset in prod
+          // (same-origin via Caddy) → falls back to a relative URL.
+          //
+          // `credentials: "include"` makes the Better Auth session cookie
+          // ride the cross-origin XHR in dev (SameSite=Lax + same eTLD+1).
+          const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
+          const res = await fetch(`${apiBase}/api/auth/change-password`, {
             method: "POST",
+            credentials: "include",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               currentPassword: form.get("currentPassword"),

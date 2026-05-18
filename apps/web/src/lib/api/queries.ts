@@ -64,13 +64,35 @@ export interface SnippetDto {
 // Team root + members
 // ---------------------------------------------------------------------------
 
+/**
+ * Read-mostly catalog cache lifetimes (seconds). These mutate rarely
+ * (minutes-to-hours cadence) yet are loaded on every /inbox refresh.
+ * Caching them collapses the per-render fan-out from "5 catalog fetches"
+ * to "0 after the first miss" within the window — the single biggest
+ * structural perf win after `loading.tsx`.
+ *
+ * Tags are listed even though no Next.js subscriber currently calls
+ * revalidateTag — they're forward-compatible so a future mutation route
+ * or webhook can bust the cache instantly without changing the call sites
+ * here. Until then, the time-based revalidate covers correctness.
+ *
+ * 60s is short enough that admin edits feel "snappy enough" (worst case:
+ * one minute before a renamed tag shows up) and long enough to amortize
+ * the catalog fetch across a session of refreshes.
+ */
+const CATALOG_REVALIDATE_S = 60;
+
 export async function getCurrentTeam(): Promise<{ id: string; name: string }> {
-  const { team } = await api<{ team: { id: string; name: string } }>("/api/team");
+  const { team } = await api<{ team: { id: string; name: string } }>("/api/team", {
+    next: { tags: ["team-root"], revalidate: CATALOG_REVALIDATE_S },
+  });
   return team;
 }
 
 export async function listTeamMembers(): Promise<User[]> {
-  const { users } = await api<{ users: User[] }>("/api/users");
+  const { users } = await api<{ users: User[] }>("/api/users", {
+    next: { tags: ["team-members"], revalidate: CATALOG_REVALIDATE_S },
+  });
   return users;
 }
 
@@ -99,7 +121,9 @@ export async function getTeamDetailForSuperAdmin(
 // ---------------------------------------------------------------------------
 
 export async function listTags(): Promise<Tag[]> {
-  const { tags } = await api<{ tags: Tag[] }>("/api/team/tags");
+  const { tags } = await api<{ tags: Tag[] }>("/api/team/tags", {
+    next: { tags: ["catalog-tags"], revalidate: CATALOG_REVALIDATE_S },
+  });
   return tags;
 }
 
@@ -109,12 +133,16 @@ export async function getTagUsage(): Promise<Record<string, number>> {
 }
 
 export async function listSnippets(): Promise<SnippetDto[]> {
-  const { snippets } = await api<{ snippets: SnippetDto[] }>("/api/team/snippets");
+  const { snippets } = await api<{ snippets: SnippetDto[] }>("/api/team/snippets", {
+    next: { tags: ["catalog-snippets"], revalidate: CATALOG_REVALIDATE_S },
+  });
   return snippets;
 }
 
 export async function listContactStages(): Promise<ContactStage[]> {
-  const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages");
+  const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages", {
+    next: { tags: ["catalog-stages"], revalidate: CATALOG_REVALIDATE_S },
+  });
   return stages;
 }
 
@@ -131,6 +159,7 @@ export async function getStageContactCounts(): Promise<{
 export async function listContactFieldDefinitions(): Promise<ContactFieldDefinition[]> {
   const { definitions } = await api<{ definitions: ContactFieldDefinition[] }>(
     "/api/team/contact-fields",
+    { next: { tags: ["catalog-contact-fields"], revalidate: CATALOG_REVALIDATE_S } },
   );
   return definitions;
 }

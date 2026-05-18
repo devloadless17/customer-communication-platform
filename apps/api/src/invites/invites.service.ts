@@ -8,7 +8,7 @@ import {
 import { Prisma } from "@prisma/client";
 
 import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/auth/invite-token";
-import { hashPassword, isPasswordBreached } from "@/auth/password";
+import { hashPassword } from "@/auth/password";
 import { assignableRoles } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 
@@ -210,14 +210,6 @@ export class InvitesService {
   async accept(
     input: AcceptInviteInput,
   ): Promise<{ email: string; teamId: string }> {
-    if (await isPasswordBreached(input.password)) {
-      throw new BadRequestException({
-        error: "password_breached",
-        detail:
-          "That password has appeared in known data breaches. Please choose another.",
-      });
-    }
-
     const tokenHash = hashInviteToken(input.token);
     const passwordHash = await hashPassword(input.password);
 
@@ -253,12 +245,11 @@ export class InvitesService {
             role: invite.role,
             name: input.name,
             email: invite.email,
-            passwordHash,
           },
         });
-        // Better Auth's credential `Account` row mirrors the password into
-        // its own column. Keeping them in sync inside the transaction so a
-        // failed account insert burns nothing.
+        // Better Auth verifies credentials against the `Account` row, not
+        // the User. Same transaction so a failed account insert rolls back
+        // the user create.
         await tx.account.create({
           data: {
             userId: user.id,

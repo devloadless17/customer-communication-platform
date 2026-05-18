@@ -51,9 +51,23 @@ import { SelectAllRow } from "@/features/contacts/components/contact-browser/sel
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
-import { ImportContactsDialog } from "./import-dialog";
-import { NewContactDialog } from "./new-contact-dialog";
-import { EditContactDialog } from "./edit-contact-dialog";
+import dynamic from "next/dynamic";
+
+// Three dialogs that only open via explicit user action — defer them out
+// of the initial contacts-page bundle. SSR-disabled because they're
+// interactive-only.
+const ImportContactsDialog = dynamic(
+  () => import("./import-dialog").then((m) => m.ImportContactsDialog),
+  { ssr: false },
+);
+const NewContactDialog = dynamic(
+  () => import("./new-contact-dialog").then((m) => m.NewContactDialog),
+  { ssr: false },
+);
+const EditContactDialog = dynamic(
+  () => import("./edit-contact-dialog").then((m) => m.EditContactDialog),
+  { ssr: false },
+);
 
 /**
  * Contacts directory.
@@ -89,7 +103,7 @@ export function ContactsClient({
     initialNextCursor,
     initialStageFilter,
   });
-  const { items, setItems, setError, reconcileContactUpdate } = list;
+  const { items, setItems, setError, reconcileContactUpdate, refetch } = list;
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
   const [fieldDefinitions, setFieldDefinitions] =
@@ -156,11 +170,20 @@ export function ContactsClient({
         return copy;
       });
     };
+    // Coalesced "many contacts changed" — server fires this from bulk-tag
+    // (and future bulk-stage / bulk-field) paths instead of N per-contact
+    // events. Just refresh the visible page; the same code path the filter
+    // change effect uses, but triggered by a remote bulk write.
+    const onContactsBulkUpdated = () => {
+      refetch();
+    };
     socket.on("contact:updated", onContactUpdated);
     socket.on("contact:deleted", onContactDeleted);
+    socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     return () => {
       socket.off("contact:updated", onContactUpdated);
       socket.off("contact:deleted", onContactDeleted);
+      socket.off("contacts:bulk_updated", onContactsBulkUpdated);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

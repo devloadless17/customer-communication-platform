@@ -13,6 +13,7 @@ import {
   toExternalContact,
   toExternalConversation,
   toExternalMessage,
+  type ExternalMessage,
 } from "@/lib/external-shapes";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getMetaProvider } from "@/lib/providers";
@@ -90,7 +91,12 @@ export class ExternalV1Service {
     };
   }
 
-  async assign(teamId: string, conversationId: string, input: ExternalAssignInput) {
+  async assign(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalAssignInput,
+  ) {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: {
@@ -134,13 +140,19 @@ export class ExternalV1Service {
       assignedUser,
       previousAssignedUserId: conversation.assignedUserId,
       newAssignedUserId: input.assignedUserId,
-      // External API: no acting user.
+      // External API: no acting user; the audit row attributes via apiKeyId.
       changedByUserId: null,
+      changedByApiKeyId: apiKeyId,
       contact: workflowContactSnapshot(conversation.contact),
     });
   }
 
-  async setStatus(teamId: string, conversationId: string, input: ExternalStatusInput) {
+  async setStatus(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalStatusInput,
+  ) {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: { include: { tags: { select: { id: true } } } } },
@@ -160,6 +172,7 @@ export class ExternalV1Service {
       previousStatus,
       newStatus: input.status,
       changedByUserId: null,
+      changedByApiKeyId: apiKeyId,
       contact: workflowContactSnapshot(conversation.contact),
     });
   }
@@ -194,7 +207,27 @@ export class ExternalV1Service {
     apiKeyId: string,
     conversationId: string,
     input: ExternalSendMessageInput,
+    /** Optional idempotency key from the `Idempotency-Key` request header. */
+    idempotencyKey?: string,
   ) {
+    // Idempotency replay — first thing we check, so a retry never reaches
+    // Meta. 24h window (Stripe-style) is plenty for a partner's automated
+    // retry loop and short enough that a logically-new operation that
+    // happens to reuse a key isn't permanently shadowed.
+    if (idempotencyKey) {
+      const cached = await this.db.apiIdempotencyKey.findUnique({
+        where: {
+          teamId_apiKeyId_key: { teamId, apiKeyId, key: idempotencyKey },
+        },
+        select: { responseBody: true, expiresAt: true },
+      });
+      if (cached && cached.expiresAt > new Date()) {
+        return cached.responseBody as unknown as { message: ExternalMessage };
+      }
+      // Expired or missing → fall through and re-do the work. Expired
+      // rows are reaped by the periodic sweeper below.
+    }
+
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: true },
@@ -261,11 +294,15 @@ export class ExternalV1Service {
       }
       const normalized = normalizeMetaSendError(err);
       if (normalized) {
+        // Unified error shape `{ error, detail? }` — same as every other
+        // /v1 throw. The Meta http status + raw message folded into
+        // `detail` so partners that need the underlying info still get
+        // it, but the top-level contract is uniform.
         throw new UnprocessableEntityException({
           error: normalized.code,
-          message: normalized.message,
-          status: normalized.httpStatus,
-          detail: normalized.detail,
+          detail: `Meta ${normalized.httpStatus}: ${normalized.message}${
+            normalized.detail ? ` — ${normalized.detail}` : ""
+          }`,
         });
       }
       this.logger.error("external sendText failed", err);
@@ -319,9 +356,46 @@ export class ExternalV1Service {
       lastMessageAt: send.timestamp.toISOString(),
       unreadDelta: 0,
       senderUserId: null,
+      // Attribution for the audit timeline + any future subscriber that
+      // wants to know which API key sent this message.
+      senderApiKeyId: apiKeyId,
     });
 
-    return { message: toExternalMessage(created) };
+    const result = { message: toExternalMessage(created) };
+
+    // Persist the idempotency mapping so a retry within 24h replays this
+    // exact response. Done last + fire-and-forget so a write failure on the
+    // idempotency table doesn't roll back a successful send. A failed write
+    // just means a retry would re-send — degrades to current behavior.
+    if (idempotencyKey) {
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      void this.db.apiIdempotencyKey
+        .upsert({
+          where: {
+            teamId_apiKeyId_key: { teamId, apiKeyId, key: idempotencyKey },
+          },
+          create: {
+            teamId,
+            apiKeyId,
+            key: idempotencyKey,
+            responseBody: result as unknown as Prisma.InputJsonValue,
+            responseStatus: 200,
+            expiresAt,
+          },
+          update: {
+            responseBody: result as unknown as Prisma.InputJsonValue,
+            responseStatus: 200,
+            expiresAt,
+          },
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `idempotency-key write failed: ${err instanceof Error ? err.message : err}`,
+          );
+        });
+    }
+
+    return result;
   }
 
   // ---- Notes ------------------------------------------------------------
@@ -337,33 +411,29 @@ export class ExternalV1Service {
     });
     if (!conv) throw new NotFoundException({ error: "conversation not found" });
 
-    let authorUserId: string | null = null;
-    if (input.authorUserId) {
-      const u = await this.db.user.findFirst({
-        where: { id: input.authorUserId, teamId },
-        select: { id: true },
+    // Require authorUserId on the request — the previous silent-fallback
+    // to "oldest admin" permanently mislabeled API-created notes to a
+    // real human who didn't write them. Better to make the partner be
+    // explicit (use a service-account user if needed).
+    if (!input.authorUserId) {
+      throw new BadRequestException({
+        error: "authorUserId_required",
+        detail:
+          "Notes created via /v1 must specify `authorUserId` (a member of " +
+          "the team). Create a dedicated service-account user for your " +
+          "integration if no human author applies.",
       });
-      if (!u) {
-        throw new BadRequestException({
-          error: "authorUserId is not a member of this team",
-        });
-      }
-      authorUserId = u.id;
     }
-    if (!authorUserId) {
-      // Fallback to oldest admin — InternalNote.authorUserId is non-nullable.
-      const fallback = await this.db.user.findFirst({
-        where: { teamId, role: { in: ["admin", "superAdmin"] } },
-        orderBy: { createdAt: "asc" },
-        select: { id: true },
+    const u = await this.db.user.findFirst({
+      where: { id: input.authorUserId, teamId },
+      select: { id: true },
+    });
+    if (!u) {
+      throw new BadRequestException({
+        error: "authorUserId is not a member of this team",
       });
-      if (!fallback) {
-        throw new ConflictException({
-          error: "team has no admin to attribute the note to",
-        });
-      }
-      authorUserId = fallback.id;
     }
+    const authorUserId: string = u.id;
 
     const note = await this.db.internalNote.create({
       data: { conversationId, authorUserId, body: input.body },

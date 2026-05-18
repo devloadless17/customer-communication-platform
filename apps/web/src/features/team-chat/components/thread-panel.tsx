@@ -33,8 +33,16 @@ export function ThreadPanel({
   canPin: boolean;
   onClose: () => void;
 }) {
-  const { replies, loading, addOptimistic, markOptimisticFailed, removeOptimistic } =
-    useThreadEvents(channelId, rootMessage.id);
+  const {
+    replies,
+    loading,
+    hasMore,
+    loadingMore,
+    loadMore,
+    addOptimistic,
+    markOptimisticFailed,
+    removeOptimistic,
+  } = useThreadEvents(channelId, rootMessage.id);
 
   return (
     <aside className="flex h-full w-[24rem] shrink-0 flex-col border-l border-border bg-card/30">
@@ -72,17 +80,29 @@ export function ThreadPanel({
           {loading && replies.length === 0 ? (
             <div className="py-8 text-center text-xs text-muted-foreground">Loading replies…</div>
           ) : (
-            replies.map((m) => (
-              <ChannelMessage
-                key={m.id}
-                message={m}
-                channelId={channelId}
-                currentUser={currentUser}
-                canPin={false}
-                canDelete={canDeleteMessage(currentUser.role, m.authorUserId, currentUser.id)}
-                isThreadReply={true}
-              />
-            ))
+            <>
+              {replies.map((m) => (
+                <ChannelMessage
+                  key={m.id}
+                  message={m}
+                  channelId={channelId}
+                  currentUser={currentUser}
+                  canPin={false}
+                  canDelete={canDeleteMessage(currentUser.role, m.authorUserId, currentUser.id)}
+                  isThreadReply={true}
+                />
+              ))}
+              {hasMore && (
+                <button
+                  type="button"
+                  onClick={() => void loadMore()}
+                  disabled={loadingMore}
+                  className="mx-4 my-2 rounded-md border border-border px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+                >
+                  {loadingMore ? "Loading…" : "Load more replies"}
+                </button>
+              )}
+            </>
           )}
         </div>
       </ScrollArea>

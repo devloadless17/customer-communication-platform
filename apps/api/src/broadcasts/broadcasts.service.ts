@@ -282,6 +282,39 @@ export class BroadcastsService implements OnModuleInit {
   }
 
   /**
+   * Cancel a broadcast that's still queued or already running. The runner
+   * checks the row's `status` between recipients and bails out the moment
+   * it sees `canceled`. Already-sent recipients stay sent (Meta can't be
+   * unsent); remaining `queued` recipient rows are left untouched in the
+   * DB so the operator can audit what would have been sent.
+   *
+   * Compare-and-set on the previous status so two operators clicking
+   * cancel at once (or cancel-while-already-canceled) don't double-emit.
+   */
+  async cancel(teamId: string, id: string): Promise<void> {
+    const row = await this.db.broadcast.findFirst({
+      where: { id, teamId },
+      select: { id: true, status: true },
+    });
+    if (!row) throw new NotFoundException({ error: "not found" });
+    if (row.status !== "queued" && row.status !== "running") {
+      throw new ConflictException({
+        error: "broadcast not cancelable",
+        detail: `Broadcast is already ${row.status}; cancel is only valid while queued or running.`,
+      });
+    }
+    const updated = await this.db.broadcast.updateMany({
+      where: { id, status: { in: ["queued", "running"] } },
+      data: { status: "canceled" },
+    });
+    if (updated.count === 0) {
+      // Another caller / the runner flipped the status between read and
+      // write — surface idempotently as success rather than a 409 race.
+      return;
+    }
+  }
+
+  /**
    * Delete broadcast + recipient rows. Refuses while runner is mid-loop —
    * the runner reads recipient rows by parent id and would error on a
    * missing parent. Real WhatsApp messages already sent stay in the inbox.

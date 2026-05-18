@@ -25,13 +25,25 @@ import { rateLimit } from "@/lib/rate-limit";
  * bounce when missing.
  */
 const RATE_LIMITED_POSTS: Record<string, number> = {
-  // Better Auth's /api/auth/sign-in/email is now blocked outright above —
-  // all signins must go through the /login server action which has the
-  // lockout gate. Same for /register / /invite (no direct API).
-  "/login": 20, // login attempts via the server action
+  // Login is gated TWICE — per-account lockout in `signInWithCredentials`
+  // (5 fails / 15 min) catches password-spray against ONE account; this
+  // per-IP gate catches botnet-style spray across MANY accounts where
+  // per-account lockout never trips because no single account is targeted
+  // enough. 5/min is what real users can manually achieve (typo, retry,
+  // typo, retry, success) — 20 in a 10-minute window was generous to the
+  // point of meaningless for that threat model.
+  "/login": 5, // login attempts via the server action
   "/register": 8, // account creation
 };
 const RATE_WINDOW_MS = 10 * 60 * 1000;
+// Tighter window for the per-IP login limit (5 attempts / 1 minute).
+const LOGIN_RATE_WINDOW_MS = 60 * 1000;
+// Per-IP GET rate cap for the public invite-lookup endpoint. Tokens are
+// 128 bits so brute force is infeasible regardless, but the unauthenticated
+// nature of the lookup makes it the easiest path to enumerate / fingerprint
+// active teams — cap to a sensible 30 lookups/min per IP.
+const INVITE_LOOKUP_RATE_LIMIT = 30;
+const INVITE_LOOKUP_RATE_WINDOW_MS = 60 * 1000;
 
 /**
  * How many reverse proxies sit between the client and this process. Defaults
@@ -89,15 +101,24 @@ function buildConnectSrc(): string {
 }
 const CONNECT_SRC = buildConnectSrc();
 
+// React's dev overlay calls eval() to reconstruct call stacks from source
+// maps. Production builds never do — keep `'unsafe-eval'` strictly gated on
+// NODE_ENV so the prod CSP stays tight.
+const IS_DEV = process.env.NODE_ENV !== "production";
+
 function buildCsp(nonce: string): string {
   return [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${IS_DEV ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     CONNECT_SRC,
-    "media-src 'self' blob:",
+    // /api/media/<id> 302-redirects to the UploadThing CDN, so the browser
+    // resolves the final URL against media-src — keep `'self'` for the route
+    // itself and add the CDN hosts so <video> / <audio> can actually load.
+    // Matches the allow-list in [blob-storage/uploadthing.ts](../../api/src/lib/blob-storage/uploadthing.ts) `isOwnUrl`.
+    "media-src 'self' blob: https://*.ufs.sh https://*.utfs.io",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -131,8 +152,10 @@ function clientIp(req: NextRequest): string {
   }
   // No trusted proxy (or no headers from one) — fall back to the TCP remote
   // address. NextRequest exposes this on `req.ip` in Edge runtime; in
-  // environments where it's missing, everything collapses to one bucket,
-  // which keeps the limiter conservative rather than completely defeated.
+  // environments where it's missing, everything collapses to one bucket.
+  // Callers that need fail-closed semantics for security-sensitive paths
+  // (e.g. /login per-IP cap) should check for "unknown" and reject rather
+  // than bucket the whole world together.
   return (req as NextRequest & { ip?: string }).ip ?? "unknown";
 }
 
@@ -156,12 +179,15 @@ function clientIp(req: NextRequest): string {
 export default function proxy(req: NextRequest): NextResponse {
   const { pathname, search } = req.nextUrl;
   const isApiPath = pathname.startsWith("/api/");
+  // Server-to-server endpoints — never render HTML, so don't waste an
+  // Edge-runtime crypto.getRandomValues per request on the CSP nonce.
+  const isMachinePath = isApiPath || pathname.startsWith("/webhooks/");
 
-  // Page routes get a per-request CSP nonce; API routes don't render HTML
-  // and skip the work. The nonce is set on:
+  // Page routes get a per-request CSP nonce; API / webhook routes don't
+  // render HTML and skip the work. The nonce is set on:
   //   - the request headers (read by app/layout.tsx via headers().get())
   //   - the response Content-Security-Policy (the enforcing header)
-  const nonce = isApiPath ? null : generateNonce();
+  const nonce = isMachinePath ? null : generateNonce();
   const csp = nonce ? buildCsp(nonce) : null;
   const stampCsp = (res: NextResponse): NextResponse => {
     if (csp) res.headers.set("Content-Security-Policy", csp);
@@ -198,8 +224,37 @@ export default function proxy(req: NextRequest): NextResponse {
   }
 
   if (req.method === "POST" && pathname in RATE_LIMITED_POSTS) {
+    const ip = clientIp(req);
+    // Security-sensitive path: if we cannot identify the client IP, fail
+    // closed rather than bucket every unknown caller together (which would
+    // let one bad actor exhaust the bucket and DoS legitimate logins).
+    if (pathname === "/login" && ip === "unknown") {
+      return NextResponse.json(
+        { error: "could not identify client; refusing login" },
+        { status: 400 },
+      );
+    }
     const limit = RATE_LIMITED_POSTS[pathname]!;
-    const { ok, retryAfter } = rateLimit(`${pathname}:${clientIp(req)}`, limit, RATE_WINDOW_MS);
+    const window =
+      pathname === "/login" ? LOGIN_RATE_WINDOW_MS : RATE_WINDOW_MS;
+    const { ok, retryAfter } = rateLimit(`${pathname}:${ip}`, limit, window);
+    if (!ok) {
+      return NextResponse.json(
+        { error: "too many requests, slow down" },
+        { status: 429, headers: { "retry-after": String(retryAfter) } },
+      );
+    }
+  }
+
+  // Per-IP cap on the unauthenticated invite-lookup GET. Token entropy
+  // makes brute force infeasible (128 bits) but the lookup is the easiest
+  // path to enumerate / fingerprint, so cap volume.
+  if (req.method === "GET" && pathname.startsWith("/api/invites/")) {
+    const { ok, retryAfter } = rateLimit(
+      `invite-lookup:${clientIp(req)}`,
+      INVITE_LOOKUP_RATE_LIMIT,
+      INVITE_LOOKUP_RATE_WINDOW_MS,
+    );
     if (!ok) {
       return NextResponse.json(
         { error: "too many requests, slow down" },
@@ -236,11 +291,19 @@ export default function proxy(req: NextRequest): NextResponse {
   const isPublicApi =
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/webhooks") ||
+    // Canonical post-migration webhook path on NestJS. Prod fronts both
+    // processes with Caddy which never sends `/webhooks/*` to Next.js,
+    // so in prod this branch is unreachable; in no-Caddy dev (ngrok →
+    // :3000) the middleware would otherwise 307 Meta's POST to /login.
+    pathname.startsWith("/webhooks/") ||
+    // Internal-only cache-bust endpoint called by NestJS via shared
+    // secret. The route handler does its own timing-safe check.
+    pathname.startsWith("/api/internal/") ||
     pathname.startsWith("/api/socket") ||
     pathname === "/api/health" ||
     // External API uses bearer-token auth (TeamApiKey), not session cookies —
     // bypass the cookie gate so n8n / partner integrations can reach it. The
-    // route handler does its own authentication via lib/auth/external.ts.
+    // NestJS ApiKeyGuard (apps/api/src/auth/api-key.guard.ts) does the auth.
     pathname.startsWith("/api/external/");
 
   // Cookie presence + signature check. Returns null for missing or tampered
@@ -267,7 +330,7 @@ export default function proxy(req: NextRequest): NextResponse {
     if (hasCookie && (pathname === "/login" || pathname === "/register")) {
       return stampCsp(NextResponse.redirect(new URL("/inbox", redirectBase)));
     }
-    return isApiPath ? NextResponse.next() : passthroughPage();
+    return isMachinePath ? NextResponse.next() : passthroughPage();
   }
 
   if (!hasCookie) {
@@ -279,7 +342,7 @@ export default function proxy(req: NextRequest): NextResponse {
     return stampCsp(NextResponse.redirect(url));
   }
 
-  return isApiPath ? NextResponse.next() : passthroughPage();
+  return isMachinePath ? NextResponse.next() : passthroughPage();
 }
 
 export const config = {

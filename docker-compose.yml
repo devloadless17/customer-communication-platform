@@ -11,6 +11,12 @@ services:
     image: postgres:16.6-alpine
     restart: unless-stopped
     networks: [ccp_net]
+    # /dev/shm is where Postgres puts parallel-query workers' shared memory.
+    # Docker's default 64MB cap surfaces as `could not resize shared memory
+    # segment` on busy systems — bumping to 256MB matches what production
+    # tuning guides recommend for a ≥2GB-RAM Postgres. Safe to keep even on
+    # small VPS since shm is allocated on-demand from page cache.
+    shm_size: 256mb
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ccp}
       POSTGRES_USER: ${POSTGRES_USER:-app}
@@ -87,6 +93,11 @@ services:
       # (same-host through Caddy) while the web container reaches the api
       # container directly over the internal docker network.
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:4000}
+      # Shared secret for the cross-process cache-revalidate bridge —
+      # NestJS POSTs to /api/internal/revalidate when a catalog mutates,
+      # this endpoint requires the same secret. Must match the value
+      # on the api service. validateEnv requires this in prod.
+      INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
       # Post-Phase-5: Next.js owns auth pages + RSC reads only. The NestJS
       # api container owns everything else (REST, Socket.io, webhooks, the
       # workflow worker, audit/analytics/dispatch). No env-toggle here for
@@ -149,6 +160,19 @@ services:
       # post-Phase-5 cleanup).
       RUN_WORKER_INLINE: ${API_RUN_WORKER_INLINE:-1}
       WORKFLOW_WORKER_CONCURRENCY: ${WORKFLOW_WORKER_CONCURRENCY:-5}
+      # Shared secret for the cache-revalidate bridge — same value as the
+      # web service. validateEnv requires this in prod.
+      INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
+      # Where this process posts cache-revalidate calls to the Next.js
+      # process. Defaults to the docker DNS for the web service; override
+      # only if the topology changes.
+      WEB_INTERNAL_URL: ${WEB_INTERNAL_URL:-http://app:3000}
+      # Optional: tunable Meta Graph fetch timeout. Default 15s.
+      META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
+      # In-app /api/dev/emit endpoint that spoofs Meta webhooks for
+      # local testing. MUST NOT be set in production — uncommenting this
+      # in prod would let any authenticated user inject inbound events.
+      ENABLE_DEV_TOOLS: ${ENABLE_DEV_TOOLS:-}
     ports:
       # Loopback-only — Caddy is the public ingress (same posture as `app`).
       - "127.0.0.1:${API_PORT:-4000}:4000"

@@ -1,15 +1,17 @@
-// Note: no `server-only` import here — the NestJS Socket.io handshake
-// historically pulled this transitively via tsx. Misuse is guarded
-// structurally: every wrapper that actually needs SSR isolation lives in
-// lib/auth/index.ts, lib/auth/helpers.ts, and lib/auth/current-user.ts —
-// those keep the `server-only` import.
+// Note: no `server-only` import here — keeping this file framework-neutral so
+// nothing accidentally pulls Next-only runtime hooks during a stray import.
+// Misuse is guarded structurally: every wrapper that actually needs SSR
+// isolation (`signInWithCredentials`, `getCurrentSession`, `getSession`) lives
+// in lib/auth/index.ts + lib/auth/current-user.ts and those keep the
+// `server-only` import. Client components never reach this file directly.
 
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
 
 import { buildSharedAuthOptions } from "@ccp/shared/auth/better-auth-config";
+import { BCRYPT_COST } from "@ccp/shared/auth/password-policy";
 
 import { db } from "@/lib/db";
 
@@ -68,7 +70,7 @@ export const auth = betterAuth({
     secret: readSecret(),
     baseURL: process.env.BETTER_AUTH_URL,
     isProd,
-    passwordHash: (password) => bcrypt.hash(password, 10),
+    passwordHash: (password) => bcrypt.hash(password, BCRYPT_COST),
     passwordVerify: ({ password, hash }) => bcrypt.compare(password, hash),
   }),
 

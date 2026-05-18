@@ -4,27 +4,21 @@ import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 
 /**
- * Garbage-collect inbound media rows that the phase-2 background download
- * never finished. The webhook handler kicks the binary-fetch off via
- * `void downloadInboundMedia(...)` AFTER returning 200 to Meta — perfectly
- * fine in steady state, but a process restart (deploy, OOM, systemd
- * `Restart=on-failure`, manual bump) drops every in-flight detached
- * promise on the floor. Without a sweeper, those rows stay forever with
- * `mediaKind` set + `mediaUrl` null, which the UI renders as a permanent
- * "Downloading…" placeholder (now a clean shimmer — even worse, looks
- * like the message will never load).
+ * Garbage-collect any inbound message row left with `mediaKind` set +
+ * `mediaUrl` null. After the in-band media flow landed in
+ * [webhooks/meta/meta.controller.ts](../../webhooks/meta/meta.controller.ts)
+ * the steady-state path never produces such rows — the binary is fetched
+ * + uploaded before `ingestEvents` runs, so the row is created with media
+ * columns populated or with `evt.media` dropped (text-only fallback).
  *
- * Retry semantics: today we just CLEAR the stale media columns. The row
- * keeps its caption (in `body`) so the agent still sees what was sent —
- * just as a text-only bubble. True retry would need to re-extract Meta's
- * media id from the rawPayload JSONB and re-call fetchMedia + blob upload;
- * that's a larger change and orthogonal to "make the UI honest."
+ * The sweeper is kept as a one-shot transition tidy (clears straggler
+ * `mediaPending` rows from before the fix deployed) and as defense-in-depth
+ * for any future failure mode that re-introduces a partial write. Without
+ * it, such a row would render as a permanent shimmer in the UI.
  *
- * Cadence: 1 min interval, 2 min stale threshold. Most downloads finish
- * within ~5s; anything still pending after 2 min is a restart casualty,
- * not slow throughput. Earlier values (5 min / 10 min) left agents staring
- * at a stuck "downloading…" placeholder for up to 15 min after every
- * deploy — too painful for pilot use.
+ * Retry semantics: we just CLEAR the stale media columns. The row keeps
+ * its caption in `body` so the agent still sees what was sent — just as a
+ * text-only bubble.
  */
 
 const SWEEP_INTERVAL_MS = 60 * 1000;

@@ -64,6 +64,13 @@ const prodRequired: Check[] = [
     name: "APP_PUBLIC_URL",
     hint: "Public URL embedded in outgoing webhook payloads (_links.*).",
   },
+  {
+    name: "INTERNAL_BUS_SECRET",
+    hint:
+      "Shared secret for the cross-process cache-revalidate bridge. NestJS " +
+      "calls /api/internal/revalidate on Next.js when catalogs mutate; this " +
+      "endpoint requires the same value. Generate with: openssl rand -base64 32.",
+  },
 ];
 
 const recommended: Check[] = [

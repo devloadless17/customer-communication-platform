@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import {
   applyConversationAssignment,
   applyConversationRead,
@@ -225,31 +226,17 @@ export function useConversationEvents(
   // Mark-read coordination. The shell tells us via `onMarkRead` to patch
   // the cached unreadCount=0 after the POST succeeds, so re-mounting the
   // thread (chat-switch back) finds initialUnread=0 and skips the POST.
-  // Throttled: a burst of inbound messages must not fan out into a burst of
-  // HTTP calls; while one is in flight we coalesce.
-  const inFlight = useRef(false);
-  const queued = useRef(false);
+  // Throttled via `useCoalescedAsync` — a burst of inbound messages fires
+  // one POST instead of N; same util backs the team-chat hook so the
+  // pattern stays consistent across both surfaces.
   const onMarkReadRef = useRef(onMarkRead);
   onMarkReadRef.current = onMarkRead;
-  const markRead = useCallback(async () => {
-    if (inFlight.current) {
-      queued.current = true;
-      return;
-    }
-    inFlight.current = true;
-    let ok = false;
+  const markRead = useCoalescedAsync(async () => {
     try {
       const res = await fetch(`/api/conversations/${conversationId}/read`, { method: "POST" });
-      ok = res.ok;
+      if (res.ok) onMarkReadRef.current?.(conversationId);
     } catch {
       // Silent — server state reconciles on the next call / page reload.
-    } finally {
-      inFlight.current = false;
-      if (ok) onMarkReadRef.current?.(conversationId);
-      if (queued.current) {
-        queued.current = false;
-        void markRead();
-      }
     }
   }, [conversationId]);
 

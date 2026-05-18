@@ -1,10 +1,11 @@
+import { cookies } from "next/headers";
 import { MessageSquareText } from "lucide-react";
 
-import { getCurrentSession } from "@/lib/auth";
 import { lookupInvite } from "@/lib/api/queries";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 
 import { AcceptForm } from "./accept-form";
+import { INVITE_JUST_ACCEPTED_COOKIE } from "./actions";
 import { RedirectToInbox } from "./redirect-to-inbox";
 
 export const metadata = {
@@ -28,15 +29,15 @@ export default async function AcceptInvitePage({ params }: PageProps) {
     // Server actions auto-revalidate the route they were called from. After
     // a successful accept the page re-renders here with `status === "used"`
     // — which unmounts AcceptForm before its router.replace effect can fire.
-    // If the current visitor is the user who just accepted (session email
-    // matches invite email), do the navigation in a fresh client subtree
-    // that survives the refresh. Stale visitors with no matching session
+    // The accept action sets a short-lived cookie keyed to this token so we
+    // can tell "this browser just accepted" from "stale visitor on a used
+    // link" without depending on the session cookie (which isn't visible in
+    // headers() on the same-request revalidation). Just-accepters navigate
+    // in a fresh client subtree that survives the refresh; stale visitors
     // still see the "go to sign in" Shell.
-    const session = await getCurrentSession();
-    if (
-      session?.user?.email &&
-      session.user.email.toLowerCase() === invite.email.toLowerCase()
-    ) {
+    const justAccepted =
+      (await cookies()).get(INVITE_JUST_ACCEPTED_COOKIE)?.value === token;
+    if (justAccepted) {
       return <RedirectToInbox />;
     }
     return <Shell title="Already accepted">This invite has already been used.</Shell>;

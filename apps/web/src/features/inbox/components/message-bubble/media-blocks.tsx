@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Download, FileText, FileAudio, Film, ImageOff, Loader2, X } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
+import { useBodyScrollLock } from "@/hooks/use-modal-overlay";
 import type { MediaAttachment, MediaKind } from "@ccp/shared/types";
 
 export function MediaBlock({
@@ -193,18 +194,15 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
   const [errored, setErrored] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Same SSR-error-recovery dance as ImageBlock — if the load failed before
-  // React attached its onError listener, the event was swallowed. <video>
-  // exposes .error after a failed load (MediaError object) so checking it
-  // once on mount catches the case. networkState === NETWORK_NO_SOURCE
-  // covers the case where the src URL itself was invalid.
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el || errored) return;
-    if (el.error || el.networkState === 3 /* NETWORK_NO_SOURCE */) {
-      setErrored(true);
-    }
-  }, [errored, media.url]);
+  // No SSR-error-recovery effect: with `preload="none"` the browser never
+  // fetches bytes on mount, so a sync mount-time check for `networkState
+  // === NETWORK_NO_SOURCE` was a false-positive trap — on a client-side
+  // socket render the resource-selection algorithm hasn't run yet and
+  // networkState is transiently 0 or 3, flipping us into the "Video
+  // unavailable" placeholder until a full page reload. `onError` on the
+  // element below is the authoritative signal: it fires when the user
+  // clicks play and the load actually fails.
+  void videoRef;
 
   // Same fixed 4:3 slot as ImageBlock for the same reason: stable bubble
   // height means useChatScroll's snap-to-bottom isn't fighting a late
@@ -240,15 +238,11 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
 function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
   const [errored, setErrored] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
-
-  // SSR-error-recovery: see VideoBlock for the long version.
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el || errored) return;
-    if (el.error || el.networkState === 3 /* NETWORK_NO_SOURCE */) {
-      setErrored(true);
-    }
-  }, [errored, media.url]);
+  // No mount-time check — see VideoBlock for why: with preload="none" the
+  // browser does no fetch on mount, so `networkState === NETWORK_NO_SOURCE`
+  // was a transient state that falsely flagged socket-delivered bubbles as
+  // errored. `onError` on the element below is the authoritative signal.
+  void audioRef;
 
   if (errored) {
     return (
@@ -338,6 +332,11 @@ function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
   const lastFocusedRef = useRef<HTMLElement | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [errored, setErrored] = useState(false);
+
+  // Lock body scroll while the lightbox is open. No focus trap needed — the
+  // overlay has exactly one tabbable target (the close button), so wrap-on-
+  // Tab would behave identically to no-trap.
+  useBodyScrollLock(true);
 
   useEffect(() => {
     lastFocusedRef.current = document.activeElement as HTMLElement | null;

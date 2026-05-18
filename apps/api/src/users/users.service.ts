@@ -9,6 +9,7 @@ import {
 import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
 import type { Role, User } from "@ccp/shared/types";
 
+import { invalidateSessionCache } from "../auth/session.guard";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
@@ -130,13 +131,27 @@ export class UsersService {
       },
     });
 
-    // Deactivation: drop Session rows + kick live sockets. Without this an
-    // already-connected socket keeps receiving team events until next reload.
-    if (data.deactivatedAt) {
+    // Bust the session cache for this user so role/deactivation/profile
+    // changes land within the next request rather than the 15s cache window.
+    invalidateSessionCache(targetId);
+
+    // Privilege-altering changes — drop Session rows + kick live sockets so
+    // the next request / handshake resolves the user fresh with new role +
+    // deactivatedAt. Without this:
+    //   - A demoted admin keeps their cached "admin" ApiSession (and any
+    //     Better Auth cookieCache snapshot) for up to 60s, including the
+    //     server-side authorization check on every controller.
+    //   - An admin who deactivates a user leaves that user's open sockets
+    //     subscribed to team events until reload.
+    const roleChanged = data.role !== undefined;
+    const deactivated = Boolean(data.deactivatedAt);
+    if (roleChanged || deactivated) {
       await this.db.session.deleteMany({ where: { userId: targetId } });
       const dropped = this.realtime.disconnectUserSockets(targetId);
       if (dropped > 0) {
-        this.logger.log(`deactivate: dropped ${dropped} live socket(s) for user=${targetId}`);
+        this.logger.log(
+          `user-update (role=${roleChanged} deactivated=${deactivated}): dropped ${dropped} live socket(s) for user=${targetId}`,
+        );
       }
     }
 

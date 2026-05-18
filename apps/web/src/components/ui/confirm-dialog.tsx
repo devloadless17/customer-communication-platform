@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import { AlertTriangle, HelpCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useModalOverlay } from "@/hooks/use-modal-overlay";
 
 /**
  * App-wide replacement for `window.confirm` / `window.alert` — a small modal
@@ -46,45 +47,12 @@ export function ConfirmDialog({
   const titleId = useId();
   const descId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
-  // Restore focus to whatever was focused before the dialog opened — caller
-  // shouldn't have to remember to do this.
-  const lastFocusedRef = useRef<HTMLElement | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    lastFocusedRef.current = document.activeElement as HTMLElement | null;
-
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        onResolve(false);
-        return;
-      }
-      // Trap Tab inside the dialog so keyboard users don't escape into the
-      // page underneath. Cycles between the first and last focusable element.
-      if (e.key === "Tab" && dialogRef.current) {
-        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-        );
-        if (focusables.length === 0) return;
-        const first = focusables[0]!;
-        const last = focusables[focusables.length - 1]!;
-        const active = document.activeElement;
-        if (e.shiftKey && active === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && active === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      // Return focus to the trigger when the dialog closes.
-      lastFocusedRef.current?.focus?.();
-    };
-  }, [open, onResolve]);
+  // Shared modal overlay primitives — body-scroll-lock + focus-trap +
+  // Escape-to-close + focus return. Same hook used by every other
+  // dialog in the app so behavior stays consistent.
+  const onClose = useCallback(() => onResolve(false), [onResolve]);
+  useModalOverlay(dialogRef, open, onClose);
 
   if (!open || !options) return null;
   const {

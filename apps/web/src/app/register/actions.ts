@@ -82,10 +82,7 @@ export async function registerAction(
     return { error: "Account created — please sign in." };
   }
 
-  // Do NOT call redirect() here. Better Auth's nextCookies plugin commits
-  // the session cookie into the server-action response; redirect() throws
-  // NEXT_REDIRECT in the same call which races the cookie commit on Next
-  // 15 + useActionState. Same root cause as the /login?next=/ bug — return
-  // the destination and let the client navigate.
+  // Do NOT call redirect() here — see [hooks/use-auth-redirect.tsx] for
+  // the full rationale on why navigation is deferred to the client.
   return { error: null, redirectTo: "/settings/whatsapp" };
 }

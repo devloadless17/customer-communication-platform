@@ -1,5 +1,4 @@
 import { redirect } from "next/navigation";
-import { headers } from "next/headers";
 
 import { getSession } from "@/lib/auth/current-user";
 import {
@@ -33,15 +32,20 @@ export default async function InboxPage({
 }: {
   searchParams: Promise<{ c?: string }>;
 }) {
-  const { user } = await getSession();
   const { c: requestedConversationId } = await searchParams;
 
+  // Fan everything out in one Promise.all — including the session lookup —
+  // so the network/DB-bound queries are not serialized behind it. Each call
+  // hits its own SessionGuard on the api side anyway; the per-userId session
+  // cache in the guard collapses the 8 deactivation re-checks into one.
+  //
   // Single source of truth for users. The previous version ran a separate
   // raw `db.user.findMany` (active users only) AND `listTeamMembers` (all
   // users incl. deactivated) — two roundtrips returning near-identical data.
   // Now we fetch once and derive `teammates` (active, for the sidebar) from
   // the same list `teamMembers` uses (all, for historical message attribution).
   const [
+    { user },
     team,
     conversationsPage,
     teamMembers,
@@ -51,6 +55,7 @@ export default async function InboxPage({
     tags,
     initialThread,
   ] = await Promise.all([
+    getSession(),
     getCurrentTeam(),
     listConversations(),
     listTeamMembers(),
@@ -81,13 +86,6 @@ export default async function InboxPage({
 
   const initialActiveConversationId = initialThread ? requestedConversationId ?? null : null;
 
-  // CSP nonce from src/proxy.ts. Threaded into InboxShell so the SSR
-  // scroll-init <script> inside ThreadWorkspace executes under
-  // `script-src 'nonce-...'` — without this the script is blocked and
-  // hard-refresh shows a one-frame scroll flicker before useChatScroll
-  // catches up.
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
-
   return (
     <InboxShell
       currentUser={user}
@@ -104,7 +102,6 @@ export default async function InboxPage({
       canManageContactFields={canManageContactFields(user.role)}
       initialActiveConversationId={initialActiveConversationId}
       initialThread={initialThread}
-      nonce={nonce}
     />
   );
 }

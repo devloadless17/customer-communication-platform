@@ -197,6 +197,13 @@ export interface UseContactListResult {
    * from a Contact payload).
    */
   reconcileContactUpdate: (contact: Contact) => void;
+  /**
+   * Refresh the visible page with current filters. Wired to the coalesced
+   * `contacts:bulk_updated` socket event from server bulk-mutation paths
+   * (no per-contact payload available, so refetch is the only way to
+   * reconcile).
+   */
+  refetch: () => void;
 }
 
 export function useContactList(opts?: {
@@ -296,6 +303,28 @@ export function useContactList(opts?: {
   });
   filtersRef.current = { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter };
 
+  // Public refetch — wired to the coalesced `contacts:bulk_updated` socket
+  // event. Bulk paths (server-side bulk-tag etc.) don't send per-contact
+  // payloads, so the only way to reconcile is "refresh the visible page."
+  // Uses the same reqId guard as the filter-change effect so a stale
+  // response can't overwrite a fresher one.
+  const refetch = useCallback(() => {
+    const my = ++reqId.current;
+    setLoading(true);
+    void (async () => {
+      try {
+        const page = await fetchContactsPage(filtersRef.current, null);
+        if (reqId.current !== my) return;
+        setItems(page.items);
+        setNextCursor(page.nextCursor);
+      } catch {
+        // Silent — next filter change recovers.
+      } finally {
+        if (reqId.current === my) setLoading(false);
+      }
+    })();
+  }, []);
+
   const reconcileTimerRef = useRef<number | null>(null);
   useEffect(() => {
     return () => {
@@ -374,6 +403,7 @@ export function useContactList(opts?: {
     setError,
     loadMore,
     reconcileContactUpdate,
+    refetch,
   };
 }
 

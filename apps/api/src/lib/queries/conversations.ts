@@ -12,6 +12,7 @@ import type {
 import {
   clampTake,
   mapContact,
+  mapContactListItem,
   mapConversation,
   mapMessage,
   mapNote,
@@ -109,6 +110,10 @@ export async function listConversations(
       // (one contact = one conversation, so per-thread tags would be dead
       // complexity).
       contact: {
+        // `customFields` is JSONB — potentially many keys × N rows × every
+        // refresh. Dropped here because the list UI never renders it (only
+        // name/stage/tags). Re-fetched in full by the per-conversation
+        // query when an agent opens a thread.
         select: {
           id: true,
           teamId: true,
@@ -119,10 +124,13 @@ export async function listConversations(
           avatarUrl: true,
           email: true,
           location: true,
-          customFields: true,
           source: true,
           stageId: true,
           createdAt: true,
+          // Denormalized — drives the inbox-row 24h-window chip without
+          // the lateral MAX(message.timestamp) GROUP BY that the list
+          // used to do per page.
+          lastInboundAt: true,
           tags: { select: { id: true } },
         },
       },
@@ -138,11 +146,17 @@ export async function listConversations(
       ? encodeConvoCursor({ lastMessageAt: last.lastMessageAt, id: last.id })
       : null;
 
-  // Pull lastInboundAt for every contact in this page in one round trip.
-  // Drives the 24h-window chip on the inbox conversation list. The contact
-  // ids are bounded by `take`, so this is at most `take` lateral lookups.
-  const contactIds = sliced.map((r) => r.contact.id);
-  const inboundMap = await fetchLastInboundMap(teamId, contactIds);
+  // Pull lastInboundAt straight from the denormalized `Contact.lastInboundAt`
+  // column maintained by the ingest path — saves the per-page lateral
+  // MAX(m.timestamp) GROUP BY contactId roundtrip the inbox list used to do
+  // (still kept below as `fetchLastInboundMap` for any future caller that
+  // needs the same value on a contact NOT yet in the SELECT).
+  const inboundMap = new Map<string, string | null>(
+    sliced.map((r) => [
+      r.contact.id,
+      r.contact.lastInboundAt ? r.contact.lastInboundAt.toISOString() : null,
+    ]),
+  );
 
   // Per-agent unread map. One indexed read scoped to this slice — no N+1.
   const sliceIds = sliced.map((r) => r.id);
@@ -166,7 +180,7 @@ export async function listConversations(
         ...(unreadForMe !== undefined ? { unreadForMe } : {}),
       },
       contact: {
-        ...mapContact(row.contact),
+        ...mapContactListItem(row.contact),
         tagIds: row.contact.tags.map((t) => t.id),
       },
       assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
@@ -179,35 +193,12 @@ export async function listConversations(
   return { items, nextCursor };
 }
 
-/**
- * Latest inbound timestamp per contact. Pulled in a single grouped query so
- * the conversation-list page doesn't N+1 on its way to rendering window
- * chips. Returns ISO strings so callers can pass them straight through.
- *
- * Defence in depth: the contactIds are already team-scoped by the caller's
- * earlier query, but we still pass teamId and gate on it here so a future
- * caller that bypasses the upstream scoping (or a refactor that loses it)
- * can't accidentally cross-tenant-read.
- */
-async function fetchLastInboundMap(
-  teamId: string,
-  contactIds: string[],
-): Promise<Map<string, string>> {
-  if (contactIds.length === 0) return new Map();
-  const rows = await db.$queryRaw<
-    Array<{ contactId: string; lastInboundAt: Date }>
-  >`
-    SELECT co."contactId" AS "contactId",
-           MAX(m."timestamp") AS "lastInboundAt"
-    FROM "Message" m
-    JOIN "Conversation" co ON co.id = m."conversationId"
-    WHERE m.direction = 'in'
-      AND co."teamId" = ${teamId}
-      AND co."contactId" IN (${Prisma.join(contactIds)})
-    GROUP BY co."contactId"
-  `;
-  return new Map(rows.map((r) => [r.contactId, r.lastInboundAt.toISOString()]));
-}
+// fetchLastInboundMap was removed when `Contact.lastInboundAt` became a
+// denormalized column (migration 20260517223100_query_perf_indexes). The
+// list-page now selects that column directly; the inline build at the
+// callsite replaces what this helper used to compute via a lateral GROUP BY.
+// Git blame this comment for the original implementation if a future
+// non-contact-aware caller needs to recompute the value.
 
 /**
  * Hydrate a conversation with its most recent `messageLimit` messages
@@ -248,19 +239,18 @@ export async function getConversationWithRefs(
   const nextOlderCursor =
     hasMore && oldest ? encodeMessageCursor({ timestamp: oldest.timestamp, id: oldest.id }) : null;
 
-  // Latest inbound across ALL of this contact's conversations (not just the
-  // current thread), since the 24h window is contact-level on Meta's side.
-  // Run in parallel with the true-count queries — none of these depend on
-  // each other and they all hit different indices.
-  const [lastInboundRow, messageCount, noteCount] = await Promise.all([
-    db.message.findFirst({
-      where: { direction: "in", conversation: { contactId: row.contactId } },
-      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-      select: { timestamp: true },
-    }),
+  // Latest inbound across ALL of this contact's conversations (the 24h
+  // window is contact-level on Meta's side). Read from the denormalized
+  // `Contact.lastInboundAt` column maintained by the ingest path — the
+  // previous Message scan with a join through Conversation seq-scanned
+  // a heavy contact's entire history on every thread open.
+  const [messageCount, noteCount] = await Promise.all([
     db.message.count({ where: { conversationId } }),
     db.internalNote.count({ where: { conversationId } }),
   ]);
+  const lastInboundAtIso = row.contact.lastInboundAt
+    ? row.contact.lastInboundAt.toISOString()
+    : null;
 
   return {
     data: {
@@ -272,7 +262,7 @@ export async function getConversationWithRefs(
       assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
       messages: messagesAsc.map(mapMessage),
       notes: row.notes.map(mapNote),
-      lastInboundAt: lastInboundRow ? lastInboundRow.timestamp.toISOString() : null,
+      lastInboundAt: lastInboundAtIso,
       messageCount,
       noteCount,
     },

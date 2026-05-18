@@ -30,6 +30,16 @@ export interface TriggerWorkflowStepConfig {
   workflowId: string;
 }
 
+/**
+ * Hard cap on workflow-to-workflow dispatch chain length. Catches the
+ * authoring footgun where A triggers B triggers A (or any longer cycle):
+ * each child run carries `metadata.depth = parent.depth + 1`, and we
+ * refuse to dispatch past TRIGGER_DEPTH_MAX. The 100-step-per-run cap
+ * inside the runtime can't prevent this on its own — a chain of N tiny
+ * workflows is N small step budgets, not one big one.
+ */
+const TRIGGER_DEPTH_MAX = 8;
+
 export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> = {
   type: "trigger_workflow",
   parseConfig(raw) {
@@ -62,6 +72,29 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
       return advanceWithError(409, "target_not_runnable", "target workflow is disabled or unpublished");
     }
 
+    // Trace depth via the envelope payload. The dispatcher writes
+    // `metadata.depth` (string) on every manual_trigger child run; a
+    // top-level user-initiated run starts at depth 0 (absent). Other
+    // trigger kinds (message_received / conversation_closed / etc.)
+    // don't carry metadata, but they CAN'T loop back into a
+    // trigger_workflow chain without a deliberate `trigger_workflow`
+    // step, which is what this gate protects.
+    const envMetadata =
+      envelope.event === "manual_trigger"
+        ? (envelope.data as { metadata?: Record<string, string> }).metadata
+        : undefined;
+    const parentDepthRaw = envMetadata?.depth;
+    const parentDepth =
+      typeof parentDepthRaw === "string" ? Number.parseInt(parentDepthRaw, 10) : NaN;
+    const nextDepth = Number.isFinite(parentDepth) ? parentDepth + 1 : 1;
+    if (nextDepth > TRIGGER_DEPTH_MAX) {
+      return advanceWithError(
+        409,
+        "trigger_depth_exceeded",
+        `chain depth ${nextDepth} exceeds the max of ${TRIGGER_DEPTH_MAX} — likely a workflow loop`,
+      );
+    }
+
     const c = envelopeContact(envelope);
     if (!c) return advanceWithError(400, "envelope missing contact");
     const contactId = c.id;
@@ -74,7 +107,11 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
       contactId,
       conversationId,
       triggeredByUserId: null,
-      metadata: { sourceRunId: ctx.runId, sourceWorkflowId: ctx.workflowId },
+      metadata: {
+        sourceRunId: ctx.runId,
+        sourceWorkflowId: ctx.workflowId,
+        depth: String(nextDepth),
+      },
     });
 
     return advance({ targetWorkflowId: target.id, dispatchedRunId: runId });

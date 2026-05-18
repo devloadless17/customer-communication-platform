@@ -39,7 +39,7 @@ export class NotesController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.notes.remove(session.teamId, id);
+    await this.notes.remove(session.teamId, session.userId, session.role, id);
     return { ok: true };
   }
 }

@@ -12,6 +12,7 @@ import { FileInterceptor } from "@nestjs/platform-express";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
+import { RateLimit } from "../common/rate-limit.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import { MessagesService } from "./messages.service";
 import {
@@ -35,6 +36,11 @@ import {
  */
 @Controller("api/messages")
 @UseGuards(SessionGuard)
+// Meta's Cloud API hard cap is 80 msg/min per number; 60/min keeps headroom
+// AND bounds the cost of a runaway browser script firing the send endpoint.
+// Counts text+media+template+forward against one bucket (a user shouldn't be
+// able to multiply quota by hitting different routes).
+@RateLimit({ perMinute: 60 })
 export class MessagesController {
   constructor(private readonly messages: MessagesService) {}
 

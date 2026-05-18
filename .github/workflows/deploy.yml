@@ -79,6 +79,7 @@ jobs:
         env:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
@@ -92,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for v in ENCRYPTION_KEY BETTER_AUTH_SECRET POSTGRES_PASSWORD UPLOADTHING_TOKEN \
+          for v in ENCRYPTION_KEY BETTER_AUTH_SECRET INTERNAL_BUS_SECRET POSTGRES_PASSWORD UPLOADTHING_TOKEN \
                    APP_DOMAIN ADMIN_EMAIL HEALTHCHECK_URL DOCKER_USERNAME DOCKER_PASSWORD \
                    VPS_HOST VPS_USER VPS_SSH_KEY; do
             [ -z "${!v:-}" ] && missing+=("$v")
@@ -278,9 +279,11 @@ jobs:
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
         run: |
           set -euo pipefail
+          : "${INTERNAL_BUS_SECRET:?INTERNAL_BUS_SECRET secret is required — generate with: openssl rand -base64 32}"
           mkdir -p _deploy
           cat > _deploy/.env <<EOF
           DOCKER_USERNAME=${DOCKER_USERNAME}
@@ -294,9 +297,21 @@ jobs:
           APP_PUBLIC_URL=https://${APP_DOMAIN}
           BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
           ENCRYPTION_KEY=${ENCRYPTION_KEY}
+          # Shared secret for the cross-process cache-revalidate bridge —
+          # NestJS POSTs to /api/internal/revalidate on Next.js when a
+          # catalog mutates; the endpoint requires this exact value.
+          # validateEnv refuses to boot prod without it.
+          INTERNAL_BUS_SECRET=${INTERNAL_BUS_SECRET}
           AUTOMATION_WORKER_CONCURRENCY=5
           UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
           META_GRAPH_VERSION=v25.0
+          # NEXT_PUBLIC_API_URL is intentionally LEFT EMPTY. In prod Caddy
+          # fronts both processes on a single origin (https://${APP_DOMAIN})
+          # so the browser's Socket.io client falls back to window.location.
+          # Setting it to the public URL would also work, but the empty path
+          # avoids baking a build-time URL into the bundle and re-deploying
+          # when the domain changes. The dev override is in .env, not here.
+          NEXT_PUBLIC_API_URL=
           EOF
           sed -e "s|__DOMAIN__|${APP_DOMAIN}|g" \
               -e "s|__ADMIN_EMAIL__|${ADMIN_EMAIL}|g" \

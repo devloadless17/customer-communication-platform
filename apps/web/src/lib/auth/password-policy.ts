@@ -1,9 +1,8 @@
 /**
- * Client-safe password policy constant.
- *
- * Lives in its own file (no `server-only` import) so that registration /
- * invite-accept / change-password client forms can render the same minLength
- * the server enforces. `password.ts` re-exports this so server code keeps
- * its single import path.
+ * Re-export of the cross-process password policy. Lives here as a tiny
+ * shim so client forms keep importing `@/lib/auth/password-policy` (no
+ * `server-only` chain → safe in `"use client"` components) while the actual
+ * source of truth is `@ccp/shared/auth/password-policy`, also consumed by
+ * the NestJS side.
  */
-export const MIN_PASSWORD_LENGTH = 6;
+export { MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from "@ccp/shared/auth/password-policy";

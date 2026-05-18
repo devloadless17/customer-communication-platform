@@ -13,9 +13,17 @@ import {
   closeWorkflowQueue,
 } from "@/lib/workflows/queue";
 import {
+  startContactDriftSweeper,
+  stopContactDriftSweeper,
+} from "@/lib/sweepers/contact-last-inbound-drift";
+import {
   startInboundMediaSweeper,
   stopInboundMediaSweeper,
 } from "@/lib/sweepers/inbound-media";
+import {
+  startWorkflowWaitingSweeper,
+  stopWorkflowWaitingSweeper,
+} from "@/lib/sweepers/workflow-waiting";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -45,6 +53,8 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkflowWorkerService.name);
   private started = false;
   private mediaSweeperStarted = false;
+  private waitingSweeperStarted = false;
+  private contactDriftSweeperStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -66,9 +76,40 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start inbound-media sweeper", err);
     }
+    try {
+      // Recovers `waiting` workflow runs whose BullMQ resume job is missing
+      // (process death between the DB update and the enqueue, or a Redis
+      // restart without persistence). Re-enqueues at the next tick; idempotent
+      // because enqueueWorkflowResume uses runId as jobId.
+      startWorkflowWaitingSweeper();
+      this.waitingSweeperStarted = true;
+      this.logger.log("Workflow waiting-runs sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start workflow-waiting sweeper", err);
+    }
+    try {
+      // Daily reconciler for the `Contact.lastInboundAt` denorm. Self-
+      // disables after a week of zero drift so a healthy system pays
+      // nothing for the scan.
+      startContactDriftSweeper();
+      this.contactDriftSweeperStarted = true;
+      this.logger.log("Contact lastInboundAt drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start contact-drift sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.contactDriftSweeperStarted) stopContactDriftSweeper();
+    } catch (err) {
+      this.logger.warn(`stopContactDriftSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.waitingSweeperStarted) stopWorkflowWaitingSweeper();
+    } catch (err) {
+      this.logger.warn(`stopWorkflowWaitingSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
     try {
       if (this.mediaSweeperStarted) stopInboundMediaSweeper();
     } catch (err) {

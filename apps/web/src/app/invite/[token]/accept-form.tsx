@@ -1,13 +1,17 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useState } from "react";
 import { useFormStatus } from "react-dom";
-import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
+import {
+  AuthRedirectFallback,
+  useAuthRedirect,
+} from "@/hooks/use-auth-redirect";
+import { cn } from "@ccp/shared/utils";
 
 import { acceptInviteAction, type AcceptState } from "./actions";
 
@@ -20,16 +24,18 @@ export function AcceptForm({
   token: string;
   email: string;
 }) {
-  const [state, action] = useActionState(acceptInviteAction, INITIAL);
-  const router = useRouter();
+  const { state, action, isRedirecting } = useAuthRedirect(
+    acceptInviteAction,
+    INITIAL,
+  );
 
-  // Navigate after the action lands. Same pattern as /login and /register —
-  // avoids the Better Auth nextCookies + redirect() race in useActionState.
-  useEffect(() => {
-    if (state.redirectTo) {
-      router.replace(state.redirectTo);
-    }
-  }, [state.redirectTo, router]);
+  // Fallback handles two flashes during navigation: (a) React resetting
+  // uncontrolled inputs the instant the action resolves, (b) the auto-
+  // revalidation of this route swapping in the "Already accepted" Shell
+  // before `router.replace("/inbox")` lands. Spinner masks both.
+  if (isRedirecting) {
+    return <AuthRedirectFallback minHeightClass="min-h-65" />;
+  }
 
   return (
     <form action={action} className="flex flex-col gap-4">
@@ -47,23 +53,33 @@ export function AcceptForm({
         <label htmlFor="name" className="text-xs font-medium text-foreground">
           Your name
         </label>
-        <Input id="name" name="name" required autoFocus placeholder="Ada Lovelace" />
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="password" className="text-xs font-medium text-foreground">
-          Choose a password
-        </label>
         <Input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
+          id="name"
+          name="name"
           required
-          minLength={MIN_PASSWORD_LENGTH}
-          placeholder={`${MIN_PASSWORD_LENGTH}+ characters`}
+          autoFocus
+          placeholder="Ada Lovelace"
+          defaultValue={state.values?.name ?? ""}
         />
       </div>
+
+      <PasswordField
+        id="password"
+        name="password"
+        label="Choose a password"
+        autoComplete="new-password"
+        placeholder={`${MIN_PASSWORD_LENGTH}+ characters`}
+        minLength={MIN_PASSWORD_LENGTH}
+      />
+
+      <PasswordField
+        id="confirmPassword"
+        name="confirmPassword"
+        label="Confirm password"
+        autoComplete="new-password"
+        placeholder="Re-enter your password"
+        minLength={MIN_PASSWORD_LENGTH}
+      />
 
       {state.error && (
         <div
@@ -76,6 +92,53 @@ export function AcceptForm({
 
       <SubmitButton />
     </form>
+  );
+}
+
+function PasswordField({
+  id,
+  name,
+  label,
+  autoComplete,
+  placeholder,
+  minLength,
+}: {
+  id: string;
+  name: string;
+  label: string;
+  autoComplete: string;
+  placeholder: string;
+  minLength: number;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-xs font-medium text-foreground">
+        {label}
+      </label>
+      <div className="relative">
+        <Input
+          id={id}
+          name={name}
+          type={visible ? "text" : "password"}
+          autoComplete={autoComplete}
+          required
+          minLength={minLength}
+          placeholder={placeholder}
+          className={cn("pr-10")}
+        />
+        <button
+          type="button"
+          aria-label={visible ? "Hide password" : "Show password"}
+          aria-pressed={visible}
+          onClick={() => setVisible((v) => !v)}
+          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-r-md"
+          tabIndex={-1}
+        >
+          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -9,6 +9,8 @@ import {
 import { canManageStages } from "@ccp/shared/auth/permissions";
 import { TAG_COLORS, type ContactStage, type Role, type TagColor } from "@ccp/shared/types";
 
+import { invalidateDefaultStageCache } from "@/lib/queries/stages";
+
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import type {
@@ -128,6 +130,10 @@ export class StagesService {
         }
         return tx.contactStage.update({ where: { id }, data: input });
       });
+      // The default-stage memo in lib/queries/stages.ts holds a 5-min copy
+      // for the webhook hot path; bust on every stage mutation so a flipped
+      // default propagates immediately to inbound-message ingest.
+      if (input.isDefault !== undefined) invalidateDefaultStageCache(teamId);
       await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
       return toDto(updated);
     } catch (err) {
@@ -174,6 +180,9 @@ export class StagesService {
     }
 
     await this.db.contactStage.delete({ where: { id } });
+    // Bust the default-stage memo so a cached pointer to the just-deleted
+    // stage can't hand a deleted id to the webhook hot path.
+    if (stage.isDefault) invalidateDefaultStageCache(teamId);
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "stages" });
   }
 

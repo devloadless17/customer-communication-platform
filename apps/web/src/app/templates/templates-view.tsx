@@ -166,7 +166,7 @@ export function TemplatesView({
           </div>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
             Connect your number in{" "}
-            <Link href="/settings/whatsapp" className="text-primary hover:underline">
+            <Link href="/settings/whatsapp?expand=advanced" className="text-primary hover:underline">
               Settings → WhatsApp
             </Link>{" "}
             to load and create templates.
@@ -181,7 +181,7 @@ export function TemplatesView({
           </div>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
             Templates live at the WABA level. Add your ID in{" "}
-            <Link href="/settings/whatsapp" className="text-primary hover:underline">
+            <Link href="/settings/whatsapp?expand=advanced" className="text-primary hover:underline">
               Settings → WhatsApp
             </Link>
             .

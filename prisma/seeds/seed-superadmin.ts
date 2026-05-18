@@ -1,6 +1,6 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { Pool } from "pg";
 
 const EMAIL = "ali@loadless.ai";
@@ -26,12 +26,10 @@ async function main() {
       role: "superAdmin",
       name: NAME,
       email: EMAIL,
-      passwordHash,
     },
     update: {
       role: "superAdmin",
       name: NAME,
-      passwordHash,
       deactivatedAt: null,
     },
   });

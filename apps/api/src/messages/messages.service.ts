@@ -116,7 +116,17 @@ export class MessagesService {
 
     let replyToMessageId: string | null = null;
     let replyToExternalId: string | undefined;
-    if (replyToRow) {
+    if (replyToMessageIdRaw) {
+      // The agent's UI built a reply pill from a message they could see —
+      // if the lookup came back empty, the row is gone (deleted, wrong
+      // conversation, cross-team leak). Fail loudly instead of stripping
+      // the quote silently and shipping a context-less reply to WhatsApp.
+      if (!replyToRow) {
+        throw new BadRequestException({
+          error: "reply_target_not_found",
+          detail: "The message you're replying to no longer exists in this conversation.",
+        });
+      }
       replyToMessageId = replyToRow.id;
       // Don't forward a placeholder externalId to Meta (would 400 it). The
       // reply snapshot still resolves locally; we just don't quote on the
@@ -306,6 +316,14 @@ export class MessagesService {
       throw new PayloadTooLargeException({
         error: `file too large for ${kind}: ${file.size} bytes > ${cap}`,
         cap,
+      });
+    }
+    // Stickers: Meta only accepts `image/webp`. Reject other types up front
+    // with a clear error instead of letting Meta reject with opaque code 100.
+    if (kind === "sticker" && mimeType.toLowerCase() !== "image/webp") {
+      throw new BadRequestException({
+        error: "invalid_sticker_mime",
+        detail: `WhatsApp stickers must be image/webp (got ${mimeType}).`,
       });
     }
 
@@ -996,9 +1014,10 @@ export class MessagesService {
           if (!(err instanceof MetaSendError)) {
             this.logger.error("[forward] send failed", err);
           }
-          // Closed window fails every remaining send for this contact —
-          // don't hammer Meta with guaranteed-fail requests.
-          if (isWindowClosed(err)) break;
+          // Any error that fails every remaining send identically (24h
+          // window closed / rate limited / auth expired) → bail the
+          // per-contact loop so the agent sees the cause once.
+          if (isBlockingSendError(err)) break;
         }
       }
 
@@ -1066,8 +1085,21 @@ function describeSendError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function isWindowClosed(err: unknown): boolean {
-  return normalizeMetaSendError(err)?.code === "outside_24h_window";
+/**
+ * Errors that fail every subsequent send IDENTICALLY for the same contact:
+ * the 24h-window is closed, Meta's rate-limit gate has tripped, or the team's
+ * access token has expired. Hammering Meta with more requests just turns the
+ * forward into a wall of identical failures (and may burn quality rating).
+ * Bail on the per-contact loop so the agent sees the real cause once instead
+ * of N times.
+ */
+function isBlockingSendError(err: unknown): boolean {
+  const code = normalizeMetaSendError(err)?.code;
+  return (
+    code === "outside_24h_window" ||
+    code === "rate_limited" ||
+    code === "auth_expired"
+  );
 }
 
 function captionable(kind: MediaKind): boolean {

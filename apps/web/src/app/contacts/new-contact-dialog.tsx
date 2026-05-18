@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+
+import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Loader2, Trash2, X } from "lucide-react";
 
 import {
@@ -68,15 +70,15 @@ export function NewContactDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const phoneRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Body-scroll-lock + focus-trap + Escape — shared with every other
+  // modal in the app. The dialog content root below carries `dialogRef`.
+  useModalOverlay(dialogRef, true, onClose);
 
   useEffect(() => {
     phoneRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   async function submit() {
     setError(null);
@@ -151,7 +153,10 @@ export function NewContactDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-lg">
+      <div
+        ref={dialogRef}
+        className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-lg"
+      >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 id="new-contact-title" className="text-base font-semibold">
             New contact

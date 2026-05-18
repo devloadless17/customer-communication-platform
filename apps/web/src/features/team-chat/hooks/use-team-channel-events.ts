@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 
 /**
@@ -27,7 +29,41 @@ export interface TeamChannelEventsState {
   typingUserIds: string[];
   hasMoreOlder: boolean;
   loadingOlder: boolean;
-  loadOlder: () => Promise<number>;
+  /**
+   * Fetch + prepend the next older page. The optional `commit` callback lets
+   * useChatScroll wrap the state update in `flushSync` between a scrollHeight
+   * read and a scrollTop write, so the prepend doesn't visually jump. Default
+   * is `flushSync` directly — manual "Load older" callers don't care about
+   * the anchor and can pass through.
+   */
+  loadOlder: (commit?: (run: () => void) => void) => Promise<number>;
+  /**
+   * "Anchored" mode — the loaded slice doesn't include the live tail. True
+   * after `loadAround()` until the user paginates forward to live (or calls
+   * `goToLive()`). When true, socket-fanout new-message events DO NOT append
+   * — they bump `pendingLiveCount` so the UI can offer a Jump-to-Live pill.
+   */
+  anchored: boolean;
+  /** Whether more newer messages exist between `messages[last]` and live. */
+  hasMoreNewer: boolean;
+  loadingNewer: boolean;
+  /** Paginate forward in time. Only meaningful while `anchored`. */
+  loadNewer: () => Promise<number>;
+  /**
+   * Load a context window around `messageId` — used by search jump-to when
+   * the target isn't in the current slice. Replaces the loaded messages and
+   * enters anchored mode. Returns the messageId iff it was found; the caller
+   * scrolls to it after this resolves.
+   */
+  loadAround: (messageId: string) => Promise<string | null>;
+  /**
+   * Drop anchored mode and refetch the live tail. Clears pendingLiveCount.
+   * Returns the new message list length so the caller can sequence a
+   * scroll-to-bottom after.
+   */
+  goToLive: () => Promise<void>;
+  /** Count of new messages arrived via socket while anchored. */
+  pendingLiveCount: number;
   addOptimistic: (m: TeamChannelMessageDto) => void;
   markOptimisticFailed: (clientTempId: string) => void;
   removeOptimistic: (clientTempId: string) => void;
@@ -37,10 +73,19 @@ export function useTeamChannelEvents(
   channelId: string,
   initialMessages: TeamChannelMessageDto[],
   initialNextCursor: string | null,
+  // Used to skip markRead when the incoming message is the current
+  // user's own send (their optimistic confirm or a multi-tab echo).
+  // Optional only to keep older call sites compiling during a refactor.
+  currentUserId?: string,
 ): TeamChannelEventsState {
   const [messages, setMessages] = useState<TeamChannelMessageDto[]>(initialMessages);
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Anchored-mode state. `null` newerCursor means "this slice ends at live"
+  // — the default for a fresh channel mount, since SSR served the newest page.
+  const [newerCursor, setNewerCursor] = useState<string | null>(null);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  const [pendingLiveCount, setPendingLiveCount] = useState(0);
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
 
   // Sync from server props when the channel changes.
@@ -49,6 +94,8 @@ export function useTeamChannelEvents(
     setTrackedId(channelId);
     setMessages(initialMessages);
     setOlderCursor(initialNextCursor);
+    setNewerCursor(null);
+    setPendingLiveCount(0);
     setTypingUserIds([]);
   }
 
@@ -57,35 +104,38 @@ export function useTeamChannelEvents(
     messagesRef.current = messages;
   });
 
+  // Per-(message,emoji) last applied version stamp — see `onReaction` below.
+  // Stored on a ref so the handler closes over a stable mutable Map across
+  // re-renders, and (crucially) keeps state across socket reconnects.
+  const lastReactionVersionsRef = useRef(new Map<string, number>());
+
   const cursorRef = useRef(olderCursor);
   useEffect(() => {
     cursorRef.current = olderCursor;
   }, [olderCursor]);
 
+  // Anchored-mode flag read by the socket onMessage handler — when true, new
+  // tail messages are queued as `pendingLiveCount` instead of appended,
+  // because the user is reading an off-tail slice. Ref so the long-lived
+  // socket effect doesn't need to re-bind on every state change.
+  const anchoredRef = useRef(newerCursor !== null);
+  useEffect(() => {
+    anchoredRef.current = newerCursor !== null;
+  }, [newerCursor]);
+
   const backfillNeededRef = useRef(false);
 
-  // Mark-read: throttled. Stamps the receipt to "now" so the sidebar
-  // badge clears for this user across every tab.
-  const inFlightRead = useRef(false);
-  const queuedRead = useRef(false);
-  const markRead = useCallback(async () => {
-    if (inFlightRead.current) {
-      queuedRead.current = true;
-      return;
-    }
-    inFlightRead.current = true;
+  // Mark-read: throttled via `useCoalescedAsync` (shared with the inbox
+  // hook so the in-flight + queued pattern stays consistent). Stamps the
+  // receipt to "now" so the sidebar badge clears for this user across
+  // every tab. A burst of inbound channel messages fires one POST.
+  const markRead = useCoalescedAsync(async () => {
     try {
       await fetchWithSessionGuard(`/api/team/channels/${channelId}/read`, {
         method: "POST",
       });
     } catch {
       // Silent — reconciles on next call.
-    } finally {
-      inFlightRead.current = false;
-      if (queuedRead.current) {
-        queuedRead.current = false;
-        void markRead();
-      }
     }
   }, [channelId]);
 
@@ -95,18 +145,65 @@ export function useTeamChannelEvents(
   }, [markRead]);
 
   const inFlightOlder = useRef(false);
-  const loadOlder = useCallback(async (): Promise<number> => {
-    const cursor = cursorRef.current;
-    if (!cursor || inFlightOlder.current) return 0;
-    inFlightOlder.current = true;
-    setLoadingOlder(true);
+  const loadOlder = useCallback(
+    async (commit: (run: () => void) => void = flushSync): Promise<number> => {
+      const cursor = cursorRef.current;
+      if (!cursor || inFlightOlder.current) return 0;
+      inFlightOlder.current = true;
+      setLoadingOlder(true);
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/team/channels/${channelId}/messages?before=${encodeURIComponent(cursor)}`,
+        );
+        if (!res.ok) return 0;
+        const page = (await res.json()) as {
+          items: TeamChannelMessageDto[];
+          nextCursor: string | null;
+        };
+        let added = 0;
+        // `commit` runs `run` synchronously so by the time it returns the DOM
+        // reflects the prepend — useChatScroll uses this to pin scroll
+        // position between scrollHeight read and scrollTop write.
+        commit(() => {
+          setMessages((prev) => {
+            const have = new Set(prev.map((m) => m.id));
+            const fresh = page.items.filter((m) => !have.has(m.id));
+            added = fresh.length;
+            if (added === 0) return prev;
+            return [...fresh, ...prev];
+          });
+          setOlderCursor(page.nextCursor);
+        });
+        return added;
+      } finally {
+        inFlightOlder.current = false;
+        setLoadingOlder(false);
+      }
+    },
+    [channelId],
+  );
+
+  /**
+   * Paginate forward in anchored mode — appends the next page after the
+   * loaded tail. Triggered by the bottom-sentinel observer in channel-thread.
+   * When the response has no `nextCursor`, we've caught up to live: we drop
+   * out of anchored mode and the pendingLiveCount queue resumes appending
+   * directly via the onMessage socket handler.
+   */
+  const inFlightNewer = useRef(false);
+  const loadNewer = useCallback(async (): Promise<number> => {
+    if (!newerCursor || inFlightNewer.current) return 0;
+    inFlightNewer.current = true;
+    setLoadingNewer(true);
     try {
       const res = await fetchWithSessionGuard(
-        `/api/team/channels/${channelId}/messages?before=${encodeURIComponent(cursor)}`,
+        `/api/team/channels/${channelId}/messages?after=${encodeURIComponent(newerCursor)}`,
       );
       if (!res.ok) return 0;
       const page = (await res.json()) as {
         items: TeamChannelMessageDto[];
+        // Server returns `nextCursor: string | null` — null means end-of-tail.
+        // Was previously optional during a pre-cursor server era; now mandatory.
         nextCursor: string | null;
       };
       let added = 0;
@@ -115,14 +212,83 @@ export function useTeamChannelEvents(
         const fresh = page.items.filter((m) => !have.has(m.id));
         added = fresh.length;
         if (added === 0) return prev;
-        return [...fresh, ...prev];
+        return [...prev, ...fresh];
       });
-      setOlderCursor(page.nextCursor);
+      setNewerCursor(page.nextCursor);
+      // Caught up to live — drain any queued socket events the user missed
+      // while anchored. The next `onMessage` event will append directly.
+      if (page.nextCursor === null) setPendingLiveCount(0);
       return added;
     } finally {
-      inFlightOlder.current = false;
-      setLoadingOlder(false);
+      inFlightNewer.current = false;
+      setLoadingNewer(false);
     }
+  }, [channelId, newerCursor]);
+
+  /**
+   * Load a context window around `messageId` — replaces the loaded slice and
+   * enters anchored mode. Returns the messageId iff the anchor was found
+   * (caller scrolls to it after).
+   */
+  const inFlightAround = useRef(false);
+  const loadAround = useCallback(
+    async (messageId: string): Promise<string | null> => {
+      if (inFlightAround.current) return null;
+      inFlightAround.current = true;
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/team/channels/${channelId}/messages/around?messageId=${encodeURIComponent(messageId)}`,
+        );
+        if (!res.ok) return null;
+        const page = (await res.json()) as {
+          items: TeamChannelMessageDto[];
+          hasMoreBefore: boolean;
+          hasMoreAfter: boolean;
+          beforeCursor: string | null;
+          afterCursor: string | null;
+        };
+        flushSync(() => {
+          setMessages(page.items);
+          setOlderCursor(page.beforeCursor);
+          setNewerCursor(page.afterCursor);
+          // Queue resets — we're showing a deliberate slice, not live.
+          // Anything the user "missed" is past `afterCursor` and will be
+          // re-counted via socket events from now on.
+          setPendingLiveCount(0);
+        });
+        return messageId;
+      } finally {
+        inFlightAround.current = false;
+      }
+    },
+    [channelId],
+  );
+
+  /**
+   * Drop anchored mode: refetch the most-recent page from the server, replace
+   * the loaded slice, and clear the pendingLiveCount queue. Used by the
+   * "Jump to live" pill at the bottom of an anchored view.
+   */
+  const goToLive = useCallback(async (): Promise<void> => {
+    const res = await fetchWithSessionGuard(`/api/team/channels/${channelId}/messages`);
+    if (!res.ok) return;
+    const page = (await res.json()) as {
+      items: TeamChannelMessageDto[];
+      nextCursor: string | null;
+    };
+    // Flip the anchored ref SYNCHRONOUSLY before the React state update.
+    // Refs update immediately; the effect that syncs `anchoredRef.current`
+    // from `newerCursor` runs AFTER commit, so if a tail message arrives in
+    // the microsecond gap between `flushSync(setNewerCursor(null))` and
+    // the effect firing, the socket handler reads `anchoredRef === true`
+    // and queues the message as pending-live — leaving an invisible gap.
+    anchoredRef.current = false;
+    flushSync(() => {
+      setMessages(page.items);
+      setOlderCursor(page.nextCursor);
+      setNewerCursor(null);
+      setPendingLiveCount(0);
+    });
   }, [channelId]);
 
   useEffect(() => {
@@ -181,10 +347,24 @@ export function useTeamChannelEvents(
       if (payload.channelId !== channelId) return;
       // Thread replies don't surface in the main channel feed.
       if (payload.message.threadRootId !== null) return;
+
+      const tempId = payload.clientTempId;
+      // Anchored mode (search-jump active): the user is reading an off-tail
+      // slice. A brand-new tail message arrived after their afterCursor and
+      // must NOT be appended — the slice would visually mix recent + old
+      // confusingly. Instead, bump pendingLiveCount so the Jump-to-Live pill
+      // can offer one-click catch-up. Exception: the user's OWN optimistic
+      // swap (matching clientTempId) must always reconcile in-place so the
+      // bubble stops showing as pending — that's a confirmation of THEIR
+      // send, not a brand-new tail message from someone else.
+      if (anchoredRef.current && !tempId) {
+        setPendingLiveCount((n) => n + 1);
+        return;
+      }
+
       setMessages((prev) => {
         // Dedupe.
         if (prev.some((m) => m.id === payload.message.id)) return prev;
-        const tempId = payload.clientTempId;
         const next = tempId
           ? prev.map((m) =>
               m.clientTempId === tempId && m.pending
@@ -197,9 +377,15 @@ export function useTeamChannelEvents(
           : [...next, payload.message];
         return reconciled;
       });
-      // The user is looking at this channel — mark it read so other tabs +
-      // the sidebar badge stay in lockstep.
-      void markRead();
+      // Skip markRead for the user's OWN send (their optimistic + the
+      // server echo). Without the gate, one user posting N messages
+      // fires N /read POSTs from their own tab — a small storm that
+      // pegs the api log under any chatty session.
+      if (payload.message.authorUserId !== currentUserId) {
+        // The user is looking at this channel — mark it read so other
+        // tabs + the sidebar badge stay in lockstep.
+        void markRead();
+      }
     };
 
     // All five handlers below follow the same shape: findIndex first, bail
@@ -239,10 +425,18 @@ export function useTeamChannelEvents(
       });
     };
 
+    // Per-(message,emoji) last-applied version. Discards events whose
+    // `version` is older than what we already applied so two toggles
+    // landing out-of-order can't roll the snapshot back.
+    const reactionVersionsRef = lastReactionVersionsRef.current;
     const onReaction: Parameters<typeof socket.on<"team:channel:reaction:changed">>[1] = (
       payload,
     ) => {
       if (payload.channelId !== channelId) return;
+      const key = `${payload.messageId}::${payload.emoji}`;
+      const lastVersion = reactionVersionsRef.get(key) ?? 0;
+      if (payload.version <= lastVersion) return;
+      reactionVersionsRef.set(key, payload.version);
       setMessages((prev) => {
         const idx = prev.findIndex((m) => m.id === payload.messageId);
         if (idx === -1) return prev;
@@ -352,6 +546,13 @@ export function useTeamChannelEvents(
     hasMoreOlder: olderCursor !== null,
     loadingOlder,
     loadOlder,
+    anchored: newerCursor !== null,
+    hasMoreNewer: newerCursor !== null,
+    loadingNewer,
+    loadNewer,
+    loadAround,
+    goToLive,
+    pendingLiveCount,
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,

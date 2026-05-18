@@ -100,13 +100,25 @@ export class MetaWebhookController {
     const events = getMetaProvider().parseWebhook(payload);
     if (events.length === 0) return { ok: true, ingested: 0 };
 
-    // Two-phase media flow:
-    //   1. Sync ingest → message row exists; `message:new` fires with
-    //      mediaPending:true ~50ms after receipt.
-    //   2. Async download + emit `message:media:ready` after we return 200.
-    //
-    // Meta's signed media URL has ~5 min window starting on the metadata
-    // GET — deferring the download until after the 200 is well inside.
+    // Hybrid in-band / async media flow. Race the binary download against
+    // a tight budget:
+    //   - If the download finishes inside the budget, ingest creates the row
+    //     with media columns populated → single `message:new` emit carries
+    //     the full image. No shimmer.
+    //   - If the budget expires first, ingest commits a `mediaPending` row
+    //     (~100ms after webhook receipt) so the bubble appears instantly
+    //     with a shimmer + caption. The still-running download promise then
+    //     updates the row + emits `message:media:ready` when bytes land,
+    //     swapping the shimmer for the image.
+    // Failures in either path delete `evt.media` so the row is created (or
+    // patched) as text-only with the caption — visible, not stuck.
+    const IN_BAND_BUDGET_MS = 500;
+    const downloadPromise = this.downloadInboundMedia(teamId, events);
+    const downloadDone = await Promise.race([
+      downloadPromise.then(() => true as const),
+      new Promise<false>((r) => setTimeout(() => r(false), IN_BAND_BUDGET_MS)),
+    ]);
+
     try {
       await ingestEvents(teamId, "meta_cloud", events);
     } catch (err) {
@@ -114,20 +126,143 @@ export class MetaWebhookController {
       throw new HttpException("ingest failed", 500);
     }
 
-    void this.downloadInboundMedia(teamId, events).catch((err) =>
-      this.logger.error(`[${teamId}] background media download failed`, err),
-    );
+    if (!downloadDone) {
+      // Budget expired — let the in-flight download finish in background,
+      // then patch the row + emit. Detached because the response should
+      // return now (~500-700ms total) so the agent's UI updates immediately.
+      void this.completePendingMedia(teamId, events, downloadPromise).catch(
+        (err) =>
+          this.logger.error(`[${teamId}] background media completion failed`, err),
+      );
+    }
 
     return { ok: true, ingested: events.length };
   }
 
   /**
-   * Phase 2 of the inbound media flow — runs detached from the response.
-   * Identical logic to the pre-migration route's `downloadInboundMedia`.
-   * Single VPS + custom Node server = detached promises continue running
-   * after the response (no serverless cold-cutoff). Failures clear the
-   * media columns and emit a `message:media:ready` with no media payload
-   * so the placeholder drops cleanly.
+   * Wait for the in-flight download to finish, then bring every still-
+   * pending row up to date — set its media columns + emit
+   * `message:media:ready`, or clear the placeholder if the download failed.
+   * Only fires when the in-band budget expired; the happy-path race-winner
+   * case never calls this.
+   */
+  private async completePendingMedia(
+    teamId: string,
+    events: NormalizedEvent[],
+    downloadPromise: Promise<void>,
+  ): Promise<void> {
+    await downloadPromise;
+    const candidates = events
+      .filter(
+        (e): e is Extract<NormalizedEvent, { kind: "message" }> =>
+          e.kind === "message",
+      )
+      .filter((evt) => evt.media || this.hadMedia(evt));
+    if (candidates.length === 0) return;
+
+    // Bulk-load every candidate row in a single round-trip instead of one
+    // findFirst per event — at a 4-image batch this saves ~3 DB RTTs and
+    // turns the per-event loop into pure CPU + a single later updateMany.
+    const externalIds = candidates.map((e) => e.externalId);
+    const rows = await this.db.message.findMany({
+      where: { teamId, externalId: { in: externalIds } },
+      select: {
+        id: true,
+        externalId: true,
+        conversationId: true,
+        mediaUrl: true,
+        mediaKind: true,
+      },
+    });
+    const rowByExtId = new Map(rows.map((r) => [r.externalId, r]));
+
+    for (const evt of candidates) {
+      const row = rowByExtId.get(evt.externalId);
+      if (!row) continue;
+
+      if (evt.media?.storageKey && evt.media.storageUrl) {
+        // Download succeeded after the race lost. Patch + emit. CAS on
+        // `mediaUrl: null` so a duplicate completion (e.g. the race winner
+        // already wrote) becomes a no-op without an orphan.
+        if (row.mediaUrl) continue;
+        const updated = await this.db.message.updateMany({
+          where: { id: row.id, mediaUrl: null },
+          data: {
+            mediaKey: evt.media.storageKey,
+            mediaUrl: evt.media.storageUrl,
+            mediaSizeBytes: evt.media.sizeBytes ?? null,
+            mediaMimeType: evt.media.mimeType,
+          },
+        });
+        if (updated.count === 0) continue;
+        await publish({
+          type: "message.media_ready",
+          teamId,
+          conversationId: row.conversationId,
+          messageId: row.id,
+          media: {
+            kind: evt.media.kind,
+            url: `/api/media/${row.id}`,
+            mimeType: evt.media.mimeType,
+            sizeBytes: evt.media.sizeBytes ?? 0,
+            ...(evt.body ? { caption: evt.body } : {}),
+            ...(evt.media.filename ? { filename: evt.media.filename } : {}),
+            ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+          },
+        });
+      } else if (row.mediaKind && !row.mediaUrl) {
+        // Download failed and the row was committed in pending state. Strip
+        // the media columns + emit empty `message:media:ready` so the
+        // shimmer collapses to a text-only bubble (caption preserved).
+        await this.db.message.update({
+          where: { id: row.id },
+          data: {
+            mediaKind: null,
+            mediaMimeType: null,
+            mediaCaption: null,
+            mediaFilename: null,
+            mediaDurationMs: null,
+            mediaKey: null,
+            mediaUrl: null,
+            mediaSizeBytes: null,
+          },
+        });
+        await publish({
+          type: "message.media_ready",
+          teamId,
+          conversationId: row.conversationId,
+          messageId: row.id,
+        });
+      }
+    }
+  }
+
+  /**
+   * Did the parser originally attach media to this event? Used to tell
+   * apart "never had media" (nothing to patch) from "had media but the
+   * download path deleted it on failure" (need to clear the placeholder).
+   */
+  private hadMedia(
+    evt: Extract<NormalizedEvent, { kind: "message" }>,
+  ): boolean {
+    // `rawPayload` is Meta's verbatim webhook body. `messages[0].type` is
+    // one of "text" | "image" | "video" | "audio" | "document" | "sticker"
+    // when this event came from Meta. Any non-text type means the parser
+    // originally produced an evt.media that may have since been deleted.
+    const m = (evt.rawPayload as {
+      entry?: { changes?: { value?: { messages?: { id?: string; type?: string }[] } }[] }[];
+    }).entry?.[0]?.changes?.[0]?.value?.messages;
+    const meta = m?.find((x) => x.id === evt.externalId);
+    return !!meta && meta.type !== "text";
+  }
+
+  /**
+   * Download every inbound media binary, mutate the event's `media` so
+   * `storageKey` / `storageUrl` / `sizeBytes` are populated, and let
+   * `ingestEvents` create the row with media columns already set. On any
+   * failure (no send config, size cap, fetch error, upload error) we
+   * `delete evt.media` so the row is created as text-only with the caption
+   * — visible failure, not a stuck shimmer.
    */
   private async downloadInboundMedia(
     teamId: string,
@@ -139,15 +274,32 @@ export class MetaWebhookController {
     );
     if (mediaEvents.length === 0) return;
 
+    // Idempotency: a Meta retry of an already-ingested batch shouldn't
+    // re-download and re-upload. If the row already exists with a mediaUrl
+    // we copy it onto the event so ingest skips the create via P2002, and
+    // we save the Meta fetch + blob upload entirely.
     const externalIds = mediaEvents.map((e) => e.externalId);
-    const rows = await this.db.message.findMany({
+    const existing = await this.db.message.findMany({
       where: { teamId, externalId: { in: externalIds } },
-      select: { id: true, externalId: true, conversationId: true, mediaUrl: true },
+      select: {
+        externalId: true,
+        mediaKey: true,
+        mediaUrl: true,
+        mediaSizeBytes: true,
+        mediaMimeType: true,
+      },
     });
-    const rowByExtId = new Map(rows.map((r) => [r.externalId, r]));
-    const todo = mediaEvents.filter((e) => {
-      const row = rowByExtId.get(e.externalId);
-      return row && !row.mediaUrl;
+    const existingByExtId = new Map(existing.map((r) => [r.externalId, r]));
+    const todo = mediaEvents.filter((evt) => {
+      const row = existingByExtId.get(evt.externalId);
+      if (row?.mediaUrl && evt.media) {
+        evt.media.storageKey = row.mediaKey ?? undefined;
+        evt.media.storageUrl = row.mediaUrl;
+        if (row.mediaSizeBytes != null) evt.media.sizeBytes = row.mediaSizeBytes;
+        if (row.mediaMimeType) evt.media.mimeType = row.mediaMimeType;
+        return false;
+      }
+      return true;
     });
     if (todo.length === 0) return;
 
@@ -156,13 +308,9 @@ export class MetaWebhookController {
       sendConfig = await getMetaSendConfig(teamId);
     } catch (err) {
       this.logger.warn(`[${teamId}] cannot download media — send config missing`, err);
-      await Promise.all(
-        todo.map((e) => {
-          const row = rowByExtId.get(e.externalId);
-          if (!row) return Promise.resolve();
-          return this.clearMediaOnRow(teamId, row.id, row.conversationId);
-        }),
-      );
+      // No way to fetch any of them — drop media so each row is created as
+      // text-only with the caption preserved.
+      for (const evt of todo) delete evt.media;
       return;
     }
 
@@ -171,119 +319,85 @@ export class MetaWebhookController {
       select: { name: true },
     });
 
-    // Same concurrency cap as pre-migration — 4 in-flight covers network
-    // latency without piling RAM (each fetch buffers the binary).
+    // 4 in-flight covers network latency without piling RAM (each fetch
+    // buffers the binary). For a 4-image batch this stays under ~3s end
+    // to end even on a cold Meta connection — well inside Meta's retry
+    // window.
     await runWithConcurrency(todo, 4, async (evt) => {
       if (!evt.media) return;
-      const row = rowByExtId.get(evt.externalId);
-      if (!row) return;
       try {
-        const fetched = await getMetaProvider().fetchMedia!(
-          evt.media.externalMediaId,
-          sendConfig,
+        // Bounded retry on transient fetch/upload errors. Meta's media
+        // download endpoint occasionally returns a 500 / connection reset
+        // even though the binary is fine; without retry, a single blip
+        // permanently strands the media (the row commits text-only and
+        // there's no second chance). Three attempts × ~250-1000ms back-off
+        // keeps total wall-time well inside Meta's webhook retry window.
+        const fetched = await retry(
+          () => getMetaProvider().fetchMedia!(evt.media!.externalMediaId, sendConfig),
+          { attempts: 3, baseMs: 250 },
         );
         const cap = MEDIA_SIZE_CAPS[evt.media.kind];
         if (fetched.bytes.length > cap) {
           this.logger.warn(
             `[${teamId}] dropping ${evt.media.kind} over cap (${fetched.bytes.length} > ${cap})`,
           );
-          await this.clearMediaOnRow(teamId, row.id, row.conversationId);
+          delete evt.media;
           return;
         }
-        const saved = await blobStorage.upload({
-          bytes: fetched.bytes,
-          mimeType: fetched.mimeType,
-          kind: evt.media.kind,
-          context: {
-            teamId,
-            teamSlug: team?.name,
-            direction: "in",
-            contactPhone: evt.contactPhone,
-            contactName: evt.contactName ?? undefined,
-            externalId: evt.externalId,
-            originalFilename: evt.media.filename ?? null,
-          },
-        });
-
-        // CAS on mediaUrl: null. Without this, a Meta webhook retry that
-        // races the original (or the inbound-media sweeper running at the
-        // same time) can both pass the !mediaUrl check at line 150, both
-        // upload to blob storage, and both emit `message.media_ready` —
-        // leaving the second blob orphaned and clients receiving a duplicate
-        // event. updateMany with a column predicate ensures only one writer
-        // wins; the loser deletes the just-uploaded blob.
-        const updated = await this.db.message.updateMany({
-          where: { id: row.id, mediaUrl: null },
-          data: {
-            mediaKey: saved.key,
-            mediaUrl: saved.url,
-            mediaSizeBytes: saved.sizeBytes,
-            mediaMimeType: fetched.mimeType,
-          },
-        });
-        if (updated.count === 0) {
-          // Another writer won — delete our orphan blob. Best-effort; if
-          // blob deletion fails the storage backend keeps the bytes but
-          // they're unreferenced and a future GC pass can sweep them.
-          await blobStorage.delete(saved.key).catch((err) => {
-            this.logger.warn(
-              `[${teamId}] failed to delete orphan blob ${saved.key}: ${err}`,
-            );
-          });
-          return;
-        }
-
-        await publish({
-          type: "message.media_ready",
-          teamId,
-          conversationId: row.conversationId,
-          messageId: row.id,
-          media: {
-            kind: evt.media.kind,
-            url: `/api/media/${row.id}`,
-            mimeType: fetched.mimeType,
-            sizeBytes: saved.sizeBytes,
-            ...(evt.body ? { caption: evt.body } : {}),
-            ...(evt.media.filename ? { filename: evt.media.filename } : {}),
-            ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
-          },
-        });
+        const saved = await retry(
+          () =>
+            blobStorage.upload({
+              bytes: fetched.bytes,
+              mimeType: fetched.mimeType,
+              kind: evt.media!.kind,
+              context: {
+                teamId,
+                teamSlug: team?.name,
+                direction: "in",
+                contactPhone: evt.contactPhone,
+                contactName: evt.contactName ?? undefined,
+                externalId: evt.externalId,
+                originalFilename: evt.media!.filename ?? null,
+              },
+            }),
+          { attempts: 3, baseMs: 250 },
+        );
+        evt.media.storageKey = saved.key;
+        evt.media.storageUrl = saved.url;
+        evt.media.sizeBytes = saved.sizeBytes;
+        evt.media.mimeType = fetched.mimeType;
       } catch (err) {
-        this.logger.error(`[${teamId}] media download failed for ${evt.externalId}`, err);
-        await this.clearMediaOnRow(teamId, row.id, row.conversationId);
+        this.logger.error(
+          `[${teamId}] media download failed for ${evt.externalId} after retries`,
+          err,
+        );
+        delete evt.media;
       }
     });
   }
+}
 
-  private async clearMediaOnRow(
-    teamId: string,
-    messageId: string,
-    conversationId: string,
-  ): Promise<void> {
+/**
+ * Tiny bounded-retry helper. Used for transient Meta / UploadThing errors
+ * inside the webhook handler — long enough to ride out a single blip,
+ * short enough to stay inside Meta's ~10s webhook retry window.
+ */
+async function retry<T>(
+  fn: () => Promise<T>,
+  opts: { attempts: number; baseMs: number },
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < opts.attempts; i++) {
     try {
-      await this.db.message.update({
-        where: { id: messageId },
-        data: {
-          mediaKind: null,
-          mediaMimeType: null,
-          mediaCaption: null,
-          mediaFilename: null,
-          mediaDurationMs: null,
-          mediaKey: null,
-          mediaUrl: null,
-          mediaSizeBytes: null,
-        },
-      });
+      return await fn();
     } catch (err) {
-      this.logger.error(`[${teamId}] clearMediaOnRow failed for ${messageId}`, err);
+      lastErr = err;
+      if (i === opts.attempts - 1) break;
+      const jitter = Math.random() * opts.baseMs * 0.25;
+      await new Promise((r) => setTimeout(r, opts.baseMs * 2 ** i + jitter));
     }
-    await publish({
-      type: "message.media_ready",
-      teamId,
-      conversationId,
-      messageId,
-    });
   }
+  throw lastErr;
 }
 
 function verifySignature(

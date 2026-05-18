@@ -25,6 +25,9 @@ interface RecordArgs {
   conversationId: string;
   teamId: string;
   userId: string | null;
+  /** Set on external /v1 mutations so the audit row attributes the change
+   *  to the API key instead of leaving userId null + opaque. */
+  apiKeyId?: string | null;
   kind: ConversationEventKind;
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
@@ -41,6 +44,7 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
         conversationId: args.conversationId,
         teamId: args.teamId,
         userId: args.userId,
+        apiKeyId: args.apiKeyId ?? null,
         kind: args.kind,
         before:
           args.before == null
