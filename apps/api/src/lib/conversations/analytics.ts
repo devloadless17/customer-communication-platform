@@ -1,0 +1,173 @@
+import { db } from "@/lib/db";
+
+/**
+ * Conversation analytics — incremental updates to the counters and
+ * timestamps that feed the workflow conversation_closed trigger's many
+ * exposed variables (first_response_time, resolution_time, etc.).
+ *
+ * Every helper here is fire-and-forget from the caller's perspective —
+ * they swallow errors and log, because none of these are critical to the
+ * primary domain event. The caller has already done its real work
+ * (assigned, sent, closed). Analytics is bookkeeping; a missed update is
+ * recoverable by re-deriving from Message at backfill time later.
+ */
+
+interface OnAssignedArgs {
+  conversationId: string;
+  teamId: string;
+  assignedUserId: string | null;
+  previousAssignedUserId: string | null;
+}
+
+export async function trackOnAssigned(args: OnAssignedArgs): Promise<void> {
+  // Only count meaningful assignments (current → different). Self-reassigns
+  // and self-unassigns don't bump counters.
+  if (args.previousAssignedUserId === args.assignedUserId) return;
+  // Skip pure unassign — counter measures "assignments to someone."
+  if (args.assignedUserId === null) return;
+
+  try {
+    await db.conversation.update({
+      where: { id: args.conversationId, teamId: args.teamId },
+      data: {
+        assignmentsCount: { increment: 1 },
+        lastAssignedAt: new Date(),
+        // firstAssignedAt only sets if currently null — the COALESCE-ish
+        // semantics here are emulated by re-reading after update would
+        // be expensive. Use updateMany with a where-condition instead.
+      },
+    });
+    // Conditional firstAssignedAt set — runs only when the column is null.
+    await db.conversation.updateMany({
+      where: {
+        id: args.conversationId,
+        teamId: args.teamId,
+        firstAssignedAt: null,
+      },
+      data: {
+        firstAssignedAt: new Date(),
+        firstAssignedUserId: args.assignedUserId,
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[conversations/analytics] trackOnAssigned conversation=${args.conversationId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+interface OnStatusChangedArgs {
+  conversationId: string;
+  teamId: string;
+  previousStatus: string;
+  newStatus: string;
+  changedByUserId: string | null;
+  /** Optional close-context written when newStatus === "closed". */
+  closedCategory?: string | null;
+  closedSummary?: string | null;
+}
+
+export async function trackOnStatusChanged(args: OnStatusChangedArgs): Promise<void> {
+  if (args.previousStatus === args.newStatus) return;
+
+  try {
+    const data: Record<string, unknown> = {};
+    if (args.newStatus === "closed") {
+      data.closedAt = new Date();
+      data.closedByUserId = args.changedByUserId;
+      if (args.closedCategory !== undefined) data.closedCategory = args.closedCategory;
+      if (args.closedSummary !== undefined) data.closedSummary = args.closedSummary;
+    } else if (args.previousStatus === "closed") {
+      // Reopening — wipe the close metadata so the next close's analytics
+      // measure from THIS cycle, not the previous one.
+      data.closedAt = null;
+      data.closedByUserId = null;
+      data.closedCategory = null;
+      data.closedSummary = null;
+    }
+    if (Object.keys(data).length === 0) return;
+    await db.conversation.update({
+      where: { id: args.conversationId, teamId: args.teamId },
+      data,
+    });
+  } catch (err) {
+    console.error(
+      `[conversations/analytics] trackOnStatusChanged conversation=${args.conversationId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+interface OnInboundMessageArgs {
+  conversationId: string;
+  teamId: string;
+}
+
+export async function trackOnInboundMessage(args: OnInboundMessageArgs): Promise<void> {
+  try {
+    await db.conversation.update({
+      where: { id: args.conversationId, teamId: args.teamId },
+      data: { incomingMessagesCount: { increment: 1 } },
+    });
+  } catch (err) {
+    console.error(
+      `[conversations/analytics] trackOnInboundMessage conversation=${args.conversationId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+interface OnOutboundMessageArgs {
+  conversationId: string;
+  teamId: string;
+  /** Null for system / workflow sends. */
+  senderUserId: string | null;
+}
+
+export async function trackOnOutboundMessage(args: OnOutboundMessageArgs): Promise<void> {
+  // "Response" semantics: an outbound message that comes after at least
+  // one inbound message COUNTS as a response. If we've never had an
+  // inbound on this conversation yet, the outbound is broadcast/outreach
+  // and doesn't count toward responsesCount.
+  try {
+    const conv = await db.conversation.findFirst({
+      where: { id: args.conversationId, teamId: args.teamId },
+      select: {
+        firstResponseAt: true,
+        incomingMessagesCount: true,
+      },
+    });
+    if (!conv) return;
+
+    const data: Record<string, unknown> = {
+      outgoingMessagesCount: { increment: 1 },
+    };
+    if (conv.incomingMessagesCount > 0) {
+      data.responsesCount = { increment: 1 };
+    }
+    await db.conversation.update({
+      where: { id: args.conversationId, teamId: args.teamId },
+      data,
+    });
+    // Conditional firstResponseAt — only when null AND there's been an inbound.
+    if (conv.firstResponseAt === null && conv.incomingMessagesCount > 0) {
+      await db.conversation.updateMany({
+        where: {
+          id: args.conversationId,
+          teamId: args.teamId,
+          firstResponseAt: null,
+        },
+        data: {
+          firstResponseAt: new Date(),
+          firstResponseByUserId: args.senderUserId,
+        },
+      });
+    }
+  } catch (err) {
+    console.error(
+      `[conversations/analytics] trackOnOutboundMessage conversation=${args.conversationId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}

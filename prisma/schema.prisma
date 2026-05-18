@@ -4,12 +4,24 @@
 // Multi-tenancy is baked in: every domain row carries teamId.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // `postgresqlExtensions` lets us declare the pg_trgm GIN indexes + the
+  // JSONB jsonb_path_ops index that the search-heavy contact / conversation /
+  // team-chat queries depend on. Without these declarations `prisma migrate
+  // dev` treats the hand-written indexes as drift and silently generates a
+  // migration that DROPS them. The partial trgm indexes on Contact.email /
+  // Contact.phoneNumber and the expression index on Contact.customFields
+  // stay hand-written — Prisma's DSL can't model partial or expression
+  // indexes — but those don't trigger the drift detector.
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // `plpgsql` is the default extension every Postgres install ships with; it
+  // must be listed once `extensions = [...]` is non-empty so the introspector
+  // doesn't flag it as drift.
+  extensions = [pg_trgm, plpgsql]
 }
 
 // ---------------------------------------------------------------------------
@@ -25,6 +37,17 @@ enum Role {
   // read-only visibility into /settings/team. No user management.
   manager
   agent
+}
+
+// Subscription tier per team. Scaffolding only — every team is set to
+// `starter` today and no features are gated yet. The feature → plan matrix
+// will be wired in packages/shared/src/auth/plans.ts when ready. UI is
+// intentionally hidden until that matrix exists.
+enum Plan {
+  free
+  starter
+  advanced
+  enterprise
 }
 
 enum ConversationStatus {
@@ -78,6 +101,11 @@ enum BroadcastStatus {
   running
   completed
   failed
+  // Operator-initiated stop while queued or running. Recipients already
+  // sent stay sent; remaining queued rows are skipped by the runner on
+  // its next status check. Distinct from `failed` so the UI can show
+  // "you canceled this" instead of "this broke."
+  canceled
 }
 
 enum BroadcastRecipientStatus {
@@ -106,6 +134,8 @@ enum ConversationEventKind {
   status_changed
   tag_added
   tag_removed
+  note_added
+  note_deleted
 }
 
 // Domain events workflows can subscribe to. Adding a new value is half the
@@ -184,6 +214,10 @@ model Team {
   name      String
   createdAt DateTime @default(now())
 
+  // Subscription tier. Default `starter` for every team — feature gating
+  // is not wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
+  plan      Plan     @default(starter)
+
   // Per-team Meta WhatsApp Cloud API credentials. Nullable because freshly
   // registered teams haven't connected their WhatsApp number yet — they paste
   // these into /settings/whatsapp. CLAUDE.md rule #6.
@@ -220,10 +254,12 @@ model Team {
   workflowRuns            WorkflowRun[]
   workflowContactStates   WorkflowContactState[]
   apiKeys                 TeamApiKey[]
+  outboundWebhooks        OutboundWebhook[]
   snippets                Snippet[]
   conversationEvents      ConversationEvent[]
   teamChannels            TeamChannel[]
   teamChannelMessages     TeamChannelMessage[]
+  outboundEvents          OutboundEvent[]
 }
 
 model User {
@@ -240,42 +276,42 @@ model User {
   // column name stays domain-meaningful while Better Auth sees the standard
   // field name in session payloads.
   avatarUrl     String?
-  // Retained for the existing Credentials flow + the data migration that
-  // copies these into Account.password (Better Auth stores credential hashes
-  // there). Safe to drop once the data migration is verified in production.
-  passwordHash  String?
   // Soft-disable: keeps FK history intact (authored messages, assignments).
   deactivatedAt DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  team                  Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  authoredMsgs          Message[]                 @relation("AuthoredMessages")
-  authoredNotes         InternalNote[]
-  assignedConvos        Conversation[]            @relation("AssignedConversations")
-  createdInvites        Invite[]                  @relation("InvitedBy")
-  createdBroadcasts     Broadcast[]               @relation("CreatedBroadcasts")
-  createdAudienceGroups AudienceGroup[]           @relation("CreatedAudienceGroups")
-  createdSnippets       Snippet[]                 @relation("CreatedSnippets")
+  team                    Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  authoredMsgs            Message[]                 @relation("AuthoredMessages")
+  authoredNotes           InternalNote[]
+  assignedConvos          Conversation[]            @relation("AssignedConversations")
+  // Account-manager assignment at the contact level (cross-thread). Distinct
+  // from `assignedConvos` (per-thread). SetNull on delete so removing a user
+  // clears assignment without nuking the contact row.
+  assignedContacts        Contact[]                 @relation("AssignedContacts")
+  createdInvites          Invite[]                  @relation("InvitedBy")
+  createdBroadcasts       Broadcast[]               @relation("CreatedBroadcasts")
+  createdAudienceGroups   AudienceGroup[]           @relation("CreatedAudienceGroups")
+  createdSnippets         Snippet[]                 @relation("CreatedSnippets")
   // Per-agent read state. One row per (user, conversation) the agent has
   // ever read. Cascading from User: when a user is hard-deleted their
   // receipts go too (they're personal state, not audit data).
-  readReceipts          ConversationReadReceipt[]
+  readReceipts            ConversationReadReceipt[]
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
-  authoredEvents        ConversationEvent[]
+  authoredEvents          ConversationEvent[]
   // Team-chat (internal messaging between agents). All SetNull on user delete
   // so deactivating a teammate leaves their messages, reactions, pins, and
   // mentions in place with a "Removed user" actor label — same audit-trail
   // discipline as customer conversations.
-  createdChannels        TeamChannel[]            @relation("CreatedChannels")
-  authoredChannelMessages TeamChannelMessage[]    @relation("AuthoredChannelMessages")
-  channelReactions       TeamChannelReaction[]    @relation("ChannelReactions")
-  channelMentions        TeamChannelMention[]     @relation("ChannelMentions")
-  pinnedChannelMessages  TeamChannelPin[]         @relation("PinnedMessages")
-  channelReadReceipts    TeamChannelReadReceipt[]
-  sessions              Session[]
-  accounts              Account[]
+  createdChannels         TeamChannel[]             @relation("CreatedChannels")
+  authoredChannelMessages TeamChannelMessage[]      @relation("AuthoredChannelMessages")
+  channelReactions        TeamChannelReaction[]     @relation("ChannelReactions")
+  channelMentions         TeamChannelMention[]      @relation("ChannelMentions")
+  pinnedChannelMessages   TeamChannelPin[]          @relation("PinnedMessages")
+  channelReadReceipts     TeamChannelReadReceipt[]
+  sessions                Session[]
+  accounts                Account[]
 
   @@index([teamId])
 }
@@ -392,7 +428,28 @@ model Contact {
   // future Instagram/Telegram ingest to dedupe contacts by their native id.
   identityProvider  ProviderName?
   externalContactId String?
+  // Canonical display name. Derived from `firstName + lastName` when both
+  // are populated; otherwise whatever the create path stored (inbound
+  // webhook profile name, manual UI, /v1 POST). Source of truth for inbox
+  // rendering — first/last are split-offs maintained alongside on writes.
   name              String
+  // First/last names split from `name` at migration time. Webhook payloads
+  // expose these as `first_name`/`last_name` for respond.io/n8n parity.
+  // Updating `name` via PATCH does NOT auto-resplit (avoids clobbering an
+  // agent's manual edit); updating `firstName`/`lastName` recomputes `name`.
+  firstName         String?
+  lastName          String?
+  // BCP-47 tag (e.g. "ar", "en"). Drives WhatsApp template language selection.
+  language          String?
+  // ISO 3166-1 alpha-2 (e.g. "LB"). Derived from `phoneNumber` via libphonenumber
+  // at inbound time. Optional — non-WhatsApp / unparseable numbers leave null.
+  countryCode       String?
+  // Account-manager: who owns this contact across all their conversations.
+  // Distinct from Conversation.assignedUserId (per-thread). SetNull so removing
+  // a user clears assignment instead of nuking the contact. When AI agents
+  // ship, a parallel assignedAiAgentId column joins this with a CHECK that
+  // exactly one is set.
+  assignedUserId    String?
   avatarUrl         String?
   // Optional profile fields surfaced in the right-rail contact panel.
   email             String?
@@ -414,9 +471,21 @@ model Contact {
   // explicitly set 'manual'.
   source            ContactSource @default(inbound)
   createdAt         DateTime      @default(now())
+  // Denormalized "most recent inbound message timestamp" for this contact.
+  // Maintained on every inbound-message commit (see lib/providers/ingest.ts).
+  // Used by:
+  //   - getConversationWithRefs to render the 24h window chip without
+  //     scanning the contact's full message history
+  //   - the contacts-list "by-recency" sort
+  // Nullable because contacts created via /contacts/new (manual or CSV)
+  // have no inbound yet.
+  lastInboundAt     DateTime?
 
   team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
   stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  // Account-manager FK. SetNull on user delete so removing an agent clears
+  // assignment instead of destroying the contact row.
+  assignedUser        User?                @relation("AssignedContacts", fields: [assignedUserId], references: [id], onDelete: SetNull)
   conversations       Conversation[]
   broadcastRecipients BroadcastRecipient[]
   // Many-to-many: an agent tags a contact with one or more labels for
@@ -440,6 +509,18 @@ model Contact {
   @@index([teamId])
   @@index([teamId, source])
   @@index([teamId, stageId])
+  // Account-manager filter ("show contacts assigned to me").
+  @@index([teamId, assignedUserId])
+  // "Contacts by recency of last inbound" — inbox-sidebar surfaces.
+  @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
+  // pg_trgm GIN index for substring ILIKE search on contact name.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
+  // NOTE: the JSONB GIN index `Contact_customFields_gin_idx` (USING GIN
+  // ("customFields" jsonb_path_ops)) is created in
+  // `20260517223100_query_perf_indexes`. It's NOT declared here because
+  // Prisma's `raw("jsonb_path_ops")` emitter appends a redundant `ASC` that
+  // its own diff tool then flags as drift on every `migrate dev`, producing
+  // a no-op DROP+CREATE migration every time. Hand-managed sidesteps that.
 }
 
 // Customer-lifecycle stage. A team configures an ordered list ("New",
@@ -449,8 +530,11 @@ model Contact {
 //
 // `isDefault` is the stage new contacts land in (manual creates, webhook
 // ingest, CSV import all consult it). At-most-one-default-per-team is
-// enforced in app code in the same transaction as the toggle; no partial
-// unique index because Prisma doesn't model those.
+// enforced by a partial unique index — see migration
+// 20260518190000_contact_stages_default_partial_unique. Prisma doesn't
+// model partial indexes, so the index is raw-SQL only; the app code's
+// pre-check still exists as a friendlier error path but is no longer
+// load-bearing for correctness.
 //
 // `color` mirrors the Tag color slot system (lib/tag-colors.ts) so the same
 // safelist of Tailwind classes covers both surfaces.
@@ -518,28 +602,28 @@ model Conversation {
   // status-change / message-create. All nullable until the first qualifying
   // event happens. Exposed to the workflow trigger payload as
   // $conversation.first_response_time etc.
-  firstAssignedAt   DateTime?
-  firstAssignedUserId String?
-  lastAssignedAt    DateTime?
+  firstAssignedAt       DateTime?
+  firstAssignedUserId   String?
+  lastAssignedAt        DateTime?
   // First outbound message timestamp, regardless of channel — used for
   // first_response_time and the assignment→response variants.
-  firstResponseAt   DateTime?
+  firstResponseAt       DateTime?
   firstResponseByUserId String?
   // When the conversation moved into `closed`. Reopens (status going from
   // closed back to anything else) zero this out so the closed-conv analytics
   // refer to the most-recent close.
-  closedAt          DateTime?
-  closedByUserId    String?
+  closedAt              DateTime?
+  closedByUserId        String?
   // Free-text fields populated by the close_conversation step + the manual
   // "Close" action in the inbox (round 2b adds the inbox surface).
-  closedCategory    String?
-  closedSummary     String?
+  closedCategory        String?
+  closedSummary         String?
   // Lightweight counters — denormalized so the closed-conv analytics
   // payload doesn't run aggregates against Message on every workflow run.
-  assignmentsCount        Int @default(0)
-  incomingMessagesCount   Int @default(0)
-  outgoingMessagesCount   Int @default(0)
-  responsesCount          Int @default(0)
+  assignmentsCount      Int       @default(0)
+  incomingMessagesCount Int       @default(0)
+  outgoingMessagesCount Int       @default(0)
+  responsesCount        Int       @default(0)
 
   team         Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
   contact      Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -563,6 +647,15 @@ model Conversation {
   // (open / pending / closed) but doesn't help the unfiltered list — the
   // planner needs status to participate in WHERE for that one to be useful.
   @@index([teamId, lastMessageAt(sort: Desc), id(sort: Desc)])
+  // Per-recipient broadcast lookup + per-contact navigation: the broadcast
+  // runner does `findFirst({ where: { teamId, contactId } })` once per
+  // recipient, and contact-detail pages list a contact's conversations.
+  // Without this the planner falls back to the (teamId, status, ...) index
+  // and filters contactId in the heap — fine at <1k conversations per team,
+  // a seq-scan-per-recipient at 50k.
+  @@index([teamId, contactId])
+  // pg_trgm GIN for the inbox-list search bar's ILIKE on lastMessagePreview.
+  @@index([lastMessagePreview(ops: raw("gin_trgm_ops"))], type: Gin, map: "Conversation_lastMessagePreview_trgm_idx")
 }
 
 model Message {
@@ -608,6 +701,16 @@ model Message {
   mediaSizeBytes  Int?
   mediaDurationMs Int?
 
+  // Optional first-frame thumbnail for video messages. Generated server-side
+  // during inbound media ingest via @ffmpeg-installer/ffmpeg + fluent-ffmpeg;
+  // stored as a separate blob (uploadthing key) so the <video> element can
+  // render a poster frame instead of a black square until the user clicks
+  // play. Outbound video sends don't generate one today (the file is already
+  // on the agent's disk; their player picks its own frame); revisit if
+  // outbound bubbles look inconsistent next to inbound.
+  mediaThumbnailKey String?
+  mediaThumbnailUrl String?
+
   // Quoted reply: the row this message is replying to. Self-FK with SetNull
   // so deleting the original (rare) doesn't take the reply with it. The
   // snapshot the UI renders comes from JOINing this row at read time, not
@@ -619,10 +722,10 @@ model Message {
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
-  // NOTE: a partial index on inbound-only messages also exists in the DB
-  // (see migration add_chat_perf_indexes). Prisma can't express partial
-  // indexes in `@@index`, so it's declared in raw SQL. It powers the
-  // "what was the contact's last inbound?" lookups (24h-window UI +
+  // NOTE: a partial index on inbound-only messages also exists in the DB —
+  // declared in raw SQL (see migration `20260517_perf_indexes`) because
+  // Prisma can't express `WHERE direction = 'in'` via `@@index`. It powers
+  // the "what was the contact's last inbound?" lookups (24h-window UI +
   // getConversationWithRefs.lastInboundAt) without scanning outbound rows.
 
   @@unique([teamId, provider, externalId])
@@ -893,16 +996,16 @@ model InternalNote {
 // enums.
 
 model Workflow {
-  id              String               @id @default(cuid())
-  teamId          String
-  name            String
+  id                    String               @id @default(cuid())
+  teamId                String
+  name                  String
   // `enabled` is the kill switch; `published` gates whether real triggers
   // actually fire the workflow (vs. test-only). A workflow can be enabled
   // but unpublished (still being edited) — the dispatcher requires BOTH to
   // match production triggers.
-  enabled         Boolean              @default(true)
-  published       Boolean              @default(false)
-  trigger         WorkflowTriggerEvent
+  enabled               Boolean              @default(true)
+  published             Boolean              @default(false)
+  trigger               WorkflowTriggerEvent
   // Trigger-specific config. Shape depends on trigger:
   //   incoming_webhook → { secret: string }  (HMAC for signature validation)
   //   manual_trigger   → { allowedRoles: ("admin"|"agent")[] }
@@ -910,11 +1013,11 @@ model Workflow {
   //   contact_field_updated → { fieldKey?: string }  (omit = any field)
   //   contact_lifecycle_updated → { toStageId?: string }  (omit = any stage)
   //   others → {}
-  triggerConfig   Json                 @default("{}")
+  triggerConfig         Json                 @default("{}")
   // Same nested AND/OR group shape used by automations Round 1 — see
   // lib/workflows/conditions.ts.
-  triggerConditions Json               @default("{\"op\":\"AND\",\"children\":[]}")
-  triggerOncePerContact Boolean        @default(false)
+  triggerConditions     Json                 @default("{\"op\":\"AND\",\"children\":[]}")
+  triggerOncePerContact Boolean              @default(false)
 
   // DAG. Shape:
   //   {
@@ -924,7 +1027,7 @@ model Workflow {
   //   }
   // `position` is round-trip persistence for the canvas — runner ignores it.
   // Validated server-side in lib/workflows/graph.ts at write time.
-  graph           Json                 @default("{\"startNodeId\":\"\",\"nodes\":[],\"edges\":[]}")
+  graph Json @default("{\"startNodeId\":\"\",\"nodes\":[],\"edges\":[]}")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -933,16 +1036,16 @@ model Workflow {
   runs          WorkflowRun[]
   contactStates WorkflowContactState[]
 
+  @@unique([teamId, name])
   // Hot path: dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true AND published=true`.
   @@index([teamId, trigger, enabled, published])
-  @@unique([teamId, name])
 }
 
 model WorkflowRun {
-  id         String              @id @default(cuid())
+  id         String               @id @default(cuid())
   workflowId String
   teamId     String
-  status     WorkflowRunStatus   @default(queued)
+  status     WorkflowRunStatus    @default(queued)
   trigger    WorkflowTriggerEvent
 
   // The contact this run is acting on. Nullable for triggers that aren't
@@ -964,7 +1067,7 @@ model WorkflowRun {
   // show "resumes in 1h" without consulting BullMQ.
   waitUntil     DateTime?
   // Jump-to-step uses this to cap loops. Hard ceiling enforced in runner.ts.
-  jumpsUsed     Int                 @default(0)
+  jumpsUsed     Int       @default(0)
 
   // Per-step audit log. Append-only array of:
   //   { stepId, type, status, startedAt, finishedAt?, responseStatus?,
@@ -1022,21 +1125,144 @@ model TeamApiKey {
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())
   revokedAt   DateTime?
+  /// Allow-listed capabilities for this key. `["*"]` = wildcard (every
+  /// scope). Empty array = deny-by-default. See
+  /// packages/shared/src/api-keys/scopes.ts for the canonical catalog.
+  /// Backfilled to `["*"]` for pre-existing rows so partner integrations
+  /// keep working — new keys ask for specific scopes from the settings UI.
+  scopes      String[]  @default(["*"])
 
-  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  team               Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  idempotencyKeys    ApiIdempotencyKey[]
+  conversationEvents ConversationEvent[]
 
   @@index([teamId, revokedAt])
+}
+
+/// Stores `Idempotency-Key` headers from external /v1 POSTs so a partner's
+/// retry after a 5xx (or n8n's default retry-on-timeout) doesn't double-send
+/// to WhatsApp. Keyed by (team, apiKey, key) so two partners using the same
+/// short key can't collide. `responseBody` is the JSON we returned the first
+/// time — replayed verbatim on retry within the TTL so the partner sees the
+/// same shape they'd see if their first call had completed.
+///
+/// 24h TTL is the canonical retry window for HTTP semantics (Stripe-style);
+/// after that a "retry" is logically a NEW operation. Sweeper job at the end
+/// of the file purges expired rows.
+model ApiIdempotencyKey {
+  id             String   @id @default(cuid())
+  teamId         String
+  apiKeyId       String
+  key            String
+  responseBody   Json
+  responseStatus Int
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  apiKey TeamApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, apiKeyId, key])
+  @@index([expiresAt])
+}
+
+/// Outbound webhook subscription. Partners create one of these per "I want
+/// to know when X happens" — `eventTypes` is the allowlist of public event
+/// names the subscriber wants. `secret` is envelope-encrypted (same helper
+/// Meta credentials use) and signs each delivery with HMAC-SHA256 over the
+/// raw body via the `X-CCP-Signature` header.
+///
+/// Plaintext secret is shown EXACTLY ONCE at creation; rotation is explicit.
+/// Auto-disabled after a sustained run of failures so a dead URL doesn't
+/// keep our queue busy forever.
+model OutboundWebhook {
+  id                String   @id @default(cuid())
+  teamId            String
+  name              String
+  url               String
+  /// HMAC-SHA256 signing secret. Stored as `enc:v1:<base64>` (envelope encryption).
+  secret            String
+  /// Allowlisted public event type names (e.g. ["message.received", "contact.updated"]).
+  eventTypes        String[]
+  enabled           Boolean  @default(true)
+  createdById       String
+  createdAt         DateTime @default(now())
+  /// Last successful delivery (2xx response) — surfaced in the UI as "Last delivered".
+  lastDeliveredAt   DateTime?
+  /// Last failure — last error message + when. Reset after a successful delivery.
+  lastErrorAt       DateTime?
+  lastErrorMessage  String?
+  /// Rolling failure count for the auto-disable circuit breaker. Reset to 0 on
+  /// every 2xx. When it crosses the threshold, `enabled` flips to false.
+  consecutiveFailures Int    @default(0)
+  /// Set when `enabled` flips to false from automatic action (circuit breaker
+  /// vs. an explicit admin toggle). Together with `disabledReason` they're
+  /// the audit trail the UI surfaces as "auto-disabled at … because …".
+  /// Manual toggles via the settings UI clear both back to null.
+  disabledAt        DateTime?
+  disabledReason    String?
+
+  team       Team                       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  deliveries OutboundWebhookDelivery[]
+
+  @@index([teamId, enabled])
+}
+
+/// One row per delivery attempt. Powers the "delivery log" UI so partners can
+/// debug receiver-side failures without us needing to surface internal logs.
+/// `responseBody` is truncated to ~4KB on insert (receivers sometimes echo
+/// huge payloads). Nightly sweeper
+/// (apps/api/src/lib/sweepers/outbound-webhook-delivery-cleanup.ts) drops
+/// rows older than 30 days; override via WEBHOOK_DELIVERY_RETENTION_DAYS.
+model OutboundWebhookDelivery {
+  id             String   @id @default(cuid())
+  webhookId      String
+  eventType      String
+  /// Public-shape payload the receiver was sent. Stored verbatim so a retry
+  /// from the UI can re-POST the same JSON.
+  payload        Json
+  /// HTTP status code from the receiver. null when fetch itself failed (DNS,
+  /// timeout, TLS) — `errorMessage` carries the reason in that case.
+  responseStatus Int?
+  responseBody   String?
+  attemptCount   Int      @default(0)
+  deliveredAt    DateTime?
+  failedAt       DateTime?
+  errorMessage   String?
+  createdAt      DateTime @default(now())
+
+  webhook OutboundWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt(sort: Desc)])
+  @@index([createdAt])
 }
 
 // ---------------------------------------------------------------------------
 // Per-agent read state
 // ---------------------------------------------------------------------------
 //
-// Replaces the implicit "team-wide unreadCount" semantic with a real
-// per-(user, conversation) record. The Conversation.unreadCount counter
-// stays as a cheap "is there anything in here" preview, but the inbox
-// sidebar badge counts conversations where the *signed-in agent* has unread
-// messages — i.e. their `lastReadAt` is older than `Conversation.lastMessageAt`.
+// The platform DELIBERATELY runs two unread tiers — they answer different
+// product questions, both are read by different parts of the UI, and merging
+// them would break one of those use cases:
+//
+//   1. Conversation.unreadCount (team-wide, INT counter, this file ~line 591).
+//      Question answered: "does ANY agent need to look at this thread?"
+//      Written by: ingest (+1 per inbound), markRead (→0), markUnread (→1).
+//      Read by: inbox conversation list badges (triage view), document.title
+//      total, n8n/outbound-webhook payloads, workflow envelope.
+//      Source-of-truth for: "the inbox needs work."
+//
+//   2. ConversationReadReceipt.lastReadAt (per-user, this model below).
+//      Question answered: "have I personally seen this thread's latest?"
+//      Maintained by: markRead per-user write (upsert with userId scope).
+//      Read by: `unreadForMe` derived field on list endpoints
+//      (lib/queries/conversations.ts) and the section sub-sidebar.
+//      Source-of-truth for: "have I, the signed-in agent, seen this?"
+//
+// Do NOT collapse these. A shared-inbox SaaS needs BOTH the team triage
+// signal AND the personal-attention signal. A previous audit recommended
+// "pick one and delete the other" — that audit was wrong; this comment is
+// the response. If you're reading this because the two seem redundant,
+// trace the consumers above and you'll see they don't overlap.
 //
 // We don't shadow every message read state; the per-message read receipts
 // model is heavier and we don't have a UX for it yet. Threshold-style
@@ -1083,6 +1309,11 @@ model ConversationEvent {
   conversationId String
   teamId         String
   userId         String?
+  /// Set when the mutation came from an external /v1 API call instead of a
+  /// human session. Mutually exclusive with userId in practice — partner
+  /// integrations have no human author. SetNull on key revoke so audit
+  /// history survives key rotation.
+  apiKeyId       String?
   kind           ConversationEventKind
   before         Json?
   after          Json?
@@ -1091,6 +1322,7 @@ model ConversationEvent {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  apiKey       TeamApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, at(sort: Desc)])
   @@index([teamId, at(sort: Desc)])
@@ -1112,23 +1344,23 @@ model ConversationEvent {
 // Cost: some duplicated media columns. Worth it.
 
 model TeamChannel {
-  id          String   @id @default(cuid())
-  teamId      String
+  id                 String   @id @default(cuid())
+  teamId             String
   // Lowercase slug, unique per team. Becomes the URL: /team/<slug>.
   // The default channel "general" is auto-created at team setup time and
   // protected — the DELETE and rename routes refuse to touch it.
-  name        String
-  description String?
+  name               String
+  description        String?
   // The first channel created with name="general" per team is the default.
   // Used to (a) redirect /team to the default channel, (b) protect from
   // deletion/rename. At-most-one-default-per-team is enforced in app code,
   // not by a partial unique (Prisma can't model those).
-  isDefault   Boolean  @default(false)
+  isDefault          Boolean  @default(false)
   // Nullable + SetNull — channels are team-shared and shouldn't be destroyed
   // when their creator leaves. The audit label degrades to "Removed user."
-  createdById String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdById        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
   // Denormalized for cheap list rendering. Kept in sync by the message-send
   // route; reads never have to join through TeamChannelMessage to render the
   // sidebar. Best-effort consistency — a race that leaves these slightly
@@ -1136,8 +1368,8 @@ model TeamChannel {
   lastMessageAt      DateTime @default(now())
   lastMessagePreview String   @default("")
 
-  team      Team                      @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdBy User?                     @relation("CreatedChannels", fields: [createdById], references: [id], onDelete: SetNull)
+  team      Team                     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User?                    @relation("CreatedChannels", fields: [createdById], references: [id], onDelete: SetNull)
   messages  TeamChannelMessage[]
   receipts  TeamChannelReadReceipt[]
   pins      TeamChannelPin[]
@@ -1159,7 +1391,7 @@ model TeamChannel {
 // admin deletes, anyone-can-react, admin/manager pins. The route handlers
 // own those checks; the model just stores the data.
 model TeamChannelMessage {
-  id           String   @id @default(cuid())
+  id           String  @id @default(cuid())
   channelId    String
   // Denormalized for cheap tenant guards. The channel obviously already
   // carries teamId, but every read site otherwise has to JOIN — and the
@@ -1217,13 +1449,23 @@ model TeamChannelMessage {
   pin           TeamChannelPin?
 
   // Keyset on the main feed: WHERE channelId = ? AND threadRootId IS NULL
-  // ORDER BY createdAt DESC, id DESC. The migration adds a PARTIAL index
-  // (Prisma can't model partial indexes) — see the migration SQL for the
-  // CREATE INDEX. The full index here covers the thread-panel read:
+  // ORDER BY createdAt DESC, id DESC. Migration
+  // `20260518000000_team_chat_search_and_partial_index/migration.sql` adds the
+  // partial index for top-level rows (Prisma can't model partial indexes).
+  // The full index below covers the thread-panel read:
   // WHERE threadRootId = ? ORDER BY createdAt ASC.
+  //
+  // Channel message search uses a pg_trgm GIN index on `body` for ILIKE —
+  // see the same migration for `TeamChannelMessage_body_trgm_idx`.
   @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([threadRootId, createdAt])
   @@index([teamId])
+  // pg_trgm GIN for substring ILIKE on channel-message body. The
+  // top-level-only partial index (`channelId, createdAt DESC, id DESC WHERE
+  // threadRootId IS NULL`) stays hand-written in
+  // 20260518000000_team_chat_search_and_partial_index — Prisma's DSL can't
+  // model partial indexes.
+  @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "TeamChannelMessage_body_trgm_idx")
 }
 
 // @user mention. One row per (message, mentionedUser) so the "show me my
@@ -1293,4 +1535,86 @@ model TeamChannelReadReceipt {
 
   @@unique([userId, channelId])
   @@index([channelId])
+}
+
+// Persistent login-attempt counters. Replaces the in-process Map in
+// apps/web/src/lib/rate-limit.ts so brute-force history survives process
+// restarts (deploys, OOM, systemd Restart=on-failure). Keyed by lowercased
+// email — login attempts happen before we know the team, so this lives at
+// the platform layer, not team-scoped.
+//
+// Lifecycle: incremented on failed login, cleared (deleted) on success.
+// `lockedUntil` is set when failedCount crosses the threshold; the gate
+// reads `lockedUntil > now()` to refuse without consulting the counter,
+// so a successful guess after lockout doesn't quietly let the attacker in.
+model LoginAttempt {
+  email        String    @id
+  failedCount  Int       @default(0)
+  lockedUntil  DateTime?
+  lastFailedAt DateTime  @default(now())
+
+  @@index([lockedUntil])
+}
+
+// ---------------------------------------------------------------------------
+// Transactional outbox
+// ---------------------------------------------------------------------------
+//
+// Closes the DB-commit → bus.publish window. Two flow patterns:
+//
+//   1. publish(event)            — fire-and-forget. Writes a row here AND
+//      runs in-process subscribers immediately. The row is the durable
+//      audit trail; subscribers ran already, so a process crash mid-publish
+//      leaves a row marked `publishedAt = null AND failedAt IS NOT NULL`
+//      (or `lastError IS NOT NULL`) that the operator can investigate.
+//
+//   2. publishInTx(tx, event)    — durable. Caller writes this row INSIDE
+//      their own $transaction so the outbox INSERT commits atomically with
+//      the entity write. The drainer (apps/api/src/events/outbox-drainer.service.ts)
+//      polls every poll-interval ms, picks oldest pending rows, marks them
+//      `publishedAt` BEFORE dispatching subscribers (at-most-once), and
+//      records `lastError` if dispatch throws. Subscribers see the event
+//      only AFTER the originating tx commits.
+//
+// At-most-once on purpose: re-dispatching events would double-fire audit
+// rows, duplicate workflow runs, and resend outbound webhooks. The trade-
+// off is "lost dispatch on crash is detectable; duplicates are not allowed."
+// To go at-least-once, every non-idempotent subscriber would need to track
+// `(dispatch_id, side_effect_id)` — deferred.
+//
+// Retention: published rows accumulate indefinitely for forensic queries.
+// A cleanup sweep should DELETE rows where `publishedAt < NOW() - INTERVAL
+// '30 days'` once the table gets large; not wired yet (no scale pressure).
+model OutboundEvent {
+  id     String @id @default(cuid())
+  teamId String
+
+  // Domain-event type — e.g. "contact.updated", "conversation.assigned".
+  // Stored as a plain string (not enum) so adding a new event type is a
+  // code-only change; the table stays stable.
+  type    String
+  // The full DomainEvent envelope minus the `type` field. Subscribers
+  // reconstruct the typed event by combining `type` + `payload`.
+  payload Json
+
+  createdAt   DateTime  @default(now())
+  // Set when the drainer (or the synchronous publish path) successfully
+  // ran all subscribers. Null = pending OR failed (see `failedAt`).
+  publishedAt DateTime?
+  // Set when dispatch threw. The row is NOT retried — the operator queries
+  // failed rows and decides what to do (manual re-publish, drop, or fix
+  // the subscriber + bulk re-publish).
+  failedAt    DateTime?
+  // Truncated error message from the throwing subscriber. NULL when the
+  // dispatch succeeded.
+  lastError   String?
+  // Reserved for future at-least-once mode. Today the drainer increments
+  // once on pickup and never retries — so this is always 0 or 1.
+  attempts    Int       @default(0)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  // The drainer's hot path. Partial index in raw SQL (Prisma can't model
+  // partial indexes) — see migration 20260518200000_outbound_event_outbox.
+  @@index([teamId, createdAt])
 }

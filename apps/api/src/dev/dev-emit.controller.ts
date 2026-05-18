@@ -1,0 +1,320 @@
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  NotFoundException,
+  Post,
+  UseGuards,
+} from "@nestjs/common";
+
+import { CurrentSession } from "../auth/current-session.decorator";
+import { SessionGuard } from "../auth/session.guard";
+import type { ApiSession } from "../auth/session.guard";
+import { DbService } from "../db/db.service";
+import { RealtimeEmitter } from "../realtime/emitter.service";
+import type {
+  ConversationStatus,
+  InternalNote,
+  Message,
+  MessageStatus,
+  User,
+} from "@ccp/shared/types";
+
+/**
+ * Dev-only event firehose. Used by the floating DevTools widget to
+ * simulate inbound messages, status changes, etc. without going through
+ * Meta.
+ *
+ * Three layers of defence:
+ *   1) `NODE_ENV !== "production"` — refuses prod builds outright (the
+ *      route 404s in prod).
+ *   2) `ENABLE_DEV_TOOLS=1` — opt-in env flag; defaults off even in dev.
+ *   3) SessionGuard + every lookup scoped to `teamId` — even with the
+ *      flag on, an unauthenticated caller can't touch anything, and a
+ *      logged-in user can't reach into another team.
+ *
+ * Direct-emit semantics preserved on purpose: the dev tool is for
+ * client-side testing of socket payload handling, NOT for exercising the
+ * full pipeline. Using `RealtimeEmitter` here instead of `bus.publish`
+ * skips audit / analytics / workflow-dispatch — which is the original
+ * behavior the DevTools UI was designed around.
+ */
+
+interface FakeInboundMessageBody {
+  kind: "fake-inbound-message";
+  conversationId: string;
+  body: string;
+}
+
+interface MarkLastReadBody {
+  kind: "mark-last-read";
+  conversationId: string;
+}
+
+interface AddNoteBody {
+  kind: "add-fake-note";
+  conversationId: string;
+  body: string;
+}
+
+interface ToggleStatusBody {
+  kind: "toggle-status";
+  conversationId: string;
+  status: ConversationStatus;
+}
+
+interface AssignBody {
+  kind: "assign";
+  conversationId: string;
+  assignedUserId: string | null;
+}
+
+type DevEmitBody =
+  | FakeInboundMessageBody
+  | MarkLastReadBody
+  | AddNoteBody
+  | ToggleStatusBody
+  | AssignBody;
+
+function devToolsEnabled(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.ENABLE_DEV_TOOLS === "1";
+}
+
+@Controller("api/dev")
+@UseGuards(SessionGuard)
+export class DevEmitController {
+  constructor(
+    private readonly db: DbService,
+    private readonly emitter: RealtimeEmitter,
+  ) {}
+
+  @Post("emit")
+  async emit(
+    @CurrentSession() session: ApiSession,
+    @Body() body: DevEmitBody,
+  ): Promise<{ ok: boolean; messageId?: string; noteId?: string; status?: MessageStatus }> {
+    if (!devToolsEnabled()) {
+      throw new NotFoundException("Not Found");
+    }
+    const { teamId, userId } = session;
+
+    switch (body.kind) {
+      case "fake-inbound-message":
+        return this.handleFakeInbound(body, teamId);
+      case "mark-last-read":
+        return this.handleMarkLastRead(body, teamId);
+      case "add-fake-note":
+        return this.handleAddNote(body, teamId, userId);
+      case "toggle-status":
+        return this.handleToggleStatus(body, teamId);
+      case "assign":
+        return this.handleAssign(body, teamId);
+      default: {
+        const _exhaustive: never = body;
+        void _exhaustive;
+        throw new BadRequestException({ error: "unknown kind" });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+
+  private async loadOwnedConversation(conversationId: string, teamId: string) {
+    return this.db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+    });
+  }
+
+  private async handleFakeInbound(
+    { conversationId, body }: FakeInboundMessageBody,
+    teamId: string,
+  ) {
+    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+
+    const externalId = `fake_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date();
+
+    const created = await this.db.message.create({
+      data: {
+        teamId,
+        conversationId,
+        externalId,
+        direction: "in",
+        provider: "meta_cloud",
+        status: "delivered",
+        body,
+        rawPayload: { fake: true, devTools: true },
+        timestamp: now,
+      },
+    });
+
+    await this.db.conversation.update({
+      where: { id: conversationId },
+      data: {
+        lastMessageAt: now,
+        lastMessagePreview: body,
+        unreadCount: { increment: 1 },
+      },
+    });
+
+    const message: Message = {
+      id: created.id,
+      teamId: created.teamId,
+      conversationId: created.conversationId,
+      externalId: created.externalId,
+      senderUserId: null,
+      body: created.body,
+      direction: "in",
+      provider: "meta_cloud",
+      status: "delivered",
+      rawPayload: created.rawPayload as Record<string, unknown>,
+      timestamp: created.timestamp.toISOString(),
+    };
+
+    // Single team-room emit. Subscribers in conversation rooms also see
+    // it (same socket is in both rooms) and filter by conversationId.
+    this.emitter.emitToTeam(teamId, "message:new", {
+      teamId,
+      conversationId,
+      message,
+      preview: body,
+      lastMessageAt: now.toISOString(),
+      unreadDelta: 1,
+    });
+
+    return { ok: true, messageId: created.id };
+  }
+
+  private async handleMarkLastRead(
+    { conversationId }: MarkLastReadBody,
+    teamId: string,
+  ) {
+    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+
+    const lastOutbound = await this.db.message.findFirst({
+      where: { conversationId, teamId, direction: "out" },
+      orderBy: { timestamp: "desc" },
+    });
+    if (!lastOutbound) {
+      throw new NotFoundException({ error: "no outbound message" });
+    }
+    const next: MessageStatus =
+      lastOutbound.status === "sent"
+        ? "delivered"
+        : lastOutbound.status === "delivered"
+          ? "read"
+          : "read";
+
+    await this.db.message.update({
+      where: { id: lastOutbound.id },
+      data: { status: next },
+    });
+
+    this.emitter.emitToTeam(teamId, "message:status", {
+      teamId,
+      conversationId,
+      messageId: lastOutbound.id,
+      status: next,
+    });
+
+    return { ok: true, status: next };
+  }
+
+  private async handleAddNote(
+    { conversationId, body }: AddNoteBody,
+    teamId: string,
+    userId: string,
+  ) {
+    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+
+    const created = await this.db.internalNote.create({
+      // Always attribute to the calling user — the request body has no say.
+      data: { conversationId, authorUserId: userId, body },
+    });
+
+    const note: InternalNote = {
+      id: created.id,
+      conversationId: created.conversationId,
+      authorUserId: created.authorUserId,
+      body: created.body,
+      timestamp: created.timestamp.toISOString(),
+    };
+
+    this.emitter.emitToTeam(teamId, "note:new", {
+      teamId,
+      conversationId,
+      note,
+    });
+
+    return { ok: true, noteId: created.id };
+  }
+
+  private async handleToggleStatus(
+    { conversationId, status }: ToggleStatusBody,
+    teamId: string,
+  ) {
+    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+
+    await this.db.conversation.update({
+      where: { id: conversationId },
+      data: { status },
+    });
+
+    this.emitter.emitToTeam(teamId, "conversation:status", {
+      teamId,
+      conversationId,
+      status,
+    });
+
+    return { ok: true };
+  }
+
+  private async handleAssign(
+    { conversationId, assignedUserId }: AssignBody,
+    teamId: string,
+  ) {
+    const convo = await this.loadOwnedConversation(conversationId, teamId);
+    if (!convo) throw new NotFoundException({ error: "conversation not found" });
+
+    if (assignedUserId) {
+      const assignee = await this.db.user.findFirst({
+        where: { id: assignedUserId, teamId },
+        select: { id: true },
+      });
+      if (!assignee) {
+        throw new BadRequestException({ error: "assignee not in team" });
+      }
+    }
+
+    const updated = await this.db.conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId },
+      include: { assignedUser: true },
+    });
+
+    const assignedUser: User | null = updated.assignedUser
+      ? {
+          id: updated.assignedUser.id,
+          teamId: updated.assignedUser.teamId,
+          role: updated.assignedUser.role,
+          name: updated.assignedUser.name,
+          email: updated.assignedUser.email,
+          avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
+          isActive: updated.assignedUser.deactivatedAt === null,
+        }
+      : null;
+
+    this.emitter.emitToTeam(teamId, "conversation:assigned", {
+      teamId,
+      conversationId,
+      assignedUser,
+    });
+
+    return { ok: true };
+  }
+}

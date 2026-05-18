@@ -11,6 +11,61 @@ services:
     image: postgres:16.6-alpine
     restart: unless-stopped
     networks: [ccp_net]
+    # /dev/shm is where Postgres puts parallel-query workers' shared memory.
+    # Docker's default 64MB cap surfaces as `could not resize shared memory
+    # segment` on busy systems — bumping to 256MB matches what production
+    # tuning guides recommend for a ≥2GB-RAM Postgres. Safe to keep even on
+    # small VPS since shm is allocated on-demand from page cache.
+    shm_size: 256mb
+    # On an 8GB VPS, Postgres + Redis + web + api can theoretically over-
+    # subscribe RAM (web/api each carry --max-old-space-size=4096). Caps
+    # turn a runaway process into a contained OOMKilled signal instead of
+    # taking the whole VPS down. Numbers reflect the actual budget — bump
+    # for any service that hits its cap legitimately in production.
+    mem_limit: 1500m
+    mem_reservation: 512m
+    # Tuning for the 8GB-VPS pilot scale. Defaults (shared_buffers=128MB,
+    # work_mem=4MB, effective_cache_size=4GB) are too conservative for the
+    # mem_limit above and leave perf on the table once 20-30 agents are
+    # querying the inbox list concurrently. Numbers below are tuned to:
+    #   - shared_buffers: ~25% of mem_limit — Postgres community guidance
+    #   - effective_cache_size: 50-75% — what the planner assumes the OS
+    #     page cache will give it; conservative to avoid over-estimation
+    #   - work_mem: per sort/hash, not per query — multiplied by parallel
+    #     workers × concurrent connections; 8MB × 35 pool slots = 280MB
+    #     worst case, well inside the cap
+    #   - max_connections: 120, leaves headroom past the 60 the two pools
+    #     reserve so a one-off psql or `prisma migrate deploy` doesn't
+    #     hit the cap
+    # log_min_duration_statement = 250ms surfaces slow queries to docker
+    # logs without flooding on normal traffic.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=384MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=120
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - log_min_duration_statement=250
+      - -c
+      - log_lock_waits=on
+    # Cap docker's json-file driver so a chatty `log_min_duration_statement`
+    # day can't fill the disk. 3 files × 50MB = 150MB ceiling per service.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ccp}
       POSTGRES_USER: ${POSTGRES_USER:-app}
@@ -39,12 +94,30 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # BullMQ working set is tiny — workflow jobs are pointers, not bulk
+    # data. 256MB is well above what Redis ever uses for the pilot scale;
+    # the cap mostly catches a runaway pub/sub or a stuck stream.
+    mem_limit: 256m
+    mem_reservation: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   app:
-    # Prod pulls :latest; `docker compose up --build` builds locally with the same tag.
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest
+    # Prod pulls :latest-web; `docker compose up --build` builds locally with
+    # the same tag. apps/web/Dockerfile carries the Next.js build output +
+    # the `next start` entrypoint.
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-web
     build:
       context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Forwarded into `next build` so the client bundle has the right
+        # Socket.io target. Runtime env (below) can't help here — Next.js
+        # inlines NEXT_PUBLIC_* at build time.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
@@ -66,10 +139,27 @@ services:
       # We sit behind one trusted reverse proxy (Caddy on the host). The
       # rate limiter in middleware.ts uses this to pick the right XFF entry.
       TRUSTED_PROXY_HOPS: "1"
-      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
       UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
-      AUTOMATION_WORKER_CONCURRENCY: ${AUTOMATION_WORKER_CONCURRENCY:-5}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      # NEXT_PUBLIC_API_URL is intentionally NOT set at runtime. Next.js
+      # inlines NEXT_PUBLIC_* into the client bundle at `next build` (see
+      # the `args:` block above) — setting it here at runtime would do
+      # nothing for the browser and just adds noise to docker inspect.
+      # Server-side target for RSC fetches + server actions. apps/web calls
+      # apps/api over this URL to read pages + run state mutations. Distinct
+      # from NEXT_PUBLIC_API_URL because the browser uses the public origin
+      # (same-host through Caddy) while the web container reaches the api
+      # container directly over the internal docker network.
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:4000}
+      # Shared secret for the cross-process cache-revalidate bridge —
+      # NestJS POSTs to /api/internal/revalidate when a catalog mutates,
+      # this endpoint requires the same secret. Must match the value
+      # on the api service. validateEnv requires this in prod.
+      INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
+      # Post-Phase-5: Next.js owns auth pages + RSC reads only. The NestJS
+      # api container owns everything else (REST, Socket.io, webhooks, the
+      # workflow worker, audit/analytics/dispatch). No env-toggle here for
+      # those ownerships any more — they're structural, not flagged.
     ports:
       # Bind to loopback only — Caddy on the host is the public ingress.
       # Without 127.0.0.1, this would publish on 0.0.0.0 and the app would
@@ -77,3 +167,118 @@ services:
       # (no TLS, no security headers, no rate limit on a real proxy hop).
       # Postgres and Redis above already follow this pattern.
       - "127.0.0.1:${APP_PORT:-3000}:3000"
+    # Next.js + Prisma. --max-old-space-size=4096 is the heap ceiling;
+    # 2GB mem_limit is conservative because RSS exceeds heap (native
+    # bindings, buffers, V8 metadata). Bump if next start ever OOM-kills
+    # in steady state.
+    mem_limit: 2g
+    mem_reservation: 768m
+    # Cap docker's json-file driver — 3 files × 100MB = 300MB ceiling per
+    # service. Web tends to log more than the api (RSC server logs +
+    # Better Auth request logs) so size is higher than the others.
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  # ---- NestJS API ---------------------------------------------------------
+  # Sits next to `app` (Next.js) on a different port. Caddy on the host
+  # routes `/api/*`, `/socket.io/*`, `/webhooks/*` here; `/`, `/_next/*`,
+  # `/api/auth/*` go to `app`.
+  #
+  # Separate Dockerfile from `app` (apps/api/Dockerfile vs apps/web/
+  # Dockerfile) so CI builds both images in parallel and the api image
+  # doesn't ship the Next.js bundle it never runs. Owns: REST, Socket.io,
+  # Meta webhooks, BullMQ workers, audit/analytics event subscribers,
+  # workflow dispatcher.
+  api:
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-api
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    networks: [ccp_net]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      # Separate pool from `app`'s — both processes share the same Postgres
+      # but get their own connections. Sized for the api's eventual share of
+      # traffic (all of it, post Phase 5). Until then it can be lower; revisit
+      # at Phase 3 when REST starts moving over.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public&connection_limit=30&pool_timeout=10
+      REDIS_URL: redis://redis:6379
+      # Better Auth secrets — used by SessionGuard to call auth.api.getSession
+      # against the same Session table the Next.js side writes to. Both must
+      # match `app` exactly or session validation fails silently.
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v25.0}
+      UPLOADTHING_TOKEN: ${UPLOADTHING_TOKEN}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      TRUSTED_PROXY_HOPS: "1"
+      API_PORT: "4000"
+      API_HOST: "0.0.0.0"
+      # Post-Phase-4: api owns the workflow worker by default. Override
+      # with API_RUN_WORKER_INLINE=0 if scaling demands an external worker
+      # container (run `docker compose --profile worker up worker` then).
+      # Workflow worker + media sweeper run in-process by default. Override
+      # to 0 only if scaling demands an external worker container — but
+      # that's a future-state setup; nothing under `profiles` runs the
+      # worker today (worker.ts and the old `worker` service were removed
+      # post-Phase-5 cleanup).
+      RUN_WORKER_INLINE: ${API_RUN_WORKER_INLINE:-1}
+      WORKFLOW_WORKER_CONCURRENCY: ${WORKFLOW_WORKER_CONCURRENCY:-5}
+      # Shared secret for the cache-revalidate bridge — same value as the
+      # web service. validateEnv requires this in prod.
+      INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
+      # Where this process posts cache-revalidate calls to the Next.js
+      # process. Defaults to the docker DNS for the web service; override
+      # only if the topology changes.
+      WEB_INTERNAL_URL: ${WEB_INTERNAL_URL:-http://app:3000}
+      # Optional: tunable Meta Graph fetch timeout. Default 15s.
+      META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
+      # In-app /api/dev/emit endpoint that spoofs Meta webhooks for
+      # local testing. MUST NOT be set in production — uncommenting this
+      # in prod would let any authenticated user inject inbound events.
+      ENABLE_DEV_TOOLS: ${ENABLE_DEV_TOOLS:-}
+    ports:
+      # Loopback-only — Caddy is the public ingress (same posture as `app`).
+      - "127.0.0.1:${API_PORT:-4000}:4000"
+    # CMD lives in the Dockerfile's `api` target — defers to apps/api's
+    # `start` script (@swc-node/register + SWC_NODE_PROJECT + the entry
+    # point). Override here only if a future scaling cliff demands a
+    # worker-only variant.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    # Higher than `app` because the api carries the workflow runner,
+    # BullMQ worker, Socket.io fanout, and audit/analytics subscribers
+    # on top of REST. 3GB tracks --max-old-space-size=4096 with margin
+    # for native bindings + socket buffers under fan-out load.
+    mem_limit: 3g
+    mem_reservation: 1g
+    # Must exceed BullMQ lockDuration (90s, see lib/workflows/worker.ts)
+    # plus a tail for sweeper stop + queue close. Docker's default 10s
+    # would SIGKILL the api mid-job, Redis would release the lock 90s
+    # later, and the next process would re-execute the same workflow
+    # step. systemd's TimeoutStopSec=120 (deploy/ccp.service) plus this
+    # makes the whole graceful-shutdown chain hold together end-to-end.
+    stop_grace_period: 100s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  # NOTE: The standalone `worker` service was removed post-Phase-5 cleanup.
+  # `worker.ts` is gone; the NestJS `api` container owns BullMQ workers
+  # via `RUN_WORKER_INLINE=1` (default in this file). If a future scaling
+  # cliff requires an external worker container, add it back here pointing
+  # at the NestJS entrypoint with worker-only flags (no HTTP listener).

@@ -1,0 +1,41 @@
+{
+  "name": "@ccp/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./types": "./src/types.ts",
+    "./dtos": "./src/dtos.ts",
+    "./socket/events": "./src/socket/events.ts",
+    "./auth/permissions": "./src/auth/permissions.ts",
+    "./auth/better-auth-config": "./src/auth/better-auth-config.ts",
+    "./auth/password-policy": "./src/auth/password-policy.ts",
+    "./api-keys/scopes": "./src/api-keys/scopes.ts",
+    "./providers/types": "./src/providers/types.ts",
+    "./team-chat/types": "./src/team-chat/types.ts",
+    "./team-chat/permissions": "./src/team-chat/permissions.ts",
+    "./team-chat/mentions": "./src/team-chat/mentions.ts",
+    "./workflows/events": "./src/workflows/events.ts",
+    "./events/types": "./src/events/types.ts",
+    "./field-tokens": "./src/field-tokens.ts",
+    "./template-bindings": "./src/template-bindings.ts",
+    "./utils": "./src/utils.ts",
+    "./utils/avatar-color": "./src/utils/avatar-color.ts",
+    "./utils/tag-colors": "./src/utils/tag-colors.ts",
+    "./utils/phone": "./src/utils/phone.ts",
+    "./utils/window": "./src/utils/window.ts"
+  },
+  "dependencies": {
+    "better-auth": "^1.6.11",
+    "clsx": "^2.1.1",
+    "libphonenumber-js": "^1.12.43",
+    "tailwind-merge": "^3.6.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@ccp/tsconfig": "workspace:*",
+    "@prisma/client": "^7.8.0",
+    "typescript": "^6.0.3"
+  }
+}

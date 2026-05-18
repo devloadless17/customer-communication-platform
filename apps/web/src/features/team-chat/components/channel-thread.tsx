@@ -1,0 +1,274 @@
+"use client";
+
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ArrowDown } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { canDeleteMessage } from "@ccp/shared/team-chat/permissions";
+import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
+import type { User } from "@ccp/shared/types";
+import { useChatScroll } from "@/features/inbox/hooks/use-chat-scroll";
+
+import { ChannelMessage } from "./channel-message";
+
+/**
+ * Channel feed scroller. Three load-bearing pieces, in this order:
+ *
+ *   1. `@tanstack/react-virtual` — windows the messages so a 5k-message
+ *      channel only mounts ~30 ChannelMessage components at a time. Each
+ *      ChannelMessage carries its own dropdown + reaction picker; without
+ *      windowing the DOM cost is real once the user has scrolled through
+ *      a few "Load older" pages.
+ *
+ *   2. `useChatScroll` (shared with the customer inbox) — stick-to-bottom,
+ *      "↓ N new messages" pill while reading history, snap on own send,
+ *      load-older anchor preservation. Virtualization composes cleanly with
+ *      it because the spacer div's `scrollHeight` reflects total content,
+ *      which is what the hook's scroll math assumes.
+ *
+ *   3. Stable `getItemKey` so the virtualizer's per-item measurements
+ *      persist across older-page prepends (indices shift; keys don't).
+ *      Optimistic rows use `clientTempId` so the same React node survives
+ *      the optimistic→confirmed swap.
+ */
+const ESTIMATE_HEIGHT = 56;
+const OVERSCAN = 6;
+
+export function ChannelThread({
+  messages,
+  channelId,
+  currentUser,
+  canPin,
+  onLoadOlder,
+  hasMoreOlder,
+  onLoadNewer,
+  hasMoreNewer,
+  anchored,
+  pendingLiveCount,
+  onGoToLive,
+  searchQuery,
+  onOpenThread,
+}: {
+  messages: TeamChannelMessageDto[];
+  channelId: string;
+  currentUser: User;
+  canPin: boolean;
+  onLoadOlder: (commit?: (run: () => void) => void) => Promise<number>;
+  hasMoreOlder: boolean;
+  onLoadNewer: () => Promise<number>;
+  hasMoreNewer: boolean;
+  /** True while the loaded slice doesn't include the live tail. */
+  anchored: boolean;
+  /** Socket-fanout messages that arrived while anchored. */
+  pendingLiveCount: number;
+  /** Refetch the live tail + clear pendingLiveCount. */
+  onGoToLive: () => Promise<void>;
+  /** When set, ChannelMessage highlights matching substrings inline. */
+  searchQuery: string | null;
+  onOpenThread: (rootMessageId: string) => void;
+}) {
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const topSentinelRef = useRef<HTMLDivElement>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement>(null);
+
+  // Resolve Radix's inner viewport once — the same selector useChatScroll
+  // uses internally. Both must point at the same element so virtualizer
+  // math and chat-scroll math agree.
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const root = scrollAreaRef.current;
+    if (!root) return;
+    setScrollEl(
+      root.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]") ?? root,
+    );
+  }, []);
+
+  const lastMessage = messages.at(-1);
+  // Key on `clientTempId` when present so the optimistic→confirmed swap
+  // doesn't count as a "new message" — same trick the inbox uses.
+  const lastEntryKey = lastMessage
+    ? lastMessage.clientTempId
+      ? `t_${lastMessage.clientTempId}`
+      : lastMessage.id
+    : null;
+  const isOwnSend =
+    lastMessage?.pending === true && lastMessage.authorUserId === currentUser.id;
+
+  const { unreadBelow, scrollToBottom } = useChatScroll({
+    scrollAreaRef,
+    contentRef,
+    topSentinelRef,
+    conversationId: channelId,
+    lastEntryKey,
+    isOwnSend,
+    hasMoreOlder,
+    loadOlder: onLoadOlder,
+  });
+
+  // Virtualizer. Stable keys per message id; clientTempId for optimistic
+  // rows so the measured-height entry persists across the swap to the
+  // real id (no flash, no re-measure storm).
+  const rowVirtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollEl,
+    estimateSize: () => ESTIMATE_HEIGHT,
+    overscan: OVERSCAN,
+    getItemKey: (idx) => {
+      const m = messages[idx]!;
+      return m.clientTempId ? `t_${m.clientTempId}` : m.id;
+    },
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const totalHeight = rowVirtualizer.getTotalSize();
+
+  // Bottom-sentinel auto-load while anchored — mirrors the top-sentinel
+  // mechanism that useChatScroll owns. When the user scrolls within 200px of
+  // the bottom of the anchored slice AND there are more newer messages, fetch
+  // the next forward page. Stays a no-op once `hasMoreNewer` flips to false
+  // (we've caught up to live).
+  const onLoadNewerRef = useRef(onLoadNewer);
+  useEffect(() => {
+    onLoadNewerRef.current = onLoadNewer;
+  }, [onLoadNewer]);
+  useEffect(() => {
+    if (!hasMoreNewer) return;
+    const sentinel = bottomSentinelRef.current;
+    const root = scrollEl;
+    if (!sentinel || !root) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          void onLoadNewerRef.current();
+        }
+      },
+      { root, rootMargin: "200px" },
+    );
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [hasMoreNewer, scrollEl]);
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <ScrollArea ref={scrollAreaRef} className="flex-1">
+        <div
+          ref={contentRef}
+          // overflow-anchor:none — useChatScroll manages scroll position
+          // explicitly; the browser's own anchoring would fight it.
+          style={{ overflowAnchor: "none" }}
+          className="relative w-full py-2"
+        >
+          {/* Top sentinel — IntersectionObserver target for "load older".
+              Lives OUTSIDE the virtual range so it's always in the DOM
+              (the virtualizer only renders a window of message rows). */}
+          <div ref={topSentinelRef} className="h-px" />
+
+          {messages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-1 px-8 py-16 text-center">
+              <div className="text-sm font-medium">This is the start of the channel.</div>
+              <div className="text-xs text-muted-foreground">
+                Say hi to your team — they'll see it in real time.
+              </div>
+            </div>
+          ) : (
+            // Virtualized spacer: holds the total scroll height so the
+            // viewport's scrollbar reflects the full message list, while
+            // only the windowed rows are absolutely positioned inside.
+            <div
+              className="relative w-full"
+              style={{ height: `${totalHeight}px` }}
+            >
+              {virtualItems.map((row) => {
+                const m = messages[row.index]!;
+                return (
+                  <div
+                    key={row.key}
+                    // measureElement: lets the virtualizer learn each row's
+                    // real height (messages vary by body length, media,
+                    // reaction chips, edited label). Required for accurate
+                    // total height + correct scroll-to behavior.
+                    ref={rowVirtualizer.measureElement}
+                    data-index={row.index}
+                    className="absolute left-0 top-0 w-full"
+                    style={{ transform: `translateY(${row.start}px)` }}
+                  >
+                    <ChannelMessage
+                      message={m}
+                      channelId={channelId}
+                      currentUser={currentUser}
+                      canPin={canPin}
+                      canDelete={canDeleteMessage(
+                        currentUser.role,
+                        m.authorUserId,
+                        currentUser.id,
+                      )}
+                      isThreadReply={false}
+                      // Stable reference — ChannelMessage is memoized; a
+                      // fresh closure per row per render would defeat memo
+                      // on every event.
+                      onOpenThread={onOpenThread}
+                      searchQuery={searchQuery}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {/* Bottom sentinel — IntersectionObserver target for auto-load
+              forward while anchored. Renders ONLY in anchored mode; in live
+              mode the channel feed naturally ends at the bottom and there's
+              nothing to auto-load. */}
+          {hasMoreNewer && <div ref={bottomSentinelRef} className="h-px" />}
+        </div>
+      </ScrollArea>
+
+      {/* Floating pill stack — anchored above the bottom edge of this
+          component. Composer sits below us in the workspace, so pills float
+          above the reply box. Three mutually-exclusive states:
+            - Anchored: "Jump to live" (refetches tail + clears queue).
+            - Live + reading history: "↓ N new messages" (scroll-to-bottom).
+            - Caught up: no pill.
+          WhatsApp / Slack / Discord pattern. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center">
+        <AnimatePresence>
+          {anchored ? (
+            <motion.button
+              key="jump-to-live"
+              type="button"
+              onClick={() => void onGoToLive()}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.15 }}
+              className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-primary px-3.5 py-1.5 text-[12px] font-medium text-primary-foreground shadow-lg ring-1 ring-border/40 transition-colors hover:bg-primary/90"
+            >
+              <ArrowDown className="size-3.5" />
+              {pendingLiveCount > 0
+                ? `Jump to live · ${pendingLiveCount} new`
+                : "Jump to live"}
+            </motion.button>
+          ) : (
+            unreadBelow > 0 && (
+              <motion.button
+                key="unread-below"
+                type="button"
+                onClick={scrollToBottom}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8 }}
+                transition={{ duration: 0.15 }}
+                className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
+              >
+                <ArrowDown className="size-3.5" />
+                {unreadBelow} new {unreadBelow === 1 ? "message" : "messages"}
+              </motion.button>
+            )
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}

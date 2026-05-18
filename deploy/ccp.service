@@ -17,11 +17,31 @@ EnvironmentFile=/opt/ccp/.env
 
 ExecStartPre=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml pull --quiet
 ExecStart=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml up
-ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml down
+# ExecStop only stops the app containers — postgres + redis stay running
+# across `systemctl restart ccp`. Bouncing the stateful services means a
+# cold postgres shared_buffers + page cache and a re-handshake for every
+# Redis connection; the first 30-60s of inbox queries after restart are
+# measurably slow. App-only restart keeps the data plane warm and turns
+# a deploy into "swap the app processes" instead of "reboot the stack."
+# When the unit itself is stopped (systemctl stop ccp), systemd still
+# sends SIGTERM to the compose process from ExecStart, which then takes
+# everything down cleanly via its own SIGTERM-fanout to each container.
+ExecStop=/usr/bin/docker compose -f /opt/ccp/docker-compose.yml stop app api
 TimeoutStartSec=180
-TimeoutStopSec=60
+# Must exceed BullMQ lockDuration (90s, see lib/workflows/worker.ts) plus a
+# safety margin for the sweeper-stop → queue-close tail. Lower than ~100s and
+# a SIGKILL can land while a step is still draining — Redis releases the lock
+# 90s later and the next process re-executes the job (irreversible Meta sends
+# double-fire). Don't reduce this without first lowering lockDuration in code.
+TimeoutStopSec=120
 
-Restart=on-failure
+# `always` matches operational intent — "if the process is gone, bring it
+# back" — and survives the (rare) clean-exit case. NestJS/Next.js never
+# exit 0 voluntarily, so this is identical to `on-failure` in practice,
+# but `always` is the one we'd want if anyone ever adds a graceful-exit
+# code path. StartLimitBurst still throttles a crash loop so an operator
+# notices a flapping deploy.
+Restart=always
 RestartSec=3
 # 5 restarts inside 60s → unit gives up so an operator notices.
 StartLimitIntervalSec=60
