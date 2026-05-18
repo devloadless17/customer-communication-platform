@@ -4,8 +4,6 @@ import { useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Bell,
-  CircleHelp,
   ContactRound,
   Inbox,
   LogOut,
@@ -136,34 +134,8 @@ export function AppRail({
         ))}
       </nav>
 
-      {/* Footer: notifications · help · user menu */}
+      {/* Footer: user menu */}
       <div className="mt-auto flex flex-col items-center gap-2 pb-1">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              aria-label="Notifications"
-            >
-              <Bell className="size-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Notifications</TooltipContent>
-        </Tooltip>
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              aria-label="Help"
-            >
-              <CircleHelp className="size-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Help</TooltipContent>
-        </Tooltip>
-
         <UserMenu currentUser={currentUser}>
           <button
             type="button"

@@ -6,7 +6,6 @@ import { api } from "../api-client";
 import type {
   AudienceGroupDto,
   ListContactsOpts,
-  MessageSearchPage,
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
   WhatsappConfigView,
@@ -24,7 +23,6 @@ import type {
   ContactStage,
   ConversationWithRefs,
   CursorPage,
-  Message,
   Role,
   Tag,
   TemplateDto,
@@ -213,28 +211,6 @@ export async function getConversationWithRefs(
     if (isApiNotFound(err)) return null;
     throw err;
   }
-}
-
-export async function searchConversationMessages(
-  conversationId: string,
-  opts: { query: string; take?: number; cursor?: string | null },
-): Promise<MessageSearchPage> {
-  return api<MessageSearchPage>(`/api/conversations/${conversationId}/messages/search`, {
-    query: {
-      q: opts.query,
-      take: opts.take,
-      cursor: opts.cursor ?? undefined,
-    },
-  });
-}
-
-export async function loadMessageContextWindow(
-  conversationId: string,
-  opts: { around: string; take?: number },
-): Promise<{ items: Message[]; nextOlderCursor: string | null; nextNewerCursor: string | null }> {
-  return api(`/api/conversations/${conversationId}/messages/context`, {
-    query: { around: opts.around, take: opts.take },
-  });
 }
 
 // ---------------------------------------------------------------------------
