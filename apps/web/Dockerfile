@@ -113,9 +113,24 @@ RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","
 # -----------------------------------------------------------------------------
 FROM node:22-slim AS runtime
 WORKDIR /app
+# `apt-get upgrade` patches stale debian packages (libc6, libcap2,
+# libsystemd0, libudev1, …) at image-build time — node:22-slim is
+# rebuilt periodically but lags debian security updates by days, and
+# the docker-build-push GHA cache can re-use a still-older base layer.
+# Pins us to the current debian security feed at the moment of build.
 RUN apt-get update \
+ && apt-get -y --no-install-recommends upgrade \
  && apt-get install -y --no-install-recommends openssl ca-certificates wget \
  && rm -rf /var/lib/apt/lists/*
+# Remove npm: nothing in the runtime invokes it (cli-tools stage already
+# completed its npm install in a separate stage; the runtime uses prisma
+# + tsx as standalone binaries via the /opt/cli-tools PATH, and the
+# Next.js standalone server runs via plain node). The npm package under
+# /usr/local/lib/node_modules/npm ships its OWN bundled deps (picomatch,
+# cross-spawn, …) that Trivy keeps flagging on every npm CVE — even
+# though the project never executes any of them. Removing it eliminates
+# a whole class of false-positives.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 
 # Standalone bundle: server.js + minimal traced node_modules.

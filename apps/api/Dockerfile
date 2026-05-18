@@ -46,6 +46,24 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
 # stage saw — no re-generate needed.
 # -----------------------------------------------------------------------------
 FROM deps AS runtime
+
+# Patch debian OS packages (libc6, libcap2, libsystemd0, libudev1, …) at
+# image-build time so Trivy doesn't flag the stale base. node:22-slim is
+# rebuilt periodically but lags actual debian security updates by days,
+# and CI's docker-build-push cache can re-use a still-older base layer.
+# Running `apt-get upgrade` here pins us to the current debian
+# security feed at the moment of build.
+#
+# Remove npm itself: the runtime uses `pnpm --filter @ccp/api start`
+# exclusively (corepack-installed pnpm at base), so the npm package
+# under /usr/local/lib/node_modules/npm is dead weight that ships its
+# OWN bundled picomatch / cross-spawn / etc. — every npm release brings
+# transitive CVEs the project doesn't actually use.
+RUN apt-get update \
+ && apt-get -y --no-install-recommends upgrade \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY apps/api ./apps/api
 COPY packages ./packages
 COPY prisma ./prisma
