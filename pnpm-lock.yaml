@@ -159,6 +159,9 @@ importers:
       '@types/multer':
         specifier: ^2.1.0
         version: 2.1.0
+      '@types/node':
+        specifier: ^24
+        version: 24.12.4
       '@types/papaparse':
         specifier: ^5.5.2
         version: 5.5.2
@@ -171,9 +174,6 @@ importers:
 
   apps/web:
     dependencies:
-      '@ccp/config':
-        specifier: workspace:*
-        version: link:../../packages/config
       '@ccp/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -216,15 +216,9 @@ importers:
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
-      clsx:
-        specifier: ^2.1.1
-        version: 2.1.1
       framer-motion:
         specifier: ^12.23.0
         version: 12.38.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      libphonenumber-js:
-        specifier: ^1.12.43
-        version: 1.13.2
       lucide-react:
         specifier: ^1.16.0
         version: 1.16.0(react@19.2.6)
@@ -252,9 +246,6 @@ importers:
       sonner:
         specifier: ^2.0.7
         version: 2.0.7(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      tailwind-merge:
-        specifier: ^3.6.0
-        version: 3.6.0
       tw-animate-css:
         specifier: ^1.2.5
         version: 1.4.0

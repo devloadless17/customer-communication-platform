@@ -232,6 +232,19 @@ services:
       # post-Phase-5 cleanup).
       RUN_WORKER_INLINE: ${API_RUN_WORKER_INLINE:-1}
       WORKFLOW_WORKER_CONCURRENCY: ${WORKFLOW_WORKER_CONCURRENCY:-5}
+      # Per-team max concurrent workflow steps. Stops one busy team from
+      # starving every other team's queue.
+      WORKFLOW_PER_TEAM_CONCURRENCY: ${WORKFLOW_PER_TEAM_CONCURRENCY:-2}
+      # Outbound-webhook delivery worker concurrency + retention + orphan-
+      # recovery sweeper grace (each one HTTP POST, idempotent retry on 5xx).
+      WEBHOOK_WORKER_CONCURRENCY: ${WEBHOOK_WORKER_CONCURRENCY:-10}
+      WEBHOOK_DELIVERY_RETENTION_DAYS: ${WEBHOOK_DELIVERY_RETENTION_DAYS:-30}
+      WEBHOOK_ORPHAN_GRACE_MS: ${WEBHOOK_ORPHAN_GRACE_MS:-300000}
+      # Require X-Webhook-Timestamp + reject >5min replays on incoming
+      # workflow-webhook posts. Set 0 only for legacy senders.
+      WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP: ${WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP:-1}
+      # safe-fetch SSRF defense. Set 1 ONLY in dev (hits a local receiver).
+      INTEGRATIONS_ALLOW_PRIVATE_HOSTS: ${INTEGRATIONS_ALLOW_PRIVATE_HOSTS:-0}
       # Shared secret for the cache-revalidate bridge — same value as the
       # web service. validateEnv requires this in prod.
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
