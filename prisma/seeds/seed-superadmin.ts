@@ -1,14 +1,21 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcrypt";
-import { Pool } from "pg";
 
 const EMAIL = "ali@loadless.ai";
 const PASSWORD = "loadless";
 const NAME = "Ali";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const db = new PrismaClient({ adapter: new PrismaPg(pool) });
+// Pass the connection string directly instead of a pre-built `pg.Pool`. The
+// runtime image has two `pg` installs (one under /app from the Next.js
+// standalone trace, one under /opt/cli-tools transitively via @prisma/
+// adapter-pg). A Pool built from /app/node_modules/pg fails the adapter's
+// `instanceof Pool` check (the adapter holds the /opt-side class), so the
+// Pool object gets treated as a config dict and pg falls back to
+// 127.0.0.1:5432. Giving the adapter a string sidesteps both copies.
+const db = new PrismaClient({
+  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
+});
 
 async function main() {
   const team = await db.team.upsert({
@@ -64,11 +71,9 @@ async function main() {
 main()
   .then(async () => {
     await db.$disconnect();
-    await pool.end();
   })
   .catch(async (err) => {
     console.error(err);
     await db.$disconnect();
-    await pool.end();
     process.exit(1);
   });

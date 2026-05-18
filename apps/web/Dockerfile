@@ -105,7 +105,19 @@ RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","
     npm install --no-save --no-package-lock --omit=dev \
       prisma@7.8.0 \
       @prisma/client@7.8.0 \
+      @prisma/adapter-pg@7.8.0 \
+      pg@8.13.0 \
+      bcrypt@6.0.0 \
       tsx@4.19.2
+# @prisma/adapter-pg + pg + bcrypt are needed by `prisma/seeds/seed-
+# superadmin.ts` which runs via `docker exec app pnpm run db:seed:
+# superadmin` in the deploy workflow's post-deploy step. Without
+# them the seed crashes with `Cannot find module '@prisma/adapter-
+# pg'` — Next.js's standalone tracer at /app/node_modules carries
+# only what the page bundle imports, and these three aren't reached
+# from any page (the only consumer is the one-shot seed script).
+# bcrypt ships native bindings; node:22-slim glibc + node 22 matches
+# bcrypt 6's prebuild lineup so no compile step is needed.
 
 # -----------------------------------------------------------------------------
 # runtime — slim image with the standalone bundle + the CLI tools. No pnpm

@@ -36,15 +36,51 @@ fi
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 
+# ---- Build .env.imitate (docker-network-correct copy of .env) --------------
+# .env is dev-mode tuned: `INTERNAL_API_URL=http://localhost:4000`,
+# `NEXT_PUBLIC_API_URL=http://localhost:4000`, etc. — correct when both
+# processes run on the host (`npm run dev` + `npm run api:dev`) but
+# WRONG inside docker compose where `localhost` is the container's own
+# loopback. The Next.js RSC fetch ends up at 127.0.0.1:4000 inside the
+# web container (no listener) and the inbox page 500s with the masked
+# "Server Components render" error.
+#
+# Generate a derived env file with the docker service names instead:
+#   INTERNAL_API_URL=http://api:4000      (RSC reaches api over docker DNS)
+#   WEB_INTERNAL_URL=http://app:3000      (NestJS reaches web over docker DNS)
+#   NEXT_PUBLIC_API_URL=                  (empty → browser uses same-origin
+#                                          via Caddy in prod / direct via
+#                                          the published port locally)
+# The original .env is untouched so `npm run dev` keeps working.
+build_imitate_env() {
+  # Strip dev-mode URL overrides AND any prior NODE_ENV; append the
+  # docker-correct values + production NODE_ENV so the image runs the
+  # standalone bundle (not dev). umask 077 because the file carries the
+  # same secrets as .env.
+  ( umask 077 && grep -vE '^(INTERNAL_API_URL|WEB_INTERNAL_URL|NEXT_PUBLIC_API_URL|NODE_ENV)=' .env > .env.imitate )
+  cat >> .env.imitate <<'EOF'
+
+# --- appended by scripts/local-deploy-imitate.sh ---
+NODE_ENV=production
+INTERNAL_API_URL=http://api:4000
+WEB_INTERNAL_URL=http://app:3000
+NEXT_PUBLIC_API_URL=
+EOF
+}
+
 case "${1:-}" in
   --down)
     echo "==> Tearing down local stack"
-    docker compose --env-file .env down -v
-    rm -f deploy/Caddyfile.rendered
-    echo "✓ stack down, volumes removed, rendered Caddyfile cleaned up"
+    [ -f .env.imitate ] || build_imitate_env
+    docker compose --env-file .env.imitate down -v
+    rm -f deploy/Caddyfile.rendered .env.imitate
+    echo "✓ stack down, volumes removed, rendered Caddyfile + .env.imitate cleaned up"
     exit 0
     ;;
 esac
+
+build_imitate_env
+echo "✓ generated .env.imitate with docker-network URLs"
 
 NO_BUILD=0
 [ "${1:-}" = "--no-build" ] && NO_BUILD=1
@@ -132,7 +168,7 @@ if [ "$NO_BUILD" = 0 ]; then
   # reuses a cached layer that may carry older debian / Go-binary CVEs
   # that CI's Trivy scan would still flag — false-positive vs CI without
   # this flag.
-  docker compose --env-file .env build --pull
+  docker compose --env-file .env.imitate build --pull
   echo "✓ images built"
 fi
 
@@ -173,12 +209,12 @@ else
 fi
 
 echo "==> Booting stack"
-docker compose --env-file .env up -d postgres redis
+docker compose --env-file .env.imitate up -d postgres redis
 echo "==> Waiting for postgres + redis to be healthy"
 deadline=$((SECONDS + 60))
 while [ $SECONDS -lt $deadline ]; do
-  pg_state=$(docker compose --env-file .env ps -q postgres | xargs -r docker inspect --format '{{.State.Health.Status}}' 2>/dev/null || echo "none")
-  rd_state=$(docker compose --env-file .env ps -q redis    | xargs -r docker inspect --format '{{.State.Health.Status}}' 2>/dev/null || echo "none")
+  pg_state=$(docker compose --env-file .env.imitate ps -q postgres | xargs -r docker inspect --format '{{.State.Health.Status}}' 2>/dev/null || echo "none")
+  rd_state=$(docker compose --env-file .env.imitate ps -q redis    | xargs -r docker inspect --format '{{.State.Health.Status}}' 2>/dev/null || echo "none")
   if [ "$pg_state" = "healthy" ] && [ "$rd_state" = "healthy" ]; then
     echo "✓ postgres + redis healthy"
     break
@@ -186,14 +222,14 @@ while [ $SECONDS -lt $deadline ]; do
   sleep 2
 done
 
-docker compose --env-file .env up -d app api
+docker compose --env-file .env.imitate up -d app api
 echo "==> Waiting for app + api to be healthy (≤120s)"
 deadline=$((SECONDS + 120))
 app_health=""
 api_health=""
 while [ $SECONDS -lt $deadline ]; do
-  app_id=$(docker compose --env-file .env ps -q app)
-  api_id=$(docker compose --env-file .env ps -q api)
+  app_id=$(docker compose --env-file .env.imitate ps -q app)
+  api_id=$(docker compose --env-file .env.imitate ps -q api)
   if [ -z "$app_id" ] || [ -z "$api_id" ]; then
     echo "⚠ container missing — waiting"
     sleep 2
@@ -203,7 +239,7 @@ while [ $SECONDS -lt $deadline ]; do
     state=$(docker inspect --format '{{.State.Status}}' "$c")
     if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
       echo "✗ container $c exited during boot"
-      docker compose --env-file .env logs --tail=80
+      docker compose --env-file .env.imitate logs --tail=80
       exit 1
     fi
   done
@@ -218,28 +254,48 @@ done
 
 if [ "$app_health" != "healthy" ] || [ "$api_health" != "healthy" ]; then
   echo "✗ healthcheck never green (app=$app_health api=$api_health)"
-  docker compose --env-file .env logs --tail=120 app api
+  docker compose --env-file .env.imitate logs --tail=120 app api
   exit 1
 fi
 
 echo "==> Deep probe: api /health must report ok:true"
-api_id=$(docker compose --env-file .env ps -q api)
+api_id=$(docker compose --env-file .env.imitate ps -q api)
 health_json=$(docker exec "$api_id" wget -qO- http://127.0.0.1:4000/health || true)
 echo "api /health: $health_json"
 echo "$health_json" | grep -q '"ok":true' || {
   echo "✗ api /health body did not contain ok:true"
-  docker compose --env-file .env logs --tail=80 api
+  docker compose --env-file .env.imitate logs --tail=80 api
   exit 1
 }
 echo "✓ api ↔ postgres ↔ redis reachable"
 
 echo "==> Deep probe: web /api/health"
-app_id=$(docker compose --env-file .env ps -q app)
+app_id=$(docker compose --env-file .env.imitate ps -q app)
 web_health=$(docker exec "$app_id" wget -qO- http://127.0.0.1:3000/api/health || true)
 echo "web /api/health: $web_health"
-echo "$web_health" | grep -q '"ok":true' || {
-  echo "⚠ web /api/health did not return ok:true — investigate"
+# Web endpoint returns `{"status":"ok","components":{"db":{"status":"ok"}}}`
+# (apps/web/src/app/api/health/route.ts shape) — different from the api's
+# `{"ok":true,…}`. Match the web shape; both reach the same Postgres so
+# matching either is sufficient evidence the pool is live.
+echo "$web_health" | grep -q '"status":"ok"' || {
+  echo "⚠ web /api/health did not return status:ok — investigate"
 }
+
+echo "==> Deep probe: seed superadmin (the actual deploy post-step)"
+# The deploy workflow's final step runs `docker exec app pnpm run
+# db:seed:superadmin`. Round 4 of the cascade burned on this exact
+# command failing with `Cannot find module '@prisma/adapter-pg'`;
+# mirroring it here so future fixes can't silently re-break the same
+# seam.
+if ! docker exec "$app_id" pnpm run db:seed:superadmin 2>&1 | tee /tmp/seed.log | tail -5; then
+  echo "✗ seed-superadmin failed — same break point as the post-deploy step"
+  exit 1
+fi
+grep -q "superAdmin ready" /tmp/seed.log || {
+  echo "✗ seed ran but didn't emit the 'superAdmin ready' line"
+  exit 1
+}
+echo "✓ seed-superadmin succeeded"
 
 echo
 echo "==================================================================="

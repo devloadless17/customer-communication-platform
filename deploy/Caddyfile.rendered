@@ -1,0 +1,179 @@
+# Caddy reverse proxy — TEMPLATE.
+#
+# This file is NOT installed directly. The deploy workflow
+# (.github/workflows/deploy.yml) renders it on every deploy:
+#
+#   localhost       → ${{ secrets.APP_DOMAIN }}
+#   dev@localhost  → ${{ secrets.ADMIN_EMAIL }}
+#
+# The rendered result is scp'd to /etc/caddy/Caddyfile on the VPS and
+# `systemctl reload caddy` is run. Editing /etc/caddy/Caddyfile directly on
+# the VPS works for a single deploy but the next deploy will overwrite it —
+# changes belong in this template, committed to git.
+#
+# -----------------------------------------------------------------------------
+# Two-upstream topology (post NestJS migration)
+# -----------------------------------------------------------------------------
+#
+#   web   = Next.js     on :3000  → RSC pages, Better Auth pages, /api/auth/*,
+#                                   /api/health, legacy Meta webhook proxy
+#   api   = NestJS      on :4000  → REST controllers, Socket.io gateway,
+#                                   webhook ingest, BullMQ workers, workflows
+#
+# Rule ordering inside the site block is LOAD-BEARING. Caddy evaluates
+# `handle` blocks in source order — the first match wins. Two rules below
+# look like they overlap but the order resolves which one fires:
+#
+#   `/api/auth/change-password*` is matched BEFORE `/api/auth/*`, so
+#   change-password (which moved off Better Auth onto a NestJS controller
+#   when the api process took ownership) reaches the api upstream. If you
+#   ever flip these two blocks, change-password will silently 404 because
+#   Next.js has no handler for that path anymore.
+#
+#   `/api/webhooks/meta/*` reaches the web upstream where a small proxy
+#   handler in apps/web/src/app/api/webhooks/meta/[teamId]/route.ts forwards
+#   raw bytes verbatim to NestJS. This is insurance for Meta subscriptions
+#   still pointing at the old URL; delete that file (and this handle block)
+#   once every subscription has been re-pointed at /webhooks/meta/{teamId}.
+
+{
+	# ACME contact email. Let's Encrypt mails this address on renewal failure
+	# and ~30 days before expiry. Use a real inbox — these are the warnings
+	# you want before the cert silently expires.
+	email dev@localhost
+}
+
+localhost {
+	# Auto-HTTPS — Caddy provisions and renews via Let's Encrypt with no
+	# config. HTTP requests get a 308 redirect to HTTPS automatically.
+
+	# Compression for HTML / JSON / JS. Static assets are already content-
+	# encoded by Next; this is for API responses + HTML.
+	encode zstd gzip
+
+	# Hardening headers complement the ones next.config.ts sets — Caddy
+	# overrides anything the app emits, so keep these aligned with
+	# next.config.ts's `headers()`.
+	header {
+		# No `preload` — that token signals you intend to submit the
+		# domain to the HSTS preload list, which is very hard to undo. Add
+		# it only after you've decided to commit and verified all
+		# subdomains can serve HTTPS.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	# Access logs to stdout → systemd-journald.
+	log {
+		output stdout
+		format json
+	}
+
+	# Rate limiting is NOT enabled at the Caddy layer here. The standard
+	# Caddy build doesn't ship the `rate_limit` directive — it requires
+	# the github.com/mholt/caddy-ratelimit plugin compiled in via xcaddy.
+	# Today the app handles per-user (300/min) and per-API-key (60/min)
+	# throttling in-process (apps/api/src/common/rate-limit.guard.ts,
+	# apps/api/src/auth/api-key.guard.ts) which covers correctness for the
+	# pilot scale.
+	#
+	# Add a proxy-layer cap when one of these triggers:
+	#   - a single bad client at the /webhooks/meta/* path saturates the
+	#     api process before the app-layer guard can throttle
+	#   - we add multi-tenant Meta webhooks and need per-team caps that
+	#     the in-process limiter (which keys on session.userId) can't
+	#     enforce for unauthenticated requests
+	# Upgrade path: rebuild Caddy with `xcaddy build --with github.com/
+	# mholt/caddy-ratelimit`, swap the systemd-managed `caddy` package for
+	# the custom binary, then add rate_limit blocks here.
+
+	# -------------------------------------------------------------------------
+	# Routing — order matters. See header comment for the rationale on the
+	# change-password and legacy-meta-webhook blocks.
+	# -------------------------------------------------------------------------
+
+	# (1) /api/auth/change-password → api (NestJS). MUST come before the
+	#     /api/auth/* catch-all below.
+	handle /api/auth/change-password* {
+		reverse_proxy 127.0.0.1:4000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (2) /api/auth/* → web (Next.js / Better Auth catch-all).
+	handle /api/auth/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (3) /api/health → web (Next.js). Legacy probe URL; the api process
+	#     exposes its own /health on :4000 for direct probing.
+	handle /api/health {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (4) /api/webhooks/meta/* → web (Next.js proxy). The Next.js handler
+	#     forwards raw bytes to api:4000/webhooks/meta/{teamId} so the HMAC
+	#     computed over the unmodified body still verifies.
+	handle /api/webhooks/meta/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (4b) /api/internal/* → web (Next.js). Internal cache-revalidate
+	#      bridge called by NestJS via shared INTERNAL_BUS_SECRET. The
+	#      endpoint lives on Next.js because revalidateTag() is only
+	#      available there. MUST come before the /api/* → api wildcard.
+	handle /api/internal/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# (5) /api/*, /webhooks/*, /socket.io/* → api (NestJS).
+	#     Socket.io heartbeats need long-lived connection support.
+	@apiBackend {
+		path /api/* /webhooks/* /socket.io/*
+	}
+	handle @apiBackend {
+		reverse_proxy 127.0.0.1:4000 {
+			header_up X-Real-IP {remote_host}
+			transport http {
+				read_buffer 64KB
+				write_buffer 64KB
+				# Long-lived connections (websocket + SSE) shouldn't hit
+				# the default 5-min idle cap.
+				read_timeout 5m
+				write_timeout 5m
+			}
+			# Direct probe of the NestJS /health endpoint.
+			health_uri /health
+			health_interval 10s
+			health_timeout 3s
+			health_status 200
+		}
+	}
+
+	# (6) Default — everything else (`/`, `/_next/*`, RSC pages, static
+	#     assets, login/register/inbox pages) → web (Next.js).
+	handle {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Real-IP {remote_host}
+			# Probe Next.js's /api/health for upstream liveness — Caddy
+			# returns 502 immediately during the ~3s restart window instead
+			# of holding the request until upstream times out.
+			health_uri /api/health
+			health_interval 10s
+			health_timeout 3s
+			health_status 200
+		}
+	}
+}
