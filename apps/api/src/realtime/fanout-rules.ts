@@ -149,24 +149,6 @@ export const FANOUT_RULES: FanoutRule[] = [
     });
   }),
 
-  // Audit timeline row landed — push to live history-panel viewers.
-  //
-  // Conversation-scoped, not team-scoped. The history panel is only visible
-  // inside the active thread view (a `subscribe:conversation` client). The
-  // conversation list, the contact panel, and the message thread itself do
-  // NOT consume `conversation:event` — they read fresh from `/api/inbox/...`
-  // on open. Team-wide fanout would wake every agent's socket on every
-  // assign/status-change/note action for state none of them render. At a
-  // team of 20 agents and 30 ops/min that's 600 frames/min for one socket
-  // each agent already has up = pure waste.
-  defineRule("conversation.event_recorded", (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "conversation:event", {
-      teamId: e.teamId,
-      conversationId: e.conversationId,
-      event: e.event,
-    });
-  }),
-
   // ---- contacts ---------------------------------------------------------
   //
   // Note on the narrow `contact.tag_changed` / `contact.lifecycle_changed` /
@@ -301,20 +283,15 @@ export const FANOUT_RULES: FanoutRule[] = [
       ...(e.clientTempId ? { clientTempId: e.clientTempId } : {}),
     });
     if (threadRootId) {
+      // Thread-room emit of `team:channel:message` would duplicate the
+      // team-room emit above (every socket is auto-joined to the team
+      // room). Only the thread-summary signal goes to the thread room.
       emitter.emitToTeam(e.teamId, "team:channel:thread:reply", {
         teamId: e.teamId,
         channelId: e.channelId,
         rootMessageId: threadRootId,
         replyCount: e.threadReplyCount,
         lastReplyAt: e.message.createdAt,
-      });
-      emitter.emitToChannelThread(threadRootId, "team:channel:message", {
-        teamId: e.teamId,
-        channelId: e.channelId,
-        message: e.message,
-        preview: null,
-        lastMessageAt: null,
-        ...(e.clientTempId ? { clientTempId: e.clientTempId } : {}),
       });
     }
   }),
@@ -385,19 +362,4 @@ export const FANOUT_RULES: FanoutRule[] = [
     });
   }),
 
-  // ---- workflows --------------------------------------------------------
-  // Run lifecycle ticks so a watcher (runs list or single-run detail) can
-  // see status transitions without polling. Step-level state stays in the
-  // DB; the page fetches it on demand. See lib/workflows/runner.ts:emitRunStatus.
-  defineRule("workflow.run_updated", (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "workflow:run:updated", {
-      teamId: e.teamId,
-      workflowId: e.workflowId,
-      runId: e.runId,
-      status: e.status,
-      currentStepId: e.currentStepId,
-      at: e.at,
-      errorMessage: e.errorMessage,
-    });
-  }),
 ];

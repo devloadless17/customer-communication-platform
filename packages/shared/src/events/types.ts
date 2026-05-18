@@ -430,31 +430,6 @@ export interface BroadcastConversationReopenedEvent {
 }
 
 /**
- * A new audit row landed in `ConversationEvent`. Carries the hydrated row
- * + author name so live history-panel viewers can prepend without a
- * refetch.
- *
- * Why this is a distinct event (not direct emit): `recordConversationEvent`
- * runs inside the audit bus subscriber, which now lives in the NestJS
- * process. Direct `emitToTeam` from there would target a Next.js-side
- * Socket.io singleton that no longer exists post-Phase-5. Routing through
- * the bus lets the NestJS realtime-fanout subscriber emit to wire.
- */
-export interface ConversationEventRecordedEvent {
-  teamId: string;
-  conversationId: string;
-  event: {
-    id: string;
-    kind: import("@prisma/client").ConversationEventKind;
-    userId: string | null;
-    userName: string | null;
-    before: import("@prisma/client").Prisma.JsonValue;
-    after: import("@prisma/client").Prisma.JsonValue;
-    at: string;
-  };
-}
-
-/**
  * Conversation read receipt — a teammate opened the thread (or hit "mark
  * read"). Broadcasts to the team room so other open tabs of the same agent
  * can clear their unread badges in lock-step.
@@ -598,35 +573,6 @@ export interface TeamCatalogChangedEvent {
     | "team-channels";
 }
 
-/**
- * A WorkflowRun transitioned through one of its terminal statuses (or kicked
- * off as `running`). Fired once per status change — NOT per step-log append,
- * so the wire stays quiet for long-running workflows. The runs-detail page
- * uses this to advance its lifecycle pill without polling; the runs-list
- * page can use it to flip a row from "queued" → "completed" live.
- *
- * Note: `running` fires on every worker pickup (including retries from
- * BullMQ) so a row can flicker queued → running → waiting → running →
- * completed on a wait-resume sequence. Consumers should treat it as a
- * "latest known status" signal, not a state machine to validate.
- */
-export interface WorkflowRunUpdatedEvent {
-  teamId: string;
-  workflowId: string;
-  runId: string;
-  /**
-   * Mirrors the Prisma enum exactly; "queued" is omitted because the runner
-   * never writes that — it's the initial state set by the dispatcher.
-   */
-  status: "running" | "waiting" | "completed" | "failed" | "skipped";
-  /** The node that will execute on next pickup. null on terminal statuses. */
-  currentStepId: string | null;
-  /** Wall-clock the transition was persisted. */
-  at: string;
-  /** Operator-visible reason. Set for `failed` / `skipped`; null otherwise. */
-  errorMessage: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // Event map — discriminated union by `type`. Use `DomainEventOf<K>` to grab
 // the strongly-typed envelope for a single type.
@@ -655,7 +601,6 @@ export interface DomainEventMap {
   "broadcast.progress": BroadcastProgressEvent;
   "broadcast.recipient_message_sent": BroadcastRecipientMessageSentEvent;
   "broadcast.conversation_reopened": BroadcastConversationReopenedEvent;
-  "conversation.event_recorded": ConversationEventRecordedEvent;
   "team_channel.message_created": TeamChannelMessageCreatedEvent;
   "team_channel.message_edited": TeamChannelMessageEditedEvent;
   "team_channel.message_deleted": TeamChannelMessageDeletedEvent;
@@ -664,7 +609,6 @@ export interface DomainEventMap {
   "team_channel.read": TeamChannelReadEvent;
   "team.catalog_changed": TeamCatalogChangedEvent;
   "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
-  "workflow.run_updated": WorkflowRunUpdatedEvent;
 }
 
 export type DomainEventType = keyof DomainEventMap;

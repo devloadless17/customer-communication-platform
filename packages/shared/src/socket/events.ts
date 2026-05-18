@@ -186,32 +186,6 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
-   * New audit row on a conversation. Kinds fired today: assigned,
-   * status_changed, note_added, note_deleted. tag_added / tag_removed exist
-   * in the enum but have no writer (tags moved back onto Contact). Lets a
-   * live history-panel viewer prepend the entry without a refetch.
-   */
-  "conversation:event": (payload: {
-    teamId: string;
-    conversationId: string;
-    event: {
-      id: string;
-      kind:
-        | "assigned"
-        | "status_changed"
-        | "tag_added"
-        | "tag_removed"
-        | "note_added"
-        | "note_deleted";
-      userId: string | null;
-      userName: string | null;
-      before: unknown;
-      after: unknown;
-      at: string;
-    };
-  }) => void;
-
-  /**
    * Snapshot of which teammates currently have a live socket. Broadcast to
    * the team room whenever the set changes; also sent to a single socket on
    * subscribe so it doesn't have to wait for the next change to populate.
@@ -452,23 +426,6 @@ export interface ServerToClientEvents {
     channelId: string;
     typingUserIds: string[];
   }) => void;
-
-  /**
-   * A WorkflowRun's status changed (running / waiting / completed / failed /
-   * skipped). Emitted by the runner at each terminal transition so a
-   * "Run detail" page or the runs list can advance its lifecycle pill
-   * without polling. Per-step state lives only in the DB (stepLog JSONB)
-   * to keep wire frames bounded — open the run to fetch full detail.
-   */
-  "workflow:run:updated": (payload: {
-    teamId: string;
-    workflowId: string;
-    runId: string;
-    status: "running" | "waiting" | "completed" | "failed" | "skipped";
-    currentStepId: string | null;
-    at: string;
-    errorMessage: string | null;
-  }) => void;
 }
 
 // -------------------------------------------------------------------------
@@ -522,15 +479,6 @@ export interface TeamChannelMessageDto {
 // ---------------------------------------------------------------------------
 
 export interface ClientToServerEvents {
-  /**
-   * Join the team room — receives every team-wide update for the inbox list.
-   *
-   * The server validates `teamId` against the authenticated handshake; a
-   * mismatched id is silently dropped. Identity itself comes from the JWT
-   * cookie at handshake time, not from any client payload.
-   */
-  "subscribe:team": (payload: { teamId: string }) => void;
-
   /** Join a conversation room — receives message/note updates for that thread. */
   "subscribe:conversation": (payload: { conversationId: string }) => void;
   "unsubscribe:conversation": (payload: { conversationId: string }) => void;

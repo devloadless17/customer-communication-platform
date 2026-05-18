@@ -82,9 +82,9 @@ export class RealtimeGateway
     // reliably get a chance to send anything in beforeunload).
     client.data.viewingConversations = new Set<string>();
 
-    // Auto-join the team room on connect. Previously some code paths
-    // forgot the explicit subscribe:team emit and silently received zero
-    // team-wide events — that footgun is closed by the auto-join.
+    // Auto-join the team room on connect. No explicit subscribe:team
+    // round-trip needed — clients always belong to one team for the
+    // lifetime of the connection.
     client.join(teamRoom(identity.teamId));
 
     const cameOnline = this.presence.add(
@@ -170,24 +170,6 @@ export class RealtimeGateway
         onlineUserIds: this.presence.snapshot(teamId),
       });
     }
-  }
-
-  // ---- subscribe:team -----------------------------------------------------
-  // Kept for backwards compat with clients that still explicitly emit it.
-  // Auto-join in handleConnection covers the common case; this just refreshes
-  // the user's presence snapshot on demand.
-  @SubscribeMessage("subscribe:team")
-  onSubscribeTeam(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() body: { teamId: string },
-  ): void {
-    const teamId = client.data.teamId as string | undefined;
-    if (!teamId || teamId !== body.teamId) return;
-    client.join(teamRoom(teamId));
-    client.emit("presence:update", {
-      teamId,
-      onlineUserIds: this.presence.snapshot(teamId),
-    });
   }
 
   // ---- conversation rooms -------------------------------------------------

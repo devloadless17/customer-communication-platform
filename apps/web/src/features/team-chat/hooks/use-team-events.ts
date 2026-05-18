@@ -130,7 +130,7 @@ export function useTeamEvents(
     }
 
     const onConnect = () => {
-      socket.emit("subscribe:team", { teamId });
+      // Server auto-joins the team room on connect; no explicit subscribe needed.
       if (firstConnectRef.value) {
         firstConnectRef.value = false;
         return; // initial — server-seeded data is already current

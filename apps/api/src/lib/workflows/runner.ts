@@ -1,7 +1,6 @@
 import type { Prisma, WorkflowTriggerEvent } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { publish } from "@/lib/events/bus";
 import { type WorkflowEventEnvelope } from "@/lib/workflows/events";
 import { findNextStep, toGraph } from "@/lib/workflows/graph";
 import { enqueueWorkflowResume } from "@/lib/workflows/queue";
@@ -60,39 +59,20 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
   }
   const wf = run.workflow;
   if (!wf || !wf.enabled || !wf.published) {
-    await markSkipped(
-      run.teamId,
-      run.workflowId,
-      run.id,
-      "workflow disabled, unpublished, or deleted",
-    );
+    await markSkipped(run.id, "workflow disabled, unpublished, or deleted");
     return { runId: run.id, status: "skipped" };
   }
 
   const graph = toGraph(wf.graph);
   if (!graph.startNodeId || graph.nodes.length === 0) {
-    await markFailed(
-      run.teamId,
-      run.workflowId,
-      run.id,
-      "workflow graph is empty",
-    );
+    await markFailed(run.id, "workflow graph is empty");
     return { runId: run.id, status: "failed" };
   }
 
-  // Mark running BEFORE the first step so the UI can show the transition.
   await db.workflowRun.update({
     where: { id: run.id },
     data: { status: "running", attempts: input.attempt },
   });
-  await emitRunStatus(
-    wf.teamId,
-    wf.id,
-    run.id,
-    "running",
-    run.currentStepId ?? graph.startNodeId,
-    null,
-  );
 
   const envelope = buildEnvelope(wf.teamId, run.trigger, run.eventPayload);
   let currentStepId: string | null = run.currentStepId ?? graph.startNodeId;
@@ -138,14 +118,6 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
           finishedAt: new Date(),
         },
       });
-      await emitRunStatus(
-        wf.teamId,
-        wf.id,
-        run.id,
-        "failed",
-        null,
-        `step "${currentStepId}" not found in graph`,
-      );
       return { runId: run.id, status: "failed" };
     }
 
@@ -261,7 +233,6 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
             finishedAt: new Date(),
           },
         });
-        await emitRunStatus(wf.teamId, wf.id, run.id, "failed", null, err.message);
         return { runId: run.id, status: "failed" };
       }
       // Persist a failing log entry BEFORE throwing — the next attempt
@@ -313,7 +284,6 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       });
       // Schedule the resume. BullMQ delayed jobs survive worker restarts.
       await enqueueWorkflowResume(run.id, result.delayMs);
-      await emitRunStatus(wf.teamId, wf.id, run.id, "waiting", nextId, null);
       return { runId: run.id, status: "waiting" };
     }
 
@@ -361,7 +331,6 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         finishedAt: new Date(),
       },
     });
-    await emitRunStatus(wf.teamId, wf.id, run.id, "failed", null, reason);
     return { runId: run.id, status: "failed" };
   }
 
@@ -376,7 +345,6 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       finishedAt: new Date(),
     },
   });
-  await emitRunStatus(wf.teamId, wf.id, run.id, "completed", null, null);
   return { runId: run.id, status: "completed" };
 }
 
@@ -455,12 +423,7 @@ function buildEnvelope(
   };
 }
 
-async function markSkipped(
-  teamId: string,
-  workflowId: string,
-  runId: string,
-  reason: string,
-): Promise<void> {
+async function markSkipped(runId: string, reason: string): Promise<void> {
   await db.workflowRun.update({
     where: { id: runId },
     data: {
@@ -469,52 +432,9 @@ async function markSkipped(
       finishedAt: new Date(),
     },
   });
-  await emitRunStatus(teamId, workflowId, runId, "skipped", null, reason);
 }
 
-/**
- * Fire `workflow.run_updated` after a terminal-status persist. Best-effort:
- * a publish failure logs and continues so a flaky bus subscriber can never
- * abort the run itself (the DB row is already correct — sockets are an
- * advisory channel, not the source of truth).
- *
- * Kept narrow on purpose: only the runner's TERMINAL transitions call this.
- * Per-step `stepLog` appends do NOT emit — too noisy for the wire and the
- * detail page polls `getRun` for that anyway.
- */
-async function emitRunStatus(
-  teamId: string,
-  workflowId: string,
-  runId: string,
-  status: "running" | "waiting" | "completed" | "failed" | "skipped",
-  currentStepId: string | null,
-  errorMessage: string | null,
-): Promise<void> {
-  try {
-    await publish({
-      type: "workflow.run_updated",
-      teamId,
-      workflowId,
-      runId,
-      status,
-      currentStepId,
-      at: new Date().toISOString(),
-      errorMessage,
-    });
-  } catch (err) {
-    console.warn(
-      `[workflow-runner] publish(workflow.run_updated) failed for run=${runId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
-}
-
-async function markFailed(
-  teamId: string,
-  workflowId: string,
-  runId: string,
-  reason: string,
-): Promise<void> {
+async function markFailed(runId: string, reason: string): Promise<void> {
   await db.workflowRun.update({
     where: { id: runId },
     data: {
@@ -523,7 +443,6 @@ async function markFailed(
       finishedAt: new Date(),
     },
   });
-  await emitRunStatus(teamId, workflowId, runId, "failed", null, reason);
 }
 
 /**
@@ -566,7 +485,6 @@ export async function failRunFromRetryExhaustion(
         finishedAt: new Date(),
       },
     });
-    await emitRunStatus(run.teamId, run.workflowId, runId, "failed", null, reason);
   } catch (err) {
     console.warn(
       `[workflow-runner] failRunFromRetryExhaustion(${runId}) threw:`,
