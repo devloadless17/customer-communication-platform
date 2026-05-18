@@ -76,6 +76,33 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 echo "✓ .env has all required vars"
 
+# ---- CI-PARITY TYPECHECK ----------------------------------------------------
+# The CI runs `pnpm install --frozen-lockfile --ignore-scripts` THEN tsc.
+# Local `npm run typecheck` runs against the dev-time pnpm tree which hoists
+# transitive @types/* differently — missing devDeps that CI catches can pass
+# locally. Re-resolve in a throwaway path that matches CI's posture before
+# typechecking. Caught a real bug (missing @types/express-serve-static-core)
+# in the first deploy round; without this step the script would have stayed
+# green while CI was red.
+echo "==> CI-parity typecheck (frozen install posture)"
+SKIP_FROZEN_TYPECHECK="${SKIP_FROZEN_TYPECHECK:-0}"
+if [ "$SKIP_FROZEN_TYPECHECK" = "1" ]; then
+  echo "  (skipped via SKIP_FROZEN_TYPECHECK=1)"
+elif command -v pnpm >/dev/null 2>&1; then
+  # `--prefer-offline` reuses the dev cache so this stays fast (~5s) while
+  # still resolving against the lockfile exactly as CI would.
+  pnpm install --frozen-lockfile --ignore-scripts --prefer-offline >/dev/null 2>&1
+  pnpm exec prisma generate >/dev/null 2>&1
+  if ! pnpm run typecheck >/tmp/typecheck.log 2>&1; then
+    echo "✗ typecheck failed under frozen-install — see /tmp/typecheck.log (tail below)"
+    tail -40 /tmp/typecheck.log
+    exit 1
+  fi
+  echo "✓ typecheck green under CI-parity install"
+else
+  echo "  ⚠ pnpm not on PATH; skipping (will be caught on CI)"
+fi
+
 # Render Caddyfile from template with localhost defaults (CI renders against
 # APP_DOMAIN secret; locally we use Caddy's HTTP-only port via :80 binding).
 APP_DOMAIN="${APP_DOMAIN:-localhost}"
@@ -101,8 +128,48 @@ fi
 
 if [ "$NO_BUILD" = 0 ]; then
   echo "==> Building images locally"
+  # --pull forces a fresh base image (node:22-slim). Without it Docker
+  # reuses a cached layer that may carry older debian / Go-binary CVEs
+  # that CI's Trivy scan would still flag — false-positive vs CI without
+  # this flag.
   docker compose --env-file .env build --pull
   echo "✓ images built"
+fi
+
+# ---- CI-PARITY TRIVY SCAN ---------------------------------------------------
+# Mirrors `.github/workflows/deploy.yml`'s `Trivy scan` steps with the SAME
+# severity threshold, `ignore-unfixed`, and `vuln-type` flags so a green
+# local run matches a green CI scan. Caught real HIGH CVEs (effect,
+# picomatch, esbuild gobinary) in the first deploy round; without this
+# step the script would pass while CI failed.
+SKIP_TRIVY="${SKIP_TRIVY:-0}"
+if [ "$SKIP_TRIVY" = "1" ]; then
+  echo "==> Trivy scan skipped (SKIP_TRIVY=1)"
+else
+  echo "==> Trivy scan (matches CI severity + flags)"
+  REPO="${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}"
+  trivy_failed=0
+  for variant in web api; do
+    echo "    scanning ${REPO}:latest-${variant}"
+    if ! docker run --rm \
+           -v /var/run/docker.sock:/var/run/docker.sock \
+           -v "${HOME}/.cache/trivy:/root/.cache/" \
+           aquasec/trivy:0.70.0 image \
+             --severity HIGH,CRITICAL \
+             --ignore-unfixed \
+             --vuln-type os,library \
+             --exit-code 1 \
+             "${REPO}:latest-${variant}"; then
+      trivy_failed=1
+    fi
+  done
+  if [ "$trivy_failed" = 1 ]; then
+    echo "✗ Trivy found HIGH/CRITICAL fixable CVEs — CI will fail the deploy here"
+    echo "  fix by bumping deps (pnpm overrides for transitive ones, npm overrides"
+    echo "  in apps/web/Dockerfile cli-tools for picomatch/effect/esbuild)"
+    exit 1
+  fi
+  echo "✓ Trivy clean on both images"
 fi
 
 echo "==> Booting stack"
