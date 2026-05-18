@@ -1077,3 +1077,33 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fk
 
 -- AddForeignKey
 ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- ---------------------------------------------------------------------------
+-- Partial / expression indexes (raw SQL because Prisma can't model them).
+-- The schema comments reference these by their pre-consolidation migration
+-- filenames; they live here now after the init consolidation.
+-- ---------------------------------------------------------------------------
+
+-- Contact.customFields JSONB containment lookups (settings/contact-fields
+-- filters, /v1 contact search). Without this the planner seqscans Contact.
+CREATE INDEX "Contact_customFields_gin_idx" ON "Contact" USING GIN ("customFields" jsonb_path_ops);
+
+-- At-most-one default ContactStage per team. Cheap partial unique that the
+-- app-code pre-check still wraps with a friendlier 4xx, but this is the
+-- backstop preventing two concurrent admin clicks from leaving two defaults.
+CREATE UNIQUE INDEX "ContactStage_teamId_isDefault_key" ON "ContactStage"("teamId") WHERE "isDefault" = true;
+
+-- Inbound-only Message lookups: "what was the contact's last inbound?"
+-- (24h-window UI, lastInboundAt drift sweeper, getConversationWithRefs).
+-- Skips outbound rows so the working set stays small on chatty conversations.
+CREATE INDEX "Message_conversationId_timestamp_inbound_idx" ON "Message"("conversationId", "timestamp" DESC) WHERE "direction" = 'in';
+
+-- Channel feed keyset: WHERE channelId = ? AND threadRootId IS NULL
+-- ORDER BY createdAt DESC, id DESC. Top-level messages only; thread replies
+-- ride the full (threadRootId, createdAt) index above.
+CREATE INDEX "TeamChannelMessage_channel_toplevel_keyset_idx" ON "TeamChannelMessage"("channelId", "createdAt" DESC, "id" DESC) WHERE "threadRootId" IS NULL;
+
+-- OutboundEvent drainer hot path: pending rows (publishedAt IS NULL AND
+-- failedAt IS NULL) ORDER BY createdAt ASC. The drainer polls this set;
+-- a partial keeps the index tiny (steady-state ≈ in-flight events only).
+CREATE INDEX "OutboundEvent_drainer_pending_idx" ON "OutboundEvent"("createdAt") WHERE "publishedAt" IS NULL AND "failedAt" IS NULL;
