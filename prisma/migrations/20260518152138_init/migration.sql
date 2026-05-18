@@ -821,9 +821,6 @@ CREATE UNIQUE INDEX "ConversationReadReceipt_userId_conversationId_key" ON "Conv
 CREATE INDEX "ConversationEvent_conversationId_at_idx" ON "ConversationEvent"("conversationId", "at" DESC);
 
 -- CreateIndex
-CREATE INDEX "ConversationEvent_teamId_at_idx" ON "ConversationEvent"("teamId", "at" DESC);
-
--- CreateIndex
 CREATE INDEX "TeamChannel_teamId_lastMessageAt_idx" ON "TeamChannel"("teamId", "lastMessageAt" DESC);
 
 -- CreateIndex
@@ -867,9 +864,6 @@ CREATE UNIQUE INDEX "TeamChannelReadReceipt_userId_channelId_key" ON "TeamChanne
 
 -- CreateIndex
 CREATE INDEX "LoginAttempt_lockedUntil_idx" ON "LoginAttempt"("lockedUntil");
-
--- CreateIndex
-CREATE INDEX "OutboundEvent_teamId_createdAt_idx" ON "OutboundEvent"("teamId", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "_ContactToTag_B_index" ON "_ContactToTag"("B");

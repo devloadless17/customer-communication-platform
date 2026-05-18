@@ -971,6 +971,14 @@ export class ContactsService {
     const [contacts, fieldDefs] = await Promise.all([
       this.db.contact.findMany({
         where: { teamId },
+        select: {
+          phoneNumber: true,
+          name: true,
+          email: true,
+          location: true,
+          source: true,
+          customFields: true,
+        },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       }),
       this.db.contactFieldDefinition.findMany({

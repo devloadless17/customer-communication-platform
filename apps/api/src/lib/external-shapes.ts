@@ -106,7 +106,9 @@ export function toExternalConversation(c: DbConversation): ExternalConversation 
   };
 }
 
-export function toExternalMessage(m: DbMessage): ExternalMessage {
+export function toExternalMessage(
+  m: Omit<DbMessage, "rawPayload"> | DbMessage,
+): ExternalMessage {
   return {
     id: m.id,
     conversationId: m.conversationId,

@@ -197,10 +197,31 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const PAGE_SIZE = 100;
   const broadcastId_ = broadcast.id; // capture for the refill closure (TS can't
   // narrow `broadcast` through the closure boundary).
+  // Select only the recipient + contact fields the send path actually reads.
+  // Without this, every page drags every Contact column (incl. customFields
+  // JSONB) for every recipient — at 10k recipients this dominates the
+  // broadcast's DB cost. Keep in sync with resolvePerRecipientVariables +
+  // resolveBinding's ContactLike (name/phoneNumber/email/location/customFields).
+  const RECIPIENT_SELECT = {
+    id: true,
+    contactId: true,
+    status: true,
+    contact: {
+      select: {
+        id: true,
+        name: true,
+        phoneNumber: true,
+        email: true,
+        location: true,
+        customFields: true,
+      },
+    },
+  } as const;
+
   type Recipient = Awaited<
     ReturnType<typeof db.broadcastRecipient.findMany<{
       where: { broadcastId: string; status: "queued" };
-      include: { contact: true };
+      select: typeof RECIPIENT_SELECT;
       orderBy: { id: "asc" };
       take: typeof PAGE_SIZE;
     }>>
@@ -214,7 +235,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     if (exhausted) return;
     const page = await db.broadcastRecipient.findMany({
       where: { broadcastId: broadcastId_, status: "queued" },
-      include: { contact: true },
+      select: RECIPIENT_SELECT,
       orderBy: { id: "asc" },
       take: PAGE_SIZE,
       ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),

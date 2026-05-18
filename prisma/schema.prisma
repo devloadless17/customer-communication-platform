@@ -1325,7 +1325,6 @@ model ConversationEvent {
   apiKey       TeamApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, at(sort: Desc)])
-  @@index([teamId, at(sort: Desc)])
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,7 +1613,9 @@ model OutboundEvent {
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
-  // The drainer's hot path. Partial index in raw SQL (Prisma can't model
-  // partial indexes) — see migration 20260518200000_outbound_event_outbox.
-  @@index([teamId, createdAt])
+  // Drainer hot-path is served by the partial index
+  // `OutboundEvent_drainer_pending_idx` (WHERE publishedAt IS NULL AND
+  // failedAt IS NULL) added in the init migration's raw-SQL section.
+  // No team-id-keyed index here on purpose: the drainer never filters by
+  // teamId, and that index was a non-trivial write tax on every publish.
 }

@@ -1241,6 +1241,9 @@ export class ExternalV1Service {
 
     const rows = await this.db.message.findMany({
       where: { conversationId },
+      // toExternalMessage uses 8 fields; rawPayload (Meta JSONB, 5-20KB/row)
+      // would ship to the integrator on every page otherwise.
+      omit: { rawPayload: true },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: q.limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
@@ -1252,7 +1255,10 @@ export class ExternalV1Service {
   }
 
   async findMessage(teamId: string, id: string) {
-    const row = await this.db.message.findFirst({ where: { id, teamId } });
+    const row = await this.db.message.findFirst({
+      where: { id, teamId },
+      omit: { rawPayload: true },
+    });
     if (!row) throw new NotFoundException({ error: "message not found" });
     return { message: toExternalMessage(row) };
   }
