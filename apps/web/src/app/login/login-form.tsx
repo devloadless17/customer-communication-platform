@@ -1,33 +1,34 @@
 "use client";
 
-import { useEffect } from "react";
+import { useActionState, useEffect } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  AuthRedirectFallback,
-  useAuthRedirect,
-} from "@/hooks/use-auth-redirect";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 
 import { loginAction, type LoginState } from "./actions";
 
 const INITIAL: LoginState = { error: null };
 
+/**
+ * No client-side spinner card. The server action calls
+ * `redirect()` directly after committing the session cookie — the browser
+ * receives both in the same response and navigates immediately. The user
+ * sees the button switch to "Signing in…" and then the destination page,
+ * with no "form-disappears-into-spinner-then-page-appears" intermediate
+ * frame the earlier `AuthRedirectFallback` produced.
+ */
 export function LoginForm({ next }: { next: string }) {
   const router = useRouter();
-  const { state, action, isRedirecting } = useAuthRedirect(loginAction, INITIAL);
+  const [state, action] = useActionState(loginAction, INITIAL);
 
-  // Prefetch the post-login destination as soon as the form mounts. Without
-  // this, the user clicks Sign in → action runs (~150ms) → state.redirectTo
-  // set → router.replace → /inbox starts SSR + 3 catalog fetches → finally
-  // /inbox paints. The intermediate `AuthRedirectFallback` is the spinner
-  // the user perceives as "the form flickering then loading". Prefetching
-  // the destination here warms Next.js's RSC cache so the post-action
-  // navigation is near-instant.
+  // Prefetch the post-login destination so the navigation that the server-
+  // side redirect triggers paints near-instantly. Even with `redirect()`
+  // the browser still fetches the destination's RSC payload before paint;
+  // prefetching makes that step a cache hit.
   useEffect(() => {
     router.prefetch(next);
   }, [router, next]);
@@ -45,10 +46,6 @@ export function LoginForm({ next }: { next: string }) {
     url.searchParams.delete("bc");
     window.history.replaceState(null, "", url.pathname + url.search + url.hash);
   }, []);
-
-  if (isRedirecting) {
-    return <AuthRedirectFallback minHeightClass="min-h-55" />;
-  }
 
   return (
     <form action={action} className="flex flex-col gap-4">

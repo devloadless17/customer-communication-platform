@@ -132,6 +132,8 @@ function HeaderImage({ url }: { url: string }) {
         src={url}
         alt="Header preview"
         onError={() => setErrored(true)}
+        loading="lazy"
+        decoding="async"
         className="h-44 w-full object-cover"
       />
     </div>

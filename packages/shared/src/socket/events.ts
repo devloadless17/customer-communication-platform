@@ -527,6 +527,15 @@ export interface ClientToServerEvents {
   "unsubscribe:channel": (payload: { channelId: string }) => void;
   "typing:channel:start": (payload: { channelId: string }) => void;
   "typing:channel:stop": (payload: { channelId: string }) => void;
+
+  /**
+   * Ask the server for a fresh `presence:update` snapshot scoped to this
+   * socket. Needed because the snapshot the server emits on handshake fires
+   * BEFORE any feature hook mounts a listener — so a route-nav into /inbox
+   * (no reconnect) would otherwise wait for the next teammate to flip online
+   * before populating the green dots.
+   */
+  "presence:request": () => void;
   /** Thread typing. `channelId` is required so the gateway can validate
    *  membership without a DB lookup (the socket is already in that room). */
   "typing:thread:start": (payload: { channelId: string; threadRootId: string }) => void;

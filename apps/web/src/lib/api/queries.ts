@@ -376,6 +376,7 @@ export interface ApiKeyListItem {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  scopes: string[];
 }
 
 export async function listApiKeys(): Promise<ApiKeyListItem[]> {

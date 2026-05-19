@@ -144,6 +144,19 @@ function MessageThreadImpl({
         teamId: contact.teamId,
         contact: { ...contact, stageId: next },
       });
+      // Sidebar stage badges are computed from a server-fetched `byStage`
+      // map (useConversationCounts). The `contact:updated` event triggers
+      // a refetch there, but the refetch is a 50-300ms round-trip — the
+      // badge would lag the thread header. Fire a delta event so the
+      // counts hook can patch byStage locally and the badge flips in the
+      // same frame as the thread header.
+      if (prev !== next && typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("ccp:contact-stage-delta", {
+            detail: { contactId: contact.id, prevStageId: prev, nextStageId: next },
+          }),
+        );
+      }
       const res = await fetch(`/api/contacts/${contact.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -156,6 +169,13 @@ function MessageThreadImpl({
           teamId: contact.teamId,
           contact: { ...contact, stageId: prev },
         });
+        if (prev !== next && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("ccp:contact-stage-delta", {
+              detail: { contactId: contact.id, prevStageId: next, nextStageId: prev },
+            }),
+          );
+        }
         await alert(
           "Couldn't change stage",
           await readError(res),

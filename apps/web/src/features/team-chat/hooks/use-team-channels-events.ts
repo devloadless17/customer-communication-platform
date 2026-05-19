@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
@@ -15,10 +15,18 @@ import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
  * Keeping this separate from `useTeamChannelEvents` (which scopes to ONE
  * channel feed) means switching channels doesn't re-run the list-side
  * subscriptions on every click.
+ *
+ * `activeChannelId` is the channel the user is currently viewing in THIS
+ * tab. Inbound messages for that channel must not flip unreadForMe true —
+ * the per-channel hook fires `markRead` server-side, but its round-trip
+ * leaves a ~100ms window where the sidebar would otherwise show stale
+ * unread state. Clicking away during that window left the dot stuck on
+ * the just-viewed channel.
  */
 export function useTeamChannelsList(
   initial: TeamChannelListItemDto[],
   currentUserId: string,
+  activeChannelId: string | null,
 ): TeamChannelListItemDto[] {
   const [channels, setChannels] = useState(initial);
 
@@ -31,6 +39,11 @@ export function useTeamChannelsList(
     setChannels(initial);
   }
 
+  // Ref so socket listeners read the latest active channel without
+  // re-binding the effect on every channel switch.
+  const activeChannelIdRef = useRef(activeChannelId);
+  activeChannelIdRef.current = activeChannelId;
+
   useEffect(() => {
     const socket = getClientSocket();
 
@@ -39,20 +52,26 @@ export function useTeamChannelsList(
       // list still cares about reply mentions but we keep that simple for
       // v0 — only top-level mentions bump the mention counter.
       if (payload.preview === null) return;
+      const isActive = payload.channelId === activeChannelIdRef.current;
       setChannels((prev) => {
         const idx = prev.findIndex((ch) => ch.id === payload.channelId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
         // Author-of-this-message doesn't get a badge for their own send.
+        // Same posture for the channel the user is actively viewing — the
+        // per-channel hook fires markRead, no point round-tripping a true→
+        // false flip through the sidebar.
         const isOwnSend = payload.message.authorUserId === currentUserId;
+        const skipUnreadBump = isOwnSend || isActive;
         const mentionsMe = payload.message.mentionedUserIds.includes(currentUserId);
+        const bumpMention = mentionsMe && !isActive;
         const next = prev.slice();
         next[idx] = {
           ...existing,
           lastMessageAt: payload.lastMessageAt ?? existing.lastMessageAt,
           lastMessagePreview: payload.preview ?? existing.lastMessagePreview,
-          unreadForMe: isOwnSend ? existing.unreadForMe : true,
-          unreadMentionCount: mentionsMe
+          unreadForMe: skipUnreadBump ? existing.unreadForMe : true,
+          unreadMentionCount: bumpMention
             ? existing.unreadMentionCount + 1
             : existing.unreadMentionCount,
         };

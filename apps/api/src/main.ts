@@ -1,6 +1,7 @@
 import "reflect-metadata";
 
 import bodyParser from "body-parser";
+import compression from "compression";
 import cookieParser from "cookie-parser";
 import { NestFactory } from "@nestjs/core";
 import { Logger, ValidationPipe } from "@nestjs/common";
@@ -82,6 +83,33 @@ async function bootstrap(): Promise<void> {
   // Cookie parsing for the Better Auth session cookie (read by SessionGuard).
   // The cookie itself is set by Next.js on signin; we only need to read it.
   app.use(cookieParser());
+
+  // gzip/deflate compression for JSON responses. Critical on slow
+  // networks: a typical conversations-list payload is ~80-150KB
+  // uncompressed and compresses to ~12-20KB. Without this, the request
+  // takes 8-10× longer on 3G.
+  //
+  // In production Caddy already compresses at the edge (`encode zstd
+  // gzip` in deploy/Caddyfile.template), so this is defense-in-depth.
+  // It IS the only source of compression in `npm run api:dev` (Caddy
+  // isn't in the loop locally), which is where 3G testing usually
+  // happens — without this middleware every JSON fetch is naked.
+  //
+  // `threshold: 1024` skips payloads tiny enough that the gzip overhead
+  // exceeds the savings (login responses, health checks). Webhook routes
+  // are also skipped — Meta doesn't send Accept-Encoding so this is a
+  // no-op there, but the explicit filter saves a header lookup per call.
+  app.use(
+    compression({
+      threshold: 1024,
+      filter: (req, res) => {
+        // Skip webhook responses (typically `{ok: true}`-shaped, tiny).
+        const url = req.url ?? "";
+        if (url.startsWith("/webhooks/")) return false;
+        return compression.filter(req, res);
+      },
+    }),
+  );
 
   // Per-IP rate-limit BEFORE auth. The session guard's bucket only fires
   // once `req.session` is set, so without this an attacker can spam

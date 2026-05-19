@@ -67,12 +67,45 @@ export function useConversationCounts(): ConversationCounts | null {
       if (payload.newConversation) void refresh();
     };
 
+    // Optimistic stage-delta. Fired from `persistStageId` in
+    // message-thread.tsx when a user changes a contact's stage. Without
+    // this, the badge would lag behind the thread header by one server
+    // round-trip (50-300ms) because the `contact:updated` listener only
+    // triggers a refetch. Patching byStage in-place makes the badge flip
+    // in the same frame as the rest of the UI; the refetch still fires
+    // and reconciles when it lands.
+    const onStageDelta = (e: Event) => {
+      const detail = (e as CustomEvent<{
+        contactId: string;
+        prevStageId: string | null;
+        nextStageId: string | null;
+      }>).detail;
+      if (!detail) return;
+      setCounts((prev) => {
+        if (!prev) return prev;
+        const byStage = { ...prev.byStage };
+        if (detail.prevStageId) {
+          byStage[detail.prevStageId] = Math.max(
+            0,
+            (byStage[detail.prevStageId] ?? 0) - 1,
+          );
+        }
+        if (detail.nextStageId) {
+          byStage[detail.nextStageId] = (byStage[detail.nextStageId] ?? 0) + 1;
+        }
+        return { ...prev, byStage };
+      });
+    };
+
     socket.on("conversation:assigned", trigger);
     socket.on("conversation:status", trigger);
     socket.on("conversation:deleted", trigger);
     socket.on("contact:updated", trigger);
     socket.on("contacts:bulk_updated", trigger);
     socket.on("message:new", onMessageNew);
+    if (typeof window !== "undefined") {
+      window.addEventListener("ccp:contact-stage-delta", onStageDelta);
+    }
 
     return () => {
       socket.off("conversation:assigned", trigger);
@@ -81,6 +114,9 @@ export function useConversationCounts(): ConversationCounts | null {
       socket.off("contact:updated", trigger);
       socket.off("contacts:bulk_updated", trigger);
       socket.off("message:new", onMessageNew);
+      if (typeof window !== "undefined") {
+        window.removeEventListener("ccp:contact-stage-delta", onStageDelta);
+      }
     };
   }, [refresh]);
 

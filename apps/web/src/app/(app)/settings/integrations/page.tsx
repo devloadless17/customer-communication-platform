@@ -10,7 +10,11 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
+import { listApiKeys } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+
+import { IntegrationConnectPanel } from "@/features/settings/integrations/components/integration-connect-panel";
+import { N8N_PRESET } from "@/features/settings/integrations/presets";
 
 export const metadata = { title: "Integrations" };
 export const dynamic = "force-dynamic";
@@ -29,6 +33,14 @@ export default async function IntegrationsLanding() {
   if (!canManageUsers(user.role)) {
     redirect("/settings/account");
   }
+
+  // One round-trip serves both the "Connect" status on tiles AND the
+  // connect panel's already-connected detection. Cheap (single SELECT,
+  // never returns plaintext) and the page is `force-dynamic` anyway.
+  const keys = await listApiKeys();
+  const n8nConnected = keys.some(
+    (k) => !k.revokedAt && k.name === N8N_PRESET.defaultName,
+  );
 
   const tiles: Tile[] = [
     {
@@ -52,7 +64,8 @@ export default async function IntegrationsLanding() {
       title: "n8n",
       description:
         "Use your API key with n8n's HTTP Request node. We document every /v1 endpoint and event so you can build flows in minutes.",
-      cta: "How it works",
+      cta: n8nConnected ? "Connected" : "Connect",
+      connected: n8nConnected,
       href: "/settings/integrations#n8n",
     },
     {
@@ -98,62 +111,56 @@ export default async function IntegrationsLanding() {
         ))}
       </div>
 
-      <section id="n8n" className="mt-12 rounded-lg border border-border bg-card p-5">
-        <div className="flex items-start gap-3">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Workflow className="size-4" />
-          </div>
-          <div>
-            <h2 className="text-sm font-semibold">Using with n8n</h2>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              n8n doesn't need a custom node — the built-in HTTP Request node
-              works with our /v1 API. Add a credential of type{" "}
-              <code className="rounded bg-muted px-1 py-0.5">Header Auth</code>{" "}
-              with header name{" "}
-              <code className="rounded bg-muted px-1 py-0.5">Authorization</code>{" "}
-              and value{" "}
-              <code className="rounded bg-muted px-1 py-0.5">Bearer ccp_…</code>
-              , then point requests at any of these endpoints:
-            </p>
-            <ul className="mt-3 grid grid-cols-1 gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-              <li>
-                <code className="font-mono">POST /api/external/v1/contacts/upsert</code>
-              </li>
-              <li>
-                <code className="font-mono">PATCH /api/external/v1/contacts/:id</code>
-              </li>
-              <li>
-                <code className="font-mono">POST /api/external/v1/contacts/:id/tags</code>
-              </li>
-              <li>
-                <code className="font-mono">
-                  POST /api/external/v1/conversations/:id/messages
-                </code>
-              </li>
-              <li>
-                <code className="font-mono">GET /api/external/v1/tags</code>
-              </li>
-              <li>
-                <code className="font-mono">GET /api/external/v1/stages</code>
-              </li>
-            </ul>
-            <div className="mt-4 flex flex-wrap gap-3 text-xs">
-              <Link
-                href="/settings/api-keys"
-                className="inline-flex items-center gap-1 text-primary hover:underline"
-              >
-                Create an API key <ArrowRight className="size-3" />
-              </Link>
-              <Link
-                href="/docs/api"
-                className="inline-flex items-center gap-1 text-primary hover:underline"
-              >
-                Full endpoint reference <ExternalLink className="size-3" />
-              </Link>
-            </div>
-          </div>
-        </div>
-      </section>
+      <div className="mt-12">
+        <IntegrationConnectPanel
+          preset={N8N_PRESET}
+          initialKeys={keys}
+          instructions={
+            <>
+              <p>
+                n8n doesn't need a custom node — the built-in HTTP Request node
+                works with our /v1 API. Add a credential of type{" "}
+                <code className="rounded bg-muted px-1 py-0.5">Header Auth</code>{" "}
+                with header name{" "}
+                <code className="rounded bg-muted px-1 py-0.5">Authorization</code>{" "}
+                and value{" "}
+                <code className="rounded bg-muted px-1 py-0.5">Bearer ccp_…</code>
+                , then point requests at any of these endpoints:
+              </p>
+              <ul className="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2">
+                <li>
+                  <code className="font-mono">POST /api/external/v1/contacts/upsert</code>
+                </li>
+                <li>
+                  <code className="font-mono">PATCH /api/external/v1/contacts/:id</code>
+                </li>
+                <li>
+                  <code className="font-mono">POST /api/external/v1/contacts/:id/tags</code>
+                </li>
+                <li>
+                  <code className="font-mono">
+                    POST /api/external/v1/conversations/:id/messages
+                  </code>
+                </li>
+                <li>
+                  <code className="font-mono">GET /api/external/v1/tags</code>
+                </li>
+                <li>
+                  <code className="font-mono">GET /api/external/v1/stages</code>
+                </li>
+              </ul>
+              <div className="mt-3">
+                <Link
+                  href="/docs/api"
+                  className="inline-flex items-center gap-1 text-primary hover:underline"
+                >
+                  Full endpoint reference <ExternalLink className="size-3" />
+                </Link>
+              </div>
+            </>
+          }
+        />
+      </div>
     </div>
   );
 }
@@ -165,9 +172,18 @@ interface Tile {
   description: string;
   cta: string;
   disabled?: boolean;
+  connected?: boolean;
 }
 
-function IntegrationTile({ href, icon: Icon, title, description, cta, disabled }: Tile) {
+function IntegrationTile({
+  href,
+  icon: Icon,
+  title,
+  description,
+  cta,
+  disabled,
+  connected,
+}: Tile) {
   const Inner = (
     <div className="flex h-full items-start gap-3">
       <div
@@ -187,7 +203,14 @@ function IntegrationTile({ href, icon: Icon, title, description, cta, disabled }
           )}
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>
-        <div className="mt-2 text-[11px] font-medium text-muted-foreground">
+        <div
+          className={`mt-2 inline-flex items-center gap-1 text-[11px] font-medium ${
+            connected ? "text-emerald-600" : "text-muted-foreground"
+          }`}
+        >
+          {connected && (
+            <span className="size-1.5 rounded-full bg-emerald-500" />
+          )}
           {cta}
         </div>
       </div>

@@ -31,8 +31,17 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   {
+    // `microphone=(self)` — voice notes in the inbox composer call
+    // navigator.mediaDevices.getUserMedia. With the empty allowlist `()`,
+    // even an in-page same-origin call is policy-blocked, so the browser
+    // shows its permission prompt, the user clicks Allow, and getUserMedia
+    // still throws NotAllowedError — making the recorder appear permanently
+    // stuck on "Microphone permission denied." Same-origin allowlist is
+    // safe: X-Frame-Options + frame-ancestors above block embedding, so
+    // there's no third-party origin that could inherit this capability.
+    // camera/geolocation/interest-cohort stay denied — unused.
     key: "Permissions-Policy",
-    value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    value: "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
   },
 ];
 
@@ -86,6 +95,29 @@ const nextConfig: NextConfig = {
     "lucide-react": {
       transform: "lucide-react/dist/esm/icons/{{kebabCase member}}",
     },
+  },
+  experimental: {
+    // Tree-shake barrel-export packages aggressively. Lucide already gets
+    // the targeted treatment via modularizeImports above; this catches
+    // the other big shippers — framer-motion (~80KB gzipped barrel),
+    // sonner, the radix packages, and @xyflow/react (the workflow canvas
+    // — only loaded on /workflows but huge when it lands). Per-symbol
+    // resolution drops ~50-150KB off the inbox client bundle. Next 16
+    // flags this as experimental-but-recommended; if a "Cannot find
+    // module" build error pops up from one of the listed packages,
+    // remove that entry as the escape hatch.
+    optimizePackageImports: [
+      "framer-motion",
+      "sonner",
+      "@radix-ui/react-avatar",
+      "@radix-ui/react-dropdown-menu",
+      "@radix-ui/react-scroll-area",
+      "@radix-ui/react-separator",
+      "@radix-ui/react-slot",
+      "@radix-ui/react-tooltip",
+      "@xyflow/react",
+      "@tanstack/react-virtual",
+    ],
   },
   async headers() {
     return [

@@ -261,6 +261,23 @@ export class RealtimeGateway
     }
   }
 
+  // ---- team presence ------------------------------------------------------
+  // Pull-style snapshot request. The handshake-time `presence:update` only
+  // reaches listeners that are already attached; route-navs that mount the
+  // sidebar AFTER the handshake miss it, leaving teammates' dots grey until
+  // the next presence change. The hook re-fires this on every `connect` so a
+  // reconnect after a long offline (>2 min connectionStateRecovery window)
+  // refreshes state without a page reload.
+  @SubscribeMessage("presence:request")
+  onPresenceRequest(@ConnectedSocket() client: Socket): void {
+    const teamId = client.data.teamId as string | undefined;
+    if (!teamId) return;
+    client.emit("presence:update", {
+      teamId,
+      onlineUserIds: this.presence.snapshot(teamId),
+    });
+  }
+
   // ---- conversation rooms -------------------------------------------------
   @SubscribeMessage("subscribe:conversation")
   async onSubscribeConversation(

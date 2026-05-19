@@ -1,5 +1,7 @@
 "use server";
 
+import { redirect } from "next/navigation";
+
 import { signInWithCredentials } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api-client";
 import { validatePasswordStructure } from "@/lib/auth/password";
@@ -20,8 +22,6 @@ import { validatePasswordStructure } from "@/lib/auth/password";
 
 export interface RegisterState {
   error: string | null;
-  /** Destination for the client to navigate to after a successful signup. */
-  redirectTo?: string;
   /**
    * Form values echoed back on validation / API error so the form can repopulate.
    * Password fields are intentionally NOT echoed — re-prefilling a password
@@ -82,7 +82,10 @@ export async function registerAction(
     return { error: "Account created — please sign in." };
   }
 
-  // Do NOT call redirect() here — see [hooks/use-auth-redirect.tsx] for
-  // the full rationale on why navigation is deferred to the client.
-  return { error: null, redirectTo: "/settings/whatsapp" };
+  // Server-side redirect — single hop, no chain through `/` or anything
+  // else. Better Auth's nextCookies plugin already committed the session
+  // cookie to the action response above; redirect() throws NEXT_REDIRECT
+  // AFTER that commit so the browser receives cookie + navigation in one
+  // round-trip. No intermediate client-side spinner card.
+  redirect("/settings/whatsapp");
 }

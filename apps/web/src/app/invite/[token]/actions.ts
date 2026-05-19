@@ -1,6 +1,7 @@
 "use server";
 
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 import { signInWithCredentials } from "@/lib/auth";
 import { api, ApiError } from "@/lib/api-client";
@@ -23,8 +24,6 @@ import { INVITE_JUST_ACCEPTED_COOKIE } from "./constants";
 
 export interface AcceptState {
   error: string | null;
-  /** Destination for the client to navigate to after accepting the invite. */
-  redirectTo?: string;
   /** Echoed back on error so the form repopulates non-secret fields. */
   values?: { name?: string };
 }
@@ -86,7 +85,8 @@ export async function acceptInviteAction(
     path: "/",
   });
 
-  // Do NOT call redirect() here — see [hooks/use-auth-redirect.tsx] for
-  // the full rationale on why navigation is deferred to the client.
-  return { error: null, redirectTo: "/inbox" };
+  // Server-side redirect — single hop, browser navigates immediately
+  // after the action response lands. Cookie commit + redirect ride the
+  // same response so there's no intermediate client-side spinner card.
+  redirect("/inbox");
 }

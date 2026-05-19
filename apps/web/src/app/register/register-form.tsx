@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useActionState, useEffect, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
@@ -8,10 +8,6 @@ import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
-import {
-  AuthRedirectFallback,
-  useAuthRedirect,
-} from "@/hooks/use-auth-redirect";
 import { cn } from "@ccp/shared/utils";
 
 import { registerAction, type RegisterState } from "./actions";
@@ -20,22 +16,13 @@ const INITIAL: RegisterState = { error: null };
 
 export function RegisterForm() {
   const router = useRouter();
-  const { state, action, isRedirecting } = useAuthRedirect(
-    registerAction,
-    INITIAL,
-  );
+  const [state, action] = useActionState(registerAction, INITIAL);
 
-  // Same prefetch trick as login-form / accept-form: warm /inbox in the
-  // router cache so the post-register navigation is near-instant. Without
-  // this, the new workspace's 3 catalog fetches block the redirect and
-  // the AuthRedirectFallback spinner lingers for ~200-400ms.
+  // Prefetch the post-signup destination so the navigation that the
+  // server-side redirect triggers paints near-instantly.
   useEffect(() => {
-    router.prefetch("/inbox");
+    router.prefetch("/settings/whatsapp");
   }, [router]);
-
-  if (isRedirecting) {
-    return <AuthRedirectFallback minHeightClass="min-h-65" />;
-  }
 
   return (
     <form action={action} className="flex flex-col gap-4">

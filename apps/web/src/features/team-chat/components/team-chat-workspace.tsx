@@ -73,7 +73,7 @@ export function TeamChatWorkspace({
   // so they don't refetch on channel switch. See /app/team/layout.tsx for
   // the rationale.
   const { channels: initialChannels, teamMembers } = useTeamChatLayoutData();
-  const channels = useTeamChannelsList(initialChannels, currentUser.id);
+  const channels = useTeamChannelsList(initialChannels, currentUser.id, initialChannel.id);
   const channelState = useTeamChannelEvents(
     initialChannel.id,
     initialMessages,

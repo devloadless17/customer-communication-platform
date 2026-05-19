@@ -1,11 +1,11 @@
 "use server";
 
+import { redirect } from "next/navigation";
+
 import { signInWithCredentials } from "@/lib/auth";
 
 export interface LoginState {
   error: string | null;
-  /** Destination for the client to navigate to after a successful sign-in. */
-  redirectTo?: string;
 }
 
 export async function loginAction(
@@ -28,21 +28,25 @@ export async function loginAction(
     return { error: result.error ?? "Invalid email or password." };
   }
 
-  // Do NOT call redirect() here. See [hooks/use-auth-redirect.tsx] for the
-  // full rationale — TL;DR Better Auth's nextCookies plugin commits the
-  // session cookie into the action response; redirect() in the same call
-  // throws NEXT_REDIRECT which has historically raced the cookie commit and
-  // produced "An unexpected response was received from the server." Return
-  // a destination and let the client navigate after the action resolves.
-  return { error: null, redirectTo: safeNext(next) };
+  // Server-side redirect. The cookie has already been committed to the
+  // action response by Better Auth's nextCookies plugin; redirect() throws
+  // NEXT_REDIRECT AFTER that commit so the browser receives both the
+  // cookie AND the navigation in the same response.
+  //
+  // Earlier this used a `{ redirectTo }` return + client-side router.replace
+  // because a CHAIN through `/` (action → `/` RSC → re-redirect to /inbox)
+  // produced "An unexpected response was received from the server." The
+  // `safeNext` normalization below collapses `/` to `/inbox` directly, so
+  // there is no chain — one hop, no race. Calling redirect() here removes
+  // the post-action spinner the user perceived as "the form flashing."
+  redirect(safeNext(next));
 }
 
 function safeNext(next: string): string {
   if (!next.startsWith("/") || next.startsWith("//")) return "/inbox";
-  // "/" is an RSC that redirects to /inbox. Chaining an action-response
-  // redirect into an RSC-render redirect has produced "An unexpected
-  // response was received from the server" in this codebase before —
-  // normalize here so the navigation lands directly at /inbox.
+  // "/" is an RSC that redirects to /inbox. Chaining the action's redirect
+  // into the RSC's redirect causes the legacy "unexpected response" bug —
+  // normalize here so the redirect lands directly at /inbox.
   if (next === "/") return "/inbox";
   return next;
 }
