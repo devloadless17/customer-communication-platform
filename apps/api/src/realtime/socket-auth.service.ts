@@ -41,9 +41,10 @@ export class SocketAuthService {
 
       const session = await auth.api.getSession({ headers });
       const userId = session?.user?.id;
+      const sessionId = session?.session?.id;
       const teamId = (session?.user as { teamId?: string } | undefined)?.teamId;
       const role = (session?.user as { role?: Role } | undefined)?.role;
-      if (!userId || !teamId || !role) return null;
+      if (!userId || !sessionId || !teamId || !role) return null;
 
       // After a Caddy bounce / deploy a whole team's tabs reconnect within
       // seconds; without the cache, every handshake paid an independent
@@ -68,6 +69,7 @@ export class SocketAuthService {
       });
       if (!dbUser || dbUser.deactivatedAt) return null;
       sessionCacheSet(userId, {
+        sessionId,
         userId: dbUser.id,
         teamId: dbUser.teamId,
         role: dbUser.role as Role,

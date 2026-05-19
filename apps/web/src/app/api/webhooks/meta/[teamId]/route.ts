@@ -15,7 +15,27 @@ import { NextResponse } from "next/server";
  *
  * Operators SHOULD flip the URL in the Meta App Dashboard to the canonical
  * path before deploying — this proxy is insurance, not a permanent design.
- * Delete this file once every subscription has been updated.
+ *
+ * ---
+ *
+ * DELETION DEADLINE: 2026-06-19
+ *
+ * (Originally added during the NestJS migration cutover on 2026-05-17.
+ * One pilot tenant + a 30-day window to confirm every Meta subscription
+ * is on the new /webhooks/meta/{teamId} URL. After the deadline:
+ *
+ *   1. Confirm zero hits to this route in the access logs for the prior 7d
+ *      (`grep '/api/webhooks/meta/' /var/log/caddy/access.log` or whatever
+ *      log path the deploy is shipping).
+ *   2. Delete this file.
+ *   3. Delete the `/api/webhooks/meta/*` handle block in
+ *      `deploy/Caddyfile.template`.
+ *   4. Update CLAUDE.md to drop the "legacy Meta webhook proxy" line from
+ *      the non-migrated-routes table.
+ *
+ * If the deadline arrives and traffic is still landing here, push the
+ * date out — but ALSO open a tracking issue to chase the operator who
+ * hasn't flipped their subscription, instead of silently extending.)
  */
 
 export const runtime = "nodejs";

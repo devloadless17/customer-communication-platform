@@ -1,26 +1,23 @@
-import * as React from "react";
+import type { ComponentProps } from "react";
 
 import { cn } from "@ccp/shared/utils";
 
-export type InputProps = React.InputHTMLAttributes<HTMLInputElement>;
+// React 19: ref flows through ComponentProps<"input">; no forwardRef wrapper.
+export type InputProps = ComponentProps<"input">;
 
-export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, type, ...props }, ref) => {
-    return (
-      <input
-        type={type}
-        className={cn(
-          "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors",
-          "placeholder:text-muted-foreground",
-          "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-          "file:border-0 file:bg-transparent file:text-sm file:font-medium",
-          "disabled:cursor-not-allowed disabled:opacity-50",
-          className,
-        )}
-        ref={ref}
-        {...props}
-      />
-    );
-  },
-);
-Input.displayName = "Input";
+export function Input({ className, type, ...props }: InputProps) {
+  return (
+    <input
+      type={type}
+      className={cn(
+        "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors",
+        "placeholder:text-muted-foreground",
+        "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+        "file:border-0 file:bg-transparent file:text-sm file:font-medium",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        className,
+      )}
+      {...props}
+    />
+  );
+}

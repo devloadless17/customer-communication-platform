@@ -22,6 +22,36 @@ import { WsAdapter } from "./realtime/ws-adapter";
  * empty Socket.io gateway. Existing Next.js routes are unaffected; this
  * process just sits idle until Phase 2 starts moving traffic to it.
  */
+// Process-level safety net for errors that escape the framework's own
+// boundaries. The most common offender at pilot scale is BullMQ's internal
+// blocking-connection (the IORedis instance the Worker `.duplicate()`s for
+// BRPOPLPUSH). That duplicate doesn't share the .on("error") listener we
+// attach to the queue's primary connection, so a Redis ECONNRESET emits an
+// 'error' event with no handler → Node crashes with an uncaughtException.
+// systemd Restart=always would bring us back in ~3s, but that's still a
+// hard 502 window where a soft reconnect would have been transparent.
+//
+// IORedis itself reconnects automatically. We just need to keep the process
+// alive long enough for that to happen. Log the error so it's visible in
+// systemd-journald, then return — same posture pm2/cluster would give us
+// without the runtime dep.
+//
+// `unhandledRejection` shares the same surface: a `void publish(...).catch(...)`
+// site missing a `.catch` would otherwise terminate the process at Node 24's
+// default `--unhandled-rejections=throw`. We log instead so a single bus
+// publish that throws doesn't take down the whole api.
+//
+// Note: these are intentionally INSTALLED-ONCE at module load (top-level),
+// not inside `bootstrap()`. NestFactory's failure path also routes through
+// these — without them a single bad `onModuleInit` would crash before the
+// logger is ready and you'd see only the unhelpful default Node stack.
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+
 async function bootstrap(): Promise<void> {
   // Validate environment BEFORE constructing the DI graph — if a required env
   // var is missing, fail loudly here rather than crashing midway through

@@ -72,6 +72,26 @@ const sweeper = setInterval(() => {
 }, BUCKET_SWEEP_INTERVAL_MS);
 sweeper.unref?.();
 
+// Cap-eviction is a silent limit relaxation (the evicted user's next
+// request gets a full bucket). We don't expect to ever hit BUCKET_MAX on
+// the single-process pilot — if this log fires, the in-memory assumption
+// is breaking and it's time to move buckets to Redis. Rate-limit the log
+// itself so a stuck-evicting state doesn't drown stdout.
+const EVICTION_LOG_INTERVAL_MS = 60_000;
+let evictionLogCount = 0;
+let evictionLogLast = 0;
+function logEviction(): void {
+  evictionLogCount += 1;
+  const now = Date.now();
+  if (now - evictionLogLast < EVICTION_LOG_INTERVAL_MS) return;
+  console.warn(
+    `[rate-limit] bucket cap ${BUCKET_MAX} reached — evicted ${evictionLogCount} ` +
+      `oldest entries since last log. Move to Redis if this fires often.`,
+  );
+  evictionLogLast = now;
+  evictionLogCount = 0;
+}
+
 function consume(
   userId: string,
   perMinute: number,
@@ -83,7 +103,10 @@ function consume(
   if (!bucket) {
     if (buckets.size >= BUCKET_MAX) {
       const oldest = buckets.keys().next().value;
-      if (oldest !== undefined) buckets.delete(oldest);
+      if (oldest !== undefined) {
+        buckets.delete(oldest);
+        logEviction();
+      }
     }
     buckets.set(key, { tokens: perMinute - 1, capacity: perMinute, lastRefill: now });
     return { ok: true };

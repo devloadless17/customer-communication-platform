@@ -63,6 +63,20 @@ const nextConfig: NextConfig = {
   // page fresh while it's on screen, and 60s is short enough that a chat the
   // agent left an hour ago will still refetch on revisit. Default is 0
   // (always re-fetch); 60 trades a small staleness window for instant feel.
+  //
+  // `staleTimes` is INTENTIONALLY still under `experimental` — verified
+  // against the Next 16.2 docs (last checked 2026-05-19). The flag was
+  // introduced in 14.2, had its `dynamic` default flipped 30s → 0s in 15.0,
+  // and remains experimental in 16.x. The Next.js docs explicitly say "this
+  // feature is currently experimental and subject to change, it's not
+  // recommended for production." We accept that warning: a 60s client-side
+  // cache window is correctness-safe here (socket events patch the screen
+  // in real time; the only thing the cache changes is the re-mount cost),
+  // and the perceived-speed win is worth the experimental tag.
+  //
+  // Re-check this annotation on the next Next.js major bump. If the flag is
+  // promoted, move it to the top level; if it's renamed (the `cacheLife` /
+  // `'use cache'` work has been the rumored successor since 15.x), migrate.
   experimental: {
     staleTimes: {
       dynamic: 60,
@@ -101,6 +115,15 @@ const nextConfig: NextConfig = {
   // They exist for the no-Caddy paths (local Docker stack, `npm run dev`
   // against a host-side api) so that browser fetches to api-owned routes
   // proxy through transparently instead of 404-ing on Next.js.
+  //
+  // DO NOT remove this block as "duplication with Caddy". The dev workflow
+  // relies on same-origin requests: SameSite=Lax session cookies are only
+  // attached to fetches against the same origin Next.js serves on
+  // (localhost:3000). Going cross-origin to localhost:4000 would silently
+  // log dev users out on every authenticated fetch. Same-origin via this
+  // rewrite is what keeps cookies attached and the CSRF posture sane in
+  // local dev. The parity risk with the Caddyfile (drift between this
+  // list and the Caddyfile route table) is the lesser evil.
   //
   // Reuses INTERNAL_API_URL (already wired in docker-compose at
   // http://api:4000) — same target the RSC layer uses for server→api

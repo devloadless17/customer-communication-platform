@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
 
+import { COOKIE_PREFIX } from "@ccp/shared/auth/better-auth-config";
+
 import { rateLimit } from "@/lib/rate-limit";
 
 /**
@@ -310,11 +312,12 @@ export default function proxy(req: NextRequest): NextResponse {
   // cookies, the cookie value otherwise. Does NOT verify the session row
   // exists in the DB — that's the route handler's job.
   //
-  // cookiePrefix MUST match `advanced.cookiePrefix` in lib/auth/better-auth.ts
-  // ("ccp"). The default is "better-auth"; without this argument the gate
-  // looks for the wrong cookie name and bounces a freshly-signed-in user
-  // straight back to /login.
-  const sessionCookie = getSessionCookie(req, { cookiePrefix: "ccp" });
+  // cookiePrefix MUST match `advanced.cookiePrefix` in the shared Better
+  // Auth config. Imported from `@ccp/shared` so we have one source of truth
+  // — hardcoding "ccp" here previously meant a future rename would silently
+  // bounce every signed-in user back to /login because the gate looked
+  // for a cookie name nothing actually sets.
+  const sessionCookie = getSessionCookie(req, { cookiePrefix: COOKIE_PREFIX });
   const hasCookie = Boolean(sessionCookie);
 
   // Base for absolute redirects. Behind our Caddy → Node setup, `req.url`

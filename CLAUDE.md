@@ -245,7 +245,7 @@ Direct `emitToTeam` calls in lib/ couldn't survive Phase 5 because the Socket.io
 |---|---|
 | `apps/web/src/app/api/auth/[...all]` | Better Auth catch-all — must stay on Next.js (Caddy routes `/api/auth/*` here, EXCEPT `/api/auth/change-password` which lives on NestJS — see Cutover step 2 below) |
 | `apps/web/src/app/api/health` | Different URL space (`/api/health` vs NestJS `/health`); kept for backwards-compat probes |
-| `apps/web/src/app/api/webhooks/meta/[teamId]` | Server-side proxy to `/webhooks/meta/{teamId}` on NestJS. Forwards raw bytes verbatim so HMAC verification still passes. Insurance for Meta subscriptions still pointing at the old URL; delete this file once every subscription has been updated. |
+| `apps/web/src/app/api/webhooks/meta/[teamId]` | Server-side proxy to `/webhooks/meta/{teamId}` on NestJS. Forwards raw bytes verbatim so HMAC verification still passes. Insurance for Meta subscriptions still pointing at the old URL. **DELETION DEADLINE: 2026-06-19** (30 days post NestJS cutover; checklist + extension policy in the file's header doc-comment). |
 
 The generic `app/api/webhooks/[provider]/[teamId]` dispatcher shim was removed in Phase 5 and not re-added — there's only one provider (Meta) today, so a generic dispatcher buys nothing.
 
@@ -267,7 +267,7 @@ Remaining steps for the actual deploy:
 2. **Caddy routing**: see [deploy/Caddyfile.example](deploy/Caddyfile.example) — commit-controlled config so the rule ordering doesn't live only in this prose. The non-obvious lines:
    - `/api/auth/change-password` → NestJS (moved off Better Auth). Must come BEFORE the `/api/auth/*` → Next.js wildcard or change-password 404s.
    - `/api/webhooks/meta/*` → Next.js (the legacy URL is handled by the proxy at [apps/web/src/app/api/webhooks/meta/[teamId]/route.ts](apps/web/src/app/api/webhooks/meta/[teamId]/route.ts) which forwards bytes verbatim to NestJS so HMAC integrity is preserved).
-   - Default for everything else: `/`, `/_next/*`, `/api/auth/*` → Next.js; `/api/*`, `/socket.io/*`, `/webhooks/*` → NestJS.
+   - Default for everything else: `/`, `/_next/*`, `/api/auth/*` → Next.js; `/api/*`, `/webhooks/*` → NestJS. (The Socket.io client connects on `/api/socket/*` and is caught by the `/api/*` matcher; no separate `/socket.io/*` rule is needed.)
 
 3. **Meta webhook URL flip (pre-deploy)**: update the Meta App Dashboard to point at the canonical `https://<host>/webhooks/meta/{teamId}` path (NestJS). The legacy proxy at `/api/webhooks/meta/{teamId}` keeps existing subscriptions alive during cutover, but it's insurance — not a permanent design. Once every subscription is on the new URL, delete `apps/web/src/app/api/webhooks/meta/[teamId]/route.ts`.
 

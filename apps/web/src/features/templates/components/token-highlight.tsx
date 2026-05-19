@@ -1,6 +1,15 @@
 "use client";
 
-import * as React from "react";
+import {
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type InputHTMLAttributes,
+  type ReactNode,
+  type Ref,
+  type TextareaHTMLAttributes,
+} from "react";
 
 import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
@@ -46,8 +55,8 @@ interface CommonProps {
 function renderTokenized(
   text: string,
   knownKeys: Set<string>,
-): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
+): ReactNode[] {
+  const nodes: ReactNode[] = [];
   const re = /(?<![A-Za-z0-9_])\$var\.(contact|agent)\.([a-z][a-z0-9_]*)\b/g;
   let lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -89,7 +98,7 @@ function useKnownKeys(
   fieldDefinitions: ContactFieldDefinition[],
   includeAgent: boolean,
 ): Set<string> {
-  return React.useMemo(
+  return useMemo(
     () => {
       const set = new Set<string>([
         "contact.name",
@@ -112,8 +121,10 @@ function useKnownKeys(
 // Input (single-line) variant
 // ---------------------------------------------------------------------------
 
-export type TokenHighlightInputProps = React.InputHTMLAttributes<HTMLInputElement> &
-  CommonProps;
+export type TokenHighlightInputProps = InputHTMLAttributes<HTMLInputElement> &
+  CommonProps & {
+    ref?: Ref<HTMLInputElement>;
+  };
 
 /**
  * Drop-in replacement for the <Input> component when the field accepts
@@ -123,21 +134,28 @@ export type TokenHighlightInputProps = React.InputHTMLAttributes<HTMLInputElemen
  * Caveat: forms that rely on the input's text COLOR being visible (e.g.
  * a form with `type="password"`) shouldn't use this — we paint the
  * underlying text transparent.
+ *
+ * React 19: ref is a regular prop. `useImperativeHandle` still does the
+ * external/internal ref merge — callers can focus / setSelectionRange via
+ * their ref while we keep our own for scroll sync.
  */
-export const TokenHighlightInput = React.forwardRef<
-  HTMLInputElement,
-  TokenHighlightInputProps
->(({ className, wrapperClassName, fieldDefinitions, includeAgent = false, value, ...props }, ref) => {
+export function TokenHighlightInput({
+  className,
+  wrapperClassName,
+  fieldDefinitions,
+  includeAgent = false,
+  value,
+  ref,
+  ...props
+}: TokenHighlightInputProps) {
   const knownKeys = useKnownKeys(fieldDefinitions, includeAgent);
   const text = typeof value === "string" ? value : "";
-  const innerRef = React.useRef<HTMLInputElement>(null);
-  // Merge the external ref with our internal one. Callers can still focus /
-  // setSelectionRange via their ref while we keep ours for scroll sync.
-  React.useImperativeHandle(ref, () => innerRef.current as HTMLInputElement);
+  const innerRef = useRef<HTMLInputElement>(null);
+  useImperativeHandle(ref, () => innerRef.current as HTMLInputElement);
 
   // Track horizontal scroll inside the input — for long values the text
   // shifts but the overlay would otherwise stay anchored at 0.
-  const [scrollLeft, setScrollLeft] = React.useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
 
   return (
     <div className={cn("relative w-full", wrapperClassName)}>
@@ -180,28 +198,35 @@ export const TokenHighlightInput = React.forwardRef<
       />
     </div>
   );
-});
-TokenHighlightInput.displayName = "TokenHighlightInput";
+}
 
 // ---------------------------------------------------------------------------
 // Textarea (multi-line) variant
 // ---------------------------------------------------------------------------
 
 export type TokenHighlightTextareaProps =
-  React.TextareaHTMLAttributes<HTMLTextAreaElement> & CommonProps;
+  TextareaHTMLAttributes<HTMLTextAreaElement> &
+    CommonProps & {
+      ref?: Ref<HTMLTextAreaElement>;
+    };
 
-export const TokenHighlightTextarea = React.forwardRef<
-  HTMLTextAreaElement,
-  TokenHighlightTextareaProps
->(({ className, wrapperClassName, fieldDefinitions, includeAgent = false, value, ...props }, ref) => {
+export function TokenHighlightTextarea({
+  className,
+  wrapperClassName,
+  fieldDefinitions,
+  includeAgent = false,
+  value,
+  ref,
+  ...props
+}: TokenHighlightTextareaProps) {
   const knownKeys = useKnownKeys(fieldDefinitions, includeAgent);
   const text = typeof value === "string" ? value : "";
-  const innerRef = React.useRef<HTMLTextAreaElement>(null);
-  React.useImperativeHandle(ref, () => innerRef.current as HTMLTextAreaElement);
+  const innerRef = useRef<HTMLTextAreaElement>(null);
+  useImperativeHandle(ref, () => innerRef.current as HTMLTextAreaElement);
 
   // Mirror the textarea's vertical scroll so the overlay stays aligned when
   // the field overflows its visible height.
-  const [scrollTop, setScrollTop] = React.useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
 
   return (
     <div className={cn("relative w-full", wrapperClassName)}>
@@ -235,5 +260,4 @@ export const TokenHighlightTextarea = React.forwardRef<
       />
     </div>
   );
-});
-TokenHighlightTextarea.displayName = "TokenHighlightTextarea";
+}

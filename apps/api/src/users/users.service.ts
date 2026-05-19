@@ -2,27 +2,23 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from "@nestjs/common";
 
 import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
 import type { Role, User } from "@ccp/shared/types";
 
-import { invalidateSessionCache } from "../auth/session.guard";
+import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
-import { RealtimeGateway } from "../realtime/realtime.gateway";
 import type { UpdateUserInput } from "./users.schemas";
 
 @Injectable()
 export class UsersService {
-  private readonly logger = new Logger(UsersService.name);
-
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
-    private readonly realtime: RealtimeGateway,
+    private readonly sessionInvalidator: SessionInvalidationService,
   ) {}
 
   /**
@@ -131,28 +127,29 @@ export class UsersService {
       },
     });
 
-    // Bust the session cache for this user so role/deactivation/profile
-    // changes land within the next request rather than the 15s cache window.
-    invalidateSessionCache(targetId);
-
-    // Privilege-altering changes — drop Session rows + kick live sockets so
-    // the next request / handshake resolves the user fresh with new role +
-    // deactivatedAt. Without this:
-    //   - A demoted admin keeps their cached "admin" ApiSession (and any
-    //     Better Auth cookieCache snapshot) for up to 60s, including the
-    //     server-side authorization check on every controller.
+    // Privilege-altering changes — delete every Session row + revoke so
+    // the user has to re-authenticate on every device with the new role
+    // (or, if deactivated, doesn't get to authenticate at all). Without
+    // this:
+    //   - A demoted admin keeps their cached "admin" ApiSession for up to
+    //     15s, including the authorization check on every controller.
     //   - An admin who deactivates a user leaves that user's open sockets
     //     subscribed to team events until reload.
+    //
+    // For non-privilege updates (just a name / avatar change), we only
+    // bust the cache so the next render shows the new value without a 15s
+    // lag — sockets stay alive so the user isn't logged out on a profile
+    // edit.
     const roleChanged = data.role !== undefined;
     const deactivated = Boolean(data.deactivatedAt);
     if (roleChanged || deactivated) {
       await this.db.session.deleteMany({ where: { userId: targetId } });
-      const dropped = this.realtime.disconnectUserSockets(targetId);
-      if (dropped > 0) {
-        this.logger.log(
-          `user-update (role=${roleChanged} deactivated=${deactivated}): dropped ${dropped} live socket(s) for user=${targetId}`,
-        );
-      }
+      this.sessionInvalidator.revoke(
+        targetId,
+        deactivated ? "deactivation" : "role-change",
+      );
+    } else {
+      this.sessionInvalidator.bustCache(targetId);
     }
 
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });
@@ -202,10 +199,10 @@ export class UsersService {
     }
 
     await this.db.user.delete({ where: { id: targetId } });
-    const dropped = this.realtime.disconnectUserSockets(targetId);
-    if (dropped > 0) {
-      this.logger.log(`delete: dropped ${dropped} live socket(s) for user=${targetId}`);
-    }
+    // Cascade-deletes Session + Account rows via FK; this call drops the
+    // per-process session cache + any live Socket.io connections so the
+    // user is kicked instantly rather than waiting for the 15s TTL.
+    this.sessionInvalidator.revoke(targetId, "deletion");
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });
   }
 }

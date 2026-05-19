@@ -16,8 +16,43 @@ import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "./password-policy";
 
 export const SESSION_MAX_AGE_S = 90 * 24 * 60 * 60;
 export const SESSION_UPDATE_AGE_S = 24 * 60 * 60;
-export const SESSION_COOKIE_CACHE_MAX_AGE_S = 60;
 export const COOKIE_PREFIX = "ccp";
+
+// RFC 6265bis cookie prefixes. Browsers REJECT any Set-Cookie (including
+// clears) for these names that doesn't carry `Secure`. Every write/clear
+// of an auth cookie must consult `cookieNameRequiresSecure` for its flag.
+export const SECURE_COOKIE_NAME_PREFIX = "__Secure-";
+export const HOST_COOKIE_NAME_PREFIX = "__Host-";
+
+// Every cookie-name prefix we own. Sign-out enumerates request cookies and
+// clears any that match — no hardcoded `session_token` / `session_data`
+// list to drift when Better Auth adds a cookie.
+export const OWNED_COOKIE_NAME_PREFIXES = [
+  `${COOKIE_PREFIX}.`,
+  `${SECURE_COOKIE_NAME_PREFIX}${COOKIE_PREFIX}.`,
+  `${HOST_COOKIE_NAME_PREFIX}${COOKIE_PREFIX}.`,
+] as const;
+
+export function isOwnedCookieName(name: string): boolean {
+  for (const p of OWNED_COOKIE_NAME_PREFIXES) {
+    if (name.startsWith(p)) return true;
+  }
+  return false;
+}
+
+export function cookieNameRequiresSecure(name: string): boolean {
+  return (
+    name.startsWith(SECURE_COOKIE_NAME_PREFIX) ||
+    name.startsWith(HOST_COOKIE_NAME_PREFIX)
+  );
+}
+
+// Single rule for "should this process issue cookies with `Secure`."
+// Both `app` and `api` run with NODE_ENV=production in prod, so they
+// agree. One knob to flip if a `staging` TLS profile is introduced.
+export function shouldIssueSecureCookies(): boolean {
+  return process.env.NODE_ENV === "production";
+}
 
 export interface SharedAuthOptionsParams {
   database: BetterAuthOptions["database"];
@@ -81,23 +116,15 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
     session: {
       expiresIn: SESSION_MAX_AGE_S,
       // Re-stamp the session row at most once a day so an active user's
-      // expiry keeps sliding forward — matches the previous "no idle logout
-      // until 90 days unused" UX. Idle users still hit the 90-day cap.
+      // expiry keeps sliding forward — matches the "no idle logout until
+      // 90 days unused" UX. Idle users still hit the 90-day cap.
       updateAge: SESSION_UPDATE_AGE_S,
-      cookieCache: {
-        // 60s cache: balance between session-table DB load and revocation
-        // latency. A signOut on the Next.js side deletes the Session row but
-        // the cached snapshot here persists for up to 60s — so a signed-out
-        // user could keep hitting the API for that window. The earlier 5-min
-        // default was too forgiving; 60s is short enough to be visible only
-        // under a deliberate stress test.
-        //
-        // The deactivation gate (loadActiveUser checks User.deactivatedAt)
-        // is independent of this cache, so admin-revoked users are blocked
-        // immediately regardless.
-        enabled: true,
-        maxAge: SESSION_COOKIE_CACHE_MAX_AGE_S,
-      },
+      // OFF intentionally. The NestJS-side 15s ApiSession cache in
+      // `session.guard.ts` is the only cache. BA's 60s cookie cache,
+      // when on, created a layering problem: revocations cleared the
+      // NestJS cache in 15s but BA kept serving the cached payload for
+      // up to 60s. One cache → one TTL → one place to invalidate.
+      cookieCache: { enabled: false },
     },
 
     advanced: {

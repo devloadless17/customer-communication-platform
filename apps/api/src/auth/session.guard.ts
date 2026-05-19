@@ -18,6 +18,12 @@ import { DbService } from "../db/db.service";
  * to the route handlers they're replacing.
  */
 export interface ApiSession {
+  /** Better Auth Session.id of the row that authorized this request. Used
+   *  by handlers that need to revoke OTHER sessions while keeping the
+   *  current one alive — e.g. password change deletes every Session row
+   *  for the user except this one so the requesting tab stays signed in
+   *  while every other device is kicked. */
+  sessionId: string;
   userId: string;
   teamId: string;
   role: Role;
@@ -162,13 +168,17 @@ export async function resolveSession(
     return null;
   }
 
-  if (!result?.user?.id) return null;
+  if (!result?.user?.id || !result?.session?.id) return null;
+  const sessionId = result.session.id;
 
   // Hot-path: same user just resolved a moment ago — Better Auth already
   // confirmed the cookie is valid, so the cached deactivation snapshot is
-  // still trustworthy for the cache window.
+  // still trustworthy for the cache window. We must still re-bind
+  // `sessionId` to the current request because the cache is keyed by
+  // userId, not by session — a user with two browsers has two session
+  // rows, and `session.sessionId` must reflect THIS request's row.
   const cached = cacheGet(result.user.id);
-  if (cached) return cached;
+  if (cached) return { ...cached, sessionId };
 
   // Deactivation re-check — the edge sees only the signed cookie, not
   // deactivatedAt. Without this an admin's deactivation is up to 90 days
@@ -188,6 +198,7 @@ export async function resolveSession(
   if (!user || user.deactivatedAt) return null;
 
   const session: ApiSession = {
+    sessionId,
     userId: user.id,
     teamId: user.teamId,
     role: user.role as Role,

@@ -3,8 +3,8 @@ import { Injectable, InternalServerErrorException, Logger } from "@nestjs/common
 import { blobStorage } from "@/lib/blob-storage";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 
+import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { DbService } from "../db/db.service";
-import { RealtimeGateway } from "../realtime/realtime.gateway";
 
 /**
  * Whole-team destroy. Cascades through every team-scoped table (users,
@@ -25,7 +25,7 @@ export class TeamRootService {
 
   constructor(
     private readonly db: DbService,
-    private readonly realtime: RealtimeGateway,
+    private readonly sessionInvalidator: SessionInvalidationService,
   ) {}
 
   async destroy(teamId: string, label: string): Promise<void> {
@@ -56,14 +56,13 @@ export class TeamRootService {
 
     invalidateProviderConfig(teamId);
 
-    let droppedSockets = 0;
+    // Revoke each member through the unified path so the per-process
+    // session cache is busted alongside the socket kick. The cascade
+    // already deleted Session rows; this just clears the local caches +
+    // closes live connections so members don't keep operating against
+    // the (now-deleted) team for the cache TTL.
     for (const m of teamMembers) {
-      droppedSockets += this.realtime.disconnectUserSockets(m.id);
-    }
-    if (droppedSockets > 0) {
-      this.logger.log(
-        `[${label}] dropped ${droppedSockets} live socket(s) across ${teamMembers.length} member(s)`,
-      );
+      this.sessionInvalidator.revoke(m.id, "team-deletion");
     }
 
     // Fire-and-forget blob cleanup. blobStorage.delete promises never throw.

@@ -138,10 +138,14 @@ __DOMAIN__ {
 		}
 	}
 
-	# (5) /api/*, /webhooks/*, /socket.io/* → api (NestJS).
-	#     Socket.io heartbeats need long-lived connection support.
+	# (5) /api/*, /webhooks/* → api (NestJS).
+	#     The Socket.io client connects on `/api/socket/*` (see `SOCKET_PATH`
+	#     in packages/shared/src/socket/events.ts) — that path is covered by
+	#     `/api/*`, so no separate `/socket.io/*` matcher is needed. The
+	#     bumped read/write timeouts below still apply to the WebSocket
+	#     traffic since it rides the same `@apiBackend` handle.
 	@apiBackend {
-		path /api/* /webhooks/* /socket.io/*
+		path /api/* /webhooks/*
 	}
 	handle @apiBackend {
 		reverse_proxy 127.0.0.1:4000 {

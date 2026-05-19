@@ -21,13 +21,20 @@ let redirecting = false;
  * Trip the redirect once. Multiple racy callers (e.g. several in-flight
  * fetches all failing on the same expired session) collapse to one
  * window.location replace.
+ *
+ * Routes to /logout, NOT /login. The 401 happens when the Session row is
+ * gone but the cookie is still in the browser — going straight to /login
+ * lets the edge proxy see `hasCookie=true` and bounce to /inbox, which
+ * 401s again, in a loop that needs /logout to break. Going to /logout
+ * first clears the cookie cleanly, then forwards to /login with `?next=`
+ * preserved.
  */
 export function handleSessionExpired(): void {
   if (typeof window === "undefined") return;
   if (redirecting) return;
   redirecting = true;
   const next = window.location.pathname + window.location.search;
-  window.location.replace(`/login?next=${encodeURIComponent(next)}`);
+  window.location.replace(`/logout?next=${encodeURIComponent(next)}`);
 }
 
 /**

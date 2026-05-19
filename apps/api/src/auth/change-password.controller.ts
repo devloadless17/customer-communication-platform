@@ -20,6 +20,7 @@ import { DbService } from "../db/db.service";
 import { CurrentSession } from "./current-session.decorator";
 import { SessionGuard } from "./session.guard";
 import type { ApiSession } from "./session.guard";
+import { SessionInvalidationService } from "./session-invalidation.service";
 
 /**
  * Per-user `currentPassword` attempt counter. Bcrypt makes mass brute force
@@ -84,7 +85,10 @@ type Input = z.infer<typeof BodySchema>;
 @Controller("api/auth/change-password")
 @UseGuards(SessionGuard)
 export class ChangePasswordController {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly sessionInvalidator: SessionInvalidationService,
+  ) {}
 
   @Post()
   @HttpCode(200)
@@ -133,6 +137,15 @@ export class ChangePasswordController {
       where: { id: account.id },
       data: { password: newHash },
     });
+
+    // Sign every other device out by deleting their Session rows; keep
+    // this tab's row so the user stays signed in here. Then revoke (drop
+    // session cache + kick live sockets) so stale callers don't keep
+    // working for the 15s cache window.
+    await this.db.session.deleteMany({
+      where: { userId: session.userId, NOT: { id: session.sessionId } },
+    });
+    this.sessionInvalidator.revoke(session.userId, "password-change");
 
     return { ok: true };
   }

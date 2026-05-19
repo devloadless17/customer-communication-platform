@@ -8,7 +8,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useRouter } from "next/navigation";
 
 const COOKIE_NAME = "tz";
 
@@ -35,10 +34,15 @@ export function useTzNow(): TzContextValue {
  * Bridges the server-detected timezone (read from the `tz` cookie) into the
  * client tree, and syncs the cookie when the browser's actual zone differs.
  *
- * On first ever visit the cookie is missing — server renders in UTC, the
- * effect below detects the real zone, writes the cookie, and triggers a
- * router refresh so the next paint uses it. Every subsequent navigation
- * is instant-correct because the server already knows the zone.
+ * On first ever visit the cookie is missing — server renders with the
+ * default zone (`Asia/Beirut`, see lib/server-tz.ts). The effect below
+ * detects the real zone and writes the cookie so subsequent navigations
+ * render with the correct zone. The first page itself stays in the default
+ * zone for that single render — we used to call `router.refresh()` to fix
+ * that, but the refresh races with auth flows (the proxy can re-evaluate
+ * the cookie gate while sign-in / sign-up is mid-flight, producing
+ * confusing transient states). One-off off-by-one for first-ever visitors
+ * is the cheaper tradeoff.
  */
 export function TimezoneProvider({
   tz,
@@ -49,8 +53,6 @@ export function TimezoneProvider({
   serverNow: number;
   children: ReactNode;
 }) {
-  const router = useRouter();
-
   // Initial state = serverNow so SSR and first client render compute the
   // same relative-time buckets. The effect re-syncs to the actual client
   // clock (within ~milliseconds, usually a no-op visually) and then ticks
@@ -67,8 +69,10 @@ export function TimezoneProvider({
     if (!detected || detected === tz) return;
     document.cookie =
       `${COOKIE_NAME}=${encodeURIComponent(detected)}; path=/; max-age=31536000; samesite=lax`;
-    router.refresh();
-  }, [tz, router]);
+    // No router.refresh() — see the comment block at the top of this
+    // function for why. The cookie is in place; the next navigation
+    // picks it up.
+  }, [tz]);
 
   const value = useMemo(() => ({ tz, now }), [tz, now]);
   return <TzContext.Provider value={value}>{children}</TzContext.Provider>;
