@@ -125,31 +125,9 @@ export default async function IntegrationsLanding() {
                 <code className="rounded bg-muted px-1 py-0.5">Authorization</code>{" "}
                 and value{" "}
                 <code className="rounded bg-muted px-1 py-0.5">Bearer ccp_…</code>
-                , then point requests at any of these endpoints:
+                .
               </p>
-              <ul className="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2">
-                <li>
-                  <code className="font-mono">POST /api/external/v1/contacts/upsert</code>
-                </li>
-                <li>
-                  <code className="font-mono">PATCH /api/external/v1/contacts/:id</code>
-                </li>
-                <li>
-                  <code className="font-mono">POST /api/external/v1/contacts/:id/tags</code>
-                </li>
-                <li>
-                  <code className="font-mono">
-                    POST /api/external/v1/conversations/:id/messages
-                  </code>
-                </li>
-                <li>
-                  <code className="font-mono">GET /api/external/v1/tags</code>
-                </li>
-                <li>
-                  <code className="font-mono">GET /api/external/v1/stages</code>
-                </li>
-              </ul>
-              <div className="mt-3">
+              <div className="mt-2">
                 <Link
                   href="/docs/api"
                   className="inline-flex items-center gap-1 text-primary hover:underline"

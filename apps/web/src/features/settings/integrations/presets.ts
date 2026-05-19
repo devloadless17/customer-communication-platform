@@ -23,6 +23,23 @@ export interface IntegrationPreset {
   label: string;
   defaultName: string;
   recommendedScopes: ApiKeyScope[];
+  /**
+   * Copy-paste-ready curl starters rendered in the connect panel. The
+   * panel substitutes the actual token when one was just generated (and
+   * is still on screen); otherwise renders `$CCP_TOKEN` as a placeholder
+   * the user can set in their shell.
+   */
+  curlExamples: CurlExample[];
+}
+
+export interface CurlExample {
+  id: string;
+  label: string;
+  method: "GET" | "POST" | "PATCH" | "DELETE";
+  /** Path-only, e.g. `/api/external/v1/contacts/upsert`. */
+  path: string;
+  /** Optional JSON request body. Sent compact-stringified in `-d`. */
+  body?: Record<string, unknown>;
 }
 
 export const N8N_PRESET: IntegrationPreset = {
@@ -42,5 +59,27 @@ export const N8N_PRESET: IntegrationPreset = {
     "read:messages",
     "write:messages",
     "read:catalog",
+  ],
+  curlExamples: [
+    {
+      id: "list-tags",
+      label: "Test the key (list tags)",
+      method: "GET",
+      path: "/api/external/v1/tags",
+    },
+    {
+      id: "upsert-contact",
+      label: "Create or update a contact",
+      method: "POST",
+      path: "/api/external/v1/contacts/upsert",
+      body: { phoneNumber: "+15555550100", name: "Jane Doe" },
+    },
+    {
+      id: "send-message",
+      label: "Send a WhatsApp message",
+      method: "POST",
+      path: "/api/external/v1/messages",
+      body: { contact: { phone: "+15555550100" }, text: "Hello from n8n" },
+    },
   ],
 };

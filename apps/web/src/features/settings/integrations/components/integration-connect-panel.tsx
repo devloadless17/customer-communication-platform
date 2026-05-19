@@ -1,15 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, CheckCircle2, Copy, KeyRound, Loader2, Zap } from "lucide-react";
+import { ArrowRight, CheckCircle2, Copy, KeyRound, Loader2, Terminal, Zap } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/lib/toast";
 import type { ApiKeyListItem } from "@/lib/api/queries";
 
-import type { IntegrationPreset } from "../presets";
+import type { CurlExample, IntegrationPreset } from "../presets";
 
 interface Props {
   preset: IntegrationPreset;
@@ -38,6 +38,13 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
   const [revealed, setRevealed] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Filled in after mount — `window` isn't available during the SSR pass,
+  // and we want the curls to use the user's actual host (works against
+  // localhost, staging, and prod without per-env overrides).
+  const [origin, setOrigin] = useState<string>("");
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
 
   async function generate() {
     setError(null);
@@ -194,6 +201,35 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
             {instructions}
           </div>
 
+          {preset.curlExamples.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                <Terminal className="size-3" />
+                Try it from your terminal
+              </div>
+              {!revealed && (
+                <p className="mb-2 text-[11px] text-muted-foreground">
+                  Replace <code className="rounded bg-muted px-1 py-0.5 font-mono">$CCP_TOKEN</code>{" "}
+                  with your key (or{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 font-mono">
+                    export CCP_TOKEN=ccp_…
+                  </code>
+                  ).
+                </p>
+              )}
+              <div className="space-y-2">
+                {preset.curlExamples.map((ex) => (
+                  <CurlBlock
+                    key={ex.id}
+                    example={ex}
+                    origin={origin}
+                    token={revealed}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
           {connected && (
             <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px]">
               <Link
@@ -208,4 +244,57 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
       </div>
     </section>
   );
+}
+
+function CurlBlock({
+  example,
+  origin,
+  token,
+}: {
+  example: CurlExample;
+  origin: string;
+  token: string | null;
+}) {
+  const command = buildCurl(example, origin, token);
+  function copy() {
+    void navigator.clipboard.writeText(command).then(
+      () => toast.success("curl copied"),
+      () => toast.error("Couldn't access clipboard"),
+    );
+  }
+  return (
+    <div className="rounded-md border border-border bg-background">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-2.5 py-1.5">
+        <div className="flex min-w-0 items-center gap-2 text-[11px]">
+          <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase">
+            {example.method}
+          </span>
+          <span className="truncate font-medium text-foreground/90">{example.label}</span>
+        </div>
+        <Button type="button" size="sm" variant="ghost" onClick={copy} className="h-6 px-2">
+          <Copy className="size-3" />
+          <span className="text-[11px]">Copy</span>
+        </Button>
+      </div>
+      <pre className="overflow-x-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed text-foreground/90">
+        {command}
+      </pre>
+    </div>
+  );
+}
+
+function buildCurl(example: CurlExample, origin: string, token: string | null): string {
+  // `origin` is empty during the SSR pass — fall back to a relative URL so
+  // the rendered HTML still parses; after hydration we re-render with the
+  // real host. Token uses the env-var placeholder unless one was just
+  // generated (only moment we have the plaintext).
+  const url = `${origin}${example.path}`;
+  const auth = token ?? "$CCP_TOKEN";
+  const lines = [`curl -X ${example.method} '${url}' \\`, `  -H 'Authorization: Bearer ${auth}'`];
+  if (example.body) {
+    lines[lines.length - 1] += " \\";
+    lines.push(`  -H 'Content-Type: application/json' \\`);
+    lines.push(`  -d '${JSON.stringify(example.body)}'`);
+  }
+  return lines.join("\n");
 }
