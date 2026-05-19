@@ -32,6 +32,10 @@ import {
   startApiIdempotencyCleanupSweeper,
   stopApiIdempotencyCleanupSweeper,
 } from "@/lib/sweepers/api-idempotency-cleanup";
+import {
+  startBlobOrphanSweeper,
+  stopBlobOrphanSweeper,
+} from "@/lib/sweepers/blob-orphan";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -57,6 +61,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private contactDriftSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
   private apiIdempotencyCleanupStarted = false;
+  private blobOrphanSweeperStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -118,9 +123,24 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start api-idempotency cleanup sweeper", err);
     }
+    try {
+      // Weekly reclaim of provider-side blobs whose DB row delete was
+      // swallowed by a transient outage. No-ops on providers without a
+      // listKeys impl.
+      startBlobOrphanSweeper();
+      this.blobOrphanSweeperStarted = true;
+      this.logger.log("Blob-orphan sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start blob-orphan sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.blobOrphanSweeperStarted) stopBlobOrphanSweeper();
+    } catch (err) {
+      this.logger.warn(`stopBlobOrphanSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
     try {
       if (this.apiIdempotencyCleanupStarted) stopApiIdempotencyCleanupSweeper();
     } catch (err) {

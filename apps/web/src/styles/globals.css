@@ -163,28 +163,13 @@
     border-radius: 9999px;
   }
 
-  /* Per-row entrance for the message timeline and conversation list. Replaces
-     the previous framer-motion `motion.div` / `motion.li` wrappers — the JS
-     library queued a render pass per new bubble and re-ran FLIP layout on
-     every list reorder, which was the dominant cost on a busy inbox. A pure
-     CSS keyframe is GPU-accelerated, fires once per element, and never reaches
-     React. Honors `prefers-reduced-motion` so a11y settings disable it. */
-  @keyframes ccp-enter {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
+  /* Row entrance is intentionally a no-op — WhatsApp-web-style: new
+     messages and conversation rows snap into place. The earlier fade+
+     slide keyframe added perceived complexity without helping the user
+     locate the new row (which the unread badge + bump-to-top already
+     do). Class kept so call sites don't need to be touched; the rule
+     just doesn't animate. */
   .animate-enter {
-    animation: ccp-enter 140ms ease-out both;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .animate-enter {
-      animation: none;
-    }
+    animation: none;
   }
 }

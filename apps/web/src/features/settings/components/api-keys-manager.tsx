@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
@@ -24,6 +24,11 @@ interface Props {
 
 export function ApiKeysManager({ initialKeys }: Props) {
   const [keys, setKeys] = useState<ApiKey[]>(initialKeys);
+  // Sync from SSR (router.refresh from useCatalogSync) so teammate
+  // additions/revocations show up without manual refresh.
+  useEffect(() => {
+    setKeys(initialKeys);
+  }, [initialKeys]);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);

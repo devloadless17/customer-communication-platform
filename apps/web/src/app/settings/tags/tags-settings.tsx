@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CheckCircle2,
@@ -41,6 +41,14 @@ export function TagsSettings({
   const { confirm, confirmDialog } = useConfirm();
   const [tags, setTags] = useState<Tag[]>(initialTags);
   const [usage, setUsage] = useState<Record<string, number>>(initialUsage);
+  // Sync from SSR-re-runs (router.refresh from useCatalogSync) so a teammate's
+  // tag additions/renames show up without manual refresh.
+  useEffect(() => {
+    setTags(initialTags);
+  }, [initialTags]);
+  useEffect(() => {
+    setUsage(initialUsage);
+  }, [initialUsage]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");

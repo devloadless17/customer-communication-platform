@@ -73,11 +73,7 @@ interface PanelProps {
   canManageFields: boolean;
   /** Team-wide tag catalog. Used by the tag picker for select/create. */
   tagCatalog: Tag[];
-  /**
-   * Team roster used to render the account-manager picker. Distinct from the
-   * per-thread `assignedUser` on the conversation — this assignee is the
-   * contact's cross-thread owner (Contact.assignedUserId).
-   */
+  /** Team roster used to render the assignee picker. */
   teamMembers: User[];
 }
 
@@ -149,17 +145,25 @@ export function ContactPanel({
       if (payload.conversationId !== conversationId) return;
       setLiveNoteCount((n) => Math.max(0, n - 1));
     };
+    const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (
+      payload,
+    ) => {
+      if (payload.conversationId !== conversationId) return;
+      setAssigneeId(payload.assignedUser?.id ?? null);
+    };
 
     socket.on("conversation:status", onStatus);
     socket.on("message:new", onMessageNew);
     socket.on("note:new", onNoteNew);
     socket.on("note:deleted", onNoteDeleted);
+    socket.on("conversation:assigned", onAssigned);
 
     return () => {
       socket.off("conversation:status", onStatus);
       socket.off("message:new", onMessageNew);
       socket.off("note:new", onNoteNew);
       socket.off("note:deleted", onNoteDeleted);
+      socket.off("conversation:assigned", onAssigned);
     };
   }, [conversation.id]);
 
@@ -183,15 +187,16 @@ export function ContactPanel({
   const [tagSaveError, setTagSaveError] = useState<string | null>(null);
   const tagBoxRef = useRef<HTMLDivElement>(null);
 
-  // Account-manager assignee — Contact.assignedUserId. Distinct from the
-  // conversation's per-thread assignee. Server-authoritative (no optimistic
-  // patch — the PATCH route handles persistence and the socket echo refreshes
-  // both this panel and any other tab open on this contact).
-  const [accountManagerId, setAccountManagerId] = useState<string | null>(
-    contact.assignedUserId ?? null,
+  // Assignee — mirrors the thread header's AssignmentDropdown. Reads/writes
+  // Conversation.assignedUserId so changes from above the chat reflect here
+  // (and vice versa). No optimistic update — same single round-trip as the
+  // header picker; the `conversation:assigned` socket echo keeps every open
+  // tab in sync.
+  const [assigneeId, setAssigneeId] = useState<string | null>(
+    data.assignedUser?.id ?? null,
   );
-  const [accountManagerPending, setAccountManagerPending] = useState(false);
-  const [accountManagerError, setAccountManagerError] = useState<string | null>(null);
+  const [assigneePending, setAssigneePending] = useState(false);
+  const [assigneeError, setAssigneeError] = useState<string | null>(null);
 
   // Re-sync when navigating to a different conversation. Without this the
   // panel would render the previous contact's edits against the new contact.
@@ -201,8 +206,8 @@ export function ContactPanel({
     setLocation(contact.location ?? "");
     setCustomFields(contact.customFields ?? {});
     setTagIds(contact.tagIds ?? []);
-    setAccountManagerId(contact.assignedUserId ?? null);
-    setAccountManagerError(null);
+    setAssigneeId(data.assignedUser?.id ?? null);
+    setAssigneeError(null);
     setTagPickerOpen(false);
     setTagSaveError(null);
   }, [
@@ -212,7 +217,7 @@ export function ContactPanel({
     contact.location,
     contact.customFields,
     contact.tagIds,
-    contact.assignedUserId,
+    data.assignedUser?.id,
   ]);
 
   // Keep our local tag catalog in sync with the server-fetched one (changes
@@ -279,11 +284,6 @@ export function ContactPanel({
       payload,
     ) => {
       if (payload.contact.id !== contactId) return;
-      // Account-manager isn't a free-text field, so a teammate's change can't
-      // race a half-typed edit on this side. Apply it unconditionally — same
-      // pattern as the message-thread's `conversation:assigned` reducer.
-      const incomingAssignee = payload.contact.assignedUserId ?? null;
-      setAccountManagerId(incomingAssignee);
       const incoming = {
         name: payload.contact.name,
         email: payload.contact.email ?? "",
@@ -419,35 +419,32 @@ export function ContactPanel({
   }
 
   /**
-   * Account-manager picker. PATCHes `Contact.assignedUserId`; the server's
-   * `contact:updated` socket echo re-syncs every open tab + the cached thread
-   * snapshot in inbox-shell. No optimistic update — the contact panel sits a
-   * single round-trip from the active thread, so the perceived lag is the
-   * same as the conversation-header AssignmentDropdown.
+   * Assignee picker. POSTs to the same `/conversations/:id/assign` endpoint
+   * as the thread header's AssignmentDropdown, so changes from either place
+   * write to the same row and the `conversation:assigned` socket echo syncs
+   * the other UI surface within a beat.
    */
-  async function persistAccountManager(nextId: string | null) {
-    if (nextId === accountManagerId || accountManagerPending) return;
-    setAccountManagerPending(true);
-    setAccountManagerError(null);
+  async function persistAssignee(nextId: string | null) {
+    if (nextId === assigneeId || assigneePending) return;
+    setAssigneePending(true);
+    setAssigneeError(null);
     try {
-      const res = await fetch(`/api/contacts/${contact.id}`, {
-        method: "PATCH",
+      const res = await fetch(`/api/conversations/${conversation.id}/assign`, {
+        method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ assignedUserId: nextId }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        setAccountManagerError(body.error ?? "Couldn't update");
+        setAssigneeError(body.error ?? "Couldn't update");
         return;
       }
-      // Apply the local value now — the socket echo will arrive a beat later
-      // and become a no-op via the equality bail in the listener above.
-      setAccountManagerId(nextId);
+      setAssigneeId(nextId);
       startSaving(() => router.refresh());
     } catch (err) {
-      setAccountManagerError(err instanceof Error ? err.message : "Network error");
+      setAssigneeError(err instanceof Error ? err.message : "Network error");
     } finally {
-      setAccountManagerPending(false);
+      setAssigneePending(false);
     }
   }
 
@@ -699,16 +696,16 @@ export function ContactPanel({
 
         <Separator />
 
-        <Section title="Account manager">
-          <AccountManagerPicker
-            currentId={accountManagerId}
+        <Section title="Assignee">
+          <AssigneePicker
+            currentId={assigneeId}
             teamMembers={teamMembers}
-            pending={accountManagerPending}
-            onChange={(next) => void persistAccountManager(next)}
+            pending={assigneePending}
+            onChange={(next) => void persistAssignee(next)}
           />
-          {accountManagerError && (
+          {assigneeError && (
             <div className="mt-2 text-[11px] text-destructive">
-              {accountManagerError}
+              {assigneeError}
             </div>
           )}
         </Section>
@@ -771,14 +768,13 @@ export function ContactPanel({
 }
 
 /**
- * Cross-thread "Account manager" assignee picker. Mirrors the conversation
- * header's `AssignmentDropdown` shape so the inbox feels coherent, but writes
- * to `Contact.assignedUserId` (not `Conversation.assignedUserId`). The two
- * fields are intentionally independent — the per-thread assignee tracks
- * "who's handling THIS chat right now", the account manager tracks "who
- * owns this customer across every chat they ever have."
+ * Sidebar assignee picker. Mirrors the conversation header's
+ * `AssignmentDropdown` shape and writes to the same `Conversation.assignedUserId`
+ * — the two pickers are intentionally the same control rendered in two places
+ * so changes in one reflect in the other via the `conversation:assigned`
+ * socket echo.
  */
-function AccountManagerPicker({
+function AssigneePicker({
   currentId,
   teamMembers,
   pending,

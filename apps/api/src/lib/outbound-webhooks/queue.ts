@@ -72,17 +72,19 @@ export function getWebhookDeliverQueue(): Queue<WebhookDeliverJobData> {
 }
 
 /**
- * Enqueue idempotently. `jobId: deliver:${deliveryId}` collapses any
+ * Enqueue idempotently. `jobId: deliver-${deliveryId}` collapses any
  * duplicate enqueue for the same delivery row — the orphan-delivery
  * sweeper can re-enqueue stranded rows without racing the subscriber's
  * original enqueue and POSTing the partner twice.
+ *
+ * Separator is `-`, not `:` — BullMQ 5.x rejects colons in custom job IDs.
  */
 export async function enqueueWebhookDelivery(deliveryId: string): Promise<string> {
   const q = getWebhookDeliverQueue();
   const job = await q.add(
     "deliver",
     { deliveryId },
-    { jobId: `deliver:${deliveryId}` },
+    { jobId: `deliver-${deliveryId}` },
   );
   return job.id as string;
 }

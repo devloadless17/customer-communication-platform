@@ -94,9 +94,15 @@ async function bootstrap(): Promise<void> {
   //   - `/webhooks/*`                                     (Meta provider ingest)
   //   - `/api/team/workflows/:id/incoming-webhook`        (per-workflow inbound)
   // Anything else skips the Buffer.from() and stays on the cheap path.
+  // 10 MB cap on JSON payloads. Meta webhook bodies are small (KB-scale,
+  // they reference media URLs rather than embed binary), and our largest
+  // internal POST is a workflow incoming-webhook from a partner. 10 MB
+  // gives partners headroom for batched event payloads while still capping
+  // a runaway client. Binary media goes through the separate
+  // multer-backed upload path, not this JSON parser.
   app.use(
     bodyParser.json({
-      limit: "2mb",
+      limit: "10mb",
       verify: (req, _res, buf) => {
         const url = (req as unknown as { url?: string }).url;
         if (!url) return;
@@ -110,7 +116,7 @@ async function bootstrap(): Promise<void> {
       },
     }),
   );
-  app.use(bodyParser.urlencoded({ extended: true, limit: "2mb" }));
+  app.use(bodyParser.urlencoded({ extended: true, limit: "10mb" }));
 
   // Socket.io with the same tuning the pre-migration custom server used
   // (path, connection-state-recovery, maxHttpBufferSize, perMessageDeflate

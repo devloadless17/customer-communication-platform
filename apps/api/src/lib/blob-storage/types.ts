@@ -68,4 +68,22 @@ export interface BlobStorageProvider {
    * exact host shapes the provider actually emits.
    */
   isOwnUrl(url: string): boolean;
+  /**
+   * Enumerate stored blobs in pages. Used by the blob-orphan sweeper to
+   * cross-check provider state against the DB and reclaim leaked uploads
+   * (e.g. a contact delete whose blobStorage.delete() got swallowed by a
+   * transient UploadThing outage). `uploadedAt` is unix-ms so the sweeper
+   * can skip recent uploads and avoid racing with in-flight sends.
+   *
+   * Returns `null` when the provider has no list capability — sweeper
+   * treats that as "no orphan cleanup possible" rather than throwing,
+   * keeping providers without a list API still usable for upload/delete.
+   */
+  listKeys?(opts: {
+    limit: number;
+    offset: number;
+  }): Promise<{
+    keys: ReadonlyArray<{ key: string; uploadedAt: number }>;
+    hasMore: boolean;
+  }>;
 }

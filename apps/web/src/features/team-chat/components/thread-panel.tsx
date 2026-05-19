@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,7 @@ import type { User } from "@ccp/shared/types";
 
 import { ChannelComposer } from "./channel-composer";
 import { ChannelMessage } from "./channel-message";
+import { TypingIndicator } from "./typing-indicator";
 
 /**
  * Right-side panel showing the root message + all of its replies +
@@ -42,7 +44,15 @@ export function ThreadPanel({
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    typingUserIds,
   } = useThreadEvents(channelId, rootMessage.id);
+
+  // Tiny lookup so the indicator can render names without a parent prop.
+  const namesById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const u of teamMembers) map.set(u.id, u.name);
+    return map;
+  }, [teamMembers]);
 
   return (
     <aside className="flex h-full w-[24rem] shrink-0 flex-col border-l border-border bg-card/30">
@@ -107,6 +117,13 @@ export function ThreadPanel({
         </div>
       </ScrollArea>
 
+      <div className="border-t border-border">
+        <TypingIndicator
+          userIds={typingUserIds}
+          namesById={namesById}
+          viewerUserId={currentUser.id}
+        />
+      </div>
       <ChannelComposer
         channelId={channelId}
         channelName={channelName}

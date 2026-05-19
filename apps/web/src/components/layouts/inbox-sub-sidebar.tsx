@@ -84,9 +84,13 @@ export function InboxSubSidebar({
 
   const stageCounts = useMemo(() => {
     if (serverCounts) return serverCounts.byStage;
+    // Count ALL conversations per stage (open + closed). Stages model
+    // contact lifecycle which is orthogonal to chat status — the badge
+    // and the clicked-stage list both follow the same "include closed"
+    // rule. See conversations service + queries for the matching
+    // server-side change.
     const out: Record<string, number> = {};
-    for (const { conversation, contact } of conversations) {
-      if (conversation.status === "closed") continue;
+    for (const { contact } of conversations) {
       const sid = contact.stageId;
       if (!sid) continue;
       out[sid] = (out[sid] ?? 0) + 1;

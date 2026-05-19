@@ -62,41 +62,20 @@ export interface SnippetDto {
 // Team root + members
 // ---------------------------------------------------------------------------
 
-/**
- * Read-mostly catalog cache lifetimes (seconds). These mutate rarely
- * (minutes-to-hours cadence) yet are loaded on every /inbox refresh.
- * Caching them collapses the per-render fan-out from "5 catalog fetches"
- * to "0 after the first miss" within the window — the single biggest
- * structural perf win after `loading.tsx`.
- *
- * Tags are listed even though no Next.js subscriber currently calls
- * revalidateTag — they're forward-compatible so a future mutation route
- * or webhook can bust the cache instantly without changing the call sites
- * here. Until then, the time-based revalidate covers correctness.
- *
- * 60s is short enough that admin edits feel "snappy enough" (worst case:
- * one minute before a renamed tag shows up) and long enough to amortize
- * the catalog fetch across a session of refreshes.
- */
-const CATALOG_REVALIDATE_S = 60;
+// Catalog fetches deliberately do NOT use Next.js' fetch cache as of
+// 2026-05-19. `revalidateTag` from the /api/internal/revalidate bridge
+// was leaving entries stale in practice on Next 16 — operators saw old
+// snippet / tag / field lists for the full revalidate window even after
+// their own edits. Trading the cache win for guaranteed freshness; the
+// per-call docker-network round trip is single-digit ms.
 
 export async function getCurrentTeam(): Promise<{ id: string; name: string }> {
-  // No cache tag — there's no Team rename endpoint today (GET + DELETE only),
-  // so a tag-based bust would have no publisher. The 60s time-based revalidate
-  // covers any future change with a one-minute upper bound on staleness. The
-  // moment a PATCH /api/team lands, add `team-root` to both this `tags` array
-  // AND the allowlist in apps/web/src/app/api/internal/revalidate/route.ts
-  // AND wire `team.catalog_changed` with a `team-root` scope.
-  const { team } = await api<{ team: { id: string; name: string } }>("/api/team", {
-    next: { revalidate: CATALOG_REVALIDATE_S },
-  });
+  const { team } = await api<{ team: { id: string; name: string } }>("/api/team");
   return team;
 }
 
 export async function listTeamMembers(): Promise<User[]> {
-  const { users } = await api<{ users: User[] }>("/api/users", {
-    next: { tags: ["team-members"], revalidate: CATALOG_REVALIDATE_S },
-  });
+  const { users } = await api<{ users: User[] }>("/api/users");
   return users;
 }
 
@@ -124,10 +103,14 @@ export async function getTeamDetailForSuperAdmin(
 // Catalogs (tags / snippets / stages / contact fields / audience groups)
 // ---------------------------------------------------------------------------
 
+// NOTE: cache tags removed 2026-05-19. Next 16's `revalidateTag` from the
+// `/api/internal/revalidate` bridge wasn't reliably busting these fetch-cache
+// entries — operators saw stale snippet / tag / stage / field lists for the
+// full 60s window even after their own edits. Strip the cache so every RSC
+// render hits NestJS fresh. Cost: ~5-15ms per call docker-network. Acceptable
+// at pilot scale. Re-introduce a working cache layer once we trust the bust.
 export async function listTags(): Promise<Tag[]> {
-  const { tags } = await api<{ tags: Tag[] }>("/api/team/tags", {
-    next: { tags: ["catalog-tags"], revalidate: CATALOG_REVALIDATE_S },
-  });
+  const { tags } = await api<{ tags: Tag[] }>("/api/team/tags");
   return tags;
 }
 
@@ -137,16 +120,12 @@ export async function getTagUsage(): Promise<Record<string, number>> {
 }
 
 export async function listSnippets(): Promise<SnippetDto[]> {
-  const { snippets } = await api<{ snippets: SnippetDto[] }>("/api/team/snippets", {
-    next: { tags: ["catalog-snippets"], revalidate: CATALOG_REVALIDATE_S },
-  });
+  const { snippets } = await api<{ snippets: SnippetDto[] }>("/api/team/snippets");
   return snippets;
 }
 
 export async function listContactStages(): Promise<ContactStage[]> {
-  const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages", {
-    next: { tags: ["catalog-stages"], revalidate: CATALOG_REVALIDATE_S },
-  });
+  const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages");
   return stages;
 }
 
@@ -163,7 +142,6 @@ export async function getStageContactCounts(): Promise<{
 export async function listContactFieldDefinitions(): Promise<ContactFieldDefinition[]> {
   const { definitions } = await api<{ definitions: ContactFieldDefinition[] }>(
     "/api/team/contact-fields",
-    { next: { tags: ["catalog-contact-fields"], revalidate: CATALOG_REVALIDATE_S } },
   );
   return definitions;
 }

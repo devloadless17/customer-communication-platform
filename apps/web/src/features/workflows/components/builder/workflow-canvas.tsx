@@ -7,13 +7,13 @@ import {
   ReactFlow,
   ReactFlowProvider,
   addEdge,
-  applyEdgeChanges,
-  applyNodeChanges,
+  useEdgesState,
+  useNodesState,
   type Connection,
   type Edge,
-  type EdgeChange,
   type Node,
   type NodeChange,
+  type EdgeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -72,10 +72,21 @@ function CanvasInner({
   onSelectStep,
   onSelectTrigger,
 }: WorkflowCanvasProps) {
-  // Build React Flow nodes/edges from canonical graph + add a synthetic
-  // trigger node at the top. The trigger node never appears in graph.nodes —
-  // it's a visual stand-in for the workflow's `trigger` property.
-  const rfNodes = useMemo<Node[]>(() => {
+  // Trigger position. The trigger node is synthetic — it isn't stored in
+  // graph.nodes, so a hardcoded position in the projection would slam it
+  // back to (0,0) every time the user changed the trigger type or anything
+  // else triggered a projection rebuild. Keep its position in local
+  // canvas state so it survives rebuilds within the session.
+  //
+  // Not persisted to the database (the trigger isn't part of WorkflowGraph
+  // and adding a schema field is a bigger change than this UX issue warrants
+  // for the pilot). A page reload resets to (0, 0).
+  const [triggerPos, setTriggerPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Project the canonical WorkflowGraph into React Flow's node/edge shape.
+  // The synthetic trigger node lives only on the canvas; it stands in for
+  // the workflow's `trigger` property and never appears in graph.nodes.
+  const projectedNodes = useMemo<Node[]>(() => {
     const stepNodes: Node[] = graph.nodes.map((n) => ({
       id: n.id,
       type: n.type === "branch" ? "branch" : "step",
@@ -90,7 +101,7 @@ function CanvasInner({
     const triggerNode: Node = {
       id: TRIGGER_NODE_ID,
       type: "trigger",
-      position: { x: 0, y: 0 },
+      position: triggerPos,
       data: {
         label: triggerLabel,
         description: triggerDescription,
@@ -100,9 +111,9 @@ function CanvasInner({
       draggable: true,
     };
     return [triggerNode, ...stepNodes];
-  }, [graph, selectedStepId, triggerSelected, triggerLabel, triggerDescription, triggerType]);
+  }, [graph, selectedStepId, triggerSelected, triggerLabel, triggerDescription, triggerType, triggerPos]);
 
-  const rfEdges = useMemo<Edge[]>(() => {
+  const projectedEdges = useMemo<Edge[]>(() => {
     const edges: Edge[] = graph.edges.map((e, i) => ({
       id: `e_${i}_${e.from}_${e.label ?? ""}_${e.to}`,
       source: e.from,
@@ -125,79 +136,89 @@ function CanvasInner({
     return edges;
   }, [graph]);
 
-  // Local position state — drives React Flow's node positions during drag
-  // so the canvas feels responsive. Committed back to `graph` on drag end.
-  const [positionOverrides, setPositionOverrides] = useState<Record<string, { x: number; y: number }>>({});
+  // React Flow's recommended controlled pattern: useNodesState owns the
+  // internal copy that applyNodeChanges feeds. The previous shape called
+  // applyNodeChanges and discarded the return value, leaving React Flow's
+  // selection / drag / dimension changes unapplied — nodes flickered or
+  // vanished on click/move because the prop'd nodes and the internal store
+  // disagreed on which one was active.
+  //
+  // Sync from projection → internal store happens via the useEffect below
+  // (fires when graph changes from outside, e.g. step palette add). User
+  // drag/select happens via onNodesChange and commits back to graph on
+  // drag end.
+  const [nodes, setNodes, onNodesChangeInternal] = useNodesState(projectedNodes);
+  const [edges, setEdges, onEdgesChangeInternal] = useEdgesState(projectedEdges);
+
+  // Adopt the projection whenever the canonical graph changes from above.
+  // Internal selection / drag state lives in the hook's internal store and
+  // would be lost on every prop'd graph change — that's intentional: a
+  // graph mutation should reset the canvas's view of "which one is in
+  // motion." Position + data fields adopt the projection's values cleanly.
   useEffect(() => {
-    setPositionOverrides({});
-  }, [graph.startNodeId]);
+    setNodes(projectedNodes);
+  }, [projectedNodes, setNodes]);
+  useEffect(() => {
+    setEdges(projectedEdges);
+  }, [projectedEdges, setEdges]);
 
-  const nodesWithOverrides = useMemo(
-    () =>
-      rfNodes.map((n) =>
-        positionOverrides[n.id] ? { ...n, position: positionOverrides[n.id]! } : n,
-      ),
-    [rfNodes, positionOverrides],
-  );
-
+  // Drag-end commit. Step nodes get pushed back into the canonical graph so
+  // persist() picks them up. The trigger node updates local `triggerPos`
+  // instead (it isn't part of graph.nodes — see the state declaration).
+  // Position-during-drag is handled entirely inside React Flow's internal
+  // store via onNodesChangeInternal — the canvas stays smooth without us
+  // touching `graph` on every mouse-move.
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      // Track positions locally for smooth dragging; only persist on drag end.
-      const next = { ...positionOverrides };
-      let dragEnded = false;
-      for (const ch of changes) {
-        if (ch.type === "position" && ch.position) {
-          next[ch.id] = ch.position;
-          if (ch.dragging === false) dragEnded = true;
-        }
-      }
-      setPositionOverrides(next);
-
-      if (dragEnded) {
-        // Commit positions back to the canonical graph (skip the trigger
-        // node — it's synthetic and doesn't live in graph.nodes).
-        onChange({
-          ...graph,
-          nodes: graph.nodes.map((n) =>
-            next[n.id] ? { ...n, position: next[n.id] } : n,
-          ),
-        });
-      }
-
-      // React Flow built-in `applyNodeChanges` is only relevant to local
-      // state we don't keep; the position-only changes are reflected via
-      // positionOverrides above. Selection changes flow through React Flow's
-      // own internal state — we don't need to mirror them.
-      applyNodeChanges(changes, nodesWithOverrides);
+      onNodesChangeInternal(changes);
+      const positionEnds = changes.filter(
+        (c): c is NodeChange & { type: "position"; id: string; position: { x: number; y: number }; dragging: false } =>
+          c.type === "position" && c.dragging === false && !!c.position,
+      );
+      if (positionEnds.length === 0) return;
+      // Trigger node — persist locally so a trigger-type change (or any
+      // other projection rebuild) doesn't snap it back to (0, 0).
+      const triggerEnd = positionEnds.find((c) => c.id === TRIGGER_NODE_ID);
+      if (triggerEnd) setTriggerPos(triggerEnd.position);
+      // Step nodes — commit back into the canonical graph.
+      const stepEnds = positionEnds.filter((c) => c.id !== TRIGGER_NODE_ID);
+      if (stepEnds.length === 0) return;
+      const positions = new Map(stepEnds.map((c) => [c.id, c.position]));
+      onChange({
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          positions.has(n.id) ? { ...n, position: positions.get(n.id)! } : n,
+        ),
+      });
     },
-    [graph, nodesWithOverrides, onChange, positionOverrides],
+    [graph, onChange, onNodesChangeInternal],
   );
 
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
+      onEdgesChangeInternal(changes);
+      // Persist only edge removals (additions go through onConnect). Ignore
+      // the synthetic trigger→start edge — startNodeId controls it.
       let next = [...graph.edges];
       let mutated = false;
       for (const ch of changes) {
-        if (ch.type === "remove") {
-          if (ch.id === "e_trigger_start") continue; // synthetic; ignore deletes
-          // Decode the edge id pattern e_{i}_{from}_{label}_{to}
-          const found = rfEdges.find((e) => e.id === ch.id);
-          if (!found) continue;
-          next = next.filter(
-            (e) =>
-              !(
-                e.from === found.source &&
-                e.to === found.target &&
-                (e.label ?? "default") === (found.sourceHandle ?? "default")
-              ),
-          );
-          mutated = true;
-        }
+        if (ch.type !== "remove") continue;
+        if (ch.id === "e_trigger_start") continue;
+        const found = projectedEdges.find((e) => e.id === ch.id);
+        if (!found) continue;
+        next = next.filter(
+          (e) =>
+            !(
+              e.from === found.source &&
+              e.to === found.target &&
+              (e.label ?? "default") === (found.sourceHandle ?? "default")
+            ),
+        );
+        mutated = true;
       }
       if (mutated) onChange({ ...graph, edges: next });
-      applyEdgeChanges(changes, rfEdges);
     },
-    [graph, rfEdges, onChange],
+    [graph, projectedEdges, onChange, onEdgesChangeInternal],
   );
 
   const onConnect = useCallback(
@@ -247,15 +268,19 @@ function CanvasInner({
   return (
     <div className="h-full w-full">
       <ReactFlow
-        nodes={nodesWithOverrides}
-        edges={rfEdges}
+        nodes={nodes}
+        edges={edges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
+        // fitView fires only on first render. Re-fitting on every graph
+        // update would yank the viewport whenever a step was added and
+        // make the canvas feel unstable.
         fitView
+        fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={20} size={1} />

@@ -46,7 +46,11 @@ import type { MediaKind, MessageStatus } from "@ccp/shared/types";
  * before it returns 200 to Meta. Without this, one slow CDN response makes
  * Meta time the webhook out and retry the whole batch.
  */
-const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS ?? 20_000);
+// `??` only catches null/undefined — empty string slips through to Number("")
+// which is 0, making every Meta call abort instantly. docker-compose.yml
+// passes the empty string when META_FETCH_TIMEOUT_MS isn't set in .env, so
+// the fallback only fires via `||` on a falsy parse.
+const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS) || 20_000;
 const META_FETCH_MAX_ATTEMPTS = 2; // 1 retry on transient 5xx
 
 async function metaFetch(input: string | URL, init?: RequestInit): Promise<Response> {

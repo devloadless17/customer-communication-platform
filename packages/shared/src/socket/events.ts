@@ -432,6 +432,18 @@ export interface ServerToClientEvents {
     channelId: string;
     typingUserIds: string[];
   }) => void;
+
+  /**
+   * Typing snapshot for a thread. Rides the channel room (so any tab with
+   * the channel open can dispatch — only the tab with the matching thread
+   * panel open will render). `threadRootId` is the discriminator clients
+   * filter on.
+   */
+  "team:channel:thread:typing:update": (payload: {
+    channelId: string;
+    threadRootId: string;
+    typingUserIds: string[];
+  }) => void;
 }
 
 // -------------------------------------------------------------------------
@@ -505,6 +517,10 @@ export interface ClientToServerEvents {
   "unsubscribe:channel": (payload: { channelId: string }) => void;
   "typing:channel:start": (payload: { channelId: string }) => void;
   "typing:channel:stop": (payload: { channelId: string }) => void;
+  /** Thread typing. `channelId` is required so the gateway can validate
+   *  membership without a DB lookup (the socket is already in that room). */
+  "typing:thread:start": (payload: { channelId: string; threadRootId: string }) => void;
+  "typing:thread:stop": (payload: { channelId: string; threadRootId: string }) => void;
 }
 
 // Inter-server events left empty until we add a Redis adapter (deferred per CLAUDE.md).
@@ -519,6 +535,9 @@ export interface SocketData {
   typingIn?: Set<string>;
   /** Channels (team chat) this socket is currently flagged as typing in. */
   typingInChannel?: Set<string>;
+  /** Threads (team chat) this socket is currently flagged as typing in.
+   *  Keyed by `threadRootId`; the channel is recoverable from socket rooms. */
+  typingInThread?: Set<string>;
   /**
    * Conversations this socket has joined as a viewer. Tracked so disconnect
    * can release viewer slots without depending on the client managing to

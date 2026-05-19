@@ -7,6 +7,25 @@ import type {
   UploadResult,
 } from "./types";
 
+// UploadThing 7.7.4 prints "file.url is deprecated"/"file.appUrl is
+// deprecated" warnings on EVERY uploadFiles() call — the SDK accesses its
+// own deprecated getters internally
+// (`uploadthing/server/index.js` `uploadFile`, lines 127–128) before
+// returning the result. Our code only reads `ufsUrl`, so the noise has no
+// signal. Suppress just these two exact messages until v8 ships with the
+// internal fix; everything else from the SDK still passes through.
+const __origWarn = console.warn;
+console.warn = (...args: unknown[]) => {
+  const msg = typeof args[0] === "string" ? args[0] : "";
+  if (
+    msg.includes("[uploadthing][deprecated] `file.url`") ||
+    msg.includes("[uploadthing][deprecated] `file.appUrl`")
+  ) {
+    return;
+  }
+  __origWarn(...args);
+};
+
 /**
  * UploadThing implementation of BlobStorageProvider.
  *
@@ -142,6 +161,18 @@ export const uploadthingProvider: BlobStorageProvider = {
       host === "ufs.sh" ||
       host.endsWith(".ufs.sh")
     );
+  },
+
+  async listKeys({ limit, offset }) {
+    const res = await getUtApi().listFiles({ limit, offset });
+    // Only "Uploaded" status counts for orphan accounting. "Deletion Pending"
+    // is what we asked the provider to delete; "Failed"/"Uploading" haven't
+    // committed. Including them would inflate the orphan set and risk
+    // double-deleting blobs that are already in the trash queue.
+    const keys = res.files
+      .filter((f) => f.status === "Uploaded")
+      .map((f) => ({ key: f.key, uploadedAt: f.uploadedAt }));
+    return { keys, hasMore: res.hasMore };
   },
 };
 

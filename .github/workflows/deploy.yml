@@ -379,11 +379,14 @@ jobs:
           docker compose --env-file .env pull
           echo "==> Booting CI stack"
           docker compose --env-file .env up -d
-          echo "==> Waiting for app container to be healthy (≤120s)"
-          # 120s because web's HEALTHCHECK start-period is 120s (covers
-          # `prisma migrate deploy` against a fresh DB which can rebuild
-          # a new index in 30-60s).
-          deadline=$((SECONDS + 120))
+          echo "==> Waiting for app container to be healthy (≤180s)"
+          # 180s budget. The chain is: api waits for postgres+redis healthy,
+          # then runs `prisma migrate deploy` as the first step of its CMD,
+          # then exec's node. api's start_period is 120s (covers a fresh-DB
+          # migration that can rebuild indexes in 30-60s). web only flips
+          # healthy after api flips healthy (depends_on chain), so we budget
+          # api 120s + web's own ~5s boot + a margin = 180s.
+          deadline=$((SECONDS + 180))
           while [ $SECONDS -lt $deadline ]; do
             app_id=$(docker compose --env-file .env ps -q app)
             if [ -z "$app_id" ]; then

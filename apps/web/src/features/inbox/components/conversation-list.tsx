@@ -281,7 +281,7 @@ function ConversationListImpl({
   }, [lastVirtualIndex, hasMore, loadingMore, visible.length]);
 
   return (
-    <div className="flex h-full w-95 shrink-0 flex-col bg-background">
+    <div className="flex h-full w-72 shrink-0 flex-col bg-background md:w-95">
       <header className="flex items-center justify-between gap-2 border-b border-border px-4 pt-4 pb-3">
         <div>
           <h1 className="text-base font-semibold leading-tight">{headerTitle}</h1>
@@ -367,9 +367,18 @@ function ConversationListImpl({
                   // shouldn't feed back into the virtualizer's measurements.
                   ref={row.measured ? rowVirtualizer.measureElement : undefined}
                   data-index={row.index}
-                  className={cn("absolute left-0 top-0 w-full", animateIn && "animate-enter")}
+                  className="absolute left-0 top-0 w-full"
                   style={{ transform: `translateY(${row.start}px)` }}
                 >
+                  {/* Inner wrapper for the entrance animation. Keeping it on
+                      a separate element is load-bearing: `.animate-enter`'s
+                      keyframe writes `transform: translateY(4px) → 0`, which
+                      would otherwise OVERRIDE the outer `translateY(row.start)`
+                      that positions the row in the virtualized list. Result:
+                      every animating row briefly stacked at translateY(0) for
+                      140ms. Split between two elements so both transforms
+                      apply cleanly. */}
+                  <div className={cn(animateIn && "animate-enter")}>
                   {selectionMode ? (
                     // <label> wrapping the checkbox is the canonical way to
                     // make the whole row a toggle target — valid HTML, native
@@ -415,6 +424,7 @@ function ConversationListImpl({
                       />
                     </button>
                   )}
+                  </div>
                 </div>
               );
             })}

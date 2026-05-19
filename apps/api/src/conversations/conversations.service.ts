@@ -80,12 +80,13 @@ export class ConversationsService {
    * to the team and the viewer, fixes the badge truthfulness without
    * forcing the list to load every conversation.
    *
-   * Five queries fan out in parallel; the per-stage one walks the
-   * non-closed conversations selecting only `contact.stageId` so the
-   * grouping happens in JS. At pilot scale (sub-thousand conversations)
-   * this is sub-millisecond against the (teamId, status, lastMessageAt)
-   * + (teamId, assignedUserId) indexes. Past ~10k conversations the
-   * findMany walk dominates and we'd want a raw GROUP BY through Contact.
+   * Five queries fan out in parallel; the per-stage one walks every
+   * conversation (open + closed) so the badge reflects the contact's
+   * lifecycle stage regardless of chat status. At pilot scale (sub-
+   * thousand conversations) this is sub-millisecond against the
+   * (teamId, status, lastMessageAt) + (teamId, assignedUserId) indexes.
+   * Past ~10k conversations the findMany walk dominates and we'd want
+   * a raw GROUP BY through Contact.
    */
   async counts(
     teamId: string,
@@ -111,7 +112,7 @@ export class ConversationsService {
         where: { teamId, status: "closed" },
       }),
       this.db.conversation.findMany({
-        where: { teamId, status: { not: "closed" } },
+        where: { teamId },
         select: { contact: { select: { stageId: true } } },
       }),
     ]);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, Pin } from "lucide-react";
+import { ChevronDown, ChevronUp, Pin, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { stripMentionMarkup } from "@ccp/shared/team-chat/mentions";
@@ -18,9 +18,22 @@ interface PinnedItem {
 /**
  * Collapsible "Pinned" bar above the message thread. Collapsed by default
  * once a channel has more than 1 pin so it doesn't eat half the viewport
- * on long-pinned channels.
+ * on long-pinned channels. Admins/owners get an inline X on each row to
+ * unpin without having to scroll back to the original message.
  */
-export function PinnedBar({ pins }: { pins: PinnedItem[] }) {
+export function PinnedBar({
+  pins,
+  canPin = false,
+  onUnpin,
+}: {
+  pins: PinnedItem[];
+  /** Gate the row-level X button. Same `canPinMessage` check used by the
+   *  bubble's 3-dot menu. */
+  canPin?: boolean;
+  /** Invoked when the row-level X is clicked. The workspace owns the
+   *  optimistic-remove + DELETE + error reconciliation. */
+  onUnpin?: (messageId: string) => void;
+}) {
   const [open, setOpen] = useState(pins.length <= 1);
   if (pins.length === 0) return null;
 
@@ -48,7 +61,7 @@ export function PinnedBar({ pins }: { pins: PinnedItem[] }) {
               <div
                 key={p.messageId}
                 className={cn(
-                  "flex items-start gap-2 rounded-md border border-amber-200/60 bg-background/80 px-2 py-1.5 text-xs",
+                  "group flex items-start gap-2 rounded-md border border-amber-200/60 bg-background/80 px-2 py-1.5 text-xs",
                   "dark:border-amber-900/40",
                 )}
               >
@@ -59,6 +72,25 @@ export function PinnedBar({ pins }: { pins: PinnedItem[] }) {
                   <div className="font-medium">{author}</div>
                   <div className="truncate text-muted-foreground">{preview}</div>
                 </div>
+                {canPin && onUnpin && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onUnpin(p.messageId);
+                    }}
+                    className={cn(
+                      "shrink-0 self-center rounded p-1 text-muted-foreground opacity-0 transition-opacity",
+                      "hover:bg-amber-100 hover:text-foreground group-hover:opacity-100",
+                      "focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40",
+                      "dark:hover:bg-amber-900/30",
+                    )}
+                    aria-label="Unpin message"
+                    title="Unpin"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
               </div>
             );
           })}

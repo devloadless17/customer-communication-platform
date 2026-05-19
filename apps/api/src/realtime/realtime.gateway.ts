@@ -97,6 +97,7 @@ export class RealtimeGateway
     // handlers + handleDisconnect read for cleanup.
     client.data.typingIn = new Set<string>();
     client.data.typingInChannel = new Set<string>();
+    client.data.typingInThread = new Set<string>();
     // Per-socket set of conversations this socket has joined as a viewer.
     // Used by disconnect to release the viewer slot without forcing the
     // client to send unsubscribe:conversation on tab close (browsers don't
@@ -160,6 +161,26 @@ export class RealtimeGateway
         });
       }
       typingInChannel.clear();
+    }
+
+    // Thread typing flags. Stored as `${channelId}::${threadRootId}` so we
+    // can recover the channel room without an extra lookup — the channel
+    // room is the dispatch target (no separate thread room exists).
+    const typingInThread = client.data.typingInThread as Set<string> | undefined;
+    if (typingInThread) {
+      for (const composite of typingInThread) {
+        const sepIdx = composite.indexOf("::");
+        if (sepIdx === -1) continue;
+        const channelId = composite.slice(0, sepIdx);
+        const threadRootId = composite.slice(sepIdx + 2);
+        this.typing.removeThread(threadRootId, userId, client.id);
+        this.server.to(channelRoom(channelId)).emit("team:channel:thread:typing:update", {
+          channelId,
+          threadRootId,
+          typingUserIds: this.typing.snapshotThread(threadRootId),
+        });
+      }
+      typingInThread.clear();
     }
 
     // Release viewer slots for every conversation this socket was viewing.
@@ -429,6 +450,58 @@ export class RealtimeGateway
       .emit("team:channel:typing:update", {
         channelId: body.channelId,
         typingUserIds: this.typing.snapshotChannel(body.channelId),
+      });
+  }
+
+  /**
+   * Thread typing — same shape as channel typing but scoped to a
+   * `threadRootId`. Dispatched to the channel room (no separate thread
+   * room exists); only tabs with the matching thread panel open will
+   * render the indicator (client-side filter on `threadRootId`).
+   *
+   * Membership check: the socket must already be in the channel room.
+   * The thread root's parent channel is the only thing we trust the
+   * client about; everything else is rederived server-side.
+   */
+  @SubscribeMessage("typing:thread:start")
+  onThreadTypingStart(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { channelId: string; threadRootId: string },
+  ): void {
+    const userId = client.data.userId as string;
+    if (!client.rooms.has(channelRoom(body.channelId))) return;
+    const composite = `${body.channelId}::${body.threadRootId}`;
+    const typingInThread = client.data.typingInThread as Set<string>;
+    const wasTyping = typingInThread.has(composite);
+    typingInThread.add(composite);
+    this.typing.addThread(body.threadRootId, userId, client.id);
+    if (!wasTyping) {
+      this.server
+        .to(channelRoom(body.channelId))
+        .emit("team:channel:thread:typing:update", {
+          channelId: body.channelId,
+          threadRootId: body.threadRootId,
+          typingUserIds: this.typing.snapshotThread(body.threadRootId),
+        });
+    }
+  }
+
+  @SubscribeMessage("typing:thread:stop")
+  onThreadTypingStop(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { channelId: string; threadRootId: string },
+  ): void {
+    const userId = client.data.userId as string;
+    const composite = `${body.channelId}::${body.threadRootId}`;
+    const typingInThread = client.data.typingInThread as Set<string>;
+    if (!typingInThread.delete(composite)) return;
+    this.typing.removeThread(body.threadRootId, userId, client.id);
+    this.server
+      .to(channelRoom(body.channelId))
+      .emit("team:channel:thread:typing:update", {
+        channelId: body.channelId,
+        threadRootId: body.threadRootId,
+        typingUserIds: this.typing.snapshotThread(body.threadRootId),
       });
   }
 

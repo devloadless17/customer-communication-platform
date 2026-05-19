@@ -56,33 +56,26 @@ const nextConfig: NextConfig = {
   // path.join keeps this portable across the dev tree and the Docker
   // build context (both resolve to the same monorepo root).
   outputFileTracingRoot: require("path").join(__dirname, "../../"),
-  // Router cache: keep dynamic segments (e.g. /inbox/[conversationId]) in the
-  // client-side router cache for 60s. Re-clicking a recently-viewed chat is
-  // then instant — no Postgres round trip, no loading skeleton — because the
-  // rendered RSC payload is served from memory. Socket events keep the cached
-  // page fresh while it's on screen, and 60s is short enough that a chat the
-  // agent left an hour ago will still refetch on revisit. Default is 0
-  // (always re-fetch); 60 trades a small staleness window for instant feel.
+  // Router cache: rely on Next 16's default (`dynamic: 0`, static unset).
   //
-  // `staleTimes` is INTENTIONALLY still under `experimental` — verified
-  // against the Next 16.2 docs (last checked 2026-05-19). The flag was
-  // introduced in 14.2, had its `dynamic` default flipped 30s → 0s in 15.0,
-  // and remains experimental in 16.x. The Next.js docs explicitly say "this
-  // feature is currently experimental and subject to change, it's not
-  // recommended for production." We accept that warning: a 60s client-side
-  // cache window is correctness-safe here (socket events patch the screen
-  // in real time; the only thing the cache changes is the re-mount cost),
-  // and the perceived-speed win is worth the experimental tag.
+  // Earlier we set `dynamic: 60` to keep recently-viewed dynamic segments
+  // (chat threads, settings pages) in the client-side router cache for
+  // 60s — instant back-clicks, no Postgres round trip on revisit. The
+  // assumption was that socket events (`useCatalogSync` → router.refresh)
+  // would keep cached pages fresh.
   //
-  // Re-check this annotation on the next Next.js major bump. If the flag is
-  // promoted, move it to the top level; if it's renamed (the `cacheLife` /
-  // `'use cache'` work has been the rumored successor since 15.x), migrate.
-  experimental: {
-    staleTimes: {
-      dynamic: 60,
-      static: 300,
-    },
-  },
+  // The assumption was wrong: `router.refresh()` only refreshes the
+  // CURRENT route, not sibling cached routes. So adding a snippet /
+  // contact field on /settings correctly refreshed the settings page
+  // but the cached /inbox RSC stayed stale until 60s elapsed — user
+  // had to "luck into" the cache expiring across 3-5 manual refreshes.
+  // Reverted 2026-05-19 to match the Next 16 default (every navigation
+  // re-fetches). One HTTP round trip on click-back (~100-300ms) buys
+  // strict freshness, which is what the product needs.
+  //
+  // If we want the instant-back UX later, the right path is a
+  // socket-driven cross-route invalidator (mark OTHER routes' caches
+  // stale on `team:catalog:changed`), not a blind 60s TTL.
   // Per-icon imports for lucide-react. Without this, Next's bundler treats
   // `import { X, Y } from "lucide-react"` as importing the full barrel and
   // tree-shaking is unreliable across edge/server boundaries. The transform

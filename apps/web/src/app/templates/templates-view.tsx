@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -54,6 +54,12 @@ export function TemplatesView({
 }) {
   const { confirm, confirmDialog } = useConfirm();
   const [templates, setTemplates] = useState<TemplateDto[]>(initialTemplates);
+  // Sync from SSR (router.refresh from useCatalogSync's
+  // team:catalog:changed handler) so template sync / teammate edits
+  // show up without a manual refresh.
+  useEffect(() => {
+    setTemplates(initialTemplates);
+  }, [initialTemplates]);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [query, setQuery] = useState("");

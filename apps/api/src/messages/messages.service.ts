@@ -890,7 +890,10 @@ export class MessagesService {
       throw new NotFoundException({ error: "no such contacts" });
     }
 
-    // Cache source-media bytes across recipients. `null` is cached too — a
+    // Cache source-media bytes across recipients. Stored as a Promise so
+    // parallel contact processors coalesce on a single in-flight fetch —
+    // without that, forwarding 1 media message to 5 contacts would download
+    // the source bytes 5× in parallel. `null` is cached too — a
     // missing/unreadable file shouldn't be retried per-recipient.
     type MediaBytes = {
       bytes: Uint8Array;
@@ -898,30 +901,31 @@ export class MessagesService {
       filename: string | null;
       kind: MediaKind;
     };
-    const mediaCache = new Map<string, MediaBytes | null>();
-    const loadMediaBytes = async (
+    const mediaCache = new Map<string, Promise<MediaBytes | null>>();
+    const loadMediaBytes = (
       m: (typeof sourceRows)[number],
     ): Promise<MediaBytes | null> => {
-      if (mediaCache.has(m.id)) return mediaCache.get(m.id)!;
-      let entry: MediaBytes | null = null;
-      // Prefer mediaUrl (CDN URL — single hop). Fall back to mediaKey for
-      // rows that predate the URL column. Same provider either way.
-      const handle = m.mediaUrl ?? m.mediaKey;
-      if (handle && m.mediaKind) {
+      const existing = mediaCache.get(m.id);
+      if (existing) return existing;
+      const promise = (async (): Promise<MediaBytes | null> => {
+        // Prefer mediaUrl (CDN URL — single hop). Fall back to mediaKey for
+        // rows that predate the URL column. Same provider either way.
+        const handle = m.mediaUrl ?? m.mediaKey;
+        if (!handle || !m.mediaKind) return null;
         try {
           const fetched = await blobStorage.fetch(handle);
-          entry = {
+          return {
             bytes: fetched.bytes,
             mime: m.mediaMimeType ?? fetched.mimeType,
             filename: m.mediaFilename ?? null,
             kind: m.mediaKind as MediaKind,
           };
         } catch {
-          entry = null;
+          return null;
         }
-      }
-      mediaCache.set(m.id, entry);
-      return entry;
+      })();
+      mediaCache.set(m.id, promise);
+      return promise;
     };
 
     const teamRow = await this.db.team.findUnique({
@@ -929,19 +933,22 @@ export class MessagesService {
       select: { name: true },
     });
 
-    const results: ForwardResult[] = [];
-
-    for (const contact of contacts) {
+    // Per-contact worker. Each contact is an independent destination (its
+    // own conversation row, its own Meta send sequence) so they can run
+    // concurrently. Within a contact the message loop stays serial to
+    // preserve the original send order at the destination.
+    const processContact = async (
+      contact: (typeof contacts)[number],
+    ): Promise<ForwardResult> => {
       if (!contact.phoneNumber) {
-        results.push({
+        return {
           contactId: contact.id,
           contactName: contact.name,
           ok: false,
           sent: 0,
           failed: sourceRows.length,
           error: "contact has no WhatsApp phone number",
-        });
-        continue;
+        };
       }
       const contactPhone = contact.phoneNumber;
 
@@ -1038,11 +1045,44 @@ export class MessagesService {
             const filename = mb.filename ?? "upload";
             const withCaption = captionable(mb.kind) ? caption : undefined;
 
-            // Pre-send.
-            const uploaded = await getMetaProvider().uploadMedia!(
-              { bytes: mb.bytes, mimeType: mb.mime, filename },
-              sendConfig,
-            );
+            // Pre-send. Run the Meta media upload and our own blob-storage
+            // upload in parallel — both consume `mb.bytes` and neither
+            // depends on the other. Saves ~200-500ms per forwarded media
+            // message vs. the previous strict serial order.
+            //
+            // The blob upload's `externalId` context field gets a
+            // placeholder (it's only used for diagnostic labelling on
+            // UploadThing's side); the canonical link to Meta lives on
+            // the Message row via `externalId` after the send completes.
+            const [uploaded, saved] = await Promise.all([
+              getMetaProvider().uploadMedia!(
+                { bytes: mb.bytes, mimeType: mb.mime, filename },
+                sendConfig,
+              ),
+              blobStorage
+                .upload({
+                  bytes: mb.bytes,
+                  mimeType: mb.mime,
+                  kind: mb.kind,
+                  context: {
+                    teamId,
+                    teamSlug: teamRow?.name,
+                    direction: "out",
+                    contactPhone,
+                    contactName: contact.name,
+                    conversationId: conversation.id,
+                    externalId: "pending-meta-send",
+                    originalFilename: filename,
+                  },
+                })
+                .catch((err) => {
+                  this.logger.error(
+                    `[forward] blob upload failed (pre-Meta-send)`,
+                    err,
+                  );
+                  return null;
+                }),
+            ]);
             const send = await getMetaProvider().sendMedia!(
               {
                 to: contactPhone,
@@ -1053,31 +1093,6 @@ export class MessagesService {
               },
               sendConfig,
             );
-
-            // Post-send: local-state-only from here on.
-            const saved = await blobStorage
-              .upload({
-                bytes: mb.bytes,
-                mimeType: mb.mime,
-                kind: mb.kind,
-                context: {
-                  teamId,
-                  teamSlug: teamRow?.name,
-                  direction: "out",
-                  contactPhone,
-                  contactName: contact.name,
-                  conversationId: conversation.id,
-                  externalId: send.externalId,
-                  originalFilename: filename,
-                },
-              })
-              .catch((err) => {
-                this.logger.error(
-                  `[forward] blob upload failed after Meta send (wamid=${send.externalId})`,
-                  err,
-                );
-                return null;
-              });
             const previewBody = (withCaption || mediaPreview(mb.kind)).slice(
               0,
               200,
@@ -1235,14 +1250,51 @@ export class MessagesService {
         }
       }
 
-      results.push({
+      return {
         contactId: contact.id,
         contactName: contact.name,
         ok: failed === 0 && sent > 0,
         sent,
         failed,
         ...(firstError ? { error: firstError } : {}),
-      });
+      };
+    };
+
+    // Bounded fanout. 5 concurrent contacts trades raw wall-time for
+    // staying well under Meta's per-phone-number-id send budget on big
+    // forwards (e.g. selecting 30 contacts from the picker). Each contact
+    // still does 1-3 Meta calls serially internally, so the actual peak
+    // request rate is ~5×1 = 5 in-flight to Meta at any moment.
+    const FORWARD_CONTACT_CONCURRENCY = 5;
+    const results: ForwardResult[] = [];
+    for (let i = 0; i < contacts.length; i += FORWARD_CONTACT_CONCURRENCY) {
+      const batch = contacts.slice(i, i + FORWARD_CONTACT_CONCURRENCY);
+      const settled = await Promise.allSettled(batch.map(processContact));
+      for (let j = 0; j < batch.length; j++) {
+        const r = settled[j]!;
+        const c = batch[j]!;
+        if (r.status === "fulfilled") {
+          results.push(r.value);
+        } else {
+          // Defensive: processContact catches its own send errors and
+          // returns a structured result. A rejection here means something
+          // outside that loop threw (DB transaction, refs fetch, etc.).
+          this.logger.error(
+            `[forward] contact ${c.id} crashed: ${
+              r.reason instanceof Error ? r.reason.message : String(r.reason)
+            }`,
+            r.reason instanceof Error ? r.reason : undefined,
+          );
+          results.push({
+            contactId: c.id,
+            contactName: c.name,
+            ok: false,
+            sent: 0,
+            failed: sourceRows.length,
+            error: "internal error",
+          });
+        }
+      }
     }
 
     return { results };

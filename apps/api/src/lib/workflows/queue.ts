@@ -73,14 +73,18 @@ export function getWorkflowQueue(): Queue<WorkflowJobData> {
 }
 
 /**
- * Enqueue immediately. `jobId: run:${runId}` makes the enqueue idempotent —
+ * Enqueue immediately. `jobId: run-${runId}` makes the enqueue idempotent —
  * the dispatcher's retry-with-backoff (Redis hiccup tail) cannot fan out a
  * second job for the same WorkflowRun row and cause concurrent execution
  * lanes that race the in_progress journal.
+ *
+ * Separator is `-`, not `:` — BullMQ 5.x rejects colons in custom job IDs
+ * (`Error: Custom Id cannot contain :`). Switched on 2026-05-19 after the
+ * bullmq bump; the underscore form has no semantic difference.
  */
 export async function enqueueWorkflowRun(runId: string): Promise<string> {
   const q = getWorkflowQueue();
-  const job = await q.add("run", { runId }, { jobId: `run:${runId}` });
+  const job = await q.add("run", { runId }, { jobId: `run-${runId}` });
   return job.id as string;
 }
 
@@ -88,9 +92,9 @@ export async function enqueueWorkflowRun(runId: string): Promise<string> {
  * Enqueue with a delay — used by `wait` steps to schedule resumption AND
  * by the waiting-runs sweeper to re-enqueue stranded waits.
  *
- * jobId is `resume:${runId}:${waitSeq}` where `waitSeq` is the step-log
+ * jobId is `resume-${runId}-${waitSeq}` where `waitSeq` is the step-log
  * length at the moment of scheduling — monotonically increasing per run.
- * The earlier `resume:${runId}` shape was ambiguous across multiple wait
+ * The earlier `resume-${runId}` shape was ambiguous across multiple wait
  * steps within the same run: removeOnComplete keeps completed jobs for 24h,
  * which made BullMQ skip the second wait's enqueue as a duplicate, leaving
  * the run stranded until the 60s waiting-sweeper noticed. Sweeper passes
@@ -98,6 +102,8 @@ export async function enqueueWorkflowRun(runId: string): Promise<string> {
  *
  * delayMs is clamped at 1ms to keep BullMQ happy (zero would mean "now,"
  * which we'd express via enqueueWorkflowRun anyway).
+ *
+ * Separator is `-`, not `:` — BullMQ 5.x rejects colons in custom job IDs.
  */
 export async function enqueueWorkflowResume(
   runId: string,
@@ -108,7 +114,7 @@ export async function enqueueWorkflowResume(
   const job = await q.add(
     "run",
     { runId },
-    { delay: Math.max(1, delayMs), jobId: `resume:${runId}:${waitSeq}` },
+    { delay: Math.max(1, delayMs), jobId: `resume-${runId}-${waitSeq}` },
   );
   return job.id as string;
 }

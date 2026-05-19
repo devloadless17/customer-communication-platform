@@ -108,7 +108,7 @@ export async function enqueueMessageSend(data: MessageSendJobData): Promise<void
   await q.add(
     `${data.kind}:${data.conversationId}`,
     data,
-    data.clientTempId ? { jobId: `msg-send:${data.clientTempId}` } : undefined,
+    data.clientTempId ? { jobId: `msg-send-${data.clientTempId}` } : undefined,
   );
 }
 

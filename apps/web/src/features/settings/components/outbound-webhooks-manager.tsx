@@ -56,6 +56,11 @@ interface RevealedSecret {
 
 export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props) {
   const [webhooks, setWebhooks] = useState<Webhook[]>(initialWebhooks);
+  // Sync from SSR (router.refresh from useCatalogSync) so teammate edits
+  // show up without manual refresh.
+  useEffect(() => {
+    setWebhooks(initialWebhooks);
+  }, [initialWebhooks]);
   const [creating, setCreating] = useState(false);
   const [revealed, setRevealed] = useState<RevealedSecret | null>(null);
   const [showCreate, setShowCreate] = useState(false);

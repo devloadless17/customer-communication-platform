@@ -28,6 +28,9 @@ export interface ThreadEventsState {
   addOptimistic: (m: TeamChannelMessageDto) => void;
   markOptimisticFailed: (clientTempId: string) => void;
   removeOptimistic: (clientTempId: string) => void;
+  /** User ids currently typing in THIS thread (excludes the viewer). The
+   *  caller renders names via the team-members map. */
+  typingUserIds: string[];
 }
 
 export function useThreadEvents(
@@ -38,6 +41,7 @@ export function useThreadEvents(
   const [loading, setLoading] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
   const inFlightRef = useRef(false);
   // Per-(message,emoji) last applied version stamp — see `onReaction`.
   const lastReactionVersionsRef = useRef(new Map<string, number>());
@@ -189,11 +193,19 @@ export function useThreadEvents(
       });
     };
 
+    const onTyping: Parameters<typeof socket.on<"team:channel:thread:typing:update">>[1] = (
+      payload,
+    ) => {
+      if (payload.threadRootId !== rootMessageId) return;
+      setTypingUserIds(payload.typingUserIds);
+    };
+
     socket.on("connect", onConnect);
     socket.on("team:channel:message", onMessage);
     socket.on("team:channel:message:edited", onEdited);
     socket.on("team:channel:message:deleted", onDeleted);
     socket.on("team:channel:reaction:changed", onReaction);
+    socket.on("team:channel:thread:typing:update", onTyping);
     if (socket.connected) onConnect();
 
     return () => {
@@ -202,6 +214,10 @@ export function useThreadEvents(
       socket.off("team:channel:message:edited", onEdited);
       socket.off("team:channel:message:deleted", onDeleted);
       socket.off("team:channel:reaction:changed", onReaction);
+      socket.off("team:channel:thread:typing:update", onTyping);
+      // Clear stale snapshot so reopening the same thread later starts
+      // from a fresh state instead of last-seen typers.
+      setTypingUserIds([]);
     };
   }, [channelId, rootMessageId]);
 
@@ -232,5 +248,6 @@ export function useThreadEvents(
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    typingUserIds,
   };
 }

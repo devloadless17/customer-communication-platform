@@ -339,49 +339,7 @@ bad, or for non-urgent rollbacks.
 
 # Pre-pilot hardening (DO BEFORE accepting real traffic)
 
-Two items that are intentionally not in the deploy workflow because they
-need exactly-once VPS-side installation. Don't ship a customer pilot
-without both.
-
-## 1. Postgres backups
-
-Without this, a VPS-level failure (Hostinger disk corruption, accidental
-`docker compose down -v`, ransomware) loses every conversation. The
-script in `deploy/scripts/backup.sh` does a daily `pg_dump | gzip` with
-atomic rename + 7-day local retention. Install:
-
-```bash
-# On the VPS, as deploy user
-mkdir -p /opt/ccp/scripts
-# Either scp the file from your dev machine, or pull from the repo:
-curl -fsSL https://raw.githubusercontent.com/devloadless17/customer-communication-platform/main/deploy/scripts/backup.sh \
-  -o /opt/ccp/scripts/backup.sh
-chmod +x /opt/ccp/scripts/backup.sh
-
-# Log dir
-sudo mkdir -p /var/log/ccp /var/backups/ccp
-sudo chown deploy:deploy /var/log/ccp /var/backups/ccp
-
-# Daily at 02:00 UTC
-( crontab -l 2>/dev/null; echo "0 2 * * * /opt/ccp/scripts/backup.sh >> /var/log/ccp/backup.log 2>&1" ) | crontab -
-
-# Verify by running once manually
-/opt/ccp/scripts/backup.sh
-ls -lh /var/backups/ccp/
-```
-
-**Off-host copy is still your job.** Local-only dumps don't survive a VPS
-loss. Pick one:
-- **Hostinger snapshots** — enable in the Hostinger control panel, set
-  frequency to daily. Cheapest, no scripting.
-- **S3/B2/etc.** — extend `backup.sh` to `aws s3 cp` the rotated dumps
-  to durable object storage. ~5 lines added at the bottom.
-- **restic** — incremental backups to any storage backend with
-  deduplication. Best technical solution, more setup.
-
-Restore one-liner is in the script header.
-
-## 2. Tighten sudo allowlist
+## Tighten sudo allowlist
 
 The deploy user has `NOPASSWD: ALL` by default — a leaked `VPS_SSH_KEY`
 plus this sudoers entry equals immediate full root. The SSH key is your

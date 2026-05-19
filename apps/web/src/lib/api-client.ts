@@ -81,6 +81,52 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Retry only when the upstream isn't reachable at all (TCP refused, DNS,
+ * undici socket close mid-flight). These manifest as `TypeError: fetch
+ * failed` and only happen in dev when the NestJS process restarts on a
+ * code change — prod has Caddy in front so the proxy returns 502 (an HTTP
+ * response, not a fetch throw) for the same ~3s window.
+ *
+ * Limited to idempotent verbs so a POST that DID reach NestJS but timed
+ * out on the response isn't double-applied. Three retries with linear
+ * backoff covers a typical @swc-node restart (~2-5s); past that, the
+ * caller's RSC error boundary takes over.
+ */
+const NETWORK_RETRY_BUDGET_MS = 6_000;
+const NETWORK_RETRY_DELAYS_MS = [400, 800, 1_500];
+
+async function fetchWithDevRestartRetry(
+  url: URL,
+  init: RequestInit,
+  method: string,
+): Promise<Response> {
+  const idempotent = method === "GET" || method === "HEAD";
+  const start = Date.now();
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      // Only retry network failures, only on idempotent verbs, only in dev,
+      // and only within the budget. Everything else: throw so the original
+      // error path runs.
+      if (
+        !idempotent ||
+        process.env.NODE_ENV === "production" ||
+        attempt >= NETWORK_RETRY_DELAYS_MS.length ||
+        Date.now() - start > NETWORK_RETRY_BUDGET_MS ||
+        init.signal?.aborted
+      ) {
+        throw err;
+      }
+      const delay = NETWORK_RETRY_DELAYS_MS[attempt]!;
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
   const cookieStore = await cookies();
   const headerStore = await headers();
@@ -95,7 +141,7 @@ export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
   // "no-store"` (which would override `next`) and let Next.js manage
   // freshness via tags + revalidate.
   const useDataCache = opts.next !== undefined;
-  const res = await fetch(url, {
+  const fetchInit: RequestInit = {
     method: opts.method ?? "GET",
     headers: {
       "content-type": "application/json",
@@ -109,7 +155,8 @@ export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
     // Opt-in caching for read-mostly catalogs via the `next` option.
     ...(useDataCache ? { next: opts.next } : { cache: "no-store" }),
     signal: opts.signal,
-  });
+  };
+  const res = await fetchWithDevRestartRetry(url, fetchInit, opts.method ?? "GET");
 
   if (res.status === 401) {
     if ((opts.on401 ?? "redirect") === "redirect") {

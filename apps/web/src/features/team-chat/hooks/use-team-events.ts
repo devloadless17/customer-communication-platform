@@ -267,12 +267,14 @@ export function useTeamEvents(
           // "Closed" view.
           if (!newConversation) return prev;
           const f = filterRef.current;
+          // Stage view includes closed conversations on purpose — see
+          // queries/conversations.ts. Presets (all/mine/unassigned) still
+          // hide closed; "closed" preset shows only closed.
           const matches =
             !f
               ? true
               : f.kind === "stage"
-                ? newConversation.contact.stageId === f.stageId &&
-                  newConversation.conversation.status !== "closed"
+                ? newConversation.contact.stageId === f.stageId
                 : f.id === "closed"
                   ? newConversation.conversation.status === "closed"
                   : f.id === "mine"
@@ -395,15 +397,19 @@ export function useTeamEvents(
         // status arrives twice (e.g. a stale tab re-fires after reconnect).
         if (existing.conversation.status === status) return prev;
         // Splice OUT when the new status no longer matches the filter
-        // (e.g. filter "all"/"mine"/"unassigned"/"stage" + status=closed,
-        // or filter "closed" + status=open|pending).
+        // (e.g. preset "all"/"mine"/"unassigned" + status=closed, or
+        // preset "closed" + status=open|pending). Stage filter keeps
+        // closed conversations on purpose — stage is contact-lifecycle,
+        // not chat status.
         const f = filterRef.current;
         const stillMatches =
-          !f || f.kind === "preset"
-            ? f && f.kind === "preset" && f.id === "closed"
-              ? status === "closed"
-              : status !== "closed"
-            : status !== "closed"; // stage filter excludes closed
+          !f
+            ? true
+            : f.kind === "stage"
+              ? true
+              : f.id === "closed"
+                ? status === "closed"
+                : status !== "closed";
         if (!stillMatches) {
           const next = prev.slice();
           next.splice(idx, 1);

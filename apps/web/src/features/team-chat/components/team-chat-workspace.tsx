@@ -6,6 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { usePresence } from "@/hooks/use-presence";
 import { useTeamChannelEvents } from "@/features/team-chat/hooks/use-team-channel-events";
 import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
+import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import { canPinMessage } from "@ccp/shared/team-chat/permissions";
 import type {
@@ -75,10 +77,7 @@ export function TeamChatWorkspace({
     currentUser.id,
   );
 
-  // Pins: hydrate from SSR; we don't yet listen to a pin-changed event for
-  // the bar (only for the bubble's chip). Refresh on pin/unpin via a small
-  // re-fetch when the socket fires. Keeps the bar correct without a full
-  // PinnedItem socket payload.
+  // Pins: hydrate from SSR, keep in sync via `team:channel:pin:changed`.
   //
   // Reset on channel switch: useEffect (NOT useMemo). useMemo running a
   // setState is a side effect — Strict Mode double-invokes it and the
@@ -88,6 +87,82 @@ export function TeamChatWorkspace({
   useEffect(() => {
     setPins(initialPins);
   }, [initialPins, initialChannel.id]);
+
+  // Socket-driven pin updates.
+  //   - unpin → filter the messageId out of the bar (fast, no fetch)
+  //   - pin   → refetch `/pins` to grab the new PinnedItem with author +
+  //             pinnedAt + full message DTO. The event payload only carries
+  //             { messageId, pinned } so we can't synthesize the row
+  //             locally without re-deriving the author/message — refetching
+  //             is simpler than threading a full DTO through the event.
+  //             Pins are rare events so the extra GET is negligible.
+  useEffect(() => {
+    const socket = getClientSocket();
+    if (!socket) return;
+    const channelId = initialChannel.id;
+    let cancelled = false;
+
+    const refetchPins = async () => {
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/team/channels/${channelId}/pins`,
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as { pins: ChannelPinDto[] };
+        if (cancelled) return;
+        setPins(data.pins);
+      } catch {
+        // Reconciles on next event or channel re-mount.
+      }
+    };
+
+    const onPin = (payload: {
+      teamId: string;
+      channelId: string;
+      messageId: string;
+      pinned: boolean;
+    }) => {
+      if (payload.channelId !== channelId) return;
+      if (!payload.pinned) {
+        setPins((prev) => prev.filter((p) => p.messageId !== payload.messageId));
+      } else {
+        void refetchPins();
+      }
+    };
+
+    socket.on("team:channel:pin:changed", onPin);
+    return () => {
+      cancelled = true;
+      socket.off("team:channel:pin:changed", onPin);
+    };
+  }, [initialChannel.id]);
+
+  // Unpin handler invoked from the PinnedBar row's X button. Optimistically
+  // drops the row; the socket event will confirm (no-op since the row is
+  // already gone) or — on server error — `refetchPins` reconciles via the
+  // next pin event from another tab. We keep the call simple: no toast on
+  // success, an error toast on failure with the affected snippet so the
+  // admin knows which one didn't go through.
+  const unpinFromBar = useCallback(
+    async (messageId: string) => {
+      const previous = pins;
+      setPins((prev) => prev.filter((p) => p.messageId !== messageId));
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/team/channels/${initialChannel.id}/messages/${messageId}/pin`,
+          { method: "DELETE" },
+        );
+        if (!res.ok) {
+          setPins(previous);
+          toast.error("Couldn't unpin", { description: `HTTP ${res.status}` });
+        }
+      } catch {
+        setPins(previous);
+        toast.error("Couldn't unpin", { description: "Network error" });
+      }
+    },
+    [initialChannel.id, pins],
+  );
 
   const [thread, setThread] = useState<TeamChannelMessageDto | null>(null);
   // Close the thread panel on channel switch. Without this, navigating
@@ -252,7 +327,11 @@ export function TeamChatWorkspace({
             onJumpTo={jumpToMessage}
           />
         )}
-        <PinnedBar pins={pins} />
+        <PinnedBar
+          pins={pins}
+          canPin={canPinMessage(currentUser.role)}
+          onUnpin={unpinFromBar}
+        />
         <ChannelThread
           messages={channelState.messages}
           channelId={initialChannel.id}

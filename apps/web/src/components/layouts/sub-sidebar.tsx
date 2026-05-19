@@ -28,7 +28,7 @@ export function SubSidebar({
   children: ReactNode;
 }) {
   return (
-    <aside className="flex h-svh w-64 shrink-0 flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground">
+    <aside className="flex h-svh w-52 shrink-0 flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground md:w-64">
       <header className="flex items-center gap-2 px-4 pb-3 pt-4">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-base font-semibold leading-tight">

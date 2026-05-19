@@ -106,10 +106,28 @@ export function ContactsClient({
   const { items, setItems, setError, reconcileContactUpdate, refetch } = list;
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
+  //
+  // Sync FROM props on every render: when `router.refresh()` (from
+  // useCatalogSync's `team:catalog:changed` handler) re-runs SSR and
+  // delivers new initialX props, we adopt them. Without this sync the
+  // useState initializer captured the first-mount value and any
+  // teammate's additions to the catalog wouldn't show up here — the
+  // user had to refresh the browser. Local optimistic mutations are
+  // still visible until the next refresh, then the server snapshot
+  // takes over (correct: server is authoritative).
   const [fieldDefinitions, setFieldDefinitions] =
     useState<ContactFieldDefinition[]>(initialFieldDefinitions);
   const [tags, setTags] = useState<Tag[]>(initialTags);
-  const [stages] = useState<ContactStage[]>(initialStages);
+  const [stages, setStages] = useState<ContactStage[]>(initialStages);
+  useEffect(() => {
+    setFieldDefinitions(initialFieldDefinitions);
+  }, [initialFieldDefinitions]);
+  useEffect(() => {
+    setTags(initialTags);
+  }, [initialTags]);
+  useEffect(() => {
+    setStages(initialStages);
+  }, [initialStages]);
   const tagById = useMemo(
     () => new Map(tags.map((t) => [t.id, t] as const)),
     [tags],

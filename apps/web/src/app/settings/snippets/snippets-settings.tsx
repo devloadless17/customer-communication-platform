@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -61,6 +61,15 @@ export function SnippetsSettings({
   const { confirm, confirmDialog } = useConfirm();
   const router = useRouter();
   const [snippets, setSnippets] = useState<SnippetDto[]>(initialSnippets);
+  // Sync FROM props: when router.refresh() (from useCatalogSync's
+  // team:catalog:changed handler — fired by THIS user's mutations or by
+  // a teammate's edits broadcasting through the bus) re-runs SSR with
+  // fresh initialSnippets, adopt them. Without this, useState's
+  // first-mount initializer froze the local copy and additions from
+  // other tabs / teammates never showed up here.
+  useEffect(() => {
+    setSnippets(initialSnippets);
+  }, [initialSnippets]);
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
   const [error, setError] = useState<string | null>(null);

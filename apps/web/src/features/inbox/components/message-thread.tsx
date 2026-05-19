@@ -360,13 +360,33 @@ function MessageThreadImpl({
     [matches],
   );
 
+  // Forward-ref to useChatScroll's `markBenignTailUpdate`. The hook is
+  // declared later (it needs `lastEntryKey` which is computed below), but
+  // the active-match effect needs to flag the slice swap as benign before
+  // it commits. The ref is assigned right after the hook call; consumers
+  // call through the ref to dodge the TDZ.
+  const markBenignTailUpdateRef = useRef<() => void>(() => {});
+
   // Whenever the active match changes, scroll its bubble into view. If the
   // bubble isn't in the loaded slice, fetch a context window first — the
   // pendingJumpId watcher below then picks up the scroll once the bubbles
   // render.
+  //
+  // `handledMatchIdRef` ensures the effect only acts when `activeMatchId`
+  // actually changes, not when `messagesById` rebuilds (e.g., after the user
+  // sends a message while search is still open — without this guard the
+  // bubble would scroll to the bottom, then bounce back to the searched
+  // match on the next render).
+  const handledMatchIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!activeMatchId) return;
+    if (!activeMatchId) {
+      handledMatchIdRef.current = null;
+      return;
+    }
+    if (handledMatchIdRef.current === activeMatchId) return;
+
     if (messagesById.has(activeMatchId)) {
+      handledMatchIdRef.current = activeMatchId;
       // Fast path: defer one frame so any concurrent state updates have
       // committed before we measure scrollIntoView.
       const id = window.requestAnimationFrame(() => {
@@ -380,6 +400,7 @@ function MessageThreadImpl({
 
     // Slow path: load a context window centered on the match and remember
     // to scroll once it renders.
+    handledMatchIdRef.current = activeMatchId;
     let cancelled = false;
     setSearchError(null);
     void (async () => {
@@ -397,6 +418,11 @@ function MessageThreadImpl({
           nextOlderCursor: string | null;
         };
         if (cancelled) return;
+        // The slice swap shifts lastEntryKey to an older message, which
+        // would otherwise trip the chat-scroll tail-entry effect into
+        // bumping the "new messages" pill. Mark the swap benign before
+        // committing it so the pill stays quiet.
+        markBenignTailUpdateRef.current();
         replaceWithContext({
           messages: ctx.messages,
           nextOlderCursor: ctx.nextOlderCursor,
@@ -530,7 +556,7 @@ function MessageThreadImpl({
   const isOwnSend =
     lastEntry?.kind === "message" && lastEntry.data.pending === true;
 
-  const { unreadBelow, scrollToBottom } = useChatScroll({
+  const { unreadBelow, scrollToBottom, markBenignTailUpdate } = useChatScroll({
     scrollAreaRef,
     contentRef,
     topSentinelRef,
@@ -540,6 +566,9 @@ function MessageThreadImpl({
     hasMoreOlder,
     loadOlder,
   });
+  // Bind the forward-ref used by the active-match effect (declared above
+  // this hook call). Assignment in render is idempotent.
+  markBenignTailUpdateRef.current = markBenignTailUpdate;
 
   // Note: we deliberately do NOT hide the scroll area until layout effects
   // run. The previous version gated `invisible` on a `scrollReady` boolean

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, HelpCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,11 @@ export function ConfirmDialog({
   useModalOverlay(dialogRef, open, onClose);
 
   if (!open || !options) return null;
+  // SSR guard — `useConfirm` is only called from client components, but the
+  // portal target is the DOM body so we need a live `document`. The early
+  // return above (`!open`) means this path doesn't run on the first server
+  // pass; once hydrated, `document` is defined.
+  if (typeof document === "undefined") return null;
   const {
     title,
     description,
@@ -64,7 +70,13 @@ export function ConfirmDialog({
     mode = "confirm",
   } = options;
 
-  return (
+  // Portal to <body> so the fixed overlay isn't trapped inside a
+  // transformed ancestor (virtualized lists in team chat / inbox use
+  // `transform: translateY(...)` on each row, which creates a new
+  // containing block for `position: fixed` descendants — without the
+  // portal the dialog renders inside the row's stacking context and
+  // ends up behind the surrounding chrome).
+  return createPortal(
     <div
       ref={dialogRef}
       role="dialog"
@@ -112,7 +124,8 @@ export function ConfirmDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

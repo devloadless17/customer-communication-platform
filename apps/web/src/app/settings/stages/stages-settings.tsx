@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -47,7 +47,16 @@ export function StagesSettings({
 }) {
   const { confirm, confirmDialog } = useConfirm();
   const [stages, setStages] = useState<ContactStage[]>(initialStages);
+  // Sync from SSR-re-runs (router.refresh from useCatalogSync) so a teammate's
+  // additions/edits show up without manual refresh. See snippets-settings.tsx
+  // for the full rationale.
+  useEffect(() => {
+    setStages(initialStages);
+  }, [initialStages]);
   const [counts, setCounts] = useState<Record<string, number>>(countsByStageId);
+  useEffect(() => {
+    setCounts(countsByStageId);
+  }, [countsByStageId]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");

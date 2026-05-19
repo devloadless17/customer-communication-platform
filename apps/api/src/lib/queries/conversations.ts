@@ -107,8 +107,13 @@ export async function listConversations(
   //   - status filters use `(teamId, status, lastMessageAt DESC)` index
   //   - assignedUserId filters use `(teamId, assignedUserId)` index
   //   - stage filter joins through Contact, which has `(teamId, stageId)`
-  // Closed threads are excluded from every preset EXCEPT `closed`, and
-  // from the stage view (matches the sub-sidebar's selected-list behavior).
+  //
+  // Closed threads are excluded from every preset EXCEPT `closed`. The
+  // STAGE view, by contrast, shows all conversations (open + closed) in
+  // that stage — stages model the contact's lifecycle, which is
+  // orthogonal to chat status. A "customer"-stage contact with a closed
+  // chat is still a customer; hiding them under the stage view caused
+  // the badge count to disagree with what appeared after clicking.
   let filterClause: Prisma.ConversationWhereInput | null = null;
   if (opts.filter?.kind === "preset") {
     switch (opts.filter.id) {
@@ -132,7 +137,6 @@ export async function listConversations(
     }
   } else if (opts.filter?.kind === "stage") {
     filterClause = {
-      status: { not: "closed" },
       contact: { stageId: opts.filter.stageId },
     };
   }

@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Paperclip, SendHorizontal } from "lucide-react";
+import {
+  FileText,
+  Image as ImageIcon,
+  Mic,
+  Paperclip,
+  SendHorizontal,
+  Video,
+  X,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -54,6 +62,11 @@ export function ChannelComposer({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [popupPos, setPopupPos] = useState<{ left: number; top: number } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Staged file from the paperclip picker. We hold it locally and show a
+  // preview chip until the user clicks Send — matches the inbox composer's
+  // UX. Previously the picker fired the upload immediately, which made
+  // accidental clicks impossible to recover from.
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
 
   // Recompute mention trigger whenever body or caret moves.
   const recomputeTrigger = useCallback(
@@ -81,28 +94,40 @@ export function ChannelComposer({
   }, [body, caret, recomputeTrigger]);
 
   // Typing indicator emit. Debounced "stop" so a brief pause doesn't drop
-  // the dot — same pattern as the conversation composer.
+  // the dot — same pattern as the conversation composer. When `threadRootId`
+  // is set, we emit thread-scoped events instead so the indicator renders
+  // in the thread side panel, not the channel.
   const typingStopTimer = useRef<number | null>(null);
   const isTypingRef = useRef(false);
   const emitTypingStart = () => {
-    if (threadRootId) return; // typing indicator scoped to channel only for v0
     const socket = getClientSocket();
     if (!isTypingRef.current) {
-      socket.emit("typing:channel:start", { channelId });
+      if (threadRootId) {
+        socket.emit("typing:thread:start", { channelId, threadRootId });
+      } else {
+        socket.emit("typing:channel:start", { channelId });
+      }
       isTypingRef.current = true;
     }
     if (typingStopTimer.current) window.clearTimeout(typingStopTimer.current);
     typingStopTimer.current = window.setTimeout(() => {
-      socket.emit("typing:channel:stop", { channelId });
+      if (threadRootId) {
+        socket.emit("typing:thread:stop", { channelId, threadRootId });
+      } else {
+        socket.emit("typing:channel:stop", { channelId });
+      }
       isTypingRef.current = false;
     }, 3000);
   };
   const emitTypingStop = () => {
-    if (threadRootId) return;
     const socket = getClientSocket();
     if (typingStopTimer.current) window.clearTimeout(typingStopTimer.current);
     if (isTypingRef.current) {
-      socket.emit("typing:channel:stop", { channelId });
+      if (threadRootId) {
+        socket.emit("typing:thread:stop", { channelId, threadRootId });
+      } else {
+        socket.emit("typing:channel:stop", { channelId });
+      }
       isTypingRef.current = false;
     }
   };
@@ -132,8 +157,21 @@ export function ChannelComposer({
   };
 
   const submit = async () => {
+    if (busy) return;
+    // Pending file takes the media path; text-only takes the text path.
+    // The user is allowed to have both (file + caption); we route through
+    // handleFile in that case since it already accepts the caption from
+    // `body`. Send is disabled when there's neither — see the button's
+    // `disabled` prop.
+    if (pendingFile) {
+      const file = pendingFile;
+      setPendingFile(null);
+      emitTypingStop();
+      await handleFile(file);
+      return;
+    }
     const trimmed = body.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed) return;
     emitTypingStop();
     const clientTempId = `tmp_${Math.random().toString(36).slice(2)}_${Date.now()}`;
     const optimistic: TeamChannelMessageDto = {
@@ -226,6 +264,12 @@ export function ChannelComposer({
 
   return (
     <div className="border-t border-border bg-background p-3">
+      {pendingFile && (
+        <PendingFileChip
+          file={pendingFile}
+          onRemove={() => setPendingFile(null)}
+        />
+      )}
       <div className="flex items-end gap-2 rounded-xl border border-border bg-muted/30 p-2 focus-within:border-primary/40 focus-within:bg-background">
         <Textarea
           ref={textareaRef}
@@ -290,14 +334,18 @@ export function ChannelComposer({
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f) void handleFile(f);
+            if (f) setPendingFile(f);
+            // Clear the input so picking the same file again still fires
+            // onChange. Browsers suppress the event when the picked value
+            // is identical to the previous one.
+            if (fileInputRef.current) fileInputRef.current.value = "";
           }}
         />
         <Button
           type="button"
           size="icon"
           onClick={() => void submit()}
-          disabled={!body.trim() || busy}
+          disabled={(!body.trim() && !pendingFile) || busy}
           className="size-9 shrink-0"
         >
           <SendHorizontal className="size-4" />
@@ -320,4 +368,55 @@ export function ChannelComposer({
       )}
     </div>
   );
+}
+
+/**
+ * Compact preview row shown above the composer when a file is staged for
+ * send. Click X to discard before sending. Same shape as the inbox
+ * composer's attachment preview — kept inline here to avoid coupling the
+ * two trees, since the team-chat composer is narrower.
+ */
+function PendingFileChip({
+  file,
+  onRemove,
+}: {
+  file: File;
+  onRemove: () => void;
+}) {
+  const Icon = iconForFile(file);
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2 py-1.5">
+      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-background">
+        <Icon className="size-4 text-muted-foreground" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs font-medium">{file.name}</div>
+        <div className="text-[11px] text-muted-foreground">
+          {formatBytes(file.size)}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        aria-label="Remove attachment"
+        title="Remove"
+      >
+        <X className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function iconForFile(file: File): typeof FileText {
+  if (file.type.startsWith("image/")) return ImageIcon;
+  if (file.type.startsWith("video/")) return Video;
+  if (file.type.startsWith("audio/")) return Mic;
+  return FileText;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }

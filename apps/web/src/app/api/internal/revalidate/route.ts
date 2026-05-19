@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { updateTag } from "next/cache";
+import { revalidateTag } from "next/cache";
 
 /**
  * Internal cache-revalidation endpoint. Called by NestJS from its
@@ -76,19 +76,28 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "tag_not_allowed" }, { status: 400 });
   }
 
-  // Next 16: `updateTag` is the route-handler-friendly bust (no profile
-  // arg, callable outside server actions). `revalidateTag` in Next 16
-  // requires a CacheLifeConfig + only runs from a server action.
+  // Next 16: `revalidateTag` is the route-handler-friendly bust. The
+  // earlier code used `updateTag` here, which Next 16 rejects outside
+  // server actions ("updateTag can only be called from within a Server
+  // Action") — every revalidate call returned 500 and the data cache
+  // stayed populated for the full 60s window. Swapped 2026-05-19.
   //
-  // Wrap in try/catch so a thrown updateTag (Next internals, edge cases on
-  // version bumps) returns 500 instead of a silent 200. The NestJS-side
-  // subscriber logs non-2xx loudly — without this the cache stays stale
-  // until the 60s time-based revalidate, with no operator signal.
+  // The `"max"` second arg is required by Next 16's new signature.
+  // Calling without it logs a deprecation warning + still works at
+  // runtime, but the typed signature refuses to compile. `"max"` maps
+  // to the most aggressive eviction profile (immediate invalidation),
+  // which matches what we want for an explicit catalog mutation.
+  //
+  // Wrap in try/catch so a thrown revalidateTag (Next internals, edge
+  // cases on version bumps) returns 500 instead of a silent 200. The
+  // NestJS-side subscriber logs non-2xx loudly — without this the cache
+  // stays stale until the 60s time-based revalidate, with no operator
+  // signal.
   try {
-    updateTag(parsed);
+    revalidateTag(parsed, "max");
   } catch (err) {
     console.error(
-      `[cache-revalidate] updateTag(${parsed}) threw: ${err instanceof Error ? err.message : err}`,
+      `[cache-revalidate] revalidateTag(${parsed}) threw: ${err instanceof Error ? err.message : err}`,
     );
     return NextResponse.json({ error: "revalidate_failed" }, { status: 500 });
   }

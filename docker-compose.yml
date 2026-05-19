@@ -76,10 +76,13 @@ services:
       - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-ccp}"]
-      # Docker 25+ runs probes every `start_interval` during boot, so
-      # `service_healthy` flips as soon as Postgres actually accepts a
-      # connection (~500ms-1s) instead of waiting a full `interval`.
+      # Docker 25+ runs probes every `start_interval` during the
+      # `start_period` window, so `service_healthy` flips as soon as
+      # Postgres actually accepts a connection (~500ms-1s) instead of
+      # waiting a full `interval`. start_period is required by docker
+      # compose v2's schema validator when start_interval is set.
       # Steady-state probing still runs at `interval` to avoid noise.
+      start_period: 30s
       start_interval: 500ms
       interval: 30s
       timeout: 3s
@@ -104,6 +107,8 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       # See postgres healthcheck above for start_interval rationale.
       # redis-cli PING returns in <50ms once redis is accepting clients.
+      # start_period required by compose v2 schema when start_interval set.
+      start_period: 10s
       start_interval: 500ms
       interval: 30s
       timeout: 3s
@@ -119,41 +124,14 @@ services:
         max-size: "50m"
         max-file: "3"
 
-  # ---- migrate (one-shot) -------------------------------------------------
-  # Runs `prisma migrate deploy` once per `docker compose up` and exits. app
-  # + api then start, gated on this container's success (exit 0). Without
-  # this gate, api previously waited on postgres-healthy only and could
-  # race the schema lock while app's CMD was still applying migrations —
-  # Prisma client caches type metadata on first connect, so a stale-schema
-  # connection could outlive the migration with broken types.
-  #
-  # Uses the web image because it carries the Prisma CLI + schema at
-  # /opt/cli-tools/node_modules/.bin/prisma + /app/prisma (web Dockerfile
-  # lines 155-166). PATH/NODE_PATH from that image already point at the CLI
-  # tree, so `prisma migrate deploy` resolves the binary correctly.
-  #
-  # Idempotent: `prisma migrate deploy` is a no-op when the DB is current.
-  # restart: "no" means docker won't auto-restart on failure (a failed
-  # migration is a real operator event — depends_on stops app/api from
-  # starting, systemd's StartLimitBurst catches a crash loop).
-  migrate:
-    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-web
-    restart: "no"
-    networks: [ccp_net]
-    depends_on:
-      postgres: { condition: service_healthy }
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
-    command: ["prisma", "migrate", "deploy"]
-    # One-shot, no in-flight work — let docker stop it instantly on
-    # teardown. Default 10s would add a fake 10s pause to `docker compose
-    # down` for a container that's already exited.
-    stop_grace_period: 0s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "2"
+  # NOTE: The standalone `migrate` one-shot service was folded into api's
+  # startup on 2026-05-19. Schema migrations now run as the first step of
+  # the api container's CMD (see the `command:` override below). web depends
+  # on api being healthy, which structurally implies migrations completed.
+  # Trade-off accepted: web can no longer boot in parallel with the schema
+  # migration phase — but web also can't serve requests without api, so the
+  # serialization happened anyway at runtime. Reduces the operator-visible
+  # container count from 5 to 4.
 
   app:
     # Prod pulls :latest-web; `docker compose up --build` builds locally with
@@ -171,12 +149,12 @@ services:
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
-      # postgres dependency is inherited transitively through `migrate`.
-      # Gating on migrate's clean exit guarantees the schema is current
-      # before Next.js boots Prisma client (which caches schema metadata
-      # on first connect).
-      migrate: { condition: service_completed_successfully }
-      redis: { condition: service_healthy }
+      # api owns the migration step (runs as the first thing in its CMD)
+      # so web only boots after api is healthy — guarantees schema is
+      # current before Next.js boots its Prisma client (which caches
+      # schema metadata on first connect). postgres + redis dependencies
+      # are inherited transitively through api.
+      api: { condition: service_healthy }
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public&connection_limit=30&pool_timeout=10
@@ -229,8 +207,10 @@ services:
     mem_reservation: 768m
     # Same probe shape as api below — gives compose dependents a real
     # "is web up" signal beyond `docker ps` PID liveness. start_period
-    # is short because migrations moved to the `migrate` service; the
-    # web CMD is now just `node apps/web/server.js`, boots in 2-3s.
+    # is short because the web CMD is just `node apps/web/server.js`
+    # (boots in 2-3s); the schema is guaranteed current by the time we
+    # get here because `depends_on: api: service_healthy` above only
+    # passes after api's CMD has finished `prisma migrate deploy`.
     # start_interval probes every 500ms during start_period so the
     # container is marked healthy the instant Next.js answers, instead
     # of waiting a full `interval` cycle.
@@ -273,11 +253,12 @@ services:
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
-      # postgres dependency is inherited through `migrate`. Gating on
-      # migrate's clean exit ensures NestJS's Prisma client sees the
-      # latest schema on first connect — no race with app's old migrate
-      # step (which used to run inside the web CMD).
-      migrate: { condition: service_completed_successfully }
+      # api owns schema migrations (runs `prisma migrate deploy` as the
+      # first step of its CMD — see the `command:` override below). Without
+      # waiting for postgres-healthy, the CLI would error on connect; we
+      # gate on it explicitly here now that there's no separate `migrate`
+      # service inheriting the dependency.
+      postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     environment:
       NODE_ENV: production
@@ -338,10 +319,35 @@ services:
     ports:
       # Loopback-only — Caddy is the public ingress (same posture as `app`).
       - "127.0.0.1:${API_PORT:-4000}:4000"
-    # CMD lives in the Dockerfile's `api` target — defers to apps/api's
-    # `start` script (@swc-node/register + SWC_NODE_PROJECT + the entry
-    # point). Override here only if a future scaling cliff demands a
-    # worker-only variant.
+    # Migrate-then-serve. Replaces the standalone `migrate` service so the
+    # operator sees 4 long-running containers instead of 5 (the migrate
+    # one-shot landed in `docker compose ps -a` as Exited and added visual
+    # noise without actually running).
+    #
+    # Three load-bearing details:
+    #   1. `cd /app` for the migrate step — that's where prisma.config.ts
+    #      + prisma/schema.prisma live. Dockerfile WORKDIR is /app/apps/api
+    #      because node's resolution needs to walk api's node_modules first
+    #      for @swc-node/register; we leave the runtime CWD there and
+    #      switch only for the prisma CLI invocation.
+    #   2. `exec node …` — replaces the shell with node so PID 1 is node,
+    #      not sh. SIGTERM from docker stop reaches node directly and
+    #      `app.enableShutdownHooks()` fires; BullMQ workers drain
+    #      cleanly (lockDuration=90s, see lib/workflows/worker.ts). Without
+    #      `exec`, sh sits as PID 1 and SIGTERM forwarding becomes
+    #      shell-implementation-dependent — irreversible Meta sends would
+    #      double-fire on restart.
+    #   3. `prisma migrate deploy` is idempotent (no-op on a current DB)
+    #      so a restart loop doesn't churn the schema. A real migration
+    #      failure exits non-zero before exec, the container fails to
+    #      start, and docker's restart-policy + systemd's StartLimitBurst
+    #      catch the loop the same way the old migrate service did.
+    command:
+      - sh
+      - -c
+      - |
+        (cd /app && pnpm prisma migrate deploy) && \
+        exec node -r @swc-node/register src/main.ts
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1"]
       # See web/postgres above — start_interval flips service_healthy
@@ -351,7 +357,14 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
-      start_period: 20s
+      # 120s start_period: api's CMD now runs `prisma migrate deploy`
+      # before exec'ing node (see the `command:` block above), so a fresh
+      # DB's first migration can take 30-60s and a multi-migration deploy
+      # against a stale DB can stack longer. start_interval still probes
+      # every 500ms during start_period, so a no-op `migrate deploy` on
+      # a current DB still flips healthy in ~3-5s — the long window only
+      # matters on first-deploy or after a schema change.
+      start_period: 120s
     # Higher than `app` because the api carries the workflow runner,
     # BullMQ worker, Socket.io fanout, and audit/analytics subscribers
     # on top of REST. 3GB tracks --max-old-space-size=4096 with margin

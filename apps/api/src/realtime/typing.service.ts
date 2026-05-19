@@ -12,6 +12,8 @@ import { Injectable } from "@nestjs/common";
 export class TypingService {
   private readonly conv = new Map<string, Map<string, Set<string>>>();
   private readonly chan = new Map<string, Map<string, Set<string>>>();
+  // Keyed by threadRootId — globally unique across channels.
+  private readonly thread = new Map<string, Map<string, Set<string>>>();
 
   addConv(conversationId: string, userId: string, socketId: string): void {
     addInto(this.conv, conversationId, userId, socketId);
@@ -31,6 +33,16 @@ export class TypingService {
   }
   snapshotChannel(channelId: string): string[] {
     return snapshotOf(this.chan, channelId);
+  }
+
+  addThread(threadRootId: string, userId: string, socketId: string): void {
+    addInto(this.thread, threadRootId, userId, socketId);
+  }
+  removeThread(threadRootId: string, userId: string, socketId: string): void {
+    removeFrom(this.thread, threadRootId, userId, socketId);
+  }
+  snapshotThread(threadRootId: string): string[] {
+    return snapshotOf(this.thread, threadRootId);
   }
 }
 

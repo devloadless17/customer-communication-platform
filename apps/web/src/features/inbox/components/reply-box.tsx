@@ -50,6 +50,12 @@ import {
   newClientTempId,
   safeReadError,
 } from "./reply-box/utils";
+import { EmojiPopover } from "./reply-box/emoji-popover";
+import {
+  MicButton,
+  RecordingBar,
+  useVoiceRecorder,
+} from "./reply-box/voice-recorder";
 
 type Mode = "reply" | "note";
 
@@ -180,8 +186,45 @@ export function ReplyBox({
   const [error, setError] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Voice recorder lives in a hook so the recorder lifecycle (MediaRecorder
+  // + AudioContext) survives re-renders of the toolbar. `start()` kicks
+  // off mic capture; the recording bar replaces the toolbar until
+  // Cancel or Send is clicked.
+  const voice = useVoiceRecorder({
+    onError: (message) => {
+      setError(message);
+      toast.error("Couldn't record voice message", { description: message });
+    },
+  });
+
+  // Splice an emoji into the textarea at the current caret position.
+  // Keep the popover open so an agent can insert several in a row; the
+  // smile button itself toggles it shut.
+  const insertEmoji = useCallback((emoji: string) => {
+    const el = ref.current;
+    if (!el) {
+      setValue((v) => v + emoji);
+      return;
+    }
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const next = el.value.slice(0, start) + emoji + el.value.slice(end);
+    setValue(next);
+    // Restore the caret right after the inserted emoji on next paint.
+    // setSelectionRange before the DOM commits the new value would
+    // clamp against the OLD length.
+    requestAnimationFrame(() => {
+      const elNow = ref.current;
+      if (!elNow) return;
+      const pos = start + emoji.length;
+      elNow.focus();
+      elNow.setSelectionRange(pos, pos);
+    });
+  }, []);
 
   // Holds the File for every in-flight or failed media send, keyed by
   // clientTempId. Lets a "Retry" on a failed media bubble restore the
@@ -479,22 +522,33 @@ export function ReplyBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.nonce]);
 
-  const submit = () => {
-    if (!canSend) return;
-    // Ref-guard against re-entry from a fast double-click / hold-Enter
-    // before the previous submit's input-clear has rendered. See
-    // sendInFlightRef declaration for the full reason.
+  // `override.file` lets the voice-recorder path inject a freshly captured
+  // audio File without going through `setAttachment` first — React state
+  // updates are async, but the recorder wants to send the moment the user
+  // taps the send-recording button.
+  const submit = (override?: { file: File }) => {
     if (sendInFlightRef.current) return;
+    const overrideFile = override?.file ?? null;
 
     const trimmed = value.trim();
-    const file = attachment;
+    const file = overrideFile ?? attachment;
     if (!file && !trimmed) return;
+    // Without an override we still respect the existing gate (window open
+    // or note mode). Voice messages bypass the empty-text gate but still
+    // need the window open / note mode — same content-side rules.
+    if (!file && !canSend) return;
+    if (overrideFile && !isNote && windowClosed) return;
 
     sendInFlightRef.current = true;
     setSendInFlight(true);
 
     const clientTempId = newClientTempId();
     const snapshotValue = value;
+    // For voice-only sends the caption is the empty string (we don't want
+    // the textarea contents leaking into a voice message — they'll get sent
+    // separately on the next submit). Otherwise the trimmed value rides
+    // along as the caption.
+    const effectiveCaption = overrideFile ? "" : trimmed;
     // Capture reply target NOW so the parent can clear the pill while the
     // network call is still in flight (next message in the same thread can
     // start typing immediately). The id rides through the API to the server.
@@ -523,7 +577,7 @@ export function ReplyBox({
           conversationId,
           externalId: clientTempId,
           senderUserId: currentUser.id,
-          body: trimmed,
+          body: effectiveCaption,
           direction: "out",
           provider: "meta_cloud",
           status: "sent",
@@ -537,7 +591,7 @@ export function ReplyBox({
             url: blobUrl,
             mimeType,
             sizeBytes: file.size,
-            ...(trimmed ? { caption: trimmed } : {}),
+            ...(effectiveCaption ? { caption: effectiveCaption } : {}),
             ...(kind === "document" ? { filename: file.name } : {}),
           },
         });
@@ -561,8 +615,10 @@ export function ReplyBox({
       }
     }
 
-    // Clear input now so the user can keep typing.
-    setValue("");
+    // Clear input now so the user can keep typing. Skip clearing `value`
+    // when this is a voice-only send so the user's draft in the textarea
+    // survives.
+    if (!overrideFile) setValue("");
     setAttachment(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (reply) onCancelReply?.();
@@ -572,11 +628,13 @@ export function ReplyBox({
 
     // Cache the File for a possible Retry. Without this, a failed media send
     // would force the agent to re-pick the file from disk — frustrating
-    // when the only problem was a transient network hiccup.
-    if (file && !isNote) {
+    // when the only problem was a transient network hiccup. Skip caching
+    // for voice messages: they're not re-pickable from disk anyway, and
+    // a failed voice send is better re-recorded fresh.
+    if (file && !isNote && !overrideFile) {
       pendingFilesRef.current.set(clientTempId, {
         file,
-        caption: trimmed,
+        caption: effectiveCaption,
         ...(replyToMessageId ? { replyToMessageId } : {}),
       });
     }
@@ -607,7 +665,7 @@ export function ReplyBox({
           const fd = new FormData();
           fd.append("conversationId", conversationId);
           fd.append("file", file);
-          if (trimmed) fd.append("caption", trimmed);
+          if (effectiveCaption) fd.append("caption", effectiveCaption);
           fd.append("clientTempId", clientTempId);
           if (replyToMessageId) fd.append("replyToMessageId", replyToMessageId);
           const res = await fetch("/api/messages/media", {
@@ -821,6 +879,23 @@ export function ReplyBox({
               }
             }}
           />
+          {voice.isRecording ? (
+            <RecordingBar
+              durationSec={voice.durationSec}
+              levels={voice.levels}
+              onCancel={() => voice.cancel()}
+              onSend={() => {
+                void (async () => {
+                  const file = await voice.stopAndCollect();
+                  if (!file) {
+                    setError("Recording was empty — try again.");
+                    return;
+                  }
+                  submit({ file });
+                })();
+              }}
+            />
+          ) : (
           <div className="flex items-center gap-1 px-2 pb-2 pt-0">
             <input
               ref={fileInputRef}
@@ -880,9 +955,39 @@ export function ReplyBox({
             >
               <Sparkles className="size-4" />
             </Button>
-            <Button variant="ghost" size="icon" className="size-7 text-muted-foreground" type="button" disabled>
-              <Smile className="size-4" />
-            </Button>
+            <div className="relative">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-muted-foreground"
+                type="button"
+                disabled={isNote && false /* emojis valid in notes too */}
+                title="Insert emoji"
+                onClick={() => setEmojiOpen((v) => !v)}
+              >
+                <Smile className="size-4" />
+              </Button>
+              <EmojiPopover
+                open={emojiOpen}
+                onClose={() => setEmojiOpen(false)}
+                onPick={insertEmoji}
+              />
+            </div>
+            <MicButton
+              onClick={() => {
+                if (isNote) return;
+                setEmojiOpen(false);
+                void voice.start();
+              }}
+              disabled={isNote || windowClosed}
+              title={
+                isNote
+                  ? "Voice messages aren't supported in Note mode"
+                  : windowClosed
+                    ? "Window closed — only templates can be sent"
+                    : "Record a voice message"
+              }
+            />
 
             <AnimatePresence>
               {isNote && (
@@ -903,7 +1008,7 @@ export function ReplyBox({
             </span>
             <Button
               size="sm"
-              onClick={submit}
+              onClick={() => submit()}
               // Disable while a previous submit is still being POSTed — pairs
               // with the sendInFlightRef guard in `submit()` to make double-
               // click a no-op. The ref is the source of truth; this just
@@ -918,6 +1023,7 @@ export function ReplyBox({
               {isNote ? "Save note" : attachment ? "Send media" : "Send"}
             </Button>
           </div>
+          )}
         </motion.div>
 
         {error && (

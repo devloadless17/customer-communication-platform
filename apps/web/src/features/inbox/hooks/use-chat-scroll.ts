@@ -63,10 +63,20 @@ export function useChatScroll({
   isOwnSend,
   hasMoreOlder,
   loadOlder,
-}: Options): { unreadBelow: number; scrollToBottom: () => void } {
+}: Options): {
+  unreadBelow: number;
+  scrollToBottom: () => void;
+  markBenignTailUpdate: () => void;
+} {
   const viewportRef = useRef<HTMLElement | null>(null);
   const stickyRef = useRef(true);
   const settleStopRef = useRef<(() => void) | null>(null);
+  // Set by the consumer before a `lastEntryKey` shift that isn't a real
+  // "new message" event (e.g. search-jump replaces the loaded slice with a
+  // context window centered on an older match — the new tail is older, but
+  // it's not new content). Consumed once by the tail-entry effect to skip
+  // the pill bump + the snap.
+  const skipNextTailEffectRef = useRef(false);
   // Counter of new tail entries that arrived while the user was scrolled
   // up reading history. Drives the "↓ N new messages" pill — UX pattern
   // borrowed from WhatsApp / Slack / Discord. Clears on conversation
@@ -185,6 +195,13 @@ export function useChatScroll({
     // "new message" — skip the unread bump that would otherwise show the
     // pill the moment a thread loads.
     if (isFirstObservation) return;
+    // Consumer flagged this transition as a benign slice swap (search-jump
+    // context window). Advance lastEntryIdRef so subsequent real events
+    // diff against the new value, but do NOT bump the pill or snap.
+    if (skipNextTailEffectRef.current) {
+      skipNextTailEffectRef.current = false;
+      return;
+    }
     if (isOwnSend) {
       // Kill any active load-older settle window — its ResizeObserver would
       // otherwise re-pin to the OLD distance-from-bottom and undo this snap.
@@ -333,5 +350,9 @@ export function useChatScroll({
     return () => obs.disconnect();
   }, [hasMoreOlder, loadOlder, contentRef, topSentinelRef]);
 
-  return { unreadBelow, scrollToBottom };
+  const markBenignTailUpdate = useCallback(() => {
+    skipNextTailEffectRef.current = true;
+  }, []);
+
+  return { unreadBelow, scrollToBottom, markBenignTailUpdate };
 }

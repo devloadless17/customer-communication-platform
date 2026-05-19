@@ -45,9 +45,58 @@ export function handleSessionExpired(): void {
 }
 
 /**
+ * Confirms whether the Better Auth session is actually gone before we
+ * nuke the cookie. Hits `/api/auth/get-session` which is served by the
+ * Next.js process directly (Better Auth catch-all) — so even when the
+ * NestJS upstream is restarting and returning 401s, this endpoint stays
+ * authoritative against the Session table via Prisma.
+ *
+ * Short cache + in-flight coalescing because a NestJS restart fires
+ * 401s from every active polling hook (counts, channel events, thread
+ * events, search) inside the same ~3s window — without coalescing we'd
+ * hammer Better Auth N times for the same answer.
+ */
+const SESSION_RECHECK_TTL_MS = 5_000;
+let lastValidatedAt = 0;
+let inFlight: Promise<boolean> | null = null;
+
+async function isSessionStillValid(): Promise<boolean> {
+  if (Date.now() - lastValidatedAt < SESSION_RECHECK_TTL_MS) return true;
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    try {
+      const res = await fetch("/api/auth/get-session", {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!res.ok) return false;
+      const data = (await res.json().catch(() => null)) as { user?: unknown } | null;
+      const alive = Boolean(data && data.user);
+      if (alive) lastValidatedAt = Date.now();
+      return alive;
+    } catch {
+      // Network error fetching the session check itself — be conservative
+      // and assume alive. Worst case the next poll cycle catches the real
+      // expiry; nuking the cookie on a network blip is the failure mode
+      // this whole helper exists to prevent.
+      return true;
+    } finally {
+      inFlight = null;
+    }
+  })();
+  return inFlight;
+}
+
+/**
  * Drop-in replacement for `fetch` that redirects to /login on 401 instead
  * of returning the response. Other status codes pass through unchanged so
  * existing per-call error handling still works.
+ *
+ * Single 401 is NOT treated as proof of expiry — during a NestJS dev
+ * restart (or any upstream blip) the SessionGuard transiently 401s for
+ * a few seconds while Better Auth's DB pool warms. We re-verify against
+ * Better Auth's own session endpoint (served by Next.js, independent of
+ * the upstream) before wiping the cookie.
  */
 export async function fetchWithSessionGuard(
   input: RequestInfo | URL,
@@ -55,6 +104,14 @@ export async function fetchWithSessionGuard(
 ): Promise<Response> {
   const res = await fetch(input, init);
   if (res.status === 401) {
+    const stillAuthed = await isSessionStillValid();
+    if (stillAuthed) {
+      // Transient upstream 401 — session is alive on the cookie-issuing
+      // side. Throw so callers' existing error paths fire (same shape as
+      // a network blip); the next poll cycle will succeed once the
+      // upstream recovers. Do NOT redirect to /logout here.
+      throw new Error("transient upstream 401");
+    }
     handleSessionExpired();
     // The redirect is async — throw so the caller doesn't try to parse the
     // 401 body as if it were valid data. Any unhandled rejection on the way
