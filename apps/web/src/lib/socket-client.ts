@@ -1,5 +1,6 @@
 "use client";
 
+import { flushSync } from "react-dom";
 import { io, type Socket } from "socket.io-client";
 
 import {
@@ -136,6 +137,59 @@ export function getClientSocket(): ClientSocket {
   return socket;
 }
 
+// -----------------------------------------------------------------------
+// Local event bus — backstop path for optimistic dispatches.
+//
+// The original implementation iterated `socket.listeners(event)` and fired
+// each handler directly. That worked for the right-rail panel + thread
+// header (their listeners ran sync), but the conversation list sidebar
+// kept lagging by ~1s — the user reported it consistently, even when the
+// other surfaces flipped within a frame.
+//
+// The relevant difference: the sidebar's listener (useTeamEvents) updates
+// state at the InboxShell root, which is a large render. The right-rail's
+// listener updates a state local to ContactPanel, which is a tiny render.
+// Both setStates ARE scheduled in the same batch, but React 18's
+// concurrent renderer is free to pre-empt the InboxShell render between
+// commits if it considers it lower-priority — so the right rail's tiny
+// re-render commits in the same frame as the click while the heavy
+// inbox-shell tree slips into a later frame.
+//
+// flushSync forces the listener loop to run inside a synchronous commit:
+// every setState fired by the dispatched listeners is flushed before the
+// dispatch function returns. The two surfaces commit together.
+//
+// The localBus also gives us a second, socket-independent subscription
+// path so any consumer that wants to be 100% sure to receive optimistic
+// frames can subscribe via `onLocalSocketEvent` instead of (or in
+// addition to) `socket.on`. Useful if a future change moves a listener
+// outside React tree where socket.io's lifecycle becomes opaque.
+// -----------------------------------------------------------------------
+type AnyListener = (payload: unknown) => void;
+const localBus = new Map<string, Set<AnyListener>>();
+
+export function onLocalSocketEvent<E extends keyof ServerToClientEvents>(
+  event: E,
+  fn: (payload: Parameters<ServerToClientEvents[E]>[0]) => void,
+): void {
+  const key = event as string;
+  let set = localBus.get(key);
+  if (!set) {
+    set = new Set();
+    localBus.set(key, set);
+  }
+  set.add(fn as AnyListener);
+}
+
+export function offLocalSocketEvent<E extends keyof ServerToClientEvents>(
+  event: E,
+  fn: (payload: Parameters<ServerToClientEvents[E]>[0]) => void,
+): void {
+  const set = localBus.get(event as string);
+  if (!set) return;
+  set.delete(fn as AnyListener);
+}
+
 /**
  * Fire a `ServerToClient` event LOCALLY (no network round-trip). Used for
  * optimistic UI when the client knows the change it's about to persist —
@@ -143,24 +197,58 @@ export function getClientSocket(): ClientSocket {
  * existing subscriber (sidebar counts, displayed thread reducer, LRU cache)
  * update instantly. The real server frame arriving moments later is absorbed
  * by reducers' identity / no-op bails — the second pass is harmless.
+ *
+ * Wrapped in `flushSync` so every state update queued by the dispatched
+ * listeners is forced to commit before this function returns. Without it,
+ * React 18's concurrent renderer was committing the small subtree updates
+ * (right-rail ContactPanel via setLiveStatus) inside the click frame but
+ * deferring the big InboxShell root update (sidebar conversation list via
+ * setConversations) by hundreds of ms — which is what the user kept reporting
+ * as "right-rail instant, left sidebar 1s lag".
  */
 export function dispatchLocalSocketEvent<E extends keyof ServerToClientEvents>(
   event: E,
   payload: Parameters<ServerToClientEvents[E]>[0],
 ): void {
   const s = socket;
-  if (!s) return;
+  // Collect every listener once so the iteration is stable even if a handler
+  // mutates the listener arrays (e.g. a useEffect cleanup fires mid-loop).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const listeners = s.listeners(event as any);
-  for (const fn of listeners) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (fn as any)(payload);
-    } catch (err) {
-      // A misbehaving subscriber must not break the optimistic UX.
-      // eslint-disable-next-line no-console
-      console.error(`[socket] local dispatch ${String(event)} subscriber threw`, err);
+  const socketListeners: AnyListener[] = s ? (s.listeners(event as any) as AnyListener[]).slice() : [];
+  const localListeners = localBus.get(event as string);
+  const localCopy: AnyListener[] = localListeners ? Array.from(localListeners) : [];
+  const all = socketListeners.length + localCopy.length;
+  if (all === 0) return;
+
+  const run = () => {
+    for (const fn of socketListeners) {
+      try {
+        fn(payload);
+      } catch (err) {
+        // A misbehaving subscriber must not break the optimistic UX.
+        // eslint-disable-next-line no-console
+        console.error(`[socket] local dispatch ${String(event)} subscriber threw`, err);
+      }
     }
+    for (const fn of localCopy) {
+      try {
+        fn(payload);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[socket] local-bus dispatch ${String(event)} subscriber threw`, err);
+      }
+    }
+  };
+
+  // flushSync errors when called during a render phase. The dispatch sites
+  // (dropdown onSelect handlers, openConversation callback, etc.) all fire
+  // from user events, not from render — so flushSync is safe. Guard anyway:
+  // a stray render-phase caller falls back to plain iteration rather than
+  // throwing.
+  try {
+    flushSync(run);
+  } catch {
+    run();
   }
 }
 
