@@ -40,6 +40,10 @@ import {
   startOutboundEventRetentionSweeper,
   stopOutboundEventRetentionSweeper,
 } from "@/lib/sweepers/outbound-event-retention";
+import {
+  startOutboundSendAttemptRetentionSweeper,
+  stopOutboundSendAttemptRetentionSweeper,
+} from "@/lib/sweepers/outbound-send-attempt-retention";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -67,6 +71,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private apiIdempotencyCleanupStarted = false;
   private blobOrphanSweeperStarted = false;
   private outboundEventRetentionStarted = false;
+  private outboundSendAttemptRetentionStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -148,9 +153,31 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start outbound-event retention sweeper", err);
     }
+    try {
+      // Daily retention on OutboundSendAttempt rows (the BEFORE-Meta-call
+      // idempotency log for text sends). 7-day cutoff — anything older has
+      // no corresponding BullMQ job left to retry, so the attempt-row's
+      // double-send-prevention role is moot.
+      startOutboundSendAttemptRetentionSweeper();
+      this.outboundSendAttemptRetentionStarted = true;
+      this.logger.log("Outbound send-attempt retention sweeper started");
+    } catch (err) {
+      this.logger.error(
+        "Failed to start outbound-send-attempt retention sweeper",
+        err,
+      );
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.outboundSendAttemptRetentionStarted)
+        stopOutboundSendAttemptRetentionSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopOutboundSendAttemptRetentionSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     try {
       if (this.outboundEventRetentionStarted) stopOutboundEventRetentionSweeper();
     } catch (err) {

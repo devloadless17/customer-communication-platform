@@ -96,6 +96,12 @@ enum TemplateCategory {
 //   completed — runner finished. `failedCount > 0` is possible (per-recipient
 //               failures don't fail the whole job).
 //   failed    — runner errored fatally (e.g. config disappeared mid-flight).
+//   paused    — process was draining gracefully (deploy, restart) and stopped
+//               the runner mid-flight. Boot reconciler auto-resumes by
+//               flipping back to `queued` and calling startBroadcast(); the
+//               CAS `queued→running` claim then takes over. Recipients
+//               already `sent` stay `sent`; remaining `queued` rows get
+//               picked up where the old runner left off.
 enum BroadcastStatus {
   queued
   running
@@ -106,6 +112,7 @@ enum BroadcastStatus {
   // its next status check. Distinct from `failed` so the UI can show
   // "you canceled this" instead of "this broke."
   canceled
+  paused
 }
 
 enum BroadcastRecipientStatus {
@@ -260,6 +267,7 @@ model Team {
   teamChannels            TeamChannel[]
   teamChannelMessages     TeamChannelMessage[]
   outboundEvents          OutboundEvent[]
+  outboundSendAttempts    OutboundSendAttempt[]
 }
 
 model User {
@@ -749,6 +757,68 @@ model Message {
   // serves chronological/range scans; this one is purpose-built for the
   // backward keyset cursor with id as the same-millisecond tiebreaker.
   @@index([conversationId, timestamp(sort: Desc), id(sort: Desc)])
+}
+
+// One-row-per-attempt log for outbound text sends, written BEFORE the Meta
+// fetch so a worker death mid-fetch can be detected on retry.
+//
+// Why this exists: BullMQ's send queue uses jobId = `msg-send-${clientTempId}`
+// and retries the SAME jobId after `lockDuration=90s` if the worker dies
+// without completing. Meta has no native idempotency key on POST /messages,
+// so a process death between Meta receiving the request and the worker
+// recording the response → BullMQ retry → Meta sends the message AGAIN.
+// The DB-level unique on `(teamId, provider, externalId)` dedupes the
+// resulting Message row, but the customer was already charged twice and
+// saw two messages on WhatsApp.
+//
+// The fix: every send attempt insert-or-fail-on-conflict a row here keyed
+// by jobId BEFORE calling Meta. If the insert succeeds, no prior attempt
+// touched Meta — safe to proceed. If a P2002 fires:
+//   - completedAt is set → the prior attempt succeeded; look up the
+//     existing Message row by externalId and re-publish `message.sent`
+//     so the originating client sees the bubble swap (idempotent reply).
+//   - completedAt is null → Meta may or may not have received the request
+//     in the prior attempt. We refuse to retry (UnrecoverableError) to
+//     avoid the rare double-charge. The originating client's post-HTTP
+//     watchdog (30s) will flip the optimistic bubble to `failed` and the
+//     user can retry — with a fresh clientTempId, which is a new jobId,
+//     and unblocked. Trade-off: a Meta-was-actually-down scenario means
+//     one "lost" send the user must re-do; vs the alternative of
+//     systematically double-charging on every deploy-induced retry.
+//
+// Cleanup: rows older than 7 days are purged by the outboundSendAttempt
+// sweeper (see apps/api/src/lib/sweepers/). Completed + failed rows are
+// expendable bookkeeping after the originating job has been ack'd by
+// BullMQ's removeOnComplete window (24h).
+model OutboundSendAttempt {
+  id               String    @id @default(cuid())
+  // Matches BullMQ's jobId for this send: `msg-send-${clientTempId}`. The
+  // SAME jobId is used across all retry attempts of the same client-side
+  // send action — that's the property we exploit to detect a retry.
+  jobId            String    @unique
+  teamId           String
+  conversationId   String
+  attemptStartedAt DateTime  @default(now())
+  // Set when the Meta fetch returned successfully AND we recorded the
+  // wamid. Until set, the attempt is considered in-flight or aborted.
+  completedAt      DateTime?
+  // Meta wamid from a successful send; used on retry to look up the
+  // existing Message row and re-publish `message.sent`.
+  externalId       String?
+  // Set when Meta returned a non-retryable error (4xx). A retry will see
+  // failedAt + a populated failureReason and proceed normally — the
+  // original failure publish to the client already happened, so a
+  // duplicate publish is harmless. (Failed-attempt rows still get
+  // recycled by the sweeper.)
+  failedAt         DateTime?
+  failureReason    String?
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  // Sweeper picks rows by (completedAt || failedAt) older than the
+  // retention window — index on attemptStartedAt for the scan.
+  @@index([attemptStartedAt])
+  @@index([teamId, completedAt])
 }
 
 // Pending team invite. Admin POSTs to /api/invites; the link contains a

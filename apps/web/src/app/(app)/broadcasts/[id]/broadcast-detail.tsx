@@ -173,10 +173,18 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   }, [data.id]);
 
   // Poll fallback — defence in depth if the socket connection drops mid-
-  // send. Stops once the broadcast finishes.
+  // send. Stops once the broadcast finishes. `paused` is included because
+  // it's not terminal — the api boot reconciler will auto-resume on next
+  // restart, flipping the row through queued → running and we want the UI
+  // to catch the transition without a manual refresh.
   useEffect(() => {
     cancelledRef.current = false;
-    if (data.status !== "queued" && data.status !== "running") return;
+    if (
+      data.status !== "queued" &&
+      data.status !== "running" &&
+      data.status !== "paused"
+    )
+      return;
     const timer = window.setInterval(() => {
       void refreshRef.current();
     }, POLL_INTERVAL_MS);
@@ -269,6 +277,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       <div className="text-[11px] text-muted-foreground">
         {progressPct}% processed
         {(data.status === "queued" || data.status === "running") && " · updates live"}
+        {data.status === "paused" && " · paused for server restart, will auto-resume"}
       </div>
 
       <section className="rounded-xl border border-border bg-card">

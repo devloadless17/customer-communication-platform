@@ -242,14 +242,6 @@ async function bootstrap(): Promise<void> {
     maxAge: 7200,
   });
 
-  // Register SIGTERM/SIGINT listeners so OnModuleDestroy fires on shutdown.
-  // Without this, WorkflowWorkerService.onModuleDestroy never runs and a
-  // VPS restart can leave BullMQ jobs in-flight at the 90s lock duration —
-  // when Redis releases the lock, the new process picks them up and may
-  // execute the same step twice (irreversible Meta sends, tag changes, etc).
-  // worker.close() awaits in-flight jobs cleanly before the queue closes.
-  app.enableShutdownHooks();
-
   const port = Number(process.env.API_PORT ?? 4000);
   const host = process.env.API_HOST ?? "0.0.0.0";
   const server = await app.listen(port, host);
@@ -267,6 +259,70 @@ async function bootstrap(): Promise<void> {
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 65_000;
+
+  // Graceful shutdown — drive the lifecycle ourselves instead of using
+  // app.enableShutdownHooks(). NestJS's bundled SIGTERM handler fires
+  // OnModuleDestroy hooks (where BullMQ workers drain — up to 90s) BEFORE
+  // the HTTP server is closed, so during that 90s window the api still
+  // accepts new requests that get SIGKILL'd when systemd's TimeoutStopSec
+  // expires. Inverting that order lets Caddy mark the upstream unhealthy
+  // immediately while workers finish in-flight jobs in the background.
+  //
+  // Sequence:
+  //   1. server.close()             — stop accepting new TCP connections
+  //                                    (returns immediately; existing
+  //                                    connections continue)
+  //   2. closeIdleConnections()     — force idle keep-alives shut so
+  //                                    Caddy's next probe sees us as down
+  //                                    within ~250ms instead of waiting for
+  //                                    them to time out
+  //   3. wait ~3s                   — gives in-flight HTTP responses a
+  //                                    chance to flush; covers ~99% of
+  //                                    normal request durations
+  //   4. app.close()                — fires OnModuleDestroy (workers drain
+  //                                    up to lockDuration=90s),
+  //                                    beforeApplicationShutdown, then
+  //                                    closes the HTTP server completely,
+  //                                    then onApplicationShutdown
+  //   5. process.exit(0)            — clean exit before systemd's
+  //                                    TimeoutStopSec=120 hard-kills us
+  //
+  // `once()` so a repeated SIGTERM (e.g., from impatient ops) doesn't
+  // re-enter the shutdown promise and double-fire app.close().
+  const shutdownLogger = new Logger("Shutdown");
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    shutdownLogger.log(`${signal} received — starting graceful drain`);
+
+    try {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        // Don't await the callback path forever — if a long-poll or
+        // websocket holds the server open, fall through after a short
+        // budget and let app.close() finish the job.
+        setTimeout(resolve, 3_000).unref();
+      });
+      if (typeof server.closeIdleConnections === "function") {
+        server.closeIdleConnections();
+      }
+    } catch (err) {
+      shutdownLogger.error("server.close() failed", err as Error);
+    }
+
+    try {
+      await app.close();
+    } catch (err) {
+      shutdownLogger.error("app.close() failed", err as Error);
+    }
+
+    shutdownLogger.log("graceful drain complete");
+    process.exit(0);
+  };
+
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
 
   const logger = new Logger("Bootstrap");
   logger.log(`NestJS API listening on http://${host}:${port}`);

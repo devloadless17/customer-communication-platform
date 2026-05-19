@@ -242,7 +242,13 @@ export interface ServerToClientEvents {
   "broadcast:status": (payload: {
     teamId: string;
     broadcastId: string;
-    status: "queued" | "running" | "completed" | "failed" | "canceled";
+    status:
+      | "queued"
+      | "running"
+      | "completed"
+      | "failed"
+      | "canceled"
+      | "paused";
     error?: string;
   }) => void;
 

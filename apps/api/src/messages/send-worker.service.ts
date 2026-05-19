@@ -64,7 +64,11 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
     }
     this.worker = new Worker<MessageSendJobData>(
       MESSAGE_SEND_QUEUE_NAME,
-      async (job) => this.handle(job.data),
+      // `job.id` is BullMQ's stable identifier — same value across all 3
+      // retry attempts when a worker dies mid-job. Threaded into the
+      // executor so it can write an OutboundSendAttempt row keyed on this
+      // id, which prevents a mid-fetch Meta retry from double-sending.
+      async (job) => this.handle(job.data, job.id),
       {
         connection: connectionOptions(),
         concurrency: 5,
@@ -100,8 +104,29 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
     // Mirror the workflow worker's graceful-stop posture: await in-flight,
     // then release the Redis lock cleanly. systemd TimeoutStopSec=120 in
     // deploy/ccp.service is sized to cover lockDuration + this drain.
+    //
+    // Hard cap on the await so a single send stuck mid-Meta-fetch can't keep
+    // the close hanging until SIGKILL. Past 85s the BullMQ lock has expired
+    // anyway — another worker will pick it up cleanly after restart.
     if (this.worker) {
-      await this.worker.close();
+      const closeTimeoutMs = 85_000;
+      const worker = this.worker;
+      await Promise.race([
+        worker.close(),
+        new Promise<void>((_resolve, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `message-sends worker.close() exceeded ${closeTimeoutMs}ms — abandoning drain so process can exit before SIGKILL`,
+                ),
+              ),
+            closeTimeoutMs,
+          ).unref(),
+        ),
+      ]).catch((err) => {
+        this.logger.warn(err instanceof Error ? err.message : String(err));
+      });
       this.worker = null;
     }
   }
@@ -112,9 +137,12 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
    * On failure we publish `message.send_failed` and decide whether BullMQ
    * should retry — transient → re-throw; permanent → UnrecoverableError.
    */
-  private async handle(data: MessageSendJobData): Promise<void> {
+  private async handle(
+    data: MessageSendJobData,
+    jobId: string | undefined,
+  ): Promise<void> {
     try {
-      await this.messages.executeTextSendJob(data);
+      await this.messages.executeTextSendJob(data, jobId);
     } catch (err) {
       const { reason, detail, recoverable } = categorizeSendError(err);
       // Publish first so the originating client sees the failed bubble

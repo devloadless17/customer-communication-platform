@@ -113,12 +113,71 @@ interface BroadcastVariables {
   header?: string;
 }
 
+/**
+ * Process-wide shutdown coordination for in-flight broadcasts.
+ *
+ * The runner can't use NestJS lifecycle hooks directly (this is a
+ * framework-agnostic lib module), so the NestJS wrapper
+ * (`BroadcastsService.onModuleDestroy`) calls into these helpers.
+ *
+ * Mechanism:
+ *   1. `shuttingDown` flag — each running lane checks it between recipients
+ *      and exits the loop cleanly (without marking the row as `failed`).
+ *   2. `inFlightRuns` — tracks the top-level `runBroadcast(id)` promises so
+ *      the wrapper can `Promise.allSettled` them before the api process
+ *      exits. Critical: returning from this means every lane has finished
+ *      its current recipient (Meta call + DB write), so the next process
+ *      restart can resume from the next `queued` row safely.
+ */
+let shuttingDown = false;
+const inFlightRuns = new Map<string, Promise<void>>();
+
+export function isShuttingDown(): boolean {
+  return shuttingDown;
+}
+
+export function signalShutdown(): void {
+  shuttingDown = true;
+}
+
+/**
+ * Snapshot of in-flight runs at call time, for the wrapper to await. Returned
+ * as an array of Promises so caller can race them against a timeout budget.
+ */
+export function getInFlightRunPromises(): Promise<void>[] {
+  return Array.from(inFlightRuns.values());
+}
+
+/**
+ * Test/restart helper — clear the in-process shutdown flag so subsequent
+ * `startBroadcast()` calls actually run. Called by the boot reconciler so
+ * a worker that signaled shutdown and is now starting fresh can accept
+ * resumes.
+ */
+export function resetShutdownFlag(): void {
+  shuttingDown = false;
+}
+
 export async function startBroadcast(broadcastId: string): Promise<void> {
+  // If we're mid-shutdown, refuse to start fresh runners — the caller (REST
+  // controller) will surface a 503 to the user and the broadcast stays in
+  // `queued` until the next boot reconciler picks it up.
+  if (shuttingDown) {
+    console.warn(
+      `[broadcast ${broadcastId}] refused to start: process is shutting down`,
+    );
+    return;
+  }
   // Fire-and-forget — the caller doesn't await this; we explicitly catch so
   // the unhandled rejection doesn't crash the server.
-  void runBroadcast(broadcastId).catch((err) => {
-    console.error(`[broadcast ${broadcastId}] runner crashed`, err);
-  });
+  const run = runBroadcast(broadcastId)
+    .catch((err) => {
+      console.error(`[broadcast ${broadcastId}] runner crashed`, err);
+    })
+    .finally(() => {
+      inFlightRuns.delete(broadcastId);
+    });
+  inFlightRuns.set(broadcastId, run);
 }
 
 async function runBroadcast(broadcastId: string): Promise<void> {
@@ -195,6 +254,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // a retry fired before the first finished), only one of them flips
   // `queued` → `running`; the other sees `count === 0` and bails out without
   // sending a single message.
+  //
+  // Resume case: the boot reconciler flips `paused` → `queued` and re-fires
+  // startBroadcast, so by the time we get here a previously-paused broadcast
+  // is `queued` again and the same CAS picks it up. No special-case needed.
   const claimed = await db.broadcast.updateMany({
     where: { id: broadcast.id, status: "queued" },
     data: { status: "running", startedAt: new Date() },
@@ -305,6 +368,13 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     Array.from({ length: lanes }, async () => {
       while (true) {
         if (await checkCanceled()) return;
+        // Graceful-shutdown check: the NestJS wrapper signals shutdown
+        // before awaiting in-flight runs. Each lane exits the loop here,
+        // which means the current recipient (if any was already started
+        // above) finished its Meta call + DB write before we return.
+        // Anything not yet pulled stays in `queued` for the next process's
+        // boot reconciler to resume.
+        if (shuttingDown) return;
         if (queue.length === 0) {
           await refill();
           if (queue.length === 0) return;
@@ -347,11 +417,36 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     progressThrottles.delete(broadcast.id);
   }
 
-  // Skip the completed transition if the operator already flipped the row
-  // to `canceled` mid-flight — the cancel endpoint will (or already did)
-  // publish its own `broadcast.status_changed`. updateMany scoped to
-  // status="running" keeps this race-safe even without the if-guard.
-  if (!canceled) {
+  // Three possible exits from the lane loop:
+  //   1. canceled by operator → cancel endpoint owns the status emit.
+  //   2. shuttingDown (graceful drain) → flip `running` → `paused`. Boot
+  //      reconciler on the next process will flip back to `queued` and call
+  //      startBroadcast(); recipient CAS prevents double-send.
+  //   3. recipients exhausted (normal completion) → flip `running` →
+  //      `completed`.
+  //
+  // Every branch is gated on status="running" so a race with cancel/pause
+  // never overwrites the more specific terminal status.
+  if (canceled) {
+    // cancel endpoint already published the status change.
+  } else if (shuttingDown) {
+    const queuedRemaining = await db.broadcastRecipient.count({
+      where: { broadcastId: broadcast.id, status: "queued" },
+    });
+    await db.broadcast.updateMany({
+      where: { id: broadcast.id, status: "running" },
+      data: { status: "paused" },
+    });
+    console.warn(
+      `[broadcast ${broadcast.id}] paused for shutdown — ${queuedRemaining} recipient(s) remain queued`,
+    );
+    await publish({
+      type: "broadcast.status_changed",
+      teamId: broadcast.teamId,
+      broadcastId: broadcast.id,
+      status: "paused",
+    });
+  } else {
     await db.broadcast.updateMany({
       where: { id: broadcast.id, status: "running" },
       data: { status: "completed", completedAt: new Date() },
@@ -809,104 +904,101 @@ async function fail(broadcastId: string, message: string): Promise<void> {
 }
 
 /**
- * Boot-time reconciler. Flips any broadcast still marked `running` to
- * `failed` — by definition orphaned, because the api process is the only
- * thing that drives the runner and we just started.
+ * Boot-time reconciler. Two cases:
  *
- * Recipients aren't touched: they only have queued/sent/failed (no running
- * state — the CAS at send time goes queued→sent atomically), so a recipient
- * stuck at `queued` under an orphaned broadcast just stays orphaned. We
- * don't auto-resume because in-flight Meta sends from the dead process
- * aren't idempotent on this end — we don't know which ones landed.
+ *   1. `running` orphans — the previous process died (crash or hard restart
+ *      that bypassed graceful shutdown) without flipping the status. By
+ *      definition orphaned: the api process is the only thing that drives
+ *      the runner. Treated as a paused broadcast — flip to `paused` and
+ *      resume below. Safer than `failed` because the per-recipient CAS
+ *      already prevents double-send on every recipient that was already
+ *      `sent`, and a recipient stuck in `queued` is by definition unsent.
  *
- * Called from BroadcastsService.onModuleInit so it fires once per boot.
+ *   2. `paused` rows — graceful shutdown stamped this; resume.
  *
- * ─── OPS RUNBOOK: recovering a crashed mid-flight broadcast ─────────────
+ * Resume mechanism: flip the row back to `queued` and call startBroadcast().
+ * The runner's CAS `queued → running` claim handles the rest; the lane loop
+ * skips already-`sent` recipients via the per-recipient `queued → sent` CAS
+ * inside processOneRecipient.
  *
- * Symptoms after a crash + restart:
- *   - One or more rows in `Broadcast` now show `status = "failed"` with
- *     `lastError = "process restarted mid-broadcast; resume not supported"`.
- *   - `BroadcastRecipient` rows for these broadcasts split into:
- *       sent     — message already went out on Meta (irreversible).
- *       queued   — never attempted; safe to re-send.
- *       failed   — attempted but Meta rejected; re-sending may or may not
- *                  succeed depending on the failure code.
+ * Edge case — mid-fetch crash on attempt 1: the previous process called
+ * Meta but died before stamping `queued → sent`. On resume, we re-call
+ * Meta for that recipient. Meta sends the message AGAIN. The recipient
+ * row stays at `queued` because we still don't know the first wamid; the
+ * SECOND call writes a fresh Message + recipient row. This is the same
+ * double-send risk that P2 (OutboundSendAttempt for outbound text sends)
+ * addresses for the text-send path; broadcasts have their own narrower
+ * window because per-recipient send + CAS happen back-to-back without a
+ * BullMQ-style retry layer in between. Document, don't block on it.
  *
- * Recommended manual recovery:
- *
- *   1. Identify the crashed broadcast(s) — query above.
- *
- *   2. Decide whether to retry. If the `queued` set is small (<50) and
- *      time-sensitive, manually create a new broadcast targeted at JUST
- *      those contacts:
- *
- *        SELECT "contactId" FROM "BroadcastRecipient"
- *        WHERE "broadcastId" = '<crashed-id>' AND status = 'queued';
- *
- *      Pipe the result into the contactIds field of a new broadcast via
- *      the UI's "send to specific contacts" path. Use the same template,
- *      audience-substitute with these ids only.
- *
- *   3. For `failed` recipients, investigate per-row `errorDetail`. Most
- *      common: 24h window closed (template was used outside the window)
- *      or contact's phone became invalid. These usually shouldn't be
- *      retried automatically.
- *
- * Future-proof: a proper resume button would need each recipient to
- * record `attemptedAt` BEFORE the Meta call so a recovery can ask Meta
- * (GET /v?/messages?fields=) whether the message ID exists. Out of
- * scope for pilot; documented here for whoever picks it up.
- * ─────────────────────────────────────────────────────────────────────────
+ * Called from BroadcastsService.onModuleInit.
  */
 export async function reconcileOrphanedBroadcasts(): Promise<void> {
-  const orphans = await db.broadcast.findMany({
+  // Reset the in-process shutdown flag — if this process previously called
+  // signalShutdown() and is now starting fresh (e.g., from a test harness
+  // restart inside the same Node instance), we need to actually accept
+  // resumes here.
+  resetShutdownFlag();
+
+  // 1) `running` orphans → flip to `paused` so the resume path below picks
+  // them up uniformly with broadcasts that were paused by graceful shutdown.
+  const runningOrphans = await db.broadcast.findMany({
     where: { status: "running" },
     select: { id: true, teamId: true },
   });
-  if (orphans.length === 0) return;
-
-  console.warn(
-    `[broadcast-reconciler] flipping ${orphans.length} orphaned running broadcast(s) to failed`,
-  );
-
-  // Count abandoned (queued) recipients per orphan BEFORE we flip the
-  // status, so the operator alert + UI banner can quantify the damage.
-  // Without this the orphan failure is silent: operators don't know that
-  // N customers never received a time-sensitive broadcast.
-  const abandonedByBroadcast = new Map<string, number>();
-  for (const o of orphans) {
-    const count = await db.broadcastRecipient.count({
-      where: { broadcastId: o.id, status: "queued" },
+  if (runningOrphans.length > 0) {
+    console.warn(
+      `[broadcast-reconciler] flipping ${runningOrphans.length} orphaned running broadcast(s) to paused for resume`,
+    );
+    await db.broadcast.updateMany({
+      where: { id: { in: runningOrphans.map((o) => o.id) } },
+      data: { status: "paused" },
     });
-    abandonedByBroadcast.set(o.id, count);
-    if (count > 0) {
-      console.warn(
-        `[broadcast-reconciler] broadcast ${o.id}: ${count} recipient(s) ` +
-          `abandoned in 'queued' state — runbook step (2) required`,
-      );
-    }
   }
 
-  const errorMessage = "process restarted mid-broadcast; resume not supported";
-  await db.broadcast.updateMany({
-    where: { id: { in: orphans.map((o) => o.id) } },
-    data: {
-      status: "failed",
-      lastError: errorMessage,
-      completedAt: new Date(),
-    },
+  // 2) Every `paused` row → flip back to `queued` and re-fire the runner.
+  // updateMany is racing with create() callers but the per-row CAS in
+  // runBroadcast.claim() (status="queued") keeps it race-safe.
+  const pausedRows = await db.broadcast.findMany({
+    where: { status: "paused" },
+    select: { id: true, teamId: true },
   });
+  if (pausedRows.length === 0) return;
 
-  for (const o of orphans) {
-    const abandoned = abandonedByBroadcast.get(o.id) ?? 0;
-    await publish({
-      type: "broadcast.status_changed",
-      teamId: o.teamId,
-      broadcastId: o.id,
-      status: "failed",
-      error: errorMessage,
-      ...(abandoned > 0 ? { abandonedRecipients: abandoned } : {}),
+  for (const row of pausedRows) {
+    const queuedRemaining = await db.broadcastRecipient.count({
+      where: { broadcastId: row.id, status: "queued" },
     });
+    if (queuedRemaining === 0) {
+      // Nothing to resume — mark completed. This handles the edge case
+      // where the previous process sent every recipient but died before
+      // flipping the parent row to `completed`.
+      await db.broadcast.updateMany({
+        where: { id: row.id, status: "paused" },
+        data: { status: "completed", completedAt: new Date() },
+      });
+      await publish({
+        type: "broadcast.status_changed",
+        teamId: row.teamId,
+        broadcastId: row.id,
+        status: "completed",
+      });
+      continue;
+    }
+
+    const flipped = await db.broadcast.updateMany({
+      where: { id: row.id, status: "paused" },
+      data: { status: "queued" },
+    });
+    if (flipped.count === 0) continue;
+
+    console.warn(
+      `[broadcast-reconciler] resuming broadcast ${row.id} (${queuedRemaining} recipient(s) remaining)`,
+    );
+    // Fire-and-forget — startBroadcast schedules the runner inside
+    // setImmediate via its own mechanics. We don't await so onModuleInit
+    // returns quickly.
+    startBroadcast(row.id);
   }
 }
 

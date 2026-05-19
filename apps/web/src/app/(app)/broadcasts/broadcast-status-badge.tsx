@@ -1,4 +1,10 @@
-import { CheckCircle2, CircleSlash, Loader2, ClockArrowUp } from "lucide-react";
+import {
+  CheckCircle2,
+  CircleSlash,
+  ClockArrowUp,
+  Loader2,
+  PauseCircle,
+} from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
 
@@ -49,6 +55,23 @@ function mapStatus(status: string) {
         Icon: CircleSlash,
         tone: "border-destructive/30 bg-destructive/10 text-destructive",
         label: "Failed",
+        spin: false,
+      };
+    case "canceled":
+      return {
+        Icon: CircleSlash,
+        tone: "border-border bg-muted/40 text-muted-foreground",
+        label: "Canceled",
+        spin: false,
+      };
+    case "paused":
+      // Auto-paused by graceful shutdown — boot reconciler will resume
+      // automatically on next restart. Amber to communicate "in-flight,
+      // waiting" without the alarm of red/failed.
+      return {
+        Icon: PauseCircle,
+        tone: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        label: "Paused (auto-resumes)",
         spin: false,
       };
     default:

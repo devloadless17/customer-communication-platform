@@ -210,6 +210,29 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
 
 export async function stopWorkflowWorker(): Promise<void> {
   if (!state.worker) return;
-  await state.worker.close();
+  // Hard cap on `worker.close()` so a single hung job (e.g., a step stuck
+  // mid-fetch with no timeout) can't outlast systemd's TimeoutStopSec=120s
+  // and force a SIGKILL — which would defeat the whole graceful-stop point.
+  // BullMQ's own lockDuration=90s means anything past 85s has already lost
+  // its lock; another worker can pick the job up cleanly after restart.
+  const closeTimeoutMs = 85_000;
+  await Promise.race([
+    state.worker.close(),
+    new Promise<void>((_resolve, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `[workflows] worker.close() exceeded ${closeTimeoutMs}ms — abandoning drain so process can exit before SIGKILL`,
+            ),
+          ),
+        closeTimeoutMs,
+      ).unref(),
+    ),
+  ]).catch((err) => {
+    // Log but don't re-throw — the caller's try/catch already warns and we
+    // want the rest of onModuleDestroy (queue close, etc.) to still run.
+    console.error(err instanceof Error ? err.message : err);
+  });
   state.worker = undefined;
 }

@@ -15,6 +15,7 @@ import {
 } from "@nestjs/common";
 
 import { blobStorage } from "@/lib/blob-storage";
+import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
 import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
@@ -322,7 +323,10 @@ export class MessagesService {
    * `timestamp` and the conversation reorder match send order even when
    * the worker has a brief backlog.
    */
-  async executeTextSendJob(data: import("./send-queue").SendTextJobData): Promise<void> {
+  async executeTextSendJob(
+    data: import("./send-queue").SendTextJobData,
+    jobId?: string,
+  ): Promise<void> {
     const {
       teamId,
       userId,
@@ -365,6 +369,105 @@ export class MessagesService {
       ? loadReplySnapshotById(replyToMessageId)
       : Promise.resolve(null);
 
+    // BEFORE-Meta-call idempotency: try to insert an OutboundSendAttempt
+    // row keyed by jobId. The first attempt succeeds and proceeds to call
+    // Meta. A retry job (same jobId, after worker death) will P2002 on
+    // this insert; we then inspect the existing row to decide what to do.
+    //
+    // If jobId is undefined (server-driven send with no clientTempId, no
+    // BullMQ jobId — none today, but defensive) we skip the attempt log
+    // entirely. The downstream DB unique constraint on externalId still
+    // dedupes; we just don't get the "refuse to retry" protection.
+    let attemptCreated = false;
+    if (jobId) {
+      try {
+        await this.db.outboundSendAttempt.create({
+          data: { jobId, teamId, conversationId },
+        });
+        attemptCreated = true;
+      } catch (err) {
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === "P2002"
+        ) {
+          // Prior attempt exists. Two sub-cases:
+          const prior = await this.db.outboundSendAttempt.findUnique({
+            where: { jobId },
+          });
+          if (prior?.completedAt && prior.externalId) {
+            // (a) Prior attempt succeeded — Meta already sent the message
+            // and we have the wamid. Look up the Message row written by
+            // the prior attempt and re-publish message.sent so the
+            // originating client gets the bubble swap. Idempotent at the
+            // socket layer (frontend reducer dedups by externalId).
+            const existing = await this.db.message.findFirst({
+              where: {
+                teamId,
+                provider: "meta_cloud",
+                externalId: prior.externalId,
+              },
+            });
+            if (existing) {
+              const replySnapshot = await replySnapshotPromise;
+              const replayed: Message = {
+                id: existing.id,
+                teamId: existing.teamId,
+                conversationId: existing.conversationId,
+                externalId: existing.externalId ?? prior.externalId,
+                senderUserId: existing.senderUserId,
+                body: existing.body,
+                direction: existing.direction,
+                provider: existing.provider,
+                status: existing.status,
+                rawPayload: existing.rawPayload as Record<string, unknown>,
+                timestamp: existing.timestamp.toISOString(),
+                ...(existing.replyToMessageId
+                  ? {
+                      replyToMessageId: existing.replyToMessageId,
+                      replyTo: replySnapshot ?? null,
+                    }
+                  : {}),
+              };
+              // publish() (not publishInTx) — this is a recovery re-emit
+              // for a client whose first delivery may have been lost. The
+              // audit row may dupe (rare; only when the original publish
+              // had also fired); accepted because the alternative is the
+              // client UI never showing the bubble.
+              await publish({
+                type: "message.sent",
+                teamId,
+                conversationId: existing.conversationId,
+                message: replayed,
+                preview: existing.body.slice(0, 200),
+                senderUserId: userId,
+                ...(clientTempId ? { clientTempId } : {}),
+              } as DomainEventOf<"message.sent">);
+              return;
+            }
+            // No Message row despite a completed attempt — extremely rare
+            // (would require a process death after the attempt completed
+            // but before the message commit). Fall through to the
+            // refuse-to-retry path; user can re-send with a new
+            // clientTempId.
+          }
+          // (b) Prior attempt incomplete (no completedAt, or completed
+          // but Message row not findable) — Meta MAY have already sent
+          // the message. Refusing to retry avoids the rare double-charge.
+          // Non-recoverable so BullMQ stops retrying; the worker
+          // categorizes this `error` field as non-recoverable, publishes
+          // message.send_failed, and the client's failed-bubble UI lets
+          // the user retry with a new clientTempId.
+          throw new UnprocessableEntityException({
+            error: "send_in_progress_or_lost",
+            message:
+              "A previous attempt for this message may have already reached WhatsApp. Refusing to retry to avoid a duplicate send. Re-send to try again.",
+            status: 409,
+          });
+        }
+        throw err;
+      }
+    }
+
     let send;
     try {
       send = await getMetaProvider().sendText(
@@ -376,6 +479,23 @@ export class MessagesService {
         config,
       );
     } catch (err) {
+      // Stamp the attempt as failed so any retry sees `failedAt` set and
+      // proceeds normally (failed attempts are bookkeeping; BullMQ already
+      // decided whether to retry via categorizeSendError).
+      if (attemptCreated && jobId) {
+        await this.db.outboundSendAttempt
+          .update({
+            where: { jobId },
+            data: {
+              failedAt: new Date(),
+              failureReason: (err instanceof Error
+                ? err.message
+                : String(err)
+              ).slice(0, 500),
+            },
+          })
+          .catch(() => undefined);
+      }
       const normalized = normalizeMetaSendError(err);
       if (normalized) {
         throw new UnprocessableEntityException({
@@ -390,6 +510,33 @@ export class MessagesService {
         error: "send_failed",
         detail: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // Meta succeeded — mark the attempt completed BEFORE writing the
+    // Message row. Order matters: if we crash between Meta returning and
+    // the Message insert, a retry would see `completedAt` set + no
+    // Message row, fall through to the refuse-to-retry path, and the
+    // user re-sends with a new clientTempId. The Meta-sent message
+    // remains uncatalogued in our inbox — rare, manually recoverable.
+    // (Alternative: write Message first, then stamp attempt completed.
+    // But the symmetric race exists: crash between Meta and Message,
+    // retry would proceed and double-send.)
+    if (attemptCreated && jobId) {
+      await this.db.outboundSendAttempt
+        .update({
+          where: { jobId },
+          data: {
+            completedAt: new Date(),
+            externalId: send.externalId,
+          },
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `OutboundSendAttempt completed-stamp failed for jobId=${jobId}: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        });
     }
 
     // Timestamp monotonicity guard — outbound must sort strictly after any

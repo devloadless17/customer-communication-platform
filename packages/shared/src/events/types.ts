@@ -398,15 +398,19 @@ export interface MessageMediaReadyEvent {
 }
 
 /**
- * Broadcast lifecycle: queued → running → completed | failed | canceled.
+ * Broadcast lifecycle: queued → running → completed | failed | canceled | paused.
  * `canceled` is operator-initiated via POST /api/broadcasts/:id/cancel —
  * runner sees the flipped status between recipients and bails.
+ * `paused` is automatic on graceful shutdown — the runner stamps it when
+ * the process is draining for deploy/restart; the boot reconciler flips
+ * back to `queued` and re-fires the runner, which resumes via the
+ * recipient CAS without re-sending anything already marked `sent`.
  * Emitted by the broadcast runner at each phase transition.
  */
 export interface BroadcastStatusChangedEvent {
   teamId: string;
   broadcastId: string;
-  status: "queued" | "running" | "completed" | "failed" | "canceled";
+  status: "queued" | "running" | "completed" | "failed" | "canceled" | "paused";
   error?: string;
   /**
    * When status === "failed" via the boot reconciler, the count of

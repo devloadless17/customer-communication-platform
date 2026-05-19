@@ -5,10 +5,16 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  type OnModuleDestroy,
   type OnModuleInit,
 } from "@nestjs/common";
 
-import { reconcileOrphanedBroadcasts, startBroadcast } from "@/lib/broadcast-runner";
+import {
+  getInFlightRunPromises,
+  reconcileOrphanedBroadcasts,
+  signalShutdown,
+  startBroadcast,
+} from "@/lib/broadcast-runner";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
@@ -17,17 +23,17 @@ import { DbService } from "../db/db.service";
 import type { CreateBroadcastInput } from "./broadcasts.schemas";
 
 @Injectable()
-export class BroadcastsService implements OnModuleInit {
+export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BroadcastsService.name);
 
   constructor(private readonly db: DbService) {}
 
   /**
-   * Boot-time crash recovery. Any broadcast row still in `running` status
-   * is by definition orphaned — the api process is the only thing that
-   * drives the runner, and we just started. Flip them to `failed` so the
-   * delete endpoint and UI can move on. See `reconcileOrphanedBroadcasts`
-   * in lib/broadcast-runner.ts for the rationale.
+   * Boot-time crash recovery + paused-broadcast resume. See
+   * `reconcileOrphanedBroadcasts` in lib/broadcast-runner.ts for the full
+   * rationale; in short, `running` orphans get demoted to `paused`, and
+   * every `paused` row gets re-fired through startBroadcast() so the
+   * runner picks up where the prior process left off (CAS per recipient).
    */
   async onModuleInit(): Promise<void> {
     try {
@@ -35,6 +41,48 @@ export class BroadcastsService implements OnModuleInit {
     } catch (err) {
       this.logger.error("orphan reconciler failed on boot", err);
     }
+  }
+
+  /**
+   * Graceful drain — fired by NestJS when main.ts triggers app.close().
+   * Order is:
+   *   1. signalShutdown() — sets the in-process flag the runner's lanes
+   *      check between recipients. New startBroadcast() calls are also
+   *      refused (would 503 the create endpoint, but we're shutting down
+   *      so no new broadcasts should be hitting us anyway).
+   *   2. Await the in-flight `runBroadcast(id)` promises with a timeout
+   *      budget. Returning from each promise means every lane has finished
+   *      its CURRENT recipient (Meta call + DB write) and the runner has
+   *      stamped the parent row as `paused`.
+   *   3. The timeout budget here matches main.ts's overall systemd
+   *      TimeoutStopSec=120s minus headroom for the other onModuleDestroy
+   *      hooks (workers, sweepers, queue close, Prisma pool drain). 25s
+   *      covers ~125 recipient drain at 5 lanes × 200ms gap. Past that,
+   *      any still-running lanes are killed mid-recipient and the boot
+   *      reconciler will resume that broadcast cleanly (recipient stays
+   *      `queued`, runner re-fires after restart).
+   */
+  async onModuleDestroy(): Promise<void> {
+    signalShutdown();
+    const inFlight = getInFlightRunPromises();
+    if (inFlight.length === 0) return;
+
+    this.logger.log(
+      `draining ${inFlight.length} in-flight broadcast(s) for graceful shutdown`,
+    );
+
+    const drainTimeoutMs = 25_000;
+    await Promise.race([
+      Promise.allSettled(inFlight),
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          this.logger.warn(
+            `broadcast drain exceeded ${drainTimeoutMs}ms — abandoning in-flight runs; boot reconciler will resume them`,
+          );
+          resolve();
+        }, drainTimeoutMs).unref(),
+      ),
+    ]);
   }
 
   /**
