@@ -65,6 +65,30 @@ async function main() {
     update: {},
   });
 
+  // Three lifecycle stages — same set the registration flow
+  // (apps/api/src/registration/register.controller.ts) seeds for every new
+  // team. Without these, /settings/stages renders an empty pipeline and the
+  // inbox sidebar's "by stage" section is blank until the first inbound
+  // message triggers `ensureDefaultStage` to lazily create a single "Stage 1".
+  const stages = [
+    { name: "Stage 1", color: "lime", position: 0, isDefault: true },
+    { name: "Stage 2", color: "amber", position: 1, isDefault: false },
+    { name: "Stage 3", color: "emerald", position: 2, isDefault: false },
+  ];
+  for (const s of stages) {
+    await db.contactStage.upsert({
+      where: { teamId_name: { teamId: team.id, name: s.name } },
+      create: {
+        teamId: team.id,
+        name: s.name,
+        color: s.color,
+        position: s.position,
+        isDefault: s.isDefault,
+      },
+      update: {},
+    });
+  }
+
   console.log(`✓ superAdmin ready: ${user.email} / ${PASSWORD}`);
 }
 

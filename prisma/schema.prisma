@@ -546,8 +546,10 @@ model ContactStage {
   // Sort order in the stages list — lower first. New stages get the next
   // available slot at create time; reorder is a bulk PATCH.
   position  Int      @default(0)
-  // Exactly one row per team should carry isDefault = true. Enforced in app
-  // code (see /api/team/stages POST + PATCH).
+  // Exactly one row per team should carry isDefault = true. The partial
+  // unique index `ContactStage_teamId_isDefault_key` (raw SQL in the init
+  // migration) is the backstop; the app-code pre-check in
+  // /api/team/stages POST + PATCH still runs as a friendlier 4xx.
   isDefault Boolean  @default(false)
   createdAt DateTime @default(now())
 
