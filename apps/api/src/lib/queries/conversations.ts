@@ -196,13 +196,6 @@ export async function listConversations(
   return { items, nextCursor };
 }
 
-// fetchLastInboundMap was removed when `Contact.lastInboundAt` became a
-// denormalized column (migration 20260517223100_query_perf_indexes). The
-// list-page now selects that column directly; the inline build at the
-// callsite replaces what this helper used to compute via a lateral GROUP BY.
-// Git blame this comment for the original implementation if a future
-// non-contact-aware caller needs to recompute the value.
-
 /**
  * Hydrate a conversation with its most recent `messageLimit` messages
  * (default 50) and the full notes list. Returns `nextOlderCursor` so the

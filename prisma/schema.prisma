@@ -516,11 +516,11 @@ model Contact {
   // pg_trgm GIN index for substring ILIKE search on contact name.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
   // NOTE: the JSONB GIN index `Contact_customFields_gin_idx` (USING GIN
-  // ("customFields" jsonb_path_ops)) is created in
-  // `20260517223100_query_perf_indexes`. It's NOT declared here because
-  // Prisma's `raw("jsonb_path_ops")` emitter appends a redundant `ASC` that
-  // its own diff tool then flags as drift on every `migrate dev`, producing
-  // a no-op DROP+CREATE migration every time. Hand-managed sidesteps that.
+  // ("customFields" jsonb_path_ops)) is hand-written in the init migration's
+  // raw-SQL section. It's NOT declared here because Prisma's
+  // `raw("jsonb_path_ops")` emitter appends a redundant `ASC` that its own
+  // diff tool then flags as drift on every `migrate dev`, producing a no-op
+  // DROP+CREATE migration every time. Hand-managed sidesteps that.
 }
 
 // Customer-lifecycle stage. A team configures an ordered list ("New",
@@ -530,11 +530,11 @@ model Contact {
 //
 // `isDefault` is the stage new contacts land in (manual creates, webhook
 // ingest, CSV import all consult it). At-most-one-default-per-team is
-// enforced by a partial unique index — see migration
-// 20260518190000_contact_stages_default_partial_unique. Prisma doesn't
-// model partial indexes, so the index is raw-SQL only; the app code's
-// pre-check still exists as a friendlier error path but is no longer
-// load-bearing for correctness.
+// enforced by a partial unique index (`ContactStage_teamId_isDefault_key`
+// in the init migration's raw-SQL section). Prisma doesn't model partial
+// indexes, so the index is raw-SQL only; the app code's pre-check still
+// exists as a friendlier error path but is no longer load-bearing for
+// correctness.
 //
 // `color` mirrors the Tag color slot system (lib/tag-colors.ts) so the same
 // safelist of Tailwind classes covers both surfaces.
@@ -722,11 +722,12 @@ model Message {
   team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User?        @relation("AuthoredMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
-  // NOTE: a partial index on inbound-only messages also exists in the DB —
-  // declared in raw SQL (see migration `20260517_perf_indexes`) because
-  // Prisma can't express `WHERE direction = 'in'` via `@@index`. It powers
-  // the "what was the contact's last inbound?" lookups (24h-window UI +
-  // getConversationWithRefs.lastInboundAt) without scanning outbound rows.
+  // NOTE: a partial index on inbound-only messages also exists in the DB
+  // (`Message_conversationId_timestamp_inbound_idx` in the init migration's
+  // raw-SQL section). Prisma can't express `WHERE direction = 'in'` via
+  // `@@index`. It powers the "what was the contact's last inbound?" lookups
+  // (24h-window UI + lastInboundAt drift sweeper) without scanning outbound
+  // rows.
 
   @@unique([teamId, provider, externalId])
   @@index([conversationId, timestamp])
@@ -1448,22 +1449,15 @@ model TeamChannelMessage {
   pin           TeamChannelPin?
 
   // Keyset on the main feed: WHERE channelId = ? AND threadRootId IS NULL
-  // ORDER BY createdAt DESC, id DESC. Migration
-  // `20260518000000_team_chat_search_and_partial_index/migration.sql` adds the
-  // partial index for top-level rows (Prisma can't model partial indexes).
-  // The full index below covers the thread-panel read:
-  // WHERE threadRootId = ? ORDER BY createdAt ASC.
-  //
-  // Channel message search uses a pg_trgm GIN index on `body` for ILIKE —
-  // see the same migration for `TeamChannelMessage_body_trgm_idx`.
+  // ORDER BY createdAt DESC, id DESC. The partial index for top-level rows
+  // (`TeamChannelMessage_channel_toplevel_keyset_idx` in the init migration's
+  // raw-SQL section) covers that read; Prisma can't model partial indexes.
+  // The full (threadRootId, createdAt) index below covers the thread-panel
+  // read: WHERE threadRootId = ? ORDER BY createdAt ASC.
   @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([threadRootId, createdAt])
   @@index([teamId])
-  // pg_trgm GIN for substring ILIKE on channel-message body. The
-  // top-level-only partial index (`channelId, createdAt DESC, id DESC WHERE
-  // threadRootId IS NULL`) stays hand-written in
-  // 20260518000000_team_chat_search_and_partial_index — Prisma's DSL can't
-  // model partial indexes.
+  // pg_trgm GIN for substring ILIKE on channel-message body.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "TeamChannelMessage_body_trgm_idx")
 }
 

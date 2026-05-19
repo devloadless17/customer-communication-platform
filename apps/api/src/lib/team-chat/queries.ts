@@ -464,10 +464,10 @@ export async function listThreadReplies(
 
 /**
  * Substring/case-insensitive search inside a single channel's top-level
- * messages. Backed by the `pg_trgm` GIN index on `body` — see the migration
- * `20260518000000_team_chat_search_and_partial_index`. ILIKE patterns shorter
- * than 3 chars hit the index only for prefix matches; the controller refuses
- * those upstream so we never sequential-scan from a 1-char query.
+ * messages. Backed by the `pg_trgm` GIN index on `body`
+ * (`TeamChannelMessage_body_trgm_idx`). ILIKE patterns shorter than 3 chars
+ * hit the index only for prefix matches; the controller refuses those
+ * upstream so we never sequential-scan from a 1-char query.
  *
  * Keyset-paginated by `(createdAt DESC, id DESC)` — the same shape as the
  * main feed, so the UI can paginate results with familiar semantics.
