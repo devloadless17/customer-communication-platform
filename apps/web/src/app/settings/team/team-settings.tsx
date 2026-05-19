@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 import { closeClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import {
@@ -191,7 +192,9 @@ export function TeamSettings({
     // chance to flash "Reconnecting…" between the server-side socket kick
     // (api/team DELETE → disconnectUserSockets) and the /logout hard nav.
     // The flag inside closeClientSocket also suppresses the banner across
-    // the rest of this teardown.
+    // the rest of this teardown. Broadcast first so every other tab in this
+    // browser tears down in parallel, not after their own next 401.
+    broadcastSignout();
     closeClientSocket();
     const res = await fetch("/api/team", { method: "DELETE" });
     if (!res.ok) {

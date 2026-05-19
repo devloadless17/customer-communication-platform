@@ -13,6 +13,13 @@
  * action paths (send, mark-read) keep their existing error handling so a
  * truly transient 401 surfaces as "couldn't send, retry" instead of a
  * forced logout.
+ *
+ * Deliberately does NOT broadcast on the auth-channel: a 401 means THIS
+ * tab's session row is gone, not necessarily every sibling tab's. The
+ * canonical case is change-password — it deletes every Session row EXCEPT
+ * the current one, so the user stays signed in on the tab they typed the
+ * password into. Broadcasting from here would kick that tab too. Cross-tab
+ * signal lives on the explicit signout paths instead.
  */
 
 let redirecting = false;

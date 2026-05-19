@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { roleLabel } from "@ccp/shared/auth/permissions";
+import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 import { closeClientSocket } from "@/lib/socket-client";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
@@ -249,6 +250,7 @@ function UserMenu({
             // Drop the socket before navigation so other clients see the
             // user go offline immediately. Hard nav avoids the Better Auth
             // cookies-vs-redirect race in server actions.
+            broadcastSignout();
             closeClientSocket();
             window.location.assign("/logout");
           }}

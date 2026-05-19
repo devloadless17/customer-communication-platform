@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TimezoneProvider } from "@/providers/tz-provider";
+import { AuthBroadcastListener } from "@/components/auth-broadcast-listener";
 import { ServiceWorkerKillSwitch } from "@/components/service-worker-killswitch";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -67,6 +68,7 @@ export default async function RootLayout({
             full rationale. Client component (no inline-script-with-nonce
             path → no hydration-mismatch warning on the nonce attribute). */}
         <ServiceWorkerKillSwitch />
+        <AuthBroadcastListener />
         <ThemeProvider
           attribute="class"
           defaultTheme="light"
