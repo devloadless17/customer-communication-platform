@@ -9,6 +9,7 @@ import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import {
   applyMessageStatus,
+  COALESCED_LIVE_HOOK_EVENTS,
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
 import type { ConversationWithRefs, CursorPage, Message } from "@ccp/shared/types";
@@ -574,16 +575,19 @@ export function useConversationEvents(
     };
 
     socket.on("message:new", onMessageNew);
-    // message:status stays out of the iterated loop because the live hook
-    // RAF-coalesces it (cached side patches the Map without React renders,
-    // no batching needed). The reducer itself is shared via the array.
+    // message:status is in COALESCED_LIVE_HOOK_EVENTS — the live hook RAF-
+    // coalesces it (sent/delivered/read transitions cascade in bursts and a
+    // React render per arrival pinned the inbox CPU during broadcasts). The
+    // reducer itself is still shared via THREAD_REDUCER_EVENTS so the
+    // cached-shell consumer applies the same logic without RAF batching.
     socket.on("message:status", onMessageStatus);
     socket.on("message:failed", onMessageFailed);
     socket.on("note:new", onNoteNew);
     socket.on("conversation:deleted", onConversationDeleted);
 
     // Iterated wiring — bind one direct-setData handler per reducer entry.
-    // Skips `message:status` (RAF-coalesced above). Adding an entry to
+    // Skips events in COALESCED_LIVE_HOOK_EVENTS (declared in thread-reducers.ts
+    // as the structural source of truth). Adding a non-coalesced entry to
     // THREAD_REDUCER_EVENTS auto-wires this hook with no edits here.
     //
     // Targeting:
@@ -594,7 +598,7 @@ export function useConversationEvents(
     //     it applies to this thread.
     const reducerCtx = { currentUserId };
     const reducerHandlers = THREAD_REDUCER_EVENTS.filter(
-      (e) => e.event !== "message:status",
+      (e) => !COALESCED_LIVE_HOOK_EVENTS.has(e.event),
     ).map(({ event, apply, target }) => {
       const handler = (payload: { conversationId?: string } & Record<string, unknown>) => {
         if ((target ?? "conversation") === "conversation") {

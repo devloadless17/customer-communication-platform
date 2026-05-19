@@ -10,36 +10,45 @@ import { db } from "@/lib/db";
  * denorm = sidebar sort order silently disagrees with the actual last
  * inbound time, with no operator signal until someone notices.
  *
- * This sweeper runs once daily and rewrites any drifted rows in a single
- * server-side UPDATE. Self-disables if no drift is found for a week so
- * a healthy system doesn't pay for the scan in perpetuity (re-enables
- * after the next process boot).
- *
- * Cadence: 24h. Cheap enough to run forever even at multi-tenant scale —
- * the UPDATE is a single set-based statement, planner walks the contact
- * table once. At pilot scale (1 customer, < 10k contacts) it's effectively
- * free.
+ * Cadence: 24h. Cheap enough to run forever — the UPDATE is a single
+ * set-based statement, planner walks the contact table once. At pilot
+ * scale (1 customer, < 10k contacts) it's effectively free, and even at
+ * 100x that the daily cost is sub-second. An earlier self-disabling
+ * variant (after 7 quiet days) was clever-not-correct: the disable state
+ * was in-memory only and reset on every process restart, so the savings
+ * were marginal and the extra state machine cost more in debug time than
+ * the scan ever cost in DB time.
  */
 
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INITIAL_DELAY_MS = 5 * 60 * 1000; // wait 5min after boot so steady-state work isn't competing
-const QUIET_DAYS_BEFORE_SELF_DISABLE = 7;
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;
-let consecutiveQuietDays = 0;
+// In-flight guard — the reconcile is a single set-based UPDATE so a slow
+// tick won't normally overlap with the 24h interval, but the guard is
+// cheap and makes the safety contract explicit.
+let inFlight = false;
+
+async function runTick(label: string): Promise<void> {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    await sweepOnce();
+  } catch (err) {
+    console.error(`[sweeper.contact-drift] ${label} failed`, err);
+  } finally {
+    inFlight = false;
+  }
+}
 
 export function startContactDriftSweeper(): void {
   if (timer || initialTimer) return;
   initialTimer = setTimeout(() => {
     initialTimer = null;
-    void sweepOnce().catch((err) =>
-      console.error("[sweeper.contact-drift] initial sweep failed", err),
-    );
+    void runTick("initial sweep");
     timer = setInterval(() => {
-      void sweepOnce().catch((err) =>
-        console.error("[sweeper.contact-drift] sweep failed", err),
-      );
+      void runTick("sweep");
     }, SWEEP_INTERVAL_MS);
     timer.unref?.();
   }, INITIAL_DELAY_MS);
@@ -58,13 +67,6 @@ export function stopContactDriftSweeper(): void {
 }
 
 async function sweepOnce(): Promise<void> {
-  if (consecutiveQuietDays >= QUIET_DAYS_BEFORE_SELF_DISABLE) {
-    // Self-disable until next process boot. Re-enable trigger is implicit
-    // (restarts naturally reset `consecutiveQuietDays = 0`), which gives
-    // the steady-state happy path zero per-day cost.
-    return;
-  }
-
   // One-pass: join Contact against the per-contact MAX(timestamp) of
   // inbound messages, update only where the denorm disagrees. Treats
   // both "actual was NULL but contact has a stale value" and "contact
@@ -96,11 +98,8 @@ async function sweepOnce(): Promise<void> {
   `;
 
   if (drifted > 0) {
-    consecutiveQuietDays = 0;
     console.warn(
       `[sweeper.contact-drift] reconciled ${drifted} contact(s) with stale lastInboundAt`,
     );
-  } else {
-    consecutiveQuietDays += 1;
   }
 }

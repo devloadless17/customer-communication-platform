@@ -81,8 +81,14 @@ export interface SnippetDto {
 const CATALOG_REVALIDATE_S = 60;
 
 export async function getCurrentTeam(): Promise<{ id: string; name: string }> {
+  // No cache tag — there's no Team rename endpoint today (GET + DELETE only),
+  // so a tag-based bust would have no publisher. The 60s time-based revalidate
+  // covers any future change with a one-minute upper bound on staleness. The
+  // moment a PATCH /api/team lands, add `team-root` to both this `tags` array
+  // AND the allowlist in apps/web/src/app/api/internal/revalidate/route.ts
+  // AND wire `team.catalog_changed` with a `team-root` scope.
   const { team } = await api<{ team: { id: string; name: string } }>("/api/team", {
-    next: { tags: ["team-root"], revalidate: CATALOG_REVALIDATE_S },
+    next: { revalidate: CATALOG_REVALIDATE_S },
   });
   return team;
 }

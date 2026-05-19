@@ -225,3 +225,23 @@ export const THREAD_REDUCER_EVENTS = [
     target: "all",
   }),
 ] as const;
+
+/**
+ * Events that the LIVE-hook consumer (`useConversationEvents`) RAF-coalesces
+ * instead of directly applying through the iterated `THREAD_REDUCER_EVENTS`
+ * loop. The reducer itself is still shared — the cached-shell consumer
+ * (`inbox-shell.tsx`) iterates the full array and applies these like any
+ * other event because Map mutations don't need React batching.
+ *
+ * Why this list exists (and not just a magic string filter in the hook):
+ * declare the exception structurally in one place. Adding a new coalesced
+ * event = drop a string here, write the reducer, add to THREAD_REDUCER_EVENTS,
+ * and bind a manual RAF-coalesced handler in the live hook. Forgetting any
+ * step is a code-search away rather than a stale-cache bug six months later.
+ *
+ * Today only `message:status` is here — sent/delivered/read transitions
+ * cascade in 100-500ms bursts and a React re-render per arrival pinned the
+ * inbox CPU at 100% during multi-recipient broadcasts.
+ */
+export const COALESCED_LIVE_HOOK_EVENTS: ReadonlySet<keyof ServerToClientEvents> =
+  new Set(["message:status"]);

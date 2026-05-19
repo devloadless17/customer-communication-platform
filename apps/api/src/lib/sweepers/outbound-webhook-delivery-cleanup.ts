@@ -10,9 +10,12 @@ import { db } from "@/lib/db";
  * adds up to millions of rows over a year. Most of those are unread debug
  * artifacts a week after they landed.
  *
- * Cadence: 24h, with self-disable after a quiet week (no deletions). Same
- * shape as the contact-drift sweeper so an operator who's read one has
- * read both.
+ * Cadence: 24h. Cheap enough to run unconditionally — a single set-based
+ * deleteMany against an indexed `createdAt < cutoff` predicate. An earlier
+ * variant self-disabled after a quiet week to save the daily scan, but the
+ * disable state lived in-memory only (reset on every restart) so the
+ * savings were illusory, and the extra state machine cost more in debug
+ * time than the scan ever cost in DB time.
  *
  * Retention: 30 days. Longer than Stripe's 30-day "Events" tab is fine if
  * a partner asks, but most debugging happens within hours of the failure.
@@ -21,7 +24,6 @@ import { db } from "@/lib/db";
 
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INITIAL_DELAY_MS = 10 * 60 * 1000; // 10min after boot so workflow + drift sweepers don't dogpile
-const QUIET_DAYS_BEFORE_SELF_DISABLE = 7;
 
 function retentionDays(): number {
   const raw = Number.parseInt(process.env.WEBHOOK_DELIVERY_RETENTION_DAYS ?? "30", 10);
@@ -30,19 +32,29 @@ function retentionDays(): number {
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;
-let consecutiveQuietDays = 0;
+// In-flight guard — explicit safety so a large backlog deleteMany can't
+// overlap with the next tick if the table is huge.
+let inFlight = false;
+
+async function runTick(label: string): Promise<void> {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    await sweepOnce();
+  } catch (err) {
+    console.error(`[sweeper.webhook-delivery-cleanup] ${label} failed`, err);
+  } finally {
+    inFlight = false;
+  }
+}
 
 export function startOutboundWebhookDeliveryCleanup(): void {
   if (timer || initialTimer) return;
   initialTimer = setTimeout(() => {
     initialTimer = null;
-    void sweepOnce().catch((err) =>
-      console.error("[sweeper.webhook-delivery-cleanup] initial sweep failed", err),
-    );
+    void runTick("initial sweep");
     timer = setInterval(() => {
-      void sweepOnce().catch((err) =>
-        console.error("[sweeper.webhook-delivery-cleanup] sweep failed", err),
-      );
+      void runTick("sweep");
     }, SWEEP_INTERVAL_MS);
     timer.unref?.();
   }, INITIAL_DELAY_MS);
@@ -61,21 +73,14 @@ export function stopOutboundWebhookDeliveryCleanup(): void {
 }
 
 async function sweepOnce(): Promise<void> {
-  if (consecutiveQuietDays >= QUIET_DAYS_BEFORE_SELF_DISABLE) {
-    return;
-  }
-
   const cutoff = new Date(Date.now() - retentionDays() * 24 * 60 * 60 * 1000);
   const { count } = await db.outboundWebhookDelivery.deleteMany({
     where: { createdAt: { lt: cutoff } },
   });
 
-  if (count === 0) {
-    consecutiveQuietDays++;
-    return;
+  if (count > 0) {
+    console.log(
+      `[sweeper.webhook-delivery-cleanup] removed ${count} rows older than ${retentionDays()}d`,
+    );
   }
-  consecutiveQuietDays = 0;
-  console.log(
-    `[sweeper.webhook-delivery-cleanup] removed ${count} rows older than ${retentionDays()}d`,
-  );
 }

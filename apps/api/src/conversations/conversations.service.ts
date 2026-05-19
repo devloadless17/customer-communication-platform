@@ -383,7 +383,22 @@ export class ConversationsService {
       .map((m) => m.mediaKey)
       .filter((k): k is string => Boolean(k));
 
-    await this.db.conversation.delete({ where: { id: conversationId } });
+    // Compound where (id + teamId) via deleteMany — Prisma's single `delete`
+    // accepts only unique constraints, and Conversation.id alone is the
+    // unique key, so a bare delete would honor any id matching the just-
+    // gated findFirst. The gate ABOVE already enforces tenant ownership,
+    // but defense-in-depth: a future refactor that drops the gate (or
+    // races a transaction across it) shouldn't be one line away from a
+    // cross-tenant delete. deleteMany on (id, teamId) is no-op if either
+    // doesn't match.
+    const { count } = await this.db.conversation.deleteMany({
+      where: { id: conversationId, teamId },
+    });
+    if (count === 0) {
+      // Row vanished between findFirst and deleteMany — concurrent delete
+      // by another actor. Treat as already-gone success; no fanout needed.
+      return;
+    }
 
     if (mediaKeys.length > 0) {
       await blobStorage.delete(mediaKeys);

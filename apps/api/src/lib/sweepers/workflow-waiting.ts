@@ -28,16 +28,29 @@ import { enqueueWorkflowResume } from "@/lib/workflows/queue";
 
 const SWEEP_INTERVAL_MS = 60_000;
 let timer: NodeJS.Timeout | null = null;
+// In-flight guard: a slow sweep (long DB query / re-enqueue tail) MUST NOT
+// overlap with the next interval tick. BullMQ deduplicates by jobId so a
+// double-enqueue is silently safe today, but the protection is implicit —
+// the moment a sweeper grows extra side effects, overlapping ticks become
+// a correctness hazard. Cheap explicit flag, no race on Node's single-
+// threaded event loop.
+let inFlight = false;
 
 export function startWorkflowWaitingSweeper(): void {
   if (timer) return;
   timer = setInterval(() => {
-    sweepOnce().catch((err) => {
-      console.warn(
-        "[workflow-waiting-sweeper] iteration failed:",
-        err instanceof Error ? err.message : err,
-      );
-    });
+    if (inFlight) return;
+    inFlight = true;
+    sweepOnce()
+      .catch((err) => {
+        console.warn(
+          "[workflow-waiting-sweeper] iteration failed:",
+          err instanceof Error ? err.message : err,
+        );
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   }, SWEEP_INTERVAL_MS);
   timer.unref?.();
 }

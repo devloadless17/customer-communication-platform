@@ -210,11 +210,30 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       // make the orphan-detect on a LATER step think this one crashed.
       if (inProgressIdx >= 0) stepLog.splice(inProgressIdx, 1);
     } catch (err) {
-      if (inProgressIdx >= 0) stepLog.splice(inProgressIdx, 1);
       // Two flavors of throw:
       //   - UnknownStepTypeError / StepConfigError → permanent (don't retry)
       //   - everything else (network, DB transient) → throw so BullMQ retries
-      if (err instanceof UnknownStepTypeError || err instanceof StepConfigError) {
+      const isPermanent =
+        err instanceof UnknownStepTypeError || err instanceof StepConfigError;
+
+      // For irreversible steps on TRANSIENT throws: preserve the in_progress
+      // entry so the next BullMQ attempt's orphan-detect (above) catches it
+      // and writes `skipped_after_crash` instead of re-running the side
+      // effect. The Meta send may have succeeded between the in_progress
+      // write and the throw; double-firing is the bug CLAUDE.md rule #3
+      // explicitly exists to prevent. We also skip the per-attempt `failed`
+      // breadcrumb in that case — pushing a terminal entry alongside the
+      // preserved in_progress would defeat the orphan-detect (which bails
+      // when ANY terminal entry exists for the stepId). UI visibility is
+      // restored on the retry via the skipped_after_crash entry.
+      const preserveInProgressForOrphanDetect =
+        !isPermanent && inProgressIdx >= 0 && hasSideEffect(node.type);
+
+      if (!preserveInProgressForOrphanDetect && inProgressIdx >= 0) {
+        stepLog.splice(inProgressIdx, 1);
+      }
+
+      if (isPermanent) {
         stepLog.push({
           stepId: node.id,
           type: node.type,
@@ -235,17 +254,20 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         });
         return { runId: run.id, status: "failed" };
       }
-      // Persist a failing log entry BEFORE throwing — the next attempt
-      // will create a fresh log entry. Without this, transient failures
-      // leave no breadcrumb in the UI between retries.
-      stepLog.push({
-        stepId: node.id,
-        type: node.type,
-        status: "failed",
-        errorMessage: err instanceof Error ? err.message : String(err),
-        startedAt: startedAt.toISOString(),
-        finishedAt: new Date().toISOString(),
-      });
+
+      if (!preserveInProgressForOrphanDetect) {
+        // Persist a failing log entry BEFORE throwing — the next attempt
+        // will create a fresh log entry. Without this, transient failures
+        // leave no breadcrumb in the UI between retries.
+        stepLog.push({
+          stepId: node.id,
+          type: node.type,
+          status: "failed",
+          errorMessage: err instanceof Error ? err.message : String(err),
+          startedAt: startedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+        });
+      }
       await db.workflowRun.update({
         where: { id: run.id },
         data: {

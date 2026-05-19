@@ -35,18 +35,31 @@ function graceMs(): number {
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;
+// In-flight guard — under a backlog the Promise.allSettled tail could grow
+// past the 60s tick. Without the guard, a second tick would re-enqueue the
+// same orphan rows in parallel; BullMQ would coalesce by row id but we'd
+// pay double the Redis writes. Explicit flag is cheaper.
+let inFlight = false;
+
+async function runTick(label: string): Promise<void> {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    await sweepOnce();
+  } catch (err) {
+    console.error(`[sweeper.orphan-webhook-delivery] ${label} failed`, err);
+  } finally {
+    inFlight = false;
+  }
+}
 
 export function startOrphanWebhookDeliverySweeper(): void {
   if (timer || initialTimer) return;
   initialTimer = setTimeout(() => {
     initialTimer = null;
-    void sweepOnce().catch((err) =>
-      console.error("[sweeper.orphan-webhook-delivery] initial sweep failed", err),
-    );
+    void runTick("initial sweep");
     timer = setInterval(() => {
-      void sweepOnce().catch((err) =>
-        console.error("[sweeper.orphan-webhook-delivery] sweep failed", err),
-      );
+      void runTick("sweep");
     }, SWEEP_INTERVAL_MS);
     timer.unref?.();
   }, INITIAL_DELAY_MS);

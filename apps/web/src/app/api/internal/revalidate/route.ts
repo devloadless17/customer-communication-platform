@@ -62,7 +62,10 @@ export async function POST(req: Request): Promise<Response> {
   // misconfigured client can't churn arbitrary tag names through the
   // cache (each revalidateTag invalidates GLOBALLY across users).
   const allowed = new Set([
-    "team-root",
+    // "team-root" intentionally omitted — getCurrentTeam() in queries.ts no
+    // longer tags the response (no rename endpoint exists; nothing publishes
+    // a matching catalog_changed scope). Re-add here AND in queries.ts AND
+    // wire a publisher the moment a Team-update endpoint ships.
     "team-members",
     "catalog-tags",
     "catalog-snippets",

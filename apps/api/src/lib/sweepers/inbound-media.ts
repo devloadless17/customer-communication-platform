@@ -23,18 +23,32 @@ const SWEEP_INTERVAL_MS = 60 * 1000;
 const STALE_THRESHOLD_MS = 2 * 60 * 1000;
 
 let timer: NodeJS.Timeout | null = null;
+// In-flight guard — prevents a slow sweep (large batched UPDATE + N media-
+// ready publishes) from overlapping with the next interval tick. The
+// publishes are bus-only so a double-publish would re-emit the same
+// "ready" frame to clients, which would harmlessly re-clear an already-
+// cleared placeholder, but the explicit flag keeps the contract clear.
+let inFlight = false;
+
+async function runTick(label: string): Promise<void> {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    await sweepOnce();
+  } catch (err) {
+    console.error(`[sweeper.inbound-media] ${label} failed`, err);
+  } finally {
+    inFlight = false;
+  }
+}
 
 export function startInboundMediaSweeper(): void {
   if (timer) return;
   // Run once on boot to clear casualties from the previous process. Then
   // settle into the periodic cadence.
-  void sweepOnce().catch((err) =>
-    console.error("[sweeper.inbound-media] initial sweep failed", err),
-  );
+  void runTick("initial sweep");
   timer = setInterval(() => {
-    void sweepOnce().catch((err) =>
-      console.error("[sweeper.inbound-media] sweep failed", err),
-    );
+    void runTick("sweep");
   }, SWEEP_INTERVAL_MS);
   timer.unref();
 }

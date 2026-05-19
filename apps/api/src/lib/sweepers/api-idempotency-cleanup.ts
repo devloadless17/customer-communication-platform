@@ -27,18 +27,30 @@ const MAX_PER_SWEEP = 10_000;
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;
+// In-flight guard — a large backlog could push a sweep tail past the next
+// tick. Guard makes the safety contract explicit and prevents two parallel
+// delete batches racing for the same rows.
+let inFlight = false;
+
+async function runTick(label: string): Promise<void> {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    await sweepOnce();
+  } catch (err) {
+    console.error(`[sweeper.api-idempotency] ${label} failed`, err);
+  } finally {
+    inFlight = false;
+  }
+}
 
 export function startApiIdempotencyCleanupSweeper(): void {
   if (timer || initialTimer) return;
   initialTimer = setTimeout(() => {
     initialTimer = null;
-    void sweepOnce().catch((err) =>
-      console.error("[sweeper.api-idempotency] initial sweep failed", err),
-    );
+    void runTick("initial sweep");
     timer = setInterval(() => {
-      void sweepOnce().catch((err) =>
-        console.error("[sweeper.api-idempotency] sweep failed", err),
-      );
+      void runTick("sweep");
     }, SWEEP_INTERVAL_MS);
     timer.unref?.();
   }, INITIAL_DELAY_MS);
