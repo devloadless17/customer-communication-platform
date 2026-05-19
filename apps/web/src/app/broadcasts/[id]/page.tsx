@@ -19,7 +19,7 @@ export default async function BroadcastDetailPage({
   if (!broadcast) notFound();
 
   return (
-    <div className="mx-auto flex max-w-4xl flex-col gap-6 px-6 py-8">
+    <div className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
       <Link
         href="/broadcasts"
         className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"

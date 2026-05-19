@@ -19,14 +19,15 @@ export default function Loading() {
       {/* AppRail column — 56px chrome (always shown — matches the real
           shell which doesn't hide AppRail at any breakpoint). */}
       <div className="h-full w-14 shrink-0 border-r border-border bg-muted/30" />
-      {/* InboxSubSidebar column — w-52 (~208px) below md:, w-64 (~256px) at
-          md+ — mirrors the responsive widths in sub-sidebar.tsx. */}
-      <div className="h-full w-52 shrink-0 border-r border-border bg-muted/20 md:w-64" />
+      {/* InboxSubSidebar column — only shown at lg+ (1024px); below that
+          it lives in the hamburger drawer. w-40 at lg, w-52 at xl+.
+          Matches sub-sidebar.tsx. */}
+      <div className="hidden h-full shrink-0 border-r border-border bg-muted/20 lg:block lg:w-40 xl:w-52" />
 
-      {/* Conversation list column — w-72 (~288px) below md:, w-95 (~380px)
-          at md+ — mirrors the responsive widths in conversation-list.tsx
-          so there's no horizontal jump the moment the real shell hydrates. */}
-      <div className="flex h-full w-72 shrink-0 flex-col border-r border-border md:w-95">
+      {/* Conversation list column — w-64 (~256px) below md+, w-64 (~256px)
+          at lg, w-80 (~320px) at xl+ — mirrors conversation-list.tsx
+          so there's no horizontal jump when the real shell hydrates. */}
+      <div className="flex h-full w-64 shrink-0 flex-col border-r border-border xl:w-80">
         <div className="border-b border-border px-3 py-3">
           <div className="h-8 w-full animate-pulse rounded-md bg-muted" />
         </div>

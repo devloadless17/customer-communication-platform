@@ -72,6 +72,9 @@ export async function sendTextInternal(
     where: { id: args.conversationId, teamId: args.teamId },
     select: {
       id: true,
+      // lastMessageAt feeds the timestamp-ordering guard below. Pulling it
+      // here avoids a second roundtrip after the Meta send returns.
+      lastMessageAt: true,
       contact: { select: { phoneNumber: true, lastInboundAt: true } },
     },
   });
@@ -119,6 +122,25 @@ export async function sendTextInternal(
     sendConfig,
   );
 
+  // Force the outbound's timestamp to be strictly later than the most
+  // recent message on the conversation. Without this, a workflow that
+  // replies inside the same wall-clock second as the inbound it's
+  // responding to ends up with `new Date()` (ms-precision) BEFORE the
+  // inbound's Meta timestamp (seconds-precision, rounded up):
+  //
+  //   inbound:  timestamp = 14:46:53.000  (Meta's second-precision ts)
+  //   outbound: timestamp = 14:46:52.939  (new Date(), happens to be earlier)
+  //
+  // Inbox sorts by `timestamp ASC`, so the welcome appeared above the
+  // message that triggered it. The +1ms bump guarantees strict ordering
+  // even when the conversation last-message tick lands later than our
+  // wall clock.
+  const lastTs = conversation.lastMessageAt ?? null;
+  const messageTimestamp =
+    lastTs && lastTs >= receivedAt
+      ? new Date(lastTs.getTime() + 1)
+      : receivedAt;
+
   const created = await createOutboundMessageIdempotent({
     teamId: args.teamId,
     conversationId: args.conversationId,
@@ -129,13 +151,17 @@ export async function sendTextInternal(
     provider: "meta_cloud",
     status: "sent",
     rawPayload: { sentVia: args.sentVia } as Prisma.InputJsonValue,
-    timestamp: receivedAt,
+    timestamp: messageTimestamp,
   });
 
   const previewBody = body.slice(0, 200);
   const bumped = await db.conversation.update({
     where: { id: args.conversationId },
-    data: { lastMessageAt: send.timestamp, lastMessagePreview: previewBody },
+    // Use the same `messageTimestamp` as the Message row so the
+    // conversation's lastMessageAt stays in lock-step with the
+    // ordering guard above. Using `send.timestamp` (Meta's response
+    // clock) here would have reintroduced the same monotonicity hole.
+    data: { lastMessageAt: messageTimestamp, lastMessagePreview: previewBody },
     select: { unreadCount: true },
   });
 
@@ -150,7 +176,7 @@ export async function sendTextInternal(
     provider: "meta_cloud",
     status: "sent",
     rawPayload: { sentVia: args.sentVia },
-    timestamp: receivedAt.toISOString(),
+    timestamp: messageTimestamp.toISOString(),
   };
 
   // Publish through the bus so socket-fanout emits `message:new` AND the
@@ -162,7 +188,7 @@ export async function sendTextInternal(
     conversationId: args.conversationId,
     message,
     preview: previewBody,
-    lastMessageAt: send.timestamp.toISOString(),
+    lastMessageAt: messageTimestamp.toISOString(),
     // Outbound doesn't bump unread; the row's current value is the
     // accurate absolute count.
     unreadCount: bumped.unreadCount,

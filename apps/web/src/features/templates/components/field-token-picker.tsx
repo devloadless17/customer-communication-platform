@@ -1,6 +1,16 @@
 "use client";
 
-import { AtSign, ChevronDown, Hash, MapPin, Tag, User, UserCircle } from "lucide-react";
+import {
+  AtSign,
+  ChevronDown,
+  Hash,
+  Inbox,
+  MapPin,
+  MessageSquare,
+  Tag,
+  User,
+  UserCircle,
+} from "lucide-react";
 
 import {
   DropdownMenu,
@@ -40,6 +50,11 @@ export function FieldTokenPicker({
    * agent per send so they leave this off).
    */
   includeAgent = false,
+  /** Expose `$var.message.*` — workflow step editors for message_received. */
+  includeMessage = false,
+  /** Expose `$var.conversation.*` — workflow step editors for any
+   *  conversation-bearing trigger. */
+  includeConversation = false,
 }: {
   fieldDefinitions: ContactFieldDefinition[];
   onInsert: (token: string) => void;
@@ -47,10 +62,18 @@ export function FieldTokenPicker({
   className?: string;
   hint?: string;
   includeAgent?: boolean;
+  includeMessage?: boolean;
+  includeConversation?: boolean;
 }) {
-  const tokens = listAvailableTokens(fieldDefinitions, { includeAgent });
+  const tokens = listAvailableTokens(fieldDefinitions, {
+    includeAgent,
+    includeMessage,
+    includeConversation,
+  });
   const builtins = tokens.filter((t) => t.group === "builtin");
   const customs = tokens.filter((t) => t.group === "custom");
+  const messages = tokens.filter((t) => t.group === "message");
+  const conversations = tokens.filter((t) => t.group === "conversation");
   const agents = tokens.filter((t) => t.group === "agent");
 
   return (
@@ -99,6 +122,48 @@ export function FieldTokenPicker({
                 className="flex items-center gap-2 text-[12px]"
               >
                 <Hash className="size-3.5 text-muted-foreground" />
+                <span className="flex-1 truncate">{t.label}</span>
+                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                  {compactToken(t.token)}
+                </code>
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+        {messages.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Trigger message
+            </DropdownMenuLabel>
+            {messages.map((t) => (
+              <DropdownMenuItem
+                key={t.token}
+                onSelect={() => onInsert(t.token)}
+                className="flex items-center gap-2 text-[12px]"
+              >
+                <MessageSquare className="size-3.5 text-muted-foreground" />
+                <span className="flex-1 truncate">{t.label}</span>
+                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                  {compactToken(t.token)}
+                </code>
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+        {conversations.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Conversation
+            </DropdownMenuLabel>
+            {conversations.map((t) => (
+              <DropdownMenuItem
+                key={t.token}
+                onSelect={() => onInsert(t.token)}
+                className="flex items-center gap-2 text-[12px]"
+              >
+                <Inbox className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
                 <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
                   {compactToken(t.token)}

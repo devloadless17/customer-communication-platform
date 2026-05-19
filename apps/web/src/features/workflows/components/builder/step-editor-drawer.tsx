@@ -23,6 +23,7 @@ import {
 } from "./step-editors";
 import {
   type BuilderCatalogs,
+  type Trigger,
   type WorkflowGraph,
   type WorkflowNode,
   STEP_OPTIONS,
@@ -41,6 +42,11 @@ interface Props {
   node: WorkflowNode;
   catalogs: BuilderCatalogs;
   graph: WorkflowGraph;
+  /** The workflow's trigger — used by BranchEditor to scope its
+   *  condition fields. Without it the branch offers fields that
+   *  only the lifecycle / status-changed triggers populate, which
+   *  silently never match for a message_received workflow. */
+  trigger: Trigger;
   error?: string;
   onChangeConfig: (config: Record<string, unknown>) => void;
   onDelete: () => void;
@@ -51,6 +57,7 @@ export function StepEditorDrawer({
   node,
   catalogs,
   graph,
+  trigger,
   error,
   onChangeConfig,
   onDelete,
@@ -89,6 +96,7 @@ export function StepEditorDrawer({
           node={node}
           catalogs={catalogs}
           graph={graph}
+          trigger={trigger}
           onChangeConfig={onChangeConfig}
         />
       </div>
@@ -111,22 +119,24 @@ function EditorForNode({
   node,
   catalogs,
   graph,
+  trigger,
   onChangeConfig,
 }: {
   node: WorkflowNode;
   catalogs: BuilderCatalogs;
   graph: WorkflowGraph;
+  trigger: Trigger;
   onChangeConfig: (config: Record<string, unknown>) => void;
 }) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const c = node.config as any;
   switch (node.type) {
     case "send_message":
-      return <SendMessageEditor config={c} onChange={onChangeConfig} />;
+      return <SendMessageEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
     case "send_template":
-      return <SendTemplateEditor config={c} onChange={onChangeConfig} templates={catalogs.templates} />;
+      return <SendTemplateEditor config={c} onChange={onChangeConfig} templates={catalogs.templates} fields={catalogs.fields} trigger={trigger} />;
     case "add_comment":
-      return <AddCommentEditor config={c} onChange={onChangeConfig} />;
+      return <AddCommentEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
     case "assign_to":
       return <AssignToEditor config={c} onChange={onChangeConfig} users={catalogs.users} />;
     case "set_status":
@@ -144,7 +154,7 @@ function EditorForNode({
     case "update_lifecycle":
       return <UpdateLifecycleEditor config={c} onChange={onChangeConfig} stages={catalogs.stages} />;
     case "branch":
-      return <BranchEditor config={c} onChange={onChangeConfig} />;
+      return <BranchEditor config={c} trigger={trigger} onChange={onChangeConfig} catalogs={catalogs} />;
     case "wait":
       return <WaitEditor config={c} onChange={onChangeConfig} />;
     case "jump_to_step":

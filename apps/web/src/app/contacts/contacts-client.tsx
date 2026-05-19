@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Download,
+  ListChecks,
   Loader2,
   MessageSquare,
   Pencil,
@@ -223,15 +224,23 @@ export function ContactsClient({
   const showEmpty = !list.loading && items.length === 0;
 
   return (
-    <div className="mx-auto max-w-5xl px-8 py-8">
-      <header className="mb-6 flex items-center justify-between gap-3">
+    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 md:px-8 md:py-8">
+      <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">Contacts</h1>
           <p className="text-sm text-muted-foreground">
             People who messaged your team, plus anyone you add manually.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {canManageFields && (
+            <Button variant="outline" asChild>
+              <Link href="/settings/contact-fields">
+                <ListChecks className="size-4" />
+                Manage fields
+              </Link>
+            </Button>
+          )}
           <Button variant="outline" asChild>
             {/* Plain anchor: lets the browser handle Content-Disposition and
                 save the file directly without a fetch + Blob round-trip. */}

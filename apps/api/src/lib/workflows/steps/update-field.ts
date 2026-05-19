@@ -12,22 +12,27 @@ import {
   StepConfigError,
   advance,
   advanceWithError,
-  envelopeContact,
 } from "./types";
+import {
+  type StepTarget,
+  parseStepTarget,
+  resolveStepTarget,
+} from "./target";
 
 /**
  * `update_field` step. Sets a single custom field on the contact.
  *
- *   Config: { fieldKey: string, value: string }
+ *   Config: { fieldKey: string, value: string, target?: StepTarget }
  *
- * `value` supports `$var.contact.*` tokens so you can do things like
- * fieldKey="last_seen_message" + value=$var.message.body in a workflow
- * that runs on message_received. fieldKey is validated against the team's
- * ContactFieldDefinition rows so unknown keys fail fast.
+ * `value` supports `$var.contact.*` tokens. `target` defaults to the
+ * trigger contact; can be set to a custom phone (auto-creates Contact if
+ * unknown). fieldKey is validated against the team's ContactFieldDefinition
+ * rows so unknown keys fail fast.
  */
 export interface UpdateFieldStepConfig {
   fieldKey: string;
   value: string;
+  target?: StepTarget;
 }
 
 export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
@@ -44,15 +49,25 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
     if (typeof r.value !== "string") {
       throw new StepConfigError("update_field.value must be a string");
     }
-    return { fieldKey: r.fieldKey, value: r.value };
+    const target = parseStepTarget(r.target);
+    return target
+      ? { fieldKey: r.fieldKey, value: r.value, target }
+      : { fieldKey: r.fieldKey, value: r.value };
   },
   describeConfig(c) {
     return `Set ${c.fieldKey} = "${c.value.slice(0, 24)}${c.value.length > 24 ? "…" : ""}"`;
   },
   async run(envelope, config, ctx): Promise<StepResult> {
-    const envContact = envelopeContact(envelope);
-    if (!envContact) return advanceWithError(400, "envelope missing contact");
-    const contactId = envContact.id;
+    let resolved;
+    try {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+        createConversation: false,
+      });
+    } catch (err) {
+      if (err instanceof StepConfigError) return advanceWithError(400, err.message);
+      throw err;
+    }
+    const contactId = resolved.contactId;
 
     const [contact, fieldDef] = await Promise.all([
       db.contact.findFirst({

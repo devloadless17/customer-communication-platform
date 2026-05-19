@@ -45,7 +45,7 @@ export default async function AdminTeamDetailPage({
   const deactivatedMembers = members.filter((m) => m.deactivatedAt);
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-8 py-8">
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:px-8 md:py-8">
       <div className="flex items-center justify-between">
         <Link
           href="/admin"

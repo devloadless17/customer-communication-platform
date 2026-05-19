@@ -135,6 +135,7 @@ export function TriggerEditorDrawer({
               trigger={trigger}
               group={toGroup(triggerConditions)}
               onChange={onChangeConditions}
+              catalogs={catalogs}
             />
           </div>
 

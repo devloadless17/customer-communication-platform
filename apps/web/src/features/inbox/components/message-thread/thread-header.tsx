@@ -1,6 +1,6 @@
 "use client";
 
-import { Search as SearchIcon } from "lucide-react";
+import { ChevronLeft, Search as SearchIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -76,6 +76,7 @@ export function ThreadHeader({
   currentStageId,
   onStageChange,
   canManageStages,
+  onMobileBack,
 }: {
   conversationId: string;
   contactId: string;
@@ -99,9 +100,21 @@ export function ThreadHeader({
   currentStageId: string | null;
   onStageChange: (stageId: string) => Promise<void>;
   canManageStages: boolean;
+  /** Mobile back-to-list affordance. Only rendered when set + below md. */
+  onMobileBack?: () => void;
 }) {
   return (
-    <header className="flex h-15 shrink-0 items-center gap-3 border-b border-border px-4">
+    <header className="flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
+      {onMobileBack && (
+        <button
+          type="button"
+          onClick={onMobileBack}
+          aria-label="Back to conversations"
+          className="-ml-1 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+        >
+          <ChevronLeft className="size-5" />
+        </button>
+      )}
       <Avatar className="size-9">
         <AvatarFallback
           className="text-xs text-white"

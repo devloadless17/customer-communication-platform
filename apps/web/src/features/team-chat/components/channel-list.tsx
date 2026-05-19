@@ -101,7 +101,7 @@ export function ChannelList({
       : visible.length * ROW_HEIGHT;
 
   return (
-    <div className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-card/40">
+    <div className="flex h-full w-full shrink-0 flex-col border-r border-border bg-card/40 md:w-64">
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <div>
           <div className="text-sm font-semibold">Team chat</div>

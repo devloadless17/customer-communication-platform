@@ -2,13 +2,17 @@ import Link from "next/link";
 import {
   ArrowRight,
   Layers,
+  ListChecks,
   Sparkles,
   Tag as TagIcon,
   type LucideIcon,
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import { canManageStages } from "@ccp/shared/auth/permissions";
+import {
+  canManageContactFields,
+  canManageStages,
+} from "@ccp/shared/auth/permissions";
 
 export const metadata = { title: "Team settings" };
 export const dynamic = "force-dynamic";
@@ -21,6 +25,7 @@ export const dynamic = "force-dynamic";
 export default async function TeamSettingsIndex() {
   const { user } = await getSession();
   const canStages = canManageStages(user.role);
+  const canFields = canManageContactFields(user.role);
 
   const cards: Card[] = [
     {
@@ -45,6 +50,17 @@ export default async function TeamSettingsIndex() {
             title: "Stages",
             description:
               "Lifecycle buckets for contacts (New → Qualified → …). Drives filtering and stage-targeted broadcasts.",
+          } satisfies Card,
+        ]
+      : []),
+    ...(canFields
+      ? [
+          {
+            href: "/settings/contact-fields",
+            icon: ListChecks,
+            title: "Contact fields",
+            description:
+              "Custom fields shown on every contact (order ID, plan, account manager…). Add or remove the field once for the whole team.",
           } satisfies Card,
         ]
       : []),

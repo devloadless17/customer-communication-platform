@@ -38,9 +38,30 @@ interface CommonProps {
   fieldDefinitions: ContactFieldDefinition[];
   /** When true, `$var.agent.name` / `$var.agent.email` highlight as known. */
   includeAgent?: boolean;
+  /** When true, `$var.message.*` highlights as known (workflow editor). */
+  includeMessage?: boolean;
+  /** When true, `$var.conversation.*` highlights as known (workflow editor). */
+  includeConversation?: boolean;
   /** Optional wrapper class on the outer relative container. */
   wrapperClassName?: string;
 }
+
+const MESSAGE_KEYS = [
+  "body",
+  "timestamp",
+  "direction",
+  "id",
+  "external_id",
+  "media_kind",
+  "media_caption",
+];
+const CONVERSATION_KEYS = [
+  "id",
+  "status",
+  "assigned_user_id",
+  "unread_count",
+  "last_message_at",
+];
 
 // ---------------------------------------------------------------------------
 // Renderer
@@ -57,7 +78,8 @@ function renderTokenized(
   knownKeys: Set<string>,
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const re = /(?<![A-Za-z0-9_])\$var\.(contact|agent)\.([a-z][a-z0-9_]*)\b/g;
+  const re =
+    /(?<![A-Za-z0-9_])\$var\.(contact|agent|message|conversation)\.([a-z][a-z0-9_]*)\b/g;
   let lastIndex = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -97,6 +119,8 @@ function renderTokenized(
 function useKnownKeys(
   fieldDefinitions: ContactFieldDefinition[],
   includeAgent: boolean,
+  includeMessage: boolean,
+  includeConversation: boolean,
 ): Set<string> {
   return useMemo(
     () => {
@@ -111,9 +135,15 @@ function useKnownKeys(
         set.add("agent.name");
         set.add("agent.email");
       }
+      if (includeMessage) {
+        for (const k of MESSAGE_KEYS) set.add(`message.${k}`);
+      }
+      if (includeConversation) {
+        for (const k of CONVERSATION_KEYS) set.add(`conversation.${k}`);
+      }
       return set;
     },
-    [fieldDefinitions, includeAgent],
+    [fieldDefinitions, includeAgent, includeMessage, includeConversation],
   );
 }
 
@@ -144,11 +174,18 @@ export function TokenHighlightInput({
   wrapperClassName,
   fieldDefinitions,
   includeAgent = false,
+  includeMessage = false,
+  includeConversation = false,
   value,
   ref,
   ...props
 }: TokenHighlightInputProps) {
-  const knownKeys = useKnownKeys(fieldDefinitions, includeAgent);
+  const knownKeys = useKnownKeys(
+    fieldDefinitions,
+    includeAgent,
+    includeMessage,
+    includeConversation,
+  );
   const text = typeof value === "string" ? value : "";
   const innerRef = useRef<HTMLInputElement>(null);
   useImperativeHandle(ref, () => innerRef.current as HTMLInputElement);
@@ -215,11 +252,18 @@ export function TokenHighlightTextarea({
   wrapperClassName,
   fieldDefinitions,
   includeAgent = false,
+  includeMessage = false,
+  includeConversation = false,
   value,
   ref,
   ...props
 }: TokenHighlightTextareaProps) {
-  const knownKeys = useKnownKeys(fieldDefinitions, includeAgent);
+  const knownKeys = useKnownKeys(
+    fieldDefinitions,
+    includeAgent,
+    includeMessage,
+    includeConversation,
+  );
   const text = typeof value === "string" ? value : "";
   const innerRef = useRef<HTMLTextAreaElement>(null);
   useImperativeHandle(ref, () => innerRef.current as HTMLTextAreaElement);

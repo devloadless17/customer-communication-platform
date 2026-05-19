@@ -4,9 +4,16 @@
 import type { WorkflowStepType, WorkflowTriggerEvent } from "@prisma/client";
 
 import type {
+  ResolverExtras,
+  MessageLike,
+  ConversationLike,
+} from "@ccp/shared/field-tokens";
+
+import type {
   WorkflowConversationSnapshot,
   WorkflowContactSnapshot,
   WorkflowEventEnvelope,
+  WorkflowMessageSnapshot,
 } from "@/lib/workflows/events";
 import type { WorkflowGraph } from "@/lib/workflows/graph";
 
@@ -135,4 +142,35 @@ export function envelopeContact(
 ): WorkflowContactSnapshot | null {
   const data = envelope.data as { contact?: WorkflowContactSnapshot | null };
   return data.contact ?? null;
+}
+
+/**
+ * Read the trigger-message snapshot from an envelope, or null. Only
+ * `message_received` carries one; other triggers return null so token
+ * expansion of `$var.message.*` resolves to empty.
+ */
+export function envelopeMessage(
+  envelope: WorkflowEventEnvelope,
+): WorkflowMessageSnapshot | null {
+  const data = envelope.data as { message?: WorkflowMessageSnapshot };
+  return data.message ?? null;
+}
+
+/**
+ * Build the `extras` argument for `resolveFieldTokens` from an envelope.
+ * Centralised so every step handler that expands user-authored copy ends
+ * up with the same set of `$var.message.*` / `$var.conversation.*` keys
+ * available. Contact stays as the explicit first argument because some
+ * step handlers (notably send_message with target.kind="phone") swap the
+ * trigger contact for the target contact at run time.
+ */
+export function envelopeExtras(
+  envelope: WorkflowEventEnvelope,
+): ResolverExtras {
+  const message = envelopeMessage(envelope);
+  const conversation = envelopeConversation(envelope);
+  const extras: ResolverExtras = {};
+  if (message) extras.message = message as MessageLike;
+  if (conversation) extras.conversation = conversation as ConversationLike;
+  return extras;
 }

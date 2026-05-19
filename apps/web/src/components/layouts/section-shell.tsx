@@ -2,18 +2,18 @@ import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
 
 import { AppRail } from "@/components/layouts/app-rail";
+import { MobileShellChrome } from "@/components/layouts/mobile-shell-chrome";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 
 /**
  * Three-column section shell shared by every authenticated section
  * (broadcasts / contacts / settings / team / templates / workflows / admin).
  *
- *   [AppRail] [optional sub-sidebar] [main content]
+ *   Desktop: [AppRail] [optional sub-sidebar] [main content]
+ *   Mobile:  [Mobile header] [main content] + Drawer(AppRail-mobile, sub-sidebar)
  *
- * The previous per-section layouts each re-implemented the same 6-line
- * shell with their own session + team fetch — this collapses all of that
- * into one component. Per-section data fetching (stages for contacts,
- * role checks for admin, etc.) stays in the calling layout.
+ * The per-section data fetching (stages for contacts, role checks for admin,
+ * etc.) stays in the calling layout — this only owns shell + chrome.
  */
 export async function SectionShell({
   subSidebar,
@@ -32,10 +32,17 @@ export async function SectionShell({
 
   return (
     <CatalogSyncBoundary>
-      <div className="flex min-h-svh bg-background text-foreground">
+      <div className="flex min-h-svh flex-col bg-background text-foreground md:flex-row">
+        <MobileShellChrome
+          currentUser={user}
+          team={{ id: team.id, name: team.name }}
+          subSidebar={subSidebar}
+        />
         <AppRail currentUser={user} team={{ id: team.id, name: team.name }} />
         {subSidebar}
-        <main className={`flex-1 ${mainClassName ?? "overflow-y-auto"}`}>
+        <main
+          className={`min-w-0 flex-1 ${mainClassName ?? "overflow-y-auto"}`}
+        >
           {children}
         </main>
       </div>

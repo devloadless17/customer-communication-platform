@@ -18,6 +18,11 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { BranchNode, StepNode, TriggerNode } from "./canvas-nodes";
+import {
+  InsertEdge,
+  StepPickerPopover,
+  type PickerAnchor,
+} from "./insert-controls";
 import type { StepType, WorkflowEdge, WorkflowGraph, WorkflowNode } from "./types";
 import { cuidLike, emptyConfigFor } from "./types";
 
@@ -36,6 +41,10 @@ const nodeTypes = {
   branch: BranchNode,
 };
 
+const edgeTypes = {
+  insert: InsertEdge,
+};
+
 export interface WorkflowCanvasProps {
   graph: WorkflowGraph;
   /** Currently-selected step id, for highlight. Trigger has its own toggle. */
@@ -49,6 +58,16 @@ export interface WorkflowCanvasProps {
   onChange: (graph: WorkflowGraph) => void;
   onSelectStep: (id: string | null) => void;
   onSelectTrigger: () => void;
+  /** Insert a step on an existing edge (or before the start when sourceId=null). */
+  onInsertStep: (
+    sourceId: string | null,
+    sourceHandle: string | null,
+    type: StepType,
+  ) => void;
+  /** Duplicate the given step in place. */
+  onDuplicateStep: (id: string) => void;
+  /** Delete a step (with auto-splice of incoming/outgoing edges). */
+  onDeleteStep: (id: string) => void;
 }
 
 export function WorkflowCanvas(props: WorkflowCanvasProps) {
@@ -71,7 +90,33 @@ function CanvasInner({
   onChange,
   onSelectStep,
   onSelectTrigger,
+  onInsertStep,
+  onDuplicateStep,
+  onDeleteStep,
 }: WorkflowCanvasProps) {
+  // Picker state — when set, a floating step picker is rendered anchored to
+  // the "+" that was clicked. The anchor carries where to insert (sourceId
+  // + sourceHandle).
+  const [picker, setPicker] = useState<PickerAnchor | null>(null);
+  const openPicker = useCallback((anchor: PickerAnchor) => {
+    setPicker(anchor);
+  }, []);
+  const closePicker = useCallback(() => setPicker(null), []);
+
+  // Set of nodes that already have an outgoing edge on their default handle.
+  // Used to decide whether to render the trailing "+" below a step (only
+  // leaves get one; non-leaves already have an in-edge "+").
+  const leafSet = useMemo(() => {
+    const hasOut = new Set<string>();
+    for (const e of graph.edges) {
+      if ((e.label ?? "default") === "default") hasOut.add(e.from);
+    }
+    const leaves = new Set<string>();
+    for (const n of graph.nodes) {
+      if (!hasOut.has(n.id) && n.type !== "branch") leaves.add(n.id);
+    }
+    return leaves;
+  }, [graph.edges, graph.nodes]);
   // Trigger position. The trigger node is synthetic — it isn't stored in
   // graph.nodes, so a hardcoded position in the projection would slam it
   // back to (0,0) every time the user changed the trigger type or anything
@@ -96,6 +141,16 @@ function CanvasInner({
         type: n.type,
         selected: n.id === selectedStepId,
         summary: describeNode(n),
+        // Inline action toolbar handlers — wired through node data because
+        // React Flow's custom node renderers only have access to data, not
+        // refs back to the canvas.
+        onDuplicate: () => onDuplicateStep(n.id),
+        onDelete: () => onDeleteStep(n.id),
+        // Trailing-"+" data: only leaves render the bottom toolbar. Branch
+        // nodes are never leaves (they have two outputs each with their own
+        // edge "+" buttons).
+        showTrailingPlus: leafSet.has(n.id),
+        onOpenPicker: openPicker,
       },
     }));
     const triggerNode: Node = {
@@ -107,6 +162,11 @@ function CanvasInner({
         description: triggerDescription,
         trigger: triggerType,
         selected: triggerSelected,
+        // Empty-graph case — show a "+" under the trigger so the user can
+        // drop the first step inline. Anything with a startNode gets the
+        // dashed edge "+" instead.
+        showTrailingPlus: !graph.startNodeId,
+        onOpenPicker: openPicker,
       },
       draggable: true,
     };
@@ -119,22 +179,27 @@ function CanvasInner({
       source: e.from,
       target: e.to,
       sourceHandle: e.label ?? "default",
+      type: "insert",
       label: e.label === "true" ? "true" : e.label === "false" ? "false" : undefined,
       labelStyle: { fontSize: 11 },
+      data: { onInsert: openPicker },
     }));
     // Synthetic edge from trigger to startNode for visual clarity. The runner
     // doesn't read this — startNodeId on the graph is what it walks from.
+    // Clicking the "+" on THIS edge inserts at the start of the workflow.
     if (graph.startNodeId) {
       edges.unshift({
         id: "e_trigger_start",
         source: TRIGGER_NODE_ID,
         target: graph.startNodeId,
         sourceHandle: "default",
+        type: "insert",
         style: { strokeDasharray: "4 4" },
+        data: { onInsert: openPicker, isSyntheticTrigger: true },
       });
     }
     return edges;
-  }, [graph]);
+  }, [graph, openPicker]);
 
   // React Flow's recommended controlled pattern: useNodesState owns the
   // internal copy that applyNodeChanges feeds. The previous shape called
@@ -271,6 +336,7 @@ function CanvasInner({
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
@@ -286,6 +352,16 @@ function CanvasInner({
         <Background gap={20} size={1} />
         <Controls />
       </ReactFlow>
+      {picker && (
+        <StepPickerPopover
+          anchor={picker}
+          onPick={(type, anchor) => {
+            onInsertStep(anchor.sourceId, anchor.sourceHandle, type);
+            closePicker();
+          }}
+          onClose={closePicker}
+        />
+      )}
     </div>
   );
 }
@@ -339,46 +415,139 @@ function humanize(ms: number): string {
   return `${Math.round(ms / 86_400_000)}d`;
 }
 
-/**
- * Standalone helper: place a new node below the lowest existing node, and
- * return a WorkflowGraph with the node + an edge from the last node added.
- * Used by the step palette to drop a new step into the graph.
- */
-export function appendStep(graph: WorkflowGraph, type: StepType): WorkflowGraph {
-  const lowest = graph.nodes.reduce<number>(
-    (acc, n) => Math.max(acc, n.position?.y ?? 0),
-    0,
-  );
-  const id = cuidLike();
-  const newNode: WorkflowNode = {
-    id,
-    type,
-    config: emptyConfigFor(type),
-    position: { x: 80, y: lowest + 140 },
-  };
-  // If the graph was empty, set startNodeId. Otherwise connect from the
-  // most-recently-added node (highest position OR last in array). The user
-  // can rewire as needed.
-  if (graph.nodes.length === 0) {
-    return {
-      startNodeId: id,
-      nodes: [newNode],
-      edges: [],
-    };
+/** Remove a step + any edges touching it. */
+export function removeStep(graph: WorkflowGraph, nodeId: string): WorkflowGraph {
+  // If the removed node sat between A → removed → B, splice the gap so
+  // execution keeps flowing. Without this, deleting a middle step orphans
+  // every downstream node and the user has to manually rewire.
+  const incoming = graph.edges.find((e) => e.to === nodeId);
+  const outgoing = graph.edges.filter((e) => e.from === nodeId);
+  const splicedEdges: WorkflowEdge[] = [];
+  if (incoming && outgoing.length === 1) {
+    splicedEdges.push({
+      from: incoming.from,
+      to: outgoing[0]!.to,
+      ...(incoming.label ? { label: incoming.label } : {}),
+    });
   }
-  const last = graph.nodes[graph.nodes.length - 1]!;
   return {
-    startNodeId: graph.startNodeId || id,
-    nodes: [...graph.nodes, newNode],
-    edges: [...graph.edges, { from: last.id, to: id }],
+    // If we just removed the start, promote the (single) downstream node so
+    // the workflow still has a valid entry point. Common case after
+    // deleting the first step.
+    startNodeId:
+      graph.startNodeId === nodeId
+        ? outgoing[0]?.to ?? ""
+        : graph.startNodeId,
+    nodes: graph.nodes.filter((n) => n.id !== nodeId),
+    edges: [
+      ...graph.edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
+      ...splicedEdges,
+    ],
   };
 }
 
-/** Remove a step + any edges touching it. */
-export function removeStep(graph: WorkflowGraph, nodeId: string): WorkflowGraph {
+/**
+ * Insert a new step immediately downstream of `sourceId` on the specified
+ * source handle. If an outgoing edge already exists on that handle, it gets
+ * rewired through the new node (A → new → B). Otherwise we just append (A →
+ * new). `sourceId === TRIGGER` means "insert at the start of the workflow."
+ */
+export function insertStepAfter(
+  graph: WorkflowGraph,
+  sourceId: string | null, // null = inserting before the current startNode
+  sourceHandle: string | null,
+  type: StepType,
+): { graph: WorkflowGraph; newNodeId: string } {
+  const newId = cuidLike();
+  // Anchor the new node below the source (or below the trigger when there's
+  // no source). User can drag afterwards; this is just a sensible default.
+  const sourceNode = sourceId
+    ? graph.nodes.find((n) => n.id === sourceId)
+    : null;
+  const anchorY = sourceNode?.position?.y ?? 0;
+  const anchorX = sourceNode?.position?.x ?? 80;
+  const newNode: WorkflowNode = {
+    id: newId,
+    type,
+    config: emptyConfigFor(type),
+    position: { x: anchorX, y: anchorY + 140 },
+  };
+
+  // Case 1: empty graph OR inserting before the start node.
+  if (sourceId === null) {
+    return {
+      graph: {
+        startNodeId: newId,
+        nodes: [...graph.nodes, newNode],
+        // Rewire trigger → start by connecting new → old start.
+        edges: graph.startNodeId
+          ? [...graph.edges, { from: newId, to: graph.startNodeId }]
+          : graph.edges,
+      },
+      newNodeId: newId,
+    };
+  }
+
+  // Case 2: inserting on an existing edge from sourceId.
+  const handle = sourceHandle ?? null;
+  const existing = graph.edges.find(
+    (e) => e.from === sourceId && (e.label ?? null) === handle,
+  );
+  if (existing) {
+    const rewired = graph.edges.map((e) =>
+      e === existing ? { ...e, to: newId } : e,
+    );
+    return {
+      graph: {
+        startNodeId: graph.startNodeId || newId,
+        nodes: [...graph.nodes, newNode],
+        edges: [...rewired, { from: newId, to: existing.to }],
+      },
+      newNodeId: newId,
+    };
+  }
+
+  // Case 3: appending — no existing outgoing edge on that handle.
+  const newEdge: WorkflowEdge = {
+    from: sourceId,
+    to: newId,
+    ...(handle ? { label: handle } : {}),
+  };
   return {
-    startNodeId: graph.startNodeId === nodeId ? "" : graph.startNodeId,
-    nodes: graph.nodes.filter((n) => n.id !== nodeId),
-    edges: graph.edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
+    graph: {
+      startNodeId: graph.startNodeId || newId,
+      nodes: [...graph.nodes, newNode],
+      edges: [...graph.edges, newEdge],
+    },
+    newNodeId: newId,
+  };
+}
+
+/**
+ * Duplicate a step in place. Copies type + config, places the clone slightly
+ * offset so it's visible, and DOES NOT rewire any edges — the duplicate is
+ * orphaned by default and the user wires it where they want. Mirrors how
+ * Figma / Miro duplicate works.
+ */
+export function duplicateStep(
+  graph: WorkflowGraph,
+  nodeId: string,
+): { graph: WorkflowGraph; newNodeId: string } {
+  const source = graph.nodes.find((n) => n.id === nodeId);
+  if (!source) return { graph, newNodeId: nodeId };
+  const newId = cuidLike();
+  const newNode: WorkflowNode = {
+    id: newId,
+    type: source.type,
+    // Deep-copy config so editing the duplicate doesn't mutate the original.
+    config: JSON.parse(JSON.stringify(source.config)) as Record<string, unknown>,
+    position: {
+      x: (source.position?.x ?? 0) + 40,
+      y: (source.position?.y ?? 0) + 40,
+    },
+  };
+  return {
+    graph: { ...graph, nodes: [...graph.nodes, newNode] },
+    newNodeId: newId,
   };
 }

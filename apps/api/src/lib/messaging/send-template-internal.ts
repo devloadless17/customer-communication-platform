@@ -194,6 +194,16 @@ export async function sendTemplateInternal(
   const renderedBody = renderTemplateBody(template.bodyText, args.variables.body);
   const previewBody = renderedBody.slice(0, 200);
 
+  // Monotonicity guard — same fix as send-text-internal.ts. Meta sends
+  // inbound webhook timestamps with second precision, rounded up; an
+  // outbound that lands in the same wall-clock second can otherwise
+  // appear BEFORE the inbound it replied to in the inbox order.
+  const lastTs = conversation.lastMessageAt ?? null;
+  const messageTimestamp =
+    lastTs && lastTs >= receivedAt
+      ? new Date(lastTs.getTime() + 1)
+      : receivedAt;
+
   const created = await createOutboundMessageIdempotent({
     teamId: args.teamId,
     conversationId: args.conversationId,
@@ -213,13 +223,13 @@ export async function sendTemplateInternal(
         ...(args.variables.header ? { header: args.variables.header } : {}),
       },
     } as Prisma.InputJsonValue,
-    timestamp: receivedAt,
+    timestamp: messageTimestamp,
   });
 
   const bumped = await db.conversation.update({
     where: { id: args.conversationId },
     data: {
-      lastMessageAt: send.timestamp,
+      lastMessageAt: messageTimestamp,
       lastMessagePreview: previewBody,
     },
     select: { unreadCount: true },
@@ -240,7 +250,7 @@ export async function sendTemplateInternal(
       templateId: template.id,
       templateName: template.name,
     },
-    timestamp: receivedAt.toISOString(),
+    timestamp: messageTimestamp.toISOString(),
   };
 
   // Publish through the bus so socket-fanout emits `message:new` AND the
@@ -252,7 +262,7 @@ export async function sendTemplateInternal(
     conversationId: args.conversationId,
     message,
     preview: previewBody,
-    lastMessageAt: send.timestamp.toISOString(),
+    lastMessageAt: messageTimestamp.toISOString(),
     // Outbound doesn't bump unread; the row's current value is the
     // accurate absolute count.
     unreadCount: bumped.unreadCount,

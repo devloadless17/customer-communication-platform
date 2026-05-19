@@ -14,8 +14,8 @@ export default async function AudienceGroupsPage() {
   const tagById = new Map(tags.map((t) => [t.id, t] as const));
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-8">
-      <header className="flex items-center justify-between gap-3">
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
+      <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           {/* In-page tabs between Broadcasts and Groups so they read as
               two views of the same area (saved audiences + past sends). */}
@@ -51,8 +51,8 @@ export default async function AudienceGroupsPage() {
       {groups.length === 0 ? (
         <EmptyState />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-border bg-card">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <table className="w-full min-w-160 text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Group</th>

@@ -6,15 +6,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 import {
+  type BuilderCatalogs,
   type Condition,
   type ConditionField,
   type ConditionGroup as Group,
   type ConditionOp,
   type GroupOp,
   type Trigger,
+  DIRECTION_VALUES,
   FIELDS_BY_TRIGGER,
   FIELD_LABELS,
+  FIELD_VALUE_KIND,
   OP_OPTIONS,
+  STATUS_VALUES,
+  TAG_CHANGE_KIND_VALUES,
   isGroup,
 } from "./types";
 
@@ -35,6 +40,14 @@ interface Props {
   onRemove?: () => void;
   /** When true, ALL condition fields are offered (used by branch steps). */
   allowAllFields?: boolean;
+  /**
+   * Optional catalogs — when provided, ID-valued fields (stage / tag / user
+   * / field_key) render as dropdowns of the team's rows instead of free-text
+   * inputs. Without catalogs the row falls back to a plain Input so the
+   * component still works in contexts that don't have one (tests, isolated
+   * preview pages).
+   */
+  catalogs?: BuilderCatalogs;
 }
 
 export function ConditionGroupEditor({
@@ -44,6 +57,7 @@ export function ConditionGroupEditor({
   depth = 0,
   onRemove,
   allowAllFields,
+  catalogs,
 }: Props) {
   const allowedFields = allowAllFields
     ? (Array.from(new Set(Object.values(FIELDS_BY_TRIGGER).flat())) as ConditionField[])
@@ -151,6 +165,7 @@ export function ConditionGroupEditor({
               onChange={(g) => updateChild(idx, g)}
               onRemove={() => removeChild(idx)}
               allowAllFields={allowAllFields}
+              catalogs={catalogs}
             />
           );
         }
@@ -161,6 +176,7 @@ export function ConditionGroupEditor({
             condition={child}
             onChange={(c) => updateChild(idx, c)}
             onRemove={() => removeChild(idx)}
+            catalogs={catalogs}
           />
         );
       })}
@@ -186,20 +202,48 @@ function ConditionRow({
   condition,
   onChange,
   onRemove,
+  catalogs,
 }: {
   allowedFields: ConditionField[];
   condition: Condition;
   onChange: (c: Condition) => void;
   onRemove: () => void;
+  catalogs?: BuilderCatalogs;
 }) {
   const op = OP_OPTIONS.find((o) => o.value === condition.op) ?? OP_OPTIONS[0]!;
   const fieldValid = allowedFields.includes(condition.field);
+  // ID-valued fields only make sense with the equality ops. When the agent
+  // picks "tag" or "stage" we narrow the operator list so they don't end up
+  // typing "contains" against a CUID and wondering why it never matches.
+  const isIdentityField =
+    FIELD_VALUE_KIND[condition.field] !== "text" &&
+    FIELD_VALUE_KIND[condition.field] !== "field_key";
+  const opOptions = isIdentityField
+    ? OP_OPTIONS.filter((o) =>
+        ["equals", "not_equals", "is_null", "is_not_null"].includes(o.value),
+      )
+    : OP_OPTIONS;
+  // If the field switched to an identity field but the saved op isn't in the
+  // narrowed set, force-normalize on change. Avoids "tag is_equal contains"
+  // states landing in the database.
+  function setField(field: ConditionField) {
+    const nextKind = FIELD_VALUE_KIND[field];
+    const nextIsIdentity = nextKind !== "text" && nextKind !== "field_key";
+    const nextOpAllowed = !nextIsIdentity ||
+      ["equals", "not_equals", "is_null", "is_not_null"].includes(condition.op);
+    onChange({
+      ...condition,
+      field,
+      op: nextOpAllowed ? condition.op : "equals",
+      value: condition.value,
+    });
+  }
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background p-2">
       <select
         value={condition.field}
-        onChange={(e) => onChange({ ...condition, field: e.target.value as ConditionField })}
+        onChange={(e) => setField(e.target.value as ConditionField)}
         className={
           "h-8 rounded-md border bg-background px-2 text-sm " +
           (fieldValid ? "border-border" : "border-destructive")
@@ -217,17 +261,18 @@ function ConditionRow({
         onChange={(e) => onChange({ ...condition, op: e.target.value as ConditionOp })}
         className="h-8 rounded-md border border-border bg-background px-2 text-sm"
       >
-        {OP_OPTIONS.map((o) => (
+        {opOptions.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
       </select>
       {op.needsValue && (
-        <Input
-          className="h-8 max-w-[240px] flex-1"
+        <ConditionValueControl
+          field={condition.field}
           value={condition.value}
-          onChange={(e) => onChange({ ...condition, value: e.target.value })}
+          onChange={(value) => onChange({ ...condition, value })}
+          catalogs={catalogs}
         />
       )}
       <Button
@@ -241,5 +286,151 @@ function ConditionRow({
         <X className="size-4" />
       </Button>
     </div>
+  );
+}
+
+/**
+ * Renders the right control for the field's value kind:
+ *   - stage / tag / user / field_key  → dropdown of the team's catalog rows
+ *   - status / direction / tag_change_kind  → dropdown of fixed enum values
+ *   - text → plain Input
+ *
+ * Catalog-backed pickers append the saved value as a sentinel option when it
+ * doesn't match any current row, so a stale id (deleted stage, renamed tag)
+ * is visible to the author instead of silently switching to the first row.
+ */
+function ConditionValueControl({
+  field,
+  value,
+  onChange,
+  catalogs,
+}: {
+  field: ConditionField;
+  value: string;
+  onChange: (next: string) => void;
+  catalogs?: BuilderCatalogs;
+}) {
+  const kind = FIELD_VALUE_KIND[field];
+  const selectClass =
+    "h-8 max-w-60 flex-1 rounded-md border border-border bg-background px-2 text-sm";
+
+  if (kind === "status") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={selectClass}>
+        <option value="">Select status…</option>
+        {STATUS_VALUES.map((s) => (
+          <option key={s} value={s}>
+            {s}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (kind === "direction") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={selectClass}>
+        <option value="">Select direction…</option>
+        {DIRECTION_VALUES.map((d) => (
+          <option key={d} value={d}>
+            {d === "in" ? "in (inbound)" : "out (outbound)"}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (kind === "tag_change_kind") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={selectClass}>
+        <option value="">Select change…</option>
+        {TAG_CHANGE_KIND_VALUES.map((k) => (
+          <option key={k} value={k}>
+            {k}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (kind === "stage" && catalogs) {
+    return (
+      <CatalogSelect
+        value={value}
+        onChange={onChange}
+        rows={catalogs.stages.map((s) => ({ id: s.id, label: s.name }))}
+        placeholder="Select stage…"
+      />
+    );
+  }
+  if (kind === "tag" && catalogs) {
+    return (
+      <CatalogSelect
+        value={value}
+        onChange={onChange}
+        rows={catalogs.tags.map((t) => ({ id: t.id, label: t.name }))}
+        placeholder="Select tag…"
+      />
+    );
+  }
+  if (kind === "user" && catalogs) {
+    return (
+      <CatalogSelect
+        value={value}
+        onChange={onChange}
+        rows={catalogs.users.map((u) => ({ id: u.id, label: u.name || u.email }))}
+        placeholder="Select user…"
+      />
+    );
+  }
+  if (kind === "field_key" && catalogs) {
+    return (
+      <CatalogSelect
+        value={value}
+        onChange={onChange}
+        rows={catalogs.fields.map((f) => ({ id: f.key, label: f.label }))}
+        placeholder="Select field…"
+      />
+    );
+  }
+  // Fallback — also the path used when catalogs aren't wired (legacy
+  // callers, tests). Renders the raw saved value so authors can still see
+  // and fix it manually.
+  return (
+    <Input
+      className="h-8 max-w-60 flex-1"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  );
+}
+
+function CatalogSelect({
+  value,
+  onChange,
+  rows,
+  placeholder,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  rows: Array<{ id: string; label: string }>;
+  placeholder: string;
+}) {
+  const knownIds = new Set(rows.map((r) => r.id));
+  const stale = value && !knownIds.has(value);
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={
+        "h-8 max-w-60 flex-1 rounded-md border bg-background px-2 text-sm " +
+        (stale ? "border-destructive" : "border-border")
+      }
+    >
+      <option value="">{placeholder}</option>
+      {stale && <option value={value}>{value.slice(0, 12)}… (missing)</option>}
+      {rows.map((r) => (
+        <option key={r.id} value={r.id}>
+          {r.label}
+        </option>
+      ))}
+    </select>
   );
 }

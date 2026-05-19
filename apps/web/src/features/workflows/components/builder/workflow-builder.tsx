@@ -7,7 +7,6 @@ import {
   ArrowUpRight,
   Loader2,
   PlayCircle,
-  Plus,
   Power,
   Trash2,
 } from "lucide-react";
@@ -17,10 +16,10 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 
 import { StepEditorDrawer } from "./step-editor-drawer";
-import { StepPalette } from "./step-palette";
 import { TriggerEditorDrawer } from "./trigger-editor-drawer";
 import {
-  appendStep,
+  duplicateStep,
+  insertStepAfter,
   removeStep,
   WorkflowCanvas,
 } from "./workflow-canvas";
@@ -216,15 +215,6 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     else setTopErrors([`delete failed: ${res.status}`]);
   }
 
-  function addStep(type: StepType) {
-    const next = appendStep(graph, type);
-    setGraph(next);
-    // Auto-select the new node so the editor drawer opens for it.
-    const newNode = next.nodes[next.nodes.length - 1]!;
-    setSelectedStepId(newNode.id);
-    setTriggerOpen(false);
-  }
-
   function updateSelectedConfig(config: Record<string, unknown>) {
     if (!selectedStepId) return;
     setGraph({
@@ -241,14 +231,44 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     setSelectedStepId(null);
   }
 
+  function handleInsertStep(
+    sourceId: string | null,
+    sourceHandle: string | null,
+    type: StepType,
+  ) {
+    const { graph: next, newNodeId } = insertStepAfter(
+      graph,
+      sourceId,
+      sourceHandle,
+      type,
+    );
+    setGraph(next);
+    // Auto-select so the editor drawer opens for the new step — same UX as
+    // the left-palette add.
+    setSelectedStepId(newNodeId);
+    setTriggerOpen(false);
+  }
+
+  function handleDuplicateStep(id: string) {
+    const { graph: next, newNodeId } = duplicateStep(graph, id);
+    setGraph(next);
+    setSelectedStepId(newNodeId);
+    setTriggerOpen(false);
+  }
+
+  function handleDeleteStep(id: string) {
+    setGraph(removeStep(graph, id));
+    if (selectedStepId === id) setSelectedStepId(null);
+  }
+
   const selectedNode = graph.nodes.find((n) => n.id === selectedStepId) ?? null;
   const triggerMeta = TRIGGER_OPTIONS.find((t) => t.value === trigger);
 
   return (
     <form className="flex h-svh flex-col" onSubmit={handleSave}>
       {/* Top bar */}
-      <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-2 md:gap-3 md:px-4">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 md:gap-3">
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -282,7 +302,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
             {published ? "Published" : "Draft"}
           </button>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {mode === "edit" && (
             <Button type="button" variant="outline" size="sm" onClick={handleTest}>
               <PlayCircle className="size-4" />
@@ -327,16 +347,10 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         <div className="border-b border-border bg-muted/40 px-4 py-2 text-xs">{testStatus}</div>
       )}
 
-      {/* Main: palette + canvas + (optional) drawer */}
+      {/* Main: canvas + (optional) drawer. Steps are added inline via the
+          "+" buttons on edges + the trailing "+" below leaf nodes, so the
+          old left palette is gone. */}
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex w-60 shrink-0 flex-col gap-2 border-r border-border bg-card px-3 py-3">
-          <div className="flex items-center gap-2 px-1">
-            <Plus className="size-3.5 text-muted-foreground" />
-            <span className="text-xs font-medium">Add steps</span>
-          </div>
-          <StepPalette onPick={addStep} />
-        </div>
-
         <div className="flex-1">
           <WorkflowCanvas
             graph={graph}
@@ -354,6 +368,9 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
               setTriggerOpen(true);
               setSelectedStepId(null);
             }}
+            onInsertStep={handleInsertStep}
+            onDuplicateStep={handleDuplicateStep}
+            onDeleteStep={handleDeleteStep}
           />
         </div>
 
@@ -377,6 +394,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
             node={selectedNode}
             catalogs={catalogs}
             graph={graph}
+            trigger={trigger}
             error={stepErrors[selectedNode.id]}
             onChangeConfig={updateSelectedConfig}
             onDelete={deleteSelected}

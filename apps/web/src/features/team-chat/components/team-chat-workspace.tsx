@@ -18,6 +18,8 @@ import type {
 } from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
 
+import { Sheet } from "@/components/ui/sheet";
+
 import { ChannelComposer } from "./channel-composer";
 import { ChannelHeader } from "./channel-header";
 import { ChannelList } from "./channel-list";
@@ -177,6 +179,13 @@ export function TeamChatWorkspace({
   const [showEdit, setShowEdit] = useState(false);
   const [channelSearchOpen, setChannelSearchOpen] = useState(false);
   const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
+  const [mobileChannelsOpen, setMobileChannelsOpen] = useState(false);
+  // Close the mobile channel sheet whenever the active channel switches —
+  // navigation happens via Link inside ChannelList, so we react to the new
+  // initialChannel.id rather than threading a callback through the list.
+  useEffect(() => {
+    setMobileChannelsOpen(false);
+  }, [initialChannel.id]);
   const [channelSearchQuery, setChannelSearchQuery] = useState("");
 
   // `?q=` on the URL keeps inline highlight active when the user lands here
@@ -294,14 +303,43 @@ export function TeamChatWorkspace({
 
   return (
     <div className="flex h-svh">
-      <ChannelList
-        channels={channels}
-        activeChannelId={initialChannel.id}
-        currentRole={currentUser.role}
-        onlinePresenceCount={onlineUserIds.size}
-        onCreate={() => setShowNew(true)}
-        onOpenWorkspaceSearch={() => setWorkspaceSearchOpen(true)}
-      />
+      {/* Desktop column. Below md the channel list lives inside the mobile
+          nav drawer (rendered by SectionShell/MobileShellChrome) — keeping
+          it out of the workspace tree on small screens. */}
+      <div className="hidden md:flex">
+        <ChannelList
+          channels={channels}
+          activeChannelId={initialChannel.id}
+          currentRole={currentUser.role}
+          onlinePresenceCount={onlineUserIds.size}
+          onCreate={() => setShowNew(true)}
+          onOpenWorkspaceSearch={() => setWorkspaceSearchOpen(true)}
+        />
+      </div>
+      {/* Mobile slide-in: triggered from the channel header on mobile, or
+          from the hamburger. Hidden on desktop where the column is visible. */}
+      <Sheet
+        open={mobileChannelsOpen}
+        onOpenChange={setMobileChannelsOpen}
+        side="left"
+        contentClassName="w-72 max-w-[85vw] md:hidden"
+        hideCloseButton
+      >
+        <ChannelList
+          channels={channels}
+          activeChannelId={initialChannel.id}
+          currentRole={currentUser.role}
+          onlinePresenceCount={onlineUserIds.size}
+          onCreate={() => {
+            setShowNew(true);
+            setMobileChannelsOpen(false);
+          }}
+          onOpenWorkspaceSearch={() => {
+            setWorkspaceSearchOpen(true);
+            setMobileChannelsOpen(false);
+          }}
+        />
+      </Sheet>
 
       <div className="flex min-w-0 flex-1 flex-col">
         <ChannelHeader
@@ -315,6 +353,7 @@ export function TeamChatWorkspace({
             void deleteChannel(initialChannel.id, "/team");
           }}
           onOpenSearch={() => setChannelSearchOpen(true)}
+          onOpenChannelList={() => setMobileChannelsOpen(true)}
         />
         {channelSearchOpen && (
           <ChannelSearch

@@ -13,6 +13,7 @@ import {
   advanceWithError,
   envelopeContact,
   envelopeConversation,
+  envelopeExtras,
   truncateBody,
 } from "./types";
 
@@ -69,10 +70,11 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       location: null,
       customFields: c?.customFields ?? {},
     };
+    const extras = envelopeExtras(envelope);
     const variables = {
-      body: config.variables.body.map((v) => resolveFieldTokens(v, contact)),
+      body: config.variables.body.map((v) => resolveFieldTokens(v, contact, extras)),
       ...(config.variables.header
-        ? { header: resolveFieldTokens(config.variables.header, contact) }
+        ? { header: resolveFieldTokens(config.variables.header, contact, extras) }
         : {}),
     };
 

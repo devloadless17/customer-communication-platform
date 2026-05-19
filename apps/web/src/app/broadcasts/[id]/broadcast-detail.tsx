@@ -308,8 +308,8 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             </div>
           </div>
         </header>
-        <div className="max-h-120 overflow-y-auto">
-          <table className="w-full text-sm">
+        <div className="max-h-120 overflow-auto">
+          <table className="w-full min-w-140 text-sm">
             <thead className="sticky top-0 bg-card">
               <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Contact</th>

@@ -1,10 +1,33 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
+
+/**
+ * Set by `MobileShellChrome` when it renders a section's sub-sidebar inside
+ * the slide-out drawer. Downstream `SubSidebar` reads this to drop the
+ * fixed-column styling and use a drawer-friendly layout (full-width, no
+ * right border, no hardcoded h-svh).
+ *
+ * Wrapping each individual `<Foo>SubSidebar` with the provider keeps the
+ * per-section sub-sidebar files unchanged.
+ */
+const MobileSubSidebarContext = createContext(false);
+
+export function MobileSubSidebarProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  return (
+    <MobileSubSidebarContext.Provider value={true}>
+      {children}
+    </MobileSubSidebarContext.Provider>
+  );
+}
 
 /**
  * Shared building blocks for every section's contextual sidebar (the column
@@ -27,8 +50,30 @@ export function SubSidebar({
   topAction?: ReactNode;
   children: ReactNode;
 }) {
+  // `mobile` flips when this sub-sidebar is rendered inside the mobile
+  // navigation drawer (see MobileShellChrome). On desktop the same tree
+  // renders as a fixed-width left column.
+  const mobile = useContext(MobileSubSidebarContext);
   return (
-    <aside className="flex h-svh w-52 shrink-0 flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground md:w-64">
+    <aside
+      className={cn(
+        mobile
+          ? "flex h-full w-full flex-1 flex-col bg-transparent text-sidebar-foreground"
+          : // Desktop column. Show only at lg+ (1024px). Below lg the same
+            // sub-sidebar tree renders inside the MobileShellChrome
+            // hamburger drawer — at the md-to-lg range (768-1023px) the
+            // three columns side-by-side squeezed the thread workspace
+            // hard. The hamburger drawer fits that range better.
+            //
+            // Width once shown: w-40 (160px) at lg, w-52 (208px) at xl+.
+            // Floor: min-w-32 (128px). The lg width is intentionally
+            // tight — at half-laptop-screen widths (1024-1279px) every
+            // pixel the chrome saves goes back to the thread + contact
+            // panel. Labels stay readable at 160px because each row is
+            // icon + short word ("All", "Mine", "Closed").
+            "hidden h-svh w-40 min-w-32 shrink flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground lg:flex xl:w-52",
+      )}
+    >
       <header className="flex items-center gap-2 px-4 pb-3 pt-4">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-base font-semibold leading-tight">

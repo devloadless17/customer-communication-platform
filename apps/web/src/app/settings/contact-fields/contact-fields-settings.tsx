@@ -1,0 +1,406 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  Loader2,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import type { ContactFieldDefinition } from "@ccp/shared/types";
+
+/**
+ * Team-wide contact custom-field manager. Mirrors the Stages settings pattern:
+ * inline add, click-to-rename, up/down reorder, delete-with-confirm. Deleting
+ * here strips the key from EVERY contact's customFields JSON in the same
+ * transaction server-side — that's the irreversible piece the confirm dialog
+ * has to convey.
+ */
+export function ContactFieldsSettings({
+  initialDefinitions,
+}: {
+  initialDefinitions: ContactFieldDefinition[];
+}) {
+  const { confirm, confirmDialog } = useConfirm();
+  const [defs, setDefs] = useState<ContactFieldDefinition[]>(initialDefinitions);
+  // Adopt SSR-re-run results so teammate edits propagate without a manual
+  // refresh (router.refresh from useCatalogSync fires on team:catalog:changed
+  // with scope=contact-fields).
+  useEffect(() => {
+    setDefs(initialDefinitions);
+  }, [initialDefinitions]);
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const newInputRef = useRef<HTMLInputElement>(null);
+
+  const sorted = useMemo(() => [...defs].sort(byOrder), [defs]);
+
+  const openCreate = useCallback(() => {
+    setCreating(true);
+    setNewLabel("");
+    setError(null);
+    requestAnimationFrame(() => newInputRef.current?.focus());
+  }, []);
+
+  const createField = useCallback(async () => {
+    const label = newLabel.trim();
+    if (!label) {
+      setError("Field needs a name.");
+      return;
+    }
+    setBusyId("__new__");
+    setError(null);
+    try {
+      const res = await fetch("/api/team/contact-fields", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        definition?: ContactFieldDefinition;
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok || !body.definition) {
+        setError(body.detail || body.error || `Couldn't create (HTTP ${res.status})`);
+        return;
+      }
+      setDefs((cur) => [...cur, body.definition!].sort(byOrder));
+      setCreating(false);
+      setNewLabel("");
+    } finally {
+      setBusyId(null);
+    }
+  }, [newLabel]);
+
+  const patchField = useCallback(
+    async (id: string, patch: Partial<Pick<ContactFieldDefinition, "label" | "order">>) => {
+      setBusyId(id);
+      setError(null);
+      const prev = defs;
+      setDefs((cur) => cur.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+      try {
+        const res = await fetch(`/api/team/contact-fields/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          setDefs(prev);
+          setError(body.detail || body.error || `Update failed (HTTP ${res.status})`);
+        }
+      } catch {
+        setDefs(prev);
+        setError("Network error");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [defs],
+  );
+
+  const reorder = useCallback(
+    async (id: string, direction: "up" | "down") => {
+      const list = [...defs].sort(byOrder);
+      const idx = list.findIndex((f) => f.id === id);
+      const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= list.length) return;
+      const a = list[idx]!;
+      const b = list[swapIdx]!;
+      // No bulk reorder endpoint — swap the two affected `order` values with
+      // two PATCHes. With the field cap at 50 per team and reorder being
+      // human-paced, the cost is fine; if it ever isn't, add /reorder
+      // mirroring the stages route.
+      const prev = defs;
+      setDefs((cur) =>
+        cur.map((f) => {
+          if (f.id === a.id) return { ...f, order: b.order };
+          if (f.id === b.id) return { ...f, order: a.order };
+          return f;
+        }),
+      );
+      setBusyId(id);
+      try {
+        const res = await Promise.all([
+          fetch(`/api/team/contact-fields/${a.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ order: b.order }),
+          }),
+          fetch(`/api/team/contact-fields/${b.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ order: a.order }),
+          }),
+        ]);
+        if (!res.every((r) => r.ok)) {
+          setDefs(prev);
+          setError("Reorder failed");
+        }
+      } catch {
+        setDefs(prev);
+        setError("Network error");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [defs],
+  );
+
+  const deleteField = useCallback(
+    async (field: ContactFieldDefinition) => {
+      const ok = await confirm({
+        title: `Delete "${field.label}"?`,
+        description:
+          "This removes the field from the team and clears any value stored on every contact. It can't be undone.",
+        confirmLabel: "Delete field",
+        destructive: true,
+      });
+      if (!ok) return;
+      setBusyId(field.id);
+      setError(null);
+      try {
+        const res = await fetch(`/api/team/contact-fields/${field.id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          setError(body.detail || body.error || `Delete failed (HTTP ${res.status})`);
+          return;
+        }
+        setDefs((cur) => cur.filter((f) => f.id !== field.id));
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [confirm],
+  );
+
+  return (
+    <div>
+      <header className="mb-6 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Contact fields</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Custom fields that show up on every contact (order ID, plan, account
+            manager…). Add one here and it appears on every contact panel;
+            delete it and the value is removed from every contact at once.
+          </p>
+        </div>
+        <Button onClick={openCreate} disabled={creating}>
+          <Plus className="size-4" />
+          Add field
+        </Button>
+      </header>
+
+      {error && (
+        <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+
+      <div className="overflow-hidden rounded-lg border border-border bg-card">
+        <ul className="divide-y divide-border">
+          {sorted.map((field, idx) => (
+            <FieldRow
+              key={field.id}
+              field={field}
+              isFirst={idx === 0}
+              isLast={idx === sorted.length - 1}
+              busy={busyId === field.id}
+              onRename={(label) => patchField(field.id, { label })}
+              onMoveUp={() => reorder(field.id, "up")}
+              onMoveDown={() => reorder(field.id, "down")}
+              onDelete={() => deleteField(field)}
+            />
+          ))}
+          {creating && (
+            <li className="px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  ref={newInputRef}
+                  value={newLabel}
+                  onChange={(e) => setNewLabel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void createField();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setCreating(false);
+                    }
+                  }}
+                  placeholder="New field name…"
+                  className="h-8 max-w-xs text-sm"
+                  disabled={busyId === "__new__"}
+                />
+                <div className="ml-auto flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setCreating(false)}
+                    disabled={busyId === "__new__"}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => void createField()}
+                    disabled={busyId === "__new__" || !newLabel.trim()}
+                  >
+                    {busyId === "__new__" ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Check className="size-3.5" />
+                    )}
+                    Create
+                  </Button>
+                </div>
+              </div>
+            </li>
+          )}
+        </ul>
+        {sorted.length === 0 && !creating && (
+          <div className="px-6 py-10 text-center text-sm text-muted-foreground">
+            No custom fields yet. Click <span className="font-medium">Add field</span> to create one.
+          </div>
+        )}
+      </div>
+
+      <p className="mt-4 text-xs text-muted-foreground">
+        {sorted.length} field{sorted.length === 1 ? "" : "s"} · max 50 per team.
+      </p>
+
+      {confirmDialog}
+    </div>
+  );
+}
+
+function FieldRow({
+  field,
+  isFirst,
+  isLast,
+  busy,
+  onRename,
+  onMoveUp,
+  onMoveDown,
+  onDelete,
+}: {
+  field: ContactFieldDefinition;
+  isFirst: boolean;
+  isLast: boolean;
+  busy: boolean;
+  onRename: (label: string) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(field.label);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function startEditing() {
+    setDraft(field.label);
+    setEditing(true);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+  }
+
+  function commit() {
+    const next = draft.trim();
+    setEditing(false);
+    if (!next || next === field.label) return;
+    onRename(next);
+  }
+
+  return (
+    <li className="flex flex-wrap items-center gap-3 px-4 py-3">
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onMoveUp}
+          disabled={isFirst || busy}
+          aria-label="Move up"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+        >
+          <ArrowUp className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={onMoveDown}
+          disabled={isLast || busy}
+          aria-label="Move down"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+        >
+          <ArrowDown className="size-3.5" />
+        </button>
+      </div>
+
+      {editing ? (
+        <Input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              setEditing(false);
+            }
+          }}
+          className="h-8 max-w-xs text-sm"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={startEditing}
+          className="group inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-sm font-medium hover:bg-accent"
+        >
+          <span>{field.label}</span>
+          <Pencil className="size-3 opacity-0 transition-opacity group-hover:opacity-50" />
+        </button>
+      )}
+
+      {/* The key is immutable — surface it so admins know what JSON path
+          shows up in exports / API responses. */}
+      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        {field.key}
+      </code>
+
+      <button
+        type="button"
+        onClick={onDelete}
+        disabled={busy}
+        aria-label={`Delete ${field.label}`}
+        className="ml-auto inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+      >
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+      </button>
+    </li>
+  );
+}
+
+function byOrder(a: ContactFieldDefinition, b: ContactFieldDefinition): number {
+  return a.order - b.order;
+}

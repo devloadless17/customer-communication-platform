@@ -11,8 +11,12 @@ import {
   StepConfigError,
   advance,
   advanceWithError,
-  envelopeContact,
 } from "./types";
+import {
+  type StepTarget,
+  parseStepTarget,
+  resolveStepTarget,
+} from "./target";
 
 /**
  * `add_tag` and `remove_tag` steps. Connect/disconnect semantics on the
@@ -21,10 +25,14 @@ import {
  *
  * Tag is verified to belong to the same team. Stale config referencing a
  * deleted tag returns 404 and advances.
+ *
+ * `target` defaults to the trigger contact; can be set to a custom phone
+ * (auto-creates Contact if unknown). No conversation needed.
  */
 
 interface TagConfig {
   tagId: string;
+  target?: StepTarget;
 }
 
 function parseTagConfig(kind: "add_tag" | "remove_tag", raw: unknown): TagConfig {
@@ -35,18 +43,27 @@ function parseTagConfig(kind: "add_tag" | "remove_tag", raw: unknown): TagConfig
   if (typeof r.tagId !== "string" || !r.tagId) {
     throw new StepConfigError(`${kind}.tagId must be a non-empty string`);
   }
-  return { tagId: r.tagId };
+  const target = parseStepTarget(r.target);
+  return target ? { tagId: r.tagId, target } : { tagId: r.tagId };
 }
 
 async function runTagMutation(
   envelope: Parameters<StepHandler["run"]>[0],
   ctx: Parameters<StepHandler["run"]>[2],
-  tagId: string,
+  cfg: TagConfig,
   kind: "add" | "remove",
 ): Promise<StepResult> {
-  const c = envelopeContact(envelope);
-  if (!c) return advanceWithError(400, "envelope missing contact");
-  const contactId = c.id;
+  let resolved;
+  try {
+    resolved = await resolveStepTarget(cfg.target, envelope, ctx.teamId, {
+      createConversation: false,
+    });
+  } catch (err) {
+    if (err instanceof StepConfigError) return advanceWithError(400, err.message);
+    throw err;
+  }
+  const contactId = resolved.contactId;
+  const tagId = cfg.tagId;
 
   const [contact, tag] = await Promise.all([
     db.contact.findFirst({
@@ -149,7 +166,7 @@ export const addTagStepHandler: StepHandler<TagConfig> = {
   sideEffect: "irreversible",
   parseConfig: (raw) => parseTagConfig("add_tag", raw),
   describeConfig: (c) => `Add tag ${c.tagId}`,
-  run: (env, c, ctx) => runTagMutation(env, ctx, c.tagId, "add"),
+  run: (env, c, ctx) => runTagMutation(env, ctx, c, "add"),
 };
 
 export const removeTagStepHandler: StepHandler<TagConfig> = {
@@ -157,7 +174,7 @@ export const removeTagStepHandler: StepHandler<TagConfig> = {
   sideEffect: "irreversible",
   parseConfig: (raw) => parseTagConfig("remove_tag", raw),
   describeConfig: (c) => `Remove tag ${c.tagId}`,
-  run: (env, c, ctx) => runTagMutation(env, ctx, c.tagId, "remove"),
+  run: (env, c, ctx) => runTagMutation(env, ctx, c, "remove"),
 };
 
 function normalizeStringMap(raw: unknown): Record<string, string> {

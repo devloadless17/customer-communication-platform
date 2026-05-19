@@ -100,7 +100,7 @@ export function AppRail({
   }, [currentUser.role]);
 
   return (
-    <aside className="flex h-svh w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/60 py-3 text-sidebar-foreground">
+    <aside className="hidden h-svh w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/60 py-3 text-sidebar-foreground md:flex">
       {/* Team badge */}
       <Tooltip>
         <TooltipTrigger asChild>

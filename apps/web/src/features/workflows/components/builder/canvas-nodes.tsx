@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import {
   ArrowRightLeft,
@@ -15,6 +16,11 @@ import {
   Zap,
 } from "lucide-react";
 
+import {
+  NodeActions,
+  TrailingPlus,
+  type PickerAnchor,
+} from "./insert-controls";
 import { type StepType, type Trigger, STEP_OPTIONS, TRIGGER_OPTIONS } from "./types";
 
 /**
@@ -57,6 +63,12 @@ export interface NodeData extends Record<string, unknown> {
   /** Optional shorthand of the step's config for "what does this do" hints. */
   summary?: string;
   hasErrors?: boolean;
+  /** Inline-action callbacks injected by WorkflowCanvas. */
+  onDuplicate?: () => void;
+  onDelete?: () => void;
+  /** Whether to render the trailing "+" below this node (leaves only). */
+  showTrailingPlus?: boolean;
+  onOpenPicker?: (anchor: PickerAnchor) => void;
 }
 
 const NODE_BASE =
@@ -84,20 +96,41 @@ export function TriggerNode({ data }: NodeProps) {
         <div className="px-3 py-2 text-[11px] text-muted-foreground">{trigger.description}</div>
       )}
       <Handle type="source" position={Position.Bottom} id="default" />
+      {/* Empty-graph affordance — when no startNode is wired yet, the
+          trigger gets the trailing "+" so the user can drop the first
+          step inline. sourceId=null tells insertStepAfter "this is the new
+          start node." */}
+      {d.showTrailingPlus && d.onOpenPicker && (
+        <TrailingPlus
+          visible
+          nodeId="__trigger__"
+          sourceHandle={null}
+          onInsert={(anchor) =>
+            d.onOpenPicker?.({ ...anchor, sourceId: null })
+          }
+        />
+      )}
     </div>
   );
 }
 
-export function StepNode({ data }: NodeProps) {
+export function StepNode({ id, data }: NodeProps) {
   const d = data as NodeData;
+  const [hovered, setHovered] = useState(false);
   const step = STEP_OPTIONS.find((s) => s.value === d.type);
   const Icon = (d.type && ICONS[d.type as StepType]) ?? Webhook;
   const borderColor = d.hasErrors ? "border-destructive/60" : "border-primary/30";
+  // Show inline actions when the node is either hovered or selected — the
+  // hover path is for "I'm about to interact", the selected path is for
+  // touch / keyboard users who don't have hover.
+  const actionsVisible = hovered || !!d.selected;
   return (
     <div
       className={`${NODE_BASE} w-64 ${borderColor} ${
         d.selected ? "ring-2 ring-primary" : ""
       }`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       <Handle type="target" position={Position.Top} />
       <div className="flex items-center gap-2 border-b border-border bg-primary/5 px-3 py-2">
@@ -113,19 +146,43 @@ export function StepNode({ data }: NodeProps) {
         <div className="truncate px-3 py-2 text-[11px] text-muted-foreground">{d.summary}</div>
       )}
       <Handle type="source" position={Position.Bottom} id="default" />
+      <NodeActions
+        visible={actionsVisible}
+        onDuplicate={() => d.onDuplicate?.()}
+        onDelete={() => d.onDelete?.()}
+      />
+      {d.showTrailingPlus && d.onOpenPicker && (
+        <TrailingPlus
+          visible
+          nodeId={id}
+          sourceHandle={null}
+          onInsert={d.onOpenPicker}
+        />
+      )}
     </div>
   );
 }
 
 export function BranchNode({ data }: NodeProps) {
   const d = data as NodeData;
+  const [hovered, setHovered] = useState(false);
+  const actionsVisible = hovered || !!d.selected;
   return (
     <div
       className={`${NODE_BASE} w-64 border-indigo-500/40 ${
         d.selected ? "ring-2 ring-indigo-500" : ""
       }`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       <Handle type="target" position={Position.Top} />
+      <NodeActions
+        visible={actionsVisible}
+        onDuplicate={() => d.onDuplicate?.()}
+        onDelete={() => d.onDelete?.()}
+      />
+      {/* Branch nodes intentionally don't render a trailing "+" — each of
+          their two outputs has its own edge "+" once a child is wired. */}
       <div className="flex items-center gap-2 border-b border-border bg-indigo-500/10 px-3 py-2">
         <Filter className="size-4 text-indigo-600" />
         <div className="min-w-0 flex-1">

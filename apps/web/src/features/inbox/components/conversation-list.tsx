@@ -281,7 +281,7 @@ function ConversationListImpl({
   }, [lastVirtualIndex, hasMore, loadingMore, visible.length]);
 
   return (
-    <div className="flex h-full w-72 shrink-0 flex-col bg-background md:w-95">
+    <div className="flex h-full w-full shrink flex-col bg-background md:w-64 md:min-w-48 lg:w-64 lg:min-w-52 xl:w-80 xl:min-w-60">
       <header className="flex items-center justify-between gap-2 border-b border-border px-4 pt-4 pb-3">
         <div>
           <h1 className="text-base font-semibold leading-tight">{headerTitle}</h1>

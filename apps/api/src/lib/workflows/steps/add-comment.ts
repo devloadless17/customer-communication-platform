@@ -10,6 +10,7 @@ import {
   advanceWithError,
   envelopeContact,
   envelopeConversation,
+  envelopeExtras,
 } from "./types";
 
 /**
@@ -64,7 +65,7 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
       location: null,
       customFields: c?.customFields ?? {},
     };
-    const body = resolveFieldTokens(config.body, contact);
+    const body = resolveFieldTokens(config.body, contact, envelopeExtras(envelope));
 
     const note = await db.internalNote.create({
       data: {

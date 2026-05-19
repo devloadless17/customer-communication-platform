@@ -1,3 +1,4 @@
+import { db } from "@/lib/db";
 import {
   SendTextValidationError,
   sendTextInternal,
@@ -12,21 +13,35 @@ import {
   advance,
   advanceWithError,
   envelopeContact,
-  envelopeConversation,
+  envelopeExtras,
   truncateBody,
 } from "./types";
+import {
+  type StepTarget,
+  parseStepTarget,
+  resolveStepTarget,
+} from "./target";
 
 /**
  * `send_message` step. Sends a free-form text via the team's provider.
  *
- *   Config: { body: string }
+ *   Config: { body: string, target?: StepTarget }
  *
  * `body` supports `$var.contact.*` tokens. Outside-of-24h-window returns 422
  * and advances — workflow authors who need cold reachout should use a
  * `send_template` step instead.
+ *
+ * `target` picks who to send to:
+ *   - undefined / trigger_contact (default) → the contact the trigger fired
+ *     for. Existing behavior.
+ *   - phone → an arbitrary E.164 number. Auto-creates Contact + open
+ *     Conversation if they don't exist yet. The 24h window still applies —
+ *     if the target's last inbound is >24h or never, this step returns 422
+ *     (use `send_template` for cold reachout).
  */
 export interface SendMessageStepConfig {
   body: string;
+  target?: StepTarget;
 }
 
 export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
@@ -40,24 +55,69 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
     if (typeof r.body !== "string" || !r.body.trim()) {
       throw new StepConfigError("send_message.body must be a non-empty string");
     }
-    return { body: r.body };
+    const target = parseStepTarget(r.target);
+    return target ? { body: r.body, target } : { body: r.body };
   },
   describeConfig(config) {
-    return `Send "${config.body.slice(0, 40)}${config.body.length > 40 ? "…" : ""}"`;
+    const head = `Send "${config.body.slice(0, 40)}${config.body.length > 40 ? "…" : ""}"`;
+    if (config.target && config.target.kind === "phone") {
+      return `${head} → ${config.target.phoneNumber}`;
+    }
+    return head;
   },
   async run(envelope, config, ctx): Promise<StepResult> {
-    const conv = envelopeConversation(envelope);
-    if (!conv) return advanceWithError(400, "envelope missing conversation");
-    const conversationId = conv.id;
-    const c = envelopeContact(envelope);
-    const contact: ContactLike = {
-      name: c?.name ?? "",
-      phoneNumber: c?.phoneNumber ?? null,
-      email: c?.email ?? null,
-      location: null,
-      customFields: c?.customFields ?? {},
-    };
-    const body = resolveFieldTokens(config.body, contact);
+    let resolved;
+    try {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+        createConversation: true,
+      });
+    } catch (err) {
+      if (err instanceof StepConfigError) {
+        return advanceWithError(400, err.message);
+      }
+      throw err;
+    }
+    if (!resolved.conversationId) {
+      return advanceWithError(400, "could not resolve a conversation for the target");
+    }
+    const conversationId = resolved.conversationId;
+    // For the trigger-contact path we already have the contact snapshot.
+    // For the phone path we need to read the contact row so $var.contact.*
+    // tokens resolve against the TARGET (not the trigger contact).
+    let contact: ContactLike;
+    if (!config.target || config.target.kind === "trigger_contact") {
+      const c = envelopeContact(envelope);
+      contact = {
+        name: c?.name ?? "",
+        phoneNumber: c?.phoneNumber ?? null,
+        email: c?.email ?? null,
+        location: null,
+        customFields: c?.customFields ?? {},
+      };
+    } else {
+      const row = await db.contact.findFirst({
+        where: { id: resolved.contactId, teamId: ctx.teamId },
+        select: {
+          name: true,
+          phoneNumber: true,
+          email: true,
+          location: true,
+          customFields: true,
+        },
+      });
+      contact = {
+        name: row?.name ?? "",
+        phoneNumber: row?.phoneNumber ?? null,
+        email: row?.email ?? null,
+        location: row?.location ?? null,
+        customFields: (row?.customFields as Record<string, string> | null) ?? {},
+      };
+    }
+    // Pass envelope message + conversation through as `extras` so authors
+    // can drop `$var.message.body`, `$var.message.timestamp`, etc. inline.
+    // Falls back to empty string for tokens whose source isn't in this
+    // trigger's payload (e.g. `$var.message.*` outside message_received).
+    const body = resolveFieldTokens(config.body, contact, envelopeExtras(envelope));
 
     try {
       const result = await sendTextInternal({

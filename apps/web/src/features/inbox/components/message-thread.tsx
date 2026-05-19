@@ -58,6 +58,7 @@ function MessageThreadImpl({
   stageCatalog,
   canManageStages,
   onMarkRead,
+  onMobileBack,
 }: {
   data: ConversationWithRefs;
   teamMembers: User[];
@@ -71,6 +72,9 @@ function MessageThreadImpl({
    *  unreadCount=0 after the mark-read POST resolves. Optional so tests and
    *  other mount points don't need to thread it. */
   onMarkRead?: (conversationId: string) => void;
+  /** Below md the inbox single-panes between conversation list and thread.
+   *  When set, ThreadHeader renders a back-arrow that returns to the list. */
+  onMobileBack?: () => void;
 }) {
   const {
     data,
@@ -601,6 +605,7 @@ function MessageThreadImpl({
         currentStageId={stageId}
         onStageChange={persistStageId}
         canManageStages={canManageStages}
+        onMobileBack={onMobileBack}
       />
 
       {searchOpen && (

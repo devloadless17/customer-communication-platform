@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import {
   KeyRound,
   Layers,
+  ListChecks,
   MessageSquare,
   Plug,
   Sparkles,
@@ -12,7 +13,11 @@ import {
   Users,
 } from "lucide-react";
 
-import { canManageStages, canManageUsers } from "@ccp/shared/auth/permissions";
+import {
+  canManageContactFields,
+  canManageStages,
+  canManageUsers,
+} from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 
 import {
@@ -32,6 +37,7 @@ export function SettingsSubSidebar({ role }: { role: Role }) {
   const pathname = usePathname() ?? "";
   const isAdmin = canManageUsers(role);
   const canStages = canManageStages(role);
+  const canFields = canManageContactFields(role);
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(href + "/");
@@ -97,6 +103,14 @@ export function SettingsSubSidebar({ role }: { role: Role }) {
           leading={<TagIcon className="size-4" />}
           active={isActive("/settings/tags")}
         />
+        {canFields && (
+          <SubSidebarItem
+            href="/settings/contact-fields"
+            label="Contact fields"
+            leading={<ListChecks className="size-4" />}
+            active={isActive("/settings/contact-fields")}
+          />
+        )}
       </SubSidebarSection>
     </SubSidebar>
   );

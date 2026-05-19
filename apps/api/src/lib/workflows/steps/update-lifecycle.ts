@@ -11,18 +11,25 @@ import {
   StepConfigError,
   advance,
   advanceWithError,
-  envelopeContact,
 } from "./types";
+import {
+  type StepTarget,
+  parseStepTarget,
+  resolveStepTarget,
+} from "./target";
 
 /**
  * `update_lifecycle` step. Moves the contact to a different ContactStage.
  *
- *   Config: { stageId: string }   — target stage; must belong to this team
+ *   Config: { stageId: string, target?: StepTarget }   — target stage; must belong to this team
  *
- * Idempotent (no-op if already in the target stage).
+ * Idempotent (no-op if already in the target stage). `target` defaults to
+ * the trigger contact; can be set to a custom phone (auto-creates Contact
+ * if unknown). No conversation is needed — Contact-level mutation only.
  */
 export interface UpdateLifecycleStepConfig {
   stageId: string;
+  target?: StepTarget;
 }
 
 export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> = {
@@ -36,15 +43,23 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
     if (typeof r.stageId !== "string" || !r.stageId) {
       throw new StepConfigError("update_lifecycle.stageId must be a non-empty string");
     }
-    return { stageId: r.stageId };
+    const target = parseStepTarget(r.target);
+    return target ? { stageId: r.stageId, target } : { stageId: r.stageId };
   },
   describeConfig(c) {
     return `Move to stage ${c.stageId}`;
   },
   async run(envelope, config, ctx): Promise<StepResult> {
-    const c = envelopeContact(envelope);
-    if (!c) return advanceWithError(400, "envelope missing contact");
-    const contactId = c.id;
+    let resolved;
+    try {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+        createConversation: false,
+      });
+    } catch (err) {
+      if (err instanceof StepConfigError) return advanceWithError(400, err.message);
+      throw err;
+    }
+    const contactId = resolved.contactId;
 
     const [contact, stage] = await Promise.all([
       db.contact.findFirst({

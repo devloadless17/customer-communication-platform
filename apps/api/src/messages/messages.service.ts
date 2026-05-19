@@ -318,10 +318,11 @@ export class MessagesService {
     // Cheap indexed existence check (no contact join, no select-all).
     // Conversation row gone → fail non-recoverable BEFORE we hit Meta so
     // we don't strand a customer with a message no agent can see.
+    // Pull lastMessageAt for the timestamp-monotonicity guard further down.
     const [exists, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
-        select: { id: true },
+        select: { id: true, lastMessageAt: true },
       }),
       getMetaSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
@@ -371,6 +372,15 @@ export class MessagesService {
       });
     }
 
+    // Timestamp monotonicity guard — outbound must sort strictly after any
+    // inbound it might be responding to. Meta's webhook timestamps are
+    // second-precision (rounded), so an outbound landing in the same
+    // second can otherwise sort BEFORE the inbound. See
+    // send-text-internal.ts for the full rationale.
+    const messageTimestamp =
+      exists.lastMessageAt && exists.lastMessageAt >= receivedAt
+        ? new Date(exists.lastMessageAt.getTime() + 1)
+        : receivedAt;
     const [created, replySnapshot] = await Promise.all([
       createOutboundMessageIdempotent({
         teamId,
@@ -382,7 +392,7 @@ export class MessagesService {
         provider: "meta_cloud",
         status: "sent",
         rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
-        timestamp: receivedAt,
+        timestamp: messageTimestamp,
         ...(replyToMessageId ? { replyToMessageId } : {}),
       }),
       replySnapshotPromise,
@@ -400,7 +410,7 @@ export class MessagesService {
       provider: "meta_cloud",
       status: "sent",
       rawPayload: { sentVia: "api/messages" },
-      timestamp: receivedAt.toISOString(),
+      timestamp: messageTimestamp.toISOString(),
       ...(replyToMessageId
         ? { replyToMessageId, replyTo: replySnapshot ?? null }
         : {}),
@@ -413,7 +423,7 @@ export class MessagesService {
     try {
       await this.commitOutboundEvent({
         conversationId,
-        bumpTimestamp: send.timestamp,
+        bumpTimestamp: messageTimestamp,
         preview,
         event: {
           type: "message.sent",
@@ -511,6 +521,9 @@ export class MessagesService {
       where: { id: conversationId, teamId },
       select: {
         id: true,
+        // For the timestamp monotonicity guard further down — outbound
+        // must sort strictly after any inbound it might be responding to.
+        lastMessageAt: true,
         contact: {
           select: { phoneNumber: true, name: true, lastInboundAt: true },
         },
@@ -696,6 +709,14 @@ export class MessagesService {
 
     const previewBody = (caption || mediaPreview(kind)).slice(0, 200);
 
+    // Timestamp monotonicity guard — see send-text-internal.ts for full
+    // rationale. Outbound must sort strictly after any inbound in the
+    // same second.
+    const messageTimestamp =
+      conversation.lastMessageAt && conversation.lastMessageAt >= receivedAt
+        ? new Date(conversation.lastMessageAt.getTime() + 1)
+        : receivedAt;
+
     const created = await createOutboundMessageIdempotent({
       teamId,
       conversationId,
@@ -710,7 +731,7 @@ export class MessagesService {
         mediaId,
         ...(saved ? {} : { blobUploadFailed: true }),
       } as Prisma.InputJsonValue,
-      timestamp: receivedAt,
+      timestamp: messageTimestamp,
       // Persist media columns only when the blob upload succeeded. The
       // mapMessage path (lib/queries/_shared.ts) treats `mediaKind &&
       // !mediaUrl` as "still downloading" — writing them unconditionally
@@ -775,7 +796,7 @@ export class MessagesService {
         mediaId,
         ...(saved ? {} : { blobUploadFailed: true }),
       },
-      timestamp: receivedAt.toISOString(),
+      timestamp: messageTimestamp.toISOString(),
       ...(media ? { media } : {}),
       ...(replyToMessageId
         ? { replyToMessageId, replyTo: replySnapshot ?? null }
@@ -790,7 +811,7 @@ export class MessagesService {
     try {
       await this.commitOutboundEvent({
         conversationId,
-        bumpTimestamp: send.timestamp,
+        bumpTimestamp: messageTimestamp,
         preview: previewBody,
         event: {
           type: "message.sent",
@@ -798,7 +819,7 @@ export class MessagesService {
           conversationId,
           message,
           preview: previewBody,
-          lastMessageAt: send.timestamp.toISOString(),
+          lastMessageAt: messageTimestamp.toISOString(),
           senderUserId: userId,
           ...(clientTempId ? { clientTempId } : {}),
         },
@@ -1098,6 +1119,12 @@ export class MessagesService {
               200,
             );
 
+            // Monotonicity guard — same fix as text/template/media sends.
+            const fwdMediaTs =
+              conversation.lastMessageAt && conversation.lastMessageAt >= send.timestamp
+                ? new Date(conversation.lastMessageAt.getTime() + 1)
+                : send.timestamp;
+
             const created = await createOutboundMessageIdempotent({
               teamId,
               conversationId: conversation.id,
@@ -1113,7 +1140,7 @@ export class MessagesService {
                 mediaId: uploaded.mediaId,
                 ...(saved ? {} : { blobUploadFailed: true }),
               } as Prisma.InputJsonValue,
-              timestamp: send.timestamp,
+              timestamp: fwdMediaTs,
               mediaKind: mb.kind,
               ...(saved
                 ? {
@@ -1165,10 +1192,10 @@ export class MessagesService {
                 sentVia: "api/messages/forward",
                 forwardedFrom: src.id,
               },
-              timestamp: send.timestamp.toISOString(),
+              timestamp: fwdMediaTs.toISOString(),
               ...(media ? { media } : {}),
             };
-            await emitForwarded(message, previewBody, send.timestamp).catch(
+            await emitForwarded(message, previewBody, fwdMediaTs).catch(
               (err) =>
                 this.logger.error(
                   `[forward] emit failed (already sent): ${err instanceof Error ? err.message : err}`,
@@ -1184,7 +1211,11 @@ export class MessagesService {
               sendConfig,
             );
 
-            // Post-send.
+            // Post-send. Monotonicity guard — see send-text-internal.ts.
+            const fwdTextTs =
+              conversation.lastMessageAt && conversation.lastMessageAt >= send.timestamp
+                ? new Date(conversation.lastMessageAt.getTime() + 1)
+                : send.timestamp;
             const created = await createOutboundMessageIdempotent({
               teamId,
               conversationId: conversation.id,
@@ -1198,7 +1229,7 @@ export class MessagesService {
                 sentVia: "api/messages/forward",
                 forwardedFrom: src.id,
               } as Prisma.InputJsonValue,
-              timestamp: send.timestamp,
+              timestamp: fwdTextTs,
             }).catch((err): null => {
               this.logger.error(
                 `[forward] DB persist failed after Meta send (wamid=${send.externalId})`,
@@ -1227,9 +1258,9 @@ export class MessagesService {
                 sentVia: "api/messages/forward",
                 forwardedFrom: src.id,
               },
-              timestamp: send.timestamp.toISOString(),
+              timestamp: fwdTextTs.toISOString(),
             };
-            await emitForwarded(message, preview, send.timestamp).catch(
+            await emitForwarded(message, preview, fwdTextTs).catch(
               (err) =>
                 this.logger.error(
                   `[forward] emit failed (already sent): ${err instanceof Error ? err.message : err}`,

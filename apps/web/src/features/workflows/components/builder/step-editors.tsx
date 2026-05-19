@@ -1,12 +1,279 @@
 "use client";
 
+import { useCallback, useRef } from "react";
 import { Tag as TagIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import type { ContactFieldDefinition } from "@ccp/shared/types";
+import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
+import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
 
 import { ConditionGroupEditor } from "./condition-group";
-import { type BuilderCatalogs, type WorkflowGraph, toGroup } from "./types";
+import { type BuilderCatalogs, type Trigger, type WorkflowGraph, toGroup } from "./types";
+
+/**
+ * Body editor wrapper: token-highlight textarea + insert-variable picker.
+ *
+ * Shared between send_message / add_comment / template-variable editors so
+ * a single change to the picker styling propagates everywhere. The parent
+ * owns the value (config.body or whatever); we just thread keystrokes back
+ * out through onChange and splice token inserts at the live cursor.
+ *
+ * Tokens are stored verbatim in the saved config and resolved at run time
+ * by `resolveFieldTokens` (see @ccp/shared/field-tokens). That's why the
+ * server's step handler doesn't need to know about the picker.
+ */
+/**
+ * Trigger → which workflow-context namespaces should the picker expose.
+ * Centralised here so adding a new trigger doesn't require touching every
+ * step editor — bump this lookup and every `BodyTokenEditor` reflects it.
+ */
+function workflowNamespacesForTrigger(trigger: Trigger): {
+  includeMessage: boolean;
+  includeConversation: boolean;
+} {
+  switch (trigger) {
+    case "message_received":
+      return { includeMessage: true, includeConversation: true };
+    case "conversation_created":
+    case "conversation_opened":
+    case "conversation_closed":
+    case "conversation_assigned":
+    case "conversation_status_changed":
+      return { includeMessage: false, includeConversation: true };
+    case "manual_trigger":
+      // Manual_trigger CAN carry a conversation but it's optional; expose
+      // the tokens — they'll resolve to empty when fired without one, same
+      // behavior as any optional snapshot.
+      return { includeMessage: false, includeConversation: true };
+    default:
+      return { includeMessage: false, includeConversation: false };
+  }
+}
+
+function BodyTokenEditor({
+  value,
+  onChange,
+  fieldDefinitions,
+  rows = 4,
+  placeholder,
+  includeAgent,
+  hint,
+  trigger,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  fieldDefinitions: ContactFieldDefinition[];
+  rows?: number;
+  placeholder?: string;
+  includeAgent?: boolean;
+  hint?: string;
+  /** Workflow's trigger — drives which extra token namespaces are exposed. */
+  trigger?: Trigger;
+}) {
+  const { includeMessage, includeConversation } = trigger
+    ? workflowNamespacesForTrigger(trigger)
+    : { includeMessage: false, includeConversation: false };
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  const insert = useCallback(
+    (token: string) => {
+      const el = ref.current;
+      if (!el) {
+        onChange(value + token);
+        return;
+      }
+      const start = el.selectionStart ?? value.length;
+      const end = el.selectionEnd ?? value.length;
+      const next = value.slice(0, start) + token + value.slice(end);
+      onChange(next);
+      requestAnimationFrame(() => {
+        el.focus();
+        const pos = start + token.length;
+        el.setSelectionRange(pos, pos);
+      });
+    },
+    [value, onChange],
+  );
+  return (
+    <>
+      <div className="flex justify-end">
+        <FieldTokenPicker
+          fieldDefinitions={fieldDefinitions}
+          onInsert={insert}
+          label="Insert variable"
+          includeAgent={includeAgent}
+          includeMessage={includeMessage}
+          includeConversation={includeConversation}
+          hint={hint}
+        />
+      </div>
+      <TokenHighlightTextarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        placeholder={placeholder}
+        fieldDefinitions={fieldDefinitions}
+        includeAgent={includeAgent}
+        includeMessage={includeMessage}
+        includeConversation={includeConversation}
+      />
+    </>
+  );
+}
+
+/**
+ * Adapter — BuilderCatalogs.fields has just key+label; the picker + highlight
+ * components want full ContactFieldDefinition. The other fields are unused by
+ * both consumers so a thin cast is safe and avoids a refactor of the catalog
+ * loader.
+ */
+function asFieldDefs(
+  fields: BuilderCatalogs["fields"],
+): ContactFieldDefinition[] {
+  return fields as unknown as ContactFieldDefinition[];
+}
+
+// Step target — which contact / phone does this step act on? -------------------
+
+/**
+ * Wire shape for the step's `target` config field. Mirrors the server-side
+ * StepTarget type in apps/api/src/lib/workflows/steps/target.ts. Keeping the
+ * type duplicated here (instead of importing from @ccp/shared) because the
+ * server side parses the raw JSON anyway; the web type is just a UI hint.
+ */
+export type StepTarget =
+  | { kind: "trigger_contact" }
+  | { kind: "phone"; phoneNumber: string };
+
+/**
+ * Target selector — radio between "trigger contact" (default) and "custom
+ * phone". When phone is picked, a single-line input collects the E.164
+ * number. The server normalizes + validates on save, so a typo here
+ * surfaces in the workflow's stepErrors block on save.
+ *
+ * `extraHint` is rendered below the phone input when set — used by
+ * send_message to mention the 24h window caveat for cold reachout.
+ */
+function TargetSelector({
+  target,
+  onChange,
+  extraHint,
+}: {
+  target: StepTarget | undefined;
+  onChange: (next: StepTarget | undefined) => void;
+  extraHint?: string;
+}) {
+  const mode = target?.kind ?? "trigger_contact";
+  const phone = target?.kind === "phone" ? target.phoneNumber : "";
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Target
+      </div>
+      <label className="flex cursor-pointer items-center gap-2 text-sm">
+        <input
+          type="radio"
+          name="target-mode"
+          checked={mode === "trigger_contact"}
+          onChange={() => onChange(undefined)}
+          className="size-3.5"
+        />
+        <span>Contact from the trigger</span>
+        <span className="text-[10.5px] text-muted-foreground">(default)</span>
+      </label>
+      <label className="flex cursor-pointer items-center gap-2 text-sm">
+        <input
+          type="radio"
+          name="target-mode"
+          checked={mode === "phone"}
+          onChange={() =>
+            onChange({ kind: "phone", phoneNumber: phone })
+          }
+          className="size-3.5"
+        />
+        <span>Custom phone number</span>
+      </label>
+      {mode === "phone" && (
+        <div className="ml-6 flex flex-col gap-1">
+          <Input
+            value={phone}
+            onChange={(e) => onChange({ kind: "phone", phoneNumber: e.target.value })}
+            placeholder="+1 555 555 0100"
+            className="font-mono text-[13px]"
+          />
+          <span className="text-[10.5px] text-muted-foreground">
+            E.164 format. If the number isn't a contact yet, a new contact is
+            created automatically.
+          </span>
+          {extraHint && (
+            <span className="text-[10.5px] text-amber-600 dark:text-amber-400">
+              {extraHint}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Single-line variable input + an inline "Insert variable" button. Used for
+ * Send Template variables where each `{{n}}` placeholder is a separate slot.
+ * Splices the picked token at the input's caret position (same pattern as
+ * the multiline body editor above).
+ */
+function TemplateVariableRow({
+  idx,
+  value,
+  onChange,
+  fieldDefinitions,
+  trigger,
+}: {
+  idx: number;
+  value: string;
+  onChange: (next: string) => void;
+  fieldDefinitions: ContactFieldDefinition[];
+  trigger?: Trigger;
+}) {
+  const { includeMessage, includeConversation } = trigger
+    ? workflowNamespacesForTrigger(trigger)
+    : { includeMessage: false, includeConversation: false };
+  const ref = useRef<HTMLInputElement | null>(null);
+  const insert = useCallback(
+    (token: string) => {
+      const el = ref.current;
+      if (!el) {
+        onChange(value + token);
+        return;
+      }
+      const start = el.selectionStart ?? value.length;
+      const end = el.selectionEnd ?? value.length;
+      const next = value.slice(0, start) + token + value.slice(end);
+      onChange(next);
+      requestAnimationFrame(() => {
+        el.focus();
+        const pos = start + token.length;
+        el.setSelectionRange(pos, pos);
+      });
+    },
+    [value, onChange],
+  );
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-12 shrink-0 font-mono text-xs text-muted-foreground">{`{{${idx + 1}}}`}</span>
+      <Input ref={ref} value={value} onChange={(e) => onChange(e.target.value)} />
+      <FieldTokenPicker
+        fieldDefinitions={fieldDefinitions}
+        onInsert={insert}
+        label="Variable"
+        includeMessage={includeMessage}
+        includeConversation={includeConversation}
+      />
+    </div>
+  );
+}
 
 /**
  * Per-step editors. Each editor takes the (typed) config + onChange + the
@@ -38,22 +305,36 @@ function Field({
 export function SendMessageEditor({
   config,
   onChange,
+  fields,
+  trigger,
 }: {
-  config: { body?: string };
+  config: { body?: string; target?: StepTarget };
   onChange: (c: Record<string, unknown>) => void;
+  fields: BuilderCatalogs["fields"];
+  trigger: Trigger;
 }) {
   return (
-    <Field
-      label="Message"
-      hint="Free-form text. Tokens like $var.contact.name resolve per contact. Outside the 24h window this step fails — use Send Template instead."
-    >
-      <Textarea
-        value={config.body ?? ""}
-        onChange={(e) => onChange({ body: e.target.value })}
-        rows={4}
-        placeholder="Hi $var.contact.name, thanks for reaching out!"
+    <div className="flex flex-col gap-4">
+      <Field
+        label="Message"
+        hint="Tokens like $var.contact.name resolve per contact. Outside the 24h window this step fails — use Send Template instead."
+      >
+        <BodyTokenEditor
+          value={config.body ?? ""}
+          onChange={(body) => onChange({ ...config, body })}
+          fieldDefinitions={asFieldDefs(fields)}
+          rows={4}
+          placeholder="Hi $var.contact.name, thanks for reaching out!"
+          hint="Contact tokens resolve against the selected target."
+          trigger={trigger}
+        />
+      </Field>
+      <TargetSelector
+        target={config.target}
+        onChange={(target) => onChange({ ...config, target })}
+        extraHint="Free-form sends require the contact to have messaged you in the last 24h. For cold reachout, use a Send Template step."
       />
-    </Field>
+    </div>
   );
 }
 
@@ -71,10 +352,14 @@ export function SendTemplateEditor({
   config,
   onChange,
   templates,
+  fields,
+  trigger,
 }: {
   config: { templateId?: string; variables?: { body?: string[]; header?: string } };
   onChange: (c: Record<string, unknown>) => void;
   templates: BuilderCatalogs["templates"];
+  fields: BuilderCatalogs["fields"];
+  trigger: Trigger;
 }) {
   const approved = templates.filter((t) => t.status === "approved");
   const selected = templates.find((t) => t.id === config.templateId);
@@ -129,13 +414,17 @@ export function SendTemplateEditor({
         </div>
       )}
       {bodyVarCount > 0 && (
-        <Field label={`Variables (${bodyVarCount})`} hint="Tokens like $var.contact.name resolve per run.">
+        <Field label={`Variables (${bodyVarCount})`} hint="Plain text or $var.contact.* tokens resolved per run.">
           <div className="flex flex-col gap-2">
             {Array.from({ length: bodyVarCount }).map((_, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span className="w-12 shrink-0 font-mono text-xs text-muted-foreground">{`{{${i + 1}}}`}</span>
-                <Input value={bodyVars[i] ?? ""} onChange={(e) => setVar(i, e.target.value)} />
-              </div>
+              <TemplateVariableRow
+                key={i}
+                idx={i}
+                value={bodyVars[i] ?? ""}
+                onChange={(v) => setVar(i, v)}
+                fieldDefinitions={asFieldDefs(fields)}
+                trigger={trigger}
+              />
             ))}
           </div>
         </Field>
@@ -149,20 +438,26 @@ export function SendTemplateEditor({
 export function AddCommentEditor({
   config,
   onChange,
+  fields,
+  trigger,
 }: {
   config: { body?: string };
   onChange: (c: Record<string, unknown>) => void;
+  fields: BuilderCatalogs["fields"];
+  trigger: Trigger;
 }) {
   return (
     <Field
       label="Note"
       hint="Internal — never sent to the contact. Tokens like $var.contact.name resolve per run."
     >
-      <Textarea
+      <BodyTokenEditor
         value={config.body ?? ""}
-        onChange={(e) => onChange({ body: e.target.value })}
+        onChange={(body) => onChange({ body })}
+        fieldDefinitions={asFieldDefs(fields)}
         rows={3}
         placeholder="Customer asking for $var.contact.email — needs invoice"
+        trigger={trigger}
       />
     </Field>
   );
@@ -286,40 +581,46 @@ export function TagEditor({
   tags,
   verb,
 }: {
-  config: { tagId?: string };
+  config: { tagId?: string; target?: StepTarget };
   onChange: (c: Record<string, unknown>) => void;
   tags: BuilderCatalogs["tags"];
   verb: "Add" | "Remove";
 }) {
   const selected = tags.find((t) => t.id === config.tagId);
   return (
-    <Field
-      label="Tag"
-      hint={tags.length === 0 ? "No tags yet — create them in Settings → Tags." : `${verb} this tag from the contact.`}
-    >
-      <div className="flex flex-col gap-2">
-        <select
-          value={config.tagId ?? ""}
-          onChange={(e) => onChange({ tagId: e.target.value })}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
-        >
-          <option value="">Select a tag…</option>
-          {tags.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
-        {selected && (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <TagIcon className="size-3.5" />
-            <span className="inline-flex items-center rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium text-primary">
-              {selected.name}
-            </span>
-          </div>
-        )}
-      </div>
-    </Field>
+    <div className="flex flex-col gap-4">
+      <Field
+        label="Tag"
+        hint={tags.length === 0 ? "No tags yet — create them in Settings → Tags." : `${verb} this tag from the contact.`}
+      >
+        <div className="flex flex-col gap-2">
+          <select
+            value={config.tagId ?? ""}
+            onChange={(e) => onChange({ ...config, tagId: e.target.value })}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+          >
+            <option value="">Select a tag…</option>
+            {tags.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+          {selected && (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <TagIcon className="size-3.5" />
+              <span className="inline-flex items-center rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium text-primary">
+                {selected.name}
+              </span>
+            </div>
+          )}
+        </div>
+      </Field>
+      <TargetSelector
+        target={config.target}
+        onChange={(target) => onChange({ ...config, target })}
+      />
+    </div>
   );
 }
 
@@ -330,7 +631,7 @@ export function UpdateFieldEditor({
   onChange,
   fields,
 }: {
-  config: { fieldKey?: string; value?: string };
+  config: { fieldKey?: string; value?: string; target?: StepTarget };
   onChange: (c: Record<string, unknown>) => void;
   fields: BuilderCatalogs["fields"];
 }) {
@@ -356,6 +657,10 @@ export function UpdateFieldEditor({
           onChange={(e) => onChange({ ...config, value: e.target.value })}
         />
       </Field>
+      <TargetSelector
+        target={config.target}
+        onChange={(target) => onChange({ ...config, target })}
+      />
     </div>
   );
 }
@@ -367,25 +672,31 @@ export function UpdateLifecycleEditor({
   onChange,
   stages,
 }: {
-  config: { stageId?: string };
+  config: { stageId?: string; target?: StepTarget };
   onChange: (c: Record<string, unknown>) => void;
   stages: BuilderCatalogs["stages"];
 }) {
   return (
-    <Field label="Stage">
-      <select
-        value={config.stageId ?? ""}
-        onChange={(e) => onChange({ stageId: e.target.value })}
-        className="h-9 rounded-md border border-border bg-background px-2 text-sm"
-      >
-        <option value="">Select a stage…</option>
-        {stages.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.name}
-          </option>
-        ))}
-      </select>
-    </Field>
+    <div className="flex flex-col gap-4">
+      <Field label="Stage">
+        <select
+          value={config.stageId ?? ""}
+          onChange={(e) => onChange({ ...config, stageId: e.target.value })}
+          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+        >
+          <option value="">Select a stage…</option>
+          {stages.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <TargetSelector
+        target={config.target}
+        onChange={(target) => onChange({ ...config, target })}
+      />
+    </div>
   );
 }
 
@@ -393,10 +704,22 @@ export function UpdateLifecycleEditor({
 
 export function BranchEditor({
   config,
+  trigger,
   onChange,
+  catalogs,
 }: {
   config: { conditions?: unknown };
+  /** Workflow's trigger — scopes which condition fields are offered.
+   *  Earlier this editor always set allowAllFields, which exposed fields
+   *  like stage_from / stage_to ("Previous stage" / "New stage") that are
+   *  only populated by the contact_lifecycle_updated trigger. On a
+   *  message_received workflow those conditions silently never matched —
+   *  users picked them and wondered why nothing fired. Scoping to the
+   *  trigger removes the confusion (contact_stage_id stays available for
+   *  every trigger because the runner reads it off the live contact row). */
+  trigger: Trigger;
   onChange: (c: Record<string, unknown>) => void;
+  catalogs: BuilderCatalogs;
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -405,10 +728,10 @@ export function BranchEditor({
         otherwise to <strong>false</strong>. Connect both edges in the canvas.
       </div>
       <ConditionGroupEditor
-        trigger="message_received"
+        trigger={trigger}
         group={toGroup(config.conditions)}
         onChange={(g) => onChange({ conditions: g })}
-        allowAllFields
+        catalogs={catalogs}
       />
     </div>
   );

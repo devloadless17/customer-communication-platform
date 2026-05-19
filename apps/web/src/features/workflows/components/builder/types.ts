@@ -193,22 +193,63 @@ export const FIELDS_BY_TRIGGER: Record<Trigger, ConditionField[]> = {
 export const FIELD_LABELS: Record<ConditionField, string> = {
   body: "Message body",
   body_lower: "Message body (lowercased)",
-  direction: "Direction (in/out)",
+  direction: "Direction",
   status_from: "Previous status",
   status_to: "New status",
-  assigned_user_id: "Assigned user id",
+  assigned_user_id: "Assigned user",
   conversation_status: "Conversation status",
   contact_phone: "Contact phone",
   contact_name: "Contact name",
   contact_email: "Contact email",
-  contact_stage_id: "Contact stage id",
-  tag_id: "Tag id",
-  tag_change_kind: "Tag change (added/removed)",
-  field_key: "Field key",
+  contact_stage_id: "Contact stage",
+  tag_id: "Tag",
+  tag_change_kind: "Tag change",
+  field_key: "Field",
   field_new_value: "Field new value",
   stage_from: "Previous stage",
   stage_to: "New stage",
 };
+
+/**
+ * How the value column should render for each condition field. Catalog-backed
+ * fields ("stage" / "tag" / "user" / "field_key") show a dropdown of the
+ * team's rows so authors never have to look up a CUID by hand. Enum fields
+ * ("status" / "direction" / "tag_change_kind") render a dropdown of allowed
+ * literal values. Everything else stays a free-text Input.
+ */
+export type FieldValueKind =
+  | "text"
+  | "stage"
+  | "tag"
+  | "user"
+  | "status"
+  | "direction"
+  | "tag_change_kind"
+  | "field_key";
+
+export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
+  body: "text",
+  body_lower: "text",
+  direction: "direction",
+  status_from: "status",
+  status_to: "status",
+  conversation_status: "status",
+  assigned_user_id: "user",
+  contact_phone: "text",
+  contact_name: "text",
+  contact_email: "text",
+  contact_stage_id: "stage",
+  tag_id: "tag",
+  tag_change_kind: "tag_change_kind",
+  field_key: "field_key",
+  field_new_value: "text",
+  stage_from: "stage",
+  stage_to: "stage",
+};
+
+export const STATUS_VALUES = ["open", "pending", "closed"] as const;
+export const DIRECTION_VALUES = ["in", "out"] as const;
+export const TAG_CHANGE_KIND_VALUES = ["added", "removed"] as const;
 
 export const OP_OPTIONS: Array<{ value: ConditionOp; label: string; needsValue: boolean }> = [
   { value: "equals", label: "is equal to", needsValue: true },

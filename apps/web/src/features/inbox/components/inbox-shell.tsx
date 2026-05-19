@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { AlertTriangle, Inbox as InboxIcon } from "lucide-react";
+import { AlertTriangle, ChevronLeft, Inbox as InboxIcon } from "lucide-react";
 
 import type {
   Contact,
@@ -33,6 +33,8 @@ import dynamic from "next/dynamic";
 
 import { AppRail } from "@/components/layouts/app-rail";
 import { InboxSubSidebar } from "@/components/layouts/inbox-sub-sidebar";
+import { MobileShellChrome } from "@/components/layouts/mobile-shell-chrome";
+import { cn } from "@ccp/shared/utils";
 import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
 import { type Filter } from "./inbox-controls";
@@ -603,10 +605,40 @@ export function InboxShell({
     void fetchThread(activeIdRef.current);
   }, [fetchThread]);
 
+  // Below md we run a single-pane mode: either the conversation list OR the
+  // thread is on screen. The hamburger (in MobileShellChrome) opens the
+  // AppRail + InboxSubSidebar drawer. The "back to list" affordance is the
+  // mobile back button rendered inside the thread (added separately).
+  const onMobileBack = useCallback(() => {
+    setActiveId(null);
+    setDisplayedId(null);
+    setPendingId(null);
+    setErrorId(null);
+    if (typeof window !== "undefined") {
+      window.history.pushState(null, "", "/inbox");
+    }
+  }, []);
+
   return (
     <SnippetsProvider snippets={snippets}>
-      <div className="relative flex h-svh w-full overflow-hidden bg-background text-foreground">
+      <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
         <ConnectionBanner />
+        {/* Mobile chrome: hamburger + inbox filters drawer. The drawer
+            embeds the same InboxSubSidebar tree the desktop column uses. */}
+        <MobileShellChrome
+          currentUser={currentUser}
+          team={team}
+          title={activeId && displayedThread ? displayedThread.data.contact.name : "Inbox"}
+          subSidebar={
+            <InboxSubSidebar
+              currentUser={currentUser}
+              conversations={live.conversations}
+              stages={stages}
+              filter={filter}
+              onFilterChange={setFilter}
+            />
+          }
+        />
         <AppRail
           currentUser={currentUser}
           team={team}
@@ -620,23 +652,40 @@ export function InboxShell({
           filter={filter}
           onFilterChange={setFilter}
         />
-        <div className="flex min-w-0 flex-1">
-          <ConversationList
-            conversations={conversationList}
-            stages={stages}
-            filter={filter}
-            search={search}
-            onSearchChange={setSearch}
-            searching={searchState.active && searchState.loading}
-            hasMore={hasMore}
-            loadingMore={loadingMore}
-            onLoadMore={loadMore}
-            activeConversationId={activeId}
-            pendingConversationId={pendingId}
-            onOpenConversation={openConversation}
-            onPrefetchConversation={fetchThread}
-          />
-          <main className="flex min-w-0 flex-1 border-l border-border bg-background">
+        <div className="flex min-w-0 flex-1 overflow-hidden">
+          {/* Mobile: ConversationList takes full width when no thread is
+              active; hidden when a thread is open. Desktop: always visible
+              as a fixed-width column. */}
+          <div
+            className={cn(
+              "flex min-h-0 flex-1 md:flex-none",
+              activeId ? "hidden md:flex" : "flex",
+            )}
+          >
+            <ConversationList
+              conversations={conversationList}
+              stages={stages}
+              filter={filter}
+              search={search}
+              onSearchChange={setSearch}
+              searching={searchState.active && searchState.loading}
+              hasMore={hasMore}
+              loadingMore={loadingMore}
+              onLoadMore={loadMore}
+              activeConversationId={activeId}
+              pendingConversationId={pendingId}
+              onOpenConversation={openConversation}
+              onPrefetchConversation={fetchThread}
+            />
+          </div>
+          {/* Mobile: main pane visible only when a thread is active.
+              Desktop: always visible. */}
+          <main
+            className={cn(
+              "min-w-0 flex-1 border-border bg-background md:flex md:border-l",
+              activeId ? "flex" : "hidden md:flex",
+            )}
+          >
             {errorId && errorId === activeId ? (
               <ThreadError onRetry={retryActive} />
             ) : displayedId && displayedThread ? (
@@ -651,9 +700,10 @@ export function InboxShell({
                 canManageContactFields={canManageContactFields}
                 tags={tags}
                 onMarkRead={handleMarkRead}
+                onMobileBack={onMobileBack}
               />
             ) : activeId && skeletonContact ? (
-              <ChatSkeleton contact={skeletonContact} />
+              <ChatSkeleton contact={skeletonContact} onMobileBack={onMobileBack} />
             ) : (
               <EmptyInboxState />
             )}
@@ -681,6 +731,7 @@ function ThreadWorkspace({
   canManageContactFields,
   tags,
   onMarkRead,
+  onMobileBack,
 }: {
   thread: CachedThread;
   teamMembers: User[];
@@ -691,6 +742,7 @@ function ThreadWorkspace({
   canManageContactFields: boolean;
   tags: Tag[];
   onMarkRead: (conversationId: string) => void;
+  onMobileBack: () => void;
 }) {
   return (
     <>
@@ -702,6 +754,7 @@ function ThreadWorkspace({
         stageCatalog={stageCatalog}
         canManageStages={canManageStages}
         onMarkRead={onMarkRead}
+        onMobileBack={onMobileBack}
       />
       <ContactPanel
         data={thread.data}
@@ -747,10 +800,26 @@ const SKELETON_BUBBLES: Array<{ side: "in" | "out"; width: number }> = [
   { side: "in", width: 200 },
 ];
 
-function ChatSkeleton({ contact }: { contact: Contact }) {
+function ChatSkeleton({
+  contact,
+  onMobileBack,
+}: {
+  contact: Contact;
+  onMobileBack?: () => void;
+}) {
   return (
     <div className="flex min-w-0 flex-1 flex-col">
       <header className="flex items-center gap-3 border-b border-border px-4 py-3">
+        {onMobileBack && (
+          <button
+            type="button"
+            onClick={onMobileBack}
+            aria-label="Back to conversations"
+            className="-ml-1 inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          >
+            <ChevronLeft className="size-5" />
+          </button>
+        )}
         <div className="size-9 animate-pulse rounded-full bg-muted/50" />
         <div className="flex min-w-0 flex-col gap-1">
           <div className="truncate text-sm font-semibold">{contact.name}</div>

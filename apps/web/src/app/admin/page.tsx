@@ -17,7 +17,7 @@ export default async function AdminOrganizationsPage() {
   const teams = await listAllTeamsForSuperAdmin();
 
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-6 px-8 py-8">
+    <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 md:px-8 md:py-8">
       <header className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Organizations</h1>
@@ -37,8 +37,8 @@ export default async function AdminOrganizationsPage() {
           </p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-border bg-card">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <table className="w-full min-w-180 text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Organization</th>

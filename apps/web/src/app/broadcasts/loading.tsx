@@ -3,7 +3,7 @@
  */
 export default function BroadcastsLoading() {
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-8">
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
       <header className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="h-8 w-28 animate-pulse rounded-md bg-muted/50" />

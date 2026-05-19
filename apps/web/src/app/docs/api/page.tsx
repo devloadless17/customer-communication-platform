@@ -13,7 +13,7 @@ export const metadata = { title: "API reference" };
  */
 export default function ApiDocsPage() {
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 md:py-10">
       <Link
         href="/settings/integrations"
         className="mb-6 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
