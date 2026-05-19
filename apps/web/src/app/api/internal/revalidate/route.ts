@@ -76,6 +76,18 @@ export async function POST(req: Request): Promise<Response> {
   // Next 16: `updateTag` is the route-handler-friendly bust (no profile
   // arg, callable outside server actions). `revalidateTag` in Next 16
   // requires a CacheLifeConfig + only runs from a server action.
-  updateTag(parsed);
+  //
+  // Wrap in try/catch so a thrown updateTag (Next internals, edge cases on
+  // version bumps) returns 500 instead of a silent 200. The NestJS-side
+  // subscriber logs non-2xx loudly — without this the cache stays stale
+  // until the 60s time-based revalidate, with no operator signal.
+  try {
+    updateTag(parsed);
+  } catch (err) {
+    console.error(
+      `[cache-revalidate] updateTag(${parsed}) threw: ${err instanceof Error ? err.message : err}`,
+    );
+    return NextResponse.json({ error: "revalidate_failed" }, { status: 500 });
+  }
   return NextResponse.json({ ok: true });
 }

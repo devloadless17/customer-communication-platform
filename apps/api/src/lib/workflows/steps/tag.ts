@@ -1,3 +1,5 @@
+import { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import type { Contact } from "@ccp/shared/types";
@@ -63,13 +65,24 @@ async function runTagMutation(
   if (kind === "add" && has) return advance({ skipped: "already_tagged" });
   if (kind === "remove" && !has) return advance({ skipped: "not_tagged" });
 
-  const updated = await db.contact.update({
-    where: { id: contactId },
-    data: {
-      tags: kind === "add" ? { connect: { id: tag.id } } : { disconnect: { id: tag.id } },
-    },
-    include: { tags: { select: { id: true } } },
-  });
+  // CAS on `version`. Same rationale as update-field / update-lifecycle:
+  // a concurrent user edit must not race-lose its changes to this step.
+  let updated;
+  try {
+    updated = await db.contact.update({
+      where: { id: contactId, teamId: ctx.teamId, version: contact.version },
+      data: {
+        tags: kind === "add" ? { connect: { id: tag.id } } : { disconnect: { id: tag.id } },
+        version: { increment: 1 },
+      },
+      include: { tags: { select: { id: true } } },
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      return advanceWithError(409, "contact modified mid-step, retry the run");
+    }
+    throw err;
+  }
 
   const newTagIds = updated.tags.map((t) => t.id);
   const previousTagIds =
@@ -133,6 +146,7 @@ async function runTagMutation(
 
 export const addTagStepHandler: StepHandler<TagConfig> = {
   type: "add_tag",
+  sideEffect: "irreversible",
   parseConfig: (raw) => parseTagConfig("add_tag", raw),
   describeConfig: (c) => `Add tag ${c.tagId}`,
   run: (env, c, ctx) => runTagMutation(env, ctx, c.tagId, "add"),
@@ -140,6 +154,7 @@ export const addTagStepHandler: StepHandler<TagConfig> = {
 
 export const removeTagStepHandler: StepHandler<TagConfig> = {
   type: "remove_tag",
+  sideEffect: "irreversible",
   parseConfig: (raw) => parseTagConfig("remove_tag", raw),
   describeConfig: (c) => `Remove tag ${c.tagId}`,
   run: (env, c, ctx) => runTagMutation(env, ctx, c.tagId, "remove"),

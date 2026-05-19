@@ -151,9 +151,10 @@ interface CategorizedError {
 }
 
 function categorizeSendError(err: unknown): CategorizedError {
-  // NestJS HTTP exceptions thrown by sendTextInner's nested preflight checks
-  // (the worker's call path runs them again, since conditions may have
-  // changed between enqueue and processing — e.g., the 24h window closing).
+  // NestJS HTTP exceptions thrown by the worker executor's narrow checks
+  // (conversation existence + provider config). These are always non-
+  // recoverable — a deleted conversation isn't going to come back, and a
+  // de-configured Meta integration needs operator action, not a retry.
   if (typeof err === "object" && err !== null && "getResponse" in err) {
     const response = (err as { getResponse: () => unknown }).getResponse();
     if (typeof response === "object" && response !== null) {

@@ -57,36 +57,43 @@ export async function publishInTx<K extends DomainEventType>(
 }
 
 /**
- * Persist a domain event OUTSIDE a transaction. Used by the synchronous
- * `publish()` path in `bus.ts` so every published event has a durable
- * audit row even when dispatch is immediate.
+ * Persist a domain event AFTER the synchronous `publish()` path has finished
+ * dispatching its in-process subscribers. The row is written with
+ * `publishedAt = NOW()` (and `failedAt` if a subscriber threw) so the outbox
+ * drainer's `WHERE publishedAt IS NULL` filter never picks it up — sync
+ * dispatch must NOT race the drainer.
  *
- * Returns the row id so the synchronous path can mark it published (or
- * failed) once the in-process subscriber dispatch completes.
+ * The earlier shape ("insert with NULL → run subscribers → mark published")
+ * left a window where the 100ms drainer poll could grab the row mid-dispatch
+ * and re-run every subscriber. Catalog-revalidate publishes routinely
+ * exceeded that window, producing duplicate audit rows, double-incremented
+ * counters, and double-fired workflow runs / outbound webhooks.
+ *
+ * Tradeoff: if the process crashes between `runSubscribers` returning and
+ * this insert, the audit row is lost. Acceptable per the existing "better
+ * stale audit than dropped fanout" posture — in-process subscriber state
+ * mutations are already partial in that crash scenario.
  */
-export async function persistOutboxRow<K extends DomainEventType>(
+export async function persistDispatchedRow<K extends DomainEventType>(
   event: DomainEventOf<K>,
-): Promise<string> {
+  error: string | null,
+): Promise<void> {
   const { type, teamId, ...rest } = event as DomainEventOf<K> & { teamId: string };
-  const row = await db.outboundEvent.create({
+  const now = new Date();
+  const truncatedError =
+    error && error.length > 1000 ? error.slice(0, 1000) + "…" : error;
+  await db.outboundEvent.create({
     data: {
       teamId,
       type,
       payload: rest as unknown as Prisma.InputJsonValue,
+      publishedAt: now,
+      attempts: 1,
+      ...(truncatedError
+        ? { failedAt: now, lastError: truncatedError }
+        : {}),
     },
     select: { id: true },
-  });
-  return row.id;
-}
-
-/**
- * Mark a row as successfully dispatched. Idempotent — calling twice is a
- * no-op; the second update returns 0 rows affected.
- */
-export async function markPublished(id: string): Promise<void> {
-  await db.outboundEvent.updateMany({
-    where: { id, publishedAt: null },
-    data: { publishedAt: new Date() },
   });
 }
 

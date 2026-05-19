@@ -5,12 +5,31 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import type { ConversationWithRefs, CursorPage } from "@ccp/shared/types";
+import type { Filter } from "@/features/inbox/components/inbox-controls";
 
 export interface TeamEventsState {
   conversations: ConversationWithRefs[];
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
+  /** True while the initial list for a freshly-selected filter is loading. */
+  refreshing: boolean;
+}
+
+/**
+ * Compose the server-side filter into URL query params. Empty when filter
+ * is `all`-preset (preserves the historical "no filter param = all
+ * non-closed" default for any legacy consumers that don't pass one).
+ */
+function filterParams(filter: Filter | undefined): URLSearchParams {
+  const p = new URLSearchParams();
+  if (!filter) return p;
+  if (filter.kind === "preset") {
+    p.set("filter", filter.id);
+  } else {
+    p.set("stageId", filter.stageId);
+  }
+  return p;
 }
 
 /**
@@ -33,11 +52,34 @@ export function useTeamEvents(
   initialConversations: ConversationWithRefs[],
   initialNextCursor: string | null,
   activeConversationId: string | null = null,
+  /**
+   * Signed-in agent id. Used to maintain per-agent `unreadForMe` alongside
+   * team-wide `unreadCount` — a teammate's read clears the team counter but
+   * NOT my "I haven't seen this" flag, while my own read clears both.
+   */
+  currentUserId: string,
+  /**
+   * Active inbox filter (preset or stage). Drives the server-side WHERE
+   * clause via `/api/conversations?filter=...&stageId=...` so the loaded
+   * slice is the FULL team's matching threads — not just whatever fits in
+   * a paginated team-recency window. SSR seeds the unfiltered list; the
+   * first filter change after mount triggers a clean refetch.
+   */
+  filter?: Filter,
 ): TeamEventsState {
   const [conversations, setConversations] =
     useState<ConversationWithRefs[]>(initialConversations);
   const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Stable filter ref so socket handlers + resync can read the latest
+  // without re-binding on every change. The filter-change effect below
+  // owns the actual refetch.
+  const filterRef = useRef<Filter | undefined>(filter);
+  useEffect(() => {
+    filterRef.current = filter;
+  }, [filter]);
 
   // Re-seed when the server hands us a MEANINGFULLY different initial list.
   // Gating on raw array identity blew away every realtime update on any
@@ -66,7 +108,9 @@ export function useTeamEvents(
     const cursor = cursorRef.current;
     if (!cursor) return;
     setLoadingMore(true);
-    fetchWithSessionGuard(`/api/conversations?cursor=${encodeURIComponent(cursor)}`)
+    const params = filterParams(filterRef.current);
+    params.set("cursor", cursor);
+    fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
       .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
       .then((page) => {
         if (!page) return;
@@ -80,6 +124,44 @@ export function useTeamEvents(
       })
       .finally(() => setLoadingMore(false));
   }, []);
+
+  // Filter-change refetch. SSR seeds the unfiltered list (matches default
+  // `{kind:"preset", id:"all"}`). When the user clicks Mine / Unassigned /
+  // Closed / a stage row, refetch with the matching server-side filter so
+  // the loaded slice is the FULL team's matching threads. Skip the very
+  // first run — that's the SSR seed.
+  const filterKey = filter
+    ? filter.kind === "preset"
+      ? `p:${filter.id}`
+      : `s:${filter.stageId}`
+    : "p:all";
+  const lastFilterKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Skip the initial mount — SSR data is current, no refetch needed.
+    if (lastFilterKeyRef.current === null) {
+      lastFilterKeyRef.current = filterKey;
+      return;
+    }
+    if (lastFilterKeyRef.current === filterKey) return;
+    lastFilterKeyRef.current = filterKey;
+
+    let cancelled = false;
+    setRefreshing(true);
+    const params = filterParams(filter);
+    fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
+      .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
+      .then((page) => {
+        if (cancelled || !page) return;
+        setConversations(page.items);
+        setNextCursor(page.nextCursor);
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filterKey, filter]);
 
   // Mirror activeConversationId into a ref so the message:new handler reads
   // the latest value without re-subscribing on every navigation.
@@ -105,7 +187,13 @@ export function useTeamEvents(
      */
     async function resyncOnce(): Promise<boolean> {
       try {
-        const r = await fetchWithSessionGuard(`/api/conversations`);
+        // Filter-aware resync: a reconnect under filter=Mine must come back
+        // with only my threads, not the whole team. Tail-merge with the
+        // existing local list to preserve any newer rows that arrived via
+        // realtime between the resync request and its response.
+        const params = filterParams(filterRef.current);
+        const url = params.toString() ? `/api/conversations?${params}` : `/api/conversations`;
+        const r = await fetchWithSessionGuard(url);
         if (!r.ok) return false;
         const page = (await r.json()) as CursorPage<ConversationWithRefs>;
         setConversations((prev) => {
@@ -129,6 +217,26 @@ export function useTeamEvents(
       // here would also work but feels heavier than warranted.
     }
 
+    // Debounced resync trigger for filter-eligibility-changing events.
+    // Per-event mutations below handle the in-list rows snappily; this
+    // catches the splice-IN case (a row that newly matches the filter
+    // because of the event) which the in-handler logic can't synthesize
+    // without the full ConversationWithRefs. Coalesces a burst of events
+    // into a single fetch.
+    let resyncTimer: number | null = null;
+    function scheduleFilterResync() {
+      // No-op when there's no filter narrowing — the unfiltered list is
+      // already shown in full; per-event mutations cover it.
+      if (!filterRef.current || filterRef.current.kind === "preset" && filterRef.current.id === "all") {
+        return;
+      }
+      if (resyncTimer !== null) return;
+      resyncTimer = window.setTimeout(() => {
+        resyncTimer = null;
+        void resyncOnce();
+      }, 300);
+    }
+
     const onConnect = () => {
       // Server auto-joins the team room on connect; no explicit subscribe needed.
       if (firstConnectRef.value) {
@@ -144,7 +252,7 @@ export function useTeamEvents(
       conversationId,
       preview,
       lastMessageAt,
-      unreadDelta,
+      unreadCount,
       message,
       newConversation,
     }) => {
@@ -152,19 +260,52 @@ export function useTeamEvents(
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) {
           // Brand-new thread (first contact, or first inbound after a closed
-          // thread). The server sends the full row; splice it in at the top.
+          // thread). The server sends the full row; splice it in at the top,
+          // but only when it matches the current server-side filter — e.g.
+          // a brand-new pending+unassigned thread doesn't belong in the
+          // "Mine" view, and a closed-thread reopen doesn't belong in the
+          // "Closed" view.
           if (!newConversation) return prev;
+          const f = filterRef.current;
+          const matches =
+            !f
+              ? true
+              : f.kind === "stage"
+                ? newConversation.contact.stageId === f.stageId &&
+                  newConversation.conversation.status !== "closed"
+                : f.id === "closed"
+                  ? newConversation.conversation.status === "closed"
+                  : f.id === "mine"
+                    ? newConversation.conversation.status !== "closed" &&
+                      newConversation.conversation.assignedUserId === currentUserId
+                    : f.id === "unassigned"
+                      ? newConversation.conversation.status !== "closed" &&
+                        newConversation.conversation.assignedUserId === null
+                      : newConversation.conversation.status !== "closed"; // "all"
+          if (!matches) return prev;
           return [newConversation, ...prev];
         }
         const existing = prev[idx]!;
         // If the user is currently viewing this thread, suppress the bump —
         // the server-side mark-read will follow but this avoids a 1-tick
         // badge flash on the conversation that's already on screen.
+        //
+        // The payload carries the ABSOLUTE team-wide unread count, so a
+        // dropped event or out-of-order delivery can't drift the local
+        // mirror — each frame replaces the value rather than adding to it.
         const isActive = activeIdRef.current === conversationId;
         const nextUnread =
           message.direction === "in" && !isActive
-            ? existing.conversation.unreadCount + unreadDelta
+            ? unreadCount
             : existing.conversation.unreadCount;
+        // Per-agent "I haven't seen this" — flip true on inbound for any
+        // non-active thread (active = I'm viewing, so I'm reading it now).
+        // Outbound never changes unreadForMe (matches the team-wide
+        // semantics: only customer messages count as "unread").
+        const nextUnreadForMe =
+          message.direction === "in" && !isActive
+            ? true
+            : existing.conversation.unreadForMe;
         const updated: ConversationWithRefs = {
           ...existing,
           conversation: {
@@ -172,6 +313,7 @@ export function useTeamEvents(
             lastMessageAt,
             lastMessagePreview: preview,
             unreadCount: nextUnread,
+            ...(nextUnreadForMe !== undefined ? { unreadForMe: nextUnreadForMe } : {}),
           },
           // Inbound messages reset the 24h customer-service window. The
           // conversation list uses this for its window chip; outbound
@@ -199,21 +341,46 @@ export function useTeamEvents(
       conversationId,
       assignedUser,
     }) => {
+      const nextAssignedUserId = assignedUser?.id ?? null;
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
+        // With server-side filtering, an assignment change can knock the
+        // row out of the current view (e.g. filter is "mine" and a teammate
+        // took the thread). Splice OUT when the new assignment no longer
+        // matches the filter. The matching-into-view case (filter "mine"
+        // and assigned to me — but row not in list) is caught by the
+        // scheduled resync below.
+        const f = filterRef.current;
+        const stillMatches =
+          !f || f.kind === "stage"
+            ? true
+            : f.id === "mine"
+              ? nextAssignedUserId === currentUserId
+              : f.id === "unassigned"
+                ? nextAssignedUserId === null
+                : true; // "all" / "closed" don't filter on assignment
+        if (!stillMatches) {
+          const next = prev.slice();
+          next.splice(idx, 1);
+          return next;
+        }
         const next = prev.slice();
         next[idx] = {
           ...existing,
           conversation: {
             ...existing.conversation,
-            assignedUserId: assignedUser?.id ?? null,
+            assignedUserId: nextAssignedUserId,
           },
           assignedUser,
         };
         return next;
       });
+      // Splice-IN catcher: a teammate assigning the thread to me when my
+      // filter is "mine" wouldn't be in the loaded list yet. Resync pulls
+      // it in. Debounced + no-op'd for the unfiltered view.
+      scheduleFilterResync();
     };
 
     const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = ({
@@ -227,6 +394,21 @@ export function useTeamEvents(
         // Status-already-current → bail. Saves a re-render when the same
         // status arrives twice (e.g. a stale tab re-fires after reconnect).
         if (existing.conversation.status === status) return prev;
+        // Splice OUT when the new status no longer matches the filter
+        // (e.g. filter "all"/"mine"/"unassigned"/"stage" + status=closed,
+        // or filter "closed" + status=open|pending).
+        const f = filterRef.current;
+        const stillMatches =
+          !f || f.kind === "preset"
+            ? f && f.kind === "preset" && f.id === "closed"
+              ? status === "closed"
+              : status !== "closed"
+            : status !== "closed"; // stage filter excludes closed
+        if (!stillMatches) {
+          const next = prev.slice();
+          next.splice(idx, 1);
+          return next;
+        }
         const next = prev.slice();
         next[idx] = {
           ...existing,
@@ -234,20 +416,32 @@ export function useTeamEvents(
         };
         return next;
       });
+      scheduleFilterResync();
     };
 
     const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = ({
       conversationId,
+      readByUserId,
     }) => {
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
-        if (existing.conversation.unreadCount === 0) return prev;
+        // Team-wide always clears; per-agent only clears if the reader
+        // is me. A teammate reading doesn't mean I've seen it.
+        const teamChange = existing.conversation.unreadCount !== 0;
+        const myChange =
+          readByUserId === currentUserId &&
+          existing.conversation.unreadForMe === true;
+        if (!teamChange && !myChange) return prev;
         const next = prev.slice();
         next[idx] = {
           ...existing,
-          conversation: { ...existing.conversation, unreadCount: 0 },
+          conversation: {
+            ...existing.conversation,
+            ...(teamChange ? { unreadCount: 0 } : {}),
+            ...(myChange ? { unreadForMe: false } : {}),
+          },
         };
         return next;
       });
@@ -279,14 +473,30 @@ export function useTeamEvents(
       contact,
     }) => {
       setConversations((prev) => {
+        const f = filterRef.current;
+        const isStageFilter = f?.kind === "stage";
         let changed = false;
-        const next = prev.map((c) => {
-          if (c.contact.id !== contact.id) return c;
+        const next: ConversationWithRefs[] = [];
+        for (const c of prev) {
+          if (c.contact.id !== contact.id) {
+            next.push(c);
+            continue;
+          }
+          // Splice OUT when this contact's stage no longer matches the
+          // active stage filter (e.g. teammate moved the contact to a
+          // different stage). The splice-IN case — a contact JUST entered
+          // this stage but the row isn't in the list — is caught by the
+          // scheduled resync below.
+          if (isStageFilter && contact.stageId !== f.stageId) {
+            changed = true;
+            continue;
+          }
           changed = true;
-          return { ...c, contact };
-        });
+          next.push({ ...c, contact });
+        }
         return changed ? next : prev;
       });
+      scheduleFilterResync();
     };
 
     // Coalesced bulk version. Server fires this from bulk-tag / bulk-stage /
@@ -333,6 +543,10 @@ export function useTeamEvents(
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
 
     return () => {
+      if (resyncTimer !== null) {
+        window.clearTimeout(resyncTimer);
+        resyncTimer = null;
+      }
       socket.off("connect", onConnect);
       socket.off("message:new", onMessageNew);
       socket.off("conversation:assigned", onAssigned);
@@ -342,7 +556,7 @@ export function useTeamEvents(
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
     };
-  }, [teamId]);
+  }, [teamId, currentUserId]);
 
-  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore };
+  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore, refreshing };
 }

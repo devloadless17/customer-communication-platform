@@ -6,10 +6,26 @@ import { z } from "zod";
 // rejects "abc" / "" / "1.5" at the pipe layer.
 const takeQuery = z.coerce.number().int().min(1).max(200).optional();
 
+/**
+ * Inbox preset filter ids. Mirrors the client-side `PresetFilterId` so the
+ * server can shape the WHERE clause to match. `all` excludes closed; `closed`
+ * is the only preset that shows closed threads.
+ */
+const PresetFilterIdSchema = z.enum(["all", "mine", "unassigned", "closed"]);
+export type PresetFilterId = z.infer<typeof PresetFilterIdSchema>;
+
 export const ListConversationsQuerySchema = z.object({
   cursor: z.string().min(1).optional(),
   take: takeQuery,
   search: z.string().max(200).optional(),
+  /**
+   * Server-side filter. When set, the WHERE clause is narrowed before
+   * keyset pagination so `Mine` / `Unassigned` / `Closed` / stage views
+   * reflect the FULL team's matching threads, not just whatever happens
+   * to be in the loaded slice. Counts come from `/conversations/counts`.
+   */
+  filter: PresetFilterIdSchema.optional(),
+  stageId: z.string().min(1).optional(),
 });
 export type ListConversationsQuery = z.infer<typeof ListConversationsQuerySchema>;
 

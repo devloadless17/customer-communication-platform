@@ -12,9 +12,15 @@ import { SOCKET_PATH } from "@ccp/shared/socket/events";
  *   - `path` MUST match the client (`SOCKET_PATH = "/api/socket"`).
  *   - `connectionStateRecovery` replays missed events for up to 2 min so a
  *     tab-sleep or wifi blip doesn't leave the inbox stale.
- *   - `skipMiddlewares: true` on recovery avoids re-running the auth
- *     handshake on every brief reconnect — without it, a hard-reload
- *     storm becomes N DB roundtrips per user.
+ *   - `skipMiddlewares: false` (default): the auth handshake re-runs on
+ *     every recovered reconnect. Earlier `true` lookalike caused two
+ *     classes of bug — (1) a deactivated user with a closed laptop could
+ *     reconnect within 2 min and survive the deactivation, and (2) the
+ *     recovered socket's `client.data` resets but the auth path was
+ *     skipped, leaving phantom typing / presence state. The 15s session
+ *     cache in `session.guard.ts` already absorbs the per-reconnect DB
+ *     cost, so the "N DB roundtrips per reconnect storm" concern that
+ *     originally justified `true` no longer applies.
  *   - `maxHttpBufferSize: 64 KiB` — payloads are tiny; the 1 MiB default
  *     is a memory-pin DoS vector for the size we actually use.
  *   - `perMessageDeflate: false` — JSON payloads are too small to compress
@@ -42,7 +48,9 @@ export class WsAdapter extends IoAdapter {
       transports: ["websocket", "polling"],
       connectionStateRecovery: {
         maxDisconnectionDuration: 2 * 60 * 1000,
-        skipMiddlewares: true,
+        // skipMiddlewares stays at the Socket.io default (false). See the
+        // class-level comment for rationale — re-auth on recovery closes
+        // the deactivation-survival window and the presence-flicker bug.
       },
       maxHttpBufferSize: 64 * 1024,
       pingTimeout: 20_000,

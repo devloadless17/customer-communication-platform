@@ -146,4 +146,27 @@ export function validateEnv(label: "api" | "web" = "api"): void {
         "Auth callbacks will fail for real users.",
     );
   }
+  if (PROD && process.env.APP_PUBLIC_URL?.includes("localhost")) {
+    console.warn(
+      `${tag} warning: APP_PUBLIC_URL points at localhost in production. ` +
+        "Outbound webhook _links.* payloads + workflow callbacks will be " +
+        "unreachable from external systems.",
+    );
+  }
+
+  // TRUSTED_PROXY_HOPS must parse as a positive integer. presence-only checks
+  // above accept "abc" / "" / "0" — all of which silently degrade the rate
+  // limiter or break per-IP detection without throwing. Fail boot loudly so
+  // ops sees the typo before the first 4xx ratelimit storm.
+  if (PROD) {
+    const raw = process.env.TRUSTED_PROXY_HOPS;
+    const parsed = raw === undefined ? NaN : Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 10) {
+      console.error(
+        `${tag} fatal: TRUSTED_PROXY_HOPS must be an integer between 0 and 10, ` +
+          `got ${JSON.stringify(raw)}. Set to '1' for the default single-Caddy topology.`,
+      );
+      process.exit(1);
+    }
+  }
 }

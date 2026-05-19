@@ -31,6 +31,7 @@ export interface AddCommentStepConfig {
 
 export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
   type: "add_comment",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("add_comment config must be an object");
@@ -74,8 +75,13 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
     });
 
     // Publish `note.created` — socket fanout emits the live update;
-    // outbound-webhooks subscriber forwards to integrators. No workflow
-    // trigger exists for notes, so no `silent` needed.
+    // outbound-webhooks subscriber forwards to integrators. `silent: true`
+    // mirrors every sibling mutation step's discipline: if a future
+    // workflow trigger on `note_added` lands, the workflow-dispatch
+    // subscriber will see this flag and skip chain-trigger dispatch on
+    // system-authored notes (today no such subscriber exists, but the
+    // contract is uniform so the next author doesn't have to remember
+    // which event types do/don't need silent).
     await publish({
       type: "note.created",
       teamId: ctx.teamId,
@@ -87,6 +93,7 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
         body,
         timestamp: note.timestamp.toISOString(),
       },
+      silent: true,
     });
 
     return advance({ noteId: note.id, conversationId });

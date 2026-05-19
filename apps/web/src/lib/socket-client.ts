@@ -8,6 +8,8 @@ import {
   type ServerToClientEvents,
 } from "@ccp/shared/socket/events";
 
+import { BROWSER_API_BASE } from "./api/browser-base";
+
 export type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 /**
@@ -43,12 +45,10 @@ export function getClientSocket(): ClientSocket {
   // banner permanently suppressed.
   teardown = false;
 
-  // Optional cross-origin target. When the NestJS api process owns Socket.io
-  // (Phase 2+ of the migration), point the browser at it via
-  // `NEXT_PUBLIC_API_URL=http://localhost:4000` in dev, or leave unset in
-  // prod when Caddy fronts both ports under the same hostname. Empty string
-  // / unset → connect to current origin, identical to pre-migration behavior.
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+  // Optional cross-origin target — see BROWSER_API_BASE for the resolution
+  // rules. Dev cross-port points here at the NestJS api; prod (Caddy) leaves
+  // it empty for same-origin fallback.
+  const apiUrl = BROWSER_API_BASE;
 
   socket = io(apiUrl || undefined, {
     path: SOCKET_PATH,
@@ -78,6 +78,23 @@ export function getClientSocket(): ClientSocket {
   // the cause discoverable from the browser console.
   let warned = false;
   socket.on("connect_error", (err) => {
+    // Server-side handshake middleware throws `new Error("unauthenticated")`
+    // when the session cookie is missing/expired. Socket.io serializes
+    // err.message into this event verbatim. Auto-reconnect would otherwise
+    // retry forever with the same dead cookie. Route to /logout — which
+    // clears the cookie and bounces to /login.
+    if (err.message === "unauthenticated") {
+      teardown = true;
+      try {
+        socket?.disconnect();
+      } finally {
+        socket = null;
+      }
+      if (window.location.pathname !== "/logout") {
+        window.location.href = "/logout";
+      }
+      return;
+    }
     if (warned || teardown) return;
     warned = true;
     const target = apiUrl || `${window.location.origin} (same-origin fallback)`;

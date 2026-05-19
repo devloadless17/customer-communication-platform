@@ -15,7 +15,13 @@ import {
 } from "@nestjs/common";
 
 import { blobStorage } from "@/lib/blob-storage";
+import { publishInTx } from "@/lib/events/outbox";
+import type { DomainEventOf } from "@ccp/shared/events/types";
 import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
+import {
+  consumeConversationSendBudget,
+  ConversationSendRateLimitedError,
+} from "@/lib/messaging/conversation-send-budget";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import {
   SendTemplateValidationError,
@@ -55,6 +61,58 @@ export class MessagesService {
     private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
+
+  /**
+   * Commit the side-effects that follow a successful outbound DB write:
+   * bump the conversation summary AND persist the `message.sent` event
+   * to the outbox — both in a single transaction. The outbox drainer
+   * picks up the event after commit and dispatches subscribers.
+   *
+   * Replaces the previous `void this.bus.publish(...)` + `void this.db
+   * .conversation.updateMany(...)` shape, which had two latent gaps:
+   *   (a) process death between the Message create and bus.publish lost
+   *       the realtime emit forever (`message.sent` is the inbox-shell's
+   *       only signal for outbound persistence),
+   *   (b) the synchronous bus.publish wrote its outbox row AFTER running
+   *       subscribers — a crash mid-dispatch dropped the audit row too.
+   *
+   * publishInTx is the same primitive the inbound ingest path uses.
+   *
+   * CAS-bump on lastMessageAt so an out-of-order older send can't
+   * overwrite a newer one's preview.
+   */
+  private async commitOutboundEvent(args: {
+    conversationId: string;
+    bumpTimestamp: Date;
+    preview: string;
+    /**
+     * `unreadCount` is omitted from the caller — outbound doesn't change
+     * the team-wide counter, so the current row value is the authoritative
+     * absolute we publish. Reading it inside the tx keeps the event in sync
+     * with whatever inbound increments interleaved (and serializable
+     * isolation ensures the read is consistent with the write below).
+     */
+    event: Omit<DomainEventOf<"message.sent">, "unreadCount">;
+  }): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      await tx.conversation.updateMany({
+        where: {
+          id: args.conversationId,
+          lastMessageAt: { lte: args.bumpTimestamp },
+        },
+        data: {
+          lastMessageAt: args.bumpTimestamp,
+          lastMessagePreview: args.preview,
+        },
+      });
+      const row = await tx.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { unreadCount: true },
+      });
+      const unreadCount = row?.unreadCount ?? 0;
+      await publishInTx(tx, { ...args.event, unreadCount });
+    });
+  }
 
   /**
    * Free-form text send — public HTTP entry point.
@@ -97,6 +155,7 @@ export class MessagesService {
           teamId,
           userId,
           conversationId: input.conversationId,
+          phoneNumber: pre.phoneNumber,
           body: input.body,
           replyToMessageId: pre.replyToMessageId,
           replyToExternalId: pre.replyToExternalId,
@@ -117,13 +176,18 @@ export class MessagesService {
    * failed 500ms later for cases we can detect up front (window closed,
    * missing phone, reply-target gone, WhatsApp unconfigured).
    *
-   * Returns resolved reply-target ids — passed straight through the queue
-   * payload so the worker doesn't re-query.
+   * Returns the resolved values the worker needs (phone number + reply
+   * target ids) so the worker can skip the DB round-trip entirely —
+   * everything we read here is threaded through the BullMQ payload. The
+   * worker still verifies conversation existence (catches a deletion in
+   * the queue gap) and re-loads Meta config (process-cached after the
+   * first call, so steady-state cost is a Map lookup, not a query).
    */
   private async preflightTextSend(
     teamId: string,
     input: SendTextInput,
   ): Promise<{
+    phoneNumber: string;
     replyToMessageId: string | null;
     replyToExternalId?: string;
   }> {
@@ -169,6 +233,27 @@ export class MessagesService {
         lastInboundAt,
       });
     }
+    // Per-conversation send ceiling. Cheap second-axis bound that catches a
+    // partner-driven hot-potato (their automation reacts to its own
+    // `message.sent` webhook) inside one thread before the per-key 60/min
+    // budget bites — a runaway loop now burns 30 sends/min/thread, not
+    // 60/min/key. Throws ConversationSendRateLimitedError on hit; the
+    // handler at the controller layer maps it to 429 + Retry-After.
+    try {
+      consumeConversationSendBudget(teamId, conversationId);
+    } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        throw new HttpException(
+          {
+            error: "conversation_rate_limited",
+            detail: err.message,
+            retryAfter: err.retryAfter,
+          },
+          429,
+        );
+      }
+      throw err;
+    }
     let replyToMessageId: string | null = null;
     let replyToExternalId: string | undefined;
     if (replyToMessageIdRaw) {
@@ -183,73 +268,67 @@ export class MessagesService {
         replyToExternalId = replyToRow.externalId;
       }
     }
-    return { replyToMessageId, ...(replyToExternalId ? { replyToExternalId } : {}) };
+    return {
+      phoneNumber: conversation.contact.phoneNumber,
+      replyToMessageId,
+      ...(replyToExternalId ? { replyToExternalId } : {}),
+    };
   }
 
   /**
-   * Internal worker-callable executor. Lifted from the previous public
-   * sendText body — same Meta send + DB + bus publish sequence, just
-   * invoked from the BullMQ worker instead of the HTTP request. Throws
-   * on Meta or DB failure; the worker catches + publishes
-   * `message.send_failed` so the optimistic bubble flips to failed.
+   * Worker-side executor. The HTTP preflight already verified the
+   * conversation, the contact's phone, the 24h window, and the reply
+   * target — the values needed at send time are all in the queue payload.
+   * The worker's job is therefore narrow:
    *
-   * `receivedAt` is threaded from the original HTTP request so the
-   * message's `timestamp` column reflects the agent's intent, not the
-   * worker's pickup time (matters when the worker is briefly backed up
-   * — the conversation reorder must match send order).
+   *   1. Verify the conversation still exists (catches a deletion between
+   *      enqueue and pickup; without this the FK error would fire AFTER
+   *      the Meta send and leave a "sent-to-customer-but-no-local-row"
+   *      ghost).
+   *   2. Resolve Meta credentials (process-cached, ~Map lookup in steady
+   *      state — first call per team is one DB hit).
+   *   3. Load the reply snapshot (cosmetic — the quote pill payload).
+   *   4. Call Meta.
+   *   5. Idempotent DB write + bus publish.
+   *
+   * The 24h-window re-check is gone: if the contact's window closes in
+   * the queue gap (sub-second normally, an edge case at exactly
+   * 23:59:59 → 00:00:00) Meta itself rejects with `outside_24h_window`,
+   * which `normalizeMetaSendError` maps to a non-recoverable failure
+   * that `categorizeSendError` flips into a `message.send_failed` event.
+   * Same UX as the inline preflight, one less DB round-trip per send.
+   *
+   * `receivedAt` is stamped at HTTP arrival, not pickup, so the row's
+   * `timestamp` and the conversation reorder match send order even when
+   * the worker has a brief backlog.
    */
   async executeTextSendJob(data: import("./send-queue").SendTextJobData): Promise<void> {
-    await this.sendTextInner(
-      data.teamId,
-      data.userId,
-      {
-        conversationId: data.conversationId,
-        body: data.body,
-        ...(data.clientTempId ? { clientTempId: data.clientTempId } : {}),
-        ...(data.replyToMessageId
-          ? { replyToMessageId: data.replyToMessageId }
-          : {}),
-      },
-      new Date(data.receivedAt),
-    );
-  }
+    const {
+      teamId,
+      userId,
+      conversationId,
+      body,
+      clientTempId,
+      phoneNumber,
+      replyToMessageId,
+      replyToExternalId,
+    } = data;
+    const receivedAt = new Date(data.receivedAt);
 
-  private async sendTextInner(
-    teamId: string,
-    userId: string,
-    input: SendTextInput,
-    receivedAtOverride?: Date,
-  ): Promise<{ messageId: string }> {
-    // Stamp logical send time at HTTP arrival (not at Meta's response or
-    // worker pickup) — preserves the user's actual send sequence on reloads
-    // even when the background worker has a brief backlog. The HTTP path
-    // passes `receivedAtOverride` from the queue payload; legacy direct
-    // callers (none post-S1, but kept for safety) get a fresh stamp.
-    const receivedAt = receivedAtOverride ?? new Date();
-    const { conversationId, body, clientTempId, replyToMessageId: replyToMessageIdRaw } = input;
-
-    // Phase A — parallel pre-flight reads.
-    const [conversation, replyToRow, configOrErr] = await Promise.all([
+    // Cheap indexed existence check (no contact join, no select-all).
+    // Conversation row gone → fail non-recoverable BEFORE we hit Meta so
+    // we don't strand a customer with a message no agent can see.
+    const [exists, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
-        select: {
-          id: true,
-          contact: { select: { phoneNumber: true, lastInboundAt: true } },
-        },
+        select: { id: true },
       }),
-      replyToMessageIdRaw
-        ? this.db.message.findFirst({
-            where: { id: replyToMessageIdRaw, conversationId, teamId },
-            select: { id: true, externalId: true },
-          })
-        : Promise.resolve(null),
       getMetaSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
       }),
     ]);
-
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!exists) throw new NotFoundException({ error: "conversation not found" });
     if (configOrErr instanceof ProviderNotConfiguredError) {
       throw new ConflictException({
         error: "whatsapp_not_connected",
@@ -258,47 +337,9 @@ export class MessagesService {
     }
     const config = configOrErr;
 
-    // 24h customer service window — outbound text is illegal outside it.
-    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-    const win = computeWindowStatus(lastInboundAt);
-    if (win.state === "closed" || win.state === "never") {
-      throw new UnprocessableEntityException({
-        error: "outside_24h_window",
-        detail: "24-hour window closed — send an approved template to re-engage this contact.",
-        lastInboundAt,
-      });
-    }
-
-    let replyToMessageId: string | null = null;
-    let replyToExternalId: string | undefined;
-    if (replyToMessageIdRaw) {
-      // The agent's UI built a reply pill from a message they could see —
-      // if the lookup came back empty, the row is gone (deleted, wrong
-      // conversation, cross-team leak). Fail loudly instead of stripping
-      // the quote silently and shipping a context-less reply to WhatsApp.
-      if (!replyToRow) {
-        throw new BadRequestException({
-          error: "reply_target_not_found",
-          detail: "The message you're replying to no longer exists in this conversation.",
-        });
-      }
-      replyToMessageId = replyToRow.id;
-      // Don't forward a placeholder externalId to Meta (would 400 it). The
-      // reply snapshot still resolves locally; we just don't quote on the
-      // wire when the parent is still pending-send.
-      if (!replyToRow.externalId.startsWith("tmp_")) {
-        replyToExternalId = replyToRow.externalId;
-      }
-    }
-
-    if (!conversation.contact.phoneNumber) {
-      throw new BadRequestException({
-        error: "contact_has_no_phone",
-        detail: "This contact has no WhatsApp number.",
-      });
-    }
-
-    // Phase B — Meta send + parallel reply snapshot prefetch.
+    // Reply snapshot loads in parallel with the Meta send — pure cosmetic
+    // payload for the quote pill; failure here degrades to a quoteless
+    // bubble, never blocks the send.
     const replySnapshotPromise = replyToMessageId
       ? loadReplySnapshotById(replyToMessageId)
       : Promise.resolve(null);
@@ -307,7 +348,7 @@ export class MessagesService {
     try {
       send = await getMetaProvider().sendText(
         {
-          to: conversation.contact.phoneNumber,
+          to: phoneNumber,
           body,
           ...(replyToExternalId ? { replyToExternalId } : {}),
         },
@@ -330,7 +371,6 @@ export class MessagesService {
       });
     }
 
-    // Phase C — DB write + snapshot finalize, in parallel.
     const [created, replySnapshot] = await Promise.all([
       createOutboundMessageIdempotent({
         teamId,
@@ -366,45 +406,35 @@ export class MessagesService {
         : {}),
     };
 
-    // Phase D — publish. Fire-and-forget so HTTP returns to the sender
-    // without waiting on the bus fanout chain (socket-fanout is microseconds
-    // but workflow-dispatch hits Pg + Redis, which on a degraded backend
-    // could add hundreds of ms to the perceived send latency). The sender's
-    // optimistic bubble already reconciles by clientTempId regardless of
-    // whether the socket frame arrives before or after the HTTP response.
-    void this.bus
-      .publish({
-        type: "message.sent",
-        teamId,
+    // Conversation bump + `message.sent` outbox row commit atomically.
+    // Drainer picks up the row ~100ms after commit and dispatches every
+    // subscriber. Trades a few ms of HTTP latency for durable realtime —
+    // a crash here loses neither the bump nor the event.
+    try {
+      await this.commitOutboundEvent({
         conversationId,
-        message,
+        bumpTimestamp: send.timestamp,
         preview,
-        lastMessageAt: send.timestamp.toISOString(),
-        unreadDelta: 0,
-        senderUserId: userId,
-        ...(clientTempId ? { clientTempId } : {}),
-      })
-      .catch((err) =>
-        this.logger.error(
-          `sendText publish failed: ${err instanceof Error ? err.message : err}`,
-        ),
+        event: {
+          type: "message.sent",
+          teamId,
+          conversationId,
+          message,
+          preview,
+          lastMessageAt: send.timestamp.toISOString(),
+          senderUserId: userId,
+          ...(clientTempId ? { clientTempId } : {}),
+        },
+      });
+    } catch (err) {
+      // Message row is durable; only the bump + outbox row failed. Log
+      // and continue — the next inbound or cold load will reconcile the
+      // conversation summary, and the operator can spot the gap by
+      // grepping for this exact log line.
+      this.logger.error(
+        `sendText commit failed for message=${created.id}: ${err instanceof Error ? err.message : err}`,
       );
-
-    // Bump conversation's lastMessageAt/preview for the next cold load.
-    // Fire-and-forget — live clients already have it from the socket emit.
-    // CAS on lastMessageAt: { lte } so a slower-arriving older send can't
-    // overwrite a newer one's preview/timestamp (race observed in rapid
-    // out-of-order arrivals).
-    void this.db.conversation
-      .updateMany({
-        where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
-        data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
-      })
-      .catch((err) =>
-        this.logger.error(`deferred conversation.update failed: ${err instanceof Error ? err.message : err}`),
-      );
-
-    return { messageId: created.id };
+    }
   }
 
   /**
@@ -715,21 +745,6 @@ export class MessagesService {
     }
     const createdId = created.id;
 
-    // Conversation summary bump — fire-and-forget. The socket emit below
-    // already carries everything an active client needs. CAS on
-    // lastMessageAt: { lte } so an out-of-order older send doesn't
-    // overwrite a newer one's summary.
-    void this.db.conversation
-      .updateMany({
-        where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
-        data: { lastMessageAt: send.timestamp, lastMessagePreview: previewBody },
-      })
-      .catch((err) =>
-        this.logger.error(
-          `deferred conversation.update failed: ${err instanceof Error ? err.message : err}`,
-        ),
-      );
-
     const media: MediaAttachment | undefined = saved
       ? {
           kind,
@@ -767,29 +782,32 @@ export class MessagesService {
         : {}),
     };
 
-    // Publish through the bus — socket-fanout pushes the bubble AND analytics
-    // stamps firstResponseAt / bumps outgoingMessagesCount. Fire-and-forget so
-    // the HTTP response to the agent doesn't wait on the bus fanout chain
-    // (workflow-dispatch in particular hits Pg + Redis). Media sends count
-    // as outbound messages for response-time + counter metrics — they're an
-    // outbound message for every other purpose, so they should be here too.
-    void this.bus
-      .publish({
-        type: "message.sent",
-        teamId,
+    // Conversation bump + `message.sent` outbox row commit atomically.
+    // Drainer dispatches subscribers after commit, closing the
+    // "Meta-accepted but realtime-lost on crash" gap. Media sends count
+    // as outbound messages for analytics, so they route through the
+    // same path as text.
+    try {
+      await this.commitOutboundEvent({
         conversationId,
-        message,
+        bumpTimestamp: send.timestamp,
         preview: previewBody,
-        lastMessageAt: send.timestamp.toISOString(),
-        unreadDelta: 0,
-        senderUserId: userId,
-        ...(clientTempId ? { clientTempId } : {}),
-      })
-      .catch((err) =>
-        this.logger.error(
-          `sendMedia publish failed: ${err instanceof Error ? err.message : err}`,
-        ),
+        event: {
+          type: "message.sent",
+          teamId,
+          conversationId,
+          message,
+          preview: previewBody,
+          lastMessageAt: send.timestamp.toISOString(),
+          senderUserId: userId,
+          ...(clientTempId ? { clientTempId } : {}),
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `sendMedia commit failed for message=${createdId}: ${err instanceof Error ? err.message : err}`,
       );
+    }
 
     return {
       messageId: createdId,
@@ -967,11 +985,15 @@ export class MessagesService {
       let emittedForConversation = false;
 
       // First emit per new conversation carries the full ConversationWithRefs
-      // so inbox lists can splice the row in without a refetch.
+      // so inbox lists can splice the row in without a refetch. Routes
+      // through commitOutboundEvent so the conversation bump + outbox row
+      // commit atomically (drainer dispatches after commit). Same shape as
+      // sendText / sendMedia — no fire-and-forget gap that loses the
+      // realtime emit on a mid-publish crash.
       const emitForwarded = async (
         message: Message,
         preview: string,
-        ts: string,
+        bumpTimestamp: Date,
       ): Promise<void> => {
         let newConversation: ConversationWithRefs | undefined;
         if (conversationIsNew && !emittedForConversation) {
@@ -981,16 +1003,20 @@ export class MessagesService {
           if (refs) newConversation = refs.data;
         }
         emittedForConversation = true;
-        await this.bus.publish({
-          type: "message.sent",
-          teamId,
+        await this.commitOutboundEvent({
           conversationId: conversation.id,
-          message,
+          bumpTimestamp,
           preview,
-          lastMessageAt: ts,
-          unreadDelta: 0,
-          senderUserId: userId,
-          ...(newConversation ? { newConversation } : {}),
+          event: {
+            type: "message.sent",
+            teamId,
+            conversationId: conversation.id,
+            message,
+            preview,
+            lastMessageAt: bumpTimestamp.toISOString(),
+            senderUserId: userId,
+            ...(newConversation ? { newConversation } : {}),
+          },
         });
       };
 
@@ -1100,20 +1126,6 @@ export class MessagesService {
               continue;
             }
 
-            void this.db.conversation
-              .updateMany({
-                where: { id: conversation.id, lastMessageAt: { lte: send.timestamp } },
-                data: {
-                  lastMessageAt: send.timestamp,
-                  lastMessagePreview: previewBody,
-                },
-              })
-              .catch((err) =>
-                this.logger.error(
-                  `[forward] deferred conversation.update failed: ${err instanceof Error ? err.message : err}`,
-                ),
-              );
-
             const media: MediaAttachment | undefined = saved
               ? {
                   kind: mb.kind,
@@ -1141,14 +1153,11 @@ export class MessagesService {
               timestamp: send.timestamp.toISOString(),
               ...(media ? { media } : {}),
             };
-            await emitForwarded(
-              message,
-              previewBody,
-              send.timestamp.toISOString(),
-            ).catch((err) =>
-              this.logger.error(
-                `[forward] emit failed (already sent): ${err instanceof Error ? err.message : err}`,
-              ),
+            await emitForwarded(message, previewBody, send.timestamp).catch(
+              (err) =>
+                this.logger.error(
+                  `[forward] emit failed (already sent): ${err instanceof Error ? err.message : err}`,
+                ),
             );
           } else {
             const body = (src.body ?? "").trim();
@@ -1189,20 +1198,6 @@ export class MessagesService {
             }
 
             const preview = body.slice(0, 200);
-            void this.db.conversation
-              .updateMany({
-                where: { id: conversation.id, lastMessageAt: { lte: send.timestamp } },
-                data: {
-                  lastMessageAt: send.timestamp,
-                  lastMessagePreview: preview,
-                },
-              })
-              .catch((err) =>
-                this.logger.error(
-                  `[forward] deferred conversation.update failed: ${err instanceof Error ? err.message : err}`,
-                ),
-              );
-
             const message: Message = {
               id: created.id,
               teamId,
@@ -1219,14 +1214,11 @@ export class MessagesService {
               },
               timestamp: send.timestamp.toISOString(),
             };
-            await emitForwarded(
-              message,
-              preview,
-              send.timestamp.toISOString(),
-            ).catch((err) =>
-              this.logger.error(
-                `[forward] emit failed (already sent): ${err instanceof Error ? err.message : err}`,
-              ),
+            await emitForwarded(message, preview, send.timestamp).catch(
+              (err) =>
+                this.logger.error(
+                  `[forward] emit failed (already sent): ${err instanceof Error ? err.message : err}`,
+                ),
             );
           }
           sent++;

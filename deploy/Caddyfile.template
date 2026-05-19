@@ -157,12 +157,25 @@ __DOMAIN__ {
 				# the default 5-min idle cap.
 				read_timeout 5m
 				write_timeout 5m
+				# Tight TCP dial — if NestJS is briefly down during a
+				# restart, fail fast and let lb_try_duration retry below
+				# rather than holding the client connection for seconds.
+				dial_timeout 2s
 			}
-			# Direct probe of the NestJS /health endpoint.
+			# Tight health probing — Caddy notices the new container is up
+			# within ~2s of post-deploy cutover instead of waiting a full
+			# 10s tick. health_uri is cheap (just a JSON {ok:true}).
 			health_uri /health
-			health_interval 10s
-			health_timeout 3s
+			health_interval 2s
+			health_timeout 2s
 			health_status 200
+			# During the ~3s container-swap window, hold the request and
+			# retry briefly instead of returning 502 immediately. WebSocket
+			# upgrades skip retry (single-shot handshake), but HTTP gets a
+			# seamless cutover for the user. Caps the retry budget at 5s
+			# so a real outage still surfaces fast.
+			lb_try_duration 5s
+			lb_try_interval 250ms
 		}
 	}
 
@@ -171,13 +184,20 @@ __DOMAIN__ {
 	handle {
 		reverse_proxy 127.0.0.1:3000 {
 			header_up X-Real-IP {remote_host}
+			transport http {
+				dial_timeout 2s
+			}
 			# Probe Next.js's /api/health for upstream liveness — Caddy
 			# returns 502 immediately during the ~3s restart window instead
 			# of holding the request until upstream times out.
 			health_uri /api/health
-			health_interval 10s
-			health_timeout 3s
+			health_interval 2s
+			health_timeout 2s
 			health_status 200
+			# Brief retry budget during cutover so a page load mid-deploy
+			# doesn't 502; see api block above for rationale.
+			lb_try_duration 5s
+			lb_try_interval 250ms
 		}
 	}
 }

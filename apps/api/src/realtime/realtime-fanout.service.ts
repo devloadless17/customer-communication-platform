@@ -1,5 +1,7 @@
 import { Injectable } from "@nestjs/common";
 
+import type { DomainEventType } from "@ccp/shared/events/types";
+
 import { EventBus } from "../events/event-bus.module";
 import { RealtimeEmitter } from "./emitter.service";
 import { FANOUT_RULES } from "./fanout-rules";
@@ -7,11 +9,14 @@ import { FANOUT_RULES } from "./fanout-rules";
 /**
  * Subscribes the bus → wire-emit rules to the domain event bus.
  *
- * Subscribers run in parallel (Promise.allSettled), so registration order
- * does not affect observability — each handler owns its own table writes
- * or socket emits and any two-subscriber ordering would need to be modeled
- * explicitly in their state. Central registration here just keeps wire-
- * emit rules together in one greppable place.
+ * Registered FIRST in the chain (see WorkflowSubscribersService) so live
+ * clients see state mutations before audit/analytics/workflow-dispatch
+ * sequence their slower writes. The bus runs subscribers sequentially in
+ * registration order — see `bus.ts` head comment for the ordering
+ * invariant downstream subscribers rely on.
+ *
+ * Central registration here just keeps wire-emit rules together in one
+ * greppable place.
  */
 @Injectable()
 export class RealtimeFanoutService {
@@ -21,13 +26,18 @@ export class RealtimeFanoutService {
   ) {}
 
   registerSubscribers(): void {
-    for (const rule of FANOUT_RULES) {
-      // The discriminated union forces handlers to match their declared
-      // `type`, but the iterator widens to the union — so we narrow per
-      // iteration the way the bus expects.
+    for (const [type, handler] of Object.entries(FANOUT_RULES) as Array<
+      [DomainEventType, (typeof FANOUT_RULES)[DomainEventType]]
+    >) {
+      // `null` entries are the explicit "no socket frame" opt-out — narrow
+      // events that the type system requires be present in the table but
+      // shouldn't fan out. Skip without subscribing.
+      if (handler === null) continue;
+      // Per-key handler is `Handler<K>` for its own K, but Object.entries
+      // widens to the union — cast per iteration the way the bus expects.
       this.bus.subscribe(
-        rule.type,
-        (e) => (rule.handle as (e: unknown, emitter: RealtimeEmitter) => void)(e, this.emitter),
+        type,
+        (e) => (handler as (e: unknown, emitter: RealtimeEmitter) => void)(e, this.emitter),
       );
     }
   }

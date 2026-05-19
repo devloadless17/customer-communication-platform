@@ -480,6 +480,15 @@ model Contact {
   // Nullable because contacts created via /contacts/new (manual or CSV)
   // have no inbound yet.
   lastInboundAt     DateTime?
+  // Optimistic concurrency token. Every Contact write CAS-bumps this from
+  // the value it just read; concurrent writers on the same row race to the
+  // bump and exactly one wins, the other gets P2025 → 409 Conflict. Without
+  // this, two simultaneous PATCHes editing different fields (or a workflow
+  // step running while an agent is mid-edit) would do read-modify-write
+  // races where one set of changes is silently lost. The conflict-park UI
+  // in contact-panel surfaces 409s as a "teammate just edited this" banner
+  // so the agent can choose to reload or overwrite.
+  version           Int           @default(0)
 
   team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
   stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)

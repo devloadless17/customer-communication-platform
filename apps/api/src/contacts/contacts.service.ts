@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 
 import { blobStorage } from "@/lib/blob-storage";
 import { serializeCsv, parseCsv } from "@/lib/csv";
@@ -279,49 +280,67 @@ export class ContactsService {
       }
     }
 
-    const result = await this.db.$transaction(async (tx) => {
-      const existing = await tx.contact.findFirst({
-        where: { id: contactId, teamId },
-        include: { tags: { select: { id: true } } },
+    let result;
+    try {
+      result = await this.db.$transaction(async (tx) => {
+        const existing = await tx.contact.findFirst({
+          where: { id: contactId, teamId },
+          include: { tags: { select: { id: true } } },
+        });
+        if (!existing) return null;
+
+        const nextCustom = customFieldsPatch
+          ? mergeCustomFields(
+              (existing.customFields as Record<string, unknown> | null) ?? {},
+              customFieldsPatch,
+            )
+          : undefined;
+
+        // When firstName or lastName changes (and `name` wasn't in the same
+        // patch), recompute `name` to keep the canonical display in lockstep —
+        // mirrors the /v1 update path so both entry points converge.
+        let derivedName: string | undefined;
+        if (name === undefined && (firstName !== undefined || lastName !== undefined)) {
+          const nextFirst = firstName !== undefined ? firstName ?? "" : existing.firstName ?? "";
+          const nextLast = lastName !== undefined ? lastName ?? "" : existing.lastName ?? "";
+          const combined = `${nextFirst}${nextFirst && nextLast ? " " : ""}${nextLast}`.trim();
+          if (combined.length > 0) derivedName = combined.slice(0, MAX_TEXT);
+        }
+
+        // CAS on `version` — concurrent writers race to bump, exactly one
+        // wins. The loser hits P2025 → caught below and rethrown as 409.
+        // Without this, two PATCHes editing different fields would race
+        // read-modify-write and silently lose one set of changes.
+        const updated = await tx.contact.update({
+          where: { id: contactId, teamId, version: existing.version },
+          data: {
+            ...(name !== undefined ? { name } : derivedName !== undefined ? { name: derivedName } : {}),
+            ...(firstName !== undefined ? { firstName } : {}),
+            ...(lastName !== undefined ? { lastName } : {}),
+            ...(language !== undefined ? { language } : {}),
+            ...(countryCode !== undefined ? { countryCode } : {}),
+            ...(assignedUserId !== undefined ? { assignedUserId } : {}),
+            ...(email !== undefined ? { email } : {}),
+            ...(location !== undefined ? { location } : {}),
+            ...(stageId !== undefined ? { stageId } : {}),
+            ...(nextCustom !== undefined ? { customFields: nextCustom } : {}),
+            version: { increment: 1 },
+          },
+          include: { tags: { select: { id: true } } },
+        });
+        return { existing, updated };
       });
-      if (!existing) return null;
-
-      const nextCustom = customFieldsPatch
-        ? mergeCustomFields(
-            (existing.customFields as Record<string, unknown> | null) ?? {},
-            customFieldsPatch,
-          )
-        : undefined;
-
-      // When firstName or lastName changes (and `name` wasn't in the same
-      // patch), recompute `name` to keep the canonical display in lockstep —
-      // mirrors the /v1 update path so both entry points converge.
-      let derivedName: string | undefined;
-      if (name === undefined && (firstName !== undefined || lastName !== undefined)) {
-        const nextFirst = firstName !== undefined ? firstName ?? "" : existing.firstName ?? "";
-        const nextLast = lastName !== undefined ? lastName ?? "" : existing.lastName ?? "";
-        const combined = `${nextFirst}${nextFirst && nextLast ? " " : ""}${nextLast}`.trim();
-        if (combined.length > 0) derivedName = combined.slice(0, MAX_TEXT);
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        // CAS lost — a concurrent writer bumped version between our read
+        // and write. Surface as 409 so the conflict-park UI in
+        // contact-panel re-seeds and the agent can retry on fresh state.
+        throw new ConflictException({
+          error: "contact was modified by another writer, retry",
+        });
       }
-
-      const updated = await tx.contact.update({
-        where: { id: contactId },
-        data: {
-          ...(name !== undefined ? { name } : derivedName !== undefined ? { name: derivedName } : {}),
-          ...(firstName !== undefined ? { firstName } : {}),
-          ...(lastName !== undefined ? { lastName } : {}),
-          ...(language !== undefined ? { language } : {}),
-          ...(countryCode !== undefined ? { countryCode } : {}),
-          ...(assignedUserId !== undefined ? { assignedUserId } : {}),
-          ...(email !== undefined ? { email } : {}),
-          ...(location !== undefined ? { location } : {}),
-          ...(stageId !== undefined ? { stageId } : {}),
-          ...(nextCustom !== undefined ? { customFields: nextCustom } : {}),
-        },
-        include: { tags: { select: { id: true } } },
-      });
-      return { existing, updated };
-    });
+      throw err;
+    }
 
     if (!result) throw new NotFoundException({ error: "contact not found" });
     const { existing, updated } = result;
@@ -573,6 +592,16 @@ export class ContactsService {
         WHERE "A" = ANY(${ownedIds}::text[]) AND "B" = ${tagId}
       `;
     }
+    // Bump version on every affected Contact so any in-flight per-contact
+    // PATCH (especially `setTags` which uses `tags: { set: ... }`) CAS-
+    // fails instead of silently overwriting the bulk's tag change.
+    // The join-table INSERT/DELETE above does NOT touch Contact.version on
+    // its own — we need a separate UPDATE to bump it.
+    await this.db.$executeRaw`
+      UPDATE "Contact"
+      SET version = version + 1
+      WHERE id = ANY(${ownedIds}::text[]) AND "teamId" = ${teamId}
+    `;
 
     // Reload ALL ownedIds (not just succeeded) — emitting the current truth
     // for a failed update is harmless and keeps the socket payload simple.
@@ -906,11 +935,24 @@ export class ContactsService {
     const added = validIds.filter((tagId) => !previousIds.has(tagId));
     const removed = [...previousIds].filter((tagId) => !nextIds.has(tagId));
 
-    const updated = await this.db.contact.update({
-      where: { id: contactId },
-      data: { tags: { set: validIds.map((tagId) => ({ id: tagId })) } },
-      include: { tags: { select: { id: true } } },
-    });
+    let updated;
+    try {
+      updated = await this.db.contact.update({
+        where: { id: contactId, teamId, version: contact.version },
+        data: {
+          tags: { set: validIds.map((tagId) => ({ id: tagId })) },
+          version: { increment: 1 },
+        },
+        include: { tags: { select: { id: true } } },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        throw new ConflictException({
+          error: "contact was modified by another writer, retry",
+        });
+      }
+      throw err;
+    }
 
     const payload: Contact = {
       id: updated.id,

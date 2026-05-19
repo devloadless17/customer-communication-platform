@@ -81,7 +81,7 @@ function MessageThreadImpl({
     markOptimisticFailed,
     removeOptimistic,
     replaceWithContext,
-  } = useConversationEvents(initialData, nextOlderCursor, onMarkRead);
+  } = useConversationEvents(initialData, nextOlderCursor, currentUser.id, onMarkRead);
   const { conversation, contact, assignedUser, messages, notes } = data;
   const { confirm, alert, confirmDialog } = useConfirm();
 

@@ -46,6 +46,10 @@ export const MESSAGES_PAGE = 30;
  * Includes contact + assigned user; does NOT pull messages/notes (the
  * thread page hydrates those separately to keep the list query lean).
  */
+export type ListConversationsFilter =
+  | { kind: "preset"; id: "all" | "mine" | "unassigned" | "closed" }
+  | { kind: "stage"; stageId: string };
+
 export async function listConversations(
   teamId: string,
   opts: {
@@ -57,8 +61,18 @@ export async function listConversations(
      * by comparing their ConversationReadReceipt against each row's
      * lastMessageAt. Omit for server-to-server reads where per-agent unread
      * is meaningless (broadcasts, automations, external API).
+     *
+     * Also required to evaluate the `mine` preset filter — the WHERE
+     * clause narrows by `assignedUserId = viewerUserId`.
      */
     viewerUserId?: string;
+    /**
+     * Server-side preset / stage narrowing. Without it the list is the
+     * full team-recency feed. With it, "Mine" returns only my threads
+     * regardless of where they fall in the team's activity, and so on.
+     * `mine` requires `viewerUserId` — handled by the filter clause below.
+     */
+    filter?: ListConversationsFilter;
   } = {},
 ): Promise<CursorPage<ConversationWithRefs>> {
   const take = clampTake(opts.take, CONVERSATIONS_PAGE);
@@ -89,11 +103,48 @@ export async function listConversations(
       }
     : null;
 
+  // Preset / stage narrowing. Index coverage:
+  //   - status filters use `(teamId, status, lastMessageAt DESC)` index
+  //   - assignedUserId filters use `(teamId, assignedUserId)` index
+  //   - stage filter joins through Contact, which has `(teamId, stageId)`
+  // Closed threads are excluded from every preset EXCEPT `closed`, and
+  // from the stage view (matches the sub-sidebar's selected-list behavior).
+  let filterClause: Prisma.ConversationWhereInput | null = null;
+  if (opts.filter?.kind === "preset") {
+    switch (opts.filter.id) {
+      case "all":
+        filterClause = { status: { not: "closed" } };
+        break;
+      case "mine":
+        // `mine` without a viewer never matches — server-to-server callers
+        // hitting this filter is a programming error; the empty result
+        // surfaces it loudly without leaking other agents' threads.
+        filterClause = opts.viewerUserId
+          ? { status: { not: "closed" }, assignedUserId: opts.viewerUserId }
+          : { id: "__no_match__" };
+        break;
+      case "unassigned":
+        filterClause = { status: { not: "closed" }, assignedUserId: null };
+        break;
+      case "closed":
+        filterClause = { status: "closed" };
+        break;
+    }
+  } else if (opts.filter?.kind === "stage") {
+    filterClause = {
+      status: { not: "closed" },
+      contact: { stageId: opts.filter.stageId },
+    };
+  }
+
+  const composedClauses = [keysetClause, searchClause, filterClause].filter(
+    (c): c is Prisma.ConversationWhereInput => c !== null,
+  );
   const where: Prisma.ConversationWhereInput = {
     teamId,
-    ...(keysetClause && searchClause
-      ? { AND: [keysetClause, searchClause] }
-      : (keysetClause ?? searchClause ?? {})),
+    ...(composedClauses.length > 1
+      ? { AND: composedClauses }
+      : composedClauses[0] ?? {}),
   };
 
   const rows = await db.conversation.findMany({
@@ -161,7 +212,16 @@ export async function listConversations(
     ]),
   );
 
-  // Per-agent unread map. One indexed read scoped to this slice — no N+1.
+  // Per-agent unread. Derived from `ConversationReadReceipt` rows: a
+  // conversation is "unread for me" iff its `lastMessageAt` is newer than
+  // my receipt's `lastReadAt` (or I have no receipt). One indexed read
+  // scoped to this page — no N+1.
+  //
+  // Semantically distinct from team-wide `unreadCount`: the badge number
+  // still reflects team-wide ("team has 3 unread"), while the row's
+  // bold-text now reflects per-agent ("I haven't seen this"). A teammate
+  // marking read zeroes the team counter but doesn't clear my per-agent
+  // flag — matches WhatsApp / Slack / Front semantics.
   const sliceIds = sliced.map((r) => r.id);
   const receiptMap = new Map<string, Date>();
   if (opts.viewerUserId && sliceIds.length > 0) {
@@ -206,7 +266,7 @@ export async function listConversations(
 export async function getConversationWithRefs(
   teamId: string,
   conversationId: string,
-  opts: { messageLimit?: number } = {},
+  opts: { messageLimit?: number; viewerUserId?: string } = {},
 ): Promise<{ data: ConversationWithRefs; nextOlderCursor: string | null } | null> {
   const limit = clampTake(opts.messageLimit, MESSAGES_PAGE);
 
@@ -240,17 +300,34 @@ export async function getConversationWithRefs(
   // `Contact.lastInboundAt` column maintained by the ingest path — the
   // previous Message scan with a join through Conversation seq-scanned
   // a heavy contact's entire history on every thread open.
-  const [messageCount, noteCount] = await Promise.all([
+  // Per-agent unread + counts fan in parallel (counts are independent;
+  // receipt is one indexed read).
+  const [messageCount, noteCount, receipt] = await Promise.all([
     db.message.count({ where: { conversationId } }),
     db.internalNote.count({ where: { conversationId } }),
+    opts.viewerUserId
+      ? db.conversationReadReceipt.findUnique({
+          where: {
+            userId_conversationId: { userId: opts.viewerUserId, conversationId },
+          },
+          select: { lastReadAt: true },
+        })
+      : Promise.resolve(null),
   ]);
   const lastInboundAtIso = row.contact.lastInboundAt
     ? row.contact.lastInboundAt.toISOString()
     : null;
 
+  const unreadForMe = opts.viewerUserId
+    ? !receipt || receipt.lastReadAt.getTime() < row.lastMessageAt.getTime()
+    : undefined;
+
   return {
     data: {
-      conversation: mapConversation(row),
+      conversation: {
+        ...mapConversation(row),
+        ...(unreadForMe !== undefined ? { unreadForMe } : {}),
+      },
       contact: {
         ...mapContact(row.contact),
         tagIds: row.contact.tags.map((t) => t.id),
@@ -318,6 +395,13 @@ export async function listOlderMessages(
  * emitted into an empty room, so on (re)connect the client asks for the
  * delta and dedupes by externalId on the way in.
  *
+ * `state` carries the current conversation header (status + assignedUser +
+ * unreadCount) so the same backfill also re-syncs non-message events that
+ * fired during the gap — without it, an assignment / status / read flip
+ * during a reconnect-after-disconnect would stay stuck on the stale value
+ * until the agent navigates away and back. Tracked as Finding #7 in the
+ * assignment audit.
+ *
  * No cursor — the delta is bounded by how long the tab was hydrating or
  * disconnected. We cap at MESSAGES_PAGE; on the rare case it's hit, the
  * client should treat it as "too far behind" and force a thread re-fetch.
@@ -325,17 +409,39 @@ export async function listOlderMessages(
 export async function listNewerMessages(
   teamId: string,
   conversationId: string,
-  opts: { after: string; take?: number },
-): Promise<{ items: Message[] }> {
+  opts: { after: string; take?: number; viewerUserId?: string },
+): Promise<{
+  items: Message[];
+  state?: {
+    status: import("@ccp/shared/types").ConversationStatus;
+    assignedUserId: string | null;
+    assignedUser: import("@ccp/shared/types").User | null;
+    unreadCount: number;
+    unreadForMe?: boolean;
+  };
+}> {
   const afterDate = new Date(opts.after);
   if (Number.isNaN(afterDate.getTime())) return { items: [] };
 
   // Same tenant gate as listOlderMessages — silent empty page so we don't
-  // leak which conversation IDs exist in other teams.
-  const owns = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
-    select: { id: true },
-  });
+  // leak which conversation IDs exist in other teams. Pull the header
+  // fields the reconnect-resync needs in the same round-trip; selected
+  // fields are cheap and avoid a second query. Per-agent receipt is one
+  // extra indexed lookup when a viewer is set.
+  const [owns, receipt] = await Promise.all([
+    db.conversation.findFirst({
+      where: { id: conversationId, teamId },
+      include: { assignedUser: true },
+    }),
+    opts.viewerUserId
+      ? db.conversationReadReceipt.findUnique({
+          where: {
+            userId_conversationId: { userId: opts.viewerUserId, conversationId },
+          },
+          select: { lastReadAt: true },
+        })
+      : Promise.resolve(null),
+  ]);
   if (!owns) return { items: [] };
 
   const take = clampTake(opts.take, MESSAGES_PAGE);
@@ -347,5 +453,18 @@ export async function listNewerMessages(
     take,
   });
 
-  return { items: rows.map(mapMessage) };
+  const unreadForMe = opts.viewerUserId
+    ? !receipt || receipt.lastReadAt.getTime() < owns.lastMessageAt.getTime()
+    : undefined;
+
+  return {
+    items: rows.map(mapMessage),
+    state: {
+      status: owns.status,
+      assignedUserId: owns.assignedUserId,
+      assignedUser: owns.assignedUser ? mapUser(owns.assignedUser) : null,
+      unreadCount: owns.unreadCount,
+      ...(unreadForMe !== undefined ? { unreadForMe } : {}),
+    },
+  };
 }

@@ -72,6 +72,23 @@ export class ThreadCache {
   }
 
   /**
+   * Drop every cached thread except `keepId` (typically the displayed one,
+   * which is being refreshed via its own state-resync path). Used on socket
+   * reconnect-after-disconnect: any socket-driven patches that fired during
+   * the gap missed the cache, so next-click on any cached non-displayed
+   * thread would render stale assignment/status. Forcing a refetch on the
+   * next visit is the cheapest fix that's guaranteed-correct.
+   *
+   * Does NOT fire `onEvict` — we want the in-flight fetch for the displayed
+   * thread (if any) to keep running.
+   */
+  clearExcept(keepId: string | null): void {
+    for (const id of Array.from(this.store.keys())) {
+      if (id !== keepId) this.store.delete(id);
+    }
+  }
+
+  /**
    * Mutate the cached thread in-place (or no-op if not cached). Use for
    * background socket reconciliations where we just want to keep an already-
    * cached snapshot fresh without disturbing LRU order. Returns true if a
@@ -84,5 +101,20 @@ export class ThreadCache {
     if (next === null || next === current) return false;
     this.store.set(id, next);
     return true;
+  }
+
+  /**
+   * Mutate every cached thread in-place via the same updater. Used by
+   * cross-thread socket events (`contact:updated`) where the payload
+   * doesn't carry a conversationId — the updater's own equality bail
+   * (e.g. `prev.contact.id === payload.contact.id`) decides which entries
+   * actually mutate. LRU order is preserved.
+   */
+  patchAll(updater: (current: CachedThread) => CachedThread | null): void {
+    for (const [id, current] of this.store) {
+      const next = updater(current);
+      if (next === null || next === current) continue;
+      this.store.set(id, next);
+    }
   }
 }

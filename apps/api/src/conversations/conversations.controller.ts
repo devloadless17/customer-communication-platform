@@ -55,7 +55,24 @@ export class ConversationsController {
       take: query.take,
       cursor: query.cursor ?? null,
       search: query.search,
+      filter: query.filter,
+      stageId: query.stageId,
     });
+  }
+
+  /**
+   * Sub-sidebar preset + per-stage counts. Computed server-side over the
+   * full team so the badges don't lie when the agent has more matching
+   * conversations than the inbox list currently has paged in. Refreshed
+   * on socket events that can change counts (assigned / status / deleted /
+   * new conversation / contact stage edit).
+   *
+   * Declared BEFORE every `:id` route on this controller so a future `:id`
+   * GET wouldn't accidentally match `/counts` as an id.
+   */
+  @Get("counts")
+  async counts(@CurrentSession() session: ApiSession) {
+    return this.conversations.counts(session.teamId, session.userId);
   }
 
   @Post("bulk")
@@ -77,6 +94,7 @@ export class ConversationsController {
       before: query.before ?? null,
       after: query.after ?? null,
       take: query.take,
+      viewerUserId: session.userId,
     });
   }
 

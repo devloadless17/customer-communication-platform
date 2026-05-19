@@ -208,13 +208,26 @@ async function retry<T>(
 
 /**
  * Fire a single workflow on a specific contact/conversation. Used by:
- *   - /api/team/workflows/[id]/manual-trigger
- *   - /api/team/workflows/[id]/test
- *   - the `trigger_workflow` step
+ *   - /api/team/workflows/[id]/manual-trigger  (UI button)
+ *   - /api/team/workflows/[id]/test            (test fire)
+ *   - the `trigger_workflow` step              (workflow chaining)
  *
  * Bypasses the trigger-conditions filter — the caller has already decided
  * this workflow should fire — but still respects `enabled` + `published`.
- * Returns the runId so the caller can show progress.
+ *
+ * `enforceOncePerContact` defaults FALSE. The UI button + test fire are
+ * explicit admin intent and should always run, even on a contact that has
+ * already fired the workflow. The `trigger_workflow` step passes TRUE so a
+ * chain (A → B → A) can't bypass the once-per-contact ledger that the
+ * non-manual `dispatch()` path honors — without this, a workflow with
+ * `triggerOncePerContact = true` runs N times for the same contact when
+ * chained from another workflow's `trigger_workflow` step (it should run
+ * once, exactly like the message-received entry point already enforces).
+ *
+ * Returns the runId on success, OR `null` when `enforceOncePerContact` is
+ * true AND the target workflow's ledger says this contact already fired.
+ * Throws on hard errors (workflow missing / disabled / unpublished /
+ * Redis / Postgres).
  */
 export async function dispatchManualTrigger(args: {
   teamId: string;
@@ -223,10 +236,16 @@ export async function dispatchManualTrigger(args: {
   conversationId: string | null;
   triggeredByUserId: string | null;
   metadata?: Record<string, string>;
-}): Promise<string> {
+  enforceOncePerContact?: boolean;
+}): Promise<string | null> {
   const wf = await db.workflow.findFirst({
     where: { id: args.workflowId, teamId: args.teamId },
-    select: { id: true, enabled: true, published: true },
+    select: {
+      id: true,
+      enabled: true,
+      published: true,
+      triggerOncePerContact: true,
+    },
   });
   if (!wf) throw new Error("workflow not found");
   if (!wf.enabled || !wf.published) {
@@ -291,6 +310,53 @@ export async function dispatchManualTrigger(args: {
 
   // Create the run directly (without re-going through dispatch's
   // conditions check — manual triggers skip that gate by design).
+  //
+  // When `enforceOncePerContact` is true AND the workflow's
+  // triggerOncePerContact flag is set, gate the run create on the
+  // WorkflowContactState ledger inside the same transaction as the run
+  // insert. The unique index on (workflowId, contactId) makes the marker
+  // insert a row-level lock — a concurrent caller that already won sees
+  // P2002 and we bail with null. Mirrors `createAndEnqueue`'s
+  // once-per-contact path so the two entry shapes converge on the same
+  // protection.
+  if (args.enforceOncePerContact && wf.triggerOncePerContact) {
+    try {
+      const runId = await db.$transaction(async (tx) => {
+        await tx.workflowContactState.create({
+          data: {
+            workflowId: wf.id,
+            contactId: args.contactId,
+            teamId: args.teamId,
+          },
+        });
+        const run = await tx.workflowRun.create({
+          data: {
+            workflowId: wf.id,
+            teamId: args.teamId,
+            trigger: "manual_trigger",
+            contactId: args.contactId,
+            conversationId: args.conversationId,
+            eventPayload: payload as unknown as Prisma.InputJsonValue,
+            status: "queued",
+          },
+          select: { id: true },
+        });
+        return run.id;
+      });
+      await enqueueWorkflowRun(runId);
+      return runId;
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        // Once-per-contact race-lost OR pre-existing marker — both mean
+        // "this contact has already fired this workflow; do not chain
+        // again." Return null so the caller (trigger_workflow step) can
+        // render a clean 409 rather than queueing a phantom run.
+        return null;
+      }
+      throw err;
+    }
+  }
+
   const run = await db.workflowRun.create({
     data: {
       workflowId: wf.id,

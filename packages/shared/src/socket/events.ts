@@ -38,7 +38,13 @@ export interface ServerToClientEvents {
     message: Message;
     preview: string;
     lastMessageAt: string;
-    unreadDelta: number;
+    /**
+     * Absolute team-wide unread count AFTER the server-side write. Clients
+     * overwrite their local mirror with this value (don't add a delta) so
+     * brief drift from a dropped event self-heals on the next frame. See
+     * MessageReceivedEvent.unreadCount for the migration rationale.
+     */
+    unreadCount: number;
     newConversation?: ConversationWithRefs;
     /**
      * Echoed from the originating client so it can swap its optimistic bubble
@@ -490,13 +496,13 @@ export interface ClientToServerEvents {
 
   // -------------------------------------------------------------------------
   // Team-chat room joins. Subscribing to a channel gets you message/edit/
-  // delete/reaction/pin/typing events for that channel. Subscribing to a
-  // thread also gets you the per-reply stream for the side panel.
+  // delete/reaction/pin/typing events for that channel — thread replies,
+  // edits, and reactions ride the same team-room frames and are filtered
+  // client-side by `payload.threadRootId === rootMessageId`. A dedicated
+  // thread room was redundant; removed.
   // -------------------------------------------------------------------------
   "subscribe:channel": (payload: { channelId: string }) => void;
   "unsubscribe:channel": (payload: { channelId: string }) => void;
-  "subscribe:channel-thread": (payload: { rootMessageId: string }) => void;
-  "unsubscribe:channel-thread": (payload: { rootMessageId: string }) => void;
   "typing:channel:start": (payload: { channelId: string }) => void;
   "typing:channel:stop": (payload: { channelId: string }) => void;
 }

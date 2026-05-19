@@ -15,16 +15,12 @@ import type {
   ClientToServerEvents,
   ServerToClientEvents,
 } from "@ccp/shared/socket/events";
+import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
-import {
-  channelRoom,
-  channelThreadRoom,
-  conversationRoom,
-  teamRoom,
-} from "./rooms";
+import { channelRoom, conversationRoom, teamRoom } from "./rooms";
 import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
@@ -58,22 +54,47 @@ export class RealtimeGateway
 
   afterInit(server: TypedIO): void {
     this.emitter.bind(server);
+
+    // Handshake auth runs in middleware (not handleConnection) so an auth
+    // failure delivers a typed `connect_error` to the client with a parseable
+    // reason. The browser uses err.message to distinguish "session expired"
+    // (route to /logout) from generic network blips (silent reconnect).
+    // ws-adapter's `connectionStateRecovery.skipMiddlewares: true` still
+    // bypasses this on brief reconnects, preserving the per-team-deploy
+    // economics — the DB hit is per real handshake, not per tick.
+    server.use(async (socket, next) => {
+      const identity = await this.auth.authenticate(socket);
+      if (!identity) {
+        // Error message is the wire payload (Socket.io serializes Error.message
+        // into the client's `connect_error` event). Keep it stable — the
+        // browser matches on this exact string.
+        return next(new Error("unauthenticated"));
+      }
+      socket.data.userId = identity.userId;
+      socket.data.teamId = identity.teamId;
+      socket.data.role = identity.role;
+      next();
+    });
+
     this.logger.log("Socket.io gateway ready");
   }
 
   async handleConnection(client: Socket): Promise<void> {
-    const identity = await this.auth.authenticate(client);
-    if (!identity) {
+    // Identity was set in the middleware above. If somehow missing (e.g. a
+    // recovered reconnect that skipped middleware AND lost socket.data) we
+    // can't trust the connection — drop it.
+    const userId = client.data.userId as string | undefined;
+    const teamId = client.data.teamId as string | undefined;
+    const role = client.data.role as Role | undefined;
+    if (!userId || !teamId || !role) {
       client.disconnect(true);
       return;
     }
+    const identity = { userId, teamId, role };
 
-    // Stash identity on socket.data — the same shape the old SocketData
-    // interface declared. Downstream `@SubscribeMessage` handlers trust this
-    // and NEVER read identity from the event payload.
-    client.data.userId = identity.userId;
-    client.data.teamId = identity.teamId;
-    client.data.role = identity.role;
+    // Identity already stashed on socket.data by the auth middleware in
+    // afterInit. Initialize the per-socket Sets that @SubscribeMessage
+    // handlers + handleDisconnect read for cleanup.
     client.data.typingIn = new Set<string>();
     client.data.typingInChannel = new Set<string>();
     // Per-socket set of conversations this socket has joined as a viewer.
@@ -364,38 +385,11 @@ export class RealtimeGateway
     }
   }
 
-  // Thread side-panel rooms — verify ownership of the root message before
-  // joining. Originally relied on "no emitter targets a stranger's thread
-  // room" as the gate, but any future code path that emits to
-  // channelThreadRoom(id) without re-checking team would leak across
-  // tenants. Cheap DB lookup (PK + teamId) once per subscribe.
-  @SubscribeMessage("subscribe:channel-thread")
-  async onSubscribeChannelThread(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() body: { rootMessageId: string },
-  ): Promise<void> {
-    const teamId = client.data.teamId as string;
-    const room = channelThreadRoom(body.rootMessageId);
-    // Idempotency guard — a chatty client (or a reconnect retry) re-emits
-    // subscribe:channel-thread, which would otherwise re-pay the
-    // findFirst on every emit. The room-membership check is O(1) on
-    // the socket's joined-rooms set and short-circuits the DB lookup.
-    if (client.rooms.has(room)) return;
-    const root = await this.db.teamChannelMessage.findFirst({
-      where: { id: body.rootMessageId, teamId },
-      select: { id: true },
-    });
-    if (!root) return;
-    client.join(room);
-  }
-
-  @SubscribeMessage("unsubscribe:channel-thread")
-  onUnsubscribeChannelThread(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() body: { rootMessageId: string },
-  ): void {
-    client.leave(channelThreadRoom(body.rootMessageId));
-  }
+  // (No subscribe:channel-thread handler — thread replies, edits, deletes,
+  // and reactions are all delivered through the team room and filtered
+  // client-side by `payload.threadRootId === rootMessageId`. The thread
+  // room would be dead weight: every event source already targets the
+  // team room, and the gateway-level DB lookup was paid for nothing.)
 
   @SubscribeMessage("typing:channel:start")
   onChannelTypingStart(

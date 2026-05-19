@@ -325,21 +325,24 @@ export interface Conversation {
   assignedUserId: string | null;
   status: ConversationStatus;
   /**
-   * Team-wide "has anything not been acked yet" hint. The sidebar badge
-   * counts unread for the SIGNED-IN agent — that calc reads
-   * `ConversationReadReceipt` rows for the user and compares against
-   * `lastMessageAt`. This counter exists for cheap previews and the
-   * conversation:read socket payload; don't use it as the canonical "is
-   * this unread for the current user" answer.
+   * Team-wide unread counter. Currently the source of truth for both the
+   * row badge AND the bold-text "unread" cue across the inbox UI.
+   *
+   * Historically the inbox planned to surface a per-agent "unread for me"
+   * signal (separate from team-wide) using the `ConversationReadReceipt`
+   * table, but no consumer was ever wired — see `unreadForMe` below.
    */
   unreadCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
   /**
-   * True iff there's at least one message in this conversation newer than
-   * the signed-in agent's read receipt. Populated server-side on routes that
-   * resolve a session; undefined elsewhere (server-to-server calls,
-   * background runners) so callers can't accidentally trust a missing value.
+   * Reserved for a future per-agent "unread for me" feature. Currently
+   * UNPOPULATED — the server-side computation in `listConversations` was
+   * removed after audit-2 found no UI consumer. `ConversationReadReceipt`
+   * rows are still upserted on `markRead`, so re-enabling means: (a)
+   * restore the receipt join in the query, (b) wire a per-user reducer
+   * for `conversation:read` (currentUserId-aware), and (c) a per-user
+   * transition on `message:new` for non-active inbounds.
    */
   unreadForMe?: boolean;
 }

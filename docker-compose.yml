@@ -76,24 +76,38 @@ services:
       - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-ccp}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      # Docker 25+ runs probes every `start_interval` during boot, so
+      # `service_healthy` flips as soon as Postgres actually accepts a
+      # connection (~500ms-1s) instead of waiting a full `interval`.
+      # Steady-state probing still runs at `interval` to avoid noise.
+      start_interval: 500ms
+      interval: 30s
+      timeout: 3s
+      retries: 5
 
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
     networks: [ccp_net]
-    command: ["redis-server", "--appendonly", "yes"]
+    # --appendonly yes: AOF durability (~1s loss window).
+    # --maxmemory + allkeys-lru: graceful eviction before the container's
+    # 256m hard cap turns into an OOMKilled. BullMQ working set is tiny
+    # (job IDs + small metadata) so 200mb is well above steady state; the
+    # ceiling exists so a runaway pub/sub or stuck stream evicts cold
+    # entries instead of crashing the queue.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "200mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis_data:/data
     ports:
       - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      # See postgres healthcheck above for start_interval rationale.
+      # redis-cli PING returns in <50ms once redis is accepting clients.
+      start_interval: 500ms
+      interval: 30s
       timeout: 3s
-      retries: 10
+      retries: 5
     # BullMQ working set is tiny — workflow jobs are pointers, not bulk
     # data. 256MB is well above what Redis ever uses for the pilot scale;
     # the cap mostly catches a runaway pub/sub or a stuck stream.
@@ -104,6 +118,42 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
+
+  # ---- migrate (one-shot) -------------------------------------------------
+  # Runs `prisma migrate deploy` once per `docker compose up` and exits. app
+  # + api then start, gated on this container's success (exit 0). Without
+  # this gate, api previously waited on postgres-healthy only and could
+  # race the schema lock while app's CMD was still applying migrations —
+  # Prisma client caches type metadata on first connect, so a stale-schema
+  # connection could outlive the migration with broken types.
+  #
+  # Uses the web image because it carries the Prisma CLI + schema at
+  # /opt/cli-tools/node_modules/.bin/prisma + /app/prisma (web Dockerfile
+  # lines 155-166). PATH/NODE_PATH from that image already point at the CLI
+  # tree, so `prisma migrate deploy` resolves the binary correctly.
+  #
+  # Idempotent: `prisma migrate deploy` is a no-op when the DB is current.
+  # restart: "no" means docker won't auto-restart on failure (a failed
+  # migration is a real operator event — depends_on stops app/api from
+  # starting, systemd's StartLimitBurst catches a crash loop).
+  migrate:
+    image: ${DOCKER_USERNAME:-local}/${APP_IMAGE_NAME:-customer-communication-platform}:latest-web
+    restart: "no"
+    networks: [ccp_net]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
+    command: ["prisma", "migrate", "deploy"]
+    # One-shot, no in-flight work — let docker stop it instantly on
+    # teardown. Default 10s would add a fake 10s pause to `docker compose
+    # down` for a container that's already exited.
+    stop_grace_period: 0s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
 
   app:
     # Prod pulls :latest-web; `docker compose up --build` builds locally with
@@ -121,7 +171,11 @@ services:
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
-      postgres: { condition: service_healthy }
+      # postgres dependency is inherited transitively through `migrate`.
+      # Gating on migrate's clean exit guarantees the schema is current
+      # before Next.js boots Prisma client (which caches schema metadata
+      # on first connect).
+      migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
     environment:
       NODE_ENV: production
@@ -173,6 +227,25 @@ services:
     # in steady state.
     mem_limit: 2g
     mem_reservation: 768m
+    # Same probe shape as api below — gives compose dependents a real
+    # "is web up" signal beyond `docker ps` PID liveness. start_period
+    # is short because migrations moved to the `migrate` service; the
+    # web CMD is now just `node apps/web/server.js`, boots in 2-3s.
+    # start_interval probes every 500ms during start_period so the
+    # container is marked healthy the instant Next.js answers, instead
+    # of waiting a full `interval` cycle.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
+      start_interval: 500ms
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    # Default 10s would SIGKILL Next.js mid-flush on `systemctl stop`.
+    # 30s gives lifecycle hooks (Prisma disconnect, RSC cache flush) time
+    # to wind down cleanly. No BullMQ workers here so we don't need the
+    # api's 100s — just enough margin to be polite.
+    stop_grace_period: 30s
     # Cap docker's json-file driver — 3 files × 100MB = 300MB ceiling per
     # service. Web tends to log more than the api (RSC server logs +
     # Better Auth request logs) so size is higher than the others.
@@ -200,7 +273,11 @@ services:
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:
-      postgres: { condition: service_healthy }
+      # postgres dependency is inherited through `migrate`. Gating on
+      # migrate's clean exit ensures NestJS's Prisma client sees the
+      # latest schema on first connect — no race with app's old migrate
+      # step (which used to run inside the web CMD).
+      migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
     environment:
       NODE_ENV: production
@@ -267,9 +344,13 @@ services:
     # worker-only variant.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1"]
-      interval: 10s
+      # See web/postgres above — start_interval flips service_healthy
+      # the instant NestJS answers (~3-5s with swc-node) instead of
+      # waiting for the next `interval` tick.
+      start_interval: 500ms
+      interval: 30s
       timeout: 3s
-      retries: 5
+      retries: 3
       start_period: 20s
     # Higher than `app` because the api carries the workflow runner,
     # BullMQ worker, Socket.io fanout, and audit/analytics subscribers

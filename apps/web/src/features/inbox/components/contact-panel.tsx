@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Mail, Phone, MapPin, Clock, FileText, Loader2 } from "lucide-react";
+import { Check, ChevronDown, Mail, Phone, MapPin, Clock, FileText, Loader2, UserRound } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -13,17 +13,26 @@ import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { getClientSocket } from "@/lib/socket-client";
-import { formatPhone, initials } from "@ccp/shared/utils";
+import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ConversationStatus,
   ConversationWithRefs,
   Tag,
+  User,
 } from "@ccp/shared/types";
 
 import { EditableField } from "./contact-panel/editable-field";
@@ -64,6 +73,12 @@ interface PanelProps {
   canManageFields: boolean;
   /** Team-wide tag catalog. Used by the tag picker for select/create. */
   tagCatalog: Tag[];
+  /**
+   * Team roster used to render the account-manager picker. Distinct from the
+   * per-thread `assignedUser` on the conversation — this assignee is the
+   * contact's cross-thread owner (Contact.assignedUserId).
+   */
+  teamMembers: User[];
 }
 
 export function ContactPanel({
@@ -71,6 +86,7 @@ export function ContactPanel({
   fieldDefinitions,
   canManageFields,
   tagCatalog,
+  teamMembers,
 }: PanelProps) {
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
@@ -167,6 +183,16 @@ export function ContactPanel({
   const [tagSaveError, setTagSaveError] = useState<string | null>(null);
   const tagBoxRef = useRef<HTMLDivElement>(null);
 
+  // Account-manager assignee — Contact.assignedUserId. Distinct from the
+  // conversation's per-thread assignee. Server-authoritative (no optimistic
+  // patch — the PATCH route handles persistence and the socket echo refreshes
+  // both this panel and any other tab open on this contact).
+  const [accountManagerId, setAccountManagerId] = useState<string | null>(
+    contact.assignedUserId ?? null,
+  );
+  const [accountManagerPending, setAccountManagerPending] = useState(false);
+  const [accountManagerError, setAccountManagerError] = useState<string | null>(null);
+
   // Re-sync when navigating to a different conversation. Without this the
   // panel would render the previous contact's edits against the new contact.
   useEffect(() => {
@@ -175,6 +201,8 @@ export function ContactPanel({
     setLocation(contact.location ?? "");
     setCustomFields(contact.customFields ?? {});
     setTagIds(contact.tagIds ?? []);
+    setAccountManagerId(contact.assignedUserId ?? null);
+    setAccountManagerError(null);
     setTagPickerOpen(false);
     setTagSaveError(null);
   }, [
@@ -184,6 +212,7 @@ export function ContactPanel({
     contact.location,
     contact.customFields,
     contact.tagIds,
+    contact.assignedUserId,
   ]);
 
   // Keep our local tag catalog in sync with the server-fetched one (changes
@@ -250,6 +279,11 @@ export function ContactPanel({
       payload,
     ) => {
       if (payload.contact.id !== contactId) return;
+      // Account-manager isn't a free-text field, so a teammate's change can't
+      // race a half-typed edit on this side. Apply it unconditionally — same
+      // pattern as the message-thread's `conversation:assigned` reducer.
+      const incomingAssignee = payload.contact.assignedUserId ?? null;
+      setAccountManagerId(incomingAssignee);
       const incoming = {
         name: payload.contact.name,
         email: payload.contact.email ?? "",
@@ -291,11 +325,40 @@ export function ContactPanel({
       // Dirty + would actually overwrite → park + banner.
       setPendingRemote(incoming);
     };
+    // Bulk paths suppress the per-contact `contact:updated` frame and emit a
+    // single `contacts:bulk_updated` instead. Without this listener, a
+    // teammate bulk-tagging the open contact would leave this panel stale
+    // until the user navigated away.
+    //
+    // Payload deliberately omits the contact (the event exists to AVOID N
+    // frames), so we can't park a snapshot like the per-contact path does.
+    // Behavior:
+    //   - clean local fields → router.refresh() pulls canonical, the
+    //     contact-prop useEffect (line 172) re-seeds local state silently.
+    //   - dirty local fields → leave them alone. Last-write-wins on next
+    //     save, matching the pre-this-listener behavior. Rare in practice
+    //     (single agent mid-edit while a bulk op hits the same contact).
+    const onContactsBulkUpdated: Parameters<
+      typeof socket.on<"contacts:bulk_updated">
+    >[1] = (payload) => {
+      if (!payload.contactIds.includes(contactId)) return;
+      const snapshot = serverSnapshotRef.current;
+      const dirty =
+        name !== snapshot.name ||
+        email !== snapshot.email ||
+        location !== snapshot.location ||
+        !shallowJsonEqual(customFields, snapshot.customFields) ||
+        !arraysEqual(tagIds, snapshot.tagIds);
+      if (dirty) return;
+      router.refresh();
+    };
     socket.on("contact:updated", onContactUpdated);
+    socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     return () => {
       socket.off("contact:updated", onContactUpdated);
+      socket.off("contacts:bulk_updated", onContactsBulkUpdated);
     };
-  }, [contact.id, name, email, location, customFields, tagIds]);
+  }, [contact.id, name, email, location, customFields, tagIds, router]);
 
   function acceptPendingRemote() {
     if (!pendingRemote) return;
@@ -353,6 +416,39 @@ export function ContactPanel({
     }
     startSaving(() => router.refresh());
     return true;
+  }
+
+  /**
+   * Account-manager picker. PATCHes `Contact.assignedUserId`; the server's
+   * `contact:updated` socket echo re-syncs every open tab + the cached thread
+   * snapshot in inbox-shell. No optimistic update — the contact panel sits a
+   * single round-trip from the active thread, so the perceived lag is the
+   * same as the conversation-header AssignmentDropdown.
+   */
+  async function persistAccountManager(nextId: string | null) {
+    if (nextId === accountManagerId || accountManagerPending) return;
+    setAccountManagerPending(true);
+    setAccountManagerError(null);
+    try {
+      const res = await fetch(`/api/contacts/${contact.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignedUserId: nextId }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setAccountManagerError(body.error ?? "Couldn't update");
+        return;
+      }
+      // Apply the local value now — the socket echo will arrive a beat later
+      // and become a no-op via the equality bail in the listener above.
+      setAccountManagerId(nextId);
+      startSaving(() => router.refresh());
+    } catch (err) {
+      setAccountManagerError(err instanceof Error ? err.message : "Network error");
+    } finally {
+      setAccountManagerPending(false);
+    }
   }
 
   // PUT replaces the whole set (server semantics), so we hand it the full
@@ -603,6 +699,22 @@ export function ContactPanel({
 
         <Separator />
 
+        <Section title="Account manager">
+          <AccountManagerPicker
+            currentId={accountManagerId}
+            teamMembers={teamMembers}
+            pending={accountManagerPending}
+            onChange={(next) => void persistAccountManager(next)}
+          />
+          {accountManagerError && (
+            <div className="mt-2 text-[11px] text-destructive">
+              {accountManagerError}
+            </div>
+          )}
+        </Section>
+
+        <Separator />
+
         <Section title="Tags">
           <div ref={tagBoxRef} className="relative flex flex-wrap items-center gap-1.5">
             {appliedTags.map((t) => (
@@ -655,5 +767,78 @@ export function ContactPanel({
 
       </ScrollArea>
     </aside>
+  );
+}
+
+/**
+ * Cross-thread "Account manager" assignee picker. Mirrors the conversation
+ * header's `AssignmentDropdown` shape so the inbox feels coherent, but writes
+ * to `Contact.assignedUserId` (not `Conversation.assignedUserId`). The two
+ * fields are intentionally independent — the per-thread assignee tracks
+ * "who's handling THIS chat right now", the account manager tracks "who
+ * owns this customer across every chat they ever have."
+ */
+function AccountManagerPicker({
+  currentId,
+  teamMembers,
+  pending,
+  onChange,
+}: {
+  currentId: string | null;
+  teamMembers: User[];
+  pending: boolean;
+  onChange: (next: string | null) => void;
+}) {
+  const current = currentId ? teamMembers.find((u) => u.id === currentId) ?? null : null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={pending}
+          className={cn(
+            "flex h-8 w-full items-center gap-2 rounded-md border border-input bg-background px-2.5 text-[13px] transition-colors hover:bg-accent hover:text-accent-foreground",
+            pending && "opacity-60",
+          )}
+        >
+          {current ? (
+            <>
+              <span className="inline-flex size-5 items-center justify-center rounded-full bg-secondary text-[10px] font-medium">
+                {initials(current.name)}
+              </span>
+              <span className="truncate font-normal">{current.name}</span>
+            </>
+          ) : (
+            <>
+              <UserRound className="size-4 text-muted-foreground" />
+              <span className="text-muted-foreground">Unassigned</span>
+            </>
+          )}
+          <ChevronDown className="ml-auto size-3.5 text-muted-foreground" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuLabel>Account manager</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => onChange(null)}>
+          {currentId === null && <Check className="size-3.5" />}
+          <span className={cn("text-muted-foreground", currentId === null && "ml-1")}>
+            Unassigned
+          </span>
+        </DropdownMenuItem>
+        {teamMembers.map((u) => (
+          <DropdownMenuItem key={u.id} onSelect={() => onChange(u.id)}>
+            {currentId === u.id ? (
+              <Check className="size-3.5" />
+            ) : (
+              <span className="inline-flex size-5 items-center justify-center rounded-full bg-secondary text-[10px] font-medium">
+                {initials(u.name)}
+              </span>
+            )}
+            <span className="truncate">{u.name}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

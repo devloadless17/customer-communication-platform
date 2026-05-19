@@ -21,6 +21,13 @@ import {
  *   Config: { url, bearerToken?, customHeaders?, timeoutMs? }
  */
 
+// Hard cap on per-step timeout (any step kind, not just http_request).
+// `worker.ts` asserts `lockDuration > MAX_STEP_TIMEOUT_MS + 10_000` on boot
+// so a step that runs to its full budget cannot outlive its BullMQ lock and
+// get re-delivered while still in flight. Raising this here without bumping
+// `lockDuration` will fail the boot assertion — by design.
+export const MAX_STEP_TIMEOUT_MS = 60_000;
+
 export interface HttpRequestStepConfig {
   url: string;
   bearerToken?: string;
@@ -30,6 +37,12 @@ export interface HttpRequestStepConfig {
 
 export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
   type: "http_request",
+  // "pure" from the runner's idempotency-journaling perspective: the
+  // CALLEE (the partner endpoint) is expected to dedupe at-least-once
+  // delivery via the X-CCP-Delivery header. From this process's POV the
+  // step is a black-box HTTP call — same as a wait/branch in that we
+  // don't journal it and let BullMQ's retry semantics handle redelivery.
+  sideEffect: "pure",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("http_request config must be an object");
@@ -49,7 +62,7 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
       }
       if (Object.keys(out).length > 0) cfg.customHeaders = out;
     }
-    if (typeof r.timeoutMs === "number" && r.timeoutMs > 0 && r.timeoutMs <= 60_000) {
+    if (typeof r.timeoutMs === "number" && r.timeoutMs > 0 && r.timeoutMs <= MAX_STEP_TIMEOUT_MS) {
       cfg.timeoutMs = r.timeoutMs;
     }
     return cfg;

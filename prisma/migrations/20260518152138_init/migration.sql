@@ -165,6 +165,7 @@ CREATE TABLE "Contact" (
     "source" "ContactSource" NOT NULL DEFAULT 'inbound',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastInboundAt" TIMESTAMP(3),
+    "version" INTEGER NOT NULL DEFAULT 0,
 
     CONSTRAINT "Contact_pkey" PRIMARY KEY ("id")
 );

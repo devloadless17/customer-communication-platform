@@ -39,32 +39,17 @@ export async function createOutboundMessageIdempotent(
       // BEFORE this row commits. The status webhook handler parks the
       // status for ~5min; drain it here so a fast-arriving status isn't
       // dropped silently. Fire-and-forget so we don't slow the happy path.
+      // One retry on transient failure — a Redis hiccup at exactly this
+      // millisecond would otherwise lose the parked status (GETDEL is
+      // atomic, so by the time the catch runs the entry is already gone).
       if (created.externalId && created.provider) {
-        void drainParkedStatus(
+        void drainWithRetry(
           created.teamId,
           created.provider as ProviderName,
           created.externalId,
           created.id,
           created.conversationId,
-        ).catch((err) => {
-          // Failure here means a status that arrived BEFORE we committed
-          // the row is now lost (we already deleted the parked entry).
-          // Logging is the only recovery signal — without it the message
-          // is stuck at its create-time status with no operator clue.
-          console.error(
-            JSON.stringify({
-              event: "drainParkedStatus.failed",
-              severity: "error",
-              correlationId: getCorrelationId() ?? null,
-              teamId: created.teamId,
-              provider: created.provider,
-              externalId: created.externalId,
-              messageId: created.id,
-              message: err instanceof Error ? err.message : String(err),
-              stack: err instanceof Error ? err.stack : undefined,
-            }),
-          );
-        });
+        );
       }
       return created;
     } catch (err) {
@@ -103,6 +88,49 @@ export async function createOutboundMessageIdempotent(
   }
   // Unreachable — last iteration either returns or throws.
   throw lastErr ?? new Error("createOutboundMessageIdempotent: retries exhausted");
+}
+
+/**
+ * Drain the parked status with one retry on failure. Drain itself does
+ * `Redis.GETDEL` atomically — a failure means either Redis was briefly
+ * unreachable (transient: retry helps) or the subsequent DB update threw
+ * (persistent: retry will fail again, then we log and move on). One sleep
+ * + retry catches the Redis-blip case at near-zero cost. Logged loudly on
+ * final failure so ops has a recovery signal — without the log the message
+ * is stuck at its create-time status with no operator clue.
+ */
+async function drainWithRetry(
+  teamId: string,
+  provider: ProviderName,
+  externalId: string,
+  messageId: string,
+  conversationId: string,
+): Promise<void> {
+  try {
+    await drainParkedStatus(teamId, provider, externalId, messageId, conversationId);
+    return;
+  } catch (firstErr) {
+    await new Promise((r) => setTimeout(r, 250));
+    try {
+      await drainParkedStatus(teamId, provider, externalId, messageId, conversationId);
+      return;
+    } catch (secondErr) {
+      console.error(
+        JSON.stringify({
+          event: "drainParkedStatus.failed",
+          severity: "error",
+          correlationId: getCorrelationId() ?? null,
+          teamId,
+          provider,
+          externalId,
+          messageId,
+          firstAttemptMessage: firstErr instanceof Error ? firstErr.message : String(firstErr),
+          message: secondErr instanceof Error ? secondErr.message : String(secondErr),
+          stack: secondErr instanceof Error ? secondErr.stack : undefined,
+        }),
+      );
+    }
+  }
 }
 
 /**

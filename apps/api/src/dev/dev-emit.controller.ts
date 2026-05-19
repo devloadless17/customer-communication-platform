@@ -150,13 +150,14 @@ export class DevEmitController {
       },
     });
 
-    await this.db.conversation.update({
+    const bumped = await this.db.conversation.update({
       where: { id: conversationId },
       data: {
         lastMessageAt: now,
         lastMessagePreview: body,
         unreadCount: { increment: 1 },
       },
+      select: { unreadCount: true },
     });
 
     const message: Message = {
@@ -181,7 +182,7 @@ export class DevEmitController {
       message,
       preview: body,
       lastMessageAt: now.toISOString(),
-      unreadDelta: 1,
+      unreadCount: bumped.unreadCount,
     });
 
     return { ok: true, messageId: created.id };

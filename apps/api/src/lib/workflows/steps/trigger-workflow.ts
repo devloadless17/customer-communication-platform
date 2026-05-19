@@ -42,6 +42,7 @@ const TRIGGER_DEPTH_MAX = 8;
 
 export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> = {
   type: "trigger_workflow",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("trigger_workflow config must be an object");
@@ -112,7 +113,25 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
         sourceWorkflowId: ctx.workflowId,
         depth: String(nextDepth),
       },
+      // Chain calls MUST respect the target workflow's
+      // `triggerOncePerContact` ledger. Without this, a workflow with
+      // once-per-contact set could be re-fired infinitely (up to
+      // TRIGGER_DEPTH_MAX) for the same contact via composition — the
+      // ledger only protects `dispatch()`-driven entries, not
+      // trigger_workflow-step entries.
+      enforceOncePerContact: true,
     });
+
+    if (runId === null) {
+      // Target is once-per-contact AND this contact already fired it.
+      // Advance with a 409-shaped log entry so the operator can spot the
+      // skip in the run timeline without the workflow stalling.
+      return advanceWithError(
+        409,
+        "target_once_per_contact_already_fired",
+        `target workflow "${target.id}" is once-per-contact and contact "${contactId}" has already fired it`,
+      );
+    }
 
     return advance({ targetWorkflowId: target.id, dispatchedRunId: runId });
   },

@@ -32,6 +32,7 @@ export interface UpdateFieldStepConfig {
 
 export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
   type: "update_field",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("update_field config must be an object");
@@ -84,11 +85,26 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
     }
     const nextFields = { ...currentFields, [config.fieldKey]: resolvedValue };
 
-    const updated = await db.contact.update({
-      where: { id: contactId },
-      data: { customFields: nextFields as Prisma.InputJsonValue },
-      include: { tags: { select: { id: true } } },
-    });
+    // CAS on `version`. If a user PATCH on the same contact lands between
+    // our read and write, the loser surfaces as P2025 → workflow step
+    // error (advanceWithError) instead of silently overwriting. Workflow
+    // runs can be retried by the operator; the user's edit is preserved.
+    let updated;
+    try {
+      updated = await db.contact.update({
+        where: { id: contactId, teamId: ctx.teamId, version: contact.version },
+        data: {
+          customFields: nextFields as Prisma.InputJsonValue,
+          version: { increment: 1 },
+        },
+        include: { tags: { select: { id: true } } },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return advanceWithError(409, "contact modified mid-step, retry the run");
+      }
+      throw err;
+    }
 
     const payload: Contact = {
       id: updated.id,

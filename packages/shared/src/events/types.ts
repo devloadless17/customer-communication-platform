@@ -58,7 +58,15 @@ export interface MessageReceivedEvent {
   newConversation?: ConversationWithRefs;
   preview: string;
   lastMessageAt: string;
-  unreadDelta: number;
+  /**
+   * Absolute team-wide unread count AFTER the server-side increment.
+   * Clients overwrite their local mirror with this value instead of adding
+   * a delta, so brief client/server drift (e.g. an earlier event dropped
+   * during a socket flap) self-heals on the next event instead of
+   * accumulating. The previous `unreadDelta: 1` semantics required the
+   * client to start from a correct prior value.
+   */
+  unreadCount: number;
   /** Recent thread context handed to workflow `message_received` trigger. */
   recentMessages: WorkflowMessageSnapshot[];
 }
@@ -69,8 +77,13 @@ export interface MessageSentEvent {
   message: import("../types").Message;
   preview: string;
   lastMessageAt: string;
-  /** Always 0 — outbound messages never bump unread. Kept for socket parity. */
-  unreadDelta: 0;
+  /**
+   * Absolute team-wide unread count at send time. Outbound sends don't
+   * change unread (only inbounds do), so this is the same value the
+   * conversation row holds. Carried for socket-payload parity with
+   * `message.received` and to let clients overwrite-not-add their mirror.
+   */
+  unreadCount: number;
   /** Echoed so the originating client can swap its optimistic bubble. */
   clientTempId?: string;
   /** null for system/automation sends (workflow steps); user id for agent sends. */
@@ -341,6 +354,15 @@ export interface NoteCreatedEvent {
   teamId: string;
   conversationId: string;
   note: InternalNote;
+  /**
+   * Set by workflow steps (`add_comment`) so a future workflow trigger on
+   * `note_added` doesn't re-fire workflows on system-authored notes. Today
+   * no such trigger exists; the flag is forward-compatible discipline so
+   * the workflow-step author doesn't have to remember to add it later
+   * after a downstream subscriber starts caring. Mirrors the silent flag
+   * on ConversationAssignedEvent / ContactUpdatedEvent.
+   */
+  silent?: boolean;
 }
 
 export interface NoteDeletedEvent {
@@ -414,6 +436,13 @@ export interface BroadcastRecipientMessageSentEvent {
   message: import("../types").Message;
   preview: string;
   lastMessageAt: string;
+  /**
+   * Absolute team-wide unread count. Broadcasts are outbound so this is
+   * unchanged from before the send; included for parity with the wire
+   * `message:new` payload so clients can absolute-overwrite instead of
+   * additive-update their local mirror.
+   */
+  unreadCount: number;
 }
 
 /**

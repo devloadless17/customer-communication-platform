@@ -72,10 +72,15 @@ export function getWorkflowQueue(): Queue<WorkflowJobData> {
   return state.queue;
 }
 
-/** Enqueue immediately. */
+/**
+ * Enqueue immediately. `jobId: run:${runId}` makes the enqueue idempotent —
+ * the dispatcher's retry-with-backoff (Redis hiccup tail) cannot fan out a
+ * second job for the same WorkflowRun row and cause concurrent execution
+ * lanes that race the in_progress journal.
+ */
 export async function enqueueWorkflowRun(runId: string): Promise<string> {
   const q = getWorkflowQueue();
-  const job = await q.add("run", { runId });
+  const job = await q.add("run", { runId }, { jobId: `run:${runId}` });
   return job.id as string;
 }
 
@@ -83,10 +88,13 @@ export async function enqueueWorkflowRun(runId: string): Promise<string> {
  * Enqueue with a delay — used by `wait` steps to schedule resumption AND
  * by the waiting-runs sweeper to re-enqueue stranded waits.
  *
- * jobId is the runId — BullMQ skips an add() whose jobId already exists,
- * so the sweeper's re-enqueue is a no-op when the original job is still
- * delayed. A run only ever has ONE in-flight wait (workflows are serial),
- * so this is the right uniqueness contract.
+ * jobId is `resume:${runId}:${waitSeq}` where `waitSeq` is the step-log
+ * length at the moment of scheduling — monotonically increasing per run.
+ * The earlier `resume:${runId}` shape was ambiguous across multiple wait
+ * steps within the same run: removeOnComplete keeps completed jobs for 24h,
+ * which made BullMQ skip the second wait's enqueue as a duplicate, leaving
+ * the run stranded until the 60s waiting-sweeper noticed. Sweeper passes
+ * the same waitSeq so its re-add on a still-delayed first wait is a no-op.
  *
  * delayMs is clamped at 1ms to keep BullMQ happy (zero would mean "now,"
  * which we'd express via enqueueWorkflowRun anyway).
@@ -94,12 +102,13 @@ export async function enqueueWorkflowRun(runId: string): Promise<string> {
 export async function enqueueWorkflowResume(
   runId: string,
   delayMs: number,
+  waitSeq: number,
 ): Promise<string> {
   const q = getWorkflowQueue();
   const job = await q.add(
     "run",
     { runId },
-    { delay: Math.max(1, delayMs), jobId: `resume:${runId}` },
+    { delay: Math.max(1, delayMs), jobId: `resume:${runId}:${waitSeq}` },
   );
   return job.id as string;
 }

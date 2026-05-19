@@ -8,12 +8,8 @@ import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import {
-  applyConversationAssignment,
-  applyConversationRead,
-  applyConversationStatus,
-  applyMessageMediaReady,
   applyMessageStatus,
-  applyNoteDeleted,
+  THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
 import type { ConversationWithRefs, CursorPage, Message } from "@ccp/shared/types";
 
@@ -137,6 +133,13 @@ export interface ConversationEventsState {
 export function useConversationEvents(
   initial: ConversationWithRefs,
   initialNextOlderCursor: string | null,
+  /**
+   * Signed-in agent id. Threaded into reducers via `ReducerContext` so the
+   * `conversation:read` handler can distinguish "I read this" (clears my
+   * per-agent `unreadForMe`) from "a teammate read this" (only clears
+   * team-wide `unreadCount`).
+   */
+  currentUserId: string,
   // Called after the mark-read POST resolves so the shell can patch its
   // cached thread snapshot (unreadCount → 0). Without this, switching back
   // to a thread already viewed this session would re-fire the POST every
@@ -309,16 +312,63 @@ export function useConversationEvents(
       void fetchWithSessionGuard(
         `/api/conversations/${conversationId}/messages?after=${encodeURIComponent(cursor)}`,
       )
-        .then((r) => (r.ok ? (r.json() as Promise<{ items: Message[] }>) : null))
+        .then((r) =>
+          r.ok
+            ? (r.json() as Promise<{
+                items: Message[];
+                state?: {
+                  status: ConversationWithRefs["conversation"]["status"];
+                  assignedUserId: string | null;
+                  assignedUser: ConversationWithRefs["assignedUser"];
+                  unreadCount: number;
+                  unreadForMe?: boolean;
+                };
+              }>)
+            : null,
+        )
         .then((res) => {
-          if (!res?.items?.length) return;
+          if (!res) return;
+          const freshState = res.state;
+          const freshItems = res.items ?? [];
+          if (!freshState && freshItems.length === 0) return;
           setData((prev) => {
-            const have = new Set(prev.messages.map((m) => m.externalId));
-            const fresh = res.items.filter((m) => !have.has(m.externalId));
-            if (!fresh.length) return prev;
+            // Re-sync the conversation header alongside any new messages.
+            // Without this, an assignment/status/read flip that fired while
+            // the socket was disconnected stays stuck on the stale value
+            // until the agent navigates away and back. The reducer-style
+            // identity-bail keeps this a no-op when nothing changed.
+            let next = prev;
+            if (freshState) {
+              const headerChanged =
+                next.conversation.status !== freshState.status ||
+                next.conversation.assignedUserId !== freshState.assignedUserId ||
+                next.conversation.unreadCount !== freshState.unreadCount ||
+                next.conversation.unreadForMe !== freshState.unreadForMe ||
+                (next.assignedUser?.id ?? null) !==
+                  (freshState.assignedUser?.id ?? null);
+              if (headerChanged) {
+                next = {
+                  ...next,
+                  conversation: {
+                    ...next.conversation,
+                    status: freshState.status,
+                    assignedUserId: freshState.assignedUserId,
+                    unreadCount: freshState.unreadCount,
+                    ...(freshState.unreadForMe !== undefined
+                      ? { unreadForMe: freshState.unreadForMe }
+                      : {}),
+                  },
+                  assignedUser: freshState.assignedUser,
+                };
+              }
+            }
+            if (freshItems.length === 0) return next;
+            const have = new Set(next.messages.map((m) => m.externalId));
+            const fresh = freshItems.filter((m) => !have.has(m.externalId));
+            if (!fresh.length) return next;
             return {
-              ...prev,
-              messages: sortByTimestamp([...prev.messages, ...fresh]),
+              ...next,
+              messages: sortByTimestamp([...next.messages, ...fresh]),
             };
           });
         })
@@ -478,16 +528,6 @@ export function useConversationEvents(
       }
     };
 
-    // Inbound media finished downloading in the background. Swap the
-    // placeholder media block (or drop it on download failure) without
-    // touching the rest of the row.
-    const onMessageMediaReady: Parameters<typeof socket.on<"message:media:ready">>[1] = (
-      payload,
-    ) => {
-      if (payload.conversationId !== conversationId) return;
-      setData((prev) => applyMessageMediaReady(prev, payload));
-    };
-
     const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
       setData((prev) => {
@@ -502,26 +542,6 @@ export function useConversationEvents(
       });
     };
 
-    const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (payload) => {
-      if (payload.conversationId !== conversationId) return;
-      setData((prev) => applyConversationAssignment(prev, payload));
-    };
-
-    const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (payload) => {
-      if (payload.conversationId !== conversationId) return;
-      setData((prev) => applyConversationStatus(prev, payload));
-    };
-
-    const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = (payload) => {
-      if (payload.conversationId !== conversationId) return;
-      setData(applyConversationRead);
-    };
-
-    const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (payload) => {
-      if (payload.conversationId !== conversationId) return;
-      setData((prev) => applyNoteDeleted(prev, payload));
-    };
-
     // The conversation we're viewing was deleted (by us, by a teammate, or as
     // a side-effect of a contact delete). Bounce back to the inbox before the
     // server-rendered detail page errors out on a missing row. router.replace
@@ -531,16 +551,10 @@ export function useConversationEvents(
       router.replace("/inbox");
     };
 
-    // A teammate edited the contact on this conversation (name, email,
-    // stage, tags, …). Swap in the fresh contact so the message thread's
-    // stage stepper and header re-render. ContactPanel listens separately
-    // because it's a sibling component with its own local mirrors.
-    const onContactUpdated: Parameters<typeof socket.on<"contact:updated">>[1] = (payload) => {
-      setData((prev) => {
-        if (prev.contact.id !== payload.contact.id) return prev;
-        return { ...prev, contact: payload.contact };
-      });
-    };
+    // `contact:updated` is now wired through THREAD_REDUCER_EVENTS
+    // (target: "all" via `applyContactUpdate`) so the same reducer drives
+    // both this live state and the LRU snapshots in inbox-shell. Don't
+    // re-bind it here — the iterated loop below handles it.
 
     // Background send-worker reported a failure. Map to the same
     // markOptimisticFailed reducer the pre-S1 inline HTTP-error path used,
@@ -560,16 +574,39 @@ export function useConversationEvents(
     };
 
     socket.on("message:new", onMessageNew);
+    // message:status stays out of the iterated loop because the live hook
+    // RAF-coalesces it (cached side patches the Map without React renders,
+    // no batching needed). The reducer itself is shared via the array.
     socket.on("message:status", onMessageStatus);
     socket.on("message:failed", onMessageFailed);
-    socket.on("message:media:ready", onMessageMediaReady);
     socket.on("note:new", onNoteNew);
-    socket.on("conversation:assigned", onAssigned);
-    socket.on("conversation:status", onStatus);
-    socket.on("conversation:read", onRead);
-    socket.on("note:deleted", onNoteDeleted);
     socket.on("conversation:deleted", onConversationDeleted);
-    socket.on("contact:updated", onContactUpdated);
+
+    // Iterated wiring — bind one direct-setData handler per reducer entry.
+    // Skips `message:status` (RAF-coalesced above). Adding an entry to
+    // THREAD_REDUCER_EVENTS auto-wires this hook with no edits here.
+    //
+    // Targeting:
+    //   - target: "conversation" (default) — payload.conversationId narrows
+    //     to this hook's thread.
+    //   - target: "all" — payload has no conversationId (e.g. contact:updated
+    //     fires team-wide). The reducer's own identity bail decides whether
+    //     it applies to this thread.
+    const reducerCtx = { currentUserId };
+    const reducerHandlers = THREAD_REDUCER_EVENTS.filter(
+      (e) => e.event !== "message:status",
+    ).map(({ event, apply, target }) => {
+      const handler = (payload: { conversationId?: string } & Record<string, unknown>) => {
+        if ((target ?? "conversation") === "conversation") {
+          if (payload?.conversationId !== conversationId) return;
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        setData((prev) => (apply as any)(prev, payload, reducerCtx));
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      socket.on(event as any, handler as any);
+      return { event, handler };
+    });
 
     return () => {
       // Drop any pending coalesced status flush — the next mount will
@@ -584,19 +621,17 @@ export function useConversationEvents(
       socket.off("message:new", onMessageNew);
       socket.off("message:status", onMessageStatus);
       socket.off("message:failed", onMessageFailed);
-      socket.off("message:media:ready", onMessageMediaReady);
       socket.off("note:new", onNoteNew);
-      socket.off("conversation:assigned", onAssigned);
-      socket.off("conversation:status", onStatus);
-      socket.off("conversation:read", onRead);
-      socket.off("note:deleted", onNoteDeleted);
       socket.off("conversation:deleted", onConversationDeleted);
-      socket.off("contact:updated", onContactUpdated);
+      for (const { event, handler } of reducerHandlers) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        socket.off(event as any, handler as any);
+      }
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisibility);
       }
     };
-  }, [conversationId, markRead, router]);
+  }, [conversationId, currentUserId, markRead, router]);
 
   // -------------------------------------------------------------------------
   // Optimistic helpers — exposed to ReplyBox so a click-to-send paints the

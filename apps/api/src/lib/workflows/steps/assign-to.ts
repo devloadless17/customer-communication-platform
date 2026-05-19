@@ -39,6 +39,7 @@ export type AssignToStepConfig =
 
 export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
   type: "assign_to",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("assign_to config must be an object");

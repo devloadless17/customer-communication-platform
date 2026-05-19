@@ -105,8 +105,12 @@ export function useThreadEvents(
   useEffect(() => {
     const socket = getClientSocket();
 
+    // Thread events ride the channel's team-room frames and are filtered
+    // here by `threadRootId === rootMessageId`. The dedicated thread room
+    // was removed — nothing on the server targeted it.
     const onConnect = () => {
-      socket.emit("subscribe:channel-thread", { rootMessageId });
+      // no-op kept for symmetry with sibling event hooks; the channel
+      // subscribe is owned by use-team-channel-events.
     };
 
     const onMessage: Parameters<typeof socket.on<"team:channel:message">>[1] = (payload) => {
@@ -193,7 +197,6 @@ export function useThreadEvents(
     if (socket.connected) onConnect();
 
     return () => {
-      socket.emit("unsubscribe:channel-thread", { rootMessageId });
       socket.off("connect", onConnect);
       socket.off("team:channel:message", onMessage);
       socket.off("team:channel:message:edited", onEdited);

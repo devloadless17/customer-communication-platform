@@ -115,7 +115,11 @@ export function mapContact(c: PrismaContact): Contact {
  * full record is re-fetched via the per-conversation query which DOES select
  * customFields.
  */
-type PrismaContactListItem = Omit<PrismaContact, "customFields">;
+// `version` is the optimistic-concurrency token on the row — it never
+// reaches the wire (clients don't need it; the server-side CAS handles
+// races) so we omit it from the mapper's input type too. Listing it
+// alongside `customFields` keeps the strict shape's `Omit` tractable.
+type PrismaContactListItem = Omit<PrismaContact, "customFields" | "version">;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   return {
     id: c.id,

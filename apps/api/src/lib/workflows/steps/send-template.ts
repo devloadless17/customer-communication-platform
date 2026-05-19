@@ -26,6 +26,7 @@ export interface SendTemplateStepConfig {
 
 export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
   type: "send_template",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("send_template config must be an object");

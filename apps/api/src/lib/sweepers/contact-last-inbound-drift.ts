@@ -70,6 +70,9 @@ async function sweepOnce(): Promise<void> {
   // both "actual was NULL but contact has a stale value" and "contact
   // is missing a value that should be present" as drift.
   //
+  // Message has no contactId column — it joins to Contact through
+  // Conversation. Group by Conversation.contactId to land per-contact maxes.
+  //
   // IS DISTINCT FROM treats NULL as comparable so the WHERE clause
   // catches both directions of drift symmetrically.
   const drifted = await db.$executeRaw`
@@ -81,11 +84,12 @@ async function sweepOnce(): Promise<void> {
         actual.max_ts as last_inbound
       FROM "Contact" c2
       LEFT JOIN (
-        SELECT "contactId", MAX("timestamp") as max_ts
-        FROM "Message"
-        WHERE direction = 'in'
-        GROUP BY "contactId"
-      ) actual ON actual."contactId" = c2.id
+        SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
+        FROM "Message" m
+        JOIN "Conversation" co ON co.id = m."conversationId"
+        WHERE m.direction = 'in'
+        GROUP BY co."contactId"
+      ) actual ON actual.contact_id = c2.id
     ) sub
     WHERE c.id = sub.contact_id
       AND c."lastInboundAt" IS DISTINCT FROM sub.last_inbound

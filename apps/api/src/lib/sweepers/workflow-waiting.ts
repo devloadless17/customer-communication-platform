@@ -16,9 +16,11 @@ import { enqueueWorkflowResume } from "@/lib/workflows/queue";
  * sliding into the past with nothing happening.
  *
  * The sweep is idempotent — re-enqueueing a run whose job already exists
- * is fine; BullMQ deduplicates by jobId in `addBulk` semantics, and
- * `enqueueWorkflowResume` uses `runId` as the jobId so duplicates are
- * collapsed.
+ * is fine; BullMQ deduplicates by jobId in `addBulk` semantics. The sweeper
+ * passes the run's current stepLog.length as `waitSeq` so the computed
+ * jobId (`resume:${runId}:${waitSeq}`) matches what the runner used when
+ * the original wait was scheduled — sweeper's re-add is a no-op if that
+ * delayed job still exists.
  *
  * Interval: 60s. Short enough to recover quickly, long enough that a
  * tight schema_index on (status, waitUntil) makes the query trivial.
@@ -58,7 +60,7 @@ async function sweepOnce(): Promise<void> {
       status: "waiting",
       waitUntil: { lte: cutoff },
     },
-    select: { id: true, waitUntil: true },
+    select: { id: true, waitUntil: true, stepLog: true },
     take: 100, // bounded per tick — protects against thundering recovery
   });
   if (stranded.length === 0) return;
@@ -70,17 +72,21 @@ async function sweepOnce(): Promise<void> {
     //   1. Defensive: if the 30s grace cutoff is ever tightened, or if the
     //      sweeper picks up a row whose waitUntil is somehow still in the
     //      future, delay:0 would wake a 1-hour wait instantly.
-    //   2. The BullMQ jobId-based dedupe (resume:${runId}) collapses any
-    //      pre-existing delayed job — but if the runner's own enqueue is
-    //      racing us with a longer delay AND the runner wins the race, we
-    //      don't want the sweeper's delay:0 job to have won the slot.
-    //      Math.max(0, …) preserves "fire now if overdue" semantics for
-    //      the common case while keeping the future-delay case correct.
+    //   2. The BullMQ jobId-based dedupe (resume:${runId}:${waitSeq})
+    //      collapses any pre-existing delayed job — but if the runner's
+    //      own enqueue is racing us with a longer delay AND the runner
+    //      wins the race, we don't want the sweeper's delay:0 job to
+    //      have won the slot. Math.max(0, …) preserves "fire now if
+    //      overdue" semantics for the common case while keeping the
+    //      future-delay case correct.
     // Non-null: the WHERE clause filters waitUntil <= cutoff, which excludes
     // NULLs in Postgres — Prisma's projected type doesn't carry that fact.
     const delayMs = Math.max(0, run.waitUntil!.getTime() - nowMs);
+    // stepLog.length matches the value the runner used at scheduling time
+    // (the runner pushes the "waiting" entry, persists, then enqueues).
+    const waitSeq = Array.isArray(run.stepLog) ? run.stepLog.length : 0;
     try {
-      await enqueueWorkflowResume(run.id, delayMs);
+      await enqueueWorkflowResume(run.id, delayMs, waitSeq);
     } catch (err) {
       console.warn(
         `[workflow-waiting-sweeper] re-enqueue failed for run=${run.id}:`,

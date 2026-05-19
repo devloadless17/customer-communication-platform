@@ -27,6 +27,7 @@ export interface BranchStepConfig {
 
 export const branchStepHandler: StepHandler<BranchStepConfig> = {
   type: "branch",
+  sideEffect: "pure",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("branch config must be an object");
@@ -64,6 +65,7 @@ const MAX_DELAY_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 export const waitStepHandler: StepHandler<WaitStepConfig> = {
   type: "wait",
+  sideEffect: "pure",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("wait config must be an object");
@@ -111,6 +113,7 @@ export interface JumpToStepConfig {
 
 export const jumpToStepHandler: StepHandler<JumpToStepConfig> = {
   type: "jump_to_step",
+  sideEffect: "pure",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("jump_to_step config must be an object");

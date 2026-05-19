@@ -70,14 +70,30 @@ COPY prisma ./prisma
 COPY tsconfig.json prisma.config.ts ./
 
 ENV NODE_ENV=production \
-    NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server"
+    NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server" \
+    SWC_NODE_PROJECT=/app/apps/api/tsconfig.json
 USER node
 EXPOSE 4000
 # wget is already installed at the base layer for compose's probes; reusing
 # it here avoids spinning a fresh Node process every 10s (which would burn
 # ~50-100 MB allocated-then-freed RSS on each probe).
-HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
+# start_interval (Docker 25+) probes every 500ms during start_period so
+# service_healthy flips the instant NestJS responds (~3-5s on swc-node)
+# instead of waiting a full `interval` cycle. Compose mirrors these.
+HEALTHCHECK --start-interval=500ms --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1
-# Defers to the package's `start` script — keeps SWC_NODE_PROJECT +
-# NODE_OPTIONS + the entry point in one place (apps/api/package.json).
-CMD ["pnpm", "--filter", "@ccp/api", "start"]
+# Direct node invocation — no pnpm/sh wrapper. Three reasons:
+#  1) Node runs as PID 1, so SIGTERM from systemd/docker reaches
+#     `app.enableShutdownHooks()` immediately. The previous
+#     `pnpm --filter @ccp/api start` chain (pnpm → sh → node, because
+#     the `start` script uses inline `VAR=value` prefix syntax) made
+#     signal forwarding shell-implementation-dependent. BullMQ's
+#     graceful drain (lib/workflows/worker.ts:lockDuration=90s) only
+#     works if SIGTERM lands on Node within the systemd TimeoutStopSec
+#     window — irreversible Meta sends double-fire otherwise.
+#  2) Faster boot — drops two process spawns (~50-100ms each on this VPS).
+#  3) Reads pnpm-workspace symlinks at /app/apps/api/node_modules to find
+#     @swc-node/register (declared as a direct dep of @ccp/api). WORKDIR
+#     set so Node's resolution walks api's node_modules first.
+WORKDIR /app/apps/api
+CMD ["node", "-r", "@swc-node/register", "src/main.ts"]

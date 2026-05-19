@@ -48,8 +48,30 @@ export type StepResult =
   | { kind: "jump"; status: number; body: string; targetStepId: string }
   | { kind: "wait"; status: number; body: string; delayMs: number };
 
+/**
+ * Whether a step's `run` produces an externally-visible side effect that
+ * MUST NOT execute twice if a retry picks the same run up.
+ *
+ *   "irreversible" — Meta send, outbound webhook fire, tag mutation,
+ *                    audit-row write. Runner journals `in_progress`
+ *                    before running and treats a retry that finds the
+ *                    journal as "presumed sent, advance."
+ *   "pure"          — DB-read-only step types (branch, wait, jump_to_step)
+ *                    and the trivial computes (advanceWithError on bad
+ *                    config). Safe to re-run.
+ *
+ * Required on every handler — adding a new step type forces the author
+ * to declare its semantics at the type-system level. The earlier
+ * hand-maintained string list in `runner.ts` silently misclassified
+ * every new step type as "pure" until someone remembered to update it,
+ * which is the exact shape of bug CLAUDE.md rule #3 exists to prevent.
+ */
+export type StepSideEffect = "irreversible" | "pure";
+
 export interface StepHandler<C = unknown> {
   type: WorkflowStepType;
+  /** See StepSideEffect. */
+  sideEffect: StepSideEffect;
   /** Throws on garbage; message surfaces back to the admin via the API. */
   parseConfig(raw: unknown): C;
   redactConfig?(config: C): unknown;

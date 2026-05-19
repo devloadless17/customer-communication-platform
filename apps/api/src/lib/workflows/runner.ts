@@ -1,4 +1,4 @@
-import type { Prisma, WorkflowTriggerEvent } from "@prisma/client";
+import type { Prisma, WorkflowStepType, WorkflowTriggerEvent } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { type WorkflowEventEnvelope } from "@/lib/workflows/events";
@@ -283,7 +283,12 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         },
       });
       // Schedule the resume. BullMQ delayed jobs survive worker restarts.
-      await enqueueWorkflowResume(run.id, result.delayMs);
+      // waitSeq = current stepLog length (post-push), unique per wait within
+      // this run so a workflow with multiple wait steps doesn't collide on
+      // the resume jobId. The waiting-sweeper passes the same value when
+      // re-enqueueing stranded waits, so its retry stays a no-op while the
+      // original delayed job is still alive.
+      await enqueueWorkflowResume(run.id, result.delayMs, stepLog.length);
       return { runId: run.id, status: "waiting" };
     }
 
@@ -383,21 +388,14 @@ interface StepLogEntry {
  * the latter is at-least-once by HTTP semantics anyway and its callee is
  * expected to dedupe) are excluded so the stepLog stays focused.
  */
-function hasSideEffect(type: string): boolean {
-  return (
-    type === "send_message" ||
-    type === "send_template" ||
-    type === "assign_to" ||
-    type === "set_status" ||
-    type === "open_conversation" ||
-    type === "close_conversation" ||
-    type === "add_tag" ||
-    type === "remove_tag" ||
-    type === "update_field" ||
-    type === "update_lifecycle" ||
-    type === "add_comment" ||
-    type === "trigger_workflow"
-  );
+function hasSideEffect(type: WorkflowStepType): boolean {
+  // Drive the answer from the per-handler `sideEffect` declaration so adding
+  // a new step type forces the author to opt in/out at the type-system
+  // level. The earlier hand-maintained string list silently classified
+  // every new step as "pure" — exactly the regression vector CLAUDE.md
+  // rule #3 (idempotent Meta sends) exists to prevent.
+  const handler = getStepHandler(type);
+  return handler.sideEffect === "irreversible";
 }
 
 function buildEnvelope(

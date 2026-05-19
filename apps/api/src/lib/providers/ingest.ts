@@ -341,26 +341,25 @@ async function ingestInboundMessage(
   // P2034 (serialization failure) on conflict; we retry once. Two retries is
   // a sensible ceiling — by then the contention is real, not a fluke.
   const { contact, conversation, isNewContact, isNewConversation, reopened } = await runWithSerializableRetry(
-    async () => {
+    async (tx) => {
       // Pre-existence check — the signal "did this inbound just create a
       // brand-new contact row?" We need it to publish `contact.created`
       // BEFORE `message.received` so n8n flows triggered on "On Contact
       // created → Send welcome" see the contact existed first.
       //
-      // Racy on simultaneous first-inbounds from the same brand-new phone
-      // (two handlers can both read null and both think they created); the
-      // worst-case symptom is one duplicate `contact.created` webhook
-      // delivery. We tolerate that — the upsert itself is correct (one
-      // row, the other handler's upsert turns into an empty update), and
-      // receivers should already dedupe via `event_id`.
-      const existingContact = await db.contact.findUnique({
+      // Every Prisma call inside this block uses `tx`, NOT the global
+      // `db`. Using `db` would run on a pooled connection OUTSIDE the
+      // Serializable transaction — the isolation level would silently
+      // become Read Committed and the duplicate-Conversation race the
+      // wrapper exists to prevent would still bite.
+      const existingContact = await tx.contact.findUnique({
         where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
         select: { id: true },
       });
       const isNewContact = !existingContact;
 
       const { firstName, lastName } = splitContactName(evt.contactName ?? evt.contactPhone);
-      const contact = await db.contact.upsert({
+      const contact = await tx.contact.upsert({
         where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
         create: {
           teamId,
@@ -390,7 +389,7 @@ async function ingestInboundMessage(
       // agent's inbox rather than fragmenting history across multiple rows.
       // Only when a contact has literally never had a conversation do we
       // create one.
-      const existingConvo = await db.conversation.findFirst({
+      const existingConvo = await tx.conversation.findFirst({
         where: { teamId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
@@ -398,7 +397,7 @@ async function ingestInboundMessage(
       let conversation = existingConvo;
       let reopened = false;
       if (!conversation) {
-        conversation = await db.conversation.create({
+        conversation = await tx.conversation.create({
           data: {
             teamId,
             contactId: contact.id,
@@ -413,7 +412,7 @@ async function ingestInboundMessage(
         // Reopen. We bump to `pending` (matches the new-thread default) so
         // the conversation re-enters the triage column instead of jumping
         // straight to `open`, which would imply an agent has it.
-        conversation = await db.conversation.update({
+        conversation = await tx.conversation.update({
           where: { id: conversation.id },
           data: { status: "pending" },
         });
@@ -577,7 +576,10 @@ async function ingestInboundMessage(
         ...(newConversation ? { newConversation } : {}),
         preview,
         lastMessageAt: evt.timestamp.toISOString(),
-        unreadDelta: 1,
+        // Absolute team-wide unread post-increment. Same value used by the
+        // conversationSnapshot above; serialized by tx isolation so other
+        // concurrent inbounds either retry or interleave correctly.
+        unreadCount: (conversation.unreadCount ?? 0) + 1,
         recentMessages,
       });
 
@@ -999,7 +1001,9 @@ export async function loadReplySnapshotById(
  * `(teamId, contactId) WHERE status != 'closed'` would also work but
  * requires a migration).
  */
-async function runWithSerializableRetry<T>(work: () => Promise<T>): Promise<T> {
+async function runWithSerializableRetry<T>(
+  work: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await db.$transaction(work, { isolationLevel: "Serializable" });

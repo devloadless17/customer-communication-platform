@@ -26,14 +26,7 @@ import { useCatalogSync } from "@/hooks/use-catalog-sync";
 import { useConversationSearch } from "@/features/inbox/hooks/use-conversation-search";
 import { getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
-import {
-  applyConversationAssignment,
-  applyConversationRead,
-  applyConversationStatus,
-  applyMessageMediaReady,
-  applyMessageStatus,
-  applyNoteDeleted,
-} from "@/features/inbox/lib/thread-reducers";
+import { THREAD_REDUCER_EVENTS } from "@/features/inbox/lib/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 
 import dynamic from "next/dynamic";
@@ -350,6 +343,8 @@ export function InboxShell({
     initialConversations,
     nextConversationCursor,
     activeId,
+    currentUser.id,
+    filter,
   );
 
   // Memoized lookup for the cache-miss skeleton (needs the contact for the
@@ -411,23 +406,11 @@ export function InboxShell({
       cache.delete(payload.conversationId);
     };
 
-    const onContactUpdated = (payload: { contact: Contact }) => {
-      if (!payload?.contact?.id) return;
-      // Contact updates can affect any cached thread that points at this
-      // contact. Walk the cache once and evict matches. The displayed
-      // thread is left alone (useConversationEvents handles it).
-      for (const c of conversationsByIdRef.current.values()) {
-        const id = c.conversation.id;
-        if (id === displayedIdRef.current) continue;
-        const cached = cache.peek(id);
-        if (cached && cached.data.contact.id === payload.contact.id) {
-          cache.delete(id);
-        }
-      }
-    };
-    // Coalesced bulk version — same cache-eviction logic across N contactIds
-    // in one walk. Server fires this from bulk-tag etc. instead of N
-    // per-contact frames to bound socket bandwidth on big batches.
+    // Coalesced bulk version — server fires this from bulk-tag etc. instead
+    // of N per-contact frames to bound socket bandwidth on big batches.
+    // Per-contact `contact:updated` frames go through the reducer table
+    // below (target: "all"). The bulk frame doesn't carry contact bodies,
+    // so we still evict + force a refetch on next click.
     const onContactsBulkUpdated = (payload: { contactIds: string[] }) => {
       if (!payload?.contactIds?.length) return;
       const affected = new Set(payload.contactIds);
@@ -465,41 +448,50 @@ export function InboxShell({
       });
     };
 
-    const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (payload) => {
-      if (!payload?.conversationId) return;
-      patchData(payload.conversationId, (d) => applyConversationStatus(d, payload));
-    };
-    const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (payload) => {
-      if (!payload?.conversationId) return;
-      patchData(payload.conversationId, (d) => applyConversationAssignment(d, payload));
-    };
-    const onMessageStatus: Parameters<typeof socket.on<"message:status">>[1] = (payload) => {
-      if (!payload?.conversationId) return;
-      patchData(payload.conversationId, (d) => applyMessageStatus(d, payload));
-    };
-    const onMessageMediaReady: Parameters<typeof socket.on<"message:media:ready">>[1] = (
-      payload,
-    ) => {
-      if (!payload?.conversationId) return;
-      patchData(payload.conversationId, (d) => applyMessageMediaReady(d, payload));
-    };
-    const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (payload) => {
-      if (!payload?.conversationId) return;
-      patchData(payload.conversationId, (d) => applyNoteDeleted(d, payload));
-    };
-    // conversation:read covers the teammate case. Our own mark-read path
-    // is already patched via handleMarkRead → onMarkRead; this patch is
-    // idempotent so the duplicate event from our own POST is a no-op.
-    //
-    // Payload is forwarded into the reducer for consistency with the other
-    // handlers in this block — `applyConversationRead` ignores it today,
-    // but if the payload ever grows (e.g. per-user read receipts), this
-    // call site stays correct without a follow-up edit.
-    const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = (payload) => {
-      if (!payload?.conversationId) return;
-      patchData(payload.conversationId, (d) => applyConversationRead(d, payload));
+    // Bind a patch handler per reducer entry. The wiring is driven by
+    // THREAD_REDUCER_EVENTS so adding a new event + reducer in
+    // thread-reducers.ts auto-wires both this side and the live hook in
+    // useConversationEvents. `target: "conversation"` patches by id;
+    // `target: "all"` (e.g. `contact:updated`, which carries no
+    // conversationId) walks every cached thread and lets the reducer's
+    // identity bail decide which entries actually mutate.
+    const reducerCtx = { currentUserId: currentUser.id };
+    const reducerHandlers = THREAD_REDUCER_EVENTS.map(({ event, apply, target }) => {
+      const handler = (payload: { conversationId?: string } & Record<string, unknown>) => {
+        if ((target ?? "conversation") === "all") {
+          cache.patchAll((curr) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const next = (apply as any)(curr.data, payload, reducerCtx);
+            return next === curr.data ? null : { ...curr, data: next };
+          });
+          return;
+        }
+        if (!payload?.conversationId) return;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        patchData(payload.conversationId, (d) => (apply as any)(d, payload, reducerCtx));
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      socket.on(event as any, handler as any);
+      return { event, handler };
+    });
+
+    // Reconnect-after-disconnect handler. Any socket-driven cache patch
+    // (assignment, status, read, message:status, …) that fired during the
+    // gap missed the cache, so non-displayed snapshots can hold stale state.
+    // Drop them all and force a refetch on the next visit. The displayed
+    // thread is left alone — useConversationEvents owns it and re-syncs its
+    // own state through the `?after=...` backfill on the same reconnect.
+    // First connect is skipped: server-seeded data is current.
+    const firstConnectRef = { value: true };
+    const onConnect = () => {
+      if (firstConnectRef.value) {
+        firstConnectRef.value = false;
+        return;
+      }
+      cache.clearExcept(displayedIdRef.current);
     };
 
+    socket.on("connect", onConnect);
     socket.on("message:new", evictIfBackground);
     socket.on("note:new", evictIfBackground);
     // Background send failures invalidate the cached snapshot too — if a
@@ -507,31 +499,27 @@ export function InboxShell({
     // worker reports a failure, the cache should drop its pending-bubble
     // copy. Active-thread updates happen inside useConversationEvents.
     socket.on("message:failed", evictIfBackground);
-    socket.on("contact:updated", onContactUpdated);
+    // `contact:updated` is now handled by the THREAD_REDUCER_EVENTS table
+    // above (target: "all"), so non-displayed cached threads get PATCHED
+    // (not evicted) and the displayed thread's LRU snapshot finally stays
+    // in sync. The bulk version below stays on the eviction path because
+    // its payload only carries ids, not contact bodies.
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     socket.on("conversation:deleted", onConversationDeleted);
-    socket.on("conversation:status", onStatus);
-    socket.on("conversation:assigned", onAssigned);
-    socket.on("message:status", onMessageStatus);
-    socket.on("message:media:ready", onMessageMediaReady);
-    socket.on("note:deleted", onNoteDeleted);
-    socket.on("conversation:read", onRead);
 
     return () => {
+      socket.off("connect", onConnect);
       socket.off("message:new", evictIfBackground);
       socket.off("note:new", evictIfBackground);
       socket.off("message:failed", evictIfBackground);
-      socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
-      socket.off("conversation:status", onStatus);
-      socket.off("conversation:assigned", onAssigned);
-      socket.off("message:status", onMessageStatus);
-      socket.off("message:media:ready", onMessageMediaReady);
-      socket.off("note:deleted", onNoteDeleted);
-      socket.off("conversation:read", onRead);
+      for (const { event, handler } of reducerHandlers) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        socket.off(event as any, handler as any);
+      }
     };
-  }, [cache]);
+  }, [cache, currentUser.id]);
 
   // ---------------------------------------------------------------
   // Mark-read cache patch — T2.1.
@@ -634,7 +622,6 @@ export function InboxShell({
         />
         <div className="flex min-w-0 flex-1">
           <ConversationList
-            currentUser={currentUser}
             conversations={conversationList}
             stages={stages}
             filter={filter}
@@ -721,6 +708,7 @@ function ThreadWorkspace({
         fieldDefinitions={fieldDefinitions}
         canManageFields={canManageContactFields}
         tagCatalog={tags}
+        teamMembers={teamMembers}
       />
       {/* Previously this slot held an inline `<script>` that ran during
           HTML parse and slammed `[data-thread-scroll-root]`'s viewport to

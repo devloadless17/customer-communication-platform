@@ -44,9 +44,86 @@ export class ConversationsService {
   list(
     teamId: string,
     viewerUserId: string,
-    opts: { take?: number; cursor?: string | null; search?: string },
+    opts: {
+      take?: number;
+      cursor?: string | null;
+      search?: string;
+      /** Preset (`all`/`mine`/`unassigned`/`closed`) or `stage:<id>`. */
+      filter?: "all" | "mine" | "unassigned" | "closed";
+      stageId?: string;
+    },
   ) {
-    return listConversations(teamId, { ...opts, viewerUserId });
+    // Translate the flat query-string surface into the typed filter union
+    // the query layer expects. `stageId` wins over the preset filter when
+    // both are sent (the inbox sub-sidebar only sends one at a time).
+    const filter = opts.stageId
+      ? { kind: "stage" as const, stageId: opts.stageId }
+      : opts.filter
+        ? { kind: "preset" as const, id: opts.filter }
+        : undefined;
+    return listConversations(teamId, {
+      take: opts.take,
+      cursor: opts.cursor,
+      search: opts.search,
+      viewerUserId,
+      ...(filter ? { filter } : {}),
+    });
+  }
+
+  /**
+   * Team-wide preset + per-stage counts for the inbox sub-sidebar.
+   *
+   * The inbox list ships a paginated slice (CONVERSATIONS_PAGE = 25 by
+   * default). Sidebar counts derived from that slice silently under-count
+   * once the team has more than one page of conversations — "Mine: 3"
+   * when the agent actually has 14, etc. Computing the counts here, scoped
+   * to the team and the viewer, fixes the badge truthfulness without
+   * forcing the list to load every conversation.
+   *
+   * Five queries fan out in parallel; the per-stage one walks the
+   * non-closed conversations selecting only `contact.stageId` so the
+   * grouping happens in JS. At pilot scale (sub-thousand conversations)
+   * this is sub-millisecond against the (teamId, status, lastMessageAt)
+   * + (teamId, assignedUserId) indexes. Past ~10k conversations the
+   * findMany walk dominates and we'd want a raw GROUP BY through Contact.
+   */
+  async counts(
+    teamId: string,
+    viewerUserId: string,
+  ): Promise<{
+    all: number;
+    mine: number;
+    unassigned: number;
+    closed: number;
+    byStage: Record<string, number>;
+  }> {
+    const [all, mine, unassigned, closed, stageRows] = await Promise.all([
+      this.db.conversation.count({
+        where: { teamId, status: { not: "closed" } },
+      }),
+      this.db.conversation.count({
+        where: { teamId, status: { not: "closed" }, assignedUserId: viewerUserId },
+      }),
+      this.db.conversation.count({
+        where: { teamId, status: { not: "closed" }, assignedUserId: null },
+      }),
+      this.db.conversation.count({
+        where: { teamId, status: "closed" },
+      }),
+      this.db.conversation.findMany({
+        where: { teamId, status: { not: "closed" } },
+        select: { contact: { select: { stageId: true } } },
+      }),
+    ]);
+
+    const byStage: Record<string, number> = {};
+    for (const r of stageRows) {
+      const sid = r.contact?.stageId;
+      if (!sid) continue;
+      byStage[sid] = (byStage[sid] ?? 0) + 1;
+    }
+
+    return { all, mine, unassigned, closed, byStage };
   }
 
   /**
@@ -56,20 +133,28 @@ export class ConversationsService {
    * into its in-memory Map and render without a route navigation. Returns
    * null if the conversation isn't in the team's scope.
    */
-  getInboxConversation(teamId: string, conversationId: string) {
-    return getConversationWithRefs(teamId, conversationId);
+  getInboxConversation(teamId: string, conversationId: string, viewerUserId: string) {
+    return getConversationWithRefs(teamId, conversationId, { viewerUserId });
   }
 
   /** Older or newer page. Exactly one of `before` / `after` must be set. */
   async listMessages(
     teamId: string,
     conversationId: string,
-    opts: { before?: string | null; after?: string | null; take?: number },
+    opts: {
+      before?: string | null;
+      after?: string | null;
+      take?: number;
+      viewerUserId?: string;
+    },
   ) {
     if (opts.after) {
       return listNewerMessages(teamId, conversationId, {
         after: opts.after,
         take: opts.take,
+        // Threaded so the reconnect state-resync also returns fresh
+        // per-agent unreadForMe alongside team-wide unreadCount.
+        ...(opts.viewerUserId ? { viewerUserId: opts.viewerUserId } : {}),
       });
     }
     if (!opts.before) {

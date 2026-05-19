@@ -1,10 +1,12 @@
 import type {
+  Contact,
   ConversationStatus,
   ConversationWithRefs,
   MediaAttachment,
   MessageStatus,
   User,
 } from "@ccp/shared/types";
+import type { ServerToClientEvents } from "@ccp/shared/socket/events";
 
 /**
  * Pure reducers: apply a socket event to a per-thread snapshot and return
@@ -15,34 +17,27 @@ import type {
  *   - `useConversationEvents` (live state of the displayed thread)
  *   - `inbox-shell.tsx` (ThreadCache snapshot for chat-switch round-trips)
  *
- * Adding a new socket event that mutates a per-thread field: add one
- * reducer here and call it from both consumers. Don't duplicate the
- * reducer in either site.
+ * To wire a new per-thread field-mutating socket event: write the reducer
+ * here and add one entry to `THREAD_REDUCER_EVENTS` below. Both consumers
+ * iterate that array and bind handlers in a loop — they auto-pick-up the
+ * new event with no edits required at either call site.
  *
- * ---------------------------------------------------------------------------
- * Per-event wiring matrix — keep BOTH sites in sync when adding events
- * ---------------------------------------------------------------------------
+ * Each entry declares a `target`:
+ *   - "conversation" (default) — patch only the thread whose id matches
+ *     `payload.conversationId`. Used for status / assigned / read / etc.
+ *   - "all" — payload has no conversationId; the consumer must walk every
+ *     cached thread and apply the reducer to each. The reducer itself
+ *     bails (returns prev) on non-matching rows. Used for `contact:updated`
+ *     which can affect any thread sharing the contact.
  *
- *  Socket event              | Reducer here                  | Live hook       | Cached shell
- *  --------------------------|-------------------------------|-----------------|-------------------
- *  conversation:status       | applyConversationStatus       | use-conv...:on  | inbox-shell:on
- *  conversation:assigned     | applyConversationAssignment   | use-conv...:on  | inbox-shell:on
- *  conversation:read         | applyConversationRead         | use-conv...:on  | inbox-shell:on
- *  message:status            | applyMessageStatus            | use-conv...:on  | inbox-shell:on
- *  message:media:ready       | applyMessageMediaReady        | use-conv...:on  | inbox-shell:on
- *  note:deleted              | applyNoteDeleted              | use-conv...:on  | inbox-shell:on
- *
- *  message:new / note:new    | (no reducer — full append /   | use-conv...:on  | inbox-shell:
- *                            |  pull via dataRef)            |                 |  evictIfBackground
- *  contact:updated           | (no reducer — full swap)      | contact-panel +  | inbox-shell:
- *                            |                                | use-conv...     |   onContactUpdated
- *  contacts:bulk_updated     | (no reducer — refetch / evict)| contacts-client | inbox-shell
- *                            |                                |                 |  bulk-evict
- *
- * If you add a per-thread field-mutating socket event and skip this matrix,
- * a chat-switch + back will revert the field to the stale cached value.
- * See `inbox-shell.tsx` for the cached-side pattern; `useConversationEvents`
- * for the live-side pattern.
+ * Exclusions (handled outside the iterated array):
+ *   - `message:new` / `note:new`     — list-mutating: live hook appends with
+ *                                       dedupe, cached shell evicts.
+ *   - `contacts:bulk_updated`        — coalesced fanout; cached shell evicts
+ *                                       affected ids, contact pages refetch.
+ *   - `conversation:deleted`         — navigation side-effect, not a patch.
+ *   - `message:failed`               — touches optimistic-only rows on live
+ *                                       side; cached shell evicts.
  */
 
 export function applyConversationStatus(
@@ -69,17 +64,48 @@ export function applyConversationAssignment(
   };
 }
 
+/**
+ * Apply a `contact:updated` socket frame to a thread snapshot. Replaces
+ * the embedded contact wholesale when the ids match, otherwise no-op.
+ *
+ * Targeted at `target: "all"` because the payload doesn't carry a
+ * conversationId — the consumer (live hook or LRU walker) iterates every
+ * cached thread and lets this reducer pick the matching one. Prior to
+ * adding this, the live hook patched the displayed thread but the LRU's
+ * snapshot was either evicted (non-displayed) or left UNTOUCHED for the
+ * displayed thread — the latter caused stale contact data to re-appear
+ * on chat-switch-back.
+ */
+export function applyContactUpdate(
+  prev: ConversationWithRefs,
+  payload: { contact: Contact },
+): ConversationWithRefs {
+  if (prev.contact.id !== payload.contact.id) return prev;
+  if (prev.contact === payload.contact) return prev;
+  return { ...prev, contact: payload.contact };
+}
+
 export function applyConversationRead(
   prev: ConversationWithRefs,
-  // Reserved for future payload growth (e.g. per-user read receipts). All
-  // callers pass it explicitly so the contract stays consistent across
-  // sibling reducers; the implementation today only needs the prev state.
-  _payload?: { conversationId: string; readByUserId: string; teamId: string },
+  payload: { conversationId: string; readByUserId: string; teamId: string },
+  ctx?: ReducerContext,
 ): ConversationWithRefs {
-  if (prev.conversation.unreadCount === 0) return prev;
+  // Team-wide counter always clears — any user marking read zeroes it.
+  // Per-agent `unreadForMe` only clears when the READER is me; another
+  // teammate reading doesn't affect my "I haven't seen this" state.
+  const teamChange = prev.conversation.unreadCount !== 0;
+  const myChange =
+    ctx?.currentUserId !== undefined &&
+    payload.readByUserId === ctx.currentUserId &&
+    prev.conversation.unreadForMe === true;
+  if (!teamChange && !myChange) return prev;
   return {
     ...prev,
-    conversation: { ...prev.conversation, unreadCount: 0 },
+    conversation: {
+      ...prev.conversation,
+      ...(teamChange ? { unreadCount: 0 } : {}),
+      ...(myChange ? { unreadForMe: false } : {}),
+    },
   };
 }
 
@@ -137,3 +163,65 @@ export function applyNoteDeleted(
       : {}),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Iterated wiring contract
+//
+// Both consumers (use-conversation-events and inbox-shell) loop over this
+// array. Adding a (event, apply) pair here auto-wires both sites — no
+// manual `socket.on`/`socket.off`/`patchData` call edits required.
+//
+// Payload typing is inferred from `ServerToClientEvents[E]` via the
+// `reducerEntry` helper, so a reducer signature mismatch is a compile error.
+// ---------------------------------------------------------------------------
+
+/**
+ * Targeting mode:
+ *   - "conversation" (default): payload.conversationId narrows to one thread.
+ *   - "all": payload has no conversationId; iterate every cached thread and
+ *     let the reducer's internal bail decide if it applies. Used for
+ *     `contact:updated`, where a single event can affect multiple threads
+ *     (one contact, N conversations) and the cache walker can't pre-filter.
+ */
+export type ThreadReducerTarget = "conversation" | "all";
+
+/**
+ * Optional context handed to reducers that need viewer-aware behavior.
+ * Today only `applyConversationRead` reads `currentUserId` (to decide
+ * whether a `conversation:read` event clears MY per-agent `unreadForMe`,
+ * or just the team-wide counter). Reducers that don't need context ignore
+ * the parameter entirely.
+ */
+export type ReducerContext = {
+  currentUserId: string;
+};
+
+export type ThreadReducerEntry<E extends keyof ServerToClientEvents> = {
+  readonly event: E;
+  readonly apply: (
+    prev: ConversationWithRefs,
+    payload: Parameters<ServerToClientEvents[E]>[0],
+    ctx?: ReducerContext,
+  ) => ConversationWithRefs;
+  readonly target?: ThreadReducerTarget;
+};
+
+function reducerEntry<E extends keyof ServerToClientEvents>(
+  entry: ThreadReducerEntry<E>,
+): ThreadReducerEntry<E> {
+  return entry;
+}
+
+export const THREAD_REDUCER_EVENTS = [
+  reducerEntry({ event: "conversation:status", apply: applyConversationStatus }),
+  reducerEntry({ event: "conversation:assigned", apply: applyConversationAssignment }),
+  reducerEntry({ event: "conversation:read", apply: applyConversationRead }),
+  reducerEntry({ event: "message:status", apply: applyMessageStatus }),
+  reducerEntry({ event: "message:media:ready", apply: applyMessageMediaReady }),
+  reducerEntry({ event: "note:deleted", apply: applyNoteDeleted }),
+  reducerEntry({
+    event: "contact:updated",
+    apply: applyContactUpdate,
+    target: "all",
+  }),
+] as const;

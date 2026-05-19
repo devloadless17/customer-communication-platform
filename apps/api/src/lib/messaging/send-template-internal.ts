@@ -216,12 +216,13 @@ export async function sendTemplateInternal(
     timestamp: receivedAt,
   });
 
-  await db.conversation.update({
+  const bumped = await db.conversation.update({
     where: { id: args.conversationId },
     data: {
       lastMessageAt: send.timestamp,
       lastMessagePreview: previewBody,
     },
+    select: { unreadCount: true },
   });
 
   const message: Message = {
@@ -252,7 +253,9 @@ export async function sendTemplateInternal(
     message,
     preview: previewBody,
     lastMessageAt: send.timestamp.toISOString(),
-    unreadDelta: 0,
+    // Outbound doesn't bump unread; the row's current value is the
+    // accurate absolute count.
+    unreadCount: bumped.unreadCount,
     senderUserId: args.senderUserId,
     ...(args.senderApiKeyId ? { senderApiKeyId: args.senderApiKeyId } : {}),
   });

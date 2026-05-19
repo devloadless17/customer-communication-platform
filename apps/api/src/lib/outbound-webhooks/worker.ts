@@ -59,11 +59,15 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
     {
       connection: webhookConnectionOptions(),
       concurrency: concurrency(),
-      // Each delivery is a single fetch + a tiny DB update. 30s lock is
-      // generous for a 10s-timeout fetch — leaves headroom for slow DNS
-      // + a couple of write retries on the DB side.
-      lockDuration: 30_000,
-      lockRenewTime: 15_000,
+      // Each delivery is a single fetch + a tiny DB update. 60s lock
+      // gives ample headroom: 10s fetch timeout, plus serialization on
+      // the OutboundWebhook row lock when N concurrent deliveries for
+      // the SAME dead URL all queue at the consecutiveFailures bump.
+      // Earlier 30s tail came close to the lock-expire edge under a real
+      // outage with 10 concurrent failing deliveries hitting the same
+      // webhook row.
+      lockDuration: 60_000,
+      lockRenewTime: 30_000,
     },
   );
 
@@ -152,6 +156,17 @@ async function deliverOnce(
   const body = JSON.stringify(delivery.payload);
   const signature = signWebhookBody(secret, body);
 
+  // Loop-detection hint for partners. When the event was triggered via an
+  // API-key-authenticated mutation (a `/v1/messages` send, a `/v1/contacts`
+  // tag flip, etc.), the public envelope carries the originating apiKeyId
+  // in `payload.data.sender.id` (for sends) or `payload.data.changed_by.id`
+  // (for contact mutations). Surface it as a request header so a partner's
+  // automation can do a single-line "if this matches my key, ignore" check
+  // without cracking open the JSON body. Closes the hot-potato vector:
+  // partner → POST /v1/messages → our `message.sent` → outbound webhook →
+  // partner → POST again, ad nauseam.
+  const originApiKeyId = extractOriginApiKeyId(delivery.payload);
+
   let response: Response;
   try {
     response = await safeFetch(webhook.url, {
@@ -162,6 +177,7 @@ async function deliverOnce(
         "X-CCP-Event": delivery.eventType,
         "X-CCP-Delivery": delivery.id,
         "X-CCP-Signature": signature,
+        ...(originApiKeyId ? { "X-CCP-Origin-Key": originApiKeyId } : {}),
       },
       body,
       timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -242,61 +258,74 @@ async function recordFailure(
    *  counter, so the threshold counts deliveries (not per-attempt retries). */
   isFinalAttempt: boolean,
 ): Promise<void> {
-  // We need the team id outside the transaction (for the socket emit) AND
-  // we want the disable to be transactional with the failure counter bump,
-  // so collect the just-tripped flag from the inner update and fire the
-  // event afterwards.
-  let tripped: { teamId: string; reason: string } | null = null;
-  await db.$transaction(async (tx) => {
-    await tx.outboundWebhookDelivery.update({
-      where: { id: deliveryId },
-      data: {
-        attemptCount: attempt,
-        responseStatus: status,
-        responseBody,
-        failedAt: new Date(),
-        errorMessage,
-      },
-    });
-    // Non-final attempts: stamp lastErrorAt/lastErrorMessage so the
-    // settings UI still surfaces "the last attempt failed", but do NOT
-    // bump the consecutive-failures counter — the delivery is still in
-    // flight from the breaker's perspective and BullMQ will retry it.
-    if (!isFinalAttempt) {
-      await tx.outboundWebhook.update({
-        where: { id: webhookId },
-        data: {
-          lastErrorAt: new Date(),
-          lastErrorMessage: errorMessage,
-        },
-      });
-      return;
-    }
-    const updated = await tx.outboundWebhook.update({
+  // Two writes, deliberately NOT wrapped in one transaction:
+  //   1. Delivery row update — single-row, no contention with other workers.
+  //   2. Webhook counter bump — every concurrent failed delivery to the
+  //      SAME dead URL queues on this row lock; folding (1) inside (2)'s
+  //      tx serialized the delivery-row write through the same lock for
+  //      no benefit. The counter is a breaker; overshooting the threshold
+  //      by a few in a real outage is benign. The delivery rows being
+  //      eventually-consistent with the counter is the right tradeoff.
+  await db.outboundWebhookDelivery.update({
+    where: { id: deliveryId },
+    data: {
+      attemptCount: attempt,
+      responseStatus: status,
+      responseBody,
+      failedAt: new Date(),
+      errorMessage,
+    },
+  });
+
+  // Non-final attempts: stamp lastErrorAt/lastErrorMessage so the
+  // settings UI still surfaces "the last attempt failed", but do NOT
+  // bump the consecutive-failures counter — the delivery is still in
+  // flight from the breaker's perspective and BullMQ will retry it.
+  if (!isFinalAttempt) {
+    await db.outboundWebhook.update({
       where: { id: webhookId },
       data: {
         lastErrorAt: new Date(),
         lastErrorMessage: errorMessage,
-        consecutiveFailures: { increment: 1 },
       },
-      select: { consecutiveFailures: true, enabled: true, teamId: true },
     });
-    if (updated.enabled && updated.consecutiveFailures >= AUTO_DISABLE_THRESHOLD) {
-      const reason = `${updated.consecutiveFailures} consecutive failures`;
-      await tx.outboundWebhook.update({
-        where: { id: webhookId },
-        data: {
-          enabled: false,
-          disabledAt: new Date(),
-          disabledReason: reason,
-        },
-      });
+    return;
+  }
+
+  // Atomic increment + read (single-row UPDATE…RETURNING). Concurrent
+  // failed deliveries to the same webhook all queue here in order.
+  const updated = await db.outboundWebhook.update({
+    where: { id: webhookId },
+    data: {
+      lastErrorAt: new Date(),
+      lastErrorMessage: errorMessage,
+      consecutiveFailures: { increment: 1 },
+    },
+    select: { consecutiveFailures: true, enabled: true, teamId: true },
+  });
+
+  let tripped: { teamId: string; reason: string } | null = null;
+  if (updated.enabled && updated.consecutiveFailures >= AUTO_DISABLE_THRESHOLD) {
+    const reason = `${updated.consecutiveFailures} consecutive failures`;
+    // Second concurrent worker may attempt the same disable — fine, the
+    // disabledAt/disabledReason update is idempotent and the publish
+    // below is rate-limited by the WHERE clause: only the first tripper
+    // actually transitions enabled=true → enabled=false.
+    const flip = await db.outboundWebhook.updateMany({
+      where: { id: webhookId, enabled: true },
+      data: {
+        enabled: false,
+        disabledAt: new Date(),
+        disabledReason: reason,
+      },
+    });
+    if (flip.count > 0) {
       tripped = { teamId: updated.teamId, reason };
       console.warn(
         `[webhooks] auto-disabled webhook ${webhookId} after ${updated.consecutiveFailures} consecutive failures`,
       );
     }
-  });
+  }
 
   if (tripped) {
     // Socket-side notification — surfaces a toast in the settings UI so an
@@ -317,3 +346,53 @@ async function recordFailure(
   }
 }
 
+/**
+ * Pull the originating API-key id out of a public-event envelope, if any.
+ *
+ * Public envelope shape varies per event type. The two shapes that carry
+ * an API-key sender today:
+ *   - message.sent:     `data.message.sender.type === "api"` + `.sender.id`
+ *   - message.received: never API-keyed (always a contact sender)
+ *   - contact.*:        `data.changed_by.type === "api"` + `.changed_by.id`
+ *   - note.created:     `data.note.author.type === "api"` (rare today)
+ *   - conversation.*:   `data.changed_by.type === "api"` + `.changed_by.id`
+ *
+ * Returns null on any payload shape we don't recognize — the partner
+ * just won't receive the loop-detection header, no harm done. JSON
+ * structure check is defensive: a partner's bad webhook URL change
+ * shouldn't tank deliveries with a TypeError on a missing nested field.
+ */
+function extractOriginApiKeyId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return null;
+
+  const candidates: Array<{ type?: unknown; id?: unknown }> = [];
+  const d = data as Record<string, unknown>;
+  // message.* envelopes nest sender on the message
+  const msg = d.message;
+  if (msg && typeof msg === "object") {
+    const sender = (msg as { sender?: unknown }).sender;
+    if (sender && typeof sender === "object") {
+      candidates.push(sender as { type?: unknown; id?: unknown });
+    }
+  }
+  // contact.* / conversation.* envelopes nest the actor on changed_by
+  const changedBy = d.changed_by;
+  if (changedBy && typeof changedBy === "object") {
+    candidates.push(changedBy as { type?: unknown; id?: unknown });
+  }
+  // note.created envelope nests on note.author
+  const note = d.note;
+  if (note && typeof note === "object") {
+    const author = (note as { author?: unknown }).author;
+    if (author && typeof author === "object") {
+      candidates.push(author as { type?: unknown; id?: unknown });
+    }
+  }
+
+  for (const c of candidates) {
+    if (c.type === "api" && typeof c.id === "string" && c.id) return c.id;
+  }
+  return null;
+}

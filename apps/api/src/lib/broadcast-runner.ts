@@ -382,6 +382,11 @@ async function processOneRecipient(
   // DB error here means we DIDN'T touch Meta — safe to mark `failed` and
   // let the user retry.
     let conversationId: string;
+    // Carried out of the try-scope so the `message:new` publish below can
+    // ship the absolute team-wide unread count without an extra round-trip.
+    // Broadcast outbound doesn't change unread, so the pre-send value
+    // remains accurate at publish time.
+    let conversationUnreadCount = 0;
     try {
       // Strict invariant: one contact = one conversation. Reuse the existing
       // row regardless of status; a closed conversation just reopens
@@ -413,6 +418,7 @@ async function processOneRecipient(
         });
       }
       conversationId = conversation.id;
+      conversationUnreadCount = conversation.unreadCount;
     } catch (err) {
       await markRecipientFailed(recipient.id, errorDetail(err));
       bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
@@ -589,6 +595,9 @@ async function processOneRecipient(
         message: messagePayload,
         preview,
         lastMessageAt: send.timestamp.toISOString(),
+        // Outbound broadcast doesn't touch unread, so the conversation
+        // row's pre-send value is still the accurate absolute count.
+        unreadCount: conversationUnreadCount,
       });
     } catch (err) {
       console.error(

@@ -1,7 +1,7 @@
 // Note: no `server-only` import — server.ts loads this on boot, outside the
 // Next bundler context. Same convention as lib/socket/server.ts.
 
-import { Worker, type Job } from "bullmq";
+import { DelayedError, Worker, type Job } from "bullmq";
 
 import { db } from "@/lib/db";
 import {
@@ -10,6 +10,24 @@ import {
   type WorkflowJobData,
 } from "@/lib/workflows/queue";
 import { failRunFromRetryExhaustion, runWorkflow } from "@/lib/workflows/runner";
+import { MAX_STEP_TIMEOUT_MS } from "@/lib/workflows/steps/http-request";
+
+// BullMQ lock the worker holds for an in-flight job. MUST exceed any step's
+// timeout by a safe margin, otherwise the lock expires while the step is
+// still running, BullMQ re-delivers, and we double-execute side effects
+// (Meta sends, tag changes, webhook POSTs). The boot-time assertion below
+// catches drift if someone bumps a step timeout without bumping this.
+const WORKFLOW_LOCK_DURATION_MS = 90_000;
+const WORKFLOW_LOCK_MARGIN_MS = 10_000;
+
+if (WORKFLOW_LOCK_DURATION_MS <= MAX_STEP_TIMEOUT_MS + WORKFLOW_LOCK_MARGIN_MS) {
+  throw new Error(
+    `[workflows] WORKFLOW_LOCK_DURATION_MS (${WORKFLOW_LOCK_DURATION_MS}) must exceed ` +
+      `MAX_STEP_TIMEOUT_MS (${MAX_STEP_TIMEOUT_MS}) + ${WORKFLOW_LOCK_MARGIN_MS}ms margin. ` +
+      `A step that runs to its timeout would outlive the lock and get re-delivered, ` +
+      `causing duplicate side-effects. Raise WORKFLOW_LOCK_DURATION_MS or lower the cap.`,
+  );
+}
 
 /**
  * BullMQ worker for the workflow queue. Lives in the same Node process as
@@ -32,14 +50,16 @@ function concurrency(): number {
 /**
  * Per-team in-process concurrency cap. Prevents one chatty team's bulk
  * operation (e.g. enrolling 1k contacts into the same workflow) from
- * grabbing all `concurrency()` worker slots and starving every other
- * tenant's runs.
+ * monopolizing every worker slot.
  *
- * Tunable via WORKFLOW_PER_TEAM_CONCURRENCY (default 2). With 5 total
- * worker slots and 2/team, two teams can fully saturate the worker
- * before head-of-line blocking kicks in for a third — beyond that the
- * over-cap team's jobs simply wait (with their BullMQ lock released so
- * the queue keeps moving for everyone else).
+ * Tunable via WORKFLOW_PER_TEAM_CONCURRENCY (default 2).
+ *
+ * Implementation: when a job arrives for a team that's already at cap,
+ * we DO NOT `await` inside the processor (that would hold the BullMQ
+ * concurrency slot while parked, wasting it and starving other teams).
+ * Instead we `job.moveToDelayed(now + DEFER_MS, token)` + throw a
+ * `DelayedError` — BullMQ re-picks the job after the delay, the
+ * concurrency slot is freed immediately for other teams' work.
  *
  * Across-process fairness needs Redis-backed slot counters (deferred —
  * single-process pilot today). Inside one process this is exact.
@@ -49,40 +69,38 @@ function perTeamConcurrency(): number {
   return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 2;
 }
 
+/** Delay before re-picking up a deferred (team-at-cap) job. */
+const TEAM_BUSY_DEFER_MS = 250;
+
 interface TeamSlotState {
   /** In-flight runs for this team. */
   active: number;
-  /** Resolvers queued waiting for a slot. FIFO. */
-  waiters: Array<() => void>;
 }
 const teamSlots = new Map<string, TeamSlotState>();
 
-async function acquireTeamSlot(teamId: string): Promise<void> {
+/**
+ * Try to claim a slot synchronously. Returns true on success (caller MUST
+ * call `releaseTeamSlot` in a finally). Returns false if the team is at
+ * cap — caller defers the job via `moveToDelayed` instead of parking.
+ */
+function tryAcquireTeamSlot(teamId: string): boolean {
   const cap = perTeamConcurrency();
   let entry = teamSlots.get(teamId);
   if (!entry) {
-    entry = { active: 0, waiters: [] };
+    entry = { active: 0 };
     teamSlots.set(teamId, entry);
   }
-  if (entry.active < cap) {
-    entry.active += 1;
-    return;
-  }
-  // At cap — park this acquire until a sibling run releases.
-  await new Promise<void>((resolve) => {
-    entry!.waiters.push(resolve);
-  });
+  if (entry.active >= cap) return false;
   entry.active += 1;
+  return true;
 }
 
 function releaseTeamSlot(teamId: string): void {
   const entry = teamSlots.get(teamId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
-  const next = entry.waiters.shift();
-  if (next) next();
   // Drop the entry to keep the Map bounded once a team is fully idle.
-  if (entry.active === 0 && entry.waiters.length === 0) {
+  if (entry.active === 0) {
     teamSlots.delete(teamId);
   }
 }
@@ -92,7 +110,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
 
   const worker = new Worker<WorkflowJobData>(
     WORKFLOW_QUEUE_NAME,
-    async (job: Job<WorkflowJobData>) => {
+    async (job: Job<WorkflowJobData>, token?: string) => {
       // Per-team concurrency gate. Look up teamId from the run row — the
       // job payload only carries runId. This is a single indexed read; OK
       // to do for every pickup since the alternative (teamId in the job
@@ -106,7 +124,16 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
         // matches what runWorkflow does for a missing row.
         return;
       }
-      await acquireTeamSlot(run.teamId);
+      if (!tryAcquireTeamSlot(run.teamId)) {
+        // Team at cap. Push this job back into the delayed queue and
+        // release the BullMQ slot immediately — other teams' work can
+        // use it. BullMQ's standard pattern: moveToDelayed + throw
+        // DelayedError. Doesn't count against `attempts`.
+        if (token) {
+          await job.moveToDelayed(Date.now() + TEAM_BUSY_DEFER_MS, token);
+        }
+        throw new DelayedError();
+      }
       try {
         await runWorkflow({
           runId: job.data.runId,
@@ -120,13 +147,14 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
       connection: connectionOptions(),
       concurrency: concurrency(),
       // BullMQ's default lock (30s) is shorter than our slowest step. A
-      // `http_request` step allowed up to 60s would lose its lock mid-flight,
-      // get re-delivered, and execute twice — bad for `tag`/`update-field`/
-      // `set-status` which mutate without an idempotency key. 90s comfortably
-      // exceeds the slowest step we permit. `lockRenewTime` halves that so a
-      // step that's still alive renews before the lock can expire.
-      lockDuration: 90_000,
-      lockRenewTime: 45_000,
+      // `http_request` step allowed up to MAX_STEP_TIMEOUT_MS would lose
+      // its lock mid-flight, get re-delivered, and execute twice — bad for
+      // `tag`/`update-field`/`set-status` which mutate without an
+      // idempotency key. The boot assertion above guarantees the margin.
+      // `lockRenewTime` halves the lock so a step that's still alive
+      // renews before the lock can expire.
+      lockDuration: WORKFLOW_LOCK_DURATION_MS,
+      lockRenewTime: Math.floor(WORKFLOW_LOCK_DURATION_MS / 2),
     },
   );
 

@@ -58,6 +58,14 @@ async function handler(req: NextRequest) {
   const next = safeNext(req.nextUrl.searchParams.get("next"));
   const loginUrl = new URL("/login", base);
   if (next) loginUrl.searchParams.set("next", next);
+  // `?bc=1` tells the login page to fire a cross-tab signout broadcast on
+  // mount. The rail button + team-settings deactivate paths already
+  // broadcast BEFORE navigating here, but server-initiated entry points
+  // (email "sign out" links, 401 → /logout redirect chains) need this flag
+  // so sibling tabs don't keep stale session UI until their next interaction.
+  // Change-password does NOT redirect through here — that tab keeps its
+  // session — so this is safe to set on any real signout.
+  if (userId) loginUrl.searchParams.set("bc", "1");
   const response = NextResponse.redirect(loginUrl);
 
   // Clear every owned cookie the browser actually sent. Self-maintaining:

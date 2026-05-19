@@ -31,6 +31,7 @@ export interface SendMessageStepConfig {
 
 export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
   type: "send_message",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("send_message config must be an object");

@@ -6,4 +6,3 @@
 export const teamRoom = (teamId: string) => `team:${teamId}`;
 export const conversationRoom = (conversationId: string) => `conv:${conversationId}`;
 export const channelRoom = (channelId: string) => `chan:${channelId}`;
-export const channelThreadRoom = (rootMessageId: string) => `chan-thr:${rootMessageId}`;

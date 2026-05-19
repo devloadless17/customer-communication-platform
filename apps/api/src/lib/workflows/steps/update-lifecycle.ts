@@ -1,3 +1,5 @@
+import { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import type { Contact } from "@ccp/shared/types";
@@ -25,6 +27,7 @@ export interface UpdateLifecycleStepConfig {
 
 export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> = {
   type: "update_lifecycle",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("update_lifecycle config must be an object");
@@ -58,11 +61,23 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
     if (contact.stageId === stage.id) return advance({ skipped: "already_in_stage" });
 
     const previousStageId = contact.stageId;
-    const updated = await db.contact.update({
-      where: { id: contactId },
-      data: { stageId: stage.id },
-      include: { tags: { select: { id: true } } },
-    });
+    // CAS on `version`. Concurrent user PATCH editing a different field
+    // would otherwise race read-modify-write here and lose one set. The
+    // loser surfaces as advanceWithError so the workflow log shows the
+    // conflict.
+    let updated;
+    try {
+      updated = await db.contact.update({
+        where: { id: contactId, teamId: ctx.teamId, version: contact.version },
+        data: { stageId: stage.id, version: { increment: 1 } },
+        include: { tags: { select: { id: true } } },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return advanceWithError(409, "contact modified mid-step, retry the run");
+      }
+      throw err;
+    }
 
     const payload: Contact = {
       id: updated.id,

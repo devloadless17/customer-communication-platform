@@ -5,6 +5,7 @@ import { Loader2, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 
 export function ChangePasswordForm() {
@@ -25,16 +26,11 @@ export function ChangePasswordForm() {
           // Caddy routes `/api/auth/change-password*` to api:4000 (the rule
           // sits BEFORE the `/api/auth/*` → Next.js catch-all). In dev there
           // is no Caddy — Next.js owns `:3000`, NestJS owns `:4000`, and the
-          // browser must target the api process directly. `NEXT_PUBLIC_API_URL`
-          // is the same dev convention the socket client uses; unset in prod
-          // (same-origin via Caddy) → falls back to a relative URL.
-          //
-          // `credentials: "include"` makes the Better Auth session cookie
-          // ride the cross-origin XHR in dev (SameSite=Lax + same eTLD+1).
-          const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
-          const res = await fetch(`${apiBase}/api/auth/change-password`, {
+          // browser must target the api process directly. apiFetch resolves
+          // the base via BROWSER_API_BASE (NEXT_PUBLIC_API_URL) and forwards
+          // the session cookie via credentials: "include".
+          const res = await apiFetch(`/api/auth/change-password`, {
             method: "POST",
-            credentials: "include",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               currentPassword: form.get("currentPassword"),

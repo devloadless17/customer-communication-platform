@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { useFormStatus } from "react-dom";
 import { Loader2 } from "lucide-react";
 
@@ -9,6 +10,7 @@ import {
   AuthRedirectFallback,
   useAuthRedirect,
 } from "@/hooks/use-auth-redirect";
+import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 
 import { loginAction, type LoginState } from "./actions";
 
@@ -16,6 +18,20 @@ const INITIAL: LoginState = { error: null };
 
 export function LoginForm({ next }: { next: string }) {
   const { state, action, isRedirecting } = useAuthRedirect(loginAction, INITIAL);
+
+  // Server-initiated /logout sets `?bc=1` on the redirect to /login.
+  // Forward that signal to sibling tabs that didn't initiate the signout
+  // (email "sign out" links, 401 → /logout chains). Rail-button signouts
+  // already broadcast before navigating; this catches the rest. Strip the
+  // flag from the URL so a back-forward navigation doesn't re-broadcast.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("bc") !== "1") return;
+    broadcastSignout();
+    url.searchParams.delete("bc");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }, []);
 
   if (isRedirecting) {
     return <AuthRedirectFallback minHeightClass="min-h-55" />;

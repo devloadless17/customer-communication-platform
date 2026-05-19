@@ -193,13 +193,16 @@ EXPOSE 3000
 # wget instead of `node --eval` — Node startup costs ~50-100 MB allocated-
 # then-freed RSS plus ~200ms every 10s for the whole container lifetime;
 # wget is already installed at the base layer for compose's probes.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 \
+# Compose redefines these flags with the same shape — keeping them
+# matched here means `docker run` standalone behaves identically to
+# `docker compose up`. start_interval (Docker 25+) flips healthy the
+# instant the standalone server.js responds (~2-3s).
+HEALTHCHECK --start-interval=500ms --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
-# `prisma migrate deploy` is idempotent — runs every container start so
-# new migrations land on deploy and it's a no-op otherwise. Then start
-# the standalone server.js (Next.js's pre-built entrypoint; replaces the
-# old `next start` indirection and boots noticeably faster). start-period
-# 120s above accounts for a fresh-DB migration that builds new indexes.
-# Migrations run from the web side only — the api service waits on
-# postgres: { healthy } and races for the schema lock otherwise.
-CMD ["sh", "-c", "prisma migrate deploy && node apps/web/server.js"]
+# Direct node invocation — no `sh -c` wrapper. Migrations run in the
+# one-shot `migrate` compose service before app/api boot (docker-
+# compose.yml: depends_on { migrate: service_completed_successfully }).
+# This image keeps the Prisma CLI at /opt/cli-tools so the migrate
+# service (same image) can still invoke `prisma migrate deploy`.
+# Node runs as PID 1, so SIGTERM reaches Next.js cleanly on shutdown.
+CMD ["node", "apps/web/server.js"]

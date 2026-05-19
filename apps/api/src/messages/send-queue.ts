@@ -38,6 +38,12 @@ interface BaseSendJob {
   teamId: string;
   userId: string;
   conversationId: string;
+  /** Pre-resolved at preflight — the worker uses this directly to call Meta
+   *  and does NOT re-fetch the contact row. The preflight verified the
+   *  number existed; if a teammate strips the contact's phone in the queue
+   *  gap (rare), Meta will reject the send with a clear error and the
+   *  worker publishes `message.send_failed`. */
+  phoneNumber: string;
   /** Pre-resolved local id when the user is replying to a quoted message. */
   replyToMessageId?: string | null;
   /** Pre-resolved wamid for Meta's `context.message_id`; absent when parent

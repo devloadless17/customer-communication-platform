@@ -8,11 +8,7 @@ import type {
 } from "@ccp/shared/events/types";
 
 import { withCorrelation } from "@/common/correlation";
-import {
-  markFailed as markOutboxFailed,
-  markPublished as markOutboxPublished,
-  persistOutboxRow,
-} from "@/lib/events/outbox";
+import { persistDispatchedRow } from "@/lib/events/outbox";
 
 /**
  * Typed in-process event bus.
@@ -20,12 +16,31 @@ import {
  * Routes / ingest publish a `DomainEvent`; subscribers (socket fanout, audit
  * log, analytics, workflow dispatcher, outbound webhooks) react to it.
  *
- * Subscribers run in PARALLEL (Promise.allSettled). Each handler is
- * functionally independent — own table writes, own socket emit, own HTTP
- * RTT — and sequencing them earlier was paying the sum of per-subscriber
- * latency on every publish. If two subscribers ever need to order against
- * each other, model that explicitly in their own state, not through bus
- * registration order.
+ * Subscribers run SEQUENTIALLY in registration order. Two downstream
+ * subscribers depend on this order:
+ *   - `workflow-dispatch` re-reads the conversation row for the
+ *     `closedCategory`/`closedSummary`/counters that `analytics` just
+ *     bumped (workflow-dispatch.ts:62,78). Parallel dispatch made that
+ *     read racy in proportion to analytics' write latency.
+ *   - `outbound-webhooks.subscriber` ships partner payloads carrying
+ *     post-mutation fields (closedAt, firstResponseAt) — same fields the
+ *     analytics subscriber sets.
+ * Registration order is:
+ *     realtime-fanout → audit → analytics → workflow-dispatch →
+ *     web-cache-revalidate → outbound-webhooks
+ * (see WorkflowSubscribersService + OutboundWebhooksSubscriber).
+ *
+ * Cost vs the old `Promise.allSettled` parallel shape: total publish
+ * latency = sum of per-subscriber latency instead of max. At pilot scale
+ * each subscriber is ~5-15ms (analytics + audit write + dispatch enqueue;
+ * web-cache-revalidate is now fire-and-forget inside its own subscriber
+ * to avoid the cross-process HTTP hop dominating the sum). The earlier
+ * "parallel + ordering doesn't matter" claim was contradicted by the
+ * downstream subscribers' own doc comments and by the symptoms that
+ * showed up at audit time.
+ *
+ * Per-subscriber try/catch still isolates failures — a broken handler
+ * cannot poison the chain.
  */
 
 type Handler<K extends DomainEventType> = (
@@ -64,39 +79,33 @@ export function subscribe<K extends DomainEventType>(
 /**
  * Publish a domain event.
  *
- * Writes a row to the transactional outbox FIRST (durable audit trail),
- * then runs every subscriber in parallel. Each subscriber gets its own
- * try/catch so a broken one can't cascade. On the way out, marks the
- * outbox row published (or failed).
+ * Runs every subscriber in parallel, then writes a single durable audit
+ * row to the outbox with the final state (`publishedAt` always set, plus
+ * `failedAt`+`lastError` if any subscriber threw). The row is written
+ * AFTER dispatch — never before — so the outbox drainer's 100ms poll
+ * cannot grab it mid-dispatch and re-fire every subscriber.
+ *
+ * Each subscriber gets its own try/catch inside `runSubscribers` so a
+ * broken one can't cascade.
  *
  * Most callers should `await`. The webhook hot path uses `void publish(...)`
  * + `.catch(...)` to avoid blocking Meta's 200.
  *
  * For publishes that must commit atomically with an entity write, use
  * `publishInTx(tx, event)` from `@/lib/events/outbox` instead. That path
- * skips the synchronous subscriber run and lets the drainer dispatch
- * once the caller's transaction commits — closes the lost-event window
- * between the entity write and bus.publish.
+ * persists a row with `publishedAt=NULL` inside the tx; the drainer picks
+ * it up after commit and dispatches subscribers. Closes the lost-event
+ * window between the entity write and bus.publish.
  *
  * Outbox-write failures (Postgres down) are swallowed and logged — the
- * subscribers still run. The choice is: better to lose the audit row
- * than to lose the realtime emit. Operators see the gap via missing
- * outbox rows.
+ * subscribers already ran. The choice is: better to lose the audit row
+ * than to lose the realtime emit. Process crash mid-dispatch loses both
+ * the audit row AND completes partially, but that's the same posture the
+ * surrounding code carries.
  */
 export async function publish<K extends DomainEventType>(
   event: DomainEventOf<K>,
 ): Promise<void> {
-  let outboxId: string | null = null;
-  try {
-    outboxId = await persistOutboxRow(event);
-  } catch (err) {
-    console.error(
-      withCorrelation(`[bus] outbox persist for "${event.type}" failed:`),
-      err instanceof Error ? err.message : err,
-    );
-    // Continue — better stale audit than dropped fanout.
-  }
-
   let dispatchError: unknown = null;
   try {
     await runSubscribers(event);
@@ -104,22 +113,19 @@ export async function publish<K extends DomainEventType>(
     dispatchError = err;
   }
 
-  if (outboxId) {
-    try {
-      if (dispatchError) {
-        await markOutboxFailed(
-          outboxId,
-          dispatchError instanceof Error ? dispatchError.message : String(dispatchError),
-        );
-      } else {
-        await markOutboxPublished(outboxId);
-      }
-    } catch (err) {
-      console.error(
-        withCorrelation(`[bus] outbox status-mark for "${event.type}" failed:`),
-        err instanceof Error ? err.message : err,
-      );
-    }
+  const errorMessage = dispatchError
+    ? dispatchError instanceof Error
+      ? dispatchError.message
+      : String(dispatchError)
+    : null;
+
+  try {
+    await persistDispatchedRow(event, errorMessage);
+  } catch (err) {
+    console.error(
+      withCorrelation(`[bus] outbox persist for "${event.type}" failed:`),
+      err instanceof Error ? err.message : err,
+    );
   }
 }
 
@@ -141,25 +147,23 @@ async function runSubscribers<K extends DomainEventType>(
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
 
-  // Run subscribers in parallel. They're functionally independent (each one
-  // writes its own table or fires its own emit), so the prior sequential
-  // `await` chain was paying the SUM of per-subscriber latencies on every
-  // publish — e.g. on `message.received` that was socket-fanout + audit DB
-  // write + analytics DB write + workflow-dispatch + web-cache-revalidate.
-  // Going parallel collapses that to the slowest single subscriber.
+  // Sequential dispatch in registration order. workflow-dispatch reads
+  // post-mutation state that analytics writes; outbound-webhooks ships
+  // partner payloads carrying those same fields. Parallel dispatch made
+  // both races inevitable in proportion to subscriber latency. See the
+  // class-level comment for the registration-order invariant.
   //
-  // Each handler still gets its own try/catch so a broken subscriber can't
-  // poison the others.
-  await Promise.allSettled(
-    list.map(async (handler, i) => {
-      try {
-        await handler(event as DomainEventOf<DomainEventType>);
-      } catch (err) {
-        console.error(
-          withCorrelation(`[bus] subscriber #${i} for "${event.type}" threw:`),
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }),
-  );
+  // Each handler still gets its own try/catch so a broken subscriber
+  // can't poison the chain.
+  for (let i = 0; i < list.length; i++) {
+    const handler = list[i]!;
+    try {
+      await handler(event as DomainEventOf<DomainEventType>);
+    } catch (err) {
+      console.error(
+        withCorrelation(`[bus] subscriber #${i} for "${event.type}" threw:`),
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 }

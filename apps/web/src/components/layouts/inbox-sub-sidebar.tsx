@@ -18,6 +18,7 @@ import type {
   Filter,
   PresetFilterId,
 } from "@/features/inbox/components/inbox-controls";
+import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
 
 import { SubSidebar, SubSidebarSection } from "./sub-sidebar";
 
@@ -54,7 +55,24 @@ export function InboxSubSidebar({
 }) {
   const [stagesOpen, setStagesOpen] = useState(filter.kind === "stage");
 
+  // Server-side counts over the FULL team. Truth source for the badges so
+  // they don't lie when an agent has more matching threads than the
+  // paginated inbox list has currently loaded. Null on first paint —
+  // we fall back to the loaded-slice count below until the GET lands.
+  const serverCounts = useConversationCounts();
+
   const presetCounts = useMemo(() => {
+    if (serverCounts) {
+      return {
+        all: serverCounts.all,
+        mine: serverCounts.mine,
+        unassigned: serverCounts.unassigned,
+        closed: serverCounts.closed,
+      } satisfies Record<PresetFilterId, number>;
+    }
+    // First-paint fallback: derive from the loaded slice. Visually correct
+    // (numbers appear immediately) and converges to truth on the first
+    // useConversationCounts response.
     const c = conversations.map((x) => x.conversation);
     return {
       all: c.filter((x) => x.status !== "closed").length,
@@ -62,9 +80,10 @@ export function InboxSubSidebar({
       unassigned: c.filter((x) => x.assignedUserId === null && x.status !== "closed").length,
       closed: c.filter((x) => x.status === "closed").length,
     } satisfies Record<PresetFilterId, number>;
-  }, [conversations, currentUser.id]);
+  }, [serverCounts, conversations, currentUser.id]);
 
   const stageCounts = useMemo(() => {
+    if (serverCounts) return serverCounts.byStage;
     const out: Record<string, number> = {};
     for (const { conversation, contact } of conversations) {
       if (conversation.status === "closed") continue;
@@ -73,7 +92,7 @@ export function InboxSubSidebar({
       out[sid] = (out[sid] ?? 0) + 1;
     }
     return out;
-  }, [conversations]);
+  }, [serverCounts, conversations]);
 
   return (
     <SubSidebar title="Inbox">

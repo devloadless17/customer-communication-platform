@@ -18,6 +18,7 @@ import { runSetStatus } from "./set-status";
 
 export const openConversationStepHandler: StepHandler<Record<string, never>> = {
   type: "open_conversation",
+  sideEffect: "irreversible",
   parseConfig(_raw) {
     // No config — opening is just "set status = open" with no extras.
     return {};
@@ -37,6 +38,7 @@ export interface CloseConversationStepConfig {
 
 export const closeConversationStepHandler: StepHandler<CloseConversationStepConfig> = {
   type: "close_conversation",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (raw == null) return {};
     if (typeof raw !== "object") {

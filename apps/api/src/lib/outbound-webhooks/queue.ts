@@ -71,9 +71,19 @@ export function getWebhookDeliverQueue(): Queue<WebhookDeliverJobData> {
   return state.queue;
 }
 
+/**
+ * Enqueue idempotently. `jobId: deliver:${deliveryId}` collapses any
+ * duplicate enqueue for the same delivery row — the orphan-delivery
+ * sweeper can re-enqueue stranded rows without racing the subscriber's
+ * original enqueue and POSTing the partner twice.
+ */
 export async function enqueueWebhookDelivery(deliveryId: string): Promise<string> {
   const q = getWebhookDeliverQueue();
-  const job = await q.add("deliver", { deliveryId });
+  const job = await q.add(
+    "deliver",
+    { deliveryId },
+    { jobId: `deliver:${deliveryId}` },
+  );
   return job.id as string;
 }
 

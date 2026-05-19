@@ -84,6 +84,7 @@ export async function runSetStatus(
 
 export const setStatusStepHandler: StepHandler<SetStatusStepConfig> = {
   type: "set_status",
+  sideEffect: "irreversible",
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("set_status config must be an object");

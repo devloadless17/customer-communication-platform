@@ -58,9 +58,28 @@ const DEFAULT_GRAPH_VERSION = process.env.META_GRAPH_VERSION ?? "v25.0";
  * bust it explicitly when the settings page saves new credentials
  * (`invalidateProviderConfig`).
  *
- * Single-process only by design (CLAUDE.md: one VPS, one app instance). The
- * day a second instance shows up this moves to Redis alongside the Socket.io
- * adapter — until then a Map is correct and simpler.
+ * SECURITY POSTURE — what we cache vs decrypt-on-demand
+ * ------------------------------------------------------
+ * The cache stores the *encrypted ciphertext* of secrets, NOT the
+ * decrypted plaintext. Decryption happens per-call, inside the
+ * `getMeta*Config` function, and the decrypted string never outlives
+ * the caller's scope. Reason: holding decrypted access tokens / app
+ * secrets in long-lived process memory undoes the DB-side envelope
+ * encryption — a `process.memoryUsage()` heap snapshot, an OOM core
+ * dump, or any post-mortem debugger lands every tenant's plaintext
+ * credentials. Decrypt is microseconds (AES-256-GCM with a hot key);
+ * the cache's real value is amortizing the DB roundtrip, which still
+ * applies.
+ *
+ * Non-secret fields (`metaPhoneNumberId`, `metaWabaId`, `metaAppId`,
+ * `metaVerifyToken`) are cached plaintext — they're either public
+ * (phone number id is in every webhook payload) or shared-with-Meta
+ * (verify token is the GET-challenge handshake value).
+ *
+ * Single-process only by design (CLAUDE.md: one VPS, one app instance).
+ * The day a second instance shows up this moves to Redis alongside the
+ * Socket.io adapter — and the same "store ciphertext, decrypt-on-demand"
+ * invariant applies there.
  */
 const CONFIG_TTL_MS = 60_000;
 // Bound the per-team caches so a multi-tenant scale-up doesn't grow them
@@ -71,9 +90,25 @@ const CONFIG_TTL_MS = 60_000;
 const CONFIG_CACHE_MAX = 10_000;
 const CONFIG_SWEEP_INTERVAL_MS = 5 * 60_000;
 
-type CachedSend = { value: MetaSendConfig } | { error: ProviderNotConfiguredError };
+interface SendConfigCipher {
+  phoneNumberId: string;
+  accessTokenCipher: string;
+  wabaId?: string;
+  appId?: string;
+}
+interface WebhookConfigCipher {
+  appSecretCipher: string;
+  verifyToken: string;
+}
+
+type CachedSend =
+  | { kind: "ok"; cipher: SendConfigCipher }
+  | { kind: "err"; missing: readonly string[] };
 const sendCache = new Map<string, { entry: CachedSend; exp: number }>();
-const webhookCache = new Map<string, { value: MetaWebhookConfig | null; exp: number }>();
+const webhookCache = new Map<
+  string,
+  { value: WebhookConfigCipher | null; exp: number }
+>();
 
 function evictExpired<V extends { exp: number }>(map: Map<string, V>): void {
   const now = Date.now();
@@ -99,7 +134,7 @@ export function invalidateProviderConfig(teamId: string): void {
   webhookCache.delete(teamId);
 }
 
-async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
+async function loadSendCipher(teamId: string): Promise<CachedSend> {
   const team = await db.team.findUnique({
     where: { id: teamId },
     select: {
@@ -109,18 +144,36 @@ async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
       metaAppId: true,
     },
   });
-  if (!team) throw new ProviderNotConfiguredError(teamId, ["team-not-found"]);
+  if (!team) return { kind: "err", missing: ["team-not-found"] };
   const missing: string[] = [];
   if (!team.metaPhoneNumberId) missing.push("phoneNumberId");
   if (!team.metaAccessToken) missing.push("accessToken");
-  if (missing.length > 0) throw new ProviderNotConfiguredError(teamId, missing);
+  if (missing.length > 0) return { kind: "err", missing };
+  return {
+    kind: "ok",
+    cipher: {
+      phoneNumberId: team.metaPhoneNumberId!,
+      // Store the CIPHERTEXT in cache, not the decrypted token. Decrypt
+      // per-call so plaintext never lives longer than the request that
+      // uses it. See the cache header comment for the security rationale.
+      accessTokenCipher: team.metaAccessToken!,
+      ...(team.metaWabaId ? { wabaId: team.metaWabaId } : {}),
+      ...(team.metaAppId ? { appId: team.metaAppId } : {}),
+    },
+  };
+}
+
+function materializeSendConfig(
+  teamId: string,
+  cipher: SendConfigCipher,
+): MetaSendConfig {
   let accessToken: string;
   try {
     // Stored as envelope-encrypted ciphertext (lib/crypto/envelope.ts).
     // decryptSecret() passes legacy plaintext rows through unchanged so the
     // first load after rollout still works; the next credential save in
     // /api/team/whatsapp rewrites the row as ciphertext.
-    accessToken = decryptSecret(team.metaAccessToken!);
+    accessToken = decryptSecret(cipher.accessTokenCipher);
   } catch (err) {
     console.error(
       `[provider-config] failed to decrypt send secrets for team=${teamId}: ${
@@ -133,11 +186,11 @@ async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
     throw new ProviderNotConfiguredError(teamId, ["accessToken (decrypt failed)"]);
   }
   return {
-    phoneNumberId: team.metaPhoneNumberId!,
+    phoneNumberId: cipher.phoneNumberId,
     accessToken,
     graphVersion: DEFAULT_GRAPH_VERSION,
-    ...(team.metaWabaId ? { wabaId: team.metaWabaId } : {}),
-    ...(team.metaAppId ? { appId: team.metaAppId } : {}),
+    ...(cipher.wabaId ? { wabaId: cipher.wabaId } : {}),
+    ...(cipher.appId ? { appId: cipher.appId } : {}),
   };
 }
 
@@ -147,25 +200,25 @@ async function loadMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
  * the reply box can render an "connect WhatsApp" prompt instead of pretending
  * the send went through. The not-configured result is cached too (a team that
  * hasn't connected gets hammered with read/mark-read attempts on stale rows).
+ *
+ * The decrypted access token is produced fresh from the cached ciphertext
+ * on every call — see the cache header comment for the security rationale.
  */
 export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig> {
   const hit = sendCache.get(teamId);
   if (hit && hit.exp > Date.now()) {
-    if ("error" in hit.entry) throw hit.entry.error;
-    return hit.entry.value;
-  }
-  try {
-    const value = await loadMetaSendConfig(teamId);
-    evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
-    sendCache.set(teamId, { entry: { value }, exp: Date.now() + CONFIG_TTL_MS });
-    return value;
-  } catch (err) {
-    if (err instanceof ProviderNotConfiguredError) {
-      evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
-      sendCache.set(teamId, { entry: { error: err }, exp: Date.now() + CONFIG_TTL_MS });
+    if (hit.entry.kind === "err") {
+      throw new ProviderNotConfiguredError(teamId, [...hit.entry.missing]);
     }
-    throw err;
+    return materializeSendConfig(teamId, hit.entry.cipher);
   }
+  const entry = await loadSendCipher(teamId);
+  evictOldestIfOverCap(sendCache, CONFIG_CACHE_MAX);
+  sendCache.set(teamId, { entry, exp: Date.now() + CONFIG_TTL_MS });
+  if (entry.kind === "err") {
+    throw new ProviderNotConfiguredError(teamId, [...entry.missing]);
+  }
+  return materializeSendConfig(teamId, entry.cipher);
 }
 
 /**
@@ -177,37 +230,46 @@ export async function getMetaSendConfig(teamId: string): Promise<MetaSendConfig>
  * is correct: Meta retries on non-2xx, so a 500 here would create a webhook
  * retry storm during an outage we can't fix from the request handler. The
  * underlying error is logged for ops.
+ *
+ * The decrypted app secret is produced fresh from the cached ciphertext on
+ * every call — see the cache header comment for the security rationale.
  */
 export async function getMetaWebhookConfig(
   teamId: string,
 ): Promise<MetaWebhookConfig | null> {
   const hit = webhookCache.get(teamId);
-  if (hit && hit.exp > Date.now()) return hit.value;
-  const team = await db.team.findUnique({
-    where: { id: teamId },
-    select: { metaAppSecret: true, metaVerifyToken: true },
-  });
-  let value: MetaWebhookConfig | null;
-  if (!team || !team.metaAppSecret || !team.metaVerifyToken) {
-    value = null;
+  let cipher: WebhookConfigCipher | null;
+  if (hit && hit.exp > Date.now()) {
+    cipher = hit.value;
   } else {
-    try {
-      // App secret signs every inbound webhook (HMAC-SHA256). Stored
-      // encrypted; legacy plaintext rows decrypt through unchanged.
-      value = {
-        appSecret: decryptSecret(team.metaAppSecret),
-        verifyToken: team.metaVerifyToken,
-      };
-    } catch (err) {
-      console.error(
-        `[provider-config] failed to decrypt webhook secrets for team=${teamId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      value = null;
-    }
+    const team = await db.team.findUnique({
+      where: { id: teamId },
+      select: { metaAppSecret: true, metaVerifyToken: true },
+    });
+    cipher =
+      team && team.metaAppSecret && team.metaVerifyToken
+        ? {
+            appSecretCipher: team.metaAppSecret,
+            verifyToken: team.metaVerifyToken,
+          }
+        : null;
+    evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
+    webhookCache.set(teamId, { value: cipher, exp: Date.now() + CONFIG_TTL_MS });
   }
-  evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
-  webhookCache.set(teamId, { value, exp: Date.now() + CONFIG_TTL_MS });
-  return value;
+  if (!cipher) return null;
+  try {
+    // App secret signs every inbound webhook (HMAC-SHA256). Stored
+    // encrypted; legacy plaintext rows decrypt through unchanged.
+    return {
+      appSecret: decryptSecret(cipher.appSecretCipher),
+      verifyToken: cipher.verifyToken,
+    };
+  } catch (err) {
+    console.error(
+      `[provider-config] failed to decrypt webhook secrets for team=${teamId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
 }

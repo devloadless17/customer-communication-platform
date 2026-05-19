@@ -466,6 +466,10 @@ export class WorkflowsService {
     }
 
     try {
+      // UI button — explicit admin intent. We do NOT pass
+      // enforceOncePerContact, so the dispatcher always returns a runId
+      // (never null) for this entry shape. The null branch only exists
+      // for the trigger_workflow step chain path.
       const runId = await dispatchManualTrigger({
         teamId,
         workflowId: id,
@@ -474,8 +478,17 @@ export class WorkflowsService {
         triggeredByUserId: userId,
         metadata: input.metadata,
       });
+      if (runId === null) {
+        // Unreachable on this entry path — defensive throw in case the
+        // dispatcher signature changes and this caller forgets to pass
+        // the flag explicitly.
+        throw new InternalServerErrorException({
+          error: "dispatcher returned no runId",
+        });
+      }
       return { runId };
     } catch (err) {
+      if (err instanceof InternalServerErrorException) throw err;
       throw new InternalServerErrorException({
         error: err instanceof Error ? err.message : "dispatch failed",
       });

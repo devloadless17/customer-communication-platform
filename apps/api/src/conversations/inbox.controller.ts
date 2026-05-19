@@ -38,6 +38,7 @@ export class InboxConversationController {
     const page = await this.conversations.getInboxConversation(
       session.teamId,
       id,
+      session.userId,
     );
     if (!page) throw new NotFoundException({ error: "Not found" });
     return page;

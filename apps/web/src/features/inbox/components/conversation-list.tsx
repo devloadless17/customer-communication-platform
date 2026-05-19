@@ -13,7 +13,6 @@ import { cn } from "@ccp/shared/utils";
 import type {
   ContactStage,
   ConversationWithRefs,
-  User,
 } from "@ccp/shared/types";
 import { ConversationListItem } from "./conversation-list-item";
 import type { Filter, PresetFilterId } from "./inbox-controls";
@@ -26,7 +25,6 @@ const PRESET_LABELS: Record<PresetFilterId, string> = {
 };
 
 function ConversationListImpl({
-  currentUser,
   conversations,
   stages,
   filter,
@@ -41,7 +39,6 @@ function ConversationListImpl({
   onOpenConversation,
   onPrefetchConversation,
 }: {
-  currentUser: User;
   conversations: ConversationWithRefs[];
   stages: ContactStage[];
   filter: Filter;
@@ -156,28 +153,18 @@ function ConversationListImpl({
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
-
+    if (!q) return conversations;
+    // Preset / stage filtering is server-side now (useTeamEvents drives a
+    // filter-aware fetch). Only the search box stays client-side because
+    // it's keystroke-debounced UX, not a true server query — flipping it
+    // server-side would force a fetch per keystroke. Search runs over the
+    // already-filtered slice the server returned.
     return conversations.filter(({ conversation: c, contact }) => {
-      if (filter.kind === "preset") {
-        if (filter.id === "mine" && c.assignedUserId !== currentUser.id) return false;
-        if (filter.id === "unassigned" && c.assignedUserId !== null) return false;
-        if (filter.id === "closed" && c.status !== "closed") return false;
-        if (filter.id === "all" && c.status === "closed") return false;
-      } else {
-        // Stage view mirrors "All": skip closed threads so the visible set
-        // matches what the user expects when they click into a stage.
-        if (c.status === "closed") return false;
-        if (contact.stageId !== filter.stageId) return false;
-      }
-
-      if (q) {
-        const haystack =
-          `${contact.name} ${contact.phoneNumber} ${c.lastMessagePreview}`.toLowerCase();
-        if (!haystack.includes(q)) return false;
-      }
-      return true;
+      const haystack =
+        `${contact.name} ${contact.phoneNumber} ${c.lastMessagePreview}`.toLowerCase();
+      return haystack.includes(q);
     });
-  }, [conversations, currentUser.id, filter, search]);
+  }, [conversations, search]);
 
   // Record what's currently visible AFTER each render so the next render can
   // tell which rows are genuinely new and worth animating. No dependency

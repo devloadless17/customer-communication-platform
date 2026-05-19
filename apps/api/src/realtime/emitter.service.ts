@@ -8,12 +8,7 @@ import type {
   SocketData,
 } from "@ccp/shared/socket/events";
 
-import {
-  channelRoom,
-  channelThreadRoom,
-  conversationRoom,
-  teamRoom,
-} from "./rooms";
+import { channelRoom, conversationRoom, teamRoom } from "./rooms";
 
 export type TypedIO = Server<
   ClientToServerEvents,
@@ -81,18 +76,4 @@ export class RealtimeEmitter {
     io.to(channelRoom(channelId)).emit(event, ...args);
   }
 
-  emitToChannelThread<E extends keyof ServerToClientEvents>(
-    rootMessageId: string,
-    event: E,
-    ...args: Parameters<ServerToClientEvents[E]>
-  ): void {
-    const io = this.server;
-    if (!io) {
-      this.logger.warn(
-        `emitToChannelThread("${String(event)}") dropped — IO not ready yet`,
-      );
-      return;
-    }
-    io.to(channelThreadRoom(rootMessageId)).emit(event, ...args);
-  }
 }
