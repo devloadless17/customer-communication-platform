@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   Copy,
   Loader2,
@@ -71,7 +71,7 @@ export function TeamSettings({
   /** Empty for non-admins (they can't see this panel). */
   pendingInvites: PendingInviteRow[];
 }) {
-  const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [lastInvite, setLastInvite] = useState<InviteResult | null>(null);
@@ -83,7 +83,7 @@ export function TeamSettings({
   const [deletingOrg, setDeletingOrg] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
 
-  const refresh = () => router.refresh();
+  const refresh = softRefresh;
   const canManage = canManageUsers(currentUserRole);
   const inviteRoles = useMemo(() => assignableRoles(currentUserRole), [currentUserRole]);
   // Org-delete is admin/superAdmin only — same gate as user-management.

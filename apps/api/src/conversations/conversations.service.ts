@@ -24,6 +24,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
+import { runWithConcurrency } from "../common/concurrency";
 import type {
   AssignConversationInput,
   BulkDeleteConversationsInput,
@@ -229,18 +230,19 @@ export class ConversationsService {
       await blobStorage.delete(mediaKeys);
     }
 
-    // Independent subscriber chains per id, fan in parallel. Socket fanout
-    // for 500 ids is microseconds.
-    await Promise.all(
-      ownedIds.map((cid) =>
-        this.bus.publish({
-          type: "conversation.deleted",
-          teamId,
-          conversationId: cid,
-          deletedByUserId: userId,
-        }),
-      ),
-    );
+    // Bounded fanout — 16 lanes. The socket emit itself is microseconds,
+    // but the full subscriber chain (audit + analytics + workflow-dispatch
+    // + outbound-webhooks + cache-revalidate) runs sequentially per id, so
+    // an unbounded Promise.all could push hundreds of ms of work onto the
+    // event loop at once on a 500-id delete.
+    await runWithConcurrency(ownedIds, 16, async (cid) => {
+      await this.bus.publish({
+        type: "conversation.deleted",
+        teamId,
+        conversationId: cid,
+        deletedByUserId: userId,
+      });
+    });
 
     return { count: ownedIds.length };
   }

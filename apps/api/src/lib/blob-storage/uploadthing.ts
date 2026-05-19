@@ -55,10 +55,70 @@ function getUtApi(): UTApi {
   return utApi;
 }
 
+/**
+ * Mime allowlist per kind. WhatsApp's documented mime set for each kind
+ * is the source of truth; anything outside is refused. Critical defense:
+ * without this, a malicious sender can stash an SVG-with-script in our
+ * UploadThing bucket, served same-origin via /api/media/<id> → stored
+ * XSS. The Meta webhook trusts content-type from the sender's claim.
+ */
+const ALLOWED_MIME_BY_KIND: Record<string, ReadonlySet<string>> = {
+  image: new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    // NOTE: SVG intentionally excluded. SVG can embed <script> and would
+    // be a stored XSS vector when rendered same-origin via /api/media/<id>.
+  ]),
+  video: new Set([
+    "video/mp4",
+    "video/3gpp",
+    "video/quicktime",
+  ]),
+  audio: new Set([
+    "audio/aac",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/amr",
+    "audio/ogg",
+    "audio/webm",
+    "audio/opus",
+  ]),
+  document: new Set([
+    "application/pdf",
+    "application/vnd.ms-powerpoint",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/plain",
+    "text/csv",
+  ]),
+  sticker: new Set(["image/webp"]),
+};
+
+function assertAllowedMime(kind: string, mimeType: string): void {
+  const allowed = ALLOWED_MIME_BY_KIND[kind];
+  if (!allowed) return; // unknown kind — caller already enforces
+  // Normalize: strip ;charset=… and trim
+  const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (!allowed.has(normalized)) {
+    throw new Error(
+      `uploadthing: mime type "${normalized}" not allowed for kind "${kind}"`,
+    );
+  }
+}
+
 export const uploadthingProvider: BlobStorageProvider = {
   name: "uploadthing",
 
   async upload(input: UploadInput): Promise<UploadResult> {
+    // Mime allowlist — see comment at ALLOWED_MIME_BY_KIND for the SVG
+    // exclusion rationale. `kind` is set by the caller from Meta's
+    // categorization, not the sender's claim, so it's trustworthy here.
+    assertAllowedMime(input.kind, input.mimeType);
     const filename = buildFilename(input);
     // Pass the Uint8Array straight to UTFile — Node 20+'s undici-backed Blob
     // accepts Uint8Array as a BlobPart at runtime, and the TS-cast pattern
@@ -110,9 +170,22 @@ export const uploadthingProvider: BlobStorageProvider = {
     try {
       await getUtApi().deleteFiles(list);
     } catch (err) {
-      // Same contract as the old disk deleteMedia: never throw. A missing or
-      // already-deleted key shouldn't block the surrounding domain delete.
-      console.warn("[blob-storage/uploadthing] delete failed (ignored)", err);
+      // Same contract as the old disk deleteMedia: never throw. A missing
+      // or already-deleted key shouldn't block the surrounding domain
+      // delete. Structured warning so a burst of failures (UploadThing
+      // outage) is greppable in journald instead of buried as a single
+      // line of opaque text — the orphan sweeper at lib/sweepers/blob-
+      // orphan.ts eventually reconciles, but the metric here is the
+      // operator's earliest signal.
+      console.warn(
+        JSON.stringify({
+          event: "blob.delete_failed",
+          severity: "warn",
+          provider: "uploadthing",
+          keyCount: list.length,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      );
     }
   },
 
@@ -135,11 +208,54 @@ export const uploadthingProvider: BlobStorageProvider = {
     }
     if (!url) throw new Error(`uploadthing fetch: no url for ${keyOrUrl}`);
 
-    const r = await fetch(url);
+    // Timeout + size cap. Without these, a slow CDN response (or a
+    // hostile redirect target if we ever loosen `isOwnUrl`) pins the
+    // forward worker indefinitely. The cap matches our outbound media
+    // ceiling (100 MiB documents) — anything bigger isn't a real send.
+    const FETCH_TIMEOUT_MS = 60_000;
+    const MAX_FETCH_BYTES = 100 * 1024 * 1024;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let r: Response;
+    try {
+      r = await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!r.ok) throw new Error(`uploadthing fetch failed: ${r.status}`);
-    const buf = Buffer.from(await r.arrayBuffer());
+    const contentLength = Number(r.headers.get("content-length") ?? 0);
+    if (contentLength > MAX_FETCH_BYTES) {
+      throw new Error(
+        `uploadthing fetch: content-length ${contentLength} exceeds cap ${MAX_FETCH_BYTES}`,
+      );
+    }
+    // Stream-read with a running size cap so a content-length-lying server
+    // still can't OOM us.
+    const reader = r.body?.getReader();
+    if (!reader) throw new Error("uploadthing fetch: no response body");
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.length;
+        if (total > MAX_FETCH_BYTES) {
+          throw new Error(
+            `uploadthing fetch: body exceeded cap ${MAX_FETCH_BYTES}`,
+          );
+        }
+        chunks.push(value);
+      }
+    }
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      merged.set(c, off);
+      off += c.length;
+    }
     return {
-      bytes: new Uint8Array(buf),
+      bytes: merged,
       mimeType: r.headers.get("content-type") ?? "application/octet-stream",
     };
   },

@@ -4,8 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { usePresence } from "@/hooks/use-presence";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useTeamChannelEvents } from "@/features/team-chat/hooks/use-team-channel-events";
 import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
+import { useTeamChatLayoutData } from "@/features/team-chat/contexts/team-chat-data";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -13,7 +15,6 @@ import { canPinMessage } from "@ccp/shared/team-chat/permissions";
 import type {
   ChannelPinDto,
   TeamChannelDto,
-  TeamChannelListItemDto,
   TeamChannelMessageDto,
 } from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
@@ -54,23 +55,24 @@ const WorkspaceSearchDialog = dynamic(
  */
 export function TeamChatWorkspace({
   currentUser,
-  teamMembers,
   initialChannel,
-  initialChannels,
   initialMessages,
   initialNextCursor,
   initialPins,
 }: {
   currentUser: User;
-  teamMembers: User[];
   initialChannel: TeamChannelDto;
-  initialChannels: TeamChannelListItemDto[];
   initialMessages: TeamChannelMessageDto[];
   initialNextCursor: string | null;
   initialPins: ChannelPinDto[];
 }) {
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const { onlineUserIds } = usePresence(currentUser.teamId, currentUser.id);
+  // Channel list + team members come from the /team layout-level context
+  // so they don't refetch on channel switch. See /app/team/layout.tsx for
+  // the rationale.
+  const { channels: initialChannels, teamMembers } = useTeamChatLayoutData();
   const channels = useTeamChannelsList(initialChannels, currentUser.id);
   const channelState = useTeamChannelEvents(
     initialChannel.id,
@@ -435,7 +437,7 @@ export function TeamChatWorkspace({
           onUpdated={(ch) => {
             setShowEdit(false);
             toast.success(`Saved #${ch.name}`);
-            router.refresh();
+            softRefresh();
           }}
         />
       )}

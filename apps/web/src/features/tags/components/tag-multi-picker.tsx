@@ -99,7 +99,7 @@ export function TagMultiPicker({
   return (
     <div
       className={cn(
-        "flex max-h-[360px] min-w-[260px] flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl",
+        "flex max-h-90 min-w-65 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl",
         className,
       )}
     >

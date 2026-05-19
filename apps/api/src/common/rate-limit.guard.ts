@@ -131,10 +131,15 @@ export class RateLimitGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const req = context.switchToHttp().getRequest<Request>();
 
-    // Skip for non-HTTP contexts (Socket.io gateway etc.) and unauthenticated
-    // requests. API-key routes have their own per-key limit upstream.
+    // Skip for non-HTTP contexts (Socket.io gateway etc.).
+    // Buckets by userId (session-auth) OR apiKeyId (Bearer-auth). The
+    // upstream ApiKeyGuard already enforces a 60/min default ceiling; this
+    // decorator-driven path lets specific routes tighten further (e.g. a
+    // bulk-tag endpoint at 20/min/key).
     const userId = req.session?.userId;
-    if (!userId) return true;
+    const apiKeyId = req.apiKey?.apiKeyId;
+    const key = userId ? `u:${userId}` : apiKeyId ? `k:${apiKeyId}` : null;
+    if (!key) return true;
 
     const opts =
       this.reflector.getAllAndOverride<RateLimitOptions | undefined>(
@@ -142,12 +147,12 @@ export class RateLimitGuard implements CanActivate {
         [context.getHandler(), context.getClass()],
       ) ?? { perMinute: DEFAULT_PER_MIN };
 
-    const r = consume(userId, opts.perMinute);
+    const r = consume(key, opts.perMinute);
     if (!r.ok) {
       throw new HttpException(
         {
           error: "rate_limited",
-          detail: `${opts.perMinute} req/min per user`,
+          detail: `${opts.perMinute} req/min per ${userId ? "user" : "api key"}`,
           retryAfter: r.retryAfter,
         },
         429,

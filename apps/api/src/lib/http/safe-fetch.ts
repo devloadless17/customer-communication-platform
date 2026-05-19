@@ -187,6 +187,10 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
   let currentUrl = url;
   let currentMethod = (opts.method ?? "GET").toUpperCase();
   let currentBody: RequestInit["body"] = opts.body;
+  // Per-hop headers — on redirect we drop sensitive headers so a malicious
+  // 307 to a different host can't capture the auth/signature meant for the
+  // original. Same posture browser fetch + curl take by default.
+  let currentHeaders: NonNullable<RequestInit["headers"]> | undefined = opts.headers;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
     await assertPublicHost(currentUrl);
@@ -203,6 +207,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
     try {
       res = await fetch(currentUrl, {
         ...opts,
+        headers: currentHeaders,
         method: currentMethod,
         body: currentBody,
         redirect: "manual",
@@ -235,10 +240,43 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
       currentMethod = "GET";
       currentBody = undefined;
     }
+    // Strip sensitive headers on every redirect hop. A malicious
+    // receiver (or a redirect to a different host) must not see the
+    // original Authorization / signature / API-key headers. Same
+    // posture browsers / curl take by default.
+    currentHeaders = stripSensitiveHeaders(currentHeaders);
     currentUrl = next.toString();
   }
 
   throw new SsrfBlockedError(url, `exceeded ${maxRedirects} redirects`);
+}
+
+const SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "x-ccp-signature",
+  "x-ccp-origin-key",
+  "x-api-key",
+  "proxy-authorization",
+]);
+
+function stripSensitiveHeaders(headers: NonNullable<RequestInit["headers"]> | undefined): NonNullable<RequestInit["headers"]> | undefined {
+  if (!headers) return headers;
+  if (headers instanceof Headers) {
+    const out = new Headers(headers);
+    for (const k of SENSITIVE_HEADERS) out.delete(k);
+    return out;
+  }
+  if (Array.isArray(headers)) {
+    return headers.filter(([k]) => !SENSITIVE_HEADERS.has(k.toLowerCase()));
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!SENSITIVE_HEADERS.has(k.toLowerCase())) {
+      out[k] = v as string;
+    }
+  }
+  return out;
 }
 
 /**

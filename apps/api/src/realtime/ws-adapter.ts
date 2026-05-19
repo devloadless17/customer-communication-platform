@@ -47,7 +47,15 @@ export class WsAdapter extends IoAdapter {
       },
       transports: ["websocket", "polling"],
       connectionStateRecovery: {
-        maxDisconnectionDuration: 2 * 60 * 1000,
+        // Shortened from 2min → 30s. Socket.io buffers ALL missed events
+        // per disconnected socket in memory for this window with no
+        // frame-count cap, so a broadcast firing 1k frames into a team
+        // room with 25 offline-for-60s sockets = ~50 MB pinned heap on
+        // the 4 GB pilot VPS. 30s covers the common case (laptop sleep,
+        // WiFi flap, Caddy restart) without becoming a memory cliff.
+        // Sockets that miss the window pay one extra handshake + backfill
+        // GET on reconnect — same correctness, lower memory ceiling.
+        maxDisconnectionDuration: 30 * 1000,
         // skipMiddlewares stays at the Socket.io default (false). See the
         // class-level comment for rationale — re-auth on recovery closes
         // the deactivation-survival window and the presence-flicker bug.

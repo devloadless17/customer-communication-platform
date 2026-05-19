@@ -17,6 +17,7 @@ import { CurrentApiKey } from "../../auth/current-session.decorator";
 import type { ApiKeyContext } from "../../auth/api-key.guard";
 import { RequireScope } from "../../auth/scope.decorator";
 import { ScopeGuard } from "../../auth/scope.guard";
+import { RateLimit } from "../../common/rate-limit.guard";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import { ExternalV1Service } from "./external-v1.service";
 import {
@@ -107,6 +108,12 @@ import {
  */
 @Controller("api/external/v1")
 @UseGuards(ApiKeyGuard, ScopeGuard)
+// Default per-key ceiling for the whole external surface. ApiKeyGuard's
+// own bucket at 60/min/key is the upstream brake; this decorator-driven
+// guard adds a second axis (per-route-class) so a bulk path can tighten
+// further with its own @RateLimit. Set to 600/min as a generous ceiling
+// for read-heavy traffic — mutation routes override to 60/min below.
+@RateLimit({ perMinute: 600 })
 export class ExternalV1Controller {
   constructor(private readonly api: ExternalV1Service) {}
 
@@ -137,6 +144,10 @@ export class ExternalV1Controller {
 
   @Post("contacts/tags/add")
   @RequireScope("write:contacts")
+  // Bulk paths accept up to 500 contact ids and fan out per-contact event
+  // chains (workflow + audit + outbound webhooks). 20/min/key bounds the
+  // worst case to ~10k contact-events/min from one partner.
+  @RateLimit({ perMinute: 20 })
   async bulkAddTags(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalBulkTagSchema)) body: ExternalBulkTagInput,
@@ -146,6 +157,7 @@ export class ExternalV1Controller {
 
   @Post("contacts/tags/remove")
   @RequireScope("write:contacts")
+  @RateLimit({ perMinute: 20 })
   async bulkRemoveTags(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalBulkTagSchema)) body: ExternalBulkTagInput,

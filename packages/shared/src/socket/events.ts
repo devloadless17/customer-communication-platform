@@ -325,6 +325,16 @@ export interface ServerToClientEvents {
     reason: string;
   }) => void;
 
+  /**
+   * Counterpart to `webhook:subscription_disabled`: a previously-failing
+   * webhook started succeeding again. The settings page clears any "this
+   * webhook is unhealthy" badge so the operator doesn't need to refresh.
+   */
+  "webhook:subscription_recovered": (payload: {
+    teamId: string;
+    webhookId: string;
+  }) => void;
+
   // -------------------------------------------------------------------------
   // Team chat (internal channels). All payloads carry `teamId` so the team
   // room's clients can ignore events from other tenants in the rare case

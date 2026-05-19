@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
@@ -32,6 +32,21 @@ const REFRESH_COALESCE_MS = 150;
 export function useCatalogSync(): void {
   const router = useRouter();
   const pending = useRef<number | null>(null);
+  // Wrap refresh in a transition so Suspense boundaries don't fall back to
+  // loading.tsx during the data refetch. Without this, the FIRST mutation
+  // to any catalog (e.g. creating the first tag for the team) felt like a
+  // full page refresh: revalidateTag busted the data cache → router.refresh
+  // re-fetched the RSC → the inbox page suspended on its parallel catalog
+  // calls → the inbox `loading.tsx` skeleton mounted for ~50-150ms → the
+  // shell unmounted and remounted. Subsequent mutations against an already-
+  // populated cache didn't suspend, so the flicker only showed up on the
+  // empty-catalog → first-entry transition.
+  //
+  // startTransition tells React: "this is a low-priority update, keep
+  // showing the OLD content while the new RSC streams in." Suspense
+  // boundaries inside the route don't unmount; the existing UI stays put
+  // and silently swaps when the new data lands.
+  const [, startTransition] = useTransition();
 
   useEffect(() => {
     const socket = getClientSocket();
@@ -40,7 +55,7 @@ export function useCatalogSync(): void {
       if (pending.current !== null) return;
       pending.current = window.setTimeout(() => {
         pending.current = null;
-        router.refresh();
+        startTransition(() => router.refresh());
       }, REFRESH_COALESCE_MS);
     };
 
@@ -52,5 +67,5 @@ export function useCatalogSync(): void {
         pending.current = null;
       }
     };
-  }, [router]);
+  }, [router, startTransition]);
 }

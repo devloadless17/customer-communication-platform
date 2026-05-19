@@ -1,10 +1,10 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2, WifiOff } from "lucide-react";
 
 import { useConnectionStatus } from "@/hooks/use-connection-status";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { cn } from "@ccp/shared/utils";
 
 /**
@@ -22,13 +22,15 @@ import { cn } from "@ccp/shared/utils";
  * the server on every wifi blip.
  */
 export function ConnectionBanner() {
-  const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const { state } = useConnectionStatus({
     onRecovered: () => {
       // Re-fetch server-rendered slices (inbox list + active thread). The
       // socket has already reconnected and re-subscribed by this point;
-      // refresh fills in anything that landed during the gap.
-      router.refresh();
+      // refresh fills in anything that landed during the gap. Wrapped in
+      // a transition (via useSoftRefresh) so the recovery doesn't briefly
+      // flash the inbox loading skeleton.
+      softRefresh();
     },
   });
 

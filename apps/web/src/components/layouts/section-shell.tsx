@@ -1,19 +1,19 @@
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
 
-import { AppRail } from "@/components/layouts/app-rail";
 import { MobileShellChrome } from "@/components/layouts/mobile-shell-chrome";
-import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 
 /**
- * Three-column section shell shared by every authenticated section
- * (broadcasts / contacts / settings / team / templates / workflows / admin).
+ * Per-section shell — renders the contextual sub-sidebar + main content.
+ * The far-left AppRail and CatalogSyncBoundary live one level up in
+ * `app/(app)/layout.tsx`, so they stay mounted across section nav.
  *
- *   Desktop: [AppRail] [optional sub-sidebar] [main content]
- *   Mobile:  [Mobile header] [main content] + Drawer(AppRail-mobile, sub-sidebar)
+ * `getSession()` / `getCurrentTeam()` here are React.cached, so re-calling
+ * them in the same render tree as the parent layout is a no-op DB hit.
+ * They're needed for the mobile chrome's user + team display.
  *
- * The per-section data fetching (stages for contacts, role checks for admin,
- * etc.) stays in the calling layout — this only owns shell + chrome.
+ *   Desktop: [(app rail from parent layout)] [optional sub-sidebar] [main]
+ *   Mobile:  [Mobile header (this file)] [main] + Drawer(primary nav, sub-sidebar)
  */
 export async function SectionShell({
   subSidebar,
@@ -27,25 +27,23 @@ export async function SectionShell({
    *  scroll (e.g. team chat). */
   mainClassName?: string;
 }) {
-  const { user } = await getSession();
-  const team = await getCurrentTeam();
+  // Both are React.cached and almost always pre-warmed by the (app) parent
+  // layout, so these are free cache hits — but parallelize anyway in case
+  // SectionShell is ever rendered before the parent layout's awaits resolve
+  // (e.g. nested suspense boundary).
+  const [{ user }, team] = await Promise.all([getSession(), getCurrentTeam()]);
 
   return (
-    <CatalogSyncBoundary>
-      <div className="flex min-h-svh flex-col bg-background text-foreground md:flex-row">
-        <MobileShellChrome
-          currentUser={user}
-          team={{ id: team.id, name: team.name }}
-          subSidebar={subSidebar}
-        />
-        <AppRail currentUser={user} team={{ id: team.id, name: team.name }} />
-        {subSidebar}
-        <main
-          className={`min-w-0 flex-1 ${mainClassName ?? "overflow-y-auto"}`}
-        >
-          {children}
-        </main>
-      </div>
-    </CatalogSyncBoundary>
+    <>
+      <MobileShellChrome
+        currentUser={user}
+        team={{ id: team.id, name: team.name }}
+        subSidebar={subSidebar}
+      />
+      {subSidebar}
+      <main className={`min-w-0 flex-1 ${mainClassName ?? "overflow-y-auto"}`}>
+        {children}
+      </main>
+    </>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { Check, ChevronDown, Mail, Phone, MapPin, Clock, FileText, Loader2, UserRound } from "lucide-react";
 
 import {
@@ -25,7 +26,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
-import { getClientSocket } from "@/lib/socket-client";
+import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
@@ -86,6 +87,7 @@ export function ContactPanel({
 }: PanelProps) {
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
 
   // ------------------------------------------------------------------
   // Live stats. ContactPanel is a SIBLING of MessageThread (see
@@ -350,7 +352,7 @@ export function ContactPanel({
         !shallowJsonEqual(customFields, snapshot.customFields) ||
         !arraysEqual(tagIds, snapshot.tagIds);
       if (dirty) return;
-      router.refresh();
+      softRefresh();
     };
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
@@ -404,6 +406,31 @@ export function ContactPanel({
     customFields?: Record<string, string | null>;
   }): Promise<boolean> {
     setError(null);
+    // Build the optimistic contact: server-canonical base + current local
+    // mirrors (which already reflect any prior committed edits) + this patch.
+    // We fan it locally so the sidebar list, the cached thread snapshots,
+    // and the thread header stage stepper / contact name all flip instantly
+    // instead of waiting on PATCH → bus → socket round-trip.
+    const nextCustomFields: Record<string, string> = { ...customFields };
+    if (patch.customFields) {
+      for (const [k, v] of Object.entries(patch.customFields)) {
+        if (v === null) delete nextCustomFields[k];
+        else nextCustomFields[k] = v;
+      }
+    }
+    const optimistic = {
+      ...contact,
+      name: patch.name ?? name,
+      email: "email" in patch ? patch.email ?? undefined : email || undefined,
+      location:
+        "location" in patch ? patch.location ?? undefined : location || undefined,
+      customFields: nextCustomFields,
+      tagIds,
+    };
+    dispatchLocalSocketEvent("contact:updated", {
+      teamId: contact.teamId,
+      contact: optimistic,
+    });
     const res = await fetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -412,6 +439,11 @@ export function ContactPanel({
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       setError(body.error ?? "Couldn't save");
+      // Roll back the optimistic dispatch.
+      dispatchLocalSocketEvent("contact:updated", {
+        teamId: contact.teamId,
+        contact,
+      });
       return false;
     }
     startSaving(() => router.refresh());
@@ -428,6 +460,18 @@ export function ContactPanel({
     if (nextId === assigneeId || assigneePending) return;
     setAssigneePending(true);
     setAssigneeError(null);
+    const prevId = assigneeId;
+    const prevUser = prevId ? teamMembers.find((u) => u.id === prevId) ?? null : null;
+    const nextUser = nextId ? teamMembers.find((u) => u.id === nextId) ?? null : null;
+    // Optimistic: paint locally + fan the same socket frame the server will
+    // broadcast so the sidebar chip, header dropdown, and list row flip
+    // instantly. Rolled back below on error.
+    setAssigneeId(nextId);
+    dispatchLocalSocketEvent("conversation:assigned", {
+      teamId: conversation.teamId,
+      conversationId: conversation.id,
+      assignedUser: nextUser,
+    });
     try {
       const res = await fetch(`/api/conversations/${conversation.id}/assign`, {
         method: "POST",
@@ -437,12 +481,23 @@ export function ContactPanel({
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         setAssigneeError(body.error ?? "Couldn't update");
+        setAssigneeId(prevId);
+        dispatchLocalSocketEvent("conversation:assigned", {
+          teamId: conversation.teamId,
+          conversationId: conversation.id,
+          assignedUser: prevUser,
+        });
         return;
       }
-      setAssigneeId(nextId);
       startSaving(() => router.refresh());
     } catch (err) {
       setAssigneeError(err instanceof Error ? err.message : "Network error");
+      setAssigneeId(prevId);
+      dispatchLocalSocketEvent("conversation:assigned", {
+        teamId: conversation.teamId,
+        conversationId: conversation.id,
+        assignedUser: prevUser,
+      });
     } finally {
       setAssigneePending(false);
     }
@@ -454,6 +509,12 @@ export function ContactPanel({
     const prevIds = tagIds;
     setTagIds(nextIds);
     setTagSaveError(null);
+    // Optimistic: fan the canonical contact:updated locally so the sidebar
+    // (and any other tag-aware surface) reflects the change instantly.
+    dispatchLocalSocketEvent("contact:updated", {
+      teamId: contact.teamId,
+      contact: { ...contact, tagIds: nextIds },
+    });
     const res = await fetch(`/api/contacts/${contact.id}/tags`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -462,6 +523,10 @@ export function ContactPanel({
     if (!res.ok) {
       setTagIds(prevIds);
       setTagSaveError("Failed to save tags");
+      dispatchLocalSocketEvent("contact:updated", {
+        teamId: contact.teamId,
+        contact: { ...contact, tagIds: prevIds },
+      });
       return;
     }
     startSaving(() => router.refresh());

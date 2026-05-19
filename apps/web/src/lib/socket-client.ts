@@ -95,6 +95,25 @@ export function getClientSocket(): ClientSocket {
       }
       return;
     }
+    // Transient classes: auth backend is degraded (Postgres flap) OR the
+    // handshake rate-limit caught a reconnect storm. In both cases the
+    // server is telling us "retry, don't log out." Socket.io's reconnect
+    // loop applies its exponential-with-jitter backoff. Log once so a
+    // sustained outage is discoverable from the console.
+    if (
+      err.message === "auth_unavailable" ||
+      err.message === "handshake_throttled"
+    ) {
+      if (!warned) {
+        warned = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[socket] transient connect_error: ${err.message}. ` +
+            `Backing off and reconnecting.`,
+        );
+      }
+      return;
+    }
     if (warned || teardown) return;
     warned = true;
     const target = apiUrl || `${window.location.origin} (same-origin fallback)`;
@@ -115,6 +134,34 @@ export function getClientSocket(): ClientSocket {
   });
 
   return socket;
+}
+
+/**
+ * Fire a `ServerToClient` event LOCALLY (no network round-trip). Used for
+ * optimistic UI when the client knows the change it's about to persist —
+ * dispatching the same frame the server will eventually broadcast lets every
+ * existing subscriber (sidebar counts, displayed thread reducer, LRU cache)
+ * update instantly. The real server frame arriving moments later is absorbed
+ * by reducers' identity / no-op bails — the second pass is harmless.
+ */
+export function dispatchLocalSocketEvent<E extends keyof ServerToClientEvents>(
+  event: E,
+  payload: Parameters<ServerToClientEvents[E]>[0],
+): void {
+  const s = socket;
+  if (!s) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const listeners = s.listeners(event as any);
+  for (const fn of listeners) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (fn as any)(payload);
+    } catch (err) {
+      // A misbehaving subscriber must not break the optimistic UX.
+      // eslint-disable-next-line no-console
+      console.error(`[socket] local dispatch ${String(event)} subscriber threw`, err);
+    }
+  }
 }
 
 /**

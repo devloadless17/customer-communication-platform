@@ -80,6 +80,34 @@ const SEND_CONCURRENCY = 5;
  */
 const MAX_RECIPIENTS_IN_PROCESS = 10_000;
 
+/**
+ * Per-broadcast 429 streak tracking. Keyed by broadcast id; bumped on
+ * each rate_limited send; reset on either a successful send or after
+ * the pause fires. The map is bounded — entries are deleted when the
+ * broadcast completes / fails (see clearBroadcast429State at the end of
+ * each run). Worst case: an aborted process leaves stale entries; the
+ * orphan reconciler at boot doesn't touch this in-memory map, but it
+ * grows-bounded with one entry per concurrent broadcast (at MAX_RECIPIENTS
+ * = 10k and one running broadcast at a time, the map holds 1 entry).
+ */
+const STREAK_429: Map<string, { count: number; firstAt: number }> = new Map();
+const STREAK_429_WINDOW_MS = 30_000;
+function track429Hit(broadcastId: string): void {
+  const now = Date.now();
+  const cur = STREAK_429.get(broadcastId);
+  if (!cur || now - cur.firstAt > STREAK_429_WINDOW_MS) {
+    STREAK_429.set(broadcastId, { count: 1, firstAt: now });
+    return;
+  }
+  cur.count += 1;
+}
+function rate429Streak(broadcastId: string): number {
+  return STREAK_429.get(broadcastId)?.count ?? 0;
+}
+function reset429Streak(broadcastId: string): void {
+  STREAK_429.delete(broadcastId);
+}
+
 interface BroadcastVariables {
   body: string[];
   header?: string;
@@ -473,6 +501,20 @@ async function processOneRecipient(
       // we wait for ~3s of cooldown then send the same recipient again.
       // Only ONE retry — a permanently-flagged number shouldn't loop.
       if (normalizeMetaSendError(err)?.code === "rate_limited") {
+        // Global per-broadcast 429 streak: when Meta rate-limits N
+        // consecutive sends within ~30s the number's quality rating is
+        // sliding — keep hammering at 25 msg/sec and we drain quality
+        // AND mark thousands of recipients as false-failed. Pause the
+        // broadcast for 60s before retrying this recipient so the rate
+        // limit window has time to clear.
+        track429Hit(broadcast.id);
+        if (rate429Streak(broadcast.id) >= 10) {
+          console.warn(
+            `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing 60s`,
+          );
+          await sleep(60_000);
+          reset429Streak(broadcast.id);
+        }
         await sleep(3_000 + Math.floor(Math.random() * 1_000));
         try {
           send = await provider.sendTemplate(
@@ -573,6 +615,18 @@ async function processOneRecipient(
         data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
       });
 
+      // Re-read so the event payload reflects DB state. If the CAS above
+      // no-op'd (a newer inbound raced past send.timestamp), publishing
+      // the broadcast's own preview would briefly flash it on every
+      // client's conversation list before SSR snaps back to the inbound's
+      // preview — the stale-preview bug the user reports.
+      const summary = await db.conversation.findUnique({
+        where: { id: conversationId },
+        select: { lastMessagePreview: true, lastMessageAt: true },
+      });
+      const publishedPreview = summary?.lastMessagePreview ?? preview;
+      const publishedLastMessageAt = (summary?.lastMessageAt ?? send.timestamp).toISOString();
+
       const messagePayload: Message = {
         id: created.id,
         teamId: broadcast.teamId,
@@ -593,8 +647,8 @@ async function processOneRecipient(
         broadcastId: broadcast.id,
         conversationId,
         message: messagePayload,
-        preview,
-        lastMessageAt: send.timestamp.toISOString(),
+        preview: publishedPreview,
+        lastMessageAt: publishedLastMessageAt,
         // Outbound broadcast doesn't touch unread, so the conversation
         // row's pre-send value is still the accurate absolute count.
         unreadCount: conversationUnreadCount,
@@ -815,6 +869,24 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     `[broadcast-reconciler] flipping ${orphans.length} orphaned running broadcast(s) to failed`,
   );
 
+  // Count abandoned (queued) recipients per orphan BEFORE we flip the
+  // status, so the operator alert + UI banner can quantify the damage.
+  // Without this the orphan failure is silent: operators don't know that
+  // N customers never received a time-sensitive broadcast.
+  const abandonedByBroadcast = new Map<string, number>();
+  for (const o of orphans) {
+    const count = await db.broadcastRecipient.count({
+      where: { broadcastId: o.id, status: "queued" },
+    });
+    abandonedByBroadcast.set(o.id, count);
+    if (count > 0) {
+      console.warn(
+        `[broadcast-reconciler] broadcast ${o.id}: ${count} recipient(s) ` +
+          `abandoned in 'queued' state — runbook step (2) required`,
+      );
+    }
+  }
+
   const errorMessage = "process restarted mid-broadcast; resume not supported";
   await db.broadcast.updateMany({
     where: { id: { in: orphans.map((o) => o.id) } },
@@ -826,12 +898,14 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
   });
 
   for (const o of orphans) {
+    const abandoned = abandonedByBroadcast.get(o.id) ?? 0;
     await publish({
       type: "broadcast.status_changed",
       teamId: o.teamId,
       broadcastId: o.id,
       status: "failed",
       error: errorMessage,
+      ...(abandoned > 0 ? { abandonedRecipients: abandoned } : {}),
     });
   }
 }

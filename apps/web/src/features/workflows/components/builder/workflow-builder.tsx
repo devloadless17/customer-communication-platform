@@ -3,6 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   ArrowUpRight,
   Loader2,
@@ -67,6 +68,7 @@ interface Props {
 
 export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
 
   const [name, setName] = useState(workflow?.name ?? "Untitled workflow");
@@ -143,7 +145,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     if (mode === "create" && json.id) {
       router.push(`/workflows/${json.id}`);
     } else if (!opts.silent) {
-      router.refresh();
+      softRefresh();
     }
     return true;
   }
@@ -181,7 +183,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       return;
     }
     setPublished(next);
-    router.refresh();
+    softRefresh();
   }
 
   async function handleTest() {

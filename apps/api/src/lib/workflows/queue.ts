@@ -47,6 +47,11 @@ export function getRedisConnection(): IORedis {
   state.connection = new IORedis(redisUrl(), {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
+    // Bound the TCP-level wait so a Redis that's silently RST-dropping
+    // packets can't wedge the worker. ioredis defaults to no timeout on
+    // either, so without these a network-partitioned Redis hangs forever.
+    connectTimeout: 10_000,
+    commandTimeout: 30_000,
   });
   state.connection.on("error", (err) => {
     console.error("[workflows][redis]", err.message);

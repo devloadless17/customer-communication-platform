@@ -33,6 +33,11 @@ export interface MetaSendConfig {
 export interface MetaWebhookConfig {
   appSecret: string;
   verifyToken: string;
+  /** Optional — when set, every webhook's `entry[].changes[].value.metadata.phone_number_id`
+   *  must match. Caching this here lets the controller's mismatch check
+   *  reuse the same cached lookup as the appSecret read instead of paying
+   *  a separate `db.team.findUnique` per webhook. */
+  phoneNumberId: string | null;
 }
 
 export class ProviderNotConfiguredError extends Error {
@@ -99,6 +104,7 @@ interface SendConfigCipher {
 interface WebhookConfigCipher {
   appSecretCipher: string;
   verifyToken: string;
+  phoneNumberId: string | null;
 }
 
 type CachedSend =
@@ -244,13 +250,18 @@ export async function getMetaWebhookConfig(
   } else {
     const team = await db.team.findUnique({
       where: { id: teamId },
-      select: { metaAppSecret: true, metaVerifyToken: true },
+      select: {
+        metaAppSecret: true,
+        metaVerifyToken: true,
+        metaPhoneNumberId: true,
+      },
     });
     cipher =
       team && team.metaAppSecret && team.metaVerifyToken
         ? {
             appSecretCipher: team.metaAppSecret,
             verifyToken: team.metaVerifyToken,
+            phoneNumberId: team.metaPhoneNumberId ?? null,
           }
         : null;
     evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);
@@ -263,6 +274,7 @@ export async function getMetaWebhookConfig(
     return {
       appSecret: decryptSecret(cipher.appSecretCipher),
       verifyToken: cipher.verifyToken,
+      phoneNumberId: cipher.phoneNumberId,
     };
   } catch (err) {
     console.error(

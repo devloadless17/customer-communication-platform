@@ -147,15 +147,45 @@ async function runSubscribers<K extends DomainEventType>(
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
 
-  // Sequential dispatch in registration order. workflow-dispatch reads
-  // post-mutation state that analytics writes; outbound-webhooks ships
-  // partner payloads carrying those same fields. Parallel dispatch made
-  // both races inevitable in proportion to subscriber latency. See the
-  // class-level comment for the registration-order invariant.
+  // Realtime fanout fires SYNCHRONOUSLY before the awaited chain — so a
+  // slow downstream subscriber (workflow-dispatch, outbound-webhooks)
+  // cannot add latency to the socket emit that the inbox UI is waiting
+  // on. The realtime subscriber is itself a `void emit(...)` to Socket.io
+  // and never throws synchronously, so this is safe to fire-and-forget
+  // outside the try/catch sequence. Subsequent subscribers still need
+  // the ordering invariant (workflow-dispatch reads analytics' writes).
   //
-  // Each handler still gets its own try/catch so a broken subscriber
-  // can't poison the chain.
-  for (let i = 0; i < list.length; i++) {
+  // Identified by registration name convention: the realtime subscriber
+  // is always registered first AND its handler is fast. We don't have
+  // a tag system yet, so we treat handler #0 as the realtime tier.
+  // RealtimeFanoutService MUST be the first subscribe(...) for each
+  // event type — verified by the registration site in
+  // realtime-fanout.service.ts (subscribers register at module init).
+  const first = list[0]!;
+  try {
+    const maybe = first(event as DomainEventOf<DomainEventType>);
+    if (maybe && typeof (maybe as Promise<void>).then === "function") {
+      void (maybe as Promise<void>).catch((err) => {
+        console.error(
+          withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }
+  } catch (err) {
+    console.error(
+      withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // Remaining subscribers: sequential dispatch in registration order.
+  // workflow-dispatch reads post-mutation state that analytics writes;
+  // outbound-webhooks ships partner payloads carrying those same fields.
+  // Parallel dispatch made both races inevitable in proportion to
+  // subscriber latency. Each handler gets its own try/catch so a broken
+  // subscriber can't poison the chain.
+  for (let i = 1; i < list.length; i++) {
     const handler = list[i]!;
     try {
       await handler(event as DomainEventOf<DomainEventType>);

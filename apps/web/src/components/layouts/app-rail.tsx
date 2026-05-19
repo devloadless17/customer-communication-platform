@@ -26,9 +26,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useSignOutOverlay } from "@/components/auth/signout-overlay";
 import { roleLabel } from "@ccp/shared/auth/permissions";
-import { broadcastSignout } from "@/lib/auth/auth-broadcast";
-import { closeClientSocket } from "@/lib/socket-client";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
 
@@ -215,50 +214,53 @@ function UserMenu({
   currentUser: User;
   children: React.ReactNode;
 }) {
+  // Sign out shows a full-screen "Signing out…" overlay during the hard nav
+  // to /logout. Without it, the blank-screen window between /logout and
+  // /login feels broken on slow connections — the overlay turns it into a
+  // brief polished spinner.
+  const { trigger: signOut, overlay } = useSignOutOverlay();
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="right" className="min-w-52">
-        <DropdownMenuLabel>
-          <div className="flex flex-col">
-            <span className="text-sm font-medium">{currentUser.name}</span>
-            <span className="text-[11px] font-normal text-muted-foreground">
-              {currentUser.email}
-            </span>
-            <span className="mt-0.5 text-[10px] font-normal text-muted-foreground/80">
-              {roleLabel(currentUser.role)}
-            </span>
-          </div>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link href="/settings/workspace">
-            <UserCircle2 className="size-4 text-muted-foreground" />
-            Account settings
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuItem asChild>
-          <Link href="/settings">
-            <SettingsIcon className="size-4 text-muted-foreground" />
-            Workspace settings
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={(e) => {
-            e.preventDefault();
-            // Drop the socket before navigation so other clients see the
-            // user go offline immediately. Hard nav avoids the Better Auth
-            // cookies-vs-redirect race in server actions.
-            broadcastSignout();
-            closeClientSocket();
-            window.location.assign("/logout");
-          }}
-        >
-          <LogOut className="size-4 text-muted-foreground" />
-          Sign out
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
+        <DropdownMenuContent align="end" side="right" className="min-w-52">
+          <DropdownMenuLabel>
+            <div className="flex flex-col">
+              <span className="text-sm font-medium">{currentUser.name}</span>
+              <span className="text-[11px] font-normal text-muted-foreground">
+                {currentUser.email}
+              </span>
+              <span className="mt-0.5 text-[10px] font-normal text-muted-foreground/80">
+                {roleLabel(currentUser.role)}
+              </span>
+            </div>
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem asChild>
+            <Link href="/settings/workspace">
+              <UserCircle2 className="size-4 text-muted-foreground" />
+              Account settings
+            </Link>
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild>
+            <Link href="/settings">
+              <SettingsIcon className="size-4 text-muted-foreground" />
+              Workspace settings
+            </Link>
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault();
+              signOut();
+            }}
+          >
+            <LogOut className="size-4 text-muted-foreground" />
+            Sign out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {overlay}
+    </>
   );
 }

@@ -798,21 +798,34 @@ export function ContactBrowser({
         )}
         {list.nextCursor && (
           <div className="border-t border-border p-3 text-center">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={list.loadMore}
-              disabled={list.loadingMore}
-            >
-              {list.loadingMore ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Loading…
-                </>
-              ) : (
-                "Load more"
-              )}
-            </Button>
+            {items.length >= 2000 ? (
+              // Render-cap. The list isn't virtualized today; past ~2000
+              // DOM rows the page becomes laggy and past ~5000 it freezes.
+              // Steer the user to refine filters instead of loading
+              // unbounded pages. The cap can be lifted once virtualization
+              // lands (use-virtualizer pattern from conversation-list.tsx).
+              <div className="text-[12px] text-muted-foreground">
+                Showing {items.length.toLocaleString()} contacts. Refine the
+                filters or search to see more — the list is capped to keep
+                the page responsive.
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={list.loadMore}
+                disabled={list.loadingMore}
+              >
+                {list.loadingMore ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    Loading…
+                  </>
+                ) : (
+                  "Load more"
+                )}
+              </Button>
+            )}
           </div>
         )}
       </div>

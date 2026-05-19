@@ -40,6 +40,10 @@ export function getWebhookRedisConnection(): IORedis {
   state.connection = new IORedis(redisUrl(), {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
+    // Same posture as the workflow queue connection. Without these a
+    // network-partitioned Redis wedges the worker indefinitely.
+    connectTimeout: 10_000,
+    commandTimeout: 30_000,
   });
   state.connection.on("error", (err) => {
     console.error("[webhooks][redis]", err.message);

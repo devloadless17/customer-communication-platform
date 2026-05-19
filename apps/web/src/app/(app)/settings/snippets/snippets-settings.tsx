@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
   Check,
@@ -59,7 +59,7 @@ export function SnippetsSettings({
   fieldDefinitions: ContactFieldDefinition[];
 }) {
   const { confirm, confirmDialog } = useConfirm();
-  const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const [snippets, setSnippets] = useState<SnippetDto[]>(initialSnippets);
   // Sync FROM props: when router.refresh() (from useCatalogSync's
   // team:catalog:changed handler — fired by THIS user's mutations or by
@@ -118,9 +118,9 @@ export function SnippetsSettings({
       // until a hard reload. The reload() call below keeps THIS page's
       // local list in sync; refresh() takes care of the inbox.
       void reload();
-      router.refresh();
+      softRefresh();
     },
-    [reload, router],
+    [reload, softRefresh],
   );
 
   const askDelete = useCallback(
@@ -142,9 +142,9 @@ export function SnippetsSettings({
       // Same reasoning as onSaved — invalidate the inbox layout's RSC so
       // the deleted snippet stops appearing in the reply-box `/menu` for
       // other agents (and this user, if they navigate away and back).
-      router.refresh();
+      softRefresh();
     },
-    [confirm, editingId, router],
+    [confirm, editingId, softRefresh],
   );
 
   return (

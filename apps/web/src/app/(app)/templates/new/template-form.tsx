@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -97,6 +98,7 @@ export function TemplateForm({
   hasAppId: boolean;
 }) {
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
 
   // ---- Core fields -----
   const [name, setName] = useState("");
@@ -267,12 +269,17 @@ export function TemplateForm({
       // Upload to Meta via our route. Returns a handle we embed in the
       // create payload's example.header_handle.
       setUploadingHeader(true);
+      // 120s upload timeout. Without it a stalled connection leaves the
+      // form in "Uploading…" forever with no Cancel affordance.
+      const abort = new AbortController();
+      const timeoutId = window.setTimeout(() => abort.abort(), 120_000);
       try {
         const fd = new FormData();
         fd.append("file", file);
         const res = await fetch("/api/team/whatsapp/templates/upload-media", {
           method: "POST",
           body: fd,
+          signal: abort.signal,
         });
         const data = (await res.json()) as {
           headerHandle?: string;
@@ -286,9 +293,14 @@ export function TemplateForm({
         }
         setHeaderHandle(data.headerHandle);
       } catch (err) {
-        setHeaderError(err instanceof Error ? err.message : "Upload failed");
+        if (err instanceof Error && err.name === "AbortError") {
+          setHeaderError("Upload timed out. Try again with a smaller file or a faster connection.");
+        } else {
+          setHeaderError(err instanceof Error ? err.message : "Upload failed");
+        }
         setHeaderHandle(null);
       } finally {
+        window.clearTimeout(timeoutId);
         setUploadingHeader(false);
       }
     },
@@ -322,7 +334,7 @@ export function TemplateForm({
         );
       }
       router.push("/templates");
-      router.refresh();
+      softRefresh();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Submit failed");
       setSubmitting(false);

@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -17,7 +18,19 @@ import { loginAction, type LoginState } from "./actions";
 const INITIAL: LoginState = { error: null };
 
 export function LoginForm({ next }: { next: string }) {
+  const router = useRouter();
   const { state, action, isRedirecting } = useAuthRedirect(loginAction, INITIAL);
+
+  // Prefetch the post-login destination as soon as the form mounts. Without
+  // this, the user clicks Sign in → action runs (~150ms) → state.redirectTo
+  // set → router.replace → /inbox starts SSR + 3 catalog fetches → finally
+  // /inbox paints. The intermediate `AuthRedirectFallback` is the spinner
+  // the user perceives as "the form flickering then loading". Prefetching
+  // the destination here warms Next.js's RSC cache so the post-action
+  // navigation is near-instant.
+  useEffect(() => {
+    router.prefetch(next);
+  }, [router, next]);
 
   // Server-initiated /logout sets `?bc=1` on the redirect to /login.
   // Forward that signal to sibling tabs that didn't initiate the signout

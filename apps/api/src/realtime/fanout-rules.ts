@@ -357,4 +357,13 @@ export const FANOUT_RULES: FanoutRuleMap = {
       reason: e.reason,
     });
   },
+
+  // Counterpart: a previously-failing webhook recovered. UI clears the
+  // unhealthy badge so the operator doesn't have to refresh manually.
+  "webhook.subscription_recovered": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "webhook:subscription_recovered", {
+      teamId: e.teamId,
+      webhookId: e.webhookId,
+    });
+  },
 };

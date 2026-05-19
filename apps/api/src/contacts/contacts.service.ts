@@ -24,6 +24,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
+import { runWithConcurrency } from "../common/concurrency";
 import type {
   AudienceCountInput,
   AudiencePreviewInput,
@@ -34,7 +35,11 @@ import type {
   UpdateContactInput,
 } from "./contacts.schemas";
 
-const MAX_BYTES = 5 * 1024 * 1024;
+// 5 MiB CSV is more than the 5000-row cap can ever fill (a 100-char row at
+// 5000 rows is ~500 KB), and a pathological CSV with one row of 5M escaped
+// chars pins the event loop hundreds of ms during parseCsv. 1 MiB is plenty
+// for 5000 typical contact rows AND bounds the worst case to ~tens of ms.
+const MAX_BYTES = 1 * 1024 * 1024;
 const MAX_ROWS = 5000;
 const MAX_TEXT = 500;
 
@@ -543,17 +548,20 @@ export class ContactsService {
         await blobStorage.delete(mediaKeys);
       }
 
-      await Promise.all(
-        ownedIds.map((id) =>
-          this.bus.publish({
-            type: "contact.deleted",
-            teamId,
-            contactId: id,
-            conversationIds: conversationsByContact.get(id) ?? [],
-            deletedByUserId: userId,
-          }),
-        ),
-      );
+      // Bounded fanout: 500 ids × 6 sequential subscribers via Promise.all
+      // pinned the event loop and blocked unrelated requests on the single
+      // VPS. 16-lane runner caps concurrent subscriber chains so the lane
+      // serializes within itself; total wall time is roughly the same as
+      // before, but the event loop stays responsive between lanes.
+      await runWithConcurrency(ownedIds, 16, async (id) => {
+        await this.bus.publish({
+          type: "contact.deleted",
+          teamId,
+          contactId: id,
+          conversationIds: conversationsByContact.get(id) ?? [],
+          deletedByUserId: userId,
+        });
+      });
 
       return { ok: true, count: ownedIds.length };
     }
@@ -613,8 +621,11 @@ export class ContactsService {
     // trigger dispatch). `suppressSocketFanout: true` skips the per-contact
     // socket emit — the coalesced `contact.bulk_updated` below carries
     // the whole id set in one frame instead.
-    await Promise.all(
-      updated.map(async (c) => {
+    //
+    // Bounded 16-lane fanout so the subscriber chain doesn't pin the event
+    // loop on a 500-id bulk-tag. Per-subscriber try/catch in the bus
+    // prevents one bad subscriber from breaking the rest.
+    await runWithConcurrency(updated, 16, async (c) => {
         const tagIds = c.tags.map((t) => t.id);
         const payload: Contact = {
           id: c.id,
@@ -676,8 +687,7 @@ export class ContactsService {
             changedByUserId: userId,
           });
         }
-      }),
-    );
+      });
 
     // One coalesced socket frame for the whole batch. At 25 agents online
     // a 500-contact bulk-tag drops from ~12,500 socket frames to 25.
@@ -898,7 +908,8 @@ export class ContactsService {
 
   /** First N matches for an audience selection (for the preview list). */
   previewAudience(teamId: string, input: AudiencePreviewInput) {
-    return previewAudienceContacts(teamId, input);
+    const { limit, ...audience } = input;
+    return previewAudienceContacts(teamId, audience, limit);
   }
 
   /**
@@ -1009,7 +1020,14 @@ export class ContactsService {
    * usage-capped at the team level and a single SELECT keeps the response
    * deterministic.
    */
-  async exportCsv(teamId: string): Promise<{ csv: string; filename: string }> {
+  async exportCsv(teamId: string): Promise<{ csv: string; filename: string; truncated: boolean }> {
+    // Hard cap. Without it a tenant with 200k contacts triggers a single
+    // SELECT that loads every row + serializes in one shot — multi-MB
+    // JSON response on the wire AND a multi-MB CSV string serialized
+    // synchronously on the event loop. 50k rows is plenty for the bulk of
+    // teams; over that, the operator should filter the audience first or
+    // we should ship a true streaming export.
+    const EXPORT_HARD_CAP = 50_000;
     const [contacts, fieldDefs] = await Promise.all([
       this.db.contact.findMany({
         where: { teamId },
@@ -1022,6 +1040,7 @@ export class ContactsService {
           customFields: true,
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: EXPORT_HARD_CAP + 1,
       }),
       this.db.contactFieldDefinition.findMany({
         where: { teamId },
@@ -1075,10 +1094,12 @@ export class ContactsService {
       return row;
     });
 
-    const csv = serializeCsv(columns, rows);
+    const truncated = contacts.length > 50_000;
+    const cappedRows = truncated ? rows.slice(0, 50_000) : rows;
+    const csv = serializeCsv(columns, cappedRows);
     // Date-stamp so multiple exports in a day don't overwrite each other.
     const stamp = new Date().toISOString().slice(0, 10);
-    return { csv, filename: `contacts-${stamp}.csv` };
+    return { csv, filename: `contacts-${stamp}.csv`, truncated };
   }
 }
 

@@ -22,7 +22,6 @@ import type {
 import { useTeamEvents } from "@/features/team-chat/hooks/use-team-events";
 import { useConnectionStatus } from "@/hooks/use-connection-status";
 import { usePresence } from "@/hooks/use-presence";
-import { useCatalogSync } from "@/hooks/use-catalog-sync";
 import { useConversationSearch } from "@/features/inbox/hooks/use-conversation-search";
 import { getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
@@ -31,7 +30,6 @@ import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 
 import dynamic from "next/dynamic";
 
-import { AppRail } from "@/components/layouts/app-rail";
 import { InboxSubSidebar } from "@/components/layouts/inbox-sub-sidebar";
 import { MobileShellChrome } from "@/components/layouts/mobile-shell-chrome";
 import { cn } from "@ccp/shared/utils";
@@ -166,6 +164,15 @@ export function InboxShell({
   displayedIdRef.current = displayedId;
 
   const fetchControllersRef = useRef<Map<string, AbortController>>(new Map());
+
+  // Tracks whether the socket "connect" listener has fired at least once
+  // for the LIFETIME of this component instance (not just the current
+  // effect run). Was a plain object inside the effect — if that effect
+  // ever re-ran (deps change), the flag reset and the next reconnect was
+  // wrongly classified as "first connect" → the cache.clearExcept call
+  // was skipped → stale snapshots survived. With useRef the flag persists
+  // across re-runs of the effect and the semantics actually hold.
+  const hasConnectedOnceRef = useRef(false);
 
   // Cache is stable across renders — lazy-init via useState so we don't
   // reconstruct the LRU on every commit. The eviction callback aborts any
@@ -460,17 +467,26 @@ export function InboxShell({
     const reducerCtx = { currentUserId: currentUser.id };
     const reducerHandlers = THREAD_REDUCER_EVENTS.map(({ event, apply, target }) => {
       const handler = (payload: { conversationId?: string } & Record<string, unknown>) => {
-        if ((target ?? "conversation") === "all") {
-          cache.patchAll((curr) => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const next = (apply as any)(curr.data, payload, reducerCtx);
-            return next === curr.data ? null : { ...curr, data: next };
-          });
-          return;
+        // Reducer try/catch — without it, a malformed payload from a
+        // version-skewed server (post-deploy) throws inside the
+        // setState updater, leaving cache state half-applied and
+        // breaking subsequent updates. Isolate failures to this event.
+        try {
+          if ((target ?? "conversation") === "all") {
+            cache.patchAll((curr) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const next = (apply as any)(curr.data, payload, reducerCtx);
+              return next === curr.data ? null : { ...curr, data: next };
+            });
+            return;
+          }
+          if (!payload?.conversationId) return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          patchData(payload.conversationId, (d) => (apply as any)(d, payload, reducerCtx));
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(`[inbox-shell] reducer for "${event}" threw`, err);
         }
-        if (!payload?.conversationId) return;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        patchData(payload.conversationId, (d) => (apply as any)(d, payload, reducerCtx));
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       socket.on(event as any, handler as any);
@@ -483,11 +499,12 @@ export function InboxShell({
     // Drop them all and force a refetch on the next visit. The displayed
     // thread is left alone — useConversationEvents owns it and re-syncs its
     // own state through the `?after=...` backfill on the same reconnect.
-    // First connect is skipped: server-seeded data is current.
-    const firstConnectRef = { value: true };
+    // First connect is skipped: server-seeded data is current. The flag
+    // lives outside the effect (useRef) so a re-run of the effect doesn't
+    // reset it and re-classify a reconnect as "first connect".
     const onConnect = () => {
-      if (firstConnectRef.value) {
-        firstConnectRef.value = false;
+      if (!hasConnectedOnceRef.current) {
+        hasConnectedOnceRef.current = true;
         return;
       }
       cache.clearExcept(displayedIdRef.current);
@@ -558,9 +575,26 @@ export function InboxShell({
   const loadingMore = searchState.active ? searchState.loadingMore : live.loadingMore;
   const loadMore = searchState.active ? searchState.loadMore : live.loadMore;
 
-  const { connected } = useConnectionStatus();
+  // useConnectionStatus is mounted for its side effect only — the AppRail
+  // (which consumed `connected`) lives in /inbox/layout.tsx now and reads
+  // it via its own hook call. ConnectionBanner reads it the same way.
+  //
+  // usePresence still joins the presence room so other clients see this
+  // user as online, AND drives the green/grey dots next to each teammate
+  // in the InboxSubSidebar.
+  //
+  // useCatalogSync is provided by the layout's CatalogSyncBoundary now;
+  // mounting it here would fire two refreshes per catalog change.
+  useConnectionStatus();
   const { onlineUserIds } = usePresence(team.id, currentUser.id);
-  useCatalogSync();
+
+  // Sidebar teammates list: active members only (deactivated users still
+  // appear in `teamMembers` so historical message attribution survives,
+  // but the sidebar shouldn't list them).
+  const teammates = useMemo(
+    () => teamMembers.filter((u) => u.isActive),
+    [teamMembers],
+  );
 
   // Warm the cache for the top N conversations on mount so the agent's first
   // click never hits a cold cache. The hover-prefetch on rows covers anything
@@ -634,21 +668,24 @@ export function InboxShell({
               currentUser={currentUser}
               conversations={live.conversations}
               stages={stages}
+              teammates={teammates}
+              onlineUserIds={onlineUserIds}
               filter={filter}
               onFilterChange={setFilter}
             />
           }
         />
-        <AppRail
-          currentUser={currentUser}
-          team={team}
-          connected={connected}
-          onlineUserIds={onlineUserIds}
-        />
+        {/* AppRail moved to /inbox/layout.tsx so it persists across the
+            inbox's loading.tsx — clicking the Inbox icon from another
+            section no longer flashes a white screen. Connection / presence
+            dots that used to show here are now surfaced via
+            ConnectionBanner (visible only when disconnected). */}
         <InboxSubSidebar
           currentUser={currentUser}
           conversations={live.conversations}
           stages={stages}
+          teammates={teammates}
+          onlineUserIds={onlineUserIds}
           filter={filter}
           onFilterChange={setFilter}
         />

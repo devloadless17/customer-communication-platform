@@ -5,13 +5,28 @@ import { auth } from "@/auth/better-auth";
 import type { Role } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
-import { sessionCacheGet, sessionCacheSet } from "../auth/session.guard";
+import {
+  sessionCacheGet,
+  sessionCacheGetByCookie,
+  sessionCacheSet,
+  sessionCacheSetByCookie,
+} from "../auth/session.guard";
 
 export interface SocketIdentity {
   userId: string;
   teamId: string;
   role: Role;
 }
+
+export type SocketAuthResult =
+  | { kind: "ok"; identity: SocketIdentity }
+  | { kind: "unauthenticated" }
+  /**
+   * Auth backend is degraded (Postgres flap, Better Auth threw). Client
+   * receives "auth_unavailable" rather than "unauthenticated" so the browser
+   * keeps reconnecting with backoff instead of force-logging the user out.
+   */
+  | { kind: "unavailable" };
 
 /**
  * Socket.io handshake authentication. Runs once per real connect (not once
@@ -33,29 +48,66 @@ export class SocketAuthService {
 
   constructor(private readonly db: DbService) {}
 
-  async authenticate(socket: Socket): Promise<SocketIdentity | null> {
+  async authenticate(socket: Socket): Promise<SocketAuthResult> {
+    const cookieHeader = socket.handshake.headers.cookie;
+    if (!cookieHeader || cookieHeader.length === 0) {
+      return { kind: "unauthenticated" };
+    }
+
+    // Fast-path: cookie-hash cache short-circuits Better Auth entirely.
+    // Without this, a deploy + 80-agent reconnect = 80 simultaneous Better
+    // Auth lookups → Postgres pool starves → `getSession` throws →
+    // every connected agent gets logged out. This is the CR1 cascade.
+    const cachedFromCookie = sessionCacheGetByCookie(cookieHeader);
+    if (cachedFromCookie) {
+      return {
+        kind: "ok",
+        identity: {
+          userId: cachedFromCookie.userId,
+          teamId: cachedFromCookie.teamId,
+          role: cachedFromCookie.role,
+        },
+      };
+    }
+
+    let session: Awaited<ReturnType<typeof auth.api.getSession>>;
     try {
       const headers = new Headers();
-      const cookieHeader = socket.handshake.headers.cookie;
-      if (cookieHeader) headers.set("cookie", cookieHeader);
+      headers.set("cookie", cookieHeader);
+      session = await auth.api.getSession({ headers });
+    } catch (err) {
+      this.logger.warn(
+        `socket auth: getSession threw: ${err instanceof Error ? err.message : err}`,
+      );
+      // Transient: tell the client to retry instead of forcing /logout.
+      return { kind: "unavailable" };
+    }
 
-      const session = await auth.api.getSession({ headers });
-      const userId = session?.user?.id;
-      const sessionId = session?.session?.id;
-      const teamId = (session?.user as { teamId?: string } | undefined)?.teamId;
-      const role = (session?.user as { role?: Role } | undefined)?.role;
-      if (!userId || !sessionId || !teamId || !role) return null;
+    const userId = session?.user?.id;
+    const sessionId = session?.session?.id;
+    const teamId = (session?.user as { teamId?: string } | undefined)?.teamId;
+    const role = (session?.user as { role?: Role } | undefined)?.role;
+    if (!userId || !sessionId || !teamId || !role) {
+      return { kind: "unauthenticated" };
+    }
 
-      // After a Caddy bounce / deploy a whole team's tabs reconnect within
-      // seconds; without the cache, every handshake paid an independent
-      // `user.findUnique` deactivation check. The HTTP SessionGuard
-      // already maintains a 15s per-userId snapshot; reuse it so socket
-      // handshakes get the same single-DB-hit-per-window economics.
-      const cached = sessionCacheGet(userId);
-      if (cached) {
-        return { userId, teamId: cached.teamId, role: cached.role };
-      }
-      const dbUser = await this.db.user.findUnique({
+    // After a Caddy bounce / deploy a whole team's tabs reconnect within
+    // seconds; without the cache, every handshake paid an independent
+    // `user.findUnique` deactivation check. The HTTP SessionGuard
+    // already maintains a 15s per-userId snapshot; reuse it so socket
+    // handshakes get the same single-DB-hit-per-window economics.
+    const cached = sessionCacheGet(userId);
+    if (cached) {
+      sessionCacheSetByCookie(cookieHeader, userId);
+      return {
+        kind: "ok",
+        identity: { userId, teamId: cached.teamId, role: cached.role },
+      };
+    }
+
+    let dbUser;
+    try {
+      dbUser = await this.db.user.findUnique({
         where: { id: userId },
         select: {
           id: true,
@@ -67,22 +119,27 @@ export class SocketAuthService {
           deactivatedAt: true,
         },
       });
-      if (!dbUser || dbUser.deactivatedAt) return null;
-      sessionCacheSet(userId, {
-        sessionId,
-        userId: dbUser.id,
-        teamId: dbUser.teamId,
-        role: dbUser.role as Role,
-        name: dbUser.name,
-        email: dbUser.email,
-        avatarUrl: dbUser.avatarUrl ?? null,
-      });
-      return { userId, teamId: dbUser.teamId, role: dbUser.role as Role };
     } catch (err) {
       this.logger.warn(
-        `socket auth threw: ${err instanceof Error ? err.message : err}`,
+        `socket auth: user.findUnique threw: ${err instanceof Error ? err.message : err}`,
       );
-      return null;
+      return { kind: "unavailable" };
     }
+    if (!dbUser) return { kind: "unauthenticated" };
+    if (dbUser.deactivatedAt) return { kind: "unauthenticated" };
+    sessionCacheSet(userId, {
+      sessionId,
+      userId: dbUser.id,
+      teamId: dbUser.teamId,
+      role: dbUser.role as Role,
+      name: dbUser.name,
+      email: dbUser.email,
+      avatarUrl: dbUser.avatarUrl ?? null,
+    });
+    sessionCacheSetByCookie(cookieHeader, dbUser.id);
+    return {
+      kind: "ok",
+      identity: { userId, teamId: dbUser.teamId, role: dbUser.role as Role },
+    };
   }
 }

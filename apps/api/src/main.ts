@@ -11,6 +11,7 @@ import { validateEnv } from "@ccp/config";
 
 import { AppModule } from "./app.module";
 import { correlationMiddleware } from "./common/correlation";
+import { ipRateLimitMiddleware } from "./common/ip-rate-limit.middleware";
 import { WsAdapter } from "./realtime/ws-adapter";
 
 /**
@@ -81,6 +82,14 @@ async function bootstrap(): Promise<void> {
   // Cookie parsing for the Better Auth session cookie (read by SessionGuard).
   // The cookie itself is set by Next.js on signin; we only need to read it.
   app.use(cookieParser());
+
+  // Per-IP rate-limit BEFORE auth. The session guard's bucket only fires
+  // once `req.session` is set, so without this an attacker can spam
+  // session-guarded routes with garbage cookies and pay the full Better
+  // Auth `getSession` cost (a Postgres lookup) per request — easy DoS.
+  // Skips /webhooks/*, /api/external/v1, /api/health, /api/socket — those
+  // have their own per-key/per-team limits or must remain unmetered.
+  app.use(ipRateLimitMiddleware());
 
   // Raw body capture for HMAC-verified ingest paths. The signature is
   // computed over the *raw* bytes — JSON-parsing first would let a single
@@ -215,7 +224,21 @@ async function bootstrap(): Promise<void> {
 
   const port = Number(process.env.API_PORT ?? 4000);
   const host = process.env.API_HOST ?? "0.0.0.0";
-  await app.listen(port, host);
+  const server = await app.listen(port, host);
+
+  // Hard timeouts on the HTTP server. Node defaults are either disabled
+  // (`requestTimeout=0` on older versions) or far too generous, so a
+  // slowloris client or a partner that opens a POST and never closes it can
+  // pin parser threads and FDs indefinitely. Numbers picked so:
+  //   - headersTimeout (10s) is shorter than Caddy's idle (60s) so a stuck
+  //     header phase is reaped before Caddy gives up.
+  //   - requestTimeout (30s) covers the slowest legitimate upload preflight
+  //     while still bounding a stuck body.
+  //   - keepAliveTimeout (65s) is just over the typical proxy idle so we
+  //     don't reset connections Caddy still thinks are alive.
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 65_000;
 
   const logger = new Logger("Bootstrap");
   logger.log(`NestJS API listening on http://${host}:${port}`);

@@ -5,22 +5,21 @@ import {
   getChannelById,
   listChannelMessages,
   listChannelPins,
-  listChannelsForUser,
-  listTeamMembers,
 } from "@/lib/api/queries";
 
 import { TeamChatWorkspace } from "@/features/team-chat/components/team-chat-workspace";
 
 /**
- * Channel view. Server-renders the initial slice of:
- *   - sidebar channel list (so it paints with badges on first frame)
+ * Channel view. Server-renders the initial slice of per-channel data:
+ *   - active channel meta
  *   - the active channel's latest message page
  *   - pins
- *   - team roster (for the @ picker)
  *
- * Switching channels uses a soft client nav inside the workspace — no
- * server round-trip per click; the URL still moves so refresh / share /
- * back work naturally.
+ * Channel-AGNOSTIC data (channels list + team members for @ picker)
+ * lives in /team/layout.tsx and reaches the workspace via context — so
+ * switching channels only re-runs these three per-channel fetches,
+ * not the full 5 it used to. See the layout's doc-comment for the
+ * rationale.
  */
 export default async function ChannelPage({
   params,
@@ -30,12 +29,10 @@ export default async function ChannelPage({
   const { user } = await getSession();
   const { channelId } = await params;
 
-  const [channel, channels, page, pins, teamMembers] = await Promise.all([
+  const [channel, page, pins] = await Promise.all([
     getChannelById(channelId),
-    listChannelsForUser(),
     listChannelMessages(channelId),
     listChannelPins(channelId),
-    listTeamMembers(),
   ]);
 
   if (!channel) {
@@ -45,9 +42,7 @@ export default async function ChannelPage({
   return (
     <TeamChatWorkspace
       currentUser={user}
-      teamMembers={teamMembers}
       initialChannel={channel}
-      initialChannels={channels}
       initialMessages={page.items}
       initialNextCursor={page.nextCursor}
       initialPins={pins}

@@ -11,15 +11,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@ccp/shared/utils";
+import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import type { ConversationStatus } from "@ccp/shared/types";
 
 import { readError } from "./utils";
 
 export function StatusDropdown({
+  teamId,
   conversationId,
   current,
   onAlert,
 }: {
+  teamId: string;
   conversationId: string;
   current: ConversationStatus;
   onAlert: (title: string, description?: string) => Promise<void>;
@@ -39,6 +42,14 @@ export function StatusDropdown({
   const setStatus = async (status: ConversationStatus) => {
     if (status === current || pending) return;
     setPending(true);
+    // Optimistic: fan the same socket frame the server will broadcast so
+    // sidebar status badges, the row, and the right-rail mirror flip
+    // instantly instead of waiting on PATCH → bus → socket round-trip.
+    dispatchLocalSocketEvent("conversation:status", {
+      teamId,
+      conversationId,
+      status,
+    });
     try {
       const res = await fetch(`/api/conversations/${conversationId}/status`, {
         method: "POST",
@@ -46,9 +57,20 @@ export function StatusDropdown({
         body: JSON.stringify({ status }),
       });
       if (!res.ok) {
+        // Roll back so the chip reflects truth.
+        dispatchLocalSocketEvent("conversation:status", {
+          teamId,
+          conversationId,
+          status: current,
+        });
         await onAlert("Couldn't change status", await readError(res));
       }
     } catch (err) {
+      dispatchLocalSocketEvent("conversation:status", {
+        teamId,
+        conversationId,
+        status: current,
+      });
       await onAlert(
         "Couldn't change status",
         err instanceof Error ? err.message : "Network error",

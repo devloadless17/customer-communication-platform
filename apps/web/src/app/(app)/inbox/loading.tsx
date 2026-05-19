@@ -1,13 +1,13 @@
 /**
- * Inbox loading shell. Renders while the RSC at /inbox is gathering data
- * (session + 8 catalogs + active thread). Without this Next.js shows
- * either a blank screen or the previous route until the entire RSC payload
- * is ready, which on a hard refresh is the felt latency that drove the
- * "list flashes empty" perf finding.
+ * Inbox loading shell — renders inside `app/(app)/layout.tsx`'s children
+ * slot, AFTER the AppRail. The shared (app) layout keeps the AppRail
+ * mounted across every suspense boundary, so clicking the Inbox icon
+ * from any other section no longer flashes a white screen — only the
+ * area to the right of the rail swaps to this skeleton, then to the
+ * real shell.
  *
- * The skeleton mirrors the real inbox layout (AppRail column, InboxSubSidebar
- * column, conversation list column, thread workspace pane) at fixed widths so
- * when the real shell mounts there's no layout shift.
+ * The columns below mirror inbox-shell's responsive widths so when the
+ * real shell mounts there's no horizontal jump.
  */
 export default function Loading() {
   return (
@@ -16,9 +16,6 @@ export default function Loading() {
       aria-label="Loading inbox"
       className="flex h-svh w-full overflow-hidden bg-background text-foreground"
     >
-      {/* AppRail column — 56px chrome (always shown — matches the real
-          shell which doesn't hide AppRail at any breakpoint). */}
-      <div className="h-full w-14 shrink-0 border-r border-border bg-muted/30" />
       {/* InboxSubSidebar column — only shown at lg+ (1024px); below that
           it lives in the hamburger drawer. w-40 at lg, w-52 at xl+.
           Matches sub-sidebar.tsx. */}

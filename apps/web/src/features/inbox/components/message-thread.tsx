@@ -5,6 +5,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Loader2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
@@ -24,6 +26,8 @@ import { useMessageSelection } from "@/features/inbox/hooks/use-message-selectio
 import { useChatScroll } from "@/features/inbox/hooks/use-chat-scroll";
 
 import dynamic from "next/dynamic";
+
+import { ErrorBoundary } from "@/components/error-boundary";
 
 import { MessageBubble } from "./message-bubble";
 import { InternalNote as InternalNoteCard } from "./internal-note";
@@ -111,6 +115,7 @@ function MessageThreadImpl({
   // contact-level and may predate the loaded message slice.
   const { lastInboundAt } = data;
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
 
   // -------------------------------------------------------------------------
   // Stage mirror. The header stepper reads from local state so arrow clicks
@@ -129,6 +134,16 @@ function MessageThreadImpl({
     async (next: string) => {
       const prev = stageId;
       setStageId(next);
+      // Fan a synthetic `contact:updated` to local socket listeners so the
+      // sidebar stage counts, the LRU cache, and the right-rail contact
+      // panel all flip immediately — without waiting on PATCH → bus →
+      // socket round-trip (~50-200ms of visible lag). When the real frame
+      // arrives, reducers re-apply with the server-canonical contact;
+      // both passes mutate the same fields so the second is invisible.
+      dispatchLocalSocketEvent("contact:updated", {
+        teamId: contact.teamId,
+        contact: { ...contact, stageId: next },
+      });
       const res = await fetch(`/api/contacts/${contact.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -137,6 +152,10 @@ function MessageThreadImpl({
       if (!res.ok) {
         // Roll back the optimistic update so the chip reflects truth.
         setStageId(prev);
+        dispatchLocalSocketEvent("contact:updated", {
+          teamId: contact.teamId,
+          contact: { ...contact, stageId: prev },
+        });
         await alert(
           "Couldn't change stage",
           await readError(res),
@@ -145,9 +164,9 @@ function MessageThreadImpl({
       }
       // Pull the fresh contact row through the server component so the
       // right rail / contacts list also see the new stage on next navigation.
-      router.refresh();
+      softRefresh();
     },
-    [alert, contact.id, router, stageId],
+    [alert, contact, router, softRefresh, stageId],
   );
 
   // -------------------------------------------------------------------------
@@ -464,12 +483,24 @@ function MessageThreadImpl({
         destructive: true,
       });
       if (!ok) return;
+      // Optimistic: fan the deletion locally so the bubble vanishes
+      // instantly + the panel's note count ticks down without waiting on
+      // the server round-trip. Reducers self-bail on missing rows, so the
+      // real server event arriving moments later is a no-op.
+      dispatchLocalSocketEvent("note:deleted", {
+        teamId: conversation.teamId,
+        conversationId: conversation.id,
+        noteId,
+      });
       const res = await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
       if (!res.ok) {
         await alert("Couldn't delete note", "Please try again.");
+        // No good rollback path — the note object isn't around to re-insert
+        // in order. softRefresh pulls the canonical thread back.
+        softRefresh();
       }
     },
-    [confirm, alert],
+    [alert, confirm, conversation.id, conversation.teamId, softRefresh],
   );
 
   const { typingUserIds, notifyTyping, stopTyping } = useTyping(
@@ -590,6 +621,7 @@ function MessageThreadImpl({
   return (
     <section className="relative flex min-w-0 flex-1 flex-col bg-background">
       <ThreadHeader
+        teamId={conversation.teamId}
         conversationId={conversation.id}
         contactId={contact.id}
         contactName={contact.name}
@@ -705,45 +737,53 @@ function MessageThreadImpl({
                     animateIn && "animate-enter",
                   )}
                 >
-                  {entry.kind === "message" ? (
-                    <MessageBubble
-                      message={entry.data}
-                      senderName={
-                        entry.data.senderUserId
-                          ? memberById.get(entry.data.senderUserId)?.name ?? null
-                          : null
-                      }
-                      contactName={contact.name}
-                      contactSeed={contact.id}
-                      onReply={beginReply}
-                      onJumpToOriginal={jumpToOriginal}
-                      onForward={forwardOne}
-                      onStartSelect={startSelect}
-                      onDismissFailed={dismissFailed}
-                      onRetryFailed={retryFailed}
-                      selecting={selection.selecting}
-                      selected={selection.isSelected(entry.data.id)}
-                      onToggleSelect={selection.toggle}
-                      searchQuery={
-                        searchOpen && matchedIds.has(entry.data.id)
-                          ? searchQuery
-                          : undefined
-                      }
-                      isActiveSearchMatch={
-                        searchOpen && entry.data.id === activeMatchId
-                      }
-                    />
-                  ) : (
-                    <InternalNoteCard
-                      note={entry.data}
-                      author={
-                        (entry.data.authorUserId
-                          ? memberById.get(entry.data.authorUserId)
-                          : undefined) ?? unknownAuthor(entry.data.authorUserId)
-                      }
-                      onDelete={deleteNote}
-                    />
-                  )}
+                  {/* Local ErrorBoundary per row — without this, a single
+                      malformed message payload (or a bug in a sub-component
+                      like LocalTime) would unmount the entire inbox via
+                      Next.js's inbox/error.tsx. With this, the agent sees
+                      a "couldn't render" placeholder for that one row and
+                      keeps working with the rest of the thread. */}
+                  <ErrorBoundary label="message">
+                    {entry.kind === "message" ? (
+                      <MessageBubble
+                        message={entry.data}
+                        senderName={
+                          entry.data.senderUserId
+                            ? memberById.get(entry.data.senderUserId)?.name ?? null
+                            : null
+                        }
+                        contactName={contact.name}
+                        contactSeed={contact.id}
+                        onReply={beginReply}
+                        onJumpToOriginal={jumpToOriginal}
+                        onForward={forwardOne}
+                        onStartSelect={startSelect}
+                        onDismissFailed={dismissFailed}
+                        onRetryFailed={retryFailed}
+                        selecting={selection.selecting}
+                        selected={selection.isSelected(entry.data.id)}
+                        onToggleSelect={selection.toggle}
+                        searchQuery={
+                          searchOpen && matchedIds.has(entry.data.id)
+                            ? searchQuery
+                            : undefined
+                        }
+                        isActiveSearchMatch={
+                          searchOpen && entry.data.id === activeMatchId
+                        }
+                      />
+                    ) : (
+                      <InternalNoteCard
+                        note={entry.data}
+                        author={
+                          (entry.data.authorUserId
+                            ? memberById.get(entry.data.authorUserId)
+                            : undefined) ?? unknownAuthor(entry.data.authorUserId)
+                        }
+                        onDelete={deleteNote}
+                      />
+                    )}
+                  </ErrorBoundary>
                 </div>
               </div>
             );

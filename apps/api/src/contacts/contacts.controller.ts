@@ -154,8 +154,7 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(AudiencePreviewSchema)) body: AudiencePreviewInput,
   ) {
-    const contacts = await this.contacts.previewAudience(session.teamId, body);
-    return { contacts };
+    return this.contacts.previewAudience(session.teamId, body);
   }
 
   // ---- :id routes ---------------------------------------------------------

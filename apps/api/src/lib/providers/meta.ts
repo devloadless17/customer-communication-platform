@@ -1,4 +1,20 @@
+import { readLimitedBody } from "@/lib/http/safe-fetch";
 import type { MetaSendConfig } from "@/lib/providers/config";
+
+// Meta error responses are tiny in practice (JSON envelope, a few KB).
+// Cap reads so a future endpoint or a compromised upstream returning a
+// multi-GB response can't OOM the worker. Errors longer than the cap
+// are truncated — we keep what fits and log the truncation.
+const META_ERROR_BODY_CAP = 8192;
+
+async function safeMetaText(res: Response): Promise<string> {
+  try {
+    const truncated = await readLimitedBody(res, META_ERROR_BODY_CAP);
+    return truncated ?? "";
+  } catch {
+    return "";
+  }
+}
 import type {
   CreateTemplateArgs,
   CreateTemplateResult,
@@ -333,7 +349,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // Surface Meta's error body so 24h-window failures (code 131047) and
       // similar policy errors land in our logs verbatim. Caller decides how
       // to render this to the agent.
-      const text = await res.text();
+      const text = await safeMetaText(res);
       throw new MetaSendError(`meta sendText failed: ${res.status} ${text}`, res.status, text);
     }
 
@@ -376,7 +392,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     });
 
     if (!res.ok) {
-      const body = await res.text();
+      const body = await safeMetaText(res);
       console.warn(
         `[meta] sendTypingIndicator failed for ${externalId}: ${res.status} ${body}`,
       );
@@ -405,7 +421,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     if (!res.ok) {
       // Non-fatal: log but don't throw. Common cause is a wamid older than
       // the 7-day window Meta accepts for read receipts.
-      const body = await res.text();
+      const body = await safeMetaText(res);
       console.warn(
         `[meta] markIncomingRead failed for ${externalId}: ${res.status} ${body}`,
       );
@@ -486,7 +502,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       body: fd,
     });
     if (!res.ok) {
-      const text = await res.text();
+      const text = await safeMetaText(res);
       throw new MetaSendError(
         `meta media upload failed: ${res.status} ${text}`,
         res.status,
@@ -531,7 +547,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     });
 
     if (!res.ok) {
-      const text = await res.text();
+      const text = await safeMetaText(res);
       throw new MetaSendError(
         `meta sendMedia failed: ${res.status} ${text}`,
         res.status,
@@ -582,7 +598,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         headers: { authorization: `Bearer ${config.accessToken}` },
       });
       if (!res.ok) {
-        const text = await res.text();
+        const text = await safeMetaText(res);
         throw new MetaSendError(
           `meta fetchTemplates failed: ${res.status} ${text}`,
           res.status,
@@ -629,7 +645,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       // for missing examples, duplicate names, policy issues, and per-
       // component validation failures. Surfacing the body verbatim is the
       // only way the UI can show useful error messages.
-      const text = await res.text();
+      const text = await safeMetaText(res);
       throw new MetaSendError(
         `meta createTemplate failed: ${res.status} ${text}`,
         res.status,
@@ -661,7 +677,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
-      const text = await res.text();
+      const text = await safeMetaText(res);
       // A 404 from Meta means the template is already gone — treat as success
       // so a stale local row that we're cleaning up doesn't keep failing.
       if (res.status === 404) return;
@@ -779,7 +795,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     });
 
     if (!res.ok) {
-      const text = await res.text();
+      const text = await safeMetaText(res);
       throw new MetaSendError(
         `meta sendTemplate failed: ${res.status} ${text}`,
         res.status,

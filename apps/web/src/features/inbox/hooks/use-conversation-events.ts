@@ -201,6 +201,15 @@ export function useConversationEvents(
         if (!res.ok) return 0;
         const page = (await res.json()) as CursorPage<Message>;
         let added = 0;
+        let nextSliceLen = 0;
+        // Hard cap on the in-memory slice. Thread isn't virtualized today
+        // (see message-thread.tsx render loop), so 500+ DOM bubbles plus a
+        // LocalTime per bubble hurts scroll perf and a runaway user clicking
+        // Load older 30+ times freezes the tab. Drop the cursor once we
+        // cross the limit so the UI hides the "Load older" affordance. To
+        // go further back the user can use search → replaceWithContext,
+        // which swaps the slice rather than appending.
+        const MAX_THREAD_SLICE = 500;
         // The caller's `commit` runs `run` synchronously (flushSync), so by
         // the time it returns the DOM reflects the prepend and `added` is set.
         commit(() => {
@@ -208,15 +217,20 @@ export function useConversationEvents(
             const have = new Set(prev.messages.map((m) => m.id));
             const fresh = page.items.filter((m) => !have.has(m.id));
             added = fresh.length;
-            if (added === 0) return prev;
+            if (added === 0) {
+              nextSliceLen = prev.messages.length;
+              return prev;
+            }
             // Server returns oldest-first; sort to keep optimistic / failed
             // rows pinned at the bottom even after a prepend.
-            return {
-              ...prev,
-              messages: sortByTimestamp([...fresh, ...prev.messages]),
-            };
+            const merged = sortByTimestamp([...fresh, ...prev.messages]);
+            nextSliceLen = merged.length;
+            return { ...prev, messages: merged };
           });
-          setOlderCursor(page.nextCursor);
+          // Past the slice cap → drop the cursor so the UI stops loading.
+          setOlderCursor(
+            nextSliceLen >= MAX_THREAD_SLICE ? null : page.nextCursor,
+          );
         });
         return added;
       } finally {
@@ -410,6 +424,16 @@ export function useConversationEvents(
         // Reconcile against any optimistic bubble we put up for this send.
         // Match by clientTempId when present; otherwise just append.
         const tempId = payload.clientTempId;
+        // Notify the reply-box's stuck-watchdog that the confirming frame
+        // arrived. Without this, the watchdog would mark the bubble as
+        // failed after 30s even though the server CONFIRMED the send.
+        if (tempId && typeof window !== "undefined") {
+          try {
+            window.dispatchEvent(new Event(`ccp:optimistic-confirmed:${tempId}`));
+          } catch {
+            // Synthetic events can't fail under normal conditions; ignore.
+          }
+        }
         const messages = tempId
           ? prev.messages.map((m) => {
               if (m.clientTempId !== tempId || !m.pending) return m;
@@ -601,11 +625,20 @@ export function useConversationEvents(
       (e) => !COALESCED_LIVE_HOOK_EVENTS.has(e.event),
     ).map(({ event, apply, target }) => {
       const handler = (payload: { conversationId?: string } & Record<string, unknown>) => {
-        if ((target ?? "conversation") === "conversation") {
-          if (payload?.conversationId !== conversationId) return;
+        // Reducer try/catch — a malformed payload from a version-skewed
+        // server (post-deploy) would throw inside the setState updater
+        // and break the React tree for the displayed thread. Isolate to
+        // this event so the rest of the inbox keeps working.
+        try {
+          if ((target ?? "conversation") === "conversation") {
+            if (payload?.conversationId !== conversationId) return;
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          setData((prev) => (apply as any)(prev, payload, reducerCtx));
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(`[use-conversation-events] reducer for "${event}" threw`, err);
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        setData((prev) => (apply as any)(prev, payload, reducerCtx));
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       socket.on(event as any, handler as any);

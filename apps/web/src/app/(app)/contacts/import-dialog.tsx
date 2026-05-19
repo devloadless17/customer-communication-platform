@@ -38,12 +38,19 @@ export function ImportContactsDialog({
     if (!file) return;
     setError(null);
     setSubmitting(true);
+    // Hard timeout. Without it, a stuck network leaves the dialog
+    // spinning forever — the user has no Cancel affordance and no
+    // signal anything's wrong. 120s is generous for a 1 MiB CSV on a
+    // slow uplink.
+    const abort = new AbortController();
+    const timeoutId = window.setTimeout(() => abort.abort(), 120_000);
     try {
       const form = new FormData();
       form.append("file", file);
       const res = await fetch("/api/contacts/import", {
         method: "POST",
         body: form,
+        signal: abort.signal,
       });
       const body = (await res.json().catch(() => ({}))) as
         | ImportResult
@@ -53,9 +60,14 @@ export function ImportContactsDialog({
         return;
       }
       setResult(body as ImportResult);
-    } catch {
-      setError("Network error. Please try again.");
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("Import timed out. Try a smaller file or check your connection.");
+      } else {
+        setError("Network error. Please try again.");
+      }
     } finally {
+      window.clearTimeout(timeoutId);
       setSubmitting(false);
     }
   }

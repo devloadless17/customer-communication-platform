@@ -17,6 +17,8 @@ import {
   type ExternalMessage,
 } from "@/lib/external-shapes";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+
+import { refundApiKeyBucket } from "../../auth/api-key.guard";
 import {
   sendTemplateInternal,
   SendTemplateValidationError,
@@ -327,6 +329,11 @@ export class ExternalV1MessagingService {
             });
           }
           if (cached.expiresAt > new Date()) {
+            // Refund the API-key token — the request did zero real work,
+            // so it shouldn't burn quota. A partner with a crashing
+            // handler retrying the same Idempotency-Key for 24h would
+            // otherwise drain 60 tokens/min on cache reads alone.
+            refundApiKeyBucket(apiKeyId);
             return cached.responseBody as unknown as { message: ExternalMessage };
           }
           // Expired completed row — fall through to re-claim. Delete first
@@ -508,10 +515,29 @@ export class ExternalV1MessagingService {
     });
 
     const preview = input.body.slice(0, 200);
-    const bumped = await this.db.conversation.update({
-      where: { id: conversationId },
-      data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
-      select: { unreadCount: true },
+    // Read-then-write so a concurrent inbound that landed during the Meta
+    // call doesn't get regressed backward in time by this bare UPDATE.
+    // Without the +1ms guard, the partner's send timestamp can be older
+    // than the inbound's, and writing it would flip inbox sort order.
+    const bumped = await this.db.$transaction(async (tx) => {
+      const current = await tx.conversation.findUnique({
+        where: { id: conversationId },
+        select: { lastMessageAt: true, unreadCount: true },
+      });
+      if (!current) {
+        throw new BadGatewayException({
+          error: "conversation_disappeared_mid_send",
+        });
+      }
+      const effectiveBump =
+        current.lastMessageAt >= send.timestamp
+          ? new Date(current.lastMessageAt.getTime() + 1)
+          : send.timestamp;
+      await tx.conversation.update({
+        where: { id: conversationId },
+        data: { lastMessageAt: effectiveBump, lastMessagePreview: preview },
+      });
+      return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
     });
 
     const message: Message = {
@@ -535,7 +561,9 @@ export class ExternalV1MessagingService {
       conversationId,
       message,
       preview,
-      lastMessageAt: send.timestamp.toISOString(),
+      // Use the effective bump so the frontend's lastMessageAt stays in
+      // sync with DB even when the +1ms guard kicked in above.
+      lastMessageAt: bumped.lastMessageAt.toISOString(),
       // Outbound doesn't bump unread; the row's current value is the
       // accurate absolute count.
       unreadCount: bumped.unreadCount,

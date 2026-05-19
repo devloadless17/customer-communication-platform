@@ -25,6 +25,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
+import { runWithConcurrency } from "../../common/concurrency";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
 import type {
   ExternalAssignInput,
@@ -929,73 +930,74 @@ export class ExternalV1Service {
       where: { teamId, id: { in: ownedIds } },
       include: { tags: { select: { id: true } } },
     });
-    await Promise.all(
-      updated.map(async (c) => {
-        const tagIds = c.tags.map((t) => t.id);
-        const payload: DomainContact = {
-          id: c.id,
-          teamId: c.teamId,
-          phoneNumber: c.phoneNumber,
-          identityProvider: c.identityProvider,
-          externalContactId: c.externalContactId,
-          name: c.name,
-          firstName: c.firstName,
-          lastName: c.lastName,
-          language: c.language,
-          countryCode: c.countryCode,
-          assignedUserId: c.assignedUserId,
-          avatarUrl: c.avatarUrl ?? undefined,
-          email: c.email ?? undefined,
-          location: c.location ?? undefined,
-          customFields: normalizeStringMap(c.customFields),
-          source: c.source,
-          stageId: c.stageId,
-          tagIds,
-          createdAt: c.createdAt.toISOString(),
-        };
-        const added =
-          action === "tag-add" ? validTagIds.filter((t) => tagIds.includes(t)) : [];
-        const removed =
-          action === "tag-remove" ? validTagIds.filter((t) => !tagIds.includes(t)) : [];
-        const tagChanges = { added, removed };
+    // Bounded 16-lane fanout — see contacts.service.ts for rationale. An
+    // unbounded Promise.all over 500 ids × 6 sequential subscribers pinned
+    // the event loop for hundreds of ms on the single VPS.
+    await runWithConcurrency(updated, 16, async (c) => {
+      const tagIds = c.tags.map((t) => t.id);
+      const payload: DomainContact = {
+        id: c.id,
+        teamId: c.teamId,
+        phoneNumber: c.phoneNumber,
+        identityProvider: c.identityProvider,
+        externalContactId: c.externalContactId,
+        name: c.name,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        language: c.language,
+        countryCode: c.countryCode,
+        assignedUserId: c.assignedUserId,
+        avatarUrl: c.avatarUrl ?? undefined,
+        email: c.email ?? undefined,
+        location: c.location ?? undefined,
+        customFields: normalizeStringMap(c.customFields),
+        source: c.source,
+        stageId: c.stageId,
+        tagIds,
+        createdAt: c.createdAt.toISOString(),
+      };
+      const added =
+        action === "tag-add" ? validTagIds.filter((t) => tagIds.includes(t)) : [];
+      const removed =
+        action === "tag-remove" ? validTagIds.filter((t) => !tagIds.includes(t)) : [];
+      const tagChanges = { added, removed };
 
+      await this.bus.publish({
+        type: "contact.updated",
+        teamId,
+        contact: payload,
+        previousStageId: c.stageId,
+        fieldChanges: [],
+        tagChanges,
+        changedByUserId: null,
+        changedByApiKeyId: apiKeyId,
+        workflowContact: workflowContactSnapshot(c),
+        suppressSocketFanout: true,
+      });
+
+      if (added.length > 0 || removed.length > 0) {
         await this.bus.publish({
-          type: "contact.updated",
+          type: "contact.tag_changed",
           teamId,
-          contact: payload,
-          previousStageId: c.stageId,
-          fieldChanges: [],
-          tagChanges,
+          contactId: c.id,
+          // `before` lacks the changes — for the add path the prior set is
+          // tagIds minus what we just added; for remove it's tagIds plus
+          // what we just removed. Compute back from the post-state to
+          // avoid re-reading the row.
+          before: {
+            tagIds:
+              action === "tag-add"
+                ? tagIds.filter((id) => !added.includes(id))
+                : [...tagIds, ...removed],
+          },
+          after: { tagIds },
+          added,
+          removed,
           changedByUserId: null,
           changedByApiKeyId: apiKeyId,
-          workflowContact: workflowContactSnapshot(c),
-          suppressSocketFanout: true,
         });
-
-        if (added.length > 0 || removed.length > 0) {
-          await this.bus.publish({
-            type: "contact.tag_changed",
-            teamId,
-            contactId: c.id,
-            // `before` lacks the changes — for the add path the prior set is
-            // tagIds minus what we just added; for remove it's tagIds plus
-            // what we just removed. Compute back from the post-state to
-            // avoid re-reading the row.
-            before: {
-              tagIds:
-                action === "tag-add"
-                  ? tagIds.filter((id) => !added.includes(id))
-                  : [...tagIds, ...removed],
-            },
-            after: { tagIds },
-            added,
-            removed,
-            changedByUserId: null,
-            changedByApiKeyId: apiKeyId,
-          });
-        }
-      }),
-    );
+      }
+    });
 
     await this.bus.publish({
       type: "contact.bulk_updated",

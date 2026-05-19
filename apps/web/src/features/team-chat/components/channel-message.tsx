@@ -25,6 +25,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import { canEditMessage } from "@ccp/shared/team-chat/permissions";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
@@ -91,6 +92,24 @@ function ChannelMessageImpl({
 
   const toggleReaction = async (emoji: string) => {
     setShowReactions(false);
+    // Optimistic: compute the next userIds list (toggle current user in or
+    // out) and dispatch the same socket frame the server will broadcast.
+    // Version=1 is intentionally far below any server `Date.now()` so the
+    // real frame's later version always wins on arrival (see version
+    // tracking in use-team-channel-events.ts).
+    const existing = message.reactions.find((r) => r.emoji === emoji);
+    const has = existing?.userIds.includes(currentUser.id) ?? false;
+    const nextUserIds = has
+      ? (existing?.userIds ?? []).filter((id) => id !== currentUser.id)
+      : [...(existing?.userIds ?? []), currentUser.id];
+    dispatchLocalSocketEvent("team:channel:reaction:changed", {
+      teamId: currentUser.teamId,
+      channelId,
+      messageId: message.id,
+      emoji,
+      userIds: nextUserIds,
+      version: 1,
+    });
     try {
       await fetchWithSessionGuard(
         `/api/team/channels/${channelId}/messages/${message.id}/reactions`,
@@ -106,12 +125,37 @@ function ChannelMessageImpl({
   };
 
   const togglePin = async () => {
+    const nextPinned = !message.pinned;
+    // Optimistic: flip the pin badge instantly + fan the same frame the
+    // server will emit so other surfaces (pinned-list etc.) update too.
+    dispatchLocalSocketEvent("team:channel:pin:changed", {
+      teamId: currentUser.teamId,
+      channelId,
+      messageId: message.id,
+      pinned: nextPinned,
+    });
     try {
-      await fetchWithSessionGuard(
+      const res = await fetchWithSessionGuard(
         `/api/team/channels/${channelId}/messages/${message.id}/pin`,
         { method: message.pinned ? "DELETE" : "POST" },
       );
-    } catch {}
+      if (!res.ok) {
+        // Roll back to the prior value.
+        dispatchLocalSocketEvent("team:channel:pin:changed", {
+          teamId: currentUser.teamId,
+          channelId,
+          messageId: message.id,
+          pinned: message.pinned,
+        });
+      }
+    } catch {
+      dispatchLocalSocketEvent("team:channel:pin:changed", {
+        teamId: currentUser.teamId,
+        channelId,
+        messageId: message.id,
+        pinned: message.pinned,
+      });
+    }
   };
 
   const submitDelete = async () => {
@@ -123,6 +167,15 @@ function ChannelMessageImpl({
     });
     if (!ok) return;
     setBusy(true);
+    // Optimistic: splice the bubble immediately. No rollback path — if the
+    // server rejects, we softly bounce by surfacing the toast; the next
+    // refresh / reconnect will bring the row back.
+    dispatchLocalSocketEvent("team:channel:message:deleted", {
+      teamId: currentUser.teamId,
+      channelId,
+      messageId: message.id,
+      threadRootId: isThreadReply ? message.threadRootId ?? null : null,
+    });
     try {
       const res = await fetchWithSessionGuard(
         `/api/team/channels/${channelId}/messages/${message.id}`,
@@ -145,6 +198,15 @@ function ChannelMessageImpl({
       return;
     }
     setBusy(true);
+    // Optimistic: update body + show (edited) label instantly. The real
+    // socket frame arriving moments later carries the canonical editedAt.
+    dispatchLocalSocketEvent("team:channel:message:edited", {
+      teamId: currentUser.teamId,
+      channelId,
+      messageId: message.id,
+      body: next,
+      editedAt: new Date().toISOString(),
+    });
     try {
       const res = await fetchWithSessionGuard(
         `/api/team/channels/${channelId}/messages/${message.id}`,
@@ -155,6 +217,16 @@ function ChannelMessageImpl({
         },
       );
       if (res.ok) setEditing(false);
+      else {
+        // Roll back to the pre-edit body.
+        dispatchLocalSocketEvent("team:channel:message:edited", {
+          teamId: currentUser.teamId,
+          channelId,
+          messageId: message.id,
+          body: message.body,
+          editedAt: message.editedAt ?? new Date().toISOString(),
+        });
+      }
     } finally {
       setBusy(false);
     }

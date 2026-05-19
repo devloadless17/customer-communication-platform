@@ -181,6 +181,26 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
 
   worker.on("error", (err) => {
     console.error("[workflows] worker error", err);
+    // Fatal error classes (ECONNRESET that BullMQ doesn't recover from,
+    // auth failure with Redis) can leave the worker in an error state
+    // where jobs stop processing but state.worker stays set, making
+    // startWorkflowWorker() a no-op. Detect the "closed" condition and
+    // null the slot so the next start call (sweeper tick, dispatcher
+    // call) re-spawns. ioredis itself reconnects on the underlying
+    // socket, so the new Worker can pick up jobs immediately.
+    const msg = err instanceof Error ? err.message : String(err);
+    const fatal =
+      msg.includes("Connection is closed") ||
+      msg.includes("WRONGPASS") ||
+      msg.includes("NOAUTH");
+    if (fatal) {
+      console.warn(
+        "[workflows] worker entered unrecoverable state; closing for re-spawn",
+      );
+      // Best-effort close; ignore errors since the connection is already broken.
+      worker.close().catch(() => undefined);
+      state.worker = undefined;
+    }
   });
 
   state.worker = worker;

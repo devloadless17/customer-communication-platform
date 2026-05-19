@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { Loader2, Trash2 } from "lucide-react";
 
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { toast } from "@/lib/toast";
 
 /**
@@ -24,7 +24,7 @@ export function BroadcastDeleteButton({
   templateName: string;
   status: string;
 }) {
-  const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
   const [pending, setPending] = useState(false);
 
@@ -51,7 +51,7 @@ export function BroadcastDeleteButton({
         return;
       }
       toast.success("Broadcast deleted");
-      router.refresh();
+      softRefresh();
     } finally {
       setPending(false);
     }

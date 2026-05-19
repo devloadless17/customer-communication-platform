@@ -226,13 +226,29 @@ export async function sendTemplateInternal(
     timestamp: messageTimestamp,
   });
 
-  const bumped = await db.conversation.update({
-    where: { id: args.conversationId },
-    data: {
-      lastMessageAt: messageTimestamp,
-      lastMessagePreview: previewBody,
-    },
-    select: { unreadCount: true },
+  // Read-then-write so a concurrent write that landed during the Meta
+  // call doesn't get clobbered backward in time by this bare UPDATE. See
+  // send-text-internal.ts for the full rationale.
+  const bumped = await db.$transaction(async (tx) => {
+    const current = await tx.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { lastMessageAt: true, unreadCount: true },
+    });
+    if (!current) {
+      throw new SendTemplateValidationError(
+        "conversation_not_found",
+        "conversation_disappeared_mid_send",
+      );
+    }
+    const effectiveBump =
+      current.lastMessageAt >= messageTimestamp
+        ? new Date(current.lastMessageAt.getTime() + 1)
+        : messageTimestamp;
+    await tx.conversation.update({
+      where: { id: args.conversationId },
+      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
+    });
+    return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
   });
 
   const message: Message = {
@@ -262,7 +278,7 @@ export async function sendTemplateInternal(
     conversationId: args.conversationId,
     message,
     preview: previewBody,
-    lastMessageAt: messageTimestamp.toISOString(),
+    lastMessageAt: bumped.lastMessageAt.toISOString(),
     // Outbound doesn't bump unread; the row's current value is the
     // accurate absolute count.
     unreadCount: bumped.unreadCount,

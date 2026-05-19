@@ -51,6 +51,11 @@ export interface BroadcastDetailDto {
   startedAt: string | null;
   completedAt: string | null;
   recipients: BroadcastRecipientDto[];
+  /** Server-side flag: true when the inline recipient set was truncated
+   *  to the first N. Use `/api/broadcasts/:id/recipients?cursor=` to page
+   *  the rest. */
+  recipientsTruncated?: boolean;
+  recipientsShown?: number;
 }
 
 export interface BroadcastRecipientDto {
@@ -305,6 +310,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             <div className="text-[11px] text-muted-foreground">
               Per-recipient delivery status. Click a row to jump to its
               conversation.
+              {data.recipientsTruncated
+                ? ` Showing first ${data.recipientsShown ?? data.recipients.length} of ${data.totalCount}.`
+                : null}
             </div>
           </div>
         </header>

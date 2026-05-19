@@ -47,21 +47,27 @@ export async function ingestEvents(
 ): Promise<void> {
   if (events.length === 0) return;
 
-  // Process events in parallel. They're independent at the DB layer (each
-  // has its own externalId-keyed dedupe gate via the P2002 catch), so the
-  // sequential `for await` here was pure latency tax — Meta's webhook
-  // timeout is ~5s and a 10-event batch at ~6 DB roundtrips each was
-  // 800ms-1.5s blocking the 200. Each event is wrapped in its own try
-  // so one bad row doesn't make Meta retry the whole batch.
-  await Promise.all(
-    events.map(async (evt) => {
-      try {
-        if (evt.kind === "message") {
-          await ingestInboundMessage(teamId, provider, evt);
-        } else {
-          await ingestStatusUpdate(teamId, provider, evt);
-        }
-      } catch (err) {
+  // Process events with BOUNDED parallelism. They're independent at the
+  // DB layer (each has its own externalId-keyed dedupe gate via the P2002
+  // catch), so a sequential `for await` would be pure latency tax. But
+  // unbounded Promise.all on a 30-message Meta batch = 30 parallel
+  // serializable transactions, which exhausts the Prisma pool (default
+  // 25) and surfaces as P2024 → Meta retries → next batch is also 30 ×
+  // serializable in a tighter race. Cap at 8 concurrent lanes so the
+  // pool has headroom for unrelated REST traffic. Each event is wrapped
+  // in its own try so one bad row doesn't make Meta retry the whole
+  // batch.
+  const INGEST_CONCURRENCY = 8;
+  const queue = events.slice();
+  const lanes = Math.min(INGEST_CONCURRENCY, queue.length);
+  const runOne = async (evt: NormalizedEvent): Promise<void> => {
+    try {
+      if (evt.kind === "message") {
+        await ingestInboundMessage(teamId, provider, evt);
+      } else {
+        await ingestStatusUpdate(teamId, provider, evt);
+      }
+    } catch (err) {
         // Structured log — fields chosen so a flood of identical errors is
         // greppable as a single event in ops (key = teamId+kind+code).
         // Stack included so a real bug isn't hidden, but never the raw
@@ -87,8 +93,15 @@ export async function ingestEvents(
         // retry. Returning 200 to Meta even when a single event blows up
         // is the lesser evil.
       }
-    }),
-  );
+  };
+  const runners = Array.from({ length: lanes }, async () => {
+    while (queue.length > 0) {
+      const next = queue.shift();
+      if (next === undefined) return;
+      await runOne(next);
+    }
+  });
+  await Promise.all(runners);
 }
 
 async function ingestStatusUpdate(
@@ -490,7 +503,15 @@ async function ingestInboundMessage(
       // Sequential write inside the same tx means the rollback boundary is
       // the only escape: either both denorms commit or neither does.
       // (Latency cost is one extra round-trip; ~1ms on a local pool.)
-      await tx.conversation.update({
+      // Capture the post-increment `unreadCount` from the UPDATE itself so
+      // the published value reflects the actual DB state. The previous code
+      // published `(conversation.unreadCount ?? 0) + 1`, derived from the
+      // snapshot read in the OUTER tx — under two concurrent inbounds for
+      // the same conversation both events published the same `snapshot+1`
+      // while DB ended up at `snapshot+2`, drifting every client's unread
+      // badge low by 1. The atomic `{ increment }` handles the DB write
+      // correctly; we just need to broadcast the truth.
+      const bumped = await tx.conversation.update({
         where: { id: conversation.id },
         data: {
           lastMessageAt: evt.timestamp,
@@ -498,6 +519,7 @@ async function ingestInboundMessage(
           unreadCount: { increment: 1 },
           incomingMessagesCount: { increment: 1 },
         },
+        select: { unreadCount: true },
       });
       await tx.contact.updateMany({
         where: {
@@ -540,7 +562,7 @@ async function ingestInboundMessage(
       const conversationSnapshot = toWorkflowConversation({
         ...conversation,
         lastMessageAt: evt.timestamp,
-        unreadCount: (conversation.unreadCount ?? 0) + 1,
+        unreadCount: bumped.unreadCount,
       });
       const contactSnapshot = toWorkflowContact(contact);
       const workflowMessage = toWorkflowMessage({
@@ -576,10 +598,11 @@ async function ingestInboundMessage(
         ...(newConversation ? { newConversation } : {}),
         preview,
         lastMessageAt: evt.timestamp.toISOString(),
-        // Absolute team-wide unread post-increment. Same value used by the
-        // conversationSnapshot above; serialized by tx isolation so other
-        // concurrent inbounds either retry or interleave correctly.
-        unreadCount: (conversation.unreadCount ?? 0) + 1,
+        // Absolute team-wide unread post-increment, read from the UPDATE
+        // return above so two concurrent inbounds publish distinct values
+        // (snapshot+1 was the source of an off-by-one drift when two
+        // webhooks landed before either's outer tx committed).
+        unreadCount: bumped.unreadCount,
         recentMessages,
       });
 

@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+
 import {
   BadRequestException,
   Body,
@@ -12,6 +16,7 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
 
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
@@ -72,12 +77,26 @@ export class WhatsappTemplatesController {
 
   /**
    * Resumable upload for template header media. 16 MB cap enforced both
-   * at multer (hard) and in the service (friendlier 413 message). Multer
-   * default storage is memory, so `file.buffer` is populated.
+   * at multer (hard) and in the service (friendlier 413 message).
+   *
+   * `diskStorage` (NOT default memoryStorage). 10 concurrent 16 MB uploads
+   * to memoryStorage = 160 MiB pinned heap; diskStorage streams to a temp
+   * file. The service expects `file.buffer`, so we load + reassign before
+   * calling, then unlink in finally.
    */
   @Post("upload-media")
   @UseInterceptors(
-    FileInterceptor("file", { limits: { fileSize: 16 * 1024 * 1024 } }),
+    FileInterceptor("file", {
+      limits: { fileSize: 16 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        filename: (_req, file, cb) =>
+          cb(
+            null,
+            `ccp-tmpl-${randomUUID()}-${sanitizeTemplateOriginalName(file.originalname)}`,
+          ),
+      }),
+    }),
   )
   async uploadMedia(
     @CurrentSession() session: ApiSession,
@@ -86,8 +105,14 @@ export class WhatsappTemplatesController {
     if (!file) {
       throw new BadRequestException({ error: "file part missing" });
     }
-    const out = await this.whatsapp.uploadHeaderMedia(session.teamId, file);
-    return { ok: true, ...out };
+    try {
+      const buffer = await readFile(file.path);
+      const fileWithBuffer = { ...file, buffer } as Express.Multer.File;
+      const out = await this.whatsapp.uploadHeaderMedia(session.teamId, fileWithBuffer);
+      return { ok: true, ...out };
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
   }
 
   @Delete(":id")
@@ -108,4 +133,10 @@ export class WhatsappTemplatesController {
     await this.whatsapp.updateTemplateBindings(session.teamId, id, body);
     return { ok: true };
   }
+}
+
+function sanitizeTemplateOriginalName(name: string | undefined): string {
+  if (!name) return "file";
+  const base = name.replace(/[/\\]/g, "_").replace(/\.+$/g, "");
+  return base.slice(-64) || "file";
 }

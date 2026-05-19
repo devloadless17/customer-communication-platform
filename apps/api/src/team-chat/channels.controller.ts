@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+
 import {
   BadRequestException,
   Body,
@@ -14,6 +18,7 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
@@ -304,10 +309,26 @@ export class ChannelsController {
    * Cap mirrors apps/api/src/messages/messages.controller.ts:sendMedia — multer
    * enforces a hard 100 MiB ceiling (the largest per-kind cap); the service
    * tightens per-kind once it classifies from the mime type.
+   *
+   * Uses `diskStorage` (NOT the default memoryStorage). Without this, four
+   * concurrent 100 MiB uploads = 400 MiB of pinned V8 heap; on the 4 GB
+   * pilot VPS that's one OOM crash away from taking every connected agent
+   * across every team offline. Streams to a temp file; service reads + we
+   * unlink in a finally block.
    */
   @Post(":id/media")
   @UseInterceptors(
-    FileInterceptor("file", { limits: { fileSize: 100 * 1024 * 1024 } }),
+    FileInterceptor("file", {
+      limits: { fileSize: 100 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        filename: (_req, file, cb) =>
+          cb(
+            null,
+            `ccp-channel-${randomUUID()}-${sanitizeChannelOriginalName(file.originalname)}`,
+          ),
+      }),
+    }),
   )
   async uploadMedia(
     @CurrentSession() session: ApiSession,
@@ -326,17 +347,36 @@ export class ChannelsController {
         ? form.threadRootId
         : null;
 
-    const out = await this.channels.uploadMedia(session.teamId, session.userId, id, {
-      file: {
-        bytes: new Uint8Array(file.buffer),
-        mimeType: file.mimetype || "application/octet-stream",
-        filename: file.originalname || "upload",
-        size: file.size,
-      },
-      body,
-      clientTempId,
-      threadRootId,
-    });
-    return { ok: true, ...out };
+    try {
+      const bytes = await readFile(file.path);
+      const out = await this.channels.uploadMedia(session.teamId, session.userId, id, {
+        file: {
+          bytes: new Uint8Array(bytes),
+          mimeType: file.mimetype || "application/octet-stream",
+          filename: file.originalname || "upload",
+          size: file.size,
+        },
+        body,
+        clientTempId,
+        threadRootId,
+      });
+      return { ok: true, ...out };
+    } finally {
+      // Best-effort cleanup. A leaked temp file is preferable to throwing
+      // out of the finally block; the OS tmp dir sweeps on reboot and the
+      // sweeper at apps/api/src/lib/sweepers/blob-orphan.ts also handles
+      // strays via the periodic clean.
+      await unlink(file.path).catch(() => undefined);
+    }
   }
+}
+
+/**
+ * Strip path separators + truncate so the original filename doesn't smuggle
+ * a relative path into the temp directory.
+ */
+function sanitizeChannelOriginalName(name: string | undefined): string {
+  if (!name) return "file";
+  const base = name.replace(/[/\\]/g, "_").replace(/\.+$/g, "");
+  return base.slice(-64) || "file";
 }

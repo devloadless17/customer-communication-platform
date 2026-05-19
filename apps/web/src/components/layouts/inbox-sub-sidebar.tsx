@@ -11,8 +11,10 @@ import {
   UserPlus,
 } from "lucide-react";
 
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
-import { cn } from "@ccp/shared/utils";
+import { cn, initials } from "@ccp/shared/utils";
 import type { ContactStage, ConversationWithRefs, User } from "@ccp/shared/types";
 import type {
   Filter,
@@ -44,16 +46,34 @@ export function InboxSubSidebar({
   currentUser,
   conversations,
   stages,
+  teammates,
+  onlineUserIds,
   filter,
   onFilterChange,
 }: {
   currentUser: User;
   conversations: ConversationWithRefs[];
   stages: ContactStage[];
+  /** Active teammates rendered under the Stages section with a presence dot. */
+  teammates?: User[];
+  /** When provided, teammate avatars get a green/grey dot. */
+  onlineUserIds?: Set<string>;
   filter: Filter;
   onFilterChange: (f: Filter) => void;
 }) {
   const [stagesOpen, setStagesOpen] = useState(filter.kind === "stage");
+  const [teammatesOpen, setTeammatesOpen] = useState(true);
+
+  // Self first, then the rest alphabetically — matches the old app-sidebar
+  // ordering so it's obvious which row is "you".
+  const orderedTeammates = useMemo(() => {
+    if (!teammates || teammates.length === 0) return [];
+    const me = teammates.find((u) => u.id === currentUser.id);
+    const others = teammates
+      .filter((u) => u.id !== currentUser.id)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return me ? [me, ...others] : others;
+  }, [teammates, currentUser.id]);
 
   // Server-side counts over the FULL team. Truth source for the badges so
   // they don't lie when an agent has more matching threads than the
@@ -213,6 +233,69 @@ export function InboxSubSidebar({
           </div>
         )}
       </div>
+
+      {orderedTeammates.length > 0 && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setTeammatesOpen((v) => !v)}
+            aria-expanded={teammatesOpen}
+            className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+          >
+            {teammatesOpen ? (
+              <ChevronDown className="size-3" />
+            ) : (
+              <ChevronRight className="size-3" />
+            )}
+            <span className="flex-1 truncate">Teammates</span>
+            {!teammatesOpen && (
+              <span className="tabular-nums text-[10px] font-medium text-muted-foreground/70">
+                {orderedTeammates.length}
+              </span>
+            )}
+          </button>
+
+          {teammatesOpen && (
+            <div className="flex flex-col gap-0.5 px-2">
+              {orderedTeammates.map((u) => {
+                // Only render presence dots when we actually know status.
+                // Otherwise the row is identical for every page.
+                const hasPresence = onlineUserIds !== undefined;
+                const online = hasPresence ? onlineUserIds.has(u.id) : false;
+                return (
+                  <div
+                    key={u.id}
+                    className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] text-muted-foreground"
+                  >
+                    <div className="relative">
+                      <Avatar className="size-5">
+                        <AvatarFallback className="text-[9px]">
+                          {initials(u.name)}
+                        </AvatarFallback>
+                      </Avatar>
+                      {hasPresence && (
+                        <span
+                          className={cn(
+                            "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar transition-colors",
+                            online ? "bg-emerald-500" : "bg-muted-foreground/40",
+                          )}
+                          aria-label={online ? "Online" : "Offline"}
+                        />
+                      )}
+                    </div>
+                    <span className="flex-1 truncate">{u.name}</span>
+                    {u.id === currentUser.id && (
+                      <Badge variant="muted" className="ml-auto px-1.5 py-0 text-[10px]">
+                        you
+                      </Badge>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </SubSidebar>
   );
 }

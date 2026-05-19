@@ -62,18 +62,65 @@ export class RealtimeGateway
     // ws-adapter's `connectionStateRecovery.skipMiddlewares: true` still
     // bypasses this on brief reconnects, preserving the per-team-deploy
     // economics — the DB hit is per real handshake, not per tick.
-    server.use(async (socket, next) => {
-      const identity = await this.auth.authenticate(socket);
-      if (!identity) {
-        // Error message is the wire payload (Socket.io serializes Error.message
-        // into the client's `connect_error` event). Keep it stable — the
-        // browser matches on this exact string.
-        return next(new Error("unauthenticated"));
+    // Handshake rate-limit by remote address. A deploy / WiFi flap
+    // wakes 80 sockets at once; without a per-IP cap an authenticated
+    // misbehaving page (or hostile client) can also fire unbounded
+    // handshakes. Token bucket: 30 handshakes / 10s per IP — generous
+    // enough for a tab cluster, tight enough to cap a hostile loop.
+    // The bucket Map is bounded LRU so a high-cardinality attacker can't
+    // OOM us.
+    const handshakeBuckets = new Map<string, { tokens: number; ts: number }>();
+    const HANDSHAKE_BUCKET_MAX = 10_000;
+    const HANDSHAKE_REFILL_PER_MS = 30 / 10_000; // 30 per 10s
+    const HANDSHAKE_CAP = 30;
+    server.use((socket, next) => {
+      const ip =
+        (socket.handshake.headers["x-forwarded-for"] as string | undefined)
+          ?.split(",")[0]
+          ?.trim() ??
+        socket.handshake.address ??
+        "unknown";
+      const now = Date.now();
+      let bucket = handshakeBuckets.get(ip);
+      if (!bucket) {
+        if (handshakeBuckets.size >= HANDSHAKE_BUCKET_MAX) {
+          const oldest = handshakeBuckets.keys().next().value;
+          if (oldest !== undefined) handshakeBuckets.delete(oldest);
+        }
+        bucket = { tokens: HANDSHAKE_CAP, ts: now };
+        handshakeBuckets.set(ip, bucket);
+      } else {
+        const refill = (now - bucket.ts) * HANDSHAKE_REFILL_PER_MS;
+        bucket.tokens = Math.min(HANDSHAKE_CAP, bucket.tokens + refill);
+        bucket.ts = now;
       }
-      socket.data.userId = identity.userId;
-      socket.data.teamId = identity.teamId;
-      socket.data.role = identity.role;
+      if (bucket.tokens < 1) {
+        // Tell the client this is transient (NOT auth failure) so its
+        // reconnect backoff applies and it doesn't log the user out.
+        return next(new Error("handshake_throttled"));
+      }
+      bucket.tokens -= 1;
       next();
+    });
+
+    server.use(async (socket, next) => {
+      const result = await this.auth.authenticate(socket);
+      if (result.kind === "ok") {
+        socket.data.userId = result.identity.userId;
+        socket.data.teamId = result.identity.teamId;
+        socket.data.role = result.identity.role;
+        return next();
+      }
+      if (result.kind === "unavailable") {
+        // Auth backend degraded — instruct the client to reconnect rather
+        // than navigate to /logout. The browser's connect_error handler
+        // distinguishes this string from "unauthenticated".
+        return next(new Error("auth_unavailable"));
+      }
+      // Error message is the wire payload (Socket.io serializes Error.message
+      // into the client's `connect_error` event). Keep it stable — the
+      // browser matches on this exact string.
+      return next(new Error("unauthenticated"));
     });
 
     this.logger.log("Socket.io gateway ready");
@@ -220,6 +267,8 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { conversationId: string },
   ): Promise<void> {
+    if (!isValidBody(body, "conversationId")) return;
+    if (!checkSubscribeBudget(client, "subscribe:conversation")) return;
     const teamId = client.data.teamId as string | undefined;
     const userId = client.data.userId as string | undefined;
     if (!teamId || !userId) return;
@@ -290,7 +339,9 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { conversationId: string },
   ): void {
-    const userId = client.data.userId as string;
+    if (!isValidBody(body, "conversationId")) return;
+    const userId = client.data.userId as string | undefined;
+    if (!userId) return;
     client.leave(conversationRoom(body.conversationId));
     const typingIn = client.data.typingIn as Set<string> | undefined;
     if (typingIn?.delete(body.conversationId)) {
@@ -328,8 +379,10 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { conversationId: string },
   ): void {
-    const userId = client.data.userId as string;
-    const typingIn = client.data.typingIn as Set<string>;
+    if (!isValidBody(body, "conversationId")) return;
+    const userId = client.data.userId as string | undefined;
+    const typingIn = client.data.typingIn as Set<string> | undefined;
+    if (!userId || !typingIn) return;
     const wasTyping = typingIn.has(body.conversationId);
     typingIn.add(body.conversationId);
     this.typing.addConv(body.conversationId, userId, client.id);
@@ -348,8 +401,10 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { conversationId: string },
   ): void {
-    const userId = client.data.userId as string;
-    const typingIn = client.data.typingIn as Set<string>;
+    if (!isValidBody(body, "conversationId")) return;
+    const userId = client.data.userId as string | undefined;
+    const typingIn = client.data.typingIn as Set<string> | undefined;
+    if (!userId || !typingIn) return;
     if (!typingIn.delete(body.conversationId)) return;
     this.typing.removeConv(body.conversationId, userId, client.id);
     this.server
@@ -366,6 +421,8 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string },
   ): Promise<void> {
+    if (!isValidBody(body, "channelId")) return;
+    if (!checkSubscribeBudget(client, "subscribe:channel")) return;
     const teamId = client.data.teamId as string | undefined;
     if (!teamId) return;
     const room = channelRoom(body.channelId);
@@ -392,7 +449,9 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string },
   ): void {
-    const userId = client.data.userId as string;
+    if (!isValidBody(body, "channelId")) return;
+    const userId = client.data.userId as string | undefined;
+    if (!userId) return;
     client.leave(channelRoom(body.channelId));
     const typingInChannel = client.data.typingInChannel as Set<string> | undefined;
     if (typingInChannel?.delete(body.channelId)) {
@@ -417,12 +476,14 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string },
   ): void {
-    const userId = client.data.userId as string;
+    if (!isValidBody(body, "channelId")) return;
+    const userId = client.data.userId as string | undefined;
+    const typingInChannel = client.data.typingInChannel as Set<string> | undefined;
+    if (!userId || !typingInChannel) return;
     // Anti-abuse: only count typing if the socket is actually in the channel
     // room. Otherwise a malicious client could spam typing into channels it
     // can't read.
     if (!client.rooms.has(channelRoom(body.channelId))) return;
-    const typingInChannel = client.data.typingInChannel as Set<string>;
     const wasTyping = typingInChannel.has(body.channelId);
     typingInChannel.add(body.channelId);
     this.typing.addChannel(body.channelId, userId, client.id);
@@ -441,8 +502,10 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string },
   ): void {
-    const userId = client.data.userId as string;
-    const typingInChannel = client.data.typingInChannel as Set<string>;
+    if (!isValidBody(body, "channelId")) return;
+    const userId = client.data.userId as string | undefined;
+    const typingInChannel = client.data.typingInChannel as Set<string> | undefined;
+    if (!userId || !typingInChannel) return;
     if (!typingInChannel.delete(body.channelId)) return;
     this.typing.removeChannel(body.channelId, userId, client.id);
     this.server
@@ -468,10 +531,12 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string; threadRootId: string },
   ): void {
-    const userId = client.data.userId as string;
+    if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
+    const userId = client.data.userId as string | undefined;
+    const typingInThread = client.data.typingInThread as Set<string> | undefined;
+    if (!userId || !typingInThread) return;
     if (!client.rooms.has(channelRoom(body.channelId))) return;
     const composite = `${body.channelId}::${body.threadRootId}`;
-    const typingInThread = client.data.typingInThread as Set<string>;
     const wasTyping = typingInThread.has(composite);
     typingInThread.add(composite);
     this.typing.addThread(body.threadRootId, userId, client.id);
@@ -491,9 +556,11 @@ export class RealtimeGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string; threadRootId: string },
   ): void {
-    const userId = client.data.userId as string;
+    if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
+    const userId = client.data.userId as string | undefined;
+    const typingInThread = client.data.typingInThread as Set<string> | undefined;
+    if (!userId || !typingInThread) return;
     const composite = `${body.channelId}::${body.threadRootId}`;
-    const typingInThread = client.data.typingInThread as Set<string>;
     if (!typingInThread.delete(composite)) return;
     this.typing.removeThread(body.threadRootId, userId, client.id);
     this.server
@@ -527,3 +594,56 @@ export class RealtimeGateway
 
 // Re-export Server typed event names for ergonomic consumer imports.
 export type { ClientToServerEvents, ServerToClientEvents };
+
+/**
+ * Defensive shape guard for socket message bodies. The frontend always
+ * sends well-formed payloads, but a hostile or buggy client can send
+ * anything — `body.conversationId` on a null body throws TypeError. The
+ * resulting unhandled-rejection is caught by process.on() but spams logs
+ * and gives no signal to the operator about WHICH handler was hit. Guard
+ * at the top of each handler instead.
+ */
+function isValidBody(
+  body: unknown,
+  key: string,
+): body is Record<string, string> {
+  if (body == null || typeof body !== "object") return false;
+  const v = (body as Record<string, unknown>)[key];
+  return typeof v === "string" && v.length > 0;
+}
+
+/**
+ * Per-socket token bucket for `subscribe:*` handlers. Without this, an
+ * authenticated client (browser bug or hostile script) can spam 10k
+ * subscribe requests/sec, each costing a Postgres roundtrip via the
+ * tenant-ownership check. 30 subscribes/10s is generous for a tab cluster
+ * but caps the worst case. Bucket lives in `client.data` so it dies with
+ * the socket.
+ */
+const SUB_CAP = 30;
+const SUB_REFILL_PER_MS = 30 / 10_000;
+function checkSubscribeBudget(client: Socket, label: string): boolean {
+  const now = Date.now();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = client.data as any;
+  let bucket = data.__subBucket as { tokens: number; ts: number } | undefined;
+  if (!bucket) {
+    bucket = { tokens: SUB_CAP, ts: now };
+    data.__subBucket = bucket;
+  } else {
+    bucket.tokens = Math.min(
+      SUB_CAP,
+      bucket.tokens + (now - bucket.ts) * SUB_REFILL_PER_MS,
+    );
+    bucket.ts = now;
+  }
+  if (bucket.tokens < 1) {
+    // Silent drop — surfacing 429 over a socket frame isn't a standard
+    // pattern. The client's logs will show that the subscribe didn't
+    // produce a reply; the LRU re-fetches on next interaction.
+    void label;
+    return false;
+  }
+  bucket.tokens -= 1;
+  return true;
+}

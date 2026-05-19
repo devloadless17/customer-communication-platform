@@ -58,7 +58,20 @@ export class SessionGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<Request>();
-    const session = await resolveSession(req, this.db, this.logger);
+    let session: ApiSession | null;
+    try {
+      session = await resolveSession(req, this.db, this.logger);
+    } catch (err) {
+      if (err instanceof AuthUnavailableError) {
+        // Auth backend is degraded — return 401 (NOT 503) so the browser's
+        // socket reconnect logic also treats this as "retry later," not "you
+        // are now logged out." HTTP path still rejects the request; the
+        // alternative (503 here) would risk false-positive sign-outs in
+        // the web app's session-refresh path.
+        throw new UnauthorizedException("auth_unavailable");
+      }
+      throw err;
+    }
     if (!session) throw new UnauthorizedException("unauthorized");
     req.session = session;
     return true;
@@ -95,6 +108,21 @@ const SESSION_CACHE_TTL_MS = 15_000;
 const SESSION_CACHE_MAX = 10_000;
 const sessionCache = new Map<string, { session: ApiSession; expiresAt: number }>();
 
+// Cookie-hash-keyed cache: short-circuits `auth.api.getSession` itself, not
+// just the deactivation re-check. Without this every fresh socket handshake
+// (and every uncached HTTP request) pays a Postgres lookup inside Better
+// Auth, so a deploy + 80-agent reconnect storm starves the pool. We can't
+// key on the cookie string directly (don't want secrets in heap dumps), so
+// hash it. Same 15s TTL as the user cache. Cleared on signout/deactivation
+// via `invalidateSessionCacheByCookie`.
+const cookieCache = new Map<string, { userId: string; expiresAt: number }>();
+
+import { createHash } from "node:crypto";
+
+function hashCookie(cookieHeader: string): string {
+  return createHash("sha256").update(cookieHeader).digest("hex");
+}
+
 /**
  * Public surface so the Socket.io handshake (`SocketAuthService`) can
  * reuse the same per-userId snapshot — without these accessors, every
@@ -105,6 +133,39 @@ export function sessionCacheGet(userId: string): ApiSession | null {
 }
 export function sessionCacheSet(userId: string, session: ApiSession): void {
   cacheSet(userId, session);
+}
+
+/**
+ * Look up an already-resolved (cookie → user) mapping. Returns the cached
+ * ApiSession for that cookie, or null if no live entry. Used by the socket
+ * handshake to skip `auth.api.getSession` entirely on the hot reconnect
+ * path. Returns null if EITHER the cookie cache OR the user cache has
+ * expired so a stale cookie hash never resurrects a dead session.
+ */
+export function sessionCacheGetByCookie(cookieHeader: string): ApiSession | null {
+  const key = hashCookie(cookieHeader);
+  const entry = cookieCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    cookieCache.delete(key);
+    return null;
+  }
+  return cacheGet(entry.userId);
+}
+
+export function sessionCacheSetByCookie(
+  cookieHeader: string,
+  userId: string,
+): void {
+  const key = hashCookie(cookieHeader);
+  if (cookieCache.size >= SESSION_CACHE_MAX) {
+    const oldest = cookieCache.keys().next().value;
+    if (oldest !== undefined) cookieCache.delete(oldest);
+  }
+  cookieCache.set(key, {
+    userId,
+    expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
+  });
 }
 
 function cacheGet(userId: string): ApiSession | null {
@@ -135,9 +196,16 @@ function cacheSet(userId: string, session: ApiSession): void {
  * `invalidateSessionCache(userId)` import — call from the controllers
  * that perform those mutations to keep the window from biting on
  * privileged transitions.
+ *
+ * Also walks the cookie-hash cache to evict every cookie that resolved to
+ * this user. Stale cookie cache entries are otherwise self-healing within
+ * the 15s TTL, but a deactivation should land immediately for sockets too.
  */
 export function invalidateSessionCache(userId: string): void {
   sessionCache.delete(userId);
+  for (const [key, entry] of cookieCache) {
+    if (entry.userId === userId) cookieCache.delete(key);
+  }
 }
 
 /**
@@ -160,15 +228,31 @@ export async function resolveSession(
     else headers.set(k, String(v));
   }
 
+  // Fast-path: cookie-hash cache short-circuits Better Auth + the user
+  // re-check entirely. Critical under reconnect storms — without it, every
+  // handshake (HTTP or socket) does a Postgres roundtrip via Better Auth.
+  const cookieHeader = req.headers["cookie"];
+  if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
+    const cached = sessionCacheGetByCookie(cookieHeader);
+    if (cached) return cached;
+  }
+
   let result: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
+  let getSessionThrew = false;
   try {
     result = await auth.api.getSession({ headers });
   } catch (err) {
+    getSessionThrew = true;
     logger.warn(`getSession threw: ${err instanceof Error ? err.message : err}`);
-    return null;
+    // Signal "auth service unavailable" to callers (vs "no session"). The
+    // socket handshake uses this to NOT emit `unauthenticated` (which would
+    // hard-log-out every connected agent on a Postgres flap); the HTTP path
+    // still 401s.
+    throw new AuthUnavailableError(err);
   }
 
   if (!result?.user?.id || !result?.session?.id) return null;
+  void getSessionThrew;
   const sessionId = result.session.id;
 
   // Hot-path: same user just resolved a moment ago — Better Auth already
@@ -207,5 +291,19 @@ export async function resolveSession(
     avatarUrl: user.avatarUrl ?? null,
   };
   cacheSet(user.id, session);
+  if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
+    sessionCacheSetByCookie(cookieHeader, user.id);
+  }
   return session;
+}
+
+/**
+ * Thrown when `auth.api.getSession` itself throws (e.g. Postgres
+ * unreachable). Distinct from "no session present" so callers can
+ * distinguish "log out" from "service degraded, retry."
+ */
+export class AuthUnavailableError extends Error {
+  constructor(public override readonly cause: unknown) {
+    super("auth_unavailable");
+  }
 }

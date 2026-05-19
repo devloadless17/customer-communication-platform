@@ -739,6 +739,28 @@ export function ReplyBox({
         sendInFlightRef.current = false;
         setSendInFlight(false);
       }
+
+      // Post-HTTP watchdog: if the HTTP request returned successfully but
+      // the server never emits the confirming `message:new` socket frame
+      // (worker crashed mid-Meta-send, bus subscriber threw, browser missed
+      // the frame between subscribe-conversation and emit), the optimistic
+      // bubble would sit in `pending: true` forever. After 30s, flip it to
+      // failed so the user sees a Retry affordance. The matching reducer
+      // dispatches `ccp:optimistic-confirmed` when the frame DOES arrive,
+      // which cancels this watchdog.
+      if (!isNote) {
+        const STUCK_WATCHDOG_MS = 30_000;
+        const ev = `ccp:optimistic-confirmed:${clientTempId}`;
+        const watchdogId = window.setTimeout(() => {
+          window.removeEventListener(ev, onConfirmed);
+          onOptimisticFail?.(clientTempId);
+        }, STUCK_WATCHDOG_MS);
+        const onConfirmed = () => {
+          window.clearTimeout(watchdogId);
+          window.removeEventListener(ev, onConfirmed);
+        };
+        window.addEventListener(ev, onConfirmed, { once: true });
+      }
     })();
   };
 

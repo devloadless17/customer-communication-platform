@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -59,6 +60,7 @@ export function GroupForm({
   initialContactLabels = [],
 }: GroupFormProps) {
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
 
   const [name, setName] = useState(initial?.name ?? "");
@@ -161,7 +163,7 @@ export function GroupForm({
       }
       toast.success(initial ? `Saved "${name.trim()}"` : `Created "${name.trim()}"`);
       router.push(redirectTo);
-      router.refresh();
+      softRefresh();
     } finally {
       setSubmitting(false);
     }
@@ -206,7 +208,7 @@ export function GroupForm({
       }
       toast.success(`Deleted "${initial.name}"`);
       router.push("/broadcasts/groups");
-      router.refresh();
+      softRefresh();
     } finally {
       setDeleting(false);
     }

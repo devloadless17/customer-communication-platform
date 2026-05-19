@@ -59,14 +59,13 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
     {
       connection: webhookConnectionOptions(),
       concurrency: concurrency(),
-      // Each delivery is a single fetch + a tiny DB update. 60s lock
-      // gives ample headroom: 10s fetch timeout, plus serialization on
-      // the OutboundWebhook row lock when N concurrent deliveries for
-      // the SAME dead URL all queue at the consecutiveFailures bump.
-      // Earlier 30s tail came close to the lock-expire edge under a real
-      // outage with 10 concurrent failing deliveries hitting the same
-      // webhook row.
-      lockDuration: 60_000,
+      // Each delivery is a single fetch + a tiny DB update — BUT under DB
+      // contention (100 concurrent failures all queued on the same
+      // OutboundWebhook row lock) tail latency can pass 60s, the BullMQ
+      // lock expires, and the job is re-delivered → duplicate POST to
+      // the partner. Bumped to 120s; lockRenewTime stays at 30s so the
+      // worker still extends while genuinely active.
+      lockDuration: 120_000,
       lockRenewTime: 30_000,
     },
   );
@@ -181,6 +180,12 @@ async function deliverOnce(
       },
       body,
       timeoutMs: DEFAULT_TIMEOUT_MS,
+      // No redirects on outbound webhooks. A 307 hop to a different host
+      // would re-send the same HMAC signature + auth headers, which a
+      // malicious receiver could log and replay. Webhook receivers are
+      // terminal endpoints; if a customer truly needs a redirect they
+      // should update the URL in our settings.
+      maxRedirects: 0,
     });
   } catch (err) {
     const isSsrf = err instanceof SsrfBlockedError;
@@ -208,6 +213,12 @@ async function deliverOnce(
   const responseText = await readLimitedBody(response, MAX_RESPONSE_BODY_BYTES);
 
   if (response.ok) {
+    // Read prior consecutive-failures count so we can emit a recovery
+    // event on the N>0 → 0 transition. Without this the operator never
+    // gets a positive signal when a previously-broken webhook recovers
+    // (the disabled flow has both a log + a socket event; recovery was
+    // silent).
+    const priorFailures = webhook.consecutiveFailures;
     await db.$transaction([
       db.outboundWebhookDelivery.update({
         where: { id: deliveryId },
@@ -230,6 +241,21 @@ async function deliverOnce(
         },
       }),
     ]);
+    if (priorFailures > 0) {
+      try {
+        await publish({
+          type: "webhook.subscription_recovered",
+          teamId: webhook.teamId,
+          webhookId: webhook.id,
+        });
+      } catch (err) {
+        // Non-fatal — the row update succeeded; the recovery notification
+        // is informational only.
+        console.warn(
+          `[webhooks] publish(webhook.subscription_recovered) failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
     return;
   }
 

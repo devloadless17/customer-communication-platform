@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   Post,
+  Query,
   UseGuards,
 } from "@nestjs/common";
 
@@ -62,6 +63,28 @@ export class BroadcastsController {
   ) {
     const broadcast = await this.broadcasts.get(session.teamId, id);
     return { broadcast };
+  }
+
+  /**
+   * Paginated recipient page. `GET :id/recipients?cursor=&status=&take=`.
+   * Used by the broadcast detail UI when `recipientsTruncated` is true on
+   * the parent get() response. Without this, a 10k-recipient broadcast
+   * caused a multi-MB JSON return + 10k DOM rows on detail-open, freezing
+   * the browser tab for tens of seconds.
+   */
+  @Get(":id/recipients")
+  async listRecipients(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query("cursor") cursor?: string,
+    @Query("status") status?: string,
+    @Query("take") take?: string,
+  ) {
+    return this.broadcasts.listRecipients(session.teamId, id, {
+      cursor,
+      status,
+      take: take ? Number.parseInt(take, 10) : undefined,
+    });
   }
 
   @Post(":id/cancel")

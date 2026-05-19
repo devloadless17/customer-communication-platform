@@ -36,6 +36,10 @@ import {
   startBlobOrphanSweeper,
   stopBlobOrphanSweeper,
 } from "@/lib/sweepers/blob-orphan";
+import {
+  startOutboundEventRetentionSweeper,
+  stopOutboundEventRetentionSweeper,
+} from "@/lib/sweepers/outbound-event-retention";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -62,6 +66,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private webhookDeliveryCleanupStarted = false;
   private apiIdempotencyCleanupStarted = false;
   private blobOrphanSweeperStarted = false;
+  private outboundEventRetentionStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -133,9 +138,24 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start blob-orphan sweeper", err);
     }
+    try {
+      // Daily retention on the OutboundEvent (bus outbox) table. Without
+      // this every domain-event publish accumulates forever — the partial
+      // drainer index degrades and pg_dump size balloons month-over-month.
+      startOutboundEventRetentionSweeper();
+      this.outboundEventRetentionStarted = true;
+      this.logger.log("Outbound event retention sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start outbound-event retention sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.outboundEventRetentionStarted) stopOutboundEventRetentionSweeper();
+    } catch (err) {
+      this.logger.warn(`stopOutboundEventRetentionSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
     try {
       if (this.blobOrphanSweeperStarted) stopBlobOrphanSweeper();
     } catch (err) {

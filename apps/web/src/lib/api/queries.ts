@@ -1,5 +1,7 @@
 import "server-only";
 
+import { cache } from "react";
+
 import type { WorkflowTriggerEvent } from "@prisma/client";
 
 import { api } from "../api-client";
@@ -69,10 +71,18 @@ export interface SnippetDto {
 // their own edits. Trading the cache win for guaranteed freshness; the
 // per-call docker-network round trip is single-digit ms.
 
-export async function getCurrentTeam(): Promise<{ id: string; name: string }> {
-  const { team } = await api<{ team: { id: string; name: string } }>("/api/team");
-  return team;
-}
+/**
+ * Wrapped in `React.cache` so the (app) route-group layout and each
+ * section's SectionShell share one HTTP round-trip per render. Without
+ * this, every authenticated page paid 2x the /api/team latency on every
+ * nav (parent layout + SectionShell each calling independently).
+ */
+export const getCurrentTeam = cache(
+  async (): Promise<{ id: string; name: string }> => {
+    const { team } = await api<{ team: { id: string; name: string } }>("/api/team");
+    return team;
+  },
+);
 
 export async function listTeamMembers(): Promise<User[]> {
   const { users } = await api<{ users: User[] }>("/api/users");
@@ -124,10 +134,16 @@ export async function listSnippets(): Promise<SnippetDto[]> {
   return snippets;
 }
 
-export async function listContactStages(): Promise<ContactStage[]> {
+// Wrapped in `React.cache` so the contacts layout (for the sub-sidebar's
+// stage chips) and the contacts page (for the table's stage column) share
+// one fetch per render — without this, navigating into /contacts paid 2x
+// the `/api/team/stages` RTT every click. Per-render dedupe only; fresh
+// fetch on each new navigation, which preserves the "always-fresh catalog"
+// behaviour the rest of this file aims for.
+export const listContactStages = cache(async (): Promise<ContactStage[]> => {
   const { stages } = await api<{ stages: ContactStage[] }>("/api/team/stages");
   return stages;
-}
+});
 
 export async function getStageContactCounts(): Promise<{
   countsByStageId: Record<string, number>;

@@ -155,14 +155,31 @@ export async function sendTextInternal(
   });
 
   const previewBody = body.slice(0, 200);
-  const bumped = await db.conversation.update({
-    where: { id: args.conversationId },
-    // Use the same `messageTimestamp` as the Message row so the
-    // conversation's lastMessageAt stays in lock-step with the
-    // ordering guard above. Using `send.timestamp` (Meta's response
-    // clock) here would have reintroduced the same monotonicity hole.
-    data: { lastMessageAt: messageTimestamp, lastMessagePreview: previewBody },
-    select: { unreadCount: true },
+  // Compute the bump inside a tx using FRESH `lastMessageAt` — the value
+  // we snapshotted in `conversation.lastMessageAt` above is stale by the
+  // Meta-call duration, so a bare UPDATE here could REGRESS the
+  // conversation's clock if an inbound webhook landed in that window.
+  // Read-then-write guarantees strict monotonicity even under race.
+  const bumped = await db.$transaction(async (tx) => {
+    const current = await tx.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { lastMessageAt: true, unreadCount: true },
+    });
+    if (!current) {
+      throw new SendTextValidationError(
+        "conversation_not_found",
+        "conversation_disappeared_mid_send",
+      );
+    }
+    const effectiveBump =
+      current.lastMessageAt >= messageTimestamp
+        ? new Date(current.lastMessageAt.getTime() + 1)
+        : messageTimestamp;
+    await tx.conversation.update({
+      where: { id: args.conversationId },
+      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
+    });
+    return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
   });
 
   const message: Message = {
@@ -188,7 +205,10 @@ export async function sendTextInternal(
     conversationId: args.conversationId,
     message,
     preview: previewBody,
-    lastMessageAt: messageTimestamp.toISOString(),
+    // The conversation's recency reflects the effective bump (which may be
+    // > messageTimestamp if a concurrent write raced ahead). Publishing the
+    // stale messageTimestamp here would race the frontend out of sync.
+    lastMessageAt: bumped.lastMessageAt.toISOString(),
     // Outbound doesn't bump unread; the row's current value is the
     // accurate absolute count.
     unreadCount: bumped.unreadCount,

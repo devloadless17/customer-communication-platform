@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
   Check,
@@ -46,7 +47,7 @@ export function WhatsappSettings({
   teamId: string;
   canManage: boolean;
 }) {
-  const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const params = useSearchParams();
   const expandAdvanced = params.get("expand") === "advanced";
   const { confirm, confirmDialog } = useConfirm();
@@ -113,7 +114,7 @@ export function WhatsappSettings({
       setError("Failed to disconnect");
       return;
     }
-    router.refresh();
+    softRefresh();
     setShowForm(true);
   }
 
@@ -193,7 +194,7 @@ export function WhatsappSettings({
                 const ok = await save(form);
                 if (ok) {
                   setShowForm(false);
-                  router.refresh();
+                  softRefresh();
                 }
               })
             }
@@ -244,7 +245,7 @@ export function WhatsappSettings({
               const ok = await save(form);
               if (ok) {
                 setShowForm(false);
-                router.refresh();
+                softRefresh();
               }
             })
           }

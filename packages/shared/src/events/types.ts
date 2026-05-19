@@ -311,6 +311,15 @@ export interface ContactTagChangedEvent {
   changedByUserId: string | null;
   /** Set on /v1 mutations for audit attribution. */
   changedByApiKeyId?: string | null;
+  /**
+   * Workflow steps set this to skip chain-trigger dispatch. Today the
+   * workflow-dispatch subscriber doesn't subscribe to this event, so the
+   * flag is dormant — but a future PR that wires the tag-changed trigger
+   * MUST honor this or step-driven tag changes will infinite-loop into
+   * themselves. Mirrors the pattern on `contact.updated`,
+   * `conversation.assigned`, etc.
+   */
+  silent?: boolean;
 }
 
 /**
@@ -399,6 +408,14 @@ export interface BroadcastStatusChangedEvent {
   broadcastId: string;
   status: "queued" | "running" | "completed" | "failed" | "canceled";
   error?: string;
+  /**
+   * When status === "failed" via the boot reconciler, the count of
+   * recipients that were still `queued` when the process died. Surfaces
+   * partial-failure scope to the UI (banner shows "N recipients never
+   * received the message — manual resume required"). Undefined for
+   * normal status transitions where this isn't meaningful.
+   */
+  abandonedRecipients?: number;
 }
 
 /**
@@ -574,6 +591,18 @@ export interface WebhookSubscriptionDisabledEvent {
 }
 
 /**
+ * A previously-failing webhook started delivering successfully again
+ * (consecutiveFailures transitioned N>0 → 0). Mirrors
+ * `webhook.subscription_disabled` — no outbound delivery, just an
+ * internal socket frame to the team room so the UI can clear any
+ * "webhook unhealthy" badge.
+ */
+export interface WebhookSubscriptionRecoveredEvent {
+  teamId: string;
+  webhookId: string;
+}
+
+/**
  * A team-scoped catalog row was created / updated / deleted / reordered.
  *
  * Two subscribers ride on this during the NestJS migration:
@@ -638,6 +667,7 @@ export interface DomainEventMap {
   "team_channel.read": TeamChannelReadEvent;
   "team.catalog_changed": TeamCatalogChangedEvent;
   "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
+  "webhook.subscription_recovered": WebhookSubscriptionRecoveredEvent;
 }
 
 export type DomainEventType = keyof DomainEventMap;

@@ -38,11 +38,11 @@ export async function extractVideoPosterFrame(
     await writeFile(srcPath, bytes);
 
     await runFfmpeg(srcPath, outPath, "00:00:00.500");
-    let frame = await readFile(outPath).catch(() => null);
+    let frame = await safeReadOutput(outPath);
     if (!frame || frame.length === 0) {
       // Some videos have a fully-black or null first second; retry at 1s.
       await runFfmpeg(srcPath, outPath, "00:00:01.000").catch(() => undefined);
-      frame = await readFile(outPath).catch(() => null);
+      frame = await safeReadOutput(outPath);
     }
     if (!frame || frame.length === 0) return null;
     return new Uint8Array(frame);
@@ -52,6 +52,28 @@ export async function extractVideoPosterFrame(
     if (workDir) {
       await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+}
+
+/**
+ * Read the ffmpeg output file. Returns null on ENOENT (legitimate "no
+ * frame produced"), null + warning log on any other error (ENOSPC, EACCES,
+ * EIO — operational issues we want visible). Without this distinction
+ * a full `/tmp` silently turns every video thumbnail into a black bubble
+ * with no signal in the logs.
+ */
+async function safeReadOutput(outPath: string): Promise<Buffer | null> {
+  try {
+    return await readFile(outPath);
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === "ENOENT") return null;
+    console.warn(
+      `[media-thumbnail] readFile failed (${code ?? "unknown"}): ${
+        err instanceof Error ? err.message : err
+      }`,
+    );
+    return null;
   }
 }
 

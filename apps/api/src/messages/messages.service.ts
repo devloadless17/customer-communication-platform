@@ -78,8 +78,19 @@ export class MessagesService {
    *
    * publishInTx is the same primitive the inbound ingest path uses.
    *
-   * CAS-bump on lastMessageAt so an out-of-order older send can't
-   * overwrite a newer one's preview.
+   * The previous shape used a CAS `lastMessageAt: { lte: bumpTimestamp }`,
+   * which silently no-op'd the UPDATE whenever an interleaved write
+   * (inbound webhook, workflow auto-reply via the bare-UPDATE path in
+   * lib/messaging/send-*-internal.ts, or a parallel send) had raced past
+   * the worker's stale-from-preflight `bumpTimestamp`. The conversation
+   * row stayed pinned to the racing write's preview, while THIS send's
+   * `message.sent` event still fanned out with the now-stale outbound
+   * preview — so the agent's list briefly flashed the correct value via
+   * socket, then snapped back to the stuck preview on the next refresh.
+   * Read `lastMessageAt` inside the tx and compute an effective bump that
+   * is strictly monotonic relative to current DB state; that keeps the
+   * inbox sort order correct AND guarantees the latest outbound's preview
+   * actually lands.
    */
   private async commitOutboundEvent(args: {
     conversationId: string;
@@ -92,25 +103,30 @@ export class MessagesService {
      * with whatever inbound increments interleaved (and serializable
      * isolation ensures the read is consistent with the write below).
      */
-    event: Omit<DomainEventOf<"message.sent">, "unreadCount">;
+    event: Omit<DomainEventOf<"message.sent">, "unreadCount" | "lastMessageAt">;
   }): Promise<void> {
     await this.db.$transaction(async (tx) => {
-      await tx.conversation.updateMany({
-        where: {
-          id: args.conversationId,
-          lastMessageAt: { lte: args.bumpTimestamp },
-        },
+      const current = await tx.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { lastMessageAt: true, unreadCount: true },
+      });
+      if (!current) return;
+      const effectiveBump =
+        current.lastMessageAt >= args.bumpTimestamp
+          ? new Date(current.lastMessageAt.getTime() + 1)
+          : args.bumpTimestamp;
+      await tx.conversation.update({
+        where: { id: args.conversationId },
         data: {
-          lastMessageAt: args.bumpTimestamp,
+          lastMessageAt: effectiveBump,
           lastMessagePreview: args.preview,
         },
       });
-      const row = await tx.conversation.findUnique({
-        where: { id: args.conversationId },
-        select: { unreadCount: true },
+      await publishInTx(tx, {
+        ...args.event,
+        lastMessageAt: effectiveBump.toISOString(),
+        unreadCount: current.unreadCount,
       });
-      const unreadCount = row?.unreadCount ?? 0;
-      await publishInTx(tx, { ...args.event, unreadCount });
     });
   }
 
@@ -233,6 +249,24 @@ export class MessagesService {
         lastInboundAt,
       });
     }
+    // Resolve the reply target FIRST. A flood of replies pointing at a
+    // deleted message id would otherwise drain the per-conversation send
+    // budget (30/min) without producing any DB writes or Meta calls —
+    // legitimate replies then get false-positive rate-limited.
+    let replyToMessageId: string | null = null;
+    let replyToExternalId: string | undefined;
+    if (replyToMessageIdRaw) {
+      if (!replyToRow) {
+        throw new BadRequestException({
+          error: "reply_target_not_found",
+          detail: "The message you're replying to no longer exists in this conversation.",
+        });
+      }
+      replyToMessageId = replyToRow.id;
+      if (!replyToRow.externalId.startsWith("tmp_")) {
+        replyToExternalId = replyToRow.externalId;
+      }
+    }
     // Per-conversation send ceiling. Cheap second-axis bound that catches a
     // partner-driven hot-potato (their automation reacts to its own
     // `message.sent` webhook) inside one thread before the per-key 60/min
@@ -253,20 +287,6 @@ export class MessagesService {
         );
       }
       throw err;
-    }
-    let replyToMessageId: string | null = null;
-    let replyToExternalId: string | undefined;
-    if (replyToMessageIdRaw) {
-      if (!replyToRow) {
-        throw new BadRequestException({
-          error: "reply_target_not_found",
-          detail: "The message you're replying to no longer exists in this conversation.",
-        });
-      }
-      replyToMessageId = replyToRow.id;
-      if (!replyToRow.externalId.startsWith("tmp_")) {
-        replyToExternalId = replyToRow.externalId;
-      }
     }
     return {
       phoneNumber: conversation.contact.phoneNumber,
@@ -431,7 +451,6 @@ export class MessagesService {
           conversationId,
           message,
           preview,
-          lastMessageAt: send.timestamp.toISOString(),
           senderUserId: userId,
           ...(clientTempId ? { clientTempId } : {}),
         },
@@ -819,7 +838,6 @@ export class MessagesService {
           conversationId,
           message,
           preview: previewBody,
-          lastMessageAt: messageTimestamp.toISOString(),
           senderUserId: userId,
           ...(clientTempId ? { clientTempId } : {}),
         },
@@ -1041,7 +1059,6 @@ export class MessagesService {
             conversationId: conversation.id,
             message,
             preview,
-            lastMessageAt: bumpTimestamp.toISOString(),
             senderUserId: userId,
             ...(newConversation ? { newConversation } : {}),
           },

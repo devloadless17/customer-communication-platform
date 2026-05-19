@@ -80,16 +80,17 @@ const prodRequired: Check[] = [
       "(either trusts spoofed IPs or collapses every request onto Caddy's " +
       "loopback bucket). Set to '1' for the default single-Caddy topology.",
   },
-];
-
-const recommended: Check[] = [
   {
     name: "UPLOADTHING_TOKEN",
     hint:
-      "Blob storage token. Without it, every inbound/outbound media upload " +
-      "will throw at first use. App boots, but media flows are broken.",
+      "Blob storage token. Without it EVERY inbound media message is silently " +
+      "swallowed (the webhook records a text-only bubble with no image — the " +
+      "agent never sees the customer's attachment). Promoted to prodRequired " +
+      "after that exact failure mode shipped on a prior misconfiguration.",
   },
 ];
+
+const recommended: Check[] = [];
 
 function present(c: Check): boolean {
   return Boolean(process.env[c.name]);
@@ -165,6 +166,21 @@ export function validateEnv(label: "api" | "web" = "api"): void {
       console.error(
         `${tag} fatal: TRUSTED_PROXY_HOPS must be an integer between 0 and 10, ` +
           `got ${JSON.stringify(raw)}. Set to '1' for the default single-Caddy topology.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  // META_GRAPH_VERSION shape check. The Meta provider builds URLs as
+  // `https://graph.facebook.com/${META_GRAPH_VERSION}/...` — a typo like
+  // "v25" (no `.0`) silently 404s every send until someone notices. The
+  // default is "v25.0" if unset; only check when an operator overrides.
+  if (label === "api" && process.env.META_GRAPH_VERSION) {
+    const raw = process.env.META_GRAPH_VERSION;
+    if (!/^v\d+\.\d+$/.test(raw)) {
+      console.error(
+        `${tag} fatal: META_GRAPH_VERSION must match v<major>.<minor> ` +
+          `(e.g. "v25.0"). Got ${JSON.stringify(raw)}.`,
       );
       process.exit(1);
     }

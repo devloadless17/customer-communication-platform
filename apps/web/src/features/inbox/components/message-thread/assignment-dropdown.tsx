@@ -13,17 +13,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn, initials } from "@ccp/shared/utils";
+import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import type { User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
 
 export function AssignmentDropdown({
+  teamId,
   conversationId,
   currentId,
   currentName,
   teamMembers,
   onAlert,
 }: {
+  teamId: string;
   conversationId: string;
   currentId: string | null;
   currentName: string | null;
@@ -35,6 +38,19 @@ export function AssignmentDropdown({
   const assign = async (assignedUserId: string | null) => {
     if (assignedUserId === currentId || pending) return;
     setPending(true);
+    const prevUser = currentId
+      ? teamMembers.find((u) => u.id === currentId) ?? null
+      : null;
+    const nextUser = assignedUserId
+      ? teamMembers.find((u) => u.id === assignedUserId) ?? null
+      : null;
+    // Optimistic: fan the same socket frame the server will broadcast so
+    // the sidebar assignee chip, list row, and panel picker flip instantly.
+    dispatchLocalSocketEvent("conversation:assigned", {
+      teamId,
+      conversationId,
+      assignedUser: nextUser,
+    });
     try {
       const res = await fetch(`/api/conversations/${conversationId}/assign`, {
         method: "POST",
@@ -42,11 +58,20 @@ export function AssignmentDropdown({
         body: JSON.stringify({ assignedUserId }),
       });
       if (!res.ok) {
-        // The optimistic UI nothing — without surfacing this the user thinks
-        // the click worked until they notice the dropdown didn't change.
+        // Roll back so the chip reflects truth.
+        dispatchLocalSocketEvent("conversation:assigned", {
+          teamId,
+          conversationId,
+          assignedUser: prevUser,
+        });
         await onAlert("Couldn't update assignment", await readError(res));
       }
     } catch (err) {
+      dispatchLocalSocketEvent("conversation:assigned", {
+        teamId,
+        conversationId,
+        assignedUser: prevUser,
+      });
       await onAlert(
         "Couldn't update assignment",
         err instanceof Error ? err.message : "Network error",

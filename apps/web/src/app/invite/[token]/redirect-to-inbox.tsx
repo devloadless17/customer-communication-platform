@@ -27,6 +27,14 @@ import { Loader2 } from "lucide-react";
 export function RedirectToInbox() {
   const router = useRouter();
   useEffect(() => {
+    // Prefetch first, then replace. AcceptForm already prefetched /inbox
+    // when it mounted, so this is usually a no-op cache hit — but if the
+    // browser navigated directly into the "Already accepted" Shell (e.g.
+    // the user followed the link in a second tab AFTER accepting in the
+    // first), the form never mounted and this is the first chance to
+    // warm the cache. Belt + suspenders so the redirect lands instantly
+    // in both code paths.
+    router.prefetch("/inbox");
     router.replace("/inbox");
   }, [router]);
 

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   Download,
   ListChecks,
@@ -98,6 +99,7 @@ export function ContactsClient({
   canManageStages: boolean;
 }) {
   const router = useRouter();
+  const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
   const list = useContactList({
     initialItems,
@@ -376,7 +378,7 @@ export function ContactsClient({
             setImporting(false);
             // Hard refresh — import might have added many rows; refetching
             // the page is simpler than splicing into local state.
-            router.refresh();
+            softRefresh();
           }}
         />
       )}
@@ -518,7 +520,7 @@ export function ContactsClient({
             // background.
             setItems((prev) => [item, ...prev]);
             setCreating(false);
-            router.refresh();
+            softRefresh();
           }}
           onTeamWideFieldAdded={(def) => {
             setFieldDefinitions((prev) =>

@@ -1,7 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-
+import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ContactSelectDialog } from "@/features/contacts/components/contact-select-dialog";
 import type { ForwardResult } from "@ccp/shared/types";
 
@@ -31,14 +30,12 @@ export function ForwardDialog({
   onError: (summary: string) => void;
 }) {
   const count = messageIds.length;
-  const router = useRouter();
+  const softRefresh = useSoftRefresh();
 
   function submit(contactIds: string[]) {
     if (contactIds.length === 0 || messageIds.length === 0) return;
     onClose();
-    void runForward(messageIds, contactIds, count, onError, () =>
-      router.refresh(),
-    );
+    void runForward(messageIds, contactIds, count, onError, softRefresh);
   }
 
   if (!open) return null;

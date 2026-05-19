@@ -114,12 +114,15 @@ interface CreateAndEnqueueArgs {
 }
 
 async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
-  // Write the once-per-contact marker FIRST when applicable, in the same tx
-  // as the run create. If the marker insert hits the unique index, another
-  // call already won — abandon this run silently so we never enqueue twice.
+  // Write the once-per-contact marker + run create inside a tx. The BullMQ
+  // enqueue runs AFTER the tx commits — calling Redis from inside a
+  // Postgres transaction holds the DB pool slot for the BullMQ command
+  // timeout (Redis hiccup = pool starvation). The waiting-runs sweeper
+  // recovers any orphaned `queued` row that never made it into Redis.
+  let runId: string | null = null;
   if (args.oncePerContact && args.contactId) {
     try {
-      await db.$transaction(async (tx) => {
+      runId = await db.$transaction(async (tx) => {
         await tx.workflowContactState.create({
           data: {
             workflowId: args.workflowId,
@@ -139,11 +142,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
           },
           select: { id: true },
         });
-        await retry(
-          () => enqueueWorkflowRun(run.id),
-          ENQUEUE_RETRIES,
-          `[workflows] enqueue team=${args.teamId} workflow=${args.workflowId}`,
-        );
+        return run.id;
       });
     } catch (err) {
       // P2002 = race lost on the once-per-contact unique index. Expected
@@ -154,23 +153,27 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
       }
       throw err;
     }
-    return;
+  } else {
+    const run = await db.workflowRun.create({
+      data: {
+        workflowId: args.workflowId,
+        teamId: args.teamId,
+        trigger: args.trigger,
+        contactId: args.contactId,
+        conversationId: args.conversationId,
+        eventPayload: args.payload as Prisma.InputJsonValue,
+        status: "queued",
+      },
+      select: { id: true },
+    });
+    runId = run.id;
   }
-
-  const run = await db.workflowRun.create({
-    data: {
-      workflowId: args.workflowId,
-      teamId: args.teamId,
-      trigger: args.trigger,
-      contactId: args.contactId,
-      conversationId: args.conversationId,
-      eventPayload: args.payload as Prisma.InputJsonValue,
-      status: "queued",
-    },
-    select: { id: true },
-  });
+  if (!runId) return;
+  // Enqueue OUTSIDE the tx so a Redis stall can't pin a Prisma connection.
+  // If this fails after retries the row stays `queued` and the
+  // workflow-waiting sweeper picks it up on the next tick.
   await retry(
-    () => enqueueWorkflowRun(run.id),
+    () => enqueueWorkflowRun(runId!),
     ENQUEUE_RETRIES,
     `[workflows] enqueue team=${args.teamId} workflow=${args.workflowId}`,
   );

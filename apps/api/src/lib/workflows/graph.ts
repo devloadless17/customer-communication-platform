@@ -103,6 +103,17 @@ function parseEdge(raw: unknown): WorkflowEdge | null {
  * of human-readable errors. Save anyway is allowed for draft workflows;
  * publish requires zero errors.
  */
+/**
+ * Hard cap on graph size. React Flow's canvas isn't using
+ * `onlyRenderVisibleElements` (would need 200+ nodes to benefit), so a
+ * runaway author wiring hundreds of step nodes makes the builder
+ * pan/zoom stutter and the per-effect re-projection at workflow-canvas.tsx
+ * walk the whole graph. Cap matches the docs target ("you don't need
+ * more than a few dozen steps per workflow") with headroom for split
+ * branches.
+ */
+export const MAX_WORKFLOW_NODES = 200;
+
 export function validateGraph(graph: WorkflowGraph): string[] {
   const errors: string[] = [];
 
@@ -111,6 +122,13 @@ export function validateGraph(graph: WorkflowGraph): string[] {
     if (graph.nodes.length > 0 || graph.edges.length > 0) {
       errors.push("graph.startNodeId is required when nodes exist");
     }
+    return errors;
+  }
+
+  if (graph.nodes.length > MAX_WORKFLOW_NODES) {
+    errors.push(
+      `graph.nodes: too many nodes (${graph.nodes.length}); max ${MAX_WORKFLOW_NODES}`,
+    );
     return errors;
   }
 
@@ -145,6 +163,51 @@ export function validateGraph(graph: WorkflowGraph): string[] {
   // because mid-edit drafts often have temporarily-detached steps. (Round 2c
   // could promote to error on publish.)
   // For now we omit the orphan check.
+
+  // Cycle detection. A workflow graph MUST be a DAG. Without this guard,
+  // an author wiring A → B → A by accident produces runs that hammer the
+  // 100-step ceiling on every fire — 100 step iterations + 100 outbox
+  // writes + 100 WorkflowRun updates PER trigger, throttled only by the
+  // worker concurrency. We exclude `jump_to_step` (its target is
+  // condition-guarded; the runner caps cycles via the step ceiling).
+  // Plain edges that form a cycle are always wrong.
+  const adjacency = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    const list = adjacency.get(e.from) ?? [];
+    list.push(e.to);
+    adjacency.set(e.from, list);
+  }
+  const WHITE = 0;
+  const GRAY = 1;
+  const BLACK = 2;
+  const color = new Map<string, number>();
+  for (const id of ids) color.set(id, WHITE);
+  const cycle: string[] = [];
+  const visit = (id: string, path: string[]): boolean => {
+    color.set(id, GRAY);
+    path.push(id);
+    const outs = adjacency.get(id) ?? [];
+    for (const next of outs) {
+      const c = color.get(next);
+      if (c === GRAY) {
+        const start = path.indexOf(next);
+        cycle.push(...path.slice(start), next);
+        return true;
+      }
+      if (c === WHITE && visit(next, path)) return true;
+    }
+    path.pop();
+    color.set(id, BLACK);
+    return false;
+  };
+  for (const id of ids) {
+    if (color.get(id) === WHITE && visit(id, [])) {
+      errors.push(
+        `graph.edges form a cycle (${cycle.join(" → ")}) — workflows must be acyclic`,
+      );
+      break;
+    }
+  }
 
   return errors;
 }

@@ -235,12 +235,24 @@ export class BroadcastsService implements OnModuleInit {
   }
 
   async get(teamId: string, id: string) {
+    // Hard cap on inlined recipients. A 10k-recipient broadcast detail page
+    // was returning multi-MB of JSON + rendering 10k <tr> rows, freezing
+    // the browser tab for 10-30s. Cap to the first 500 (status grouped:
+    // failed first so the operator can triage immediately, then queued,
+    // then sent — the recipients they care about are the ones that didn't
+    // succeed). Caller paginates the rest via /recipients?status=&cursor=.
+    const RECIPIENTS_INLINE_CAP = 500;
     const row = await this.db.broadcast.findFirst({
       where: { id, teamId },
       include: {
         createdBy: { select: { id: true, name: true } },
         recipients: {
+          // failed → queued → sent groups the most actionable rows first.
+          // BroadcastRecipientStatus enum sorts alphabetically (canceled,
+          // failed, queued, sending, sent) so status-asc puts failures
+          // near the top, which is what the operator wants to see first.
           orderBy: [{ status: "asc" }, { id: "asc" }],
+          take: RECIPIENTS_INLINE_CAP + 1,
           include: {
             contact: { select: { id: true, name: true, phoneNumber: true } },
           },
@@ -248,6 +260,11 @@ export class BroadcastsService implements OnModuleInit {
       },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
+
+    const truncated = row.recipients.length > RECIPIENTS_INLINE_CAP;
+    const recipients = truncated
+      ? row.recipients.slice(0, RECIPIENTS_INLINE_CAP)
+      : row.recipients;
 
     return {
       id: row.id,
@@ -266,7 +283,9 @@ export class BroadcastsService implements OnModuleInit {
       createdAt: row.createdAt.toISOString(),
       startedAt: row.startedAt?.toISOString() ?? null,
       completedAt: row.completedAt?.toISOString() ?? null,
-      recipients: row.recipients.map((r) => ({
+      recipientsTruncated: truncated,
+      recipientsShown: recipients.length,
+      recipients: recipients.map((r) => ({
         id: r.id,
         contactId: r.contactId,
         contactName: r.contact.name,
@@ -277,6 +296,55 @@ export class BroadcastsService implements OnModuleInit {
         errorMessage: r.errorMessage,
         sentAt: r.sentAt?.toISOString() ?? null,
       })),
+    };
+  }
+
+  /**
+   * Paginated recipient page. Cursor-based on `id` (status-grouped) so
+   * "Load more" works without offset's "rows shift under you" problem.
+   */
+  async listRecipients(
+    teamId: string,
+    broadcastId: string,
+    opts: { cursor?: string; status?: string; take?: number },
+  ) {
+    const take = Math.min(Math.max(opts.take ?? 200, 1), 500);
+    const broadcast = await this.db.broadcast.findFirst({
+      where: { id: broadcastId, teamId },
+      select: { id: true },
+    });
+    if (!broadcast) throw new NotFoundException({ error: "not found" });
+
+    const where: Prisma.BroadcastRecipientWhereInput = {
+      broadcastId,
+    };
+    if (opts.status) {
+      where.status = opts.status as Prisma.BroadcastRecipientWhereInput["status"];
+    }
+    const rows = await this.db.broadcastRecipient.findMany({
+      where,
+      orderBy: [{ status: "asc" }, { id: "asc" }],
+      take: take + 1,
+      ...(opts.cursor
+        ? { cursor: { id: opts.cursor }, skip: 1 }
+        : {}),
+      include: { contact: { select: { id: true, name: true, phoneNumber: true } } },
+    });
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    return {
+      recipients: page.map((r) => ({
+        id: r.id,
+        contactId: r.contactId,
+        contactName: r.contact.name,
+        contactPhone: r.contact.phoneNumber,
+        conversationId: r.conversationId,
+        status: r.status,
+        externalId: r.externalId,
+        errorMessage: r.errorMessage,
+        sentAt: r.sentAt?.toISOString() ?? null,
+      })),
+      nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
     };
   }
 

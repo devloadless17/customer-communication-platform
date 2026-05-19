@@ -28,6 +28,13 @@ export interface TokenBucket {
    * should wait before retrying.
    */
   consume(key: string): { ok: true } | { ok: false; retryAfter: number };
+
+  /**
+   * Refund one token to `key`. Used when an early-path consume was
+   * speculative (e.g. before an idempotency-cache hit check). No-ops if
+   * the bucket has been evicted; over-refunds clip at `capacity`.
+   */
+  refund(key: string): void;
 }
 
 const WINDOW_MS = 60_000;
@@ -79,6 +86,11 @@ export function createTokenBucket(options: TokenBucketOptions): TokenBucket {
       }
       bucket.tokens -= 1;
       return { ok: true };
+    },
+    refund(key: string) {
+      const bucket = map.get(key);
+      if (!bucket) return;
+      bucket.tokens = Math.min(bucket.capacity, bucket.tokens + 1);
     },
   };
 }

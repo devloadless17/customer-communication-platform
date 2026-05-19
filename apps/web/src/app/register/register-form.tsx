@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -18,10 +19,19 @@ import { registerAction, type RegisterState } from "./actions";
 const INITIAL: RegisterState = { error: null };
 
 export function RegisterForm() {
+  const router = useRouter();
   const { state, action, isRedirecting } = useAuthRedirect(
     registerAction,
     INITIAL,
   );
+
+  // Same prefetch trick as login-form / accept-form: warm /inbox in the
+  // router cache so the post-register navigation is near-instant. Without
+  // this, the new workspace's 3 catalog fetches block the redirect and
+  // the AuthRedirectFallback spinner lingers for ~200-400ms.
+  useEffect(() => {
+    router.prefetch("/inbox");
+  }, [router]);
 
   if (isRedirecting) {
     return <AuthRedirectFallback minHeightClass="min-h-65" />;

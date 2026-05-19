@@ -41,6 +41,18 @@ declare module "express-serve-static-core" {
 const apiKeyBucket = createTokenBucket({ perMin: 60, maxKeys: 10_000 });
 
 /**
+ * Refund a token on the API-key bucket. Used by handlers that detected an
+ * idempotency-cache HIT: the request did no real work, so the upstream
+ * guard's consume() should be returned. Without this, a partner whose
+ * automation crashes and retries the same Idempotency-Key for 24h burns
+ * 60 tokens/min on cache reads that produce zero side effects, starving
+ * legitimate requests on the same key.
+ */
+export function refundApiKeyBucket(apiKeyId: string): void {
+  apiKeyBucket.refund(apiKeyId);
+}
+
+/**
  * Bearer-token guard for the external API.
  *
  *   - Read `Authorization: Bearer <token>` header

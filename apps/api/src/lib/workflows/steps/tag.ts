@@ -156,6 +156,11 @@ async function runTagMutation(
     added: kind === "add" ? [tag.id] : [],
     removed: kind === "remove" ? [tag.id] : [],
     changedByUserId: null,
+    // Defensive — workflow-dispatch doesn't subscribe to this event
+    // today, but the day someone wires the "On Contact Tag updated"
+    // trigger they MUST honor `silent` or this step infinite-loops into
+    // itself. Mirrors the catch-all `contact.updated` publish above.
+    silent: true,
   });
 
   return advance({ contactId, tagId: tag.id, kind, tagIds: payload.tagIds });

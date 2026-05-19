@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCheck, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
+import { Loader2, MoreHorizontal, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -26,24 +26,13 @@ export function ConversationMenu({
   const { confirm, alert, confirmDialog } = useConfirm();
   const [pending, setPending] = useState(false);
 
-  async function markUnread() {
-    setPending(true);
-    try {
-      const res = await fetch(`/api/conversations/${conversationId}/unread`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        await alert("Couldn't mark as unread", "Please try again.");
-        return;
-      }
-      // Pull fresh data through the server component so the conversation list
-      // re-renders with the bumped unreadCount. The conversation list reflects
-      // the change on next SSR pass; meanwhile the user has navigated away.
-      router.push("/inbox");
-    } finally {
-      setPending(false);
-    }
-  }
+  // Mark-as-unread was removed 2026-05-19 — operators reported it as
+  // not useful in practice (the unread badge is driven by inbound
+  // messages, not by manual toggles, and bumping a thread back to
+  // "unread" after reading didn't match anyone's workflow). The
+  // /api/conversations/:id/unread endpoint remains in case a future
+  // re-introduction wants it; deleting the server route can wait until
+  // we're sure no embedded integration relies on it.
 
   async function deleteConversation() {
     const ok = await confirm({
@@ -90,15 +79,6 @@ export function ConversationMenu({
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuLabel>Chat actions</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onSelect={(e) => {
-              e.preventDefault();
-              void markUnread();
-            }}
-          >
-            <CheckCheck className="size-3.5" />
-            Mark as unread
-          </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={(e) => {
               e.preventDefault();

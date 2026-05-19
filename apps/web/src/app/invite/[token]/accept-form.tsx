@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useFormStatus } from "react-dom";
+import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -24,10 +25,20 @@ export function AcceptForm({
   token: string;
   email: string;
 }) {
+  const router = useRouter();
   const { state, action, isRedirecting } = useAuthRedirect(
     acceptInviteAction,
     INITIAL,
   );
+
+  // Prefetch the post-accept destination (always /inbox for invite flow)
+  // so the navigation after the action resolves is near-instant. Same
+  // rationale as login-form.tsx: without prefetch, the user sees the
+  // AuthRedirectFallback spinner for ~150-300ms while /inbox does its
+  // server fetches.
+  useEffect(() => {
+    router.prefetch("/inbox");
+  }, [router]);
 
   // Fallback handles two flashes during navigation: (a) React resetting
   // uncontrolled inputs the instant the action resolves, (b) the auto-

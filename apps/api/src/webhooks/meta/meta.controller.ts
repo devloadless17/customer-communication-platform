@@ -108,10 +108,14 @@ export class MetaWebhookController {
     // whitespace difference.
     const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
     if (!rawBody) {
+      // Fail SOFT — Meta retries on any non-2xx and a 500 here would put
+      // us in an infinite retry storm if a future middleware reordering
+      // or content-type drift breaks the verify hook. Log loudly so the
+      // regression is discoverable, but return 200 to bound the damage.
       this.logger.error(
-        `[${teamId}] missing rawBody — main.ts verify hook regressed?`,
+        `[${teamId}] missing rawBody — main.ts verify hook regressed? returning 200 to avoid retry storm`,
       );
-      throw new HttpException("server misconfigured", 500);
+      return { ok: true, ingested: 0, dropped: "missing_raw_body" };
     }
     if (!verifySignature(rawBody, signature, config.appSecret)) {
       throw new HttpException("forbidden", 403);
@@ -133,7 +137,7 @@ export class MetaWebhookController {
     // is configured for the team — newly-onboarded teams that haven't
     // wired the field yet still receive events (the appSecret check is
     // the gate, and Meta won't sign anything to a non-onboarded team).
-    if (await this.phoneNumberMismatch(teamId, payload)) {
+    if (phoneNumberMismatch(config.phoneNumberId, payload)) {
       this.logger.warn(
         `[${teamId}] webhook payload phone_number_id does not match team configuration — dropping`,
       );
@@ -351,37 +355,9 @@ export class MetaWebhookController {
    * Only iterates the shape we care about — a malformed payload (no entry
    * array) returns false rather than crashing the request.
    */
-  private async phoneNumberMismatch(
-    teamId: string,
-    payload: unknown,
-  ): Promise<boolean> {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: { metaPhoneNumberId: true },
-    });
-    if (!team?.metaPhoneNumberId) return false;
-    const expected = team.metaPhoneNumberId;
-
-    const p = payload as {
-      entry?: Array<{
-        changes?: Array<{
-          value?: { metadata?: { phone_number_id?: string } };
-        }>;
-      }>;
-    };
-    const entries = p?.entry;
-    if (!Array.isArray(entries)) return false;
-    for (const entry of entries) {
-      const changes = entry?.changes;
-      if (!Array.isArray(changes)) continue;
-      for (const change of changes) {
-        const incoming = change?.value?.metadata?.phone_number_id;
-        // Missing metadata isn't grounds to drop — see jsdoc above.
-        if (incoming && incoming !== expected) return true;
-      }
-    }
-    return false;
-  }
+  // (Free function below — moved out of the controller class so it can read
+  // the cached `phoneNumberId` from getMetaWebhookConfig instead of a per-
+  // request `db.team.findUnique`.)
 
   /**
    * Did the parser originally attach media to this event? Used to tell
@@ -607,6 +583,44 @@ async function retry<T>(
     }
   }
   throw lastErr;
+}
+
+/**
+ * Phone-number-id defense-in-depth check. Returns true if the payload's
+ * `entry[].changes[].value.metadata.phone_number_id` is set on at least
+ * one change AND doesn't match the team-configured number. False when:
+ *   - The team has no `phoneNumberId` configured (newly onboarded; HMAC
+ *     is the only gate).
+ *   - The payload omits metadata on every change (some Meta event types
+ *     don't carry it).
+ *   - Every change's phone_number_id matches.
+ *
+ * Reads from the cached `MetaWebhookConfig.phoneNumberId` instead of a
+ * per-request DB lookup — see provider/config.ts for the cache TTL.
+ */
+function phoneNumberMismatch(
+  expected: string | null,
+  payload: unknown,
+): boolean {
+  if (!expected) return false;
+  const p = payload as {
+    entry?: Array<{
+      changes?: Array<{
+        value?: { metadata?: { phone_number_id?: string } };
+      }>;
+    }>;
+  };
+  const entries = p?.entry;
+  if (!Array.isArray(entries)) return false;
+  for (const entry of entries) {
+    const changes = entry?.changes;
+    if (!Array.isArray(changes)) continue;
+    for (const change of changes) {
+      const incoming = change?.value?.metadata?.phone_number_id;
+      if (incoming && incoming !== expected) return true;
+    }
+  }
+  return false;
 }
 
 function verifySignature(

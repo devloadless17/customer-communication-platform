@@ -61,6 +61,7 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
 }
 
 export function ThreadHeader({
+  teamId,
   conversationId,
   contactId,
   contactName,
@@ -78,6 +79,7 @@ export function ThreadHeader({
   canManageStages,
   onMobileBack,
 }: {
+  teamId: string;
   conversationId: string;
   contactId: string;
   contactName: string;
@@ -152,6 +154,7 @@ export function ThreadHeader({
           <SearchIcon className="size-4" />
         </Button>
         <AssignmentDropdown
+          teamId={teamId}
           conversationId={conversationId}
           currentId={assignedUserId}
           currentName={assignedUserName}
@@ -159,6 +162,7 @@ export function ThreadHeader({
           onAlert={onAlert}
         />
         <StatusDropdown
+          teamId={teamId}
           conversationId={conversationId}
           current={status}
           onAlert={onAlert}

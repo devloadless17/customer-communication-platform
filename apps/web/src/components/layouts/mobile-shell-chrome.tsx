@@ -20,9 +20,8 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Sheet } from "@/components/ui/sheet";
 import { MobileSubSidebarProvider } from "@/components/layouts/sub-sidebar";
+import { useSignOutOverlay } from "@/components/auth/signout-overlay";
 import { roleLabel } from "@ccp/shared/auth/permissions";
-import { broadcastSignout } from "@/lib/auth/auth-broadcast";
-import { closeClientSocket } from "@/lib/socket-client";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
 
@@ -89,6 +88,9 @@ export function MobileShellChrome({
 }) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname() ?? "";
+  // Same signout overlay used by the desktop AppRail — masks the blank
+  // window between the /logout hard nav and /login painting.
+  const { trigger: signOut, overlay: signOutOverlay } = useSignOutOverlay();
 
   // Close the drawer when the route changes — without this, navigating
   // via a drawer link leaves it open over the new page.
@@ -193,11 +195,7 @@ export function MobileShellChrome({
               </Link>
               <button
                 type="button"
-                onClick={() => {
-                  broadcastSignout();
-                  closeClientSocket();
-                  window.location.assign("/logout");
-                }}
+                onClick={signOut}
                 className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 <LogOut className="size-4" />
@@ -207,6 +205,7 @@ export function MobileShellChrome({
           </div>
         </div>
       </Sheet>
+      {signOutOverlay}
     </>
   );
 }
