@@ -325,6 +325,14 @@ function MessageThreadImpl({
     }, 1500);
   }, []);
 
+  // Scroll refs (also consumed by useChatScroll further down). Declared up
+  // here so the search-jump helper below can install its settle-window
+  // ResizeObserver + media-load listeners against the same content + viewport
+  // the chat-scroll hook does.
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const topSentinelRef = useRef<HTMLDivElement>(null);
+
   // -------------------------------------------------------------------------
   // In-thread search — WhatsApp-style. The slim search bar lives just below
   // the thread header; matches are highlighted IN PLACE inside the existing
@@ -410,6 +418,92 @@ function MessageThreadImpl({
   // call through the ref to dodge the TDZ.
   const markBenignTailUpdateRef = useRef<() => void>(() => {});
 
+  // Re-center the viewport on a matched bubble, robustly. A plain
+  // `scrollIntoView({behavior:"smooth"})` computes its target position at
+  // call time — while the ~300-500ms smooth animation is running, content
+  // ABOVE the target can reflow (image decode, video poster mount,
+  // framer-motion entrance, font swap), shifting the target's absolute Y by
+  // tens-to-hundreds of pixels. The scroll then lands at the now-stale
+  // position: "close to the searched message but not quite on it, user has
+  // to scroll a bit."
+  //
+  // useChatScroll already mitigates this for the stick-to-bottom case via a
+  // ResizeObserver + media-load listener, but ONLY while `stickyRef===true`.
+  // Search jumps happen with the user scrolled up in history, so that hook
+  // is silent. Mirror its load-older settle pattern here: after the initial
+  // smooth scroll, install a temporary ResizeObserver on the content + a
+  // capture-phase `load`/`loadedmetadata` listener on the viewport. Each
+  // reflow re-centers the bubble (auto, not smooth, so we don't fight our
+  // own animation). Bails on the first user wheel/touch or after 1.2s.
+  const matchSettleStopRef = useRef<(() => void) | null>(null);
+  const scrollMatchIntoView = useCallback((messageId: string) => {
+    matchSettleStopRef.current?.();
+    // Double-rAF before the first scroll so framer-motion's mount transition
+    // (one frame) and the subsequent layout pass (next frame) both commit
+    // before we measure. Track inner rAF in a closure var so the returned
+    // cleanup can cancel whichever frame is currently outstanding.
+    let pending: number | null = null;
+    pending = window.requestAnimationFrame(() => {
+      pending = window.requestAnimationFrame(() => {
+        pending = null;
+        const el = document.querySelector<HTMLElement>(
+          `[data-message-id="${messageId}"]`,
+        );
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+
+        const content = contentRef.current;
+        const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
+          "[data-radix-scroll-area-viewport]",
+        );
+        if (!content || !viewport) return;
+
+        let done = false;
+        const recenter = () => {
+          if (done) return;
+          // Re-resolve each time — re-renders can swap the DOM node.
+          const current = document.querySelector<HTMLElement>(
+            `[data-message-id="${messageId}"]`,
+          );
+          if (current) {
+            current.scrollIntoView({ behavior: "auto", block: "center" });
+          }
+        };
+        const onMediaLoad = (e: Event) => {
+          const tag = (e.target as HTMLElement | null)?.tagName;
+          if (tag === "IMG" || tag === "VIDEO") recenter();
+        };
+        const ro = new ResizeObserver(recenter);
+        ro.observe(content);
+        viewport.addEventListener("load", onMediaLoad, true);
+        viewport.addEventListener("loadedmetadata", onMediaLoad, true);
+        const stop = () => {
+          if (done) return;
+          done = true;
+          ro.disconnect();
+          viewport.removeEventListener("load", onMediaLoad, true);
+          viewport.removeEventListener("loadedmetadata", onMediaLoad, true);
+          viewport.removeEventListener("wheel", stop);
+          viewport.removeEventListener("touchmove", stop);
+          window.clearTimeout(timer);
+          if (matchSettleStopRef.current === stop) {
+            matchSettleStopRef.current = null;
+          }
+        };
+        viewport.addEventListener("wheel", stop, { passive: true });
+        viewport.addEventListener("touchmove", stop, { passive: true });
+        const timer = window.setTimeout(stop, 1200);
+        matchSettleStopRef.current = stop;
+      });
+    });
+    return () => {
+      if (pending != null) window.cancelAnimationFrame(pending);
+    };
+  }, []);
+
+  // Tear down any in-flight settle window on unmount.
+  useEffect(() => () => matchSettleStopRef.current?.(), []);
+
   // Whenever the active match changes, scroll its bubble into view. If the
   // bubble isn't in the loaded slice, fetch a context window first — the
   // pendingJumpId watcher below then picks up the scroll once the bubbles
@@ -430,15 +524,7 @@ function MessageThreadImpl({
 
     if (messagesById.has(activeMatchId)) {
       handledMatchIdRef.current = activeMatchId;
-      // Fast path: defer one frame so any concurrent state updates have
-      // committed before we measure scrollIntoView.
-      const id = window.requestAnimationFrame(() => {
-        const el = document.querySelector<HTMLElement>(
-          `[data-message-id="${activeMatchId}"]`,
-        );
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
-      return () => window.cancelAnimationFrame(id);
+      return scrollMatchIntoView(activeMatchId);
     }
 
     // Slow path: load a context window centered on the match and remember
@@ -478,22 +564,18 @@ function MessageThreadImpl({
     return () => {
       cancelled = true;
     };
-  }, [activeMatchId, messagesById, conversation.id, replaceWithContext]);
+  }, [activeMatchId, messagesById, conversation.id, replaceWithContext, scrollMatchIntoView]);
 
   // Once the context window has rendered, scroll to the message we were
-  // waiting on. Two-frame deferral so React + Framer Motion both commit.
+  // waiting on. Routed through the shared helper so the same settle window
+  // re-pins us as the new slice's images decode in.
   useEffect(() => {
     if (!pendingJumpId) return;
     if (!messagesById.has(pendingJumpId)) return;
-    const id = window.requestAnimationFrame(() => {
-      const el = document.querySelector<HTMLElement>(
-        `[data-message-id="${pendingJumpId}"]`,
-      );
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-      setPendingJumpId(null);
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [pendingJumpId, messagesById]);
+    const cleanup = scrollMatchIntoView(pendingJumpId);
+    setPendingJumpId(null);
+    return cleanup;
+  }, [pendingJumpId, messagesById, scrollMatchIntoView]);
 
   const deleteNote = useCallback(
     async (noteId: string) => {
@@ -589,12 +671,10 @@ function MessageThreadImpl({
   // Scroll behavior — see `useChatScroll`. All the messy bits (viewport
   // resolution, scroll listener, ResizeObserver for stick-to-bottom,
   // load-older anchor preservation, settle window) live in the hook so this
-  // component stays a renderer.
+  // component stays a renderer. The refs themselves are declared further up
+  // (above the in-thread search block) so the search-jump settle window can
+  // observe the same nodes.
   // ---------------------------------------------------------------------
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const topSentinelRef = useRef<HTMLDivElement>(null);
-
   const lastEntry = timeline.at(-1);
   const lastEntryKey = lastEntry ? `${lastEntry.kind}_${lastEntry.data.id}` : null;
   const isOwnSend =

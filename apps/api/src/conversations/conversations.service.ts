@@ -248,9 +248,32 @@ export class ConversationsService {
   }
 
   /**
-   * Assign / unassign a conversation. CAS on the previous assignee — racing
-   * clients get 409 and re-render. Publishes `conversation.assigned`
-   * so socket-fanout, audit, analytics, and workflow-dispatch all react.
+   * Assign / unassign a conversation. CAS on the previous assignee + status
+   * — racing clients get 409 and re-render. Publishes
+   * `conversation.assigned` so socket-fanout, audit, analytics, and
+   * workflow-dispatch all react.
+   *
+   * **Status side-effect** (product rule, see thread w/ user on 2026-05-20):
+   * Assignment carries an ownership signal — closed chats getting picked
+   * back up should reopen, and chats that lose their assignee should drop
+   * back to "waiting" state. Applied atomically with the assignment write
+   * so the two never desync:
+   *
+   *   - Assign to a user + status was `closed`    →  status becomes `open`
+   *   - Unassign (→ null) + status was `open`     →  status becomes `pending`
+   *   - All other combinations                    →  status unchanged
+   *
+   * Both transitions are bounded (`closed → open` and `open → pending` are
+   * single-step), so an explicit "after one auto-promote, the next won't
+   * cascade" guard isn't needed. When status DOES change, a second event
+   * `conversation.status_changed` is published with the same actor — that
+   * way audit log, analytics, workflow triggers (e.g. "on reopen, ping
+   * channel"), and the realtime sidebar all reflect both changes without
+   * needing to special-case auto-promotes.
+   *
+   * Bulk-assign opts out of the side-effect (see `assignBulk`) — bulk
+   * operations should be predictable; auto-reopening 50 closed chats in a
+   * batch would be a footgun.
    */
   async assign(
     teamId: string,
@@ -263,12 +286,14 @@ export class ConversationsService {
       select: {
         id: true,
         assignedUserId: true,
+        status: true,
         contact: { include: { tags: { select: { id: true } } } },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
     const previousAssignedUserId = conversation.assignedUserId;
+    const previousStatus = conversation.status;
     const { assignedUserId } = input;
 
     if (assignedUserId !== null) {
@@ -281,15 +306,33 @@ export class ConversationsService {
       if (!member) throw new BadRequestException({ error: "user not in team" });
     }
 
+    // Derive the next status from the assignment transition. Two narrow
+    // rules — anything not listed keeps status untouched.
+    let nextStatus: typeof previousStatus = previousStatus;
+    if (assignedUserId !== null && previousStatus === "closed") {
+      nextStatus = "open";
+    } else if (assignedUserId === null && previousStatus === "open") {
+      nextStatus = "pending";
+    }
+    const statusChanged = nextStatus !== previousStatus;
+
     let updated;
     try {
       updated = await this.db.conversation.update({
+        // CAS includes status when we're changing it, so a teammate's
+        // racing setStatus call can't get clobbered silently — they get
+        // 409 and retry. When status isn't changing we still pin it in
+        // the where so a concurrent close (e.g. teammate closes while we
+        // assign) isn't dropped by writing back `data.status: <stale>`.
         where: {
           id: conversationId,
           teamId,
           assignedUserId: previousAssignedUserId,
+          status: previousStatus,
         },
-        data: { assignedUserId },
+        data: statusChanged
+          ? { assignedUserId, status: nextStatus }
+          : { assignedUserId },
         include: { assignedUser: true },
       });
     } catch (err) {
@@ -321,6 +364,25 @@ export class ConversationsService {
       changedByUserId: actorUserId,
       contact: workflowContactSnapshot(conversation.contact),
     });
+
+    if (statusChanged) {
+      // Fired AFTER conversation.assigned so a consumer that watches both
+      // (audit / analytics / workflow-dispatch) sees the cause-then-effect
+      // order. Same actor, same contact snapshot — the status change was
+      // a side-effect of the assign, not an independent event, but it IS
+      // a real status change and downstream handlers should treat it as
+      // such (workflows on reopen/pending fire, badge counts re-evaluate,
+      // status-history audit row gets written).
+      await this.bus.publish({
+        type: "conversation.status_changed",
+        teamId,
+        conversationId,
+        previousStatus,
+        newStatus: nextStatus,
+        changedByUserId: actorUserId,
+        contact: workflowContactSnapshot(conversation.contact),
+      });
+    }
   }
 
   /**

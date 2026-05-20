@@ -3,7 +3,6 @@ import { redirect } from "next/navigation";
 import {
   ArrowRight,
   ExternalLink,
-  KeyRound,
   Plug,
   Webhook,
   Workflow,
@@ -21,12 +20,11 @@ export const dynamic = "force-dynamic";
 
 /**
  * Integrations landing page — the respond.io-style tile grid. Each tile
- * links to either an existing page (API keys), a new management page
- * (Webhooks), or a "Coming soon" disabled state for tools we'll surface
- * once the underlying capability ships.
+ * links to a management page (Webhooks) or a "Coming soon" disabled
+ * state for tools we'll surface once the underlying capability ships.
  *
- * Admin-only — issuing an API key or wiring a webhook is the kind of
- * security-relevant action we don't want agents triggering.
+ * Admin-only — wiring a webhook or generating an integration key is the
+ * kind of security-relevant action we don't want agents triggering.
  */
 export default async function IntegrationsLanding() {
   const { user } = await getSession();
@@ -43,14 +41,6 @@ export default async function IntegrationsLanding() {
   );
 
   const tiles: Tile[] = [
-    {
-      href: "/settings/api-keys",
-      icon: KeyRound,
-      title: "API keys",
-      description:
-        "Bearer tokens for the /api/external/v1 API. Use these to drive an n8n HTTP Request node, a Zapier Webhooks step, or your own backend.",
-      cta: "Manage",
-    },
     {
       href: "/settings/integrations/webhooks",
       icon: Webhook,
@@ -145,7 +135,7 @@ export default async function IntegrationsLanding() {
 
 interface Tile {
   href?: string;
-  icon: typeof KeyRound;
+  icon: typeof Webhook;
   title: string;
   description: string;
   cta: string;

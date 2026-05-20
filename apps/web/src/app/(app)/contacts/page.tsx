@@ -8,6 +8,7 @@ import {
 } from "@/lib/api/queries";
 
 import { ContactsClient } from "./contacts-client";
+import type { StageFilter } from "@/features/contacts/components/contact-browser";
 
 /**
  * Server-render the first page of contacts + the team's field + tag
@@ -35,20 +36,27 @@ export default async function ContactsPage({
     listContactStages(),
   ]);
 
+  const resolvedStageFilter: StageFilter =
+    stageParam === "none"
+      ? "none"
+      : stageParam && stages.some((s) => s.id === stageParam)
+        ? stageParam
+        : "any";
+
+  // Key by the resolved stage filter so a sidebar click (which is a soft nav
+  // between two /contacts?stage=… URLs) forces ContactsClient to remount with
+  // the new SSR-seeded items + stage filter. Without this, `useContactList`'s
+  // useState initializers latch the first stage filter forever and the
+  // sidebar appears to do nothing.
   return (
     <ContactsClient
+      key={resolvedStageFilter}
       initialItems={page.items}
       initialNextCursor={page.nextCursor}
       fieldDefinitions={fieldDefinitions}
       initialTags={tags}
       initialStages={stages}
-      initialStageFilter={
-        stageParam === "none"
-          ? "none"
-          : stageParam && stages.some((s) => s.id === stageParam)
-            ? stageParam
-            : "any"
-      }
+      initialStageFilter={resolvedStageFilter}
       canManageFields={canManageContactFields(user.role)}
       canManageStages={canManageStages(user.role)}
     />

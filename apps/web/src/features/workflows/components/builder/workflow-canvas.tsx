@@ -1,20 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Controls,
+  MiniMap,
+  Panel,
   ReactFlow,
   ReactFlowProvider,
   addEdge,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Connection,
   type Edge,
   type Node,
   type NodeChange,
   type EdgeChange,
+  type OnConnectStartParams,
 } from "@xyflow/react";
+import { LayoutGrid } from "lucide-react";
 import "@xyflow/react/dist/style.css";
 
 import { BranchNode, StepNode, TriggerNode } from "./canvas-nodes";
@@ -58,11 +63,14 @@ export interface WorkflowCanvasProps {
   onChange: (graph: WorkflowGraph) => void;
   onSelectStep: (id: string | null) => void;
   onSelectTrigger: () => void;
-  /** Insert a step on an existing edge (or before the start when sourceId=null). */
+  /** Insert a step on an existing edge (or before the start when sourceId=null).
+   *  Optional `positionOverride` lands the new node at a specific canvas
+   *  coordinate — used by the drag-to-canvas n8n-style flow. */
   onInsertStep: (
     sourceId: string | null,
     sourceHandle: string | null,
     type: StepType,
+    positionOverride?: { x: number; y: number },
   ) => void;
   /** Duplicate the given step in place. */
   onDuplicateStep: (id: string) => void;
@@ -103,6 +111,103 @@ function CanvasInner({
   }, []);
   const closePicker = useCallback(() => setPicker(null), []);
 
+  // React Flow's screenToFlowPosition lets us project a mouseup pixel
+  // coordinate to canvas (graph) coordinates so a node dropped at the
+  // cursor lands exactly under the cursor — regardless of zoom or pan.
+  // `fitView` is used after a Rearrange so the new layout is centered.
+  const { screenToFlowPosition, fitView } = useReactFlow();
+
+  // Rearrange handler — runs the tree-layout helper and commits the
+  // resulting positions back into the canonical graph, then refits the
+  // viewport so the user sees the new layout without manually zooming
+  // out. Lives on the canvas (not the parent builder) because we want
+  // access to React Flow's fitView; the builder just hands us `graph`.
+  const onRearrange = useCallback(() => {
+    onChange(autoLayoutGraph(graph));
+    // Schedule fitView for the NEXT frame, after the projection rebuild
+    // has actually re-rendered the nodes at their new positions.
+    // Without the rAF, fitView measures the OLD positions and centers
+    // on those instead.
+    requestAnimationFrame(() => {
+      fitView({ padding: 0.35, maxZoom: 0.75, duration: 250 });
+    });
+  }, [graph, onChange, fitView]);
+
+  // Pending-connection bookkeeping for the n8n-style "drag a wire onto
+  // empty canvas → pick a node type → it appears here, pre-connected"
+  // flow. Lives in a ref because both onConnectStart and the mouseup
+  // listener that fires onConnectEnd need to read it without re-binding
+  // listeners on every render.
+  const pendingConnectionRef = useRef<{
+    nodeId: string | null;
+    handleId: string | null;
+    /**
+     * True iff this connection has already been consumed by a normal
+     * handle-to-handle connect (onConnect fired). The mouseup-on-pane
+     * handler reads this so it doesn't ALSO open the picker for the
+     * same drag.
+     */
+    consumed: boolean;
+  } | null>(null);
+
+  const onConnectStart = useCallback(
+    (_: unknown, params: OnConnectStartParams) => {
+      pendingConnectionRef.current = {
+        nodeId: params.nodeId ?? null,
+        handleId: params.handleId ?? null,
+        consumed: false,
+      };
+    },
+    [],
+  );
+
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent) => {
+      const pending = pendingConnectionRef.current;
+      pendingConnectionRef.current = null;
+      if (!pending || pending.consumed) return;
+      if (!pending.nodeId) return; // Dragging from the synthetic trigger? skip.
+
+      // Did we drop on the empty pane (vs. on a node/handle/edge)?
+      // React Flow tags its background pane with `react-flow__pane`.
+      // If the drop target is anywhere inside a node/edge/handle, the
+      // normal `onConnect` path handled it (and set consumed=true), so
+      // we'd have already returned above.
+      const target = event.target as HTMLElement | null;
+      if (!target || !target.classList?.contains("react-flow__pane")) return;
+
+      // Project the mouseup pixel to canvas coordinates. Touch falls back
+      // to the first changedTouch — same coord space as `clientX/Y`.
+      const point =
+        "touches" in event
+          ? event.changedTouches[0]
+          : (event as MouseEvent);
+      if (!point) return;
+      const flowPosition = screenToFlowPosition({
+        x: point.clientX,
+        y: point.clientY,
+      });
+
+      // Inserting from the synthetic trigger means "this becomes the
+      // start node" — sourceId=null is the canvas's signal for that.
+      const sourceId =
+        pending.nodeId === TRIGGER_NODE_ID ? null : pending.nodeId;
+      const sourceHandle =
+        pending.handleId && pending.handleId !== "default"
+          ? pending.handleId
+          : null;
+
+      openPicker({
+        x: point.clientX,
+        y: point.clientY,
+        sourceId,
+        sourceHandle,
+        flowPosition,
+      });
+    },
+    [openPicker, screenToFlowPosition],
+  );
+
   // Set of nodes that already have an outgoing edge on their default handle.
   // Used to decide whether to render the trailing "+" below a step (only
   // leaves get one; non-leaves already have an in-edge "+").
@@ -117,6 +222,24 @@ function CanvasInner({
     }
     return leaves;
   }, [graph.edges, graph.nodes]);
+
+  // Per-branch-node: which of its two outputs (true / false) already has
+  // a child wired. Drives BranchNode's inline "+" affordances so the user
+  // can add a step on each empty branch path with one click — instead of
+  // having to drag a connection blind from the bare handle.
+  const branchOutputs = useMemo(() => {
+    const map = new Map<string, { hasTrue: boolean; hasFalse: boolean }>();
+    for (const n of graph.nodes) {
+      if (n.type === "branch") map.set(n.id, { hasTrue: false, hasFalse: false });
+    }
+    for (const e of graph.edges) {
+      const out = map.get(e.from);
+      if (!out) continue;
+      if (e.label === "true") out.hasTrue = true;
+      else if (e.label === "false") out.hasFalse = true;
+    }
+    return map;
+  }, [graph.nodes, graph.edges]);
   // Trigger position. The trigger node is synthetic — it isn't stored in
   // graph.nodes, so a hardcoded position in the projection would slam it
   // back to (0,0) every time the user changed the trigger type or anything
@@ -132,27 +255,38 @@ function CanvasInner({
   // The synthetic trigger node lives only on the canvas; it stands in for
   // the workflow's `trigger` property and never appears in graph.nodes.
   const projectedNodes = useMemo<Node[]>(() => {
-    const stepNodes: Node[] = graph.nodes.map((n) => ({
-      id: n.id,
-      type: n.type === "branch" ? "branch" : "step",
-      position: n.position ?? { x: 0, y: 0 },
-      data: {
-        label: n.id,
-        type: n.type,
-        selected: n.id === selectedStepId,
-        summary: describeNode(n),
-        // Inline action toolbar handlers — wired through node data because
-        // React Flow's custom node renderers only have access to data, not
-        // refs back to the canvas.
-        onDuplicate: () => onDuplicateStep(n.id),
-        onDelete: () => onDeleteStep(n.id),
-        // Trailing-"+" data: only leaves render the bottom toolbar. Branch
-        // nodes are never leaves (they have two outputs each with their own
-        // edge "+" buttons).
-        showTrailingPlus: leafSet.has(n.id),
-        onOpenPicker: openPicker,
-      },
-    }));
+    const stepNodes: Node[] = graph.nodes.map((n) => {
+      const branchOut = n.type === "branch" ? branchOutputs.get(n.id) : null;
+      return {
+        id: n.id,
+        type: n.type === "branch" ? "branch" : "step",
+        position: n.position ?? { x: 0, y: 0 },
+        data: {
+          // Author-supplied name takes precedence; otherwise fall back to
+          // the bare node id so a freshly-inserted unnamed node still has
+          // a visible string. The step type ("Send Message" etc.) is
+          // rendered above the label inside the node renderer.
+          label: n.name && n.name.length > 0 ? n.name : n.id,
+          type: n.type,
+          selected: n.id === selectedStepId,
+          summary: describeNode(n),
+          // Inline action toolbar handlers — wired through node data because
+          // React Flow's custom node renderers only have access to data, not
+          // refs back to the canvas.
+          onDuplicate: () => onDuplicateStep(n.id),
+          onDelete: () => onDeleteStep(n.id),
+          // Trailing-"+" data: only leaves render the bottom toolbar.
+          // Branch nodes render their own per-output "+" affordances
+          // through `branchHasTrueChild` / `branchHasFalseChild` below.
+          showTrailingPlus: leafSet.has(n.id),
+          onOpenPicker: openPicker,
+          // Branch-only — undefined for other step types, ignored by the
+          // generic StepNode/TriggerNode renderers.
+          branchHasTrueChild: branchOut?.hasTrue,
+          branchHasFalseChild: branchOut?.hasFalse,
+        },
+      };
+    });
     const triggerNode: Node = {
       id: TRIGGER_NODE_ID,
       type: "trigger",
@@ -171,19 +305,53 @@ function CanvasInner({
       draggable: true,
     };
     return [triggerNode, ...stepNodes];
-  }, [graph, selectedStepId, triggerSelected, triggerLabel, triggerDescription, triggerType, triggerPos]);
+  }, [
+    graph,
+    selectedStepId,
+    triggerSelected,
+    triggerLabel,
+    triggerDescription,
+    triggerType,
+    triggerPos,
+    leafSet,
+    branchOutputs,
+    openPicker,
+    onDuplicateStep,
+    onDeleteStep,
+  ]);
 
   const projectedEdges = useMemo<Edge[]>(() => {
-    const edges: Edge[] = graph.edges.map((e, i) => ({
-      id: `e_${i}_${e.from}_${e.label ?? ""}_${e.to}`,
-      source: e.from,
-      target: e.to,
-      sourceHandle: e.label ?? "default",
-      type: "insert",
-      label: e.label === "true" ? "true" : e.label === "false" ? "false" : undefined,
-      labelStyle: { fontSize: 11 },
-      data: { onInsert: openPicker },
-    }));
+    const edges: Edge[] = graph.edges.map((e, i) => {
+      // Label-text color matches the edge stroke — so "true"/"false" tags
+      // and the stroke colors visually agree.
+      const labelColor =
+        e.label === "true"
+          ? "rgb(16 185 129)"
+          : e.label === "false"
+            ? "rgb(244 63 94)"
+            : undefined;
+      return {
+        id: `e_${i}_${e.from}_${e.label ?? ""}_${e.to}`,
+        source: e.from,
+        target: e.to,
+        sourceHandle: e.label ?? "default",
+        type: "insert",
+        label: e.label === "true" ? "true" : e.label === "false" ? "false" : undefined,
+        labelStyle: {
+          fontSize: 11,
+          fontWeight: 600,
+          ...(labelColor ? { fill: labelColor } : {}),
+        },
+        // Soft pill background behind the label so it stays readable
+        // against the edge stroke at every zoom level.
+        labelBgStyle: labelColor
+          ? { fill: "var(--background)", fillOpacity: 0.9 }
+          : undefined,
+        labelBgPadding: [4, 2] as [number, number],
+        labelBgBorderRadius: 4,
+        data: { onInsert: openPicker },
+      };
+    });
     // Synthetic edge from trigger to startNode for visual clarity. The runner
     // doesn't read this — startNodeId on the graph is what it walks from.
     // Clicking the "+" on THIS edge inserts at the start of the workflow.
@@ -288,6 +456,11 @@ function CanvasInner({
 
   const onConnect = useCallback(
     (conn: Connection) => {
+      // Mark the in-flight drag as consumed so onConnectEnd's
+      // dropped-on-empty-canvas branch doesn't ALSO open the picker.
+      if (pendingConnectionRef.current) {
+        pendingConnectionRef.current.consumed = true;
+      }
       if (!conn.source || !conn.target) return;
       // Connecting from the trigger node sets the workflow's startNodeId.
       // The actual edge isn't stored in graph.edges — it's a synthetic.
@@ -330,8 +503,62 @@ function CanvasInner({
     onSelectStep(null);
   }
 
+  // Canvas-scoped keyboard shortcuts:
+  //   - Esc       → deselect the current step (closes the editor drawer)
+  //   - Delete    → delete the currently-selected step
+  //   - Backspace → same (Mac users expect both)
+  //
+  // We DON'T bind globally because the editor drawer hosts text inputs
+  // and a global Delete handler would eat keystrokes. The listener lives
+  // on the canvas container's div (added below) so it only fires when
+  // the canvas has keyboard focus. ReactFlow gives nodes focus on
+  // click; the wrapper div picks up the bubbling keydown.
+  //
+  // We deliberately don't bind Cmd+D / duplicate yet — that conflicts
+  // with the browser's "Bookmark this page" default and the NodeActions
+  // toolbar already exposes the duplicate affordance.
+  const onCanvasKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      // Skip when the user is typing in a form field anywhere inside the
+      // canvas tree (the StepPickerPopover hosts a search input).
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+        return;
+      }
+      if (e.key === "Escape") {
+        if (picker) {
+          closePicker();
+          e.preventDefault();
+          return;
+        }
+        if (selectedStepId !== null || triggerSelected) {
+          onSelectStep(null);
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        // The trigger isn't deletable (it's the workflow root). Only
+        // deletes a real step.
+        if (selectedStepId && !triggerSelected) {
+          onDeleteStep(selectedStepId);
+          e.preventDefault();
+        }
+      }
+    },
+    [picker, closePicker, selectedStepId, triggerSelected, onSelectStep, onDeleteStep],
+  );
+
   return (
-    <div className="h-full w-full">
+    // tabIndex=0 + outline-none so the wrapper can take keyboard focus
+    // (needed for Delete / Esc) without showing a focus ring around the
+    // entire canvas area — ReactFlow draws its own selection halo.
+    <div
+      className="h-full w-full outline-none"
+      tabIndex={0}
+      onKeyDown={onCanvasKeyDown}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -340,23 +567,71 @@ function CanvasInner({
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         // fitView fires only on first render. Re-fitting on every graph
         // update would yank the viewport whenever a step was added and
         // make the canvas feel unstable.
         fitView
-        fitViewOptions={{ padding: 0.2 }}
+        // `maxZoom: 0.75` caps initial zoom so a 2-3 node workflow doesn't
+        // render at canvas-filling size — nodes stay readable but feel
+        // like part of a graph, not a poster. `minZoom: 0.25` keeps the
+        // user from zooming out so far the diagram becomes unreadable.
+        // Padding bumped 0.2 → 0.35 so the framed graph has breathing
+        // room on either side, matching the n8n / Make.com canvas feel.
+        fitViewOptions={{ padding: 0.35, maxZoom: 0.75 }}
+        minZoom={0.25}
+        maxZoom={1.5}
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={20} size={1} />
         <Controls />
+        {/* Top-right "Rearrange" — opt-in auto-layout. We don't run it on
+            every insert because users place nodes deliberately and the
+            canvas fighting them would feel hostile. Disabled when there
+            are no steps yet (nothing to lay out). */}
+        <Panel position="top-right">
+          <button
+            type="button"
+            onClick={onRearrange}
+            disabled={graph.nodes.length === 0}
+            title="Rearrange layout"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[11px] font-medium text-foreground shadow-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <LayoutGrid className="size-3.5" />
+            Rearrange
+          </button>
+        </Panel>
+        {/* Compact minimap, bottom-right. Color-matches node types so the
+            user can scan a large graph quickly: amber=trigger, indigo=
+            branch, primary=normal step. `pannable` lets clicking the
+            minimap re-center the viewport. */}
+        <MiniMap
+          pannable
+          zoomable
+          nodeStrokeWidth={2}
+          nodeColor={(n) => {
+            if (n.type === "trigger") return "rgb(245 158 11)"; // amber-500
+            if (n.type === "branch") return "rgb(99 102 241)"; // indigo-500
+            return "var(--primary)";
+          }}
+          maskColor="rgba(0,0,0,0.05)"
+          className="bg-card! border! border-border! rounded-md!"
+          style={{ height: 110, width: 160 }}
+        />
       </ReactFlow>
       {picker && (
         <StepPickerPopover
           anchor={picker}
           onPick={(type, anchor) => {
-            onInsertStep(anchor.sourceId, anchor.sourceHandle, type);
+            onInsertStep(
+              anchor.sourceId,
+              anchor.sourceHandle,
+              type,
+              anchor.flowPosition,
+            );
             closePicker();
           }}
           onClose={closePicker}
@@ -415,6 +690,132 @@ function humanize(ms: number): string {
   return `${Math.round(ms / 86_400_000)}d`;
 }
 
+/**
+ * Auto-layout a workflow graph as a top-down tree, fanning branch outputs
+ * out horizontally. Triggered by the "Rearrange" canvas button — opt-in
+ * because users place nodes deliberately and an on-every-insert auto-layout
+ * would feel like the canvas was fighting them.
+ *
+ * Algorithm (Reingold-Tilford-ish, simplified for our shallow DAGs):
+ *
+ *   1. Compute children-of map; for each branch source, sort outputs in
+ *      a stable order (true first, false second, anything else after) so
+ *      "true" reliably lands on the left and "false" on the right.
+ *   2. Compute each subtree's "leaf width" — how many columns its leaves
+ *      occupy. A leaf is 1 column wide; a branch with N children is the
+ *      sum of its childrens' widths.
+ *   3. Walk the tree DFS, allocating each subtree its width slice of
+ *      horizontal space. Each node sits at the horizontal CENTER of its
+ *      allocated slice — that's what makes a branch's true/false outputs
+ *      visually balance under the parent.
+ *
+ * Edge cases:
+ *   - **DAG joins** (e.g. true + false branches converging on a common
+ *     downstream node): the join target is placed by the FIRST visit
+ *     only; subsequent visits skip via the `placed` set. The second
+ *     branch's edge then routes to the already-placed node, which is
+ *     correct.
+ *   - **Cycles**: `visited` set prevents infinite recursion in the
+ *     subtree-width DFS. Cycles aren't legal in a valid workflow but
+ *     we don't want to crash the rearrange button on a draft graph.
+ *   - **Orphans** (nodes unreachable from the start): laid out in a
+ *     second row below the main tree so they're visible — the author
+ *     can wire them up or delete them.
+ */
+export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
+  // Tuned to leave room for a w-64 node (256px) + the branch label pill,
+  // and enough vertical breathing room for the edge "+" hit target.
+  const COL_WIDTH = 320;
+  const ROW_HEIGHT = 180;
+  // Branch outputs read better when the sort order is deterministic.
+  const sortRank = (label: string | null) =>
+    label === "true" ? 0 : label === "false" ? 2 : 1;
+
+  // Build child map (parent → ordered children).
+  const childMap = new Map<string, { id: string; label: string | null }[]>();
+  for (const e of graph.edges) {
+    const arr = childMap.get(e.from) ?? [];
+    arr.push({ id: e.to, label: e.label ?? null });
+    childMap.set(e.from, arr);
+  }
+  for (const arr of childMap.values()) {
+    arr.sort((a, b) => sortRank(a.label) - sortRank(b.label));
+  }
+
+  // Subtree widths in column units (memoized; cycle-safe via `visiting`).
+  const widths = new Map<string, number>();
+  const visiting = new Set<string>();
+  function computeWidth(id: string): number {
+    const cached = widths.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return 1; // cycle — treat as a leaf so we don't loop
+    visiting.add(id);
+    const kids = childMap.get(id) ?? [];
+    let w = 0;
+    for (const k of kids) w += computeWidth(k.id);
+    visiting.delete(id);
+    const total = Math.max(1, w); // leaves get 1
+    widths.set(id, total);
+    return total;
+  }
+
+  const positions = new Map<string, { x: number; y: number }>();
+  const placed = new Set<string>();
+  function place(id: string, centerX: number, depth: number) {
+    if (placed.has(id)) return;
+    placed.add(id);
+    positions.set(id, { x: centerX, y: depth * ROW_HEIGHT });
+    const kids = childMap.get(id) ?? [];
+    if (kids.length === 0) return;
+    const myWidth = (widths.get(id) ?? 1) * COL_WIDTH;
+    let cursorX = centerX - myWidth / 2;
+    for (const k of kids) {
+      const kWidth = (widths.get(k.id) ?? 1) * COL_WIDTH;
+      place(k.id, cursorX + kWidth / 2, depth + 1);
+      cursorX += kWidth;
+    }
+  }
+
+  if (graph.startNodeId) {
+    computeWidth(graph.startNodeId);
+    // Start node sits one row below the trigger (which the canvas owns
+    // separately via `triggerPos`). The user can drag the trigger around;
+    // we just lay out the step subtree from y=ROW_HEIGHT downward.
+    place(graph.startNodeId, 0, 1);
+  }
+
+  // Orphans: anything we never placed. Drop them in a dedicated row well
+  // below the main tree so they're discoverable but don't tangle with it.
+  // findIndex-based offset puts them in a neat left-to-right strip.
+  const inEdges = new Set(graph.edges.map((e) => e.to));
+  const orphans = graph.nodes.filter(
+    (n) => !placed.has(n.id) && !inEdges.has(n.id) && n.id !== graph.startNodeId,
+  );
+  if (orphans.length > 0) {
+    // Use the main tree's depth as the row offset so orphans don't
+    // overlap leaves.
+    const mainMaxDepth = positions.size > 0
+      ? Math.max(...Array.from(positions.values()).map((p) => p.y / ROW_HEIGHT))
+      : 0;
+    const orphanY = (mainMaxDepth + 2) * ROW_HEIGHT;
+    orphans.forEach((n, i) => {
+      // Center the orphan strip at x=0 so it shares the main tree's axis.
+      positions.set(n.id, {
+        x: (i - (orphans.length - 1) / 2) * COL_WIDTH,
+        y: orphanY,
+      });
+    });
+  }
+
+  return {
+    ...graph,
+    nodes: graph.nodes.map((n) => {
+      const p = positions.get(n.id);
+      return p ? { ...n, position: p } : n;
+    }),
+  };
+}
+
 /** Remove a step + any edges touching it. */
 export function removeStep(graph: WorkflowGraph, nodeId: string): WorkflowGraph {
   // If the removed node sat between A → removed → B, splice the gap so
@@ -451,12 +852,22 @@ export function removeStep(graph: WorkflowGraph, nodeId: string): WorkflowGraph 
  * source handle. If an outgoing edge already exists on that handle, it gets
  * rewired through the new node (A → new → B). Otherwise we just append (A →
  * new). `sourceId === TRIGGER` means "insert at the start of the workflow."
+ *
+ * `positionOverride` lets the caller place the node at a specific canvas
+ * coordinate — used by the drag-from-handle-to-empty-canvas flow (n8n
+ * style) so the new node lands where the user dropped the connection,
+ * not at the autoplaced "below source" slot. When omitted, the helper
+ * computes a sensible default: directly below the source for normal
+ * steps, with a sideways offset for branch outputs (true→left, false→
+ * right) so the two branches fan out visibly instead of stacking on top
+ * of each other.
  */
 export function insertStepAfter(
   graph: WorkflowGraph,
   sourceId: string | null, // null = inserting before the current startNode
   sourceHandle: string | null,
   type: StepType,
+  positionOverride?: { x: number; y: number },
 ): { graph: WorkflowGraph; newNodeId: string } {
   const newId = cuidLike();
   // Anchor the new node below the source (or below the trigger when there's
@@ -466,11 +877,20 @@ export function insertStepAfter(
     : null;
   const anchorY = sourceNode?.position?.y ?? 0;
   const anchorX = sourceNode?.position?.x ?? 80;
+  // Branch outputs spread horizontally — without this both children pile
+  // on top of each other at sourceX, and the user has to drag one out
+  // before they can even see the second is there. 140 = enough to clear
+  // a w-64 (256px) node's half-width plus the edge label.
+  const branchOffset =
+    sourceHandle === "true" ? -140 : sourceHandle === "false" ? 140 : 0;
   const newNode: WorkflowNode = {
     id: newId,
     type,
     config: emptyConfigFor(type),
-    position: { x: anchorX, y: anchorY + 140 },
+    position: positionOverride ?? {
+      x: anchorX + branchOffset,
+      y: anchorY + 140,
+    },
   };
 
   // Case 1: empty graph OR inserting before the start node.

@@ -112,12 +112,14 @@ export class ExternalV1MessagingService {
       select: {
         id: true,
         assignedUserId: true,
+        status: true,
         contact: { include: { tags: { select: { id: true } } } },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
     const previousAssignedUserId = conversation.assignedUserId;
+    const previousStatus = conversation.status;
 
     if (input.assignedUserId !== null) {
       // Mirror the UI route's guard (conversations.service.ts:assign): refuse
@@ -131,9 +133,22 @@ export class ExternalV1MessagingService {
       if (!member) throw new BadRequestException({ error: "user not in team" });
     }
 
-    // CAS on previous assignee. Mirrors the UI route so a concurrent UI click
-    // and /v1 call converge on the same race-loser-409 behavior, instead of
-    // the /v1 update silently clobbering a fresh UI assignment.
+    // Mirror conversations.service.ts:assign — assignment carries an
+    // ownership signal so the status auto-flips on the two transitions
+    // worth automating. Kept identical between routes so a UI click + a
+    // partner /v1 POST produce the same end state.
+    let nextStatus: typeof previousStatus = previousStatus;
+    if (input.assignedUserId !== null && previousStatus === "closed") {
+      nextStatus = "open";
+    } else if (input.assignedUserId === null && previousStatus === "open") {
+      nextStatus = "pending";
+    }
+    const statusChanged = nextStatus !== previousStatus;
+
+    // CAS on previous assignee + status. Mirrors the UI route so a concurrent
+    // UI click and /v1 call converge on the same race-loser-409 behavior,
+    // instead of the /v1 update silently clobbering a fresh UI assignment
+    // (or a fresh manual close in the brief window before our write lands).
     let updated;
     try {
       updated = await this.db.conversation.update({
@@ -141,8 +156,11 @@ export class ExternalV1MessagingService {
           id: conversationId,
           teamId,
           assignedUserId: previousAssignedUserId,
+          status: previousStatus,
         },
-        data: { assignedUserId: input.assignedUserId },
+        data: statusChanged
+          ? { assignedUserId: input.assignedUserId, status: nextStatus }
+          : { assignedUserId: input.assignedUserId },
         include: { assignedUser: true },
       });
     } catch (err) {
@@ -175,6 +193,19 @@ export class ExternalV1MessagingService {
       changedByApiKeyId: apiKeyId,
       contact: workflowContactSnapshot(conversation.contact),
     });
+
+    if (statusChanged) {
+      await this.bus.publish({
+        type: "conversation.status_changed",
+        teamId,
+        conversationId,
+        previousStatus,
+        newStatus: nextStatus,
+        changedByUserId: null,
+        changedByApiKeyId: apiKeyId,
+        contact: workflowContactSnapshot(conversation.contact),
+      });
+    }
   }
 
   async setStatus(

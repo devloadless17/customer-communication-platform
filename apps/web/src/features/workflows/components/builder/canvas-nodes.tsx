@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import {
+  BranchTrailingPlus,
   NodeActions,
   TrailingPlus,
   type PickerAnchor,
@@ -69,6 +70,13 @@ export interface NodeData extends Record<string, unknown> {
   /** Whether to render the trailing "+" below this node (leaves only). */
   showTrailingPlus?: boolean;
   onOpenPicker?: (anchor: PickerAnchor) => void;
+  /**
+   * Branch-only: per-output "does this handle already have a child?".
+   * Drives the inline "+" affordances on the true / false handles so the
+   * user can add a step on an empty branch without dragging a wire blind.
+   */
+  branchHasTrueChild?: boolean;
+  branchHasFalseChild?: boolean;
 }
 
 const NODE_BASE =
@@ -163,7 +171,7 @@ export function StepNode({ id, data }: NodeProps) {
   );
 }
 
-export function BranchNode({ data }: NodeProps) {
+export function BranchNode({ id, data }: NodeProps) {
   const d = data as NodeData;
   const [hovered, setHovered] = useState(false);
   const actionsVisible = hovered || !!d.selected;
@@ -181,8 +189,6 @@ export function BranchNode({ data }: NodeProps) {
         onDuplicate={() => d.onDuplicate?.()}
         onDelete={() => d.onDelete?.()}
       />
-      {/* Branch nodes intentionally don't render a trailing "+" — each of
-          their two outputs has its own edge "+" once a child is wired. */}
       <div className="flex items-center gap-2 border-b border-border bg-indigo-500/10 px-3 py-2">
         <Filter className="size-4 text-indigo-600" />
         <div className="min-w-0 flex-1">
@@ -212,6 +218,20 @@ export function BranchNode({ data }: NodeProps) {
         id="false"
         style={{ left: "75%", background: "hsl(var(--destructive))" }}
       />
+      {/* Per-output "+" affordances for empty handles. Without these, a
+          freshly-added Branch step had two bare handles and the only way
+          to wire a child was to drag a connection blind — every test
+          user got stuck here. The two buttons are color-matched to their
+          handle so the visual link is obvious. Once a child is wired,
+          the edge "+" takes over and the handle's button disappears. */}
+      {d.onOpenPicker && (
+        <BranchTrailingPlus
+          hasTrueChild={!!d.branchHasTrueChild}
+          hasFalseChild={!!d.branchHasFalseChild}
+          nodeId={id}
+          onInsert={d.onOpenPicker}
+        />
+      )}
     </div>
   );
 }

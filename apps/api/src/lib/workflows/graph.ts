@@ -33,6 +33,13 @@ export interface WorkflowNode {
   type: WorkflowStepType;
   config: Record<string, unknown>;
   position?: NodePosition;
+  /**
+   * Author-supplied label rendered as the node's title on the canvas. When
+   * empty/missing the canvas falls back to the step type label (e.g.
+   * "Send Message"), so existing graphs keep rendering identically. Used
+   * purely for human readability — the runner ignores it.
+   */
+  name?: string;
 }
 
 export interface WorkflowEdge {
@@ -78,11 +85,17 @@ function parseNode(raw: unknown): WorkflowNode | null {
   const position = r.position && typeof r.position === "object" && !Array.isArray(r.position)
     ? r.position as NodePosition
     : undefined;
+  // Trim + cap at 80 chars so a runaway paste can't blow up the canvas
+  // layout. Empty string is normalized to undefined so the render path's
+  // fallback-to-type-label branch fires.
+  const rawName = typeof r.name === "string" ? r.name.trim().slice(0, 80) : "";
+  const name = rawName.length > 0 ? rawName : undefined;
   return {
     id: r.id,
     type: r.type as WorkflowStepType,
     config,
     ...(position ? { position } : {}),
+    ...(name ? { name } : {}),
   };
 }
 

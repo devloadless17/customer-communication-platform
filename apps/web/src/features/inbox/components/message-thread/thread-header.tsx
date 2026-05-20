@@ -158,6 +158,7 @@ export function ThreadHeader({
           conversationId={conversationId}
           currentId={assignedUserId}
           currentName={assignedUserName}
+          currentStatus={status}
           teamMembers={teamMembers}
           onAlert={onAlert}
         />

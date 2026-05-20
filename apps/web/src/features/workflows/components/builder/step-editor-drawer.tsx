@@ -3,6 +3,7 @@
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 import {
   AddCommentEditor,
@@ -49,6 +50,9 @@ interface Props {
   trigger: Trigger;
   error?: string;
   onChangeConfig: (config: Record<string, unknown>) => void;
+  /** Persist the author-supplied node title. Empty input drops the field
+   *  (canvas falls back to the step type label). */
+  onChangeName: (name: string) => void;
   onDelete: () => void;
   onClose: () => void;
 }
@@ -60,6 +64,7 @@ export function StepEditorDrawer({
   trigger,
   error,
   onChangeConfig,
+  onChangeName,
   onDelete,
   onClose,
 }: Props) {
@@ -67,14 +72,27 @@ export function StepEditorDrawer({
 
   return (
     <aside className="flex h-full w-96 flex-col border-l border-border bg-card">
-      <header className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="min-w-0">
+      <header className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
+        <div className="min-w-0 flex-1">
           <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             {meta?.label ?? node.type}
           </div>
-          <div className="truncate text-sm font-medium">Step {node.id}</div>
+          {/* Inline rename. Defaults to empty when the node has no name so
+              the placeholder ("Step abc123") gives the author a hint of
+              the fallback. Save on blur or Enter — both feel native and
+              avoid setGraph on every keystroke. We DON'T render the
+              node.id directly anymore; making it the placeholder keeps
+              identification possible without locking the field. */}
+          <Input
+            value={node.name ?? ""}
+            onChange={(e) => onChangeName(e.target.value)}
+            placeholder={`Step ${node.id.slice(0, 6)}`}
+            maxLength={80}
+            className="mt-0.5 h-8 px-2 text-sm font-medium"
+            aria-label="Rename step"
+          />
         </div>
-        <Button type="button" variant="ghost" size="icon" onClick={onClose} className="size-8" aria-label="Close">
+        <Button type="button" variant="ghost" size="icon" onClick={onClose} className="size-8 shrink-0" aria-label="Close">
           <X className="size-4" />
         </Button>
       </header>

@@ -2,16 +2,12 @@ import type { ApiKeyScope } from "@ccp/shared/api-keys/scopes";
 
 /**
  * Per-integration defaults for the one-click "Connect" flow on the
- * integrations page. The same `/api/team/api-keys` endpoint backs both
- * manual creation (settings/api-keys) and these presets — the only
- * difference is that the connect flow pre-fills a sensible name + a
- * least-privilege scope set tailored to what the integration actually
- * calls.
+ * integrations page. The connect flow hits `/api/team/api-keys` with a
+ * preset-derived name + a least-privilege scope set tailored to what
+ * the integration actually calls.
  *
- * Why least-privilege over `["*"]`: if the partner's key leaks, the blast
- * radius is bounded by the scopes we pre-selected. Admins who want
- * something broader can still create a wildcard key manually from the
- * API keys page.
+ * Why least-privilege over `["*"]`: if the partner's key leaks, the
+ * blast radius is bounded by the scopes we pre-selected.
  *
  * `defaultName` is also the lookup key for "already connected" detection
  * — we match against active (non-revoked) keys by exact name. That makes

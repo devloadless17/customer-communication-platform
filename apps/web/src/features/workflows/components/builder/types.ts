@@ -26,6 +26,9 @@ export interface WorkflowNode {
   type: StepType;
   config: Record<string, unknown>;
   position?: NodePosition;
+  /** Author-supplied node title. Falls back to the step type label on the
+   *  canvas when undefined. Mirrors apps/api/src/lib/workflows/graph.ts. */
+  name?: string;
 }
 
 export interface WorkflowEdge {

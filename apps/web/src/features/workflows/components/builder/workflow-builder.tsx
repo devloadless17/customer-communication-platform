@@ -227,6 +227,26 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     });
   }
 
+  /** Author-facing rename. Empty / whitespace-only input drops the field
+   *  so the canvas falls back to "Step <id>". Trimmed + 80-char cap to
+   *  match the server-side parser. */
+  function updateSelectedName(name: string) {
+    if (!selectedStepId) return;
+    const trimmed = name.trim().slice(0, 80);
+    setGraph({
+      ...graph,
+      nodes: graph.nodes.map((n) => {
+        if (n.id !== selectedStepId) return n;
+        if (trimmed.length === 0) {
+          // Drop the field so the optional shape stays clean.
+          const { name: _drop, ...rest } = n;
+          return rest;
+        }
+        return { ...n, name: trimmed };
+      }),
+    });
+  }
+
   function deleteSelected() {
     if (!selectedStepId) return;
     setGraph(removeStep(graph, selectedStepId));
@@ -237,12 +257,14 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     sourceId: string | null,
     sourceHandle: string | null,
     type: StepType,
+    positionOverride?: { x: number; y: number },
   ) {
     const { graph: next, newNodeId } = insertStepAfter(
       graph,
       sourceId,
       sourceHandle,
       type,
+      positionOverride,
     );
     setGraph(next);
     // Auto-select so the editor drawer opens for the new step — same UX as
@@ -399,6 +421,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
             trigger={trigger}
             error={stepErrors[selectedNode.id]}
             onChangeConfig={updateSelectedConfig}
+            onChangeName={updateSelectedName}
             onDelete={deleteSelected}
             onClose={() => setSelectedStepId(null)}
           />

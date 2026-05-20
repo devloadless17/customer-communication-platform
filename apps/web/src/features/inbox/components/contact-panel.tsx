@@ -463,15 +463,37 @@ export function ContactPanel({
     const prevId = assigneeId;
     const prevUser = prevId ? teamMembers.find((u) => u.id === prevId) ?? null : null;
     const nextUser = nextId ? teamMembers.find((u) => u.id === nextId) ?? null : null;
-    // Optimistic: paint locally + fan the same socket frame the server will
-    // broadcast so the sidebar chip, header dropdown, and list row flip
-    // instantly. Rolled back below on error.
+    // Mirror conversations.service.ts:assign's status side-effect — kept
+    // identical to assignment-dropdown.tsx so a header change and a panel
+    // change produce the same end state.
+    //   - assign + closed → open
+    //   - unassign + open → pending
+    // Driven off `liveStatus` (the panel's local mirror of the conversation
+    // status) so a teammate's concurrent close/reopen is already reflected
+    // when we evaluate the rule here.
+    const predictedNextStatus =
+      nextId !== null && liveStatus === "closed"
+        ? "open"
+        : nextId === null && liveStatus === "open"
+          ? "pending"
+          : liveStatus;
+    const statusWillChange = predictedNextStatus !== liveStatus;
+    // Optimistic: paint locally + fan the same socket frames the server
+    // will broadcast so every surface flips instantly. Order matches the
+    // server publish order: assigned first, then status.
     setAssigneeId(nextId);
     dispatchLocalSocketEvent("conversation:assigned", {
       teamId: conversation.teamId,
       conversationId: conversation.id,
       assignedUser: nextUser,
     });
+    if (statusWillChange) {
+      dispatchLocalSocketEvent("conversation:status", {
+        teamId: conversation.teamId,
+        conversationId: conversation.id,
+        status: predictedNextStatus,
+      });
+    }
     try {
       const res = await fetch(`/api/conversations/${conversation.id}/assign`, {
         method: "POST",
@@ -487,6 +509,13 @@ export function ContactPanel({
           conversationId: conversation.id,
           assignedUser: prevUser,
         });
+        if (statusWillChange) {
+          dispatchLocalSocketEvent("conversation:status", {
+            teamId: conversation.teamId,
+            conversationId: conversation.id,
+            status: liveStatus,
+          });
+        }
         return;
       }
       startSaving(() => router.refresh());
@@ -498,6 +527,13 @@ export function ContactPanel({
         conversationId: conversation.id,
         assignedUser: prevUser,
       });
+      if (statusWillChange) {
+        dispatchLocalSocketEvent("conversation:status", {
+          teamId: conversation.teamId,
+          conversationId: conversation.id,
+          status: liveStatus,
+        });
+      }
     } finally {
       setAssigneePending(false);
     }

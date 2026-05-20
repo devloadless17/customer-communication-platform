@@ -2,7 +2,6 @@
 
 import { usePathname } from "next/navigation";
 import {
-  KeyRound,
   Layers,
   ListChecks,
   MessageSquare,
@@ -72,12 +71,6 @@ export function SettingsSubSidebar({ role }: { role: Role }) {
             label="Integrations"
             leading={<Plug className="size-4" />}
             active={isActive("/settings/integrations")}
-          />
-          <SubSidebarItem
-            href="/settings/api-keys"
-            label="API keys"
-            leading={<KeyRound className="size-4" />}
-            active={isActive("/settings/api-keys")}
           />
         </SubSidebarSection>
       )}

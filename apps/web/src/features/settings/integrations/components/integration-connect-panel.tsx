@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { ArrowRight, CheckCircle2, Copy, KeyRound, Loader2, Terminal, Zap } from "lucide-react";
+import { CheckCircle2, Copy, KeyRound, Loader2, Terminal, Zap } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
@@ -230,16 +229,6 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
             </div>
           )}
 
-          {connected && (
-            <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px]">
-              <Link
-                href="/settings/api-keys"
-                className="inline-flex items-center gap-1 text-primary hover:underline"
-              >
-                Rotate or revoke <ArrowRight className="size-3" />
-              </Link>
-            </div>
-          )}
         </div>
       </div>
     </section>

@@ -1,7 +1,6 @@
 import Link from "next/link";
 import {
   ArrowRight,
-  KeyRound,
   MessageSquare,
   Plug,
   UserCircle2,
@@ -47,12 +46,6 @@ export default async function WorkspaceSettingsIndex() {
             title: "WhatsApp",
             description:
               "Meta Cloud API credentials, phone number, and template catalog.",
-          } satisfies Card,
-          {
-            href: "/settings/api-keys",
-            icon: KeyRound,
-            title: "API keys",
-            description: "Bearer tokens for the external /api/external/v1 endpoints.",
           } satisfies Card,
           {
             href: "/settings/integrations",

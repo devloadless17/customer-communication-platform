@@ -40,6 +40,14 @@ import { STEP_OPTIONS, type StepType } from "./types";
 // ---- Shared anchor / payload type ----------------------------------------
 
 export interface PickerAnchor {
+  /**
+   * Optional flow-coordinate position to place the new node at — only set
+   * when the picker was opened by dropping a connection onto empty canvas
+   * (drag-from-handle-to-empty-canvas, n8n style). When undefined, the
+   * inserter falls back to its computed default position (below source,
+   * or sideways for branch outputs).
+   */
+  flowPosition?: { x: number; y: number };
   /** Screen coordinates for the picker — usually the rect center of the "+". */
   x: number;
   y: number;
@@ -81,6 +89,23 @@ export function InsertEdge(props: EdgeProps) {
     targetPosition: targetPosition ?? Position.Top,
   });
 
+  // Color the edge to match its source handle so a glance tells you which
+  // branch path you're looking at. Falls back to the muted-foreground
+  // stroke for non-branch edges (the synthetic trigger→start edge keeps
+  // its dashed style applied via the `style` prop from the canvas
+  // projection — we spread it last so the caller can still override).
+  const handleStroke =
+    sourceHandleId === "true"
+      ? "rgb(16 185 129)" // emerald-500 — matches the BranchNode handle dot
+      : sourceHandleId === "false"
+        ? "rgb(244 63 94)" // rose-500 — matches the BranchNode handle dot
+        : undefined;
+  const mergedStyle: React.CSSProperties = {
+    strokeWidth: 2,
+    ...(handleStroke ? { stroke: handleStroke } : {}),
+    ...(style ?? {}),
+  };
+
   function onClick(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
     d.onInsert?.({
@@ -95,7 +120,7 @@ export function InsertEdge(props: EdgeProps) {
 
   return (
     <>
-      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} />
+      <BaseEdge id={id} path={path} style={mergedStyle} markerEnd={markerEnd} />
       <EdgeLabelRenderer>
         <div
           // pointer-events-none on the wrapper so the invisible label area
@@ -158,6 +183,109 @@ export function TrailingPlus({
         <Plus className="size-3.5" />
       </button>
     </NodeToolbar>
+  );
+}
+
+// ---- Branch outputs "+" (per-handle for true / false) --------------------
+//
+// Rendered below a Branch node when one or both of its outputs has no child
+// yet. Without this, the user had to drag a connection out of the bare
+// handle blind — there was no visible affordance saying "add a step on
+// the true path." Each button is anchored under its own handle's x-offset
+// (25% for true, 75% for false) so the visual relationship to the handle
+// stays clear regardless of zoom.
+//
+// Uses two NodeToolbars (one anchored start, one anchored end) instead of
+// one toolbar with two buttons because React Flow's NodeToolbar respects
+// `align` per-toolbar — we get correct positioning at any zoom level
+// without manually computing pixel offsets.
+export function BranchTrailingPlus({
+  hasTrueChild,
+  hasFalseChild,
+  onInsert,
+  nodeId,
+}: {
+  hasTrueChild: boolean;
+  hasFalseChild: boolean;
+  onInsert: (anchor: PickerAnchor) => void;
+  nodeId: string;
+}) {
+  if (hasTrueChild && hasFalseChild) return null;
+  return (
+    <>
+      {!hasTrueChild && (
+        <NodeToolbar
+          isVisible
+          position={Position.Bottom}
+          offset={12}
+          align="start"
+        >
+          <BranchPlusButton
+            label="Add step on the true path"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              onInsert({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+                sourceId: nodeId,
+                sourceHandle: "true",
+              });
+            }}
+            color="emerald"
+          />
+        </NodeToolbar>
+      )}
+      {!hasFalseChild && (
+        <NodeToolbar
+          isVisible
+          position={Position.Bottom}
+          offset={12}
+          align="end"
+        >
+          <BranchPlusButton
+            label="Add step on the false path"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              onInsert({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+                sourceId: nodeId,
+                sourceHandle: "false",
+              });
+            }}
+            color="rose"
+          />
+        </NodeToolbar>
+      )}
+    </>
+  );
+}
+
+function BranchPlusButton({
+  label,
+  onClick,
+  color,
+}: {
+  label: string;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  color: "emerald" | "rose";
+}) {
+  // Per-handle color matches the handle dot itself so the user reads
+  // "this + adds onto the emerald (true) handle" without a tooltip.
+  const ring =
+    color === "emerald"
+      ? "border-emerald-500/60 text-emerald-600 hover:bg-emerald-500 hover:text-white"
+      : "border-rose-500/60 text-rose-600 hover:bg-rose-500 hover:text-white";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={`inline-flex size-6 cursor-pointer items-center justify-center rounded-full border bg-background shadow-sm transition-all hover:scale-110 ${ring}`}
+    >
+      <Plus className="size-3.5" />
+    </button>
   );
 }
 
