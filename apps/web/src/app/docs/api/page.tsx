@@ -48,9 +48,15 @@ export default function ApiDocsPage() {
 
       <Section title="Contacts">
         <Endpoint method="GET" path="/api/external/v1/contacts?phone=%2B15555550100">
-          List or find contacts. <code>?phone=</code> for exact E.164 match;{" "}
-          <code>?search=</code> for fuzzy; <code>?stageId=</code>,{" "}
-          <code>?tagIds=</code>, <code>?cursor=</code>, <code>?limit=</code> for paging.
+          List or find contacts. <strong>Natural-key lookups</strong> short-circuit
+          with at most one row (no cursor):{" "}
+          <code>?phone=</code> (E.164, server-normalized),{" "}
+          <code>?email=</code> (case-insensitive exact), or{" "}
+          <code>?externalContactId=</code> (your CRM id, stamped at create time).
+          <strong> Browsing</strong>:{" "}
+          <code>?search=</code> for fuzzy across name / phone / email,{" "}
+          <code>?stageId=</code>, <code>?tagIds=</code>,{" "}
+          <code>?cursor=</code>, <code>?limit=</code>.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contacts/:id">
           Fetch a single contact (including custom fields, tags, stage).
@@ -258,19 +264,57 @@ export default function ApiDocsPage() {
       <header className="mb-4">
         <h2 className="text-xl font-semibold">Webhook events</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          When you subscribe a webhook to one of these event names in{" "}
+          Subscribe a URL to one or more event names in{" "}
           <Link
             href="/settings/integrations/webhooks"
             className="text-primary hover:underline"
           >
             Integrations → Webhooks
           </Link>
-          , we POST a JSON envelope to your URL with an{" "}
-          <code className="rounded bg-muted px-1 text-xs">X-CCP-Signature</code>{" "}
-          header (HMAC-SHA256 over the raw body, timestamped — see the docs in
-          the create form).
+          . Every event posts the same envelope shape; only{" "}
+          <code className="rounded bg-muted px-1 text-xs">data</code> differs.
         </p>
       </header>
+
+      <div className="mb-6 rounded-md border border-border bg-card p-3 text-xs">
+        <p className="mb-2 font-semibold text-foreground">Envelope (wraps every delivery)</p>
+        <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono leading-relaxed">{`{
+  "event_id": "cmpevt_…",          // stable id; also in X-CCP-Delivery
+  "event_type": "message.received",
+  "occurred_at": "2026-05-20T11:00:00.000Z",
+  "team_id": "cmpteam_…",
+  "channel": {                      // null until you've connected WhatsApp
+    "source": "meta_cloud",
+    "phone_number_id": "…",
+    "display_phone_number": "+1…"
+  },
+  "data": { /* event-specific — see samples below */ }
+}`}</pre>
+      </div>
+
+      <div className="mb-6 rounded-md border border-border bg-card p-3 text-xs">
+        <p className="mb-1 font-semibold text-foreground">Signature verification</p>
+        <p className="mb-2 text-muted-foreground">
+          Every delivery includes{" "}
+          <code className="rounded bg-muted px-1">X-CCP-Signature: t=&lt;unix-seconds&gt;,v1=&lt;hex&gt;</code>.
+          Recompute <code>HMAC-SHA256(secret, &quot;&lt;t&gt;.&lt;raw_body&gt;&quot;)</code>{" "}
+          and compare to <code>v1</code> in constant time. Reject if{" "}
+          <code>t</code> is older than 5 minutes (replay protection).
+        </p>
+        <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono leading-relaxed">{`// Node.js example
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(rawBody, header, secret) {
+  const [tPart, sigPart] = header.split(",");
+  const t = tPart.slice(2);             // "t=…"
+  const sig = sigPart.slice(3);         // "v1=…"
+  if (Date.now() / 1000 - Number(t) > 300) return false;
+  const expected = createHmac("sha256", secret)
+    .update(t + "." + rawBody)
+    .digest("hex");
+  return timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+}`}</pre>
+      </div>
 
       <div className="flex flex-col gap-6">
         {PUBLIC_EVENT_GROUPS.map((g) => (
@@ -278,14 +322,20 @@ export default function ApiDocsPage() {
             <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
               {g.group}
             </h3>
-            <div className="flex flex-col gap-2 rounded-md border border-border bg-card p-3">
+            <div className="flex flex-col gap-3 rounded-md border border-border bg-card p-3">
               {g.events.map((e) => (
-                <div key={e.type} className="flex flex-col gap-0.5">
+                <div key={e.type} className="flex flex-col gap-1">
                   <code className="font-mono text-xs">{e.type}</code>
                   <span className="text-xs font-medium">{e.label}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {e.description}
-                  </span>
+                  <span className="text-xs text-muted-foreground">{e.description}</span>
+                  <details className="mt-1 text-[11px]">
+                    <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                      Sample <code>data</code> payload
+                    </summary>
+                    <pre className="mt-1 overflow-x-auto rounded bg-muted/40 p-2 font-mono leading-relaxed">
+                      {JSON.stringify(e.samplePayload, null, 2)}
+                    </pre>
+                  </details>
                 </div>
               ))}
             </div>

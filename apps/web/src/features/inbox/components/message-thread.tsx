@@ -417,6 +417,12 @@ function MessageThreadImpl({
   // it commits. The ref is assigned right after the hook call; consumers
   // call through the ref to dodge the TDZ.
   const markBenignTailUpdateRef = useRef<() => void>(() => {});
+  // Same TDZ dodge for `releaseStickToBottom`. The search-jump scroller has
+  // to drop sticky BEFORE its `scrollIntoView` runs, otherwise the hook's
+  // ResizeObserver + media-load handlers re-snap to the bottom and fight
+  // the smooth scroll — viewport lands below the match and the user has to
+  // scroll up to see the highlight.
+  const releaseStickToBottomRef = useRef<() => void>(() => {});
 
   // Re-center the viewport on a matched bubble, robustly. A plain
   // `scrollIntoView({behavior:"smooth"})` computes its target position at
@@ -438,6 +444,13 @@ function MessageThreadImpl({
   const matchSettleStopRef = useRef<(() => void) | null>(null);
   const scrollMatchIntoView = useCallback((messageId: string) => {
     matchSettleStopRef.current?.();
+    // Hand scroll control off from useChatScroll before we do anything else.
+    // If sticky was true (user was at the bottom when they opened search),
+    // the upcoming reflows from slice swap / `<mark>` insertion / image
+    // decode would otherwise re-snap to the bottom and override our
+    // `scrollIntoView`. Releasing also stops any in-flight load-older
+    // settle window for the same reason.
+    releaseStickToBottomRef.current();
     // Double-rAF before the first scroll so framer-motion's mount transition
     // (one frame) and the subsequent layout pass (next frame) both commit
     // before we measure. Track inner rAF in a closure var so the returned
@@ -680,19 +693,21 @@ function MessageThreadImpl({
   const isOwnSend =
     lastEntry?.kind === "message" && lastEntry.data.pending === true;
 
-  const { unreadBelow, scrollToBottom, markBenignTailUpdate } = useChatScroll({
-    scrollAreaRef,
-    contentRef,
-    topSentinelRef,
-    conversationId: conversation.id,
-    lastEntryKey,
-    isOwnSend,
-    hasMoreOlder,
-    loadOlder,
-  });
-  // Bind the forward-ref used by the active-match effect (declared above
-  // this hook call). Assignment in render is idempotent.
+  const { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom } =
+    useChatScroll({
+      scrollAreaRef,
+      contentRef,
+      topSentinelRef,
+      conversationId: conversation.id,
+      lastEntryKey,
+      isOwnSend,
+      hasMoreOlder,
+      loadOlder,
+    });
+  // Bind the forward-refs used by the active-match + search-jump effects
+  // (declared above this hook call). Assignment in render is idempotent.
   markBenignTailUpdateRef.current = markBenignTailUpdate;
+  releaseStickToBottomRef.current = releaseStickToBottom;
 
   // Note: we deliberately do NOT hide the scroll area until layout effects
   // run. The previous version gated `invisible` on a `scrollReady` boolean

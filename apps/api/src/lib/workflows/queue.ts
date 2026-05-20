@@ -124,6 +124,33 @@ export async function enqueueWorkflowResume(
   return job.id as string;
 }
 
+/**
+ * Resume an `ask_question` step early because the contact replied. The
+ * inbound-ingest hook drops the answer onto `WorkflowRun.pendingAnswer`
+ * and then calls this to wake the worker immediately. `tag` is the inbound
+ * message's row id — unique per (run, inbound) so a second reply from the
+ * same contact doesn't collide with the still-buffered previous resume.
+ *
+ * The timeout's `resume-${runId}-${waitSeq}` job stays in BullMQ's delayed
+ * queue; when it eventually fires the runner reads pendingAnswer (now
+ * cleared after the answered branch ran) and either re-enters the
+ * ask_question step (if it's still the current step on a subsequent ask)
+ * or no-ops if the run already advanced. Worker per-run locking keeps the
+ * two from racing.
+ */
+export async function enqueueWorkflowInboundResume(
+  runId: string,
+  tag: string,
+): Promise<string> {
+  const q = getWorkflowQueue();
+  const job = await q.add(
+    "run",
+    { runId },
+    { delay: 1, jobId: `inbound-${runId}-${tag}` },
+  );
+  return job.id as string;
+}
+
 export async function closeWorkflowQueue(): Promise<void> {
   if (state.queue) {
     await state.queue.close();

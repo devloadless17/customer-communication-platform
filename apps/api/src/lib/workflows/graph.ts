@@ -160,14 +160,24 @@ export function validateGraph(graph: WorkflowGraph): string[] {
     if (!ids.has(e.to)) errors.push(`graph.edges: to "${e.to}" not in nodes`);
   }
 
-  // Branch nodes must have a labeled true + false edge. Other control-flow
-  // step types enforce their own edge invariants in the runner/handler.
+  // Branch nodes must have a labeled true + false edge. ask_question nodes
+  // must have answered + timeout edges. Other control-flow step types
+  // enforce their own edge invariants in the runner/handler.
   for (const n of graph.nodes) {
     if (n.type === "branch") {
       const outs = graph.edges.filter((e) => e.from === n.id);
       const labels = new Set(outs.map((e) => e.label));
       if (!labels.has("true") || !labels.has("false")) {
         errors.push(`branch node "${n.id}" must have edges labeled "true" and "false"`);
+      }
+    }
+    if (n.type === "ask_question") {
+      const outs = graph.edges.filter((e) => e.from === n.id);
+      const labels = new Set(outs.map((e) => e.label));
+      if (!labels.has("answered") || !labels.has("timeout")) {
+        errors.push(
+          `ask_question node "${n.id}" must have edges labeled "answered" and "timeout"`,
+        );
       }
     }
   }

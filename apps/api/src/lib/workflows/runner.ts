@@ -1,4 +1,4 @@
-import type { Prisma, WorkflowStepType, WorkflowTriggerEvent } from "@prisma/client";
+import { Prisma, type WorkflowStepType, type WorkflowTriggerEvent } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { type WorkflowEventEnvelope } from "@/lib/workflows/events";
@@ -192,6 +192,19 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       });
     }
 
+    // For `ask_question` (and any future await_reply-shaped step), the
+    // handler needs to know "is this the first call or a resume?" — first
+    // call sends the question, resume picks an outgoing edge. `isResume` is
+    // true when ANY prior log entry for this step was status=waiting.
+    // `pendingAnswer` is the inbound message the ingest hook dropped onto
+    // run.pendingAnswer; null on first call and on the timeout path.
+    const isResume = stepLog.some(
+      (e) => e.stepId === node.id && e.status === "waiting",
+    );
+    const pendingAnswer = (run.pendingAnswer ?? null) as
+      | { body: string; messageId: string; timestamp: string }
+      | null;
+
     let result: StepResult;
     try {
       const handler = getStepHandler(node.type);
@@ -204,6 +217,8 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         attempt: input.attempt,
         stepId: node.id,
         graph,
+        pendingAnswer,
+        isResume,
       });
       // Strip the in-progress sentinel — the success/failed entry below
       // is the canonical record. Leaving the in_progress in place would
@@ -311,6 +326,85 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       // re-enqueueing stranded waits, so its retry stays a no-op while the
       // original delayed job is still alive.
       await enqueueWorkflowResume(run.id, result.delayMs, stepLog.length);
+      return { runId: run.id, status: "waiting" };
+    }
+
+    if (result.kind === "await_reply") {
+      // Like wait, but the step itself is re-executed on resume — so we
+      // DON'T advance currentStepId. The handler picks an outgoing edge
+      // on the second invocation (`isResume === true`) based on whether
+      // pendingAnswer is set by the inbound ingest hook before the
+      // resume fires.
+      const contactId = run.contactId;
+      if (!contactId) {
+        // No contact on the run = no way to receive a reply. Skip into
+        // the timeout edge on the same step by failing fast; the handler
+        // will return branch:timeout the moment we re-execute. But there's
+        // no inbound path to trigger that re-execution, so going straight
+        // to a permanent failure is the honest outcome.
+        stepLog.push({
+          stepId: node.id,
+          type: node.type,
+          status: "failed",
+          errorMessage: "ask_question requires a contact-scoped trigger",
+          startedAt: startedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+        });
+        await db.workflowRun.update({
+          where: { id: run.id },
+          data: {
+            status: "failed",
+            currentStepId: null,
+            stepLog: stepLog as unknown as Prisma.InputJsonValue,
+            errorMessage: "ask_question requires a contact-scoped trigger",
+            finishedAt: new Date(),
+          },
+        });
+        return { runId: run.id, status: "failed" };
+      }
+      const resumeAt = new Date(Date.now() + result.timeoutMs);
+      stepLog.push({
+        stepId: node.id,
+        type: node.type,
+        status: "waiting",
+        startedAt: startedAt.toISOString(),
+        finishedAt: new Date().toISOString(),
+        responseStatus: result.status,
+        responseBody: result.body,
+        // No nextStepId — the same step re-runs.
+      });
+      // Upsert the awaiting row + clear any stale pendingAnswer from a
+      // previous ask_question in this run so the next resume only sees a
+      // fresh answer from this question.
+      await db.$transaction([
+        db.workflowAwaitingReply.upsert({
+          where: { runId: run.id },
+          create: {
+            teamId: wf.teamId,
+            contactId,
+            runId: run.id,
+            workflowId: wf.id,
+            stepId: node.id,
+            expiresAt: resumeAt,
+          },
+          update: {
+            stepId: node.id,
+            expiresAt: resumeAt,
+          },
+        }),
+        db.workflowRun.update({
+          where: { id: run.id },
+          data: {
+            status: "waiting",
+            // KEEP currentStepId — the same step re-runs on resume.
+            waitUntil: resumeAt,
+            stepLog: stepLog as unknown as Prisma.InputJsonValue,
+            jumpsUsed,
+            pendingAnswer: Prisma.DbNull,
+          },
+        }),
+      ]);
+      await enqueueWorkflowResume(run.id, result.timeoutMs, stepLog.length);
       return { runId: run.id, status: "waiting" };
     }
 

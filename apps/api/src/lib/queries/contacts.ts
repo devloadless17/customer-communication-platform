@@ -229,6 +229,7 @@ export async function listContactFieldDefinitions(
     key: r.key,
     label: r.label,
     order: r.order,
+    isVisible: r.isVisible,
   }));
 }
 

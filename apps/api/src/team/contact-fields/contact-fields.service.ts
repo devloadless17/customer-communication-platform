@@ -12,11 +12,35 @@ import type { ContactFieldDefinition, Role } from "@ccp/shared/types";
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import type {
+  ContactPanelBuiltins,
   CreateContactFieldInput,
   UpdateContactFieldInput,
 } from "./contact-fields.schemas";
 
 const MAX_FIELDS_PER_TEAM = 50;
+
+/**
+ * Default visibility for built-in contact-panel fields. Used when the team's
+ * `contactPanelBuiltins` JSON is empty (every team starts that way). Preserves
+ * the pre-feature behavior: email + location + firstContacted are rendered;
+ * phone is rendered too but isn't toggleable so it's not in this map.
+ */
+const DEFAULT_BUILTINS: Required<ContactPanelBuiltins> = {
+  email: true,
+  location: true,
+  firstContacted: true,
+};
+
+function resolveBuiltins(raw: unknown): Required<ContactPanelBuiltins> {
+  if (!raw || typeof raw !== "object") return DEFAULT_BUILTINS;
+  const r = raw as Record<string, unknown>;
+  return {
+    email: typeof r.email === "boolean" ? r.email : DEFAULT_BUILTINS.email,
+    location: typeof r.location === "boolean" ? r.location : DEFAULT_BUILTINS.location,
+    firstContacted:
+      typeof r.firstContacted === "boolean" ? r.firstContacted : DEFAULT_BUILTINS.firstContacted,
+  };
+}
 
 @Injectable()
 export class ContactFieldsService {
@@ -31,6 +55,38 @@ export class ContactFieldsService {
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
     });
     return rows.map(toDto);
+  }
+
+  async getBuiltins(teamId: string): Promise<Required<ContactPanelBuiltins>> {
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { contactPanelBuiltins: true },
+    });
+    return resolveBuiltins(team?.contactPanelBuiltins ?? null);
+  }
+
+  async updateBuiltins(
+    teamId: string,
+    role: Role,
+    patch: ContactPanelBuiltins,
+  ): Promise<Required<ContactPanelBuiltins>> {
+    requireManage(role);
+    const current = await this.getBuiltins(teamId);
+    const next: Required<ContactPanelBuiltins> = {
+      email: patch.email ?? current.email,
+      location: patch.location ?? current.location,
+      firstContacted: patch.firstContacted ?? current.firstContacted,
+    };
+    await this.db.team.update({
+      where: { id: teamId },
+      data: { contactPanelBuiltins: next },
+    });
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      teamId,
+      scope: "contact-fields",
+    });
+    return next;
   }
 
   async create(
@@ -151,6 +207,7 @@ function toDto(r: {
   key: string;
   label: string;
   order: number;
+  isVisible: boolean;
 }): ContactFieldDefinition {
   return {
     id: r.id,
@@ -158,6 +215,7 @@ function toDto(r: {
     key: r.key,
     label: r.label,
     order: r.order,
+    isVisible: r.isVisible,
   };
 }
 

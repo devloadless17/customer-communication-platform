@@ -8,9 +8,10 @@ import {
   NodeToolbar,
   Position,
   getSmoothStepPath,
+  useReactFlow,
   type EdgeProps,
 } from "@xyflow/react";
-import { Copy, Plus, Search, Trash2 } from "lucide-react";
+import { Copy, Plus, Search, Trash2, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { cn } from "@ccp/shared/utils";
@@ -75,11 +76,14 @@ export function InsertEdge(props: EdgeProps) {
     targetPosition,
     source,
     sourceHandleId,
+    selected,
     style,
     markerEnd,
     data,
   } = props;
   const d = (data ?? {}) as InsertEdgeData;
+  const [hovered, setHovered] = useState(false);
+  const { setEdges } = useReactFlow();
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -90,23 +94,26 @@ export function InsertEdge(props: EdgeProps) {
   });
 
   // Color the edge to match its source handle so a glance tells you which
-  // branch path you're looking at. Falls back to the muted-foreground
-  // stroke for non-branch edges (the synthetic trigger→start edge keeps
-  // its dashed style applied via the `style` prop from the canvas
-  // projection — we spread it last so the caller can still override).
+  // branch / ask_question path you're looking at. Falls back to the
+  // muted-foreground stroke for non-branched edges (the synthetic
+  // trigger→start edge keeps its dashed style applied via the `style` prop
+  // from the canvas projection — we spread it last so the caller can still
+  // override).
   const handleStroke =
-    sourceHandleId === "true"
-      ? "rgb(16 185 129)" // emerald-500 — matches the BranchNode handle dot
+    sourceHandleId === "true" || sourceHandleId === "answered"
+      ? "rgb(16 185 129)" // emerald-500 — matches the green handle dot
       : sourceHandleId === "false"
-        ? "rgb(244 63 94)" // rose-500 — matches the BranchNode handle dot
-        : undefined;
+        ? "rgb(244 63 94)" // rose-500
+        : sourceHandleId === "timeout"
+          ? "rgb(245 158 11)" // amber-500 — matches the AskQuestionNode handle dot
+          : undefined;
   const mergedStyle: React.CSSProperties = {
-    strokeWidth: 2,
+    strokeWidth: selected ? 3 : 2,
     ...(handleStroke ? { stroke: handleStroke } : {}),
     ...(style ?? {}),
   };
 
-  function onClick(e: React.MouseEvent<HTMLButtonElement>) {
+  function onInsertClick(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
     d.onInsert?.({
       x: rect.left + rect.width / 2,
@@ -118,27 +125,52 @@ export function InsertEdge(props: EdgeProps) {
     });
   }
 
+  // Delete this connection. Routes through `onEdgesChange` (via setEdges
+  // with a "remove" change), which is where the canonical graph picks up
+  // the removal and persists it. Hidden on the synthetic trigger→start
+  // edge — that edge is controlled by `graph.startNodeId`, not by the
+  // edge array, so a manual delete would just re-project next render.
+  function onDeleteClick(e: React.MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    setEdges((eds) => eds.filter((edge) => edge.id !== id));
+  }
+
+  const showDelete = (hovered || selected) && !d.isSyntheticTrigger;
+
   return (
     <>
       <BaseEdge id={id} path={path} style={mergedStyle} markerEnd={markerEnd} />
       <EdgeLabelRenderer>
         <div
           // pointer-events-none on the wrapper so the invisible label area
-          // doesn't eat clicks on the canvas behind it; the button below
-          // re-enables them for itself.
-          className="pointer-events-none absolute"
+          // doesn't eat clicks on the canvas behind it; the buttons below
+          // re-enable them for themselves.
+          className="pointer-events-none absolute flex items-center gap-1"
           style={{
             transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
           }}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
         >
           <button
             type="button"
-            onClick={onClick}
+            onClick={onInsertClick}
             aria-label="Insert step"
             className="pointer-events-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-primary/40 bg-background text-primary shadow-sm transition-all hover:scale-110 hover:bg-primary hover:text-primary-foreground"
           >
             <Plus className="size-3.5" />
           </button>
+          {showDelete && (
+            <button
+              type="button"
+              onClick={onDeleteClick}
+              aria-label="Delete connection"
+              title="Delete connection"
+              className="pointer-events-auto inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-destructive/40 bg-background text-destructive shadow-sm transition-all hover:scale-110 hover:bg-destructive hover:text-destructive-foreground"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
         </div>
       </EdgeLabelRenderer>
     </>
@@ -268,14 +300,16 @@ function BranchPlusButton({
 }: {
   label: string;
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  color: "emerald" | "rose";
+  color: "emerald" | "rose" | "amber";
 }) {
   // Per-handle color matches the handle dot itself so the user reads
   // "this + adds onto the emerald (true) handle" without a tooltip.
   const ring =
     color === "emerald"
       ? "border-emerald-500/60 text-emerald-600 hover:bg-emerald-500 hover:text-white"
-      : "border-rose-500/60 text-rose-600 hover:bg-rose-500 hover:text-white";
+      : color === "rose"
+        ? "border-rose-500/60 text-rose-600 hover:bg-rose-500 hover:text-white"
+        : "border-amber-500/60 text-amber-600 hover:bg-amber-500 hover:text-white";
   return (
     <button
       type="button"
@@ -286,6 +320,62 @@ function BranchPlusButton({
     >
       <Plus className="size-3.5" />
     </button>
+  );
+}
+
+/**
+ * ask_question counterpart of BranchTrailingPlus — answered (emerald) +
+ * timeout (amber) buttons under the corresponding handles.
+ */
+export function AskQuestionTrailingPlus({
+  hasAnsweredChild,
+  hasTimeoutChild,
+  onInsert,
+  nodeId,
+}: {
+  hasAnsweredChild: boolean;
+  hasTimeoutChild: boolean;
+  onInsert: (anchor: PickerAnchor) => void;
+  nodeId: string;
+}) {
+  if (hasAnsweredChild && hasTimeoutChild) return null;
+  return (
+    <>
+      {!hasAnsweredChild && (
+        <NodeToolbar isVisible position={Position.Bottom} offset={12} align="start">
+          <BranchPlusButton
+            label="Add step on the answered path"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              onInsert({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+                sourceId: nodeId,
+                sourceHandle: "answered",
+              });
+            }}
+            color="emerald"
+          />
+        </NodeToolbar>
+      )}
+      {!hasTimeoutChild && (
+        <NodeToolbar isVisible position={Position.Bottom} offset={12} align="end">
+          <BranchPlusButton
+            label="Add step on the timeout path"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              onInsert({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+                sourceId: nodeId,
+                sourceHandle: "timeout",
+              });
+            }}
+            color="amber"
+          />
+        </NodeToolbar>
+      )}
+    </>
   );
 }
 

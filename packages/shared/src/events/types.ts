@@ -74,6 +74,9 @@ export interface MessageReceivedEvent {
 export interface MessageSentEvent {
   teamId: string;
   conversationId: string;
+  /** Carried so outbound webhook envelopes can include contact_id without
+   *  a DB roundtrip in the framework-agnostic event mapper. */
+  contactId: string;
   message: import("../types").Message;
   preview: string;
   lastMessageAt: string;
@@ -106,6 +109,9 @@ export interface MessageSentEvent {
 export interface MessageStatusChangedEvent {
   teamId: string;
   conversationId: string;
+  /** Carried so outbound webhook envelopes can include contact_id without
+   *  a DB roundtrip in the framework-agnostic event mapper. */
+  contactId: string;
   messageId: string;
   status: MessageStatus;
 }

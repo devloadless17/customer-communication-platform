@@ -127,6 +127,13 @@ export type ExternalNoteInput = z.infer<typeof ExternalNoteSchema>;
 export const ListContactsQuerySchema = z.object({
   /** Exact-match filter on E.164 phone. Returns at most one row. */
   phone: z.string().min(1).optional(),
+  /** Exact-match filter on email. Returns at most one row. Case-insensitive
+   *  since emails compare case-insensitively per RFC. */
+  email: z.string().trim().min(1).optional(),
+  /** Exact-match filter on the integrator-owned id stamped at create time.
+   *  Returns at most one row. Lets partners look up our contact by their
+   *  own CRM id without storing our ids. */
+  externalContactId: z.string().min(1).optional(),
   /** Free-text search across name / phone / email / customFields. */
   search: z.string().trim().min(1).optional(),
   stageId: z.string().min(1).optional(),

@@ -1,4 +1,11 @@
 import { evaluateConditions } from "@/lib/workflows/conditions";
+import {
+  type BranchPreset,
+  BranchPresetConfigError,
+  describeBranchPreset,
+  evaluateBranchPreset,
+  parseBranchPreset,
+} from "@/lib/workflows/branch-presets";
 
 import {
   type StepHandler,
@@ -21,7 +28,18 @@ import {
 // Branch
 // ---------------------------------------------------------------------------
 
+/**
+ * Branch step config. Two mutually exclusive modes:
+ *   - `preset` — typed domain check (24h window, has tag, etc.). When set,
+ *     `conditions` is ignored.
+ *   - `conditions` — original generic AND/OR condition group. Used when no
+ *     `preset` is present.
+ *
+ * Backwards compat: configs saved before the preset mode existed have only
+ * `conditions` set, which still resolves correctly.
+ */
 export interface BranchStepConfig {
+  preset?: BranchPreset;
   conditions: unknown;
 }
 
@@ -33,15 +51,36 @@ export const branchStepHandler: StepHandler<BranchStepConfig> = {
       throw new StepConfigError("branch config must be an object");
     }
     const r = raw as Record<string, unknown>;
+    let preset: BranchPreset | undefined;
+    if (r.preset !== undefined && r.preset !== null) {
+      try {
+        const parsed = parseBranchPreset(r.preset);
+        if (!parsed) {
+          throw new StepConfigError("branch.preset has an unknown type");
+        }
+        preset = parsed;
+      } catch (err) {
+        if (err instanceof BranchPresetConfigError) {
+          throw new StepConfigError(err.message);
+        }
+        throw err;
+      }
+    }
     // Tolerant — the canvas may stub a branch with no conditions yet.
     // Falsy/empty conditions evaluate true (matches everything).
-    return { conditions: r.conditions ?? { op: "AND", children: [] } };
+    return {
+      ...(preset ? { preset } : {}),
+      conditions: r.conditions ?? { op: "AND", children: [] },
+    };
   },
-  describeConfig() {
+  describeConfig(config) {
+    if (config.preset) return describeBranchPreset(config.preset);
     return "Branch";
   },
   async run(envelope, config): Promise<StepResult> {
-    const matched = evaluateConditions(config.conditions, envelope.data);
+    const matched = config.preset
+      ? await evaluateBranchPreset(config.preset, envelope)
+      : evaluateConditions(config.conditions, envelope.data);
     return {
       kind: "branch",
       status: 200,

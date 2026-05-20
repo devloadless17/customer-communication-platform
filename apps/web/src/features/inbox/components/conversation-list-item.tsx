@@ -59,13 +59,13 @@ function ConversationListItemImpl({
       className={cn(
         "group relative flex cursor-pointer gap-3 rounded-lg px-2.5 py-2.5 transition-colors",
         active
-          ? "bg-accent"
+          ? "bg-primary/10"
           : pending
             ? "bg-accent/60"
             : "hover:bg-accent/60",
       )}
     >
-      {unreadForMe && !active && (
+      {active && (
         <span className="absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-r-full bg-primary" />
       )}
       <Avatar className="size-10">

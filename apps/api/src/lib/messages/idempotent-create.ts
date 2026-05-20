@@ -43,13 +43,22 @@ export async function createOutboundMessageIdempotent(
       // millisecond would otherwise lose the parked status (GETDEL is
       // atomic, so by the time the catch runs the entry is already gone).
       if (created.externalId && created.provider) {
-        void drainWithRetry(
-          created.teamId,
-          created.provider as ProviderName,
-          created.externalId,
-          created.id,
-          created.conversationId,
-        );
+        // contactId lookup is unconditional but cheap (indexed PK) — needed
+        // so the parked-status publish carries contact_id for outbound webhooks.
+        const convo = await db.conversation.findUnique({
+          where: { id: created.conversationId },
+          select: { contactId: true },
+        });
+        if (convo) {
+          void drainWithRetry(
+            created.teamId,
+            created.provider as ProviderName,
+            created.externalId,
+            created.id,
+            created.conversationId,
+            convo.contactId,
+          );
+        }
       }
       return created;
     } catch (err) {
@@ -105,14 +114,15 @@ async function drainWithRetry(
   externalId: string,
   messageId: string,
   conversationId: string,
+  contactId: string,
 ): Promise<void> {
   try {
-    await drainParkedStatus(teamId, provider, externalId, messageId, conversationId);
+    await drainParkedStatus(teamId, provider, externalId, messageId, conversationId, contactId);
     return;
   } catch (firstErr) {
     await new Promise((r) => setTimeout(r, 250));
     try {
-      await drainParkedStatus(teamId, provider, externalId, messageId, conversationId);
+      await drainParkedStatus(teamId, provider, externalId, messageId, conversationId, contactId);
       return;
     } catch (secondErr) {
       console.error(

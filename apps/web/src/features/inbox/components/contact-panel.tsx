@@ -30,6 +30,7 @@ import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
+  ContactPanelBuiltins,
   ConversationStatus,
   ConversationWithRefs,
   Tag,
@@ -70,6 +71,9 @@ function arraysEqual(a: string[], b: string[]): boolean {
 interface PanelProps {
   data: ConversationWithRefs;
   fieldDefinitions: ContactFieldDefinition[];
+  /** Built-in field visibility (email / location / firstContacted). Phone is
+   *  always rendered regardless. Admin-controlled from /settings/contact-fields. */
+  builtins: ContactPanelBuiltins;
   /** Whether the current user can add/rename/delete team-wide field definitions. */
   canManageFields: boolean;
   /** Team-wide tag catalog. Used by the tag picker for select/create. */
@@ -81,6 +85,7 @@ interface PanelProps {
 export function ContactPanel({
   data,
   fieldDefinitions,
+  builtins,
   canManageFields,
   tagCatalog,
   teamMembers,
@@ -466,13 +471,13 @@ export function ContactPanel({
     // Mirror conversations.service.ts:assign's status side-effect — kept
     // identical to assignment-dropdown.tsx so a header change and a panel
     // change produce the same end state.
-    //   - assign + closed → open
+    //   - assign + (pending | closed) → open
     //   - unassign + open → pending
     // Driven off `liveStatus` (the panel's local mirror of the conversation
     // status) so a teammate's concurrent close/reopen is already reflected
     // when we evaluate the rule here.
     const predictedNextStatus =
-      nextId !== null && liveStatus === "closed"
+      nextId !== null && liveStatus !== "open"
         ? "open"
         : nextId === null && liveStatus === "open"
           ? "pending"
@@ -662,56 +667,64 @@ export function ContactPanel({
               inbound webhooks and route conversations. Editing it would
               silently break the link to the customer's WhatsApp account, so
               we don't allow it from the UI. */}
+          {/* Phone is always shown — WhatsApp identity, not hideable. */}
           <ReadOnlyRow
             icon={Phone}
             label="Phone"
             mono
             value={formatPhone(contact.phoneNumber)}
           />
-          <EditableField
-            icon={Mail}
-            label="Email"
-            value={email}
-            placeholder="—"
-            onSave={async (next) => {
-              const trimmed = next.trim();
-              if (trimmed === (email ?? "").trim()) return true;
-              const prev = email;
-              setEmail(trimmed);
-              const ok = await save({ email: trimmed === "" ? null : trimmed });
-              if (!ok) setEmail(prev);
-              return ok;
-            }}
-          />
-          <EditableField
-            icon={MapPin}
-            label="Location"
-            value={location}
-            placeholder="—"
-            onSave={async (next) => {
-              const trimmed = next.trim();
-              if (trimmed === (location ?? "").trim()) return true;
-              const prev = location;
-              setLocation(trimmed);
-              const ok = await save({ location: trimmed === "" ? null : trimmed });
-              if (!ok) setLocation(prev);
-              return ok;
-            }}
-          />
-          <ReadOnlyRow
-            icon={Clock}
-            label="First contacted"
-            value={
-              messages[0] ? (
-                <LocalTime iso={messages[0].timestamp} format="shortDate" />
-              ) : (
-                "—"
-              )
-            }
-          />
+          {builtins.email && (
+            <EditableField
+              icon={Mail}
+              label="Email"
+              value={email}
+              placeholder="—"
+              onSave={async (next) => {
+                const trimmed = next.trim();
+                if (trimmed === (email ?? "").trim()) return true;
+                const prev = email;
+                setEmail(trimmed);
+                const ok = await save({ email: trimmed === "" ? null : trimmed });
+                if (!ok) setEmail(prev);
+                return ok;
+              }}
+            />
+          )}
+          {builtins.location && (
+            <EditableField
+              icon={MapPin}
+              label="Location"
+              value={location}
+              placeholder="—"
+              onSave={async (next) => {
+                const trimmed = next.trim();
+                if (trimmed === (location ?? "").trim()) return true;
+                const prev = location;
+                setLocation(trimmed);
+                const ok = await save({ location: trimmed === "" ? null : trimmed });
+                if (!ok) setLocation(prev);
+                return ok;
+              }}
+            />
+          )}
+          {builtins.firstContacted && (
+            <ReadOnlyRow
+              icon={Clock}
+              label="First contacted"
+              value={
+                messages[0] ? (
+                  <LocalTime iso={messages[0].timestamp} format="shortDate" />
+                ) : (
+                  "—"
+                )
+              }
+            />
+          )}
 
-          {/* Team-wide fields. Rendered in their definition order. */}
-          {fieldDefinitions.map((def) => (
+          {/* Team-wide fields. Rendered in their definition order; admin-hidden
+              definitions are dropped at this level so they never paint. */}
+          {fieldDefinitions.filter((def) => def.isVisible).map((def) => (
             <EditableField
               key={def.id}
               label={def.label}

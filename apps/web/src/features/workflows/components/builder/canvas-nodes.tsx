@@ -4,10 +4,12 @@ import { useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import {
   ArrowRightLeft,
+  CircleSlash,
   Circle,
   Clock,
   Filter,
   Globe,
+  HelpCircle,
   MessageSquare,
   RotateCcw,
   Tag as TagIcon,
@@ -17,6 +19,7 @@ import {
 } from "lucide-react";
 
 import {
+  AskQuestionTrailingPlus,
   BranchTrailingPlus,
   NodeActions,
   TrailingPlus,
@@ -51,6 +54,8 @@ const ICONS: Partial<Record<StepType, React.ComponentType<{ className?: string }
   branch: Filter,
   wait: Clock,
   jump_to_step: RotateCcw,
+  noop: CircleSlash,
+  ask_question: HelpCircle,
   http_request: Globe,
   trigger_workflow: ArrowRightLeft,
 };
@@ -77,6 +82,12 @@ export interface NodeData extends Record<string, unknown> {
    */
   branchHasTrueChild?: boolean;
   branchHasFalseChild?: boolean;
+  /**
+   * ask_question-only counterpart of the branch flags. Drives the inline
+   * "+" affordances on the answered / timeout handles.
+   */
+  askHasAnsweredChild?: boolean;
+  askHasTimeoutChild?: boolean;
 }
 
 const NODE_BASE =
@@ -228,6 +239,74 @@ export function BranchNode({ id, data }: NodeProps) {
         <BranchTrailingPlus
           hasTrueChild={!!d.branchHasTrueChild}
           hasFalseChild={!!d.branchHasFalseChild}
+          nodeId={id}
+          onInsert={d.onOpenPicker}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ask-question node: sends a question to the contact, pauses the run, then
+ * branches "answered" (contact replied within timeoutHours) or "timeout"
+ * (no reply). Same shape as BranchNode but with the n8n-style "wait for
+ * input" semantics.
+ */
+export function AskQuestionNode({ id, data }: NodeProps) {
+  const d = data as NodeData;
+  const [hovered, setHovered] = useState(false);
+  const actionsVisible = hovered || !!d.selected;
+  return (
+    <div
+      className={`${NODE_BASE} w-64 border-violet-500/40 ${
+        d.selected ? "ring-2 ring-violet-500" : ""
+      }`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <Handle type="target" position={Position.Top} />
+      <NodeActions
+        visible={actionsVisible}
+        onDuplicate={() => d.onDuplicate?.()}
+        onDelete={() => d.onDelete?.()}
+      />
+      <div className="flex items-center gap-2 border-b border-border bg-violet-500/10 px-3 py-2">
+        <HelpCircle className="size-4 text-violet-600" />
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-violet-700 dark:text-violet-300">
+            Ask a Question
+          </div>
+          <div className="truncate text-sm font-medium">{d.label}</div>
+        </div>
+      </div>
+      {d.summary && (
+        <div className="truncate px-3 py-2 text-[11px] text-muted-foreground">{d.summary}</div>
+      )}
+      <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1">
+          <span className="size-1.5 rounded-full bg-emerald-500" /> answered
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="size-1.5 rounded-full bg-amber-500" /> timeout
+        </span>
+      </div>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="answered"
+        style={{ left: "25%", background: "rgb(16 185 129)" }}
+      />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="timeout"
+        style={{ left: "75%", background: "rgb(245 158 11)" }}
+      />
+      {d.onOpenPicker && (
+        <AskQuestionTrailingPlus
+          hasAnsweredChild={!!d.askHasAnsweredChild}
+          hasTimeoutChild={!!d.askHasTimeoutChild}
           nodeId={id}
           onInsert={d.onOpenPicker}
         />

@@ -346,7 +346,7 @@ export class MessagesService {
     const [exists, configOrErr] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
-        select: { id: true, lastMessageAt: true },
+        select: { id: true, lastMessageAt: true, contactId: true },
       }),
       getMetaSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
@@ -437,6 +437,7 @@ export class MessagesService {
                 type: "message.sent",
                 teamId,
                 conversationId: existing.conversationId,
+                contactId: exists.contactId,
                 message: replayed,
                 preview: existing.body.slice(0, 200),
                 senderUserId: userId,
@@ -596,6 +597,7 @@ export class MessagesService {
           type: "message.sent",
           teamId,
           conversationId,
+          contactId: exists.contactId,
           message,
           preview,
           senderUserId: userId,
@@ -687,6 +689,7 @@ export class MessagesService {
       where: { id: conversationId, teamId },
       select: {
         id: true,
+        contactId: true,
         // For the timestamp monotonicity guard further down — outbound
         // must sort strictly after any inbound it might be responding to.
         lastMessageAt: true,
@@ -983,6 +986,7 @@ export class MessagesService {
           type: "message.sent",
           teamId,
           conversationId,
+          contactId: conversation.contactId,
           message,
           preview: previewBody,
           senderUserId: userId,
@@ -1204,6 +1208,7 @@ export class MessagesService {
             type: "message.sent",
             teamId,
             conversationId: conversation.id,
+            contactId: contact.id,
             message,
             preview,
             senderUserId: userId,

@@ -22,7 +22,7 @@ import {
 import { LayoutGrid } from "lucide-react";
 import "@xyflow/react/dist/style.css";
 
-import { BranchNode, StepNode, TriggerNode } from "./canvas-nodes";
+import { AskQuestionNode, BranchNode, StepNode, TriggerNode } from "./canvas-nodes";
 import {
   InsertEdge,
   StepPickerPopover,
@@ -44,6 +44,7 @@ const nodeTypes = {
   trigger: TriggerNode,
   step: StepNode,
   branch: BranchNode,
+  ask_question: AskQuestionNode,
 };
 
 const edgeTypes = {
@@ -218,7 +219,11 @@ function CanvasInner({
     }
     const leaves = new Set<string>();
     for (const n of graph.nodes) {
-      if (!hasOut.has(n.id) && n.type !== "branch") leaves.add(n.id);
+      // Branch and ask_question render their own per-handle "+" affordances
+      // and don't use the default-handle trailing "+".
+      if (!hasOut.has(n.id) && n.type !== "branch" && n.type !== "ask_question") {
+        leaves.add(n.id);
+      }
     }
     return leaves;
   }, [graph.edges, graph.nodes]);
@@ -240,6 +245,22 @@ function CanvasInner({
     }
     return map;
   }, [graph.nodes, graph.edges]);
+
+  // ask_question counterpart of branchOutputs — tracks `answered` /
+  // `timeout` handle children.
+  const askOutputs = useMemo(() => {
+    const map = new Map<string, { hasAnswered: boolean; hasTimeout: boolean }>();
+    for (const n of graph.nodes) {
+      if (n.type === "ask_question") map.set(n.id, { hasAnswered: false, hasTimeout: false });
+    }
+    for (const e of graph.edges) {
+      const out = map.get(e.from);
+      if (!out) continue;
+      if (e.label === "answered") out.hasAnswered = true;
+      else if (e.label === "timeout") out.hasTimeout = true;
+    }
+    return map;
+  }, [graph.nodes, graph.edges]);
   // Trigger position. The trigger node is synthetic — it isn't stored in
   // graph.nodes, so a hardcoded position in the projection would slam it
   // back to (0,0) every time the user changed the trigger type or anything
@@ -257,9 +278,15 @@ function CanvasInner({
   const projectedNodes = useMemo<Node[]>(() => {
     const stepNodes: Node[] = graph.nodes.map((n) => {
       const branchOut = n.type === "branch" ? branchOutputs.get(n.id) : null;
+      const askOut = n.type === "ask_question" ? askOutputs.get(n.id) : null;
       return {
         id: n.id,
-        type: n.type === "branch" ? "branch" : "step",
+        type:
+          n.type === "branch"
+            ? "branch"
+            : n.type === "ask_question"
+              ? "ask_question"
+              : "step",
         position: n.position ?? { x: 0, y: 0 },
         data: {
           // Author-supplied name takes precedence; otherwise fall back to
@@ -284,6 +311,9 @@ function CanvasInner({
           // generic StepNode/TriggerNode renderers.
           branchHasTrueChild: branchOut?.hasTrue,
           branchHasFalseChild: branchOut?.hasFalse,
+          // ask_question-only — undefined elsewhere.
+          askHasAnsweredChild: askOut?.hasAnswered,
+          askHasTimeoutChild: askOut?.hasTimeout,
         },
       };
     });
@@ -315,6 +345,7 @@ function CanvasInner({
     triggerPos,
     leafSet,
     branchOutputs,
+    askOutputs,
     openPicker,
     onDuplicateStep,
     onDeleteStep,
@@ -322,21 +353,27 @@ function CanvasInner({
 
   const projectedEdges = useMemo<Edge[]>(() => {
     const edges: Edge[] = graph.edges.map((e, i) => {
-      // Label-text color matches the edge stroke — so "true"/"false" tags
-      // and the stroke colors visually agree.
+      // Label-text color matches the edge stroke — so "true"/"false" /
+      // "answered"/"timeout" tags and the stroke colors visually agree.
       const labelColor =
-        e.label === "true"
+        e.label === "true" || e.label === "answered"
           ? "rgb(16 185 129)"
           : e.label === "false"
             ? "rgb(244 63 94)"
-            : undefined;
+            : e.label === "timeout"
+              ? "rgb(245 158 11)"
+              : undefined;
+      const labelText =
+        e.label === "true" || e.label === "false" || e.label === "answered" || e.label === "timeout"
+          ? e.label
+          : undefined;
       return {
         id: `e_${i}_${e.from}_${e.label ?? ""}_${e.to}`,
         source: e.from,
         target: e.to,
         sourceHandle: e.label ?? "default",
         type: "insert",
-        label: e.label === "true" ? "true" : e.label === "false" ? "false" : undefined,
+        label: labelText,
         labelStyle: {
           fontSize: 11,
           fontWeight: 600,
@@ -544,10 +581,35 @@ function CanvasInner({
         if (selectedStepId && !triggerSelected) {
           onDeleteStep(selectedStepId);
           e.preventDefault();
+          return;
+        }
+        // No selected step → fall through to deleting any selected edges.
+        // React Flow marks edges with `selected: true` in the internal
+        // store; the existing `onEdgesChange` already persists `remove`
+        // changes, so we just route through it. Skip the synthetic
+        // trigger→start edge — it's controlled by startNodeId, not
+        // graph.edges.
+        const selectedEdges = edges.filter(
+          (ed) => ed.selected && ed.id !== "e_trigger_start",
+        );
+        if (selectedEdges.length > 0) {
+          onEdgesChange(
+            selectedEdges.map((ed) => ({ type: "remove" as const, id: ed.id })),
+          );
+          e.preventDefault();
         }
       }
     },
-    [picker, closePicker, selectedStepId, triggerSelected, onSelectStep, onDeleteStep],
+    [
+      picker,
+      closePicker,
+      selectedStepId,
+      triggerSelected,
+      onSelectStep,
+      onDeleteStep,
+      edges,
+      onEdgesChange,
+    ],
   );
 
   return (
@@ -670,6 +732,10 @@ function describeNode(n: WorkflowNode): string | undefined {
       return typeof c.delayMs === "number" ? humanize(c.delayMs) : undefined;
     case "jump_to_step":
       return typeof c.targetStepId === "string" ? `→ ${c.targetStepId}` : undefined;
+    case "noop":
+      return "Do nothing";
+    case "ask_question":
+      return typeof c.question === "string" ? clip(c.question) : undefined;
     case "http_request":
       return typeof c.url === "string" ? `POST ${clip(c.url, 40)}` : undefined;
     case "trigger_workflow":
@@ -727,9 +793,14 @@ export function autoLayoutGraph(graph: WorkflowGraph): WorkflowGraph {
   // and enough vertical breathing room for the edge "+" hit target.
   const COL_WIDTH = 320;
   const ROW_HEIGHT = 180;
-  // Branch outputs read better when the sort order is deterministic.
+  // Branch + ask_question outputs read better when the sort order is
+  // deterministic: success/affirmative on the left, fallback on the right.
   const sortRank = (label: string | null) =>
-    label === "true" ? 0 : label === "false" ? 2 : 1;
+    label === "true" || label === "answered"
+      ? 0
+      : label === "false" || label === "timeout"
+        ? 2
+        : 1;
 
   // Build child map (parent → ordered children).
   const childMap = new Map<string, { id: string; label: string | null }[]>();
@@ -877,12 +948,16 @@ export function insertStepAfter(
     : null;
   const anchorY = sourceNode?.position?.y ?? 0;
   const anchorX = sourceNode?.position?.x ?? 80;
-  // Branch outputs spread horizontally — without this both children pile
-  // on top of each other at sourceX, and the user has to drag one out
-  // before they can even see the second is there. 140 = enough to clear
-  // a w-64 (256px) node's half-width plus the edge label.
+  // Branch + ask_question outputs spread horizontally — without this both
+  // children pile on top of each other at sourceX, and the user has to drag
+  // one out before they can even see the second is there. 140 = enough to
+  // clear a w-64 (256px) node's half-width plus the edge label.
   const branchOffset =
-    sourceHandle === "true" ? -140 : sourceHandle === "false" ? 140 : 0;
+    sourceHandle === "true" || sourceHandle === "answered"
+      ? -140
+      : sourceHandle === "false" || sourceHandle === "timeout"
+        ? 140
+        : 0;
   const newNode: WorkflowNode = {
     id: newId,
     type,

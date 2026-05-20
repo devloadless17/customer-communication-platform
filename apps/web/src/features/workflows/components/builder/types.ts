@@ -133,6 +133,8 @@ export const STEP_OPTIONS: Array<{
   { value: "branch", label: "Branch", description: "If/else based on conditions.", group: "control" },
   { value: "wait", label: "Wait", description: "Pause before continuing.", group: "control" },
   { value: "jump_to_step", label: "Jump to Step", description: "Jump to another step in this workflow.", group: "control" },
+  { value: "noop", label: "Do Nothing", description: "Stop this branch with no action.", group: "control" },
+  { value: "ask_question", label: "Ask a Question", description: "Send a question, wait for the contact's reply, branch on answered / timeout.", group: "control" },
   { value: "http_request", label: "HTTP Request", description: "POST the envelope to an external URL.", group: "external" },
   { value: "trigger_workflow", label: "Trigger Workflow", description: "Run another workflow for this contact.", group: "external" },
 ];
@@ -166,6 +168,10 @@ export function emptyConfigFor(type: StepType): Record<string, unknown> {
       return { delayMs: 60_000 };
     case "jump_to_step":
       return { targetStepId: "" };
+    case "noop":
+      return {};
+    case "ask_question":
+      return { question: "", timeoutHours: 24 };
     case "http_request":
       return { url: "" };
     case "trigger_workflow":

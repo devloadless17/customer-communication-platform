@@ -10,6 +10,7 @@ import { FieldTokenPicker } from "@/features/templates/components/field-token-pi
 import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
 
 import { ConditionGroupEditor } from "./condition-group";
+import { OpenWindowContactCombobox } from "./open-window-contact-combobox";
 import { type BuilderCatalogs, type Trigger, type WorkflowGraph, toGroup } from "./types";
 
 /**
@@ -197,15 +198,19 @@ function TargetSelector({
       </label>
       {mode === "phone" && (
         <div className="ml-6 flex flex-col gap-1">
-          <Input
-            value={phone}
-            onChange={(e) => onChange({ kind: "phone", phoneNumber: e.target.value })}
-            placeholder="+1 555 555 0100"
-            className="font-mono text-[13px]"
+          <OpenWindowContactCombobox
+            value={phone ? { phoneNumber: phone } : null}
+            onChange={(next) =>
+              onChange(
+                next
+                  ? { kind: "phone", phoneNumber: next.phoneNumber }
+                  : { kind: "phone", phoneNumber: "" },
+              )
+            }
           />
           <span className="text-[10.5px] text-muted-foreground">
-            E.164 format. If the number isn't a contact yet, a new contact is
-            created automatically.
+            Pick from contacts who messaged you in the last 24h. Cold reachout
+            (outside the window) requires a Send Template step.
           </span>
           {extraHint && (
             <span className="text-[10.5px] text-amber-600 dark:text-amber-400">
@@ -702,13 +707,39 @@ export function UpdateLifecycleEditor({
 
 // branch --------------------------------------------------------------------
 
+/**
+ * Wire shape for the Branch step's `preset` config field. Mirrors the
+ * server-side BranchPreset type in apps/api/src/lib/workflows/branch-presets.ts.
+ * Duplicated here (not imported) for the same reason as StepTarget — the
+ * server parses the raw JSON anyway and we don't drag server-only modules
+ * into the client bundle.
+ */
+export type BranchPreset =
+  | { type: "window_open" }
+  | { type: "has_tag"; tagId: string }
+  | { type: "in_stage"; stageId: string }
+  | { type: "field_equals"; fieldKey: string; value: string }
+  | { type: "message_contains"; needle: string; caseSensitive?: boolean };
+
+const BRANCH_PRESET_OPTIONS: Array<{
+  type: BranchPreset["type"];
+  label: string;
+  description: string;
+}> = [
+  { type: "window_open", label: "Is 24h window open?", description: "true → contact messaged in the last 24h. Wire true to Send Message, false to Send Template." },
+  { type: "has_tag", label: "Contact has tag", description: "true → contact carries the selected tag." },
+  { type: "in_stage", label: "Contact in stage", description: "true → contact is in the selected lifecycle stage." },
+  { type: "field_equals", label: "Custom field equals", description: "true → the contact's custom field matches the value." },
+  { type: "message_contains", label: "Message contains text", description: "true → the triggering message body contains the substring (only for message_received)." },
+];
+
 export function BranchEditor({
   config,
   trigger,
   onChange,
   catalogs,
 }: {
-  config: { conditions?: unknown };
+  config: { preset?: BranchPreset; conditions?: unknown };
   /** Workflow's trigger — scopes which condition fields are offered.
    *  Earlier this editor always set allowAllFields, which exposed fields
    *  like stage_from / stage_to ("Previous stage" / "New stage") that are
@@ -721,20 +752,213 @@ export function BranchEditor({
   onChange: (c: Record<string, unknown>) => void;
   catalogs: BuilderCatalogs;
 }) {
+  const mode: "preset" | "custom" = config.preset ? "preset" : "custom";
+  const preset = config.preset;
+
+  function switchToPreset() {
+    // Default to window_open — most-asked check.
+    onChange({ ...config, preset: { type: "window_open" } });
+  }
+  function switchToCustom() {
+    const next = { ...config };
+    delete next.preset;
+    onChange(next);
+  }
+  function setPreset(p: BranchPreset) {
+    onChange({ ...config, preset: p });
+  }
+
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <div className="text-xs text-muted-foreground">
-        Step routes to the <strong>true</strong> branch when conditions match,
+        Step routes to the <strong>true</strong> branch when the check passes,
         otherwise to <strong>false</strong>. Connect both edges in the canvas.
       </div>
-      <ConditionGroupEditor
-        trigger={trigger}
-        group={toGroup(config.conditions)}
-        onChange={(g) => onChange({ conditions: g })}
-        catalogs={catalogs}
-      />
+      <div className="inline-flex w-fit items-center gap-0.5 rounded-md border border-border bg-muted/40 p-0.5 text-xs">
+        <button
+          type="button"
+          onClick={switchToPreset}
+          className={
+            mode === "preset"
+              ? "rounded px-2.5 py-1 font-medium bg-background text-foreground shadow-sm"
+              : "rounded px-2.5 py-1 text-muted-foreground hover:text-foreground"
+          }
+        >
+          Preset
+        </button>
+        <button
+          type="button"
+          onClick={switchToCustom}
+          className={
+            mode === "custom"
+              ? "rounded px-2.5 py-1 font-medium bg-background text-foreground shadow-sm"
+              : "rounded px-2.5 py-1 text-muted-foreground hover:text-foreground"
+          }
+        >
+          Custom expression
+        </button>
+      </div>
+      {mode === "preset" && preset && (
+        <BranchPresetEditor
+          preset={preset}
+          onChange={setPreset}
+          catalogs={catalogs}
+          trigger={trigger}
+        />
+      )}
+      {mode === "custom" && (
+        <ConditionGroupEditor
+          trigger={trigger}
+          group={toGroup(config.conditions)}
+          onChange={(g) => onChange({ ...config, conditions: g })}
+          catalogs={catalogs}
+        />
+      )}
     </div>
   );
+}
+
+function BranchPresetEditor({
+  preset,
+  onChange,
+  catalogs,
+  trigger,
+}: {
+  preset: BranchPreset;
+  onChange: (p: BranchPreset) => void;
+  catalogs: BuilderCatalogs;
+  trigger: Trigger;
+}) {
+  const meta = BRANCH_PRESET_OPTIONS.find((o) => o.type === preset.type);
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/20 p-3">
+      <Field label="Check">
+        <select
+          value={preset.type}
+          onChange={(e) => {
+            const type = e.target.value as BranchPreset["type"];
+            // Reset secondary fields when switching type so the saved config
+            // never carries stale fields from another preset shape.
+            onChange(emptyPreset(type));
+          }}
+          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+        >
+          {BRANCH_PRESET_OPTIONS.map((o) => (
+            <option key={o.type} value={o.type}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        {meta && (
+          <div className="text-xs text-muted-foreground">{meta.description}</div>
+        )}
+      </Field>
+      {preset.type === "has_tag" && (
+        <Field label="Tag">
+          <select
+            value={preset.tagId}
+            onChange={(e) => onChange({ type: "has_tag", tagId: e.target.value })}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+          >
+            <option value="">Select a tag…</option>
+            {catalogs.tags.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+      {preset.type === "in_stage" && (
+        <Field label="Stage">
+          <select
+            value={preset.stageId}
+            onChange={(e) => onChange({ type: "in_stage", stageId: e.target.value })}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+          >
+            <option value="">Select a stage…</option>
+            {catalogs.stages.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+      {preset.type === "field_equals" && (
+        <>
+          <Field label="Custom field">
+            <select
+              value={preset.fieldKey}
+              onChange={(e) => onChange({ ...preset, fieldKey: e.target.value })}
+              className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+            >
+              <option value="">Select a field…</option>
+              {catalogs.fields.map((f) => (
+                <option key={f.key} value={f.key}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Equals">
+            <Input
+              value={preset.value}
+              onChange={(e) => onChange({ ...preset, value: e.target.value })}
+              placeholder="VIP"
+            />
+          </Field>
+        </>
+      )}
+      {preset.type === "message_contains" && (
+        <>
+          <Field
+            label="Substring"
+            hint={
+              trigger === "message_received"
+                ? undefined
+                : "This trigger doesn't carry a message body — the check will always be false."
+            }
+          >
+            <Input
+              value={preset.needle}
+              onChange={(e) => onChange({ ...preset, needle: e.target.value })}
+              placeholder="refund"
+            />
+          </Field>
+          <label className="flex cursor-pointer items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={preset.caseSensitive ?? false}
+              onChange={(e) =>
+                onChange({
+                  ...preset,
+                  ...(e.target.checked ? { caseSensitive: true } : { caseSensitive: undefined }),
+                })
+              }
+              className="size-3.5"
+            />
+            <span>Case sensitive</span>
+          </label>
+        </>
+      )}
+    </div>
+  );
+}
+
+function emptyPreset(type: BranchPreset["type"]): BranchPreset {
+  switch (type) {
+    case "window_open":
+      return { type: "window_open" };
+    case "has_tag":
+      return { type: "has_tag", tagId: "" };
+    case "in_stage":
+      return { type: "in_stage", stageId: "" };
+    case "field_equals":
+      return { type: "field_equals", fieldKey: "", value: "" };
+    case "message_contains":
+      return { type: "message_contains", needle: "" };
+  }
 }
 
 // wait ----------------------------------------------------------------------
@@ -838,6 +1062,72 @@ export function JumpToStepEditor({
           className="max-w-[120px]"
         />
       </Field>
+    </div>
+  );
+}
+
+// ask_question -------------------------------------------------------------
+
+export function AskQuestionEditor({
+  config,
+  onChange,
+  fields,
+  trigger,
+}: {
+  config: { question?: string; timeoutHours?: number };
+  onChange: (c: Record<string, unknown>) => void;
+  fields: BuilderCatalogs["fields"];
+  trigger: Trigger;
+}) {
+  const hours = config.timeoutHours ?? 24;
+  return (
+    <div className="flex flex-col gap-4">
+      <Field
+        label="Question"
+        hint="Sent to the trigger contact via WhatsApp. $var tokens resolve. The run pauses until they reply or the timeout expires."
+      >
+        <BodyTokenEditor
+          value={config.question ?? ""}
+          onChange={(question) => onChange({ ...config, question })}
+          fieldDefinitions={asFieldDefs(fields)}
+          rows={3}
+          placeholder="Want to schedule a callback? Reply YES or NO."
+          trigger={trigger}
+        />
+      </Field>
+      <Field label="Timeout (hours)" hint="If no reply within this window the workflow takes the 'timeout' edge.">
+        <Input
+          type="number"
+          min={1}
+          max={24 * 7}
+          value={hours}
+          onChange={(e) => {
+            const n = Number.parseInt(e.target.value, 10);
+            if (Number.isFinite(n) && n > 0) {
+              onChange({ ...config, timeoutHours: n });
+            }
+          }}
+          className="max-w-[140px]"
+        />
+      </Field>
+      <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+        Downstream steps can read the answer via{" "}
+        <code className="rounded bg-muted px-1 font-mono">$var.previousStep.answer</code>.
+        Pair with a Branch step (preset: message contains) to route on
+        specific replies.
+      </div>
+    </div>
+  );
+}
+
+// noop ---------------------------------------------------------------------
+
+export function NoopEditor() {
+  return (
+    <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-4 text-xs text-muted-foreground">
+      This step does nothing. Useful as an explicit terminator for a branch
+      path (e.g. <span className="font-mono">false</span> → Do Nothing) so the
+      canvas doesn&apos;t read like an unfinished workflow.
     </div>
   );
 }

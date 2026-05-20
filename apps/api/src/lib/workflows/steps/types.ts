@@ -18,6 +18,17 @@ import type {
 import type { WorkflowGraph } from "@/lib/workflows/graph";
 
 /**
+ * Inbound answer dropped onto the run by the message-ingest hook when a
+ * contact replies to an `ask_question` step. The step reads this on resume
+ * to decide whether to take the `answered` or `timeout` edge.
+ */
+export interface PendingAnswer {
+  body: string;
+  messageId: string;
+  timestamp: string;
+}
+
+/**
  * Context handed to every step handler at run time. The envelope already
  * carries teamId / contact / conversation; this is the slim extras a
  * handler couldn't infer.
@@ -32,6 +43,15 @@ export interface StepRunContext {
   stepId: string;
   /** Read-only — handlers may need to peek at peers for branch/jump logic. */
   graph: WorkflowGraph;
+  /** Populated by the message-ingest hook for `ask_question` steps when the
+   *  contact replies. Null on the first invocation AND on the timeout
+   *  resume path. */
+  pendingAnswer?: PendingAnswer | null;
+  /** True when this step invocation is a re-execution after a wait /
+   *  await_reply pause. The handler can use it to skip the side-effecting
+   *  "send the question" path and go straight to selecting the outgoing
+   *  edge based on `pendingAnswer`. */
+  isResume?: boolean;
 }
 
 /**
@@ -53,7 +73,15 @@ export type StepResult =
   | { kind: "advance"; status: number; body: string }
   | { kind: "branch"; status: number; body: string; selectedLabel: string }
   | { kind: "jump"; status: number; body: string; targetStepId: string }
-  | { kind: "wait"; status: number; body: string; delayMs: number };
+  | { kind: "wait"; status: number; body: string; delayMs: number }
+  /**
+   * Pause the run on the SAME step waiting for the contact's next inbound
+   * message (or `timeoutMs` to elapse, whichever comes first). Unlike `wait`,
+   * the runner does NOT advance `currentStepId` — when the run resumes the
+   * step is re-executed, and the handler picks an outgoing edge via a
+   * subsequent `branch` return. Used by `ask_question`.
+   */
+  | { kind: "await_reply"; status: number; body: string; timeoutMs: number };
 
 /**
  * Whether a step's `run` produces an externally-visible side effect that

@@ -67,6 +67,7 @@ export function useChatScroll({
   unreadBelow: number;
   scrollToBottom: () => void;
   markBenignTailUpdate: () => void;
+  releaseStickToBottom: () => void;
 } {
   const viewportRef = useRef<HTMLElement | null>(null);
   const stickyRef = useRef(true);
@@ -354,5 +355,17 @@ export function useChatScroll({
     skipNextTailEffectRef.current = true;
   }, []);
 
-  return { unreadBelow, scrollToBottom, markBenignTailUpdate };
+  // Hand scroll control off to a caller doing its own targeted scroll (e.g.
+  // the in-thread search jumping to a match). Drops sticky so the
+  // ResizeObserver + media-load handlers above don't fire `snapToBottom`
+  // mid-animation and fight the caller's `scrollIntoView`. Also stops any
+  // in-flight load-older settle window for the same reason. Sticky re-arms
+  // naturally the next time the user scrolls back to the bottom (the scroll
+  // listener flips it on the false→true transition).
+  const releaseStickToBottom = useCallback(() => {
+    settleStopRef.current?.();
+    stickyRef.current = false;
+  }, []);
+
+  return { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom };
 }

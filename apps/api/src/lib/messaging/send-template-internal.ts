@@ -276,6 +276,7 @@ export async function sendTemplateInternal(
     type: "message.sent",
     teamId: args.teamId,
     conversationId: args.conversationId,
+    contactId: conversation.contactId,
     message,
     preview: previewBody,
     lastMessageAt: bumped.lastMessageAt.toISOString(),

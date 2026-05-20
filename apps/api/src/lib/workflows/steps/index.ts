@@ -1,6 +1,7 @@
 import type { WorkflowStepType } from "@prisma/client";
 
 import { addCommentStepHandler } from "./add-comment";
+import { askQuestionStepHandler } from "./ask-question";
 import { assignToStepHandler } from "./assign-to";
 import {
   branchStepHandler,
@@ -8,6 +9,7 @@ import {
   waitStepHandler,
 } from "./control-flow";
 import { httpRequestStepHandler } from "./http-request";
+import { noopStepHandler } from "./noop";
 import {
   closeConversationStepHandler,
   openConversationStepHandler,
@@ -49,6 +51,8 @@ const REGISTRY: Record<WorkflowStepType, StepHandler<unknown>> = {
   branch: branchStepHandler as StepHandler<unknown>,
   wait: waitStepHandler as StepHandler<unknown>,
   jump_to_step: jumpToStepHandler as StepHandler<unknown>,
+  noop: noopStepHandler as StepHandler<unknown>,
+  ask_question: askQuestionStepHandler as StepHandler<unknown>,
   http_request: httpRequestStepHandler as StepHandler<unknown>,
   trigger_workflow: triggerWorkflowStepHandler as StepHandler<unknown>,
 };

@@ -392,6 +392,7 @@ export class ExternalV1MessagingService {
       where: { id: conversationId, teamId },
       select: {
         id: true,
+        contactId: true,
         contact: { select: { phoneNumber: true, lastInboundAt: true } },
       },
     });
@@ -590,6 +591,7 @@ export class ExternalV1MessagingService {
       type: "message.sent",
       teamId,
       conversationId,
+      contactId: conversation.contactId,
       message,
       preview,
       // Use the effective bump so the frontend's lastMessageAt stays in

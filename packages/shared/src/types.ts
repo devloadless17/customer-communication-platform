@@ -118,6 +118,24 @@ export interface ContactFieldDefinition {
   key: string;
   label: string;
   order: number;
+  /** Admin-controlled visibility for the inbox contact panel. Hidden fields
+   *  are dropped from the panel for all agents. Defaults to true on the
+   *  server for backwards compat. */
+  isVisible: boolean;
+}
+
+/**
+ * Built-in contact-panel field visibility. Per-team admin toggle for the
+ * email / location / firstContacted rows in the inbox contact panel. Phone is
+ * NOT in this map — it's the WhatsApp identity and always renders. Stored as
+ * a JSON map on Team.contactPanelBuiltins; the server resolves missing keys
+ * to the legacy "always visible" default so existing teams stay on parity
+ * until an admin explicitly hides one.
+ */
+export interface ContactPanelBuiltins {
+  email: boolean;
+  location: boolean;
+  firstContacted: boolean;
 }
 
 /**

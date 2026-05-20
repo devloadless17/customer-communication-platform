@@ -5,6 +5,8 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  Eye,
+  EyeOff,
   Loader2,
   Pencil,
   Plus,
@@ -14,7 +16,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import type { ContactFieldDefinition } from "@ccp/shared/types";
+import type {
+  ContactFieldDefinition,
+  ContactPanelBuiltins,
+} from "@ccp/shared/types";
 
 /**
  * Team-wide contact custom-field manager. Mirrors the Stages settings pattern:
@@ -25,17 +30,23 @@ import type { ContactFieldDefinition } from "@ccp/shared/types";
  */
 export function ContactFieldsSettings({
   initialDefinitions,
+  initialBuiltins,
 }: {
   initialDefinitions: ContactFieldDefinition[];
+  initialBuiltins: ContactPanelBuiltins;
 }) {
   const { confirm, confirmDialog } = useConfirm();
   const [defs, setDefs] = useState<ContactFieldDefinition[]>(initialDefinitions);
+  const [builtins, setBuiltins] = useState<ContactPanelBuiltins>(initialBuiltins);
   // Adopt SSR-re-run results so teammate edits propagate without a manual
   // refresh (router.refresh from useCatalogSync fires on team:catalog:changed
   // with scope=contact-fields).
   useEffect(() => {
     setDefs(initialDefinitions);
   }, [initialDefinitions]);
+  useEffect(() => {
+    setBuiltins(initialBuiltins);
+  }, [initialBuiltins]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newLabel, setNewLabel] = useState("");
@@ -82,8 +93,39 @@ export function ContactFieldsSettings({
     }
   }, [newLabel]);
 
+  const toggleBuiltin = useCallback(
+    async (key: keyof ContactPanelBuiltins) => {
+      const prev = builtins;
+      const next = { ...builtins, [key]: !builtins[key] };
+      setBuiltins(next);
+      setError(null);
+      try {
+        const res = await fetch("/api/team/contact-fields/builtins", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ [key]: next[key] }),
+        });
+        if (!res.ok) {
+          setBuiltins(prev);
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          setError(body.detail || body.error || `Update failed (HTTP ${res.status})`);
+        }
+      } catch {
+        setBuiltins(prev);
+        setError("Network error");
+      }
+    },
+    [builtins],
+  );
+
   const patchField = useCallback(
-    async (id: string, patch: Partial<Pick<ContactFieldDefinition, "label" | "order">>) => {
+    async (
+      id: string,
+      patch: Partial<Pick<ContactFieldDefinition, "label" | "order" | "isVisible">>,
+    ) => {
       setBusyId(id);
       setError(null);
       const prev = defs;
@@ -215,6 +257,36 @@ export function ContactFieldsSettings({
         </div>
       )}
 
+      <section className="mb-6 overflow-hidden rounded-lg border border-border bg-card">
+        <header className="border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold">Built-in fields</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Toggle which built-in fields show up on the contact panel. Phone is
+            always shown — it&apos;s the WhatsApp identity.
+          </p>
+        </header>
+        <ul className="divide-y divide-border">
+          <BuiltinRow
+            label="Email"
+            description="Contact's email address."
+            visible={builtins.email}
+            onToggle={() => void toggleBuiltin("email")}
+          />
+          <BuiltinRow
+            label="Location"
+            description="Free-form location string (city, region, etc.)."
+            visible={builtins.location}
+            onToggle={() => void toggleBuiltin("location")}
+          />
+          <BuiltinRow
+            label="First contacted"
+            description="Timestamp of the earliest message in this thread."
+            visible={builtins.firstContacted}
+            onToggle={() => void toggleBuiltin("firstContacted")}
+          />
+        </ul>
+      </section>
+
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         <ul className="divide-y divide-border">
           {sorted.map((field, idx) => (
@@ -227,6 +299,9 @@ export function ContactFieldsSettings({
               onRename={(label) => patchField(field.id, { label })}
               onMoveUp={() => reorder(field.id, "up")}
               onMoveDown={() => reorder(field.id, "down")}
+              onToggleVisibility={() =>
+                patchField(field.id, { isVisible: !field.isVisible })
+              }
               onDelete={() => deleteField(field)}
             />
           ))}
@@ -300,6 +375,7 @@ function FieldRow({
   onRename,
   onMoveUp,
   onMoveDown,
+  onToggleVisibility,
   onDelete,
 }: {
   field: ContactFieldDefinition;
@@ -309,6 +385,7 @@ function FieldRow({
   onRename: (label: string) => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  onToggleVisibility: () => void;
   onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -388,14 +465,69 @@ function FieldRow({
         {field.key}
       </code>
 
+      {!field.isVisible && (
+        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+          Hidden
+        </span>
+      )}
+
+      <div className="ml-auto flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onToggleVisibility}
+          disabled={busy}
+          aria-label={field.isVisible ? `Hide ${field.label}` : `Show ${field.label}`}
+          title={field.isVisible ? "Hide from contact panel" : "Show on contact panel"}
+          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+        >
+          {field.isVisible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={busy}
+          aria-label={`Delete ${field.label}`}
+          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function BuiltinRow({
+  label,
+  description,
+  visible,
+  onToggle,
+}: {
+  label: string;
+  description: string;
+  visible: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <li className="flex items-center gap-3 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">{label}</span>
+          {!visible && (
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+              Hidden
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+      </div>
       <button
         type="button"
-        onClick={onDelete}
-        disabled={busy}
-        aria-label={`Delete ${field.label}`}
-        className="ml-auto inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+        onClick={onToggle}
+        aria-label={visible ? `Hide ${label}` : `Show ${label}`}
+        title={visible ? "Hide from contact panel" : "Show on contact panel"}
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
-        {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+        {visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
       </button>
     </li>
   );

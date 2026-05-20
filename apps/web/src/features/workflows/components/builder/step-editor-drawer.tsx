@@ -7,11 +7,13 @@ import { Input } from "@/components/ui/input";
 
 import {
   AddCommentEditor,
+  AskQuestionEditor,
   AssignToEditor,
   BranchEditor,
   CloseConversationEditor,
   HttpRequestEditor,
   JumpToStepEditor,
+  NoopEditor,
   OpenConversationEditor,
   SendMessageEditor,
   SendTemplateEditor,
@@ -177,6 +179,10 @@ function EditorForNode({
       return <WaitEditor config={c} onChange={onChangeConfig} />;
     case "jump_to_step":
       return <JumpToStepEditor config={c} onChange={onChangeConfig} graph={graph} selfId={node.id} />;
+    case "noop":
+      return <NoopEditor />;
+    case "ask_question":
+      return <AskQuestionEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
     case "http_request":
       return <HttpRequestEditor config={c} onChange={onChangeConfig} />;
     case "trigger_workflow":

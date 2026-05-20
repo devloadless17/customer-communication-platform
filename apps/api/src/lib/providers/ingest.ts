@@ -5,12 +5,16 @@ import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import { ensureDefaultStage } from "@/lib/queries";
 import { mapReplySnapshot, REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
-import { getRedisConnection } from "@/lib/workflows/queue";
+import {
+  enqueueWorkflowInboundResume,
+  getRedisConnection,
+} from "@/lib/workflows/queue";
 import type {
   WorkflowContactSnapshot,
   WorkflowConversationSnapshot,
   WorkflowMessageSnapshot,
 } from "@/lib/workflows/events";
+import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound";
 import type {
   NormalizedEvent,
   NormalizedInboundMessage,
@@ -121,7 +125,13 @@ async function ingestStatusUpdate(
         externalId: evt.externalId,
       },
     },
-    select: { id: true, teamId: true, conversationId: true, status: true },
+    select: {
+      id: true,
+      teamId: true,
+      conversationId: true,
+      status: true,
+      conversation: { select: { contactId: true } },
+    },
   });
   // Status arriving for an unknown message: classic race where Meta delivers
   // `sent`/`delivered`/`read` for an outbound BEFORE our create-message path
@@ -163,6 +173,7 @@ async function ingestStatusUpdate(
     type: "message.status_changed",
     teamId: existing.teamId,
     conversationId: existing.conversationId,
+    contactId: existing.conversation.contactId,
     messageId: existing.id,
     status: evt.status,
   });
@@ -236,6 +247,7 @@ export async function drainParkedStatus(
   externalId: string,
   messageId: string,
   conversationId: string,
+  contactId: string,
 ): Promise<void> {
   const key = parkKey(teamId, provider, externalId);
   const redis = getRedisConnection();
@@ -258,6 +270,7 @@ export async function drainParkedStatus(
     type: "message.status_changed",
     teamId,
     conversationId,
+    contactId,
     messageId,
     status: parked,
   });
@@ -457,7 +470,7 @@ async function ingestInboundMessage(
   // commits, the drainer WILL eventually dispatch it; if the tx rolls
   // back, both the message AND the event vanish together.
   try {
-    await db.$transaction(async (tx) => {
+    const txResult = await db.$transaction(async (tx) => {
       const created = await tx.message.create({
         data: {
           teamId,
@@ -606,8 +619,36 @@ async function ingestInboundMessage(
         recentMessages,
       });
 
-      return created.id;
+      // ask_question resume: if any workflow run is paused awaiting this
+      // contact's reply, drop the body onto run.pendingAnswer + delete the
+      // awaiting row inside the same tx. The actual BullMQ resume enqueue
+      // happens AFTER the tx commits (below) so the worker doesn't pick
+      // up the run before the message row is visible.
+      const resumeRunIds = await findAndConsumeAwaitingReplies(tx, {
+        teamId,
+        contactId: contact.id,
+        answer: {
+          body: evt.body,
+          messageId: created.id,
+          timestamp: evt.timestamp.toISOString(),
+        },
+      });
+
+      return { messageId: created.id, resumeRunIds };
     });
+    // Post-commit: kick each awaiting run. Failure here just delays the
+    // resume until the timeout job fires (it'll see pendingAnswer set and
+    // take the `answered` edge), so a Redis blip is recoverable rather
+    // than catastrophic.
+    if (txResult?.resumeRunIds?.length) {
+      for (const runId of txResult.resumeRunIds) {
+        try {
+          await enqueueWorkflowInboundResume(runId, txResult.messageId);
+        } catch (err) {
+          console.error("[ingest][ask_question_resume]", { runId, err });
+        }
+      }
+    }
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       // Race: another worker won the insert. Drop without side effects —

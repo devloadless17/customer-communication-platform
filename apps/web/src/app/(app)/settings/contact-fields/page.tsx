@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 import { canManageContactFields } from "@ccp/shared/auth/permissions";
-import { listContactFieldDefinitions } from "@/lib/api/queries";
+import { listContactFieldsWithBuiltins } from "@/lib/api/queries";
 
 import { ContactFieldsSettings } from "./contact-fields-settings";
 
@@ -15,7 +15,12 @@ export default async function ContactFieldsSettingsPage() {
     redirect("/settings/account");
   }
 
-  const definitions = await listContactFieldDefinitions();
+  const { definitions, builtins } = await listContactFieldsWithBuiltins();
 
-  return <ContactFieldsSettings initialDefinitions={definitions} />;
+  return (
+    <ContactFieldsSettings
+      initialDefinitions={definitions}
+      initialBuiltins={builtins}
+    />
+  );
 }

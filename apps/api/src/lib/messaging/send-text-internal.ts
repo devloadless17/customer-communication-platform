@@ -72,6 +72,7 @@ export async function sendTextInternal(
     where: { id: args.conversationId, teamId: args.teamId },
     select: {
       id: true,
+      contactId: true,
       // lastMessageAt feeds the timestamp-ordering guard below. Pulling it
       // here avoids a second roundtrip after the Meta send returns.
       lastMessageAt: true,
@@ -203,6 +204,7 @@ export async function sendTextInternal(
     type: "message.sent",
     teamId: args.teamId,
     conversationId: args.conversationId,
+    contactId: conversation.contactId,
     message,
     preview: previewBody,
     // The conversation's recency reflects the effective bump (which may be

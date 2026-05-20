@@ -179,13 +179,34 @@ export class ExternalV1Service {
    * E.164 match, at most one row. Everything else is the paged list path.
    */
   async listContacts(teamId: string, q: ListContactsQueryInput) {
-    // Phone exact-match short-circuit. n8n's "find contact" flow always
-    // posts a normalized E.164 phone; we accept loose input + normalize on
-    // our side so an integration mis-formatted number still resolves.
+    // Natural-key short-circuits. Integrators usually know exactly one of
+    // {phone, email, externalContactId} and want a single hydrated row back
+    // without paging. Each branch returns at most one item and no cursor.
+    //
+    // Phone is normalized server-side so a mis-formatted "961 71 50…" still
+    // resolves to the same E.164 row.
     if (q.phone) {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
         where: { teamId, phoneNumber: normalized },
+        include: { tags: { select: { id: true } } },
+        take: 1,
+      });
+      const items = rows.map((r) => toExternalContact(r, r.tags.map((t) => t.id)));
+      return { items, nextCursor: null };
+    }
+    if (q.email) {
+      const rows = await this.db.contact.findMany({
+        where: { teamId, email: { equals: q.email.trim(), mode: "insensitive" } },
+        include: { tags: { select: { id: true } } },
+        take: 1,
+      });
+      const items = rows.map((r) => toExternalContact(r, r.tags.map((t) => t.id)));
+      return { items, nextCursor: null };
+    }
+    if (q.externalContactId) {
+      const rows = await this.db.contact.findMany({
+        where: { teamId, externalContactId: q.externalContactId },
         include: { tags: { select: { id: true } } },
         take: 1,
       });

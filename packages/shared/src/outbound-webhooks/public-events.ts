@@ -74,10 +74,20 @@ export function isPublicEventType(s: string): s is PublicEventType {
   return (PUBLIC_EVENT_TYPES as readonly string[]).includes(s);
 }
 
+/**
+ * Compact JSON example used by the docs page + create-webhook UI to show
+ * receivers what they'll need to parse. Real envelopes carry the wrapper
+ * fields (`event_id`, `event_type`, `occurred_at`, `team_id`, `channel`) —
+ * see `PublicEnvelope` — so each sample below shows only `data`. Strings
+ * use the `cmp…` placeholder convention so partners don't paste fake-looking
+ * ids into their workflows.
+ */
+type SampleData = Record<string, unknown>;
+
 /** Human-friendly grouping for the create-webhook UI multiselect. */
 export const PUBLIC_EVENT_GROUPS: Array<{
   group: string;
-  events: { type: PublicEventType; label: string; description: string }[];
+  events: { type: PublicEventType; label: string; description: string; samplePayload: SampleData }[];
 }> = [
   {
     group: "Messages",
@@ -86,16 +96,80 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         type: "message.received",
         label: "On Message received",
         description: "Fires when a contact sends a WhatsApp message.",
+        samplePayload: {
+          message: {
+            id: "cmpmsg_01",
+            conversation_id: "cmpconv_01",
+            contact_id: "cmpcnt_01",
+            direction: "in",
+            body: "Hi, are you open today?",
+            timestamp: "2026-05-20T11:00:00.000Z",
+            status: "sent",
+            sender: { type: "contact", id: null, name: null },
+            sender_api_key_id: null,
+            media_kind: null,
+            media_caption: null,
+          },
+          contact: {
+            id: "cmpcnt_01",
+            phone_number: "+15555550100",
+            name: "Jane Doe",
+            first_name: "Jane",
+            last_name: "Doe",
+            language: "en",
+            country_code: "US",
+            avatar_url: null,
+            email: null,
+            location: null,
+            stage_id: "cmpstg_01",
+            tag_ids: [],
+            assignee: null,
+            custom_fields: {},
+            created_at: "2026-05-19T08:30:00.000Z",
+          },
+          conversation: {
+            id: "cmpconv_01",
+            contact_id: "cmpcnt_01",
+            status: "open",
+            unread_count: 1,
+            last_message_at: "2026-05-20T11:00:00.000Z",
+            assignee: null,
+          },
+          is_new_conversation: false,
+          reopened: false,
+        },
       },
       {
         type: "message.sent",
         label: "On Message sent",
         description: "Fires when an agent or API sends a message.",
+        samplePayload: {
+          message: {
+            id: "cmpmsg_02",
+            conversation_id: "cmpconv_01",
+            contact_id: "cmpcnt_01",
+            direction: "out",
+            body: "Yes! Open until 8pm.",
+            timestamp: "2026-05-20T11:00:05.000Z",
+            status: "sent",
+            sender: { type: "user", id: "cmpusr_01", name: null },
+            sender_api_key_id: null,
+            media_kind: null,
+            media_caption: null,
+          },
+          conversation: { id: "cmpconv_01", contact_id: "cmpcnt_01" },
+        },
       },
       {
         type: "message.status_changed",
         label: "Delivery status changed",
         description: "Sent / delivered / read receipts from WhatsApp.",
+        samplePayload: {
+          message_id: "cmpmsg_02",
+          conversation_id: "cmpconv_01",
+          contact_id: "cmpcnt_01",
+          status: "delivered",
+        },
       },
     ],
   },
@@ -106,21 +180,59 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         type: "conversation.assigned",
         label: "On Conversation assignee updated",
         description: "Conversation reassigned to a new (or no) user.",
+        samplePayload: {
+          conversation_id: "cmpconv_01",
+          contact_id: "cmpcnt_01",
+          previous_assignee: null,
+          assignee: { type: "user", id: "cmpusr_01", name: "Ali", email: "ali@example.com" },
+          changed_by_user_id: "cmpusr_02",
+          changed_by_api_key_id: null,
+        },
       },
       {
         type: "conversation.opened",
         label: "On Conversation opened",
         description: "Conversation transitioned to `open` (new thread or reopen).",
+        samplePayload: {
+          conversation_id: "cmpconv_01",
+          contact_id: "cmpcnt_01",
+          previous_status: "pending",
+          status: "open",
+          changed_by_user_id: "cmpusr_01",
+          changed_by_api_key_id: null,
+          closed_category: null,
+          closed_summary: null,
+        },
       },
       {
         type: "conversation.closed",
         label: "On Conversation closed",
         description: "Conversation transitioned to `closed`.",
+        samplePayload: {
+          conversation_id: "cmpconv_01",
+          contact_id: "cmpcnt_01",
+          previous_status: "open",
+          status: "closed",
+          changed_by_user_id: "cmpusr_01",
+          changed_by_api_key_id: null,
+          closed_category: "resolved",
+          closed_summary: "Customer's question answered.",
+        },
       },
       {
         type: "conversation.status_changed",
         label: "Conversation status changed (any)",
         description: "Raw status transitions — open / pending / closed. Subscribe to this OR to opened/closed, not both.",
+        samplePayload: {
+          conversation_id: "cmpconv_01",
+          contact_id: "cmpcnt_01",
+          previous_status: "open",
+          status: "pending",
+          changed_by_user_id: null,
+          changed_by_api_key_id: null,
+          closed_category: null,
+          closed_summary: null,
+        },
       },
     ],
   },
@@ -131,31 +243,89 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         type: "contact.created",
         label: "On Contact created",
         description: "A new contact row landed (inbound or API).",
+        samplePayload: {
+          contact: {
+            id: "cmpcnt_01",
+            phone_number: "+15555550100",
+            name: "Jane Doe",
+            first_name: "Jane",
+            last_name: "Doe",
+            language: null,
+            country_code: "US",
+            avatar_url: null,
+            email: null,
+            location: null,
+            stage_id: "cmpstg_01",
+            tag_ids: [],
+            assignee: null,
+            custom_fields: {},
+            created_at: "2026-05-19T08:30:00.000Z",
+          },
+          source: "inbound",
+          created_by_user_id: null,
+          created_by_api_key_id: null,
+        },
       },
       {
         type: "contact.updated",
         label: "On Contact updated",
         description: "Any field on a contact changed (name, email, custom fields).",
+        samplePayload: {
+          contact: { id: "cmpcnt_01", name: "Jane D.", email: "jane@example.com" },
+          field_changes: { name: { before: "Jane Doe", after: "Jane D." } },
+          tag_changes: null,
+          previous_stage_id: null,
+          changed_by_user_id: "cmpusr_01",
+          changed_by_api_key_id: null,
+        },
       },
       {
         type: "contact.tag_changed",
         label: "On Contact Tag updated",
         description: "Tag membership changed on a contact (added or removed).",
+        samplePayload: {
+          contact_id: "cmpcnt_01",
+          before: { tag_ids: [] },
+          after: { tag_ids: ["cmptag_vip"] },
+          added: ["cmptag_vip"],
+          removed: [],
+          changed_by_user_id: "cmpusr_01",
+          changed_by_api_key_id: null,
+        },
       },
       {
         type: "contact.lifecycle_changed",
         label: "On Contact Lifecycle updated",
         description: "Contact moved to a different lifecycle stage.",
+        samplePayload: {
+          contact_id: "cmpcnt_01",
+          before: { stage_id: "cmpstg_lead" },
+          after: { stage_id: "cmpstg_qualified" },
+          changed_by_user_id: "cmpusr_01",
+          changed_by_api_key_id: null,
+        },
       },
       {
         type: "contact.assignee_changed",
         label: "On Contact Assignee updated",
         description: "Account-manager for this contact changed.",
+        samplePayload: {
+          contact_id: "cmpcnt_01",
+          before: null,
+          after: { type: "user", id: "cmpusr_01", name: "Ali", email: "ali@example.com" },
+          changed_by_user_id: "cmpusr_02",
+          changed_by_api_key_id: null,
+        },
       },
       {
         type: "contact.deleted",
         label: "Contact deleted",
         description: "Hard delete; conversationIds are included for cleanup.",
+        samplePayload: {
+          contact_id: "cmpcnt_01",
+          conversation_ids: ["cmpconv_01"],
+          deleted_by_user_id: "cmpusr_01",
+        },
       },
     ],
   },
@@ -166,6 +336,15 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         type: "note.created",
         label: "On Comment added",
         description: "An agent posted an internal note on a conversation.",
+        samplePayload: {
+          note: {
+            id: "cmpnote_01",
+            conversation_id: "cmpconv_01",
+            author_user_id: "cmpusr_01",
+            body: "Customer prefers SMS — leaving a note here.",
+            timestamp: "2026-05-20T11:05:00.000Z",
+          },
+        },
       },
     ],
   },
@@ -265,6 +444,10 @@ export interface PublicContact {
 
 export interface PublicConversation {
   id: string;
+  /** Contact this thread belongs to. Surfaced on every conversation-bearing
+   *  envelope so receivers can route by contact without a callback to
+   *  `/v1/conversations/:id`. */
+  contact_id: string;
   status: "open" | "pending" | "closed";
   unread_count: number;
   last_message_at: string;
@@ -311,10 +494,11 @@ export function toPublicEnvelopes(
       out.push({
         type: "message.received",
         envelope: build(e.teamId, occurredAt, "message.received", {
-          message: messageFromDomain(e.message, "in", null),
+          message: messageFromDomain(e.message, "in", null, e.contact.id),
           contact: contactFromSnapshot(e),
           conversation: {
             id: e.conversationId,
+            contact_id: e.contact.id,
             status: e.conversation.status,
             unread_count: e.conversation.unreadCount,
             last_message_at: e.conversation.lastMessageAt,
@@ -333,8 +517,8 @@ export function toPublicEnvelopes(
       out.push({
         type: "message.sent",
         envelope: build(e.teamId, occurredAt, "message.sent", {
-          message: messageFromDomain(e.message, "out", e.senderApiKeyId ?? null),
-          conversation: { id: e.conversationId },
+          message: messageFromDomain(e.message, "out", e.senderApiKeyId ?? null, e.contactId),
+          conversation: { id: e.conversationId, contact_id: e.contactId },
         }),
       });
       break;
@@ -346,6 +530,7 @@ export function toPublicEnvelopes(
         envelope: build(e.teamId, occurredAt, "message.status_changed", {
           message_id: e.messageId,
           conversation_id: e.conversationId,
+          contact_id: e.contactId,
           status: e.status,
         }),
       });
@@ -357,6 +542,7 @@ export function toPublicEnvelopes(
         type: "conversation.assigned",
         envelope: build(e.teamId, occurredAt, "conversation.assigned", {
           conversation_id: e.conversationId,
+          contact_id: e.contact.id,
           previous_assignee: e.previousAssignedUserId ? assigneeRef(e.previousAssignedUserId) : null,
           assignee: e.assignedUser
             ? { type: "user" as const, id: e.assignedUser.id, name: e.assignedUser.name, email: e.assignedUser.email }
@@ -371,6 +557,7 @@ export function toPublicEnvelopes(
       const e = event as ConversationStatusChangedEvent;
       const data = {
         conversation_id: e.conversationId,
+        contact_id: e.contact.id,
         previous_status: e.previousStatus,
         status: e.newStatus,
         changed_by_user_id: e.changedByUserId,
@@ -561,6 +748,7 @@ function messageFromDomain(
   m: import("../types").Message,
   direction: "in" | "out",
   senderApiKeyId: string | null,
+  contactId: string,
 ): PublicMessage {
   // Sender shape: `direction === "in"` is always a contact (we don't see
   // multi-party inbound). Outbound is either user (senderUserId set), api
@@ -582,7 +770,7 @@ function messageFromDomain(
   return {
     id: m.id,
     conversation_id: m.conversationId,
-    contact_id: "", // not on the wire — receivers look up via /v1 if needed
+    contact_id: contactId,
     direction: m.direction,
     body: m.body,
     timestamp: m.timestamp,

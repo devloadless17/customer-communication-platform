@@ -12,6 +12,7 @@ import { AlertTriangle, ChevronLeft, Inbox as InboxIcon } from "lucide-react";
 import type {
   Contact,
   ContactFieldDefinition,
+  ContactPanelBuiltins,
   ContactStage,
   ConversationWithRefs,
   SnippetItem,
@@ -109,6 +110,7 @@ export function InboxShell({
   snippets,
   stages,
   fieldDefinitions,
+  contactPanelBuiltins,
   tags,
   canManageStages: canManageStagesPerm,
   canManageContactFields,
@@ -123,6 +125,7 @@ export function InboxShell({
   snippets: SnippetItem[];
   stages: ContactStage[];
   fieldDefinitions: ContactFieldDefinition[];
+  contactPanelBuiltins: ContactPanelBuiltins;
   tags: Tag[];
   canManageStages: boolean;
   canManageContactFields: boolean;
@@ -743,6 +746,7 @@ export function InboxShell({
                 stageCatalog={stages}
                 canManageStages={canManageStagesPerm}
                 fieldDefinitions={fieldDefinitions}
+                contactPanelBuiltins={contactPanelBuiltins}
                 canManageContactFields={canManageContactFields}
                 tags={tags}
                 onMarkRead={handleMarkRead}
@@ -774,6 +778,7 @@ function ThreadWorkspace({
   stageCatalog,
   canManageStages,
   fieldDefinitions,
+  contactPanelBuiltins,
   canManageContactFields,
   tags,
   onMarkRead,
@@ -785,6 +790,7 @@ function ThreadWorkspace({
   stageCatalog: ContactStage[];
   canManageStages: boolean;
   fieldDefinitions: ContactFieldDefinition[];
+  contactPanelBuiltins: ContactPanelBuiltins;
   canManageContactFields: boolean;
   tags: Tag[];
   onMarkRead: (conversationId: string) => void;
@@ -805,6 +811,7 @@ function ThreadWorkspace({
       <ContactPanel
         data={thread.data}
         fieldDefinitions={fieldDefinitions}
+        builtins={contactPanelBuiltins}
         canManageFields={canManageContactFields}
         tagCatalog={tags}
         teamMembers={teamMembers}

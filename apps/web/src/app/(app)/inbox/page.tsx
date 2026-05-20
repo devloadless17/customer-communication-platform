@@ -5,7 +5,7 @@ import {
   getConversationWithRefs,
   getCurrentTeam,
   listConversations,
-  listContactFieldDefinitions,
+  listContactFieldsWithBuiltins,
   listContactStages,
   listSnippets,
   listTags,
@@ -50,7 +50,7 @@ export default async function InboxPage({
     teamMembers,
     snippets,
     stages,
-    fieldDefinitions,
+    contactFields,
     tags,
     initialThread,
   ] = await Promise.all([
@@ -60,7 +60,7 @@ export default async function InboxPage({
     listTeamMembers(),
     listSnippets(),
     listContactStages(),
-    listContactFieldDefinitions(),
+    listContactFieldsWithBuiltins(),
     listTags(),
     // Only SSR-fetch the picked thread when the URL carried `?c=<id>`. On the
     // empty inbox state (no query param), this is null and the shell renders
@@ -92,7 +92,8 @@ export default async function InboxPage({
       nextConversationCursor={conversationsPage.nextCursor}
       snippets={snippets}
       stages={stages}
-      fieldDefinitions={fieldDefinitions}
+      fieldDefinitions={contactFields.definitions}
+      contactPanelBuiltins={contactFields.builtins}
       tags={tags}
       canManageStages={canManageStages(user.role)}
       canManageContactFields={canManageContactFields(user.role)}

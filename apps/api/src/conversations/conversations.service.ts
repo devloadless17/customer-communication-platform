@@ -308,8 +308,11 @@ export class ConversationsService {
 
     // Derive the next status from the assignment transition. Two narrow
     // rules — anything not listed keeps status untouched.
+    //   - Assigning to someone while pending/closed → open (claim moves it
+    //     out of the triage column or reopens it).
+    //   - Unassigning while open → pending (back to triage).
     let nextStatus: typeof previousStatus = previousStatus;
-    if (assignedUserId !== null && previousStatus === "closed") {
+    if (assignedUserId !== null && previousStatus !== "open") {
       nextStatus = "open";
     } else if (assignedUserId === null && previousStatus === "open") {
       nextStatus = "pending";
@@ -353,6 +356,34 @@ export class ConversationsService {
           isActive: updated.assignedUser.deactivatedAt === null,
         }
       : null;
+
+    // Mirror onto Contact.assignedUserId so the external `/v1` API + contact
+    // CRUD reflect the same owner the inbox shows. The two columns are one
+    // logical field for this product (one phone = one active relationship);
+    // the inbox writes through the conversation, the API reads from the
+    // contact, and this keeps them in sync without a read-time JOIN. Also
+    // publish `contact.assignee_changed` so partners subscribed to the
+    // contact-level webhook see the assignment without having to also
+    // subscribe to `conversation.assigned`.
+    if (previousAssignedUserId !== assignedUserId) {
+      await this.db.contact
+        .update({
+          where: { id: conversation.contact.id },
+          data: { assignedUserId },
+        })
+        .catch((err) => {
+          if (!isP2025(err)) throw err;
+        });
+      await this.bus.publish({
+        type: "contact.assignee_changed",
+        teamId,
+        contactId: conversation.contact.id,
+        before: { assignedUserId: previousAssignedUserId },
+        after: { assignedUserId },
+        afterUser: assignedUser,
+        changedByUserId: actorUserId,
+      });
+    }
 
     await this.bus.publish({
       type: "conversation.assigned",

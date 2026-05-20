@@ -190,6 +190,8 @@ enum WorkflowStepType {
   branch
   wait
   jump_to_step
+  noop
+  ask_question
   // External
   http_request
   trigger_workflow
@@ -246,6 +248,17 @@ model Team {
   // so a team without media-header templates can ignore it.
   metaAppId              String?
 
+  // Contact panel built-in field visibility. JSON map of built-in field key →
+  // boolean. Missing key = visible (preserves backwards compat: existing teams
+  // see all built-ins until an admin explicitly hides one). Phone is never
+  // hideable — it's the WhatsApp identity and always renders. Custom fields
+  // have their own per-row `isVisible` on ContactFieldDefinition.
+  //
+  // Supported keys: "email" | "location" | "firstContacted". Adding more
+  // built-ins later (firstName / lastName / language / countryCode) just
+  // means adding the key and rendering — no schema bump.
+  contactPanelBuiltins   Json    @default("{}")
+
   users                   User[]
   contacts                Contact[]
   conversations           Conversation[]
@@ -260,6 +273,7 @@ model Team {
   workflows               Workflow[]
   workflowRuns            WorkflowRun[]
   workflowContactStates   WorkflowContactState[]
+  workflowAwaitingReplies WorkflowAwaitingReply[]
   apiKeys                 TeamApiKey[]
   outboundWebhooks        OutboundWebhook[]
   snippets                Snippet[]
@@ -505,6 +519,7 @@ model Contact {
   assignedUser        User?                @relation("AssignedContacts", fields: [assignedUserId], references: [id], onDelete: SetNull)
   conversations       Conversation[]
   broadcastRecipients BroadcastRecipient[]
+  workflowAwaitingReplies WorkflowAwaitingReply[]
   // Many-to-many: an agent tags a contact with one or more labels for
   // segmentation. Implicit join table — Prisma manages the link rows.
   // Tags live on Contact (NOT Conversation): one contact = one conversation
@@ -593,6 +608,11 @@ model ContactFieldDefinition {
   // Sort order within the panel — lower first. Tracked so the UI can reorder
   // later without us needing alphabetical-only sorting.
   order     Int      @default(0)
+  // Admin-controlled visibility for the inbox contact panel. Hidden fields
+  // are dropped from the panel for ALL agents (including admins — they can
+  // still toggle them back on from /settings/contact-fields). Default true
+  // so existing definitions stay visible after the migration.
+  isVisible Boolean  @default(true)
   createdAt DateTime @default(now())
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -1117,6 +1137,7 @@ model Workflow {
   team          Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
   runs          WorkflowRun[]
   contactStates WorkflowContactState[]
+  awaitingReplies WorkflowAwaitingReply[]
 
   @@unique([teamId, name])
   // Hot path: dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true AND published=true`.
@@ -1157,6 +1178,12 @@ model WorkflowRun {
   // Limited to ~100 entries by the runner's step ceiling.
   stepLog Json @default("[]")
 
+  // Inbound answer dropped here by the message-ingest hook when a contact
+  // replies to an `ask_question` step. The ask_question step handler reads
+  // and clears it on resume; null means "still awaiting / timed out."
+  // Shape: { body: string, messageId: string, timestamp: string } | null
+  pendingAnswer Json?
+
   attempts     Int       @default(0)
   errorMessage String?
   startedAt    DateTime  @default(now())
@@ -1164,12 +1191,48 @@ model WorkflowRun {
 
   workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
   team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  awaitingReply WorkflowAwaitingReply?
 
   @@index([workflowId, startedAt(sort: Desc)])
   @@index([teamId, startedAt(sort: Desc)])
   // Status-leading index for the worker's "find runs to resume" sweep
   // (round 3 fallback if a wait job goes missing).
   @@index([status, waitUntil])
+}
+
+// One row per `ask_question` step that's currently paused waiting for the
+// contact's next inbound message. The message-ingest hook does
+// `findFirst({ where: { teamId, contactId } })` on each inbound and, if it
+// finds a match, drops the message body onto `WorkflowRun.pendingAnswer`,
+// deletes this row, and enqueues an immediate resume for the run. The
+// runner's timeout job re-fires the same step independently — whoever wins
+// the race deletes this row; the loser is a no-op.
+//
+// Separate from WorkflowContactState (the trigger-once-per-contact ledger)
+// because the semantics + cardinality differ: that table is one row per
+// (workflow, contact) for life-of-deployment; this table is one row per
+// in-flight question with a near-term expiresAt.
+model WorkflowAwaitingReply {
+  id         String   @id @default(cuid())
+  teamId     String
+  contactId  String
+  runId      String   @unique
+  workflowId String
+  stepId     String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  team     Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contact  Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  run      WorkflowRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  workflow Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  // Inbound-resume lookup: every inbound message hits this index to ask
+  // "is anyone awaiting from this contact?"
+  @@index([teamId, contactId])
+  // Timeout sweeper fallback (round 3): find awaiting rows past expiresAt
+  // in case the BullMQ delayed job got lost.
+  @@index([expiresAt])
 }
 
 // Per-(workflow, contact) ledger row for `triggerOncePerContact`. Existence

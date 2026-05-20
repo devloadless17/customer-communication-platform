@@ -22,6 +22,7 @@ import type {
   Contact,
   ContactFieldDefinition,
   ContactListItem,
+  ContactPanelBuiltins,
   ContactStage,
   ConversationWithRefs,
   CursorPage,
@@ -160,6 +161,15 @@ export async function listContactFieldDefinitions(): Promise<ContactFieldDefinit
     "/api/team/contact-fields",
   );
   return definitions;
+}
+
+export async function listContactFieldsWithBuiltins(): Promise<{
+  definitions: ContactFieldDefinition[];
+  builtins: ContactPanelBuiltins;
+}> {
+  return api<{ definitions: ContactFieldDefinition[]; builtins: ContactPanelBuiltins }>(
+    "/api/team/contact-fields",
+  );
 }
 
 export async function listAudienceGroups(): Promise<AudienceGroupDto[]> {

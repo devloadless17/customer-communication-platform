@@ -15,8 +15,10 @@ import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
 import { zBody } from "../../common/zod-validation.pipe";
 import {
+  ContactPanelBuiltinSchema,
   CreateContactFieldSchema,
   UpdateContactFieldSchema,
+  type ContactPanelBuiltins,
   type CreateContactFieldInput,
   type UpdateContactFieldInput,
 } from "./contact-fields.schemas";
@@ -41,8 +43,20 @@ export class ContactFieldsController {
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
-    const definitions = await this.fields.list(session.teamId);
-    return { definitions };
+    const [definitions, builtins] = await Promise.all([
+      this.fields.list(session.teamId),
+      this.fields.getBuiltins(session.teamId),
+    ]);
+    return { definitions, builtins };
+  }
+
+  @Patch("builtins")
+  async updateBuiltins(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(ContactPanelBuiltinSchema)) body: ContactPanelBuiltins,
+  ) {
+    const builtins = await this.fields.updateBuiltins(session.teamId, session.role, body);
+    return { builtins };
   }
 
   @Post()
