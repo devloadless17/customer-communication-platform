@@ -28,7 +28,21 @@ import type { ContactFieldDefinition } from "./types";
  * surfaces leave agent off — there's no single "agent" for a 1-to-many send.
  */
 
-const BUILTIN_CONTACT_KEYS = ["name", "phone", "email", "location"] as const;
+const BUILTIN_CONTACT_KEYS = [
+  "name",
+  "phone",
+  "email",
+  "location",
+  // PR 2.4 additions — derivable / populated by the snapshot builder when
+  // the call site joins the related rows. Resolve to empty string when
+  // the field isn't on the contact (back-compat for older snapshots).
+  "last_inbound_at",
+  "window_state",
+  "stage_name",
+  "tag_names",
+  "assigned_agent_name",
+  "assigned_agent_email",
+] as const;
 type BuiltinContactKey = (typeof BUILTIN_CONTACT_KEYS)[number];
 
 const BUILTIN_AGENT_KEYS = ["name", "email"] as const;
@@ -42,6 +56,10 @@ const MESSAGE_KEYS = [
   "external_id",
   "media_kind",
   "media_caption",
+  // PR 2.4 additions.
+  "sender_name",
+  "media_url",
+  "has_media",
 ] as const;
 type MessageKey = (typeof MESSAGE_KEYS)[number];
 
@@ -51,10 +69,22 @@ const CONVERSATION_KEYS = [
   "assigned_user_id",
   "unread_count",
   "last_message_at",
+  // PR 2.4 additions.
+  "has_unread",
+  "assigned_agent_name",
+  "assigned_agent_email",
 ] as const;
 type ConversationKey = (typeof CONVERSATION_KEYS)[number];
 
-export type TokenNamespace = "contact" | "agent" | "message" | "conversation";
+export type TokenNamespace =
+  | "contact"
+  | "agent"
+  | "message"
+  | "conversation"
+  | "sender"
+  | "previousStep"
+  | "steps"
+  | "trigger";
 
 /**
  * One token the picker UI can offer. `token` is what gets inserted into the
@@ -67,9 +97,16 @@ export interface TokenSpec {
   /**
    * "builtin" / "custom" are contact fields; "agent" is the agent namespace;
    * "message" / "conversation" are workflow trigger-context fields exposed
-   * inside the step editor.
+   * inside the step editor; "sender" is the trigger-actor alias (contact
+   * for inbound messages, agent for assignments etc.).
    */
-  group: "builtin" | "custom" | "agent" | "message" | "conversation";
+  group:
+    | "builtin"
+    | "custom"
+    | "agent"
+    | "message"
+    | "conversation"
+    | "sender";
 }
 
 const BUILTIN_CONTACT_TOKENS: TokenSpec[] = [
@@ -77,6 +114,11 @@ const BUILTIN_CONTACT_TOKENS: TokenSpec[] = [
   { token: "$var.contact.phone", label: "Phone number", group: "builtin" },
   { token: "$var.contact.email", label: "Email", group: "builtin" },
   { token: "$var.contact.location", label: "Location", group: "builtin" },
+  // PR 2.4 additions — surface in the picker so authors discover them.
+  { token: "$var.contact.window_state", label: "Window state (open/closed/…)", group: "builtin" },
+  { token: "$var.contact.stage_name", label: "Lifecycle stage", group: "builtin" },
+  { token: "$var.contact.tag_names", label: "Tag names (comma-separated)", group: "builtin" },
+  { token: "$var.contact.assigned_agent_name", label: "Account manager name", group: "builtin" },
 ];
 
 const AGENT_TOKENS: TokenSpec[] = [
@@ -86,20 +128,35 @@ const AGENT_TOKENS: TokenSpec[] = [
 
 const MESSAGE_TOKENS: TokenSpec[] = [
   { token: "$var.message.body", label: "Message text", group: "message" },
+  { token: "$var.message.sender_name", label: "Sender name", group: "message" },
   { token: "$var.message.timestamp", label: "Sent at", group: "message" },
   { token: "$var.message.direction", label: "Direction (in/out)", group: "message" },
   { token: "$var.message.id", label: "Message id", group: "message" },
   { token: "$var.message.external_id", label: "External id (wamid)", group: "message" },
   { token: "$var.message.media_kind", label: "Media kind", group: "message" },
   { token: "$var.message.media_caption", label: "Media caption", group: "message" },
+  { token: "$var.message.media_url", label: "Media URL", group: "message" },
+  { token: "$var.message.has_media", label: "Has media (true/false)", group: "message" },
 ];
 
 const CONVERSATION_TOKENS: TokenSpec[] = [
   { token: "$var.conversation.id", label: "Conversation id", group: "conversation" },
   { token: "$var.conversation.status", label: "Status", group: "conversation" },
   { token: "$var.conversation.assigned_user_id", label: "Assigned user id", group: "conversation" },
+  { token: "$var.conversation.assigned_agent_name", label: "Assigned agent name", group: "conversation" },
   { token: "$var.conversation.unread_count", label: "Unread count", group: "conversation" },
+  { token: "$var.conversation.has_unread", label: "Has unread (true/false)", group: "conversation" },
   { token: "$var.conversation.last_message_at", label: "Last message at", group: "conversation" },
+];
+
+// `sender` alias — for message-driven triggers the contact IS the sender,
+// so we expose the same shape under the explicit name. The resolver
+// resolves these against the contact (then falls back to the agent for
+// non-message triggers like `conversation_assigned`).
+const SENDER_TOKENS: TokenSpec[] = [
+  { token: "$var.sender.name", label: "Sender name", group: "sender" },
+  { token: "$var.sender.phone", label: "Sender phone", group: "sender" },
+  { token: "$var.sender.email", label: "Sender email", group: "sender" },
 ];
 
 export interface TokenContextOptions {
@@ -109,6 +166,10 @@ export interface TokenContextOptions {
   includeMessage?: boolean;
   /** Include `$var.conversation.*` — only for triggers that carry a conversation. */
   includeConversation?: boolean;
+  /** Include `$var.sender.*` alias tokens. Useful in workflow editors
+   *  whose triggers carry a contact (message_received) or an actor
+   *  (conversation_assigned). */
+  includeSender?: boolean;
 }
 
 /**
@@ -128,9 +189,11 @@ export function listAvailableTokens(
   const message = options.includeMessage ? MESSAGE_TOKENS : [];
   const conversation = options.includeConversation ? CONVERSATION_TOKENS : [];
   const agent = options.includeAgent ? AGENT_TOKENS : [];
+  const sender = options.includeSender ? SENDER_TOKENS : [];
   return [
     ...BUILTIN_CONTACT_TOKENS,
     ...customs,
+    ...sender,
     ...message,
     ...conversation,
     ...agent,
@@ -138,15 +201,21 @@ export function listAvailableTokens(
 }
 
 /**
- * Regex for `$var.<namespace>.<field>`.
+ * Regex for `$var.<segment>(.<segment>)+`.
  *
- * Word-boundary on the trailing side (`\b`) so adjacent punctuation in
- * normal prose ("Hi $var.contact.name, …") doesn't get sucked into the
- * field name. The lookbehind on the leading side guards against accidental
- * matches inside identifiers like `email$var.contact.name`.
+ * Two-deep tokens still match (`$var.contact.name`); deeper paths now
+ * resolve too — `$var.trigger.contact.name`, `$var.previousStep.body`,
+ * `$var.steps.<stepId>.outputField`. The first segment is the namespace;
+ * everything after is a path inside that namespace.
+ *
+ * Segment grammar: starts with a letter/underscore, then alphanumerics +
+ * underscores. Allows mixed-case in the path so step ids (cuids like
+ * `ckxyz123`) round-trip. Word-boundary on the trailing side keeps
+ * adjacent punctuation out; the lookbehind guards against accidental
+ * matches inside an existing identifier.
  */
 const TOKEN_RE =
-  /(?<![A-Za-z0-9_])\$var\.(contact|agent|message|conversation)\.([a-z][a-z0-9_]*)\b/g;
+  /(?<![A-Za-z0-9_])\$var\.([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\b/g;
 
 /**
  * Extract the fully-qualified tokens present in `text` (e.g.
@@ -157,12 +226,42 @@ const TOKEN_RE =
 export function extractFieldTokens(text: string): string[] {
   const out = new Set<string>();
   let m: RegExpExecArray | null;
-  // Reset lastIndex defensively — the regex is module-scope.
-  TOKEN_RE.lastIndex = 0;
-  while ((m = TOKEN_RE.exec(text)) !== null) {
+  // Local regex instance — the module-scope TOKEN_RE has the `g` flag and
+  // its `lastIndex` would carry state between calls if we reused it.
+  const re = new RegExp(TOKEN_RE.source, TOKEN_RE.flags);
+  while ((m = re.exec(text)) !== null) {
     out.add(m[0]);
   }
   return Array.from(out);
+}
+
+/**
+ * Walk a dotted path inside an arbitrary JSON value. Returns the final
+ * value (any type) or undefined when any segment misses. Used by the
+ * `$var.previousStep.X` / `$var.steps.<id>.X` resolution path so a step's
+ * structured output can be addressed N levels deep without per-shape glue
+ * code.
+ */
+function lookupDeep(value: unknown, segments: readonly string[]): unknown {
+  let cur: unknown = value;
+  for (const seg of segments) {
+    if (cur == null) return undefined;
+    if (typeof cur !== "object" || Array.isArray(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+
+/** Stringify whatever lookupDeep returned for a token replacement. */
+function stringifyForToken(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -181,6 +280,15 @@ export interface ContactLike {
   email?: string | null;
   location?: string | null;
   customFields: Prisma.JsonValue;
+  // PR 2.4 fields — all optional. The snapshot builder populates them when
+  // the call site supplies the joined data; non-workflow callers (broadcast
+  // runner, snippet preview) leave them undefined and the resolver answers
+  // empty for the matching tokens.
+  lastInboundAt?: string | null;
+  windowState?: "open" | "closing-soon" | "closed" | "never";
+  stageName?: string | null;
+  tagNames?: string[];
+  assignedAgent?: { id: string; name: string; email: string } | null;
 }
 
 /**
@@ -205,6 +313,10 @@ export interface MessageLike {
   timestamp?: string;
   mediaKind?: string | null;
   mediaCaption?: string | null;
+  // PR 2.4 additions.
+  senderName?: string | null;
+  mediaUrl?: string | null;
+  hasMedia?: boolean;
 }
 
 /**
@@ -218,6 +330,9 @@ export interface ConversationLike {
   assignedUserId?: string | null;
   unreadCount?: number;
   lastMessageAt?: string;
+  // PR 2.4 additions.
+  hasUnread?: boolean;
+  assignedAgent?: { id: string; name: string; email: string } | null;
 }
 
 /**
@@ -239,6 +354,12 @@ export interface ResolverExtras {
   agent?: AgentLike | null;
   message?: MessageLike | null;
   conversation?: ConversationLike | null;
+  /** Per-step structured outputs (`stepId → JSON value`). Drives
+   *  `$var.steps.<id>.X` and `$var.previousStep.X` token resolution. */
+  stepOutputs?: Record<string, unknown> | null;
+  /** Step the runner advanced from to reach the current step. When set,
+   *  `$var.previousStep.X` resolves to `stepOutputs[previousStepId][X]`. */
+  previousStepId?: string | null;
 }
 
 export function resolveFieldTokens(
@@ -253,17 +374,97 @@ export function resolveFieldTokens(
     extrasOrAgent && "name" in extrasOrAgent && "email" in extrasOrAgent
       ? { agent: extrasOrAgent as AgentLike }
       : (extrasOrAgent as ResolverExtras | null | undefined) ?? {};
+  // The regex matches the FULL path after `$var.` as one capture group;
+  // resolve walks the segments. Two-deep tokens (`$var.contact.name`) and
+  // deeper ones (`$var.trigger.contact.name`, `$var.previousStep.body`)
+  // share this path — `resolvePath` decides the right resolver based on
+  // the first segment.
   return text.replace(
-    /(?<![A-Za-z0-9_])\$var\.(contact|agent|message|conversation)\.([a-z][a-z0-9_]*)\b/g,
-    (_, namespace: string, key: string) => {
-      if (namespace === "agent") return resolveAgent(key, extras.agent ?? null);
-      if (namespace === "message") return resolveMessage(key, extras.message ?? null);
-      if (namespace === "conversation") {
-        return resolveConversation(key, extras.conversation ?? null);
-      }
-      return resolveContact(key, contact);
+    /(?<![A-Za-z0-9_])\$var\.([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\b/g,
+    (_, fullPath: string) => {
+      const segments = fullPath.split(".");
+      return resolvePath(segments, contact, extras);
     },
   );
+}
+
+/**
+ * Dispatch a parsed token path to the right resolver. First segment is
+ * the namespace; everything else is the path within.
+ *
+ * Namespaces:
+ *   - contact, agent, message, conversation — legacy 2-deep paths. The
+ *     second segment is the field name; resolution matches the original
+ *     pre-refactor behavior exactly (no surprise breakages).
+ *   - trigger.<sub>.* — trigger-scoped aliases. `trigger.contact.name`
+ *     resolves identically to `contact.name`, `trigger.message.body` to
+ *     `message.body`, etc. Makes "this came from the triggering event"
+ *     explicit in workflow tokens without forcing a rename.
+ *   - sender.* — for `message_received` and similar triggers, resolves to
+ *     the contact's fields (the contact IS the sender). For
+ *     `conversation_assigned` and friends, falls back to the agent. Pure
+ *     convenience alias; the workflow author thinks "who sent / acted on
+ *     this" rather than "which snapshot was attached."
+ *   - previousStep.<path> — `extras.stepOutputs[extras.previousStepId][path]`.
+ *     Drives the per-step output flow for downstream branching.
+ *   - steps.<stepId>.<path> — addresses ANY prior step's output by id.
+ *     Falls back to undefined if the id isn't in stepOutputs (typo or
+ *     step hasn't run yet).
+ */
+function resolvePath(
+  segments: string[],
+  contact: ContactLike,
+  extras: ResolverExtras,
+): string {
+  if (segments.length === 0) return "";
+  const namespace = segments[0]!;
+  const rest = segments.slice(1);
+  switch (namespace) {
+    case "contact":
+      return rest.length === 1 ? resolveContact(rest[0]!, contact) : "";
+    case "agent":
+      return rest.length === 1 ? resolveAgent(rest[0]!, extras.agent ?? null) : "";
+    case "message":
+      return rest.length === 1
+        ? resolveMessage(rest[0]!, extras.message ?? null)
+        : "";
+    case "conversation":
+      return rest.length === 1
+        ? resolveConversation(rest[0]!, extras.conversation ?? null)
+        : "";
+    case "trigger":
+      // trigger.<sub>.<field> → recurse with the inner namespace.
+      return resolvePath(rest, contact, extras);
+    case "sender": {
+      // Sender alias. For message-driven triggers the sender IS the
+      // contact; agent-driven (assignment/close) prefer the agent. Today
+      // we don't have an explicit trigger-kind discriminator in extras,
+      // so we use a simple precedence: contact first (most common), then
+      // agent. Both keys ("name", "phone", "email") have parallel paths
+      // on each shape — contact.name vs agent.name — so the resolution
+      // works for either snapshot.
+      if (rest.length !== 1) return "";
+      const k = rest[0]!;
+      const fromContact = resolveContact(k, contact);
+      if (fromContact !== "") return fromContact;
+      return resolveAgent(k, extras.agent ?? null);
+    }
+    case "previousStep": {
+      const id = extras.previousStepId;
+      if (!id || !extras.stepOutputs) return "";
+      const stepValue = extras.stepOutputs[id];
+      return stringifyForToken(lookupDeep(stepValue, rest));
+    }
+    case "steps": {
+      // steps.<stepId>.<path...>
+      if (rest.length < 1 || !extras.stepOutputs) return "";
+      const stepId = rest[0]!;
+      const stepValue = extras.stepOutputs[stepId];
+      return stringifyForToken(lookupDeep(stepValue, rest.slice(1)));
+    }
+    default:
+      return "";
+  }
 }
 
 function resolveContact(key: string, contact: ContactLike): string {
@@ -277,6 +478,18 @@ function resolveContact(key: string, contact: ContactLike): string {
         return contact.email ?? "";
       case "location":
         return contact.location ?? "";
+      case "last_inbound_at":
+        return contact.lastInboundAt ?? "";
+      case "window_state":
+        return contact.windowState ?? "";
+      case "stage_name":
+        return contact.stageName ?? "";
+      case "tag_names":
+        return (contact.tagNames ?? []).join(", ");
+      case "assigned_agent_name":
+        return contact.assignedAgent?.name ?? "";
+      case "assigned_agent_email":
+        return contact.assignedAgent?.email ?? "";
       default:
         return "";
     }
@@ -322,6 +535,12 @@ function resolveMessage(key: string, message: MessageLike | null): string {
       return message.mediaKind ?? "";
     case "media_caption":
       return message.mediaCaption ?? "";
+    case "sender_name":
+      return message.senderName ?? "";
+    case "media_url":
+      return message.mediaUrl ?? "";
+    case "has_media":
+      return message.hasMedia ? "true" : "false";
     default:
       return "";
   }
@@ -346,6 +565,12 @@ function resolveConversation(
         : String(conversation.unreadCount);
     case "last_message_at":
       return conversation.lastMessageAt ?? "";
+    case "has_unread":
+      return conversation.hasUnread ? "true" : "false";
+    case "assigned_agent_name":
+      return conversation.assignedAgent?.name ?? "";
+    case "assigned_agent_email":
+      return conversation.assignedAgent?.email ?? "";
     default:
       return "";
   }
@@ -401,25 +626,54 @@ export function findUnknownTokens(
   const conversationKeys = options.includeConversation
     ? new Set<string>(CONVERSATION_KEYS)
     : null;
+  // Helper for the legacy 2-deep namespaces (contact / agent / message /
+  // conversation). Returns true iff the key is in the corresponding
+  // schema and the namespace itself is opted in by the caller.
+  function knownLegacyKey(namespace: string, key: string): boolean {
+    if (namespace === "contact") return contactKeys.has(key);
+    if (namespace === "agent") return !!agentKeys && agentKeys.has(key);
+    if (namespace === "message") return !!messageKeys && messageKeys.has(key);
+    if (namespace === "conversation") {
+      return !!conversationKeys && conversationKeys.has(key);
+    }
+    return false;
+  }
   const out: string[] = [];
   for (const tok of extractFieldTokens(text)) {
-    // tok looks like "$var.<namespace>.<key>". Split once.
-    const rest = tok.slice("$var.".length);
-    const dot = rest.indexOf(".");
-    if (dot === -1) continue;
-    const namespace = rest.slice(0, dot);
-    const key = rest.slice(dot + 1);
-    if (namespace === "contact") {
-      if (!contactKeys.has(key)) out.push(tok);
-    } else if (namespace === "agent") {
-      if (!agentKeys || !agentKeys.has(key)) out.push(tok);
-    } else if (namespace === "message") {
-      if (!messageKeys || !messageKeys.has(key)) out.push(tok);
-    } else if (namespace === "conversation") {
-      if (!conversationKeys || !conversationKeys.has(key)) out.push(tok);
-    } else {
+    const segments = tok.slice("$var.".length).split(".");
+    if (segments.length < 2) {
       out.push(tok);
+      continue;
     }
+    const ns = segments[0]!;
+    // Legacy 2-deep paths: <namespace>.<key>
+    if (
+      (ns === "contact" || ns === "agent" || ns === "message" || ns === "conversation") &&
+      segments.length === 2
+    ) {
+      if (!knownLegacyKey(ns, segments[1]!)) out.push(tok);
+      continue;
+    }
+    // trigger.<sub>.<key> — same validation as the bare sub-namespace.
+    if (ns === "trigger" && segments.length === 3) {
+      if (!knownLegacyKey(segments[1]!, segments[2]!)) out.push(tok);
+      continue;
+    }
+    // sender.<key> — accepts any key the contact OR agent namespace has.
+    if (ns === "sender" && segments.length === 2) {
+      const k = segments[1]!;
+      const ok = contactKeys.has(k) || (agentKeys?.has(k) ?? false);
+      if (!ok) out.push(tok);
+      continue;
+    }
+    // previousStep.<...> and steps.<id>.<...> can't be statically
+    // validated — the step's output shape isn't part of the schema (it's
+    // computed at run time). Accept ANY path under them; runtime returns
+    // empty for misses, which is the same fail-soft semantics as the
+    // legacy namespaces.
+    if (ns === "previousStep" && segments.length >= 2) continue;
+    if (ns === "steps" && segments.length >= 3) continue;
+    out.push(tok);
   }
   return out;
 }

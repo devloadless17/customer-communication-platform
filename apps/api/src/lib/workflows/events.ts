@@ -55,6 +55,17 @@ export interface WorkflowMessageSnapshot {
   mediaCaption: string | null;
   timestamp: string;
   senderUserId: string | null;
+  // PR 2.4 additions — all optional so existing callers keep working.
+  // Builders compute the derivable ones (hasMedia from mediaKind) and
+  // accept the JOINed ones (senderName) when the call site has the data.
+  /** Display name of whoever sent this message. Contact name for inbound,
+   *  Agent name for outbound. Resolves to empty string when the call site
+   *  didn't supply it. */
+  senderName?: string | null;
+  /** Public CDN URL of the media binary, or null for text-only messages. */
+  mediaUrl?: string | null;
+  /** Convenience boolean — true when mediaKind is set. */
+  hasMedia?: boolean;
 }
 
 export interface WorkflowConversationSnapshot {
@@ -80,6 +91,12 @@ export interface WorkflowConversationSnapshot {
   incomingMessagesCount: number;
   outgoingMessagesCount: number;
   responsesCount: number;
+  // PR 2.4 additions — both derivable / loadable on demand.
+  /** True when unreadCount > 0. Convenience for branch conditions. */
+  hasUnread?: boolean;
+  /** Full agent object when the call site JOINed User on assignedUserId.
+   *  Null when no agent is assigned OR the call site didn't load it. */
+  assignedAgent?: WorkflowUserSnapshot | null;
 }
 
 export interface WorkflowContactSnapshot {
@@ -103,6 +120,25 @@ export interface WorkflowContactSnapshot {
   location?: string | null;
   assignedUserId?: string | null;
   createdAt?: string;
+  // PR 2.4 additions — loadable / derivable on demand. None of these are
+  // required at the builder boundary; the call site passes them when it
+  // has the data, else they resolve to null/empty in tokens.
+  /** ISO of the latest inbound timestamp on this contact. Drives
+   *  windowState below and exposes a stable token for "have they
+   *  messaged us recently?" branching. */
+  lastInboundAt?: string | null;
+  /** WhatsApp 24h customer-service window state. Computed inside the
+   *  builder from lastInboundAt; one of "open" | "closing-soon" |
+   *  "closed" | "never". Always present on the snapshot when
+   *  lastInboundAt is supplied. */
+  windowState?: "open" | "closing-soon" | "closed" | "never";
+  /** Tag display names parallel to `tagIds`. Same order. Loaded only when
+   *  the call site JOINed Tag rows. */
+  tagNames?: string[];
+  /** Lifecycle stage display name. Loaded when the call site JOINed Stage. */
+  stageName?: string | null;
+  /** Full agent object when the call site JOINed User on assignedUserId. */
+  assignedAgent?: WorkflowUserSnapshot | null;
 }
 
 /**
@@ -131,6 +167,8 @@ export function workflowConversationSnapshot(c: {
   incomingMessagesCount?: number;
   outgoingMessagesCount?: number;
   responsesCount?: number;
+  // PR 2.4 input — populated when the call site JOINed User.
+  assignedUser?: { id: string; name: string; email: string } | null;
 }): WorkflowConversationSnapshot {
   return {
     id: c.id,
@@ -151,6 +189,10 @@ export function workflowConversationSnapshot(c: {
     incomingMessagesCount: c.incomingMessagesCount ?? 0,
     outgoingMessagesCount: c.outgoingMessagesCount ?? 0,
     responsesCount: c.responsesCount ?? 0,
+    hasUnread: c.unreadCount > 0,
+    assignedAgent: c.assignedUser
+      ? { id: c.assignedUser.id, name: c.assignedUser.name, email: c.assignedUser.email }
+      : null,
   };
 }
 
@@ -162,7 +204,7 @@ export function workflowContactSnapshot(c: {
   name: string;
   email?: string | null;
   stageId?: string | null;
-  tags?: Array<{ id: string }>;
+  tags?: Array<{ id: string; name?: string }>;
   customFields?: unknown;
   firstName?: string | null;
   lastName?: string | null;
@@ -172,7 +214,29 @@ export function workflowContactSnapshot(c: {
   location?: string | null;
   assignedUserId?: string | null;
   createdAt?: Date | string | null;
+  // PR 2.4 inputs — all optional.
+  lastInboundAt?: Date | string | null;
+  stage?: { name: string } | null;
+  assignedUser?: { id: string; name: string; email: string } | null;
 }): WorkflowContactSnapshot {
+  const tags = c.tags ?? [];
+  const tagIds = tags.map((t) => t.id);
+  const tagNamesRaw = tags
+    .map((t) => t.name)
+    .filter((n): n is string => typeof n === "string");
+  // tagNames is only meaningful when EVERY tag came with a name; mixing
+  // some-with some-without would produce a misaligned parallel array that
+  // breaks `tagNames[i] == tagIds[i]` assumptions.
+  const tagNames = tagNamesRaw.length === tags.length ? tagNamesRaw : undefined;
+  const lastInboundAtIso =
+    c.lastInboundAt instanceof Date
+      ? c.lastInboundAt.toISOString()
+      : c.lastInboundAt ?? null;
+  // Inline window-state compute — same 24h / closing-soon logic as
+  // @ccp/shared/utils/window's computeWindowStatus, but duplicated here to
+  // avoid pulling the whole shared helper into the events module. Drift is
+  // a non-issue because both anchor on a hardcoded 24h / 4h pair.
+  const windowState = computeWindowStateFromIso(lastInboundAtIso ?? null);
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
@@ -181,7 +245,7 @@ export function workflowContactSnapshot(c: {
     name: c.name,
     email: c.email ?? null,
     stageId: c.stageId ?? null,
-    tagIds: (c.tags ?? []).map((t) => t.id),
+    tagIds,
     customFields: normalizeCustomFields(c.customFields),
     firstName: c.firstName ?? null,
     lastName: c.lastName ?? null,
@@ -194,7 +258,29 @@ export function workflowContactSnapshot(c: {
       c.createdAt instanceof Date
         ? c.createdAt.toISOString()
         : c.createdAt ?? undefined,
+    ...(lastInboundAtIso !== null ? { lastInboundAt: lastInboundAtIso } : {}),
+    windowState,
+    ...(tagNames ? { tagNames } : {}),
+    stageName: c.stage?.name ?? null,
+    assignedAgent: c.assignedUser
+      ? { id: c.assignedUser.id, name: c.assignedUser.name, email: c.assignedUser.email }
+      : null,
   };
+}
+
+const WINDOW_MS = 24 * 60 * 60 * 1000;
+const WINDOW_CLOSING_SOON_MS = 4 * 60 * 60 * 1000;
+
+function computeWindowStateFromIso(
+  iso: string | null,
+): "open" | "closing-soon" | "closed" | "never" {
+  if (!iso) return "never";
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return "never";
+  const remaining = ms + WINDOW_MS - Date.now();
+  if (remaining <= 0) return "closed";
+  if (remaining <= WINDOW_CLOSING_SOON_MS) return "closing-soon";
+  return "open";
 }
 
 function normalizeCustomFields(raw: unknown): Record<string, string> {

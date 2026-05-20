@@ -55,6 +55,10 @@ export function FieldTokenPicker({
   /** Expose `$var.conversation.*` — workflow step editors for any
    *  conversation-bearing trigger. */
   includeConversation = false,
+  /** Expose `$var.sender.*` alias tokens. Defaults to true when EITHER
+   *  message or conversation is exposed — the sender alias is most useful
+   *  in those workflow contexts. */
+  includeSender,
 }: {
   fieldDefinitions: ContactFieldDefinition[];
   onInsert: (token: string) => void;
@@ -64,14 +68,18 @@ export function FieldTokenPicker({
   includeAgent?: boolean;
   includeMessage?: boolean;
   includeConversation?: boolean;
+  includeSender?: boolean;
 }) {
+  const senderOn = includeSender ?? (includeMessage || includeConversation);
   const tokens = listAvailableTokens(fieldDefinitions, {
     includeAgent,
     includeMessage,
     includeConversation,
+    includeSender: senderOn,
   });
   const builtins = tokens.filter((t) => t.group === "builtin");
   const customs = tokens.filter((t) => t.group === "custom");
+  const senders = tokens.filter((t) => t.group === "sender");
   const messages = tokens.filter((t) => t.group === "message");
   const conversations = tokens.filter((t) => t.group === "conversation");
   const agents = tokens.filter((t) => t.group === "agent");
@@ -122,6 +130,27 @@ export function FieldTokenPicker({
                 className="flex items-center gap-2 text-[12px]"
               >
                 <Hash className="size-3.5 text-muted-foreground" />
+                <span className="flex-1 truncate">{t.label}</span>
+                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                  {compactToken(t.token)}
+                </code>
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+        {senders.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Sender
+            </DropdownMenuLabel>
+            {senders.map((t) => (
+              <DropdownMenuItem
+                key={t.token}
+                onSelect={() => onInsert(t.token)}
+                className="flex items-center gap-2 text-[12px]"
+              >
+                <UserCircle className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
                 <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
                   {compactToken(t.token)}

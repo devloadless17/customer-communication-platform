@@ -247,17 +247,50 @@ function CanvasInner({
   }, [graph.nodes, graph.edges]);
 
   // ask_question counterpart of branchOutputs — tracks `answered` /
-  // `timeout` handle children.
+  // `timeout` handle children AND per-option-id children for N-way
+  // (buttons-mode) nodes. Also surfaces each ask_question node's own
+  // answer-kind + option list to the renderer so it can pick the right
+  // handle layout without re-parsing the config.
   const askOutputs = useMemo(() => {
-    const map = new Map<string, { hasAnswered: boolean; hasTimeout: boolean }>();
+    type Out = {
+      hasAnswered: boolean;
+      hasTimeout: boolean;
+      answerKind: "free_text" | "buttons" | "list";
+      options: Array<{ id: string; title: string }>;
+      optionHasChild: Record<string, boolean>;
+    };
+    const map = new Map<string, Out>();
     for (const n of graph.nodes) {
-      if (n.type === "ask_question") map.set(n.id, { hasAnswered: false, hasTimeout: false });
+      if (n.type !== "ask_question") continue;
+      const cfg = (n.config ?? {}) as {
+        answerKind?: "free_text" | "buttons" | "list";
+        options?: Array<{ id?: string; title?: string }>;
+      };
+      const answerKind = cfg.answerKind ?? "free_text";
+      const options =
+        answerKind === "buttons" && Array.isArray(cfg.options)
+          ? cfg.options
+              .filter((o) => typeof o?.id === "string" && o.id.length > 0)
+              .map((o) => ({ id: o.id as string, title: (o.title ?? o.id) as string }))
+          : [];
+      const optionHasChild: Record<string, boolean> = {};
+      for (const o of options) optionHasChild[o.id] = false;
+      map.set(n.id, {
+        hasAnswered: false,
+        hasTimeout: false,
+        answerKind,
+        options,
+        optionHasChild,
+      });
     }
     for (const e of graph.edges) {
       const out = map.get(e.from);
       if (!out) continue;
       if (e.label === "answered") out.hasAnswered = true;
       else if (e.label === "timeout") out.hasTimeout = true;
+      else if (e.label && out.optionHasChild[e.label] !== undefined) {
+        out.optionHasChild[e.label] = true;
+      }
     }
     return map;
   }, [graph.nodes, graph.edges]);
@@ -314,6 +347,9 @@ function CanvasInner({
           // ask_question-only — undefined elsewhere.
           askHasAnsweredChild: askOut?.hasAnswered,
           askHasTimeoutChild: askOut?.hasTimeout,
+          askAnswerKind: askOut?.answerKind,
+          askOptionIds: askOut?.options,
+          askOptionChildren: askOut?.optionHasChild,
         },
       };
     });
@@ -355,6 +391,15 @@ function CanvasInner({
     const edges: Edge[] = graph.edges.map((e, i) => {
       // Label-text color matches the edge stroke — so "true"/"false" /
       // "answered"/"timeout" tags and the stroke colors visually agree.
+      // ask_question option-id edges (anything labeled, but not the four
+      // reserved values) also colour emerald — same as "answered".
+      const isReserved =
+        e.label === "true" ||
+        e.label === "false" ||
+        e.label === "answered" ||
+        e.label === "timeout";
+      const isAskQuestionSource =
+        graph.nodes.find((n) => n.id === e.from)?.type === "ask_question";
       const labelColor =
         e.label === "true" || e.label === "answered"
           ? "rgb(16 185 129)"
@@ -362,9 +407,14 @@ function CanvasInner({
             ? "rgb(244 63 94)"
             : e.label === "timeout"
               ? "rgb(245 158 11)"
-              : undefined;
+              : isAskQuestionSource && e.label && !isReserved
+                ? "rgb(16 185 129)"
+                : undefined;
+      // Print the bare label for reserved tags AND for option ids on
+      // ask_question edges so the canvas reads like the editor's option
+      // list.
       const labelText =
-        e.label === "true" || e.label === "false" || e.label === "answered" || e.label === "timeout"
+        isReserved || (isAskQuestionSource && e.label && !isReserved)
           ? e.label
           : undefined;
       return {
@@ -952,12 +1002,19 @@ export function insertStepAfter(
   // children pile on top of each other at sourceX, and the user has to drag
   // one out before they can even see the second is there. 140 = enough to
   // clear a w-64 (256px) node's half-width plus the edge label.
+  //
+  // Option-id edges (anything that isn't true/false/answered/timeout) are
+  // also ask_question paths; treat them like "answered" — slot to the left
+  // of the source so a freshly added per-option child doesn't collide with
+  // the timeout child on the right.
   const branchOffset =
     sourceHandle === "true" || sourceHandle === "answered"
       ? -140
       : sourceHandle === "false" || sourceHandle === "timeout"
         ? 140
-        : 0;
+        : sourceHandle && sourceHandle !== "default"
+          ? -140
+          : 0;
   const newNode: WorkflowNode = {
     id: newId,
     type,

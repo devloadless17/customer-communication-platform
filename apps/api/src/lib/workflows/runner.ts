@@ -76,11 +76,63 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
 
   const envelope = buildEnvelope(wf.teamId, run.trigger, run.eventPayload);
   let currentStepId: string | null = run.currentStepId ?? graph.startNodeId;
+  // Tracks the step we advanced FROM to reach the current step. Drives
+  // `$var.previousStep.X` token expansion. Carried over resumes via the
+  // last terminal stepLog entry's stepId.
+  let previousStepId: string | null = null;
   let jumpsUsed = run.jumpsUsed;
   // Read the existing stepLog so we can append (instead of overwriting on retry).
   const stepLog: StepLogEntry[] = Array.isArray(run.stepLog)
     ? (run.stepLog as unknown as StepLogEntry[])
     : [];
+  // Per-step structured outputs (`stepId → JSON value`). Persisted to
+  // WorkflowRun.stepOutputs after each step so paused runs can resume
+  // without losing the prior step's output.
+  const stepOutputs: Record<string, unknown> =
+    run.stepOutputs && typeof run.stepOutputs === "object" && !Array.isArray(run.stepOutputs)
+      ? { ...(run.stepOutputs as Record<string, unknown>) }
+      : {};
+  // Recover previousStepId on resume by walking the stepLog backwards for
+  // the most recent terminal entry of a DIFFERENT step.
+  for (let i = stepLog.length - 1; i >= 0; i--) {
+    const entry = stepLog[i];
+    if (
+      entry &&
+      entry.stepId !== currentStepId &&
+      (entry.status === "success" || entry.status === "waiting")
+    ) {
+      previousStepId = entry.stepId;
+      break;
+    }
+  }
+  // Cap per-step output to ~32KB so a pathological HTTP-request response
+  // can't bloat `WorkflowRun.stepOutputs` past a sensible upper bound.
+  // The truncation is a marker JSON so consumers can detect it instead of
+  // silently seeing a clipped object.
+  const STEP_OUTPUT_MAX_BYTES = 32 * 1024;
+  function captureStepOutput(stepId: string, body: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = { body };
+    }
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(parsed);
+    } catch {
+      return;
+    }
+    if (serialized.length > STEP_OUTPUT_MAX_BYTES) {
+      stepOutputs[stepId] = {
+        __truncated: true,
+        size: serialized.length,
+        preview: serialized.slice(0, STEP_OUTPUT_MAX_BYTES),
+      };
+    } else {
+      stepOutputs[stepId] = parsed;
+    }
+  }
   // Count THIS pickup's executed steps separately from the cumulative one in
   // stepLog. The global ceiling enforces total steps across the run; the
   // pickup-local counter prevents a single resumption from hogging the
@@ -225,6 +277,8 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         graph,
         pendingAnswer,
         isResume,
+        stepOutputs,
+        previousStepId,
       });
       // Strip the in-progress sentinel — the success/failed entry below
       // is the canonical record. Leaving the in_progress in place would
@@ -442,6 +496,28 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       nextStepId: nextId,
     });
 
+    // Capture the step's output ON success only — a 4xx/5xx response body
+    // is often an error object, not a useful upstream value. Successful
+    // results feed `$var.previousStep.X` for whatever runs next.
+    if (result.status >= 200 && result.status < 400) {
+      captureStepOutput(node.id, result.body);
+    }
+
+    // Persist BOTH stepLog AND stepOutputs after each step. The previous
+    // shape only flushed at run-end / wait — a process death mid-run lost
+    // the latest output captures for the next pickup. Cheap update: tiny
+    // JSONB writes on the same row. previousStepId follows the same
+    // boundary so it's correct even on hot-reload of the runner.
+    await db.workflowRun.update({
+      where: { id: run.id },
+      data: {
+        stepLog: stepLog as unknown as Prisma.InputJsonValue,
+        stepOutputs: stepOutputs as unknown as Prisma.InputJsonValue,
+        jumpsUsed,
+      },
+    });
+
+    previousStepId = node.id;
     currentStepId = nextId;
   }
 

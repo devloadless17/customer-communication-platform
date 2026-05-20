@@ -88,6 +88,15 @@ export interface NodeData extends Record<string, unknown> {
    */
   askHasAnsweredChild?: boolean;
   askHasTimeoutChild?: boolean;
+  /** ask_question answer kind — drives whether to render N option handles
+   *  or the generic answered+timeout pair. */
+  askAnswerKind?: "free_text" | "buttons" | "list";
+  /** Stable ids + labels of the step's options, in declaration order. Only
+   *  populated when askAnswerKind === "buttons" (the N-way mode). */
+  askOptionIds?: Array<{ id: string; title: string }>;
+  /** For each option id, whether an outgoing edge with that label already
+   *  exists. Drives the per-option "+" affordances. */
+  askOptionChildren?: Record<string, boolean>;
 }
 
 const NODE_BASE =
@@ -249,14 +258,23 @@ export function BranchNode({ id, data }: NodeProps) {
 
 /**
  * Ask-question node: sends a question to the contact, pauses the run, then
- * branches "answered" (contact replied within timeoutHours) or "timeout"
- * (no reply). Same shape as BranchNode but with the n8n-style "wait for
- * input" semantics.
+ * branches based on the answer.
+ *
+ *   Free-text + list modes → 2 handles: "answered" (emerald) + "timeout" (amber).
+ *   Buttons mode (1-3 options) → N+1 handles: one per option id + "timeout".
+ *
+ * The buttons N-way path keeps button workflows clean — author wires each
+ * option's edge directly to the next step instead of forcing a Branch in
+ * between. Buttons cap at 3 (Meta limit) so the N-handle width stays
+ * comfortable on a w-64 (256px) node. List mode keeps the 2-handle shape
+ * because 10 handles in 256px is unreadable.
  */
 export function AskQuestionNode({ id, data }: NodeProps) {
   const d = data as NodeData;
   const [hovered, setHovered] = useState(false);
   const actionsVisible = hovered || !!d.selected;
+  const options = d.askOptionIds ?? [];
+  const nWay = d.askAnswerKind === "buttons" && options.length > 0;
   return (
     <div
       className={`${NODE_BASE} w-64 border-violet-500/40 ${
@@ -283,30 +301,82 @@ export function AskQuestionNode({ id, data }: NodeProps) {
       {d.summary && (
         <div className="truncate px-3 py-2 text-[11px] text-muted-foreground">{d.summary}</div>
       )}
-      <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
-        <span className="flex items-center gap-1">
-          <span className="size-1.5 rounded-full bg-emerald-500" /> answered
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="size-1.5 rounded-full bg-amber-500" /> timeout
-        </span>
-      </div>
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="answered"
-        style={{ left: "25%", background: "rgb(16 185 129)" }}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="timeout"
-        style={{ left: "75%", background: "rgb(245 158 11)" }}
-      />
+      {nWay ? (
+        <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
+          {options.map((opt) => (
+            <span key={opt.id} className="flex items-center gap-1 truncate" title={opt.id}>
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              <span className="truncate">{opt.id}</span>
+            </span>
+          ))}
+          <span className="flex items-center gap-1">
+            <span className="size-1.5 rounded-full bg-amber-500" /> timeout
+          </span>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <span className="size-1.5 rounded-full bg-emerald-500" /> answered
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="size-1.5 rounded-full bg-amber-500" /> timeout
+          </span>
+        </div>
+      )}
+      {nWay
+        ? (() => {
+            // N+1 handles evenly spaced. With N=3 buttons + 1 timeout, the
+            // 4 positions land at 12.5 / 37.5 / 62.5 / 87.5 % — same gutter
+            // either side as the 2-handle layout's 25 / 75 %.
+            const slots = options.length + 1;
+            return (
+              <>
+                {options.map((opt, idx) => (
+                  <Handle
+                    key={opt.id}
+                    type="source"
+                    position={Position.Bottom}
+                    id={opt.id}
+                    style={{
+                      left: `${((idx + 0.5) / slots) * 100}%`,
+                      background: "rgb(16 185 129)",
+                    }}
+                  />
+                ))}
+                <Handle
+                  type="source"
+                  position={Position.Bottom}
+                  id="timeout"
+                  style={{
+                    left: `${((options.length + 0.5) / slots) * 100}%`,
+                    background: "rgb(245 158 11)",
+                  }}
+                />
+              </>
+            );
+          })()
+        : (
+            <>
+              <Handle
+                type="source"
+                position={Position.Bottom}
+                id="answered"
+                style={{ left: "25%", background: "rgb(16 185 129)" }}
+              />
+              <Handle
+                type="source"
+                position={Position.Bottom}
+                id="timeout"
+                style={{ left: "75%", background: "rgb(245 158 11)" }}
+              />
+            </>
+          )}
       {d.onOpenPicker && (
         <AskQuestionTrailingPlus
           hasAnsweredChild={!!d.askHasAnsweredChild}
           hasTimeoutChild={!!d.askHasTimeoutChild}
+          options={nWay ? options : null}
+          optionHasChild={d.askOptionChildren ?? {}}
           nodeId={id}
           onInsert={d.onOpenPicker}
         />

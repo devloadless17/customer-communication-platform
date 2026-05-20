@@ -33,6 +33,10 @@ export interface SendInteractiveInternalArgs {
   options: InteractiveOption[];
   listCtaLabel?: string;
   listSectionTitle?: string;
+  /** Author of the message. Null = system (workflow auto-send); a uuid =
+   *  agent-driven send via the inbox composer. Drives bubble attribution
+   *  the same way it does for text replies. Defaults to null. */
+  senderUserId?: string | null;
   /** Provenance label for raw_payload.sentVia. e.g. "workflow/<id>". */
   sentVia: string;
 }
@@ -131,7 +135,7 @@ export async function sendInteractiveInternal(
     teamId: args.teamId,
     conversationId: args.conversationId,
     externalId: send.externalId,
-    senderUserId: null,
+    senderUserId: args.senderUserId ?? null,
     body: bodyText,
     direction: "out",
     provider: "meta_cloud",
@@ -174,12 +178,13 @@ export async function sendInteractiveInternal(
 
   // Publish on the bus so the realtime socket sees the new message and
   // analytics counters tick the same way they do for plain text sends.
+  const senderUserId = args.senderUserId ?? null;
   const message: Message = {
     id: created.id,
     teamId: args.teamId,
     conversationId: args.conversationId,
     externalId: send.externalId,
-    senderUserId: null,
+    senderUserId,
     body: bodyText,
     direction: "out",
     provider: "meta_cloud",
@@ -202,7 +207,7 @@ export async function sendInteractiveInternal(
     preview: previewBody,
     lastMessageAt: bumped.lastMessageAt.toISOString(),
     unreadCount: bumped.unreadCount,
-    senderUserId: null,
+    senderUserId,
   });
 
   return { messageId: created.id, externalId: send.externalId };

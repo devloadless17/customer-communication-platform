@@ -1184,6 +1184,15 @@ model WorkflowRun {
   // Shape: { body: string, messageId: string, timestamp: string } | null
   pendingAnswer Json?
 
+  // Per-step structured outputs from this run. Map of stepId → JSON object
+  // produced by the step's run() (parsed from StepResult.body). Drives the
+  // `$var.previousStep.X` + `$var.steps.<id>.X` tokens so downstream steps
+  // can route on what an earlier step produced (e.g. HTTP response body
+  // fields, ask_question answer + optionId, branch selection). Capped at
+  // ~32KB per step in the runner; cheap as long as `body` payloads stay
+  // small. Empty for runs that don't reference per-step outputs.
+  stepOutputs Json @default("{}")
+
   attempts     Int       @default(0)
   errorMessage String?
   startedAt    DateTime  @default(now())

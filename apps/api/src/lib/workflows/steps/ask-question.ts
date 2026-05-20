@@ -79,7 +79,16 @@ export type AskQuestionSaveTo = { kind: "custom_field"; key: string };
  * (same Meta policy as free-form text). The step short-circuits to the
  * `timeout` edge so the author can wire a Send Template fallback there.
  */
-export type AskQuestionAnswerKind = "free_text" | "buttons" | "list";
+/**
+ * Adds `number` + `date` to the buttons/list/free_text set. These don't
+ * change the WhatsApp send shape (still sent as plain text question), but
+ * the resume path PARSES + VALIDATES the answer and routes a malformed
+ * reply to the timeout edge. Authors can also set `numberMin`/`numberMax`
+ * to enforce a range; out-of-range replies route to the validation edge
+ * (treated as timeout for now — adding a dedicated `invalid` edge would
+ * be a bigger UX change).
+ */
+export type AskQuestionAnswerKind = "free_text" | "buttons" | "list" | "number" | "date";
 
 export interface AskQuestionStepConfig {
   question: string;
@@ -88,6 +97,9 @@ export interface AskQuestionStepConfig {
   answerKind?: AskQuestionAnswerKind;
   options?: InteractiveOption[];
   listCtaLabel?: string;
+  /** number kind only: inclusive bounds. */
+  numberMin?: number;
+  numberMax?: number;
 }
 
 const MIN_TIMEOUT_HOURS = 1;
@@ -133,10 +145,16 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       }
       saveTo = { kind: "custom_field", key: s.key };
     }
+    const answerKindRaw = typeof r.answerKind === "string" ? r.answerKind : undefined;
     const answerKind: AskQuestionAnswerKind =
-      r.answerKind === "buttons" || r.answerKind === "list" ? r.answerKind : "free_text";
+      answerKindRaw === "buttons" ||
+      answerKindRaw === "list" ||
+      answerKindRaw === "number" ||
+      answerKindRaw === "date"
+        ? answerKindRaw
+        : "free_text";
     let options: InteractiveOption[] | undefined;
-    if (answerKind !== "free_text") {
+    if (answerKind === "buttons" || answerKind === "list") {
       if (!Array.isArray(r.options) || r.options.length === 0) {
         throw new StepConfigError(
           `ask_question.options must be a non-empty array when answerKind="${answerKind}"`,
@@ -179,6 +197,25 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       typeof r.listCtaLabel === "string" && r.listCtaLabel.trim()
         ? r.listCtaLabel
         : undefined;
+    let numberMin: number | undefined;
+    let numberMax: number | undefined;
+    if (answerKind === "number") {
+      const minRaw = typeof r.numberMin === "number" ? r.numberMin : undefined;
+      const maxRaw = typeof r.numberMax === "number" ? r.numberMax : undefined;
+      if (minRaw !== undefined && !Number.isFinite(minRaw)) {
+        throw new StepConfigError("ask_question.numberMin must be finite");
+      }
+      if (maxRaw !== undefined && !Number.isFinite(maxRaw)) {
+        throw new StepConfigError("ask_question.numberMax must be finite");
+      }
+      if (minRaw !== undefined && maxRaw !== undefined && minRaw > maxRaw) {
+        throw new StepConfigError(
+          "ask_question.numberMin must be <= numberMax",
+        );
+      }
+      numberMin = minRaw;
+      numberMax = maxRaw;
+    }
     return {
       question: r.question,
       timeoutHours: hours,
@@ -186,6 +223,8 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       ...(answerKind !== "free_text" ? { answerKind } : {}),
       ...(options ? { options } : {}),
       ...(listCtaLabel ? { listCtaLabel } : {}),
+      ...(numberMin !== undefined ? { numberMin } : {}),
+      ...(numberMax !== undefined ? { numberMax } : {}),
     };
   },
   describeConfig(config) {
@@ -196,7 +235,36 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
     // populates ctx.pendingAnswer from the run row before calling us;
     // present ⇒ answered, null ⇒ timeout.
     if (ctx.isResume) {
-      const answered = ctx.pendingAnswer !== null && ctx.pendingAnswer !== undefined;
+      let answered = ctx.pendingAnswer !== null && ctx.pendingAnswer !== undefined;
+      // Number / date validation: a typed reply that fails to parse is
+      // treated as a missed answer (routes to the timeout edge). This is
+      // the right default for "ask how many seats?" + a contact replying
+      // "next tuesday" — better to fall back to a clarifier than to feed
+      // garbage into downstream steps.
+      let parsedAnswer: string | null = null;
+      if (answered && ctx.pendingAnswer) {
+        if (config.answerKind === "number") {
+          const raw = ctx.pendingAnswer.body.trim().replace(/,/g, "");
+          const n = Number.parseFloat(raw);
+          const inRange =
+            Number.isFinite(n) &&
+            (config.numberMin === undefined || n >= config.numberMin) &&
+            (config.numberMax === undefined || n <= config.numberMax);
+          if (inRange) {
+            parsedAnswer = String(n);
+          } else {
+            answered = false;
+          }
+        } else if (config.answerKind === "date") {
+          const raw = ctx.pendingAnswer.body.trim();
+          const ms = Date.parse(raw);
+          if (Number.isFinite(ms)) {
+            parsedAnswer = new Date(ms).toISOString();
+          } else {
+            answered = false;
+          }
+        }
+      }
       // Clean up the awaiting row regardless of source. The ingest hook
       // also deletes on the answered path, so this is idempotent there;
       // on the timeout path the row is still present and this is the
@@ -206,15 +274,42 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
         where: { runId: ctx.runId },
       });
 
+      // N-way label selection: if the contact tapped a button (or list row)
+      // AND the graph has an outgoing edge labeled with that option id,
+      // take it. Otherwise fall back to the generic "answered" / "timeout"
+      // edges so free-text and unmatched answers still route somewhere.
+      // The graph topology drives the choice; the handler doesn't need to
+      // know whether the workflow author wired N option-edges or just
+      // answered+timeout.
+      const outgoingLabels = new Set(
+        ctx.graph.edges
+          .filter((e) => e.from === ctx.stepId)
+          .map((e) => e.label ?? null),
+      );
+      const optionId = ctx.pendingAnswer?.optionId;
+      const optionMatched =
+        answered && optionId && outgoingLabels.has(optionId);
+      const selectedLabel = optionMatched
+        ? optionId!
+        : answered
+          ? "answered"
+          : "timeout";
+
       // Save-to-field: persist the answer onto the contact's customFields
       // bag when configured. Only fires on the answered path — a timeout
       // shouldn't overwrite the field with an empty value (or worse,
-      // clobber an existing answer from a prior question).
+      // clobber an existing answer from a prior question). Preference
+      // order:
+      //   - parsedAnswer (canonical form for number / date)
+      //   - optionId (stable id for button / list taps)
+      //   - raw body (free-text fallback)
+      const valueToSave =
+        parsedAnswer ?? ctx.pendingAnswer?.optionId ?? ctx.pendingAnswer?.body ?? "";
       if (answered && config.saveTo && ctx.pendingAnswer) {
         const c = envelopeContact(envelope);
         const contactId = c?.id;
         if (contactId) {
-          const trimmed = ctx.pendingAnswer.body.slice(0, 2048);
+          const trimmed = valueToSave.slice(0, 2048);
           // jsonb concatenation: existing keys are preserved, the target
           // key is overwritten. Same pattern as the manual contact-panel
           // edit flow (update-field step + contact PATCH).
@@ -234,11 +329,14 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
         status: 200,
         body: truncateBody(
           JSON.stringify({
-            selected: answered ? "answered" : "timeout",
+            selected: selectedLabel,
             answer: answered ? ctx.pendingAnswer?.body ?? null : null,
+            ...(answered && ctx.pendingAnswer?.optionId
+              ? { optionId: ctx.pendingAnswer.optionId }
+              : {}),
           }),
         ),
-        selectedLabel: answered ? "answered" : "timeout",
+        selectedLabel,
       };
     }
 

@@ -99,14 +99,21 @@ export function InsertEdge(props: EdgeProps) {
   // trigger→start edge keeps its dashed style applied via the `style` prop
   // from the canvas projection — we spread it last so the caller can still
   // override).
+  //
+  // Reserved handle ids ("default", "true"/"false", "answered"/"timeout")
+  // pick a fixed color. Any OTHER handle id is treated as an ask_question
+  // option id and gets the emerald success colour — the only non-reserved
+  // handle ids in this codebase come from ask_question N-way mode.
   const handleStroke =
     sourceHandleId === "true" || sourceHandleId === "answered"
-      ? "rgb(16 185 129)" // emerald-500 — matches the green handle dot
+      ? "rgb(16 185 129)" // emerald-500
       : sourceHandleId === "false"
         ? "rgb(244 63 94)" // rose-500
         : sourceHandleId === "timeout"
-          ? "rgb(245 158 11)" // amber-500 — matches the AskQuestionNode handle dot
-          : undefined;
+          ? "rgb(245 158 11)" // amber-500
+          : sourceHandleId && sourceHandleId !== "default"
+            ? "rgb(16 185 129)" // option-id edge — match the handle dot
+            : undefined;
   const mergedStyle: React.CSSProperties = {
     strokeWidth: selected ? 3 : 2,
     ...(handleStroke ? { stroke: handleStroke } : {}),
@@ -324,20 +331,78 @@ function BranchPlusButton({
 }
 
 /**
- * ask_question counterpart of BranchTrailingPlus — answered (emerald) +
- * timeout (amber) buttons under the corresponding handles.
+ * ask_question counterpart of BranchTrailingPlus. Two render modes:
+ *
+ *   - Default (`options` null/empty): answered (emerald) + timeout
+ *     (amber) buttons under the corresponding handles.
+ *   - N-way (`options` non-empty): one emerald "+" per option id + a
+ *     timeout (amber) "+" at the right. Rendered inline in a single
+ *     center-aligned toolbar so the buttons row stays compact under the
+ *     N-handle node.
  */
 export function AskQuestionTrailingPlus({
   hasAnsweredChild,
   hasTimeoutChild,
+  options,
+  optionHasChild,
   onInsert,
   nodeId,
 }: {
   hasAnsweredChild: boolean;
   hasTimeoutChild: boolean;
+  options: Array<{ id: string; title: string }> | null;
+  optionHasChild: Record<string, boolean>;
   onInsert: (anchor: PickerAnchor) => void;
   nodeId: string;
 }) {
+  if (options && options.length > 0) {
+    const allOptsWired = options.every((o) => optionHasChild[o.id]);
+    if (allOptsWired && hasTimeoutChild) return null;
+    return (
+      <NodeToolbar
+        isVisible
+        position={Position.Bottom}
+        offset={12}
+        align="center"
+      >
+        <div className="flex items-center gap-1.5">
+          {options.map((opt) =>
+            optionHasChild[opt.id] ? null : (
+              <BranchPlusButton
+                key={opt.id}
+                label={`Add step on the "${opt.id}" path`}
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  onInsert({
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2,
+                    sourceId: nodeId,
+                    sourceHandle: opt.id,
+                  });
+                }}
+                color="emerald"
+              />
+            ),
+          )}
+          {!hasTimeoutChild && (
+            <BranchPlusButton
+              label="Add step on the timeout path"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                onInsert({
+                  x: rect.left + rect.width / 2,
+                  y: rect.top + rect.height / 2,
+                  sourceId: nodeId,
+                  sourceHandle: "timeout",
+                });
+              }}
+              color="amber"
+            />
+          )}
+        </div>
+      </NodeToolbar>
+    );
+  }
   if (hasAnsweredChild && hasTimeoutChild) return null;
   return (
     <>

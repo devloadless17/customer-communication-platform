@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   MessageSquare,
+  MousePointerClick,
   Paperclip,
   Send,
   Smile,
@@ -42,6 +43,7 @@ import { SnippetPopup } from "./snippet-popup";
 import { useSnippets } from "./snippets-context";
 
 import { AttachmentPreview } from "./reply-box/attachment-preview";
+import { InteractivePopover } from "./interactive-popover";
 import { ReplyTargetPill } from "./reply-box/reply-target-pill";
 import { ToggleButton } from "./reply-box/toggle-button";
 import {
@@ -346,6 +348,9 @@ export function ReplyBox({
   // Template picker state
   // -------------------------------------------------------------------------
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Interactive (buttons) popover state. Synchronous-send agent-side
+  // counterpart of the workflow ask_question step's interactive path.
+  const [interactiveOpen, setInteractiveOpen] = useState(false);
   const [templates, setTemplates] = useState<TemplateDto[]>([]);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -977,6 +982,44 @@ export function ReplyBox({
             >
               <Sparkles className="size-4" />
             </Button>
+            <div className="relative">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-muted-foreground"
+                type="button"
+                disabled={isNote || windowClosed}
+                title={
+                  isNote
+                    ? "Buttons can only be sent in Reply mode"
+                    : windowClosed
+                      ? "Window closed — buttons require the 24h window to be open"
+                      : "Send a question with buttons"
+                }
+                onClick={() => setInteractiveOpen(true)}
+              >
+                <MousePointerClick className="size-4" />
+              </Button>
+              <InteractivePopover
+                open={interactiveOpen}
+                onClose={() => setInteractiveOpen(false)}
+                conversationId={conversationId}
+                initialBody={value}
+                onSent={() => {
+                  // Mirror the text-send post-success path: clear the
+                  // composer + drop any persisted draft so the next focus
+                  // starts fresh. The new bubble lands via the
+                  // message.sent socket event published by
+                  // sendInteractiveInternal.
+                  setValue("");
+                  try {
+                    window.localStorage.removeItem(draftKey);
+                  } catch {
+                    // ignore quota / private-mode failures
+                  }
+                }}
+              />
+            </div>
             <div className="relative">
               <Button
                 variant="ghost"

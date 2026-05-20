@@ -174,9 +174,22 @@ export function validateGraph(graph: WorkflowGraph): string[] {
     if (n.type === "ask_question") {
       const outs = graph.edges.filter((e) => e.from === n.id);
       const labels = new Set(outs.map((e) => e.label));
-      if (!labels.has("answered") || !labels.has("timeout")) {
+      // Two legal shapes:
+      //   1. Generic free-text mode: "answered" + "timeout" edges.
+      //   2. N-way buttons mode: one edge per option id + "timeout". Option
+      //      ids come from the step's `options` config (validated by
+      //      parseStepConfig); here we just require SOMETHING-non-timeout +
+      //      timeout. The runner falls back to "answered" if the tapped
+      //      option doesn't match any edge, which keeps the safety net
+      //      alive even when an author renames an option after wiring.
+      const hasTimeout = labels.has("timeout");
+      const hasAnswered = labels.has("answered");
+      const hasNonTimeoutOption = Array.from(labels).some(
+        (l) => l && l !== "timeout" && l !== "answered",
+      );
+      if (!hasTimeout || (!hasAnswered && !hasNonTimeoutOption)) {
         errors.push(
-          `ask_question node "${n.id}" must have edges labeled "answered" and "timeout"`,
+          `ask_question node "${n.id}" must have a "timeout" edge plus either an "answered" edge OR one edge per option id`,
         );
       }
     }

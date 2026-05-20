@@ -24,6 +24,8 @@ import {
   ConversationSendRateLimitedError,
 } from "@/lib/messaging/conversation-send-budget";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
+import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import {
   SendTemplateValidationError,
   sendTemplateInternal,
@@ -1553,6 +1555,67 @@ export class MessagesService {
         });
       }
       this.logger.error("template send failed", err);
+      throw new BadGatewayException({
+        error: "send_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Agent-side interactive send. Synchronous (no BullMQ queue) — interactive
+   * sends are rare admin moves vs. high-volume text replies, so the latency
+   * extra of an inline Meta call (~300ms) doesn't justify the queue
+   * scaffolding overhead. Reuses sendInteractiveInternal which already
+   * handles the 24h-window gate, conversation bump, and `message.sent`
+   * outbox publish.
+   *
+   * `senderUserId` is captured on the message row so attribution works
+   * the same way as for text replies — the inbox shows "Agent name" on
+   * the outbound bubble.
+   */
+  async sendInteractive(
+    teamId: string,
+    userId: string,
+    input: import("./messages.schemas").SendInteractiveInput,
+  ): Promise<{ messageId: string }> {
+    try {
+      const result = await sendInteractiveInternal({
+        teamId,
+        conversationId: input.conversationId,
+        bodyText: input.body,
+        kind: input.kind,
+        options: input.options,
+        ...(input.listCtaLabel ? { listCtaLabel: input.listCtaLabel } : {}),
+        senderUserId: userId,
+        sentVia: "api/messages/interactive",
+      });
+      return { messageId: result.messageId };
+    } catch (err) {
+      if (err instanceof SendTextValidationError) {
+        const status =
+          err.code === "outside_24h_window"
+            ? 422
+            : err.code === "provider_not_configured"
+              ? 422
+              : err.code === "conversation_not_found"
+                ? 404
+                : 400;
+        throw new HttpException(
+          { error: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+          status,
+        );
+      }
+      const normalized = normalizeMetaSendError(err);
+      if (normalized) {
+        throw new UnprocessableEntityException({
+          error: normalized.code,
+          message: normalized.message,
+          status: normalized.httpStatus,
+          detail: normalized.detail,
+        });
+      }
+      this.logger.error("interactive send failed", err);
       throw new BadGatewayException({
         error: "send_failed",
         detail: err instanceof Error ? err.message : String(err),

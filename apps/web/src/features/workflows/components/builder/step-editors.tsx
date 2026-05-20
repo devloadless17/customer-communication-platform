@@ -1075,7 +1075,7 @@ interface AskOption {
   title: string;
   description?: string;
 }
-type AnswerKind = "free_text" | "buttons" | "list";
+type AnswerKind = "free_text" | "buttons" | "list" | "number" | "date";
 interface AskQuestionSaveTo {
   kind: "custom_field";
   key: string;
@@ -1093,6 +1093,8 @@ export function AskQuestionEditor({
     answerKind?: AnswerKind;
     options?: AskOption[];
     listCtaLabel?: string;
+    numberMin?: number;
+    numberMax?: number;
     saveTo?: AskQuestionSaveTo;
   };
   onChange: (c: Record<string, unknown>) => void;
@@ -1106,8 +1108,15 @@ export function AskQuestionEditor({
 
   function changeAnswerKind(next: AnswerKind) {
     if (next === "free_text") {
-      const { options: _o, listCtaLabel: _l, ...rest } = config;
+      const { options: _o, listCtaLabel: _l, numberMin: _nmin, numberMax: _nmax, ...rest } = config;
       onChange({ ...rest, answerKind: undefined });
+      return;
+    }
+    if (next === "number" || next === "date") {
+      // Drop interactive shape fields so a switch buttons → number doesn't
+      // carry stale options through.
+      const { options: _o, listCtaLabel: _l, ...rest } = config;
+      onChange({ ...rest, answerKind: next });
       return;
     }
     // Switching to a kind with a tighter cap: trim down so we don't carry
@@ -1115,7 +1124,8 @@ export function AskQuestionEditor({
     const cap = next === "buttons" ? 3 : 10;
     const nextOptions =
       options.length > 0 ? options.slice(0, cap) : [{ id: "yes", title: "Yes" }];
-    onChange({ ...config, answerKind: next, options: nextOptions });
+    const { numberMin: _nmin, numberMax: _nmax, ...rest } = config;
+    onChange({ ...rest, answerKind: next, options: nextOptions });
   }
 
   function setOption(idx: number, patch: Partial<AskOption>) {
@@ -1151,9 +1161,9 @@ export function AskQuestionEditor({
         />
       </Field>
 
-      <Field label="Answer type" hint="Buttons + list send a WhatsApp interactive message — taps round-trip as option ids.">
-        <div className="inline-flex w-fit items-center gap-0.5 rounded-md border border-border bg-muted/40 p-0.5 text-xs">
-          {(["free_text", "buttons", "list"] as const).map((k) => (
+      <Field label="Answer type" hint="Buttons + list send a WhatsApp interactive message. Number / date validate the reply on resume — unparseable replies route to the timeout edge.">
+        <div className="inline-flex w-fit flex-wrap items-center gap-0.5 rounded-md border border-border bg-muted/40 p-0.5 text-xs">
+          {(["free_text", "buttons", "list", "number", "date"] as const).map((k) => (
             <button
               key={k}
               type="button"
@@ -1164,7 +1174,15 @@ export function AskQuestionEditor({
                   : "rounded px-2.5 py-1 text-muted-foreground hover:text-foreground"
               }
             >
-              {k === "free_text" ? "Free text" : k === "buttons" ? "Buttons" : "List"}
+              {k === "free_text"
+                ? "Free text"
+                : k === "buttons"
+                  ? "Buttons"
+                  : k === "list"
+                    ? "List"
+                    : k === "number"
+                      ? "Number"
+                      : "Date"}
             </button>
           ))}
         </div>
@@ -1234,6 +1252,40 @@ export function AskQuestionEditor({
             maxLength={20}
             className="max-w-50"
           />
+        </Field>
+      )}
+
+      {answerKind === "number" && (
+        <Field label="Allowed range (optional)" hint="Inclusive min / max. Unparseable or out-of-range replies route to the timeout edge.">
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              value={config.numberMin ?? ""}
+              onChange={(e) => {
+                const n = Number.parseFloat(e.target.value);
+                onChange({
+                  ...config,
+                  numberMin: Number.isFinite(n) ? n : undefined,
+                });
+              }}
+              placeholder="min"
+              className="max-w-30"
+            />
+            <span className="text-xs text-muted-foreground">—</span>
+            <Input
+              type="number"
+              value={config.numberMax ?? ""}
+              onChange={(e) => {
+                const n = Number.parseFloat(e.target.value);
+                onChange({
+                  ...config,
+                  numberMax: Number.isFinite(n) ? n : undefined,
+                });
+              }}
+              placeholder="max"
+              className="max-w-30"
+            />
+          </div>
         </Field>
       )}
 

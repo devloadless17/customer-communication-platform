@@ -22,6 +22,41 @@ export const SendTemplateSchema = z.object({
 export type SendTemplateInput = z.infer<typeof SendTemplateSchema>;
 
 /**
+ * Agent-side interactive send. Buttons + list share the same shape; the
+ * `kind` discriminator decides whether Meta gets `interactive.type=button`
+ * (max 3 options) or `interactive.type=list` (max 10).
+ *
+ * Limits enforced at the Zod boundary to fail fast — the provider also caps
+ * but its error message is cryptic. The composer UI mirrors these caps so
+ * the user never hits this validator under normal use.
+ */
+export const SendInteractiveSchema = z
+  .object({
+    conversationId: z.string().min(1),
+    body: z.string().trim().min(1).max(1024),
+    kind: z.enum(["buttons", "list"]),
+    options: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(256),
+          title: z.string().min(1).max(24),
+          description: z.string().max(72).optional(),
+        }),
+      )
+      .min(1)
+      .max(10),
+    listCtaLabel: z.string().min(1).max(20).optional(),
+  })
+  .refine((b) => b.kind !== "buttons" || b.options.length <= 3, {
+    message: "buttons supports at most 3 options — use kind=list for more",
+  })
+  .refine(
+    (b) => new Set(b.options.map((o) => o.id)).size === b.options.length,
+    { message: "option ids must be unique" },
+  );
+export type SendInteractiveInput = z.infer<typeof SendInteractiveSchema>;
+
+/**
  * Multipart form fields for POST /api/messages/media. The actual file ships
  * separately via @UploadedFile (multer). Everything below is a string because
  * multipart form fields are always strings; `caption` trims to empty for

@@ -21,10 +21,12 @@ import { zBody } from "../common/zod-validation.pipe";
 import { MessagesService } from "./messages.service";
 import {
   ForwardMessagesSchema,
+  SendInteractiveSchema,
   SendMediaFormSchema,
   SendTemplateSchema,
   SendTextSchema,
   type ForwardMessagesInput,
+  type SendInteractiveInput,
   type SendMediaFormInput,
   type SendTemplateInput,
   type SendTextInput,
@@ -119,6 +121,21 @@ export class MessagesController {
     @Body(zBody(SendTemplateSchema)) body: SendTemplateInput,
   ) {
     const out = await this.messages.sendTemplate(session.teamId, session.userId, body);
+    return { ok: true, messageId: out.messageId };
+  }
+
+  /**
+   * Agent-side interactive send (buttons / list). Synchronous — no queue
+   * scaffolding, since interactive sends are rare admin moves vs. high-
+   * volume text replies and the ~300ms inline Meta hop is acceptable for
+   * the agent's clicked-Send-button latency.
+   */
+  @Post("interactive")
+  async sendInteractive(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SendInteractiveSchema)) body: SendInteractiveInput,
+  ) {
+    const out = await this.messages.sendInteractive(session.teamId, session.userId, body);
     return { ok: true, messageId: out.messageId };
   }
 

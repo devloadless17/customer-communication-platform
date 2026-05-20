@@ -56,6 +56,14 @@ export interface StepRunContext {
    *  "send the question" path and go straight to selecting the outgoing
    *  edge based on `pendingAnswer`. */
   isResume?: boolean;
+  /** Structured outputs of every step that's already completed in this run.
+   *  Map of stepId → JSON value. Threaded into ResolverExtras so token
+   *  expansion can resolve `$var.steps.<id>.X` and `$var.previousStep.X`. */
+  stepOutputs?: Record<string, unknown>;
+  /** Id of the step the runner advanced from to reach THIS step (i.e. the
+   *  one whose output `$var.previousStep.X` should reference). Undefined
+   *  on the start node. */
+  previousStepId?: string | null;
 }
 
 /**
@@ -198,11 +206,21 @@ export function envelopeMessage(
  */
 export function envelopeExtras(
   envelope: WorkflowEventEnvelope,
+  ctx?: StepRunContext,
 ): ResolverExtras {
   const message = envelopeMessage(envelope);
   const conversation = envelopeConversation(envelope);
   const extras: ResolverExtras = {};
   if (message) extras.message = message as MessageLike;
   if (conversation) extras.conversation = conversation as ConversationLike;
+  // Thread per-step outputs + previousStepId through so the resolver can
+  // expand `$var.previousStep.X` and `$var.steps.<id>.X`. Optional —
+  // non-workflow callers (broadcasts, snippets) don't pass ctx and these
+  // tokens resolve to empty there. Same backwards-compatible shape the
+  // ResolverExtras interface guarantees.
+  if (ctx?.stepOutputs) extras.stepOutputs = ctx.stepOutputs;
+  if (ctx?.previousStepId !== undefined) {
+    extras.previousStepId = ctx.previousStepId;
+  }
   return extras;
 }

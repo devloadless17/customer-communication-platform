@@ -78,8 +78,11 @@ function renderTokenized(
   knownKeys: Set<string>,
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
+  // Matches the same N-deep token grammar the shared resolver uses. The
+  // capture group is the FULL dotted path after `$var.`; isTokenKnown
+  // decides whether to render blue (known) or amber (unknown).
   const re =
-    /(?<![A-Za-z0-9_])\$var\.(contact|agent|message|conversation)\.([a-z][a-z0-9_]*)\b/g;
+    /(?<![A-Za-z0-9_])\$var\.([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\b/g;
   let lastIndex = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -87,9 +90,7 @@ function renderTokenized(
     if (m.index > lastIndex) {
       nodes.push(text.slice(lastIndex, m.index));
     }
-    const namespace = m[1]!;
-    const key = m[2]!;
-    const isKnown = knownKeys.has(`${namespace}.${key}`);
+    const isKnown = isTokenKnown(m[1]!, knownKeys);
     nodes.push(
       <span
         key={`tok-${i++}`}
@@ -114,6 +115,40 @@ function renderTokenized(
   // glyph so the overlay's height matches.
   if (text.endsWith("\n")) nodes.push(" ");
   return nodes;
+}
+
+/**
+ * Validate a parsed token path against the known-keys schema.
+ *
+ *   - legacy 2-deep paths: knownKeys lookup as before.
+ *   - `trigger.<sub>.<key>`: passthrough — known iff the underlying
+ *     2-deep alias is known.
+ *   - `sender.<key>`: known if any contact / agent key matches.
+ *   - `previousStep.<...>` and `steps.<id>.<...>`: optimistically known,
+ *     since step outputs are run-time shapes the static schema can't
+ *     describe. Same fail-soft default the resolver uses (empty string on
+ *     a miss).
+ */
+function isTokenKnown(fullPath: string, knownKeys: Set<string>): boolean {
+  const segments = fullPath.split(".");
+  if (segments.length < 2) return false;
+  const ns = segments[0]!;
+  if (
+    (ns === "contact" || ns === "agent" || ns === "message" || ns === "conversation") &&
+    segments.length === 2
+  ) {
+    return knownKeys.has(`${ns}.${segments[1]!}`);
+  }
+  if (ns === "trigger" && segments.length === 3) {
+    return knownKeys.has(`${segments[1]!}.${segments[2]!}`);
+  }
+  if (ns === "sender" && segments.length === 2) {
+    const k = segments[1]!;
+    return knownKeys.has(`contact.${k}`) || knownKeys.has(`agent.${k}`);
+  }
+  if (ns === "previousStep" && segments.length >= 2) return true;
+  if (ns === "steps" && segments.length >= 3) return true;
+  return false;
 }
 
 function useKnownKeys(
