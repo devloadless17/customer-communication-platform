@@ -56,6 +56,20 @@ import type {
 import { runWithSendIdempotency } from "./send-idempotency";
 import { enqueueMessageSend } from "./send-queue";
 
+/**
+ * Meta's accepted audio MIME types for `/messages` sends. Anything outside
+ * this set comes back as a vague `provider_rejected`. Voice notes (the
+ * waveform-rendering kind) additionally REQUIRE `audio/ogg` with opus —
+ * setting `voice: true` on an audio/mp4 send is itself a Meta-side reject.
+ */
+const META_AUDIO_ALLOWED = new Set([
+  "audio/aac",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/amr",
+  "audio/ogg",
+]);
+
 @Injectable()
 export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
@@ -732,7 +746,14 @@ export class MessagesService {
       }
     }
 
-    const mimeType = file.mimetype || "application/octet-stream";
+    // Strip codec parameters (`audio/ogg;codecs=opus` → `audio/ogg`). Meta's
+    // `/media` upload reads the `type` form field strictly; the codec suffix
+    // that Chrome's MediaRecorder emits is enough to make it reject the
+    // payload with a non-obvious error. Blob storage was already tolerant
+    // (splits on `;` for its allowlist check) — Meta isn't.
+    const rawMime = file.mimetype || "application/octet-stream";
+    const mimeType =
+      rawMime.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
     const kind = kindFromMime(mimeType);
     const cap = MEDIA_SIZE_CAPS[kind];
     if (file.size > cap) {
@@ -755,24 +776,14 @@ export class MessagesService {
     // `provider_rejected` at send time. Block it here with a clear error.
     // The blob-storage allowlist still permits webm (so we can debug-replay),
     // but we won't push it to Meta.
-    if (kind === "audio") {
-      const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
-      const META_AUDIO_ALLOWED = new Set([
-        "audio/aac",
-        "audio/mp4",
-        "audio/mpeg",
-        "audio/amr",
-        "audio/ogg",
-      ]);
-      if (!META_AUDIO_ALLOWED.has(normalized)) {
-        throw new BadRequestException({
-          error: "invalid_audio_mime",
-          detail:
-            `WhatsApp doesn't accept ${normalized || "this audio format"}. ` +
-            "Supported: AAC, MP4 (m4a), MP3, AMR, OGG/Opus. " +
-            "If this came from a voice recorder, try a different browser (Chrome 105+, Firefox, Safari).",
-        });
-      }
+    if (kind === "audio" && !META_AUDIO_ALLOWED.has(mimeType)) {
+      throw new BadRequestException({
+        error: "invalid_audio_mime",
+        detail:
+          `WhatsApp doesn't accept ${mimeType || "this audio format"}. ` +
+          "Supported: AAC, MP4 (m4a), MP3, AMR, OGG/Opus. " +
+          "If this came from a voice recorder, try a different browser (Chrome 105+, Firefox, Safari).",
+      });
     }
 
     // Read the disk-backed multer temp file ONCE into a single Buffer that
@@ -872,7 +883,13 @@ export class MessagesService {
           caption: caption || undefined,
           filename: kind === "document" ? filename : undefined,
           ...(replyToExternalId ? { replyToExternalId } : {}),
-          ...(kind === "audio" && form.voice ? { voice: true } : {}),
+          // Meta voice-note rendering requires audio/ogg specifically. Safari
+          // records audio/mp4; setting voice:true on that comes back as a
+          // 400 from Meta. Quietly drop the flag for non-ogg recordings —
+          // they still send as a regular audio attachment.
+          ...(kind === "audio" && form.voice && mimeType === "audio/ogg"
+            ? { voice: true }
+            : {}),
         },
         sendConfig,
       );
