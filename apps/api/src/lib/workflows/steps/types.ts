@@ -26,6 +26,10 @@ export interface PendingAnswer {
   body: string;
   messageId: string;
   timestamp: string;
+  /** Stable machine id when the reply was an interactive button / list tap.
+   *  Undefined for plain text replies. */
+  optionId?: string;
+  optionKind?: "button_reply" | "list_reply";
 }
 
 /**

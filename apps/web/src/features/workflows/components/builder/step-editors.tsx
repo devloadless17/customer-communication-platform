@@ -997,7 +997,7 @@ export function WaitEditor({
               onChange({ delayMs: n * multipliers[initialUnit] });
             }
           }}
-          className="max-w-[120px]"
+          className="max-w-30"
         />
         <select
           value={initialUnit}
@@ -1059,7 +1059,7 @@ export function JumpToStepEditor({
               maxJumps: Number.isFinite(n) && n > 0 ? n : undefined,
             });
           }}
-          className="max-w-[120px]"
+          className="max-w-30"
         />
       </Field>
     </div>
@@ -1068,18 +1068,73 @@ export function JumpToStepEditor({
 
 // ask_question -------------------------------------------------------------
 
+/** Mirrors @ccp/shared/providers/types InteractiveOption — duplicated here
+ *  for the same reason BranchPreset is. */
+interface AskOption {
+  id: string;
+  title: string;
+  description?: string;
+}
+type AnswerKind = "free_text" | "buttons" | "list";
+interface AskQuestionSaveTo {
+  kind: "custom_field";
+  key: string;
+}
+
 export function AskQuestionEditor({
   config,
   onChange,
   fields,
   trigger,
 }: {
-  config: { question?: string; timeoutHours?: number };
+  config: {
+    question?: string;
+    timeoutHours?: number;
+    answerKind?: AnswerKind;
+    options?: AskOption[];
+    listCtaLabel?: string;
+    saveTo?: AskQuestionSaveTo;
+  };
   onChange: (c: Record<string, unknown>) => void;
   fields: BuilderCatalogs["fields"];
   trigger: Trigger;
 }) {
   const hours = config.timeoutHours ?? 24;
+  const answerKind: AnswerKind = config.answerKind ?? "free_text";
+  const options = config.options ?? [];
+  const maxOptions = answerKind === "buttons" ? 3 : 10;
+
+  function changeAnswerKind(next: AnswerKind) {
+    if (next === "free_text") {
+      const { options: _o, listCtaLabel: _l, ...rest } = config;
+      onChange({ ...rest, answerKind: undefined });
+      return;
+    }
+    // Switching to a kind with a tighter cap: trim down so we don't carry
+    // 10 list options into a 3-button mode.
+    const cap = next === "buttons" ? 3 : 10;
+    const nextOptions =
+      options.length > 0 ? options.slice(0, cap) : [{ id: "yes", title: "Yes" }];
+    onChange({ ...config, answerKind: next, options: nextOptions });
+  }
+
+  function setOption(idx: number, patch: Partial<AskOption>) {
+    const next = [...options];
+    next[idx] = { ...next[idx]!, ...patch };
+    onChange({ ...config, options: next });
+  }
+  function addOption() {
+    if (options.length >= maxOptions) return;
+    onChange({
+      ...config,
+      options: [...options, { id: `opt_${options.length + 1}`, title: "" }],
+    });
+  }
+  function removeOption(idx: number) {
+    const next = options.filter((_, i) => i !== idx);
+    onChange({ ...config, options: next });
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Field
@@ -1095,6 +1150,93 @@ export function AskQuestionEditor({
           trigger={trigger}
         />
       </Field>
+
+      <Field label="Answer type" hint="Buttons + list send a WhatsApp interactive message — taps round-trip as option ids.">
+        <div className="inline-flex w-fit items-center gap-0.5 rounded-md border border-border bg-muted/40 p-0.5 text-xs">
+          {(["free_text", "buttons", "list"] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => changeAnswerKind(k)}
+              className={
+                answerKind === k
+                  ? "rounded px-2.5 py-1 font-medium bg-background text-foreground shadow-sm"
+                  : "rounded px-2.5 py-1 text-muted-foreground hover:text-foreground"
+              }
+            >
+              {k === "free_text" ? "Free text" : k === "buttons" ? "Buttons" : "List"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {answerKind !== "free_text" && (
+        <Field
+          label={answerKind === "buttons" ? "Buttons (1-3)" : "List options (1-10)"}
+          hint="Each option has an id (round-trips back as `$var.previousStep.optionId`) and a title (what the contact sees)."
+        >
+          <div className="flex flex-col gap-2">
+            {options.map((opt, idx) => (
+              <div key={idx} className="flex items-center gap-2">
+                <Input
+                  value={opt.id}
+                  onChange={(e) => setOption(idx, { id: e.target.value })}
+                  placeholder="id"
+                  className="max-w-25 font-mono text-[12px]"
+                  aria-label={`Option ${idx + 1} id`}
+                />
+                <Input
+                  value={opt.title}
+                  onChange={(e) => setOption(idx, { title: e.target.value })}
+                  placeholder={answerKind === "buttons" ? "Title (max 20)" : "Title (max 24)"}
+                  maxLength={answerKind === "buttons" ? 20 : 24}
+                  className="flex-1"
+                  aria-label={`Option ${idx + 1} title`}
+                />
+                {answerKind === "list" && (
+                  <Input
+                    value={opt.description ?? ""}
+                    onChange={(e) => setOption(idx, { description: e.target.value })}
+                    placeholder="Description (optional)"
+                    maxLength={72}
+                    className="flex-1 text-[12px]"
+                    aria-label={`Option ${idx + 1} description`}
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={() => removeOption(idx)}
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  aria-label={`Remove option ${idx + 1}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addOption}
+              disabled={options.length >= maxOptions}
+              className="inline-flex w-fit items-center gap-1 rounded-md border border-dashed border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              + Add option
+            </button>
+          </div>
+        </Field>
+      )}
+
+      {answerKind === "list" && (
+        <Field label="List CTA button label" hint="Shown on the button the contact taps to open the option sheet. Default: Choose.">
+          <Input
+            value={config.listCtaLabel ?? ""}
+            onChange={(e) => onChange({ ...config, listCtaLabel: e.target.value || undefined })}
+            placeholder="Choose"
+            maxLength={20}
+            className="max-w-50"
+          />
+        </Field>
+      )}
+
       <Field label="Timeout (hours)" hint="If no reply within this window the workflow takes the 'timeout' edge.">
         <Input
           type="number"
@@ -1107,14 +1249,48 @@ export function AskQuestionEditor({
               onChange({ ...config, timeoutHours: n });
             }
           }}
-          className="max-w-[140px]"
+          className="max-w-35"
         />
       </Field>
+
+      <Field label="Save answer to field (optional)" hint="When the contact replies, write their answer to a contact custom field.">
+        <select
+          value={config.saveTo?.key ?? ""}
+          onChange={(e) => {
+            const key = e.target.value;
+            if (!key) {
+              const { saveTo: _s, ...rest } = config;
+              onChange(rest);
+            } else {
+              onChange({ ...config, saveTo: { kind: "custom_field", key } });
+            }
+          }}
+          className="h-9 max-w-xs rounded-md border border-border bg-background px-2 text-sm"
+        >
+          <option value="">— Don&apos;t save</option>
+          {fields.map((f) => (
+            <option key={f.key} value={f.key}>
+              {f.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
       <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-        Downstream steps can read the answer via{" "}
-        <code className="rounded bg-muted px-1 font-mono">$var.previousStep.answer</code>.
-        Pair with a Branch step (preset: message contains) to route on
-        specific replies.
+        {answerKind === "free_text" ? (
+          <>
+            Downstream steps read the answer via{" "}
+            <code className="rounded bg-muted px-1 font-mono">$var.previousStep.answer</code>.
+            Pair with a Branch (preset: message contains) to route on specific
+            replies.
+          </>
+        ) : (
+          <>
+            Downstream steps see the tapped option id via{" "}
+            <code className="rounded bg-muted px-1 font-mono">$var.previousStep.optionId</code>.
+            Route with a Branch (preset: message contains) on the id you chose.
+          </>
+        )}
       </div>
     </div>
   );

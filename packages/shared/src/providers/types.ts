@@ -42,6 +42,22 @@ export interface NormalizedMediaRef {
   thumbnailStorageUrl?: string;
 }
 
+/**
+ * Interactive reply from a contact who tapped a quick-reply button or list
+ * row in a previous outbound interactive message. The parser folds the
+ * tapped option's title into `body` (so search + previews stay uniform with
+ * text messages) AND surfaces the option's stable id here for workflow
+ * routing — Meta's button/list ids are author-controlled at send time, so
+ * the ask_question step recognises them on reply without parsing free text.
+ */
+export interface InteractiveReply {
+  kind: "button_reply" | "list_reply";
+  /** Author-assigned id (the `id` field on the outbound option). */
+  id: string;
+  /** Display title the contact tapped — matches `body` for convenience. */
+  title: string;
+}
+
 export interface NormalizedInboundMessage {
   kind: "message";
   /** Provider-assigned id; the dedupe key. */
@@ -52,11 +68,14 @@ export interface NormalizedInboundMessage {
   contactName: string | null;
   /**
    * Body text. For text messages this is the message itself; for media it's
-   * the caption (or empty). Either body or media (or both) will be present.
+   * the caption (or empty); for interactive replies it's the tapped option's
+   * title. Either body or media (or both) will be present.
    */
   body: string;
   /** Set when the message carries an attachment that needs downloading. */
   media?: NormalizedMediaRef;
+  /** Set when the message is a contact's tap on a button / list row. */
+  interactiveReply?: InteractiveReply;
   /**
    * Provider id of the message this one is replying to (Meta `context.id`).
    * Ingest resolves it to our internal Message.id; the parser stays
@@ -93,6 +112,49 @@ export interface SendTextArgs {
 export interface SendTextResult {
   externalId: string;
   timestamp: Date;
+}
+
+/**
+ * One option presented to the contact. `id` round-trips back to the
+ * workflow as the `interactiveReply.id` on the inbound reply; pick stable
+ * machine ids (yes/no, slot_morning, etc.) — the author-facing label goes
+ * in `title`.
+ */
+export interface InteractiveOption {
+  /** Stable machine id, max 256 chars per Meta. */
+  id: string;
+  /** Display label, max 20 chars for buttons / 24 for list rows. */
+  title: string;
+  /** Optional list-row sub-text (ignored for buttons). */
+  description?: string;
+}
+
+/**
+ * Outbound interactive message: a question + buttons (1-3) or list rows
+ * (1-10). `kind` decides which WhatsApp interactive shape to send:
+ *
+ *   "buttons" → Meta's `interactive.type = "button"` (compact 3-button row)
+ *   "list"    → Meta's `interactive.type = "list"` (sheet with rows, opened
+ *               by tapping a single CTA button — `listCtaLabel` is its text)
+ *
+ * Caller pre-validates option counts; the provider also fails fast on
+ * out-of-range option counts because Meta returns a cryptic 132xxx error
+ * for "wrong button count" that an admin can't easily decode.
+ */
+export interface SendInteractiveArgs {
+  /** E.164 digits, no '+'. */
+  to: string;
+  /** Question / body text the contact sees above the options. */
+  bodyText: string;
+  kind: "buttons" | "list";
+  options: InteractiveOption[];
+  /** List only — label on the CTA button that opens the row sheet.
+   *  Defaults to "Choose" if omitted. Ignored for buttons. */
+  listCtaLabel?: string;
+  /** List only — header rendered above the rows. Defaults to "Options". */
+  listSectionTitle?: string;
+  /** Quoted-reply context, same semantics as SendTextArgs. */
+  replyToExternalId?: string;
 }
 
 export interface UploadMediaArgs {
@@ -292,6 +354,12 @@ export interface MessagingProvider<SendConfig = unknown> {
   parseWebhook(payload: unknown): NormalizedEvent[];
   /** Outbound text. */
   sendText(args: SendTextArgs, config: SendConfig): Promise<SendTextResult>;
+  /**
+   * Outbound interactive question (buttons / list). Optional — providers
+   * without interactive support fall back to plain text (the caller decides
+   * how to degrade). Same 24h-window rule applies as plain text sends.
+   */
+  sendInteractive?(args: SendInteractiveArgs, config: SendConfig): Promise<SendTextResult>;
   /** Outbound media — caller uploads first, then sends with the returned id. */
   uploadMedia?(args: UploadMediaArgs, config: SendConfig): Promise<UploadMediaResult>;
   sendMedia?(args: SendMediaArgs, config: SendConfig): Promise<SendTextResult>;

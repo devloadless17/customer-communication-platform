@@ -202,7 +202,13 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       (e) => e.stepId === node.id && e.status === "waiting",
     );
     const pendingAnswer = (run.pendingAnswer ?? null) as
-      | { body: string; messageId: string; timestamp: string }
+      | {
+          body: string;
+          messageId: string;
+          timestamp: string;
+          optionId?: string;
+          optionKind?: "button_reply" | "list_reply";
+        }
       | null;
 
     let result: StepResult;

@@ -25,6 +25,10 @@ import {
   stopWorkflowWaitingSweeper,
 } from "@/lib/sweepers/workflow-waiting";
 import {
+  startWorkflowAwaitingReplySweeper,
+  stopWorkflowAwaitingReplySweeper,
+} from "@/lib/sweepers/workflow-awaiting-reply";
+import {
   startOutboundWebhookDeliveryCleanup,
   stopOutboundWebhookDeliveryCleanup,
 } from "@/lib/sweepers/outbound-webhook-delivery-cleanup";
@@ -66,6 +70,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private started = false;
   private mediaSweeperStarted = false;
   private waitingSweeperStarted = false;
+  private awaitingReplySweeperStarted = false;
   private contactDriftSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
   private apiIdempotencyCleanupStarted = false;
@@ -103,6 +108,16 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Workflow waiting-runs sweeper started");
     } catch (err) {
       this.logger.error("Failed to start workflow-waiting sweeper", err);
+    }
+    try {
+      // Hourly cleanup of stale WorkflowAwaitingReply rows that the
+      // ask_question step's on-resume delete missed (workflow disabled
+      // mid-pause, manual DB intervention, etc.).
+      startWorkflowAwaitingReplySweeper();
+      this.awaitingReplySweeperStarted = true;
+      this.logger.log("Workflow awaiting-reply sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start workflow-awaiting-reply sweeper", err);
     }
     try {
       // Daily reconciler for the `Contact.lastInboundAt` denorm. Self-
@@ -202,6 +217,13 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       if (this.contactDriftSweeperStarted) stopContactDriftSweeper();
     } catch (err) {
       this.logger.warn(`stopContactDriftSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.awaitingReplySweeperStarted) stopWorkflowAwaitingReplySweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopWorkflowAwaitingReplySweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
     }
     try {
       if (this.waitingSweeperStarted) stopWorkflowWaitingSweeper();

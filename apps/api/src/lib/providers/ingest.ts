@@ -631,6 +631,16 @@ async function ingestInboundMessage(
           body: evt.body,
           messageId: created.id,
           timestamp: evt.timestamp.toISOString(),
+          // Structured interactive reply id when the contact tapped a button
+          // or list row. Lets the ask_question step's downstream Branch
+          // (preset: message_contains) match on the stable machine id
+          // instead of the user-facing title.
+          ...(evt.interactiveReply
+            ? {
+                optionId: evt.interactiveReply.id,
+                optionKind: evt.interactiveReply.kind,
+              }
+            : {}),
         },
       });
 

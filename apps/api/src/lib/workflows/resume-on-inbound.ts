@@ -24,6 +24,11 @@ export interface InboundAnswer {
   messageId: string;
   /** ISO string. */
   timestamp: string;
+  /** Author-assigned id when the reply was an interactive button / list tap.
+   *  Round-trips through to the workflow envelope so the ask_question step
+   *  can match on a stable id instead of the user-facing title. */
+  optionId?: string;
+  optionKind?: "button_reply" | "list_reply";
 }
 
 /**

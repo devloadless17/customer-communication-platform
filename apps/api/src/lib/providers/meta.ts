@@ -26,6 +26,7 @@ import type {
   NormalizedMediaRef,
   NormalizedStatusUpdate,
   ProviderTemplate,
+  SendInteractiveArgs,
   SendMediaArgs,
   SendTemplateArgs,
   SendTextArgs,
@@ -173,6 +174,12 @@ interface MetaContextRef {
   from?: string;
 }
 
+interface MetaInteractivePayload {
+  type?: "button_reply" | "list_reply";
+  button_reply?: { id?: string; title?: string };
+  list_reply?: { id?: string; title?: string; description?: string };
+}
+
 interface MetaMessage {
   from?: string;
   id?: string;
@@ -184,6 +191,7 @@ interface MetaMessage {
   audio?: MetaMediaPayload;
   document?: MetaMediaPayload;
   sticker?: MetaMediaPayload;
+  interactive?: MetaInteractivePayload;
   context?: MetaContextRef;
 }
 
@@ -268,6 +276,52 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
               rawPayload: payload as Record<string, unknown>,
               ...(replyToExternalId ? { replyToExternalId } : {}),
             } satisfies NormalizedInboundMessage);
+            continue;
+          }
+
+          // Interactive reply: the contact tapped a button or list row on a
+          // previous outbound interactive message. The author-assigned id
+          // round-trips back as `interactive.button_reply.id` (or
+          // `list_reply.id`); the displayed text comes back as `title`.
+          // We fold the title into `body` for uniform search + preview AND
+          // surface the structured payload via `interactiveReply` for the
+          // ask_question step to route on.
+          if (m.type === "interactive") {
+            const inner = m.interactive;
+            if (inner?.type === "button_reply" && inner.button_reply) {
+              const { id: optId, title } = inner.button_reply;
+              if (!optId || !title) continue;
+              events.push({
+                kind: "message",
+                externalId,
+                contactPhone: phone,
+                contactName: nameByWaId.get(phone) ?? null,
+                body: title,
+                interactiveReply: { kind: "button_reply", id: optId, title },
+                timestamp: ts,
+                rawPayload: payload as Record<string, unknown>,
+                ...(replyToExternalId ? { replyToExternalId } : {}),
+              } satisfies NormalizedInboundMessage);
+              continue;
+            }
+            if (inner?.type === "list_reply" && inner.list_reply) {
+              const { id: optId, title } = inner.list_reply;
+              if (!optId || !title) continue;
+              events.push({
+                kind: "message",
+                externalId,
+                contactPhone: phone,
+                contactName: nameByWaId.get(phone) ?? null,
+                body: title,
+                interactiveReply: { kind: "list_reply", id: optId, title },
+                timestamp: ts,
+                rawPayload: payload as Record<string, unknown>,
+                ...(replyToExternalId ? { replyToExternalId } : {}),
+              } satisfies NormalizedInboundMessage);
+              continue;
+            }
+            // Unknown interactive subtype — skip rather than fabricate a
+            // body. Future Meta additions (e.g. nfm_reply) land here.
             continue;
           }
 
@@ -362,6 +416,106 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
 
     // Meta's response doesn't include a server timestamp; we stamp at send.
+    return { externalId, timestamp: new Date() };
+  },
+
+  async sendInteractive(
+    args: SendInteractiveArgs,
+    config: MetaSendConfig,
+  ): Promise<SendTextResult> {
+    // Pre-flight option-count check. Meta rejects with a cryptic 132xxx
+    // error for "wrong option count"; failing fast with a clear message
+    // saves the admin a debugging round-trip.
+    if (args.options.length === 0) {
+      throw new MetaSendError("sendInteractive: at least one option required", 400, "");
+    }
+    if (args.kind === "buttons" && args.options.length > 3) {
+      throw new MetaSendError(
+        "sendInteractive: WhatsApp buttons cap at 3 options — use kind=list for more",
+        400,
+        "",
+      );
+    }
+    if (args.kind === "list" && args.options.length > 10) {
+      throw new MetaSendError("sendInteractive: WhatsApp lists cap at 10 rows", 400, "");
+    }
+
+    // Build the interactive payload. Buttons + list share the outer
+    // shape; only `interactive.type` + `action` differ.
+    const interactive =
+      args.kind === "buttons"
+        ? {
+            type: "button" as const,
+            body: { text: args.bodyText },
+            action: {
+              buttons: args.options.map((o) => ({
+                type: "reply" as const,
+                reply: {
+                  // Meta caps button title length at 20 chars + id length at
+                  // 256. We rely on the caller / UI to enforce; truncate
+                  // defensively to keep a stray long title from causing a
+                  // 400 (which would surface in the workflow run as a
+                  // generic "send failed").
+                  id: o.id.slice(0, 256),
+                  title: o.title.slice(0, 20),
+                },
+              })),
+            },
+          }
+        : {
+            type: "list" as const,
+            body: { text: args.bodyText },
+            action: {
+              button: (args.listCtaLabel ?? "Choose").slice(0, 20),
+              sections: [
+                {
+                  title: (args.listSectionTitle ?? "Options").slice(0, 24),
+                  rows: args.options.map((o) => ({
+                    id: o.id.slice(0, 200),
+                    // List rows: title cap 24, description cap 72.
+                    title: o.title.slice(0, 24),
+                    ...(o.description
+                      ? { description: o.description.slice(0, 72) }
+                      : {}),
+                  })),
+                },
+              ],
+            },
+          };
+
+    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    const res = await metaFetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: args.to,
+        type: "interactive",
+        interactive,
+        ...(args.replyToExternalId
+          ? { context: { message_id: args.replyToExternalId } }
+          : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await safeMetaText(res);
+      throw new MetaSendError(
+        `meta sendInteractive failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+
+    const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+    const externalId = json.messages?.[0]?.id;
+    if (!externalId) {
+      throw new Error(`meta sendInteractive response missing message id: ${JSON.stringify(json)}`);
+    }
     return { externalId, timestamp: new Date() };
   },
 
