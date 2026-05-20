@@ -1,6 +1,15 @@
+import { existsSync } from "node:fs";
+
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcrypt";
+
+// `tsx` doesn't auto-load .env. In the docker container DATABASE_URL is
+// injected at runtime so loading would no-op; on the host, the seed npm
+// scripts expect to read it out of .env.
+if (existsSync(".env")) {
+  process.loadEnvFile(".env");
+}
 
 const EMAIL = "ali@loadless.ai";
 const PASSWORD = "loadless";

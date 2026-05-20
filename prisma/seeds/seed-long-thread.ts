@@ -11,9 +11,15 @@
  * re-running just refreshes content without duplicating.
  */
 
+import { existsSync } from "node:fs";
+
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { Pool } from "pg";
+
+if (existsSync(".env")) {
+  process.loadEnvFile(".env");
+}
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const db = new PrismaClient({ adapter: new PrismaPg(pool) });
