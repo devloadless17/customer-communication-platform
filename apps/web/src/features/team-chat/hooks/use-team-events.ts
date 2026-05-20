@@ -66,6 +66,24 @@ export function useTeamEvents(
    * first filter change after mount triggers a clean refetch.
    */
   filter?: Filter,
+  /**
+   * Full ConversationWithRefs for the conversation the user is currently
+   * viewing (from the LRU thread cache). Used by the per-event handlers
+   * below for OPTIMISTIC splice-IN: when the user changes a field on the
+   * displayed thread (status, assignment, stage) and that change makes
+   * the thread newly match the active filter, we synthesize the row
+   * locally from this data instead of waiting on
+   * `scheduleFilterResync()` → fetch round-trip.
+   *
+   * Without this, the row would only appear after the (300ms debounce +
+   * ~200-400ms /api/conversations fetch) the user reported as "1 second
+   * lag" when changing a chat's stage with a stage filter active, or
+   * closing a chat with the "Closed" preset active.
+   *
+   * Null on first paint or when nothing is selected; in that case the
+   * fallback resync path still works, just at the slower cadence.
+   */
+  activeThread: ConversationWithRefs | null = null,
 ): TeamEventsState {
   const [conversations, setConversations] =
     useState<ConversationWithRefs[]>(initialConversations);
@@ -74,12 +92,31 @@ export function useTeamEvents(
   const [refreshing, setRefreshing] = useState(false);
 
   // Stable filter ref so socket handlers + resync can read the latest
-  // without re-binding on every change. The filter-change effect below
-  // owns the actual refetch.
+  // without re-binding on every change. Sync-assigned during render (not
+  // via useEffect) — same reasoning as activeThreadRef below: a
+  // dispatchLocalSocketEvent fired from a click handler immediately
+  // after a filter change would otherwise see the OLD filter through this
+  // ref, because the post-commit useEffect hasn't run yet. The filter-
+  // change effect later in this file owns the actual refetch.
   const filterRef = useRef<Filter | undefined>(filter);
-  useEffect(() => {
-    filterRef.current = filter;
-  }, [filter]);
+  filterRef.current = filter;
+
+  // Stable ref for the displayed thread's full row. Read by the splice-IN
+  // branches in the socket handlers below.
+  //
+  // **Synced during render, not via useEffect — load-bearing.** A
+  // dispatchLocalSocketEvent call from a click handler fires socket
+  // listeners SYNCHRONOUSLY (before the post-commit useEffect runs). If
+  // this ref were synced in a useEffect, the listener would see a stale
+  // value on EXACTLY the first click after the displayed thread changes
+  // — which is the most common case (user clicks a chat, then immediately
+  // changes its status). Don't "fix" this by moving to useEffect; the
+  // tradeoff (theoretical inconsistency during a discarded concurrent
+  // render) doesn't apply to click-driven flows wrapped in flushSync (see
+  // dispatchLocalSocketEvent in apps/web/src/lib/socket-client.ts).
+  // Same pattern inbox-shell.tsx uses for activeIdRef / displayedIdRef.
+  const activeThreadRef = useRef(activeThread);
+  activeThreadRef.current = activeThread;
 
   // Re-seed when the server hands us a MEANINGFULLY different initial list.
   // Gating on raw array identity blew away every realtime update on any
@@ -164,11 +201,12 @@ export function useTeamEvents(
   }, [filterKey, filter]);
 
   // Mirror activeConversationId into a ref so the message:new handler reads
-  // the latest value without re-subscribing on every navigation.
+  // the latest value without re-subscribing on every navigation. Sync-
+  // assigned during render so a click that switches conversation + fires
+  // an immediate inbound message (server echo for own send, teammate's
+  // typing-then-sending, etc.) reads the new id, not the previous one.
   const activeIdRef = useRef(activeConversationId);
-  useEffect(() => {
-    activeIdRef.current = activeConversationId;
-  }, [activeConversationId]);
+  activeIdRef.current = activeConversationId;
 
   useEffect(() => {
     const socket = getClientSocket();
@@ -217,13 +255,51 @@ export function useTeamEvents(
       // here would also work but feels heavier than warranted.
     }
 
-    // Debounced resync trigger for filter-eligibility-changing events.
-    // Per-event mutations below handle the in-list rows snappily; this
-    // catches the splice-IN case (a row that newly matches the filter
-    // because of the event) which the in-handler logic can't synthesize
-    // without the full ConversationWithRefs. Coalesces a burst of events
-    // into a single fetch.
+    // Tight-debounced + coalesced resync trigger for filter-eligibility-
+    // changing events. Per-event mutations below handle the in-list rows
+    // snappily AND optimistically splice IN the displayed thread (using
+    // `activeThreadRef.current`) when the event makes it newly match the
+    // filter — so the common "user changed the chat they're viewing" case
+    // is instant without a fetch. This resync is the fallback for the
+    // case we DON'T have data for: a teammate's change to an unrelated
+    // conversation that now matches our filter.
+    //
+    // Two layers of coalescing:
+    //   1. The 50ms timer collapses a burst of events that arrive BEFORE
+    //      the timer fires (typical case during user input).
+    //   2. The in-flight / queued flags collapse events that arrive AFTER
+    //      the timer fires but BEFORE the GET returns (typical case during
+    //      a teammate's bulk operation, where contact:updated frames can
+    //      land mid-fetch). Without this second layer, those late events
+    //      would each schedule a fresh 50ms timer, each one firing its own
+    //      resyncOnce in parallel — N parallel fetches per burst.
+    //
+    // The window used to be 300ms; the user reported the resulting ~1s
+    // total lag (debounce + fetch + render) on stage / closed-preset
+    // changes. 50ms is enough to coalesce a burst but invisible to the eye
+    // for a single change.
     let resyncTimer: number | null = null;
+    let resyncInFlight = false;
+    let resyncQueued = false;
+    async function runCoalescedResync(): Promise<void> {
+      if (resyncInFlight) {
+        resyncQueued = true;
+        return;
+      }
+      resyncInFlight = true;
+      try {
+        await resyncOnce();
+      } finally {
+        resyncInFlight = false;
+        if (resyncQueued) {
+          resyncQueued = false;
+          // Re-enter so any events that landed mid-fetch are reconciled.
+          // No recursion depth concern: each call awaits a network round-
+          // trip, so at most one trailing run per actual event burst.
+          void runCoalescedResync();
+        }
+      }
+    }
     function scheduleFilterResync() {
       // No-op when there's no filter narrowing — the unfiltered list is
       // already shown in full; per-event mutations cover it.
@@ -233,8 +309,54 @@ export function useTeamEvents(
       if (resyncTimer !== null) return;
       resyncTimer = window.setTimeout(() => {
         resyncTimer = null;
-        void resyncOnce();
-      }, 300);
+        void runCoalescedResync();
+      }, 50);
+    }
+
+    // Shared filter-match check used by all three splice-IN branches below.
+    // Centralized so the rules stay in one place — adding a new filter kind
+    // or preset means updating this function, not three call sites.
+    //
+    // `nextRow` is the (locally synthesized) row that would land in the
+    // list. We check whether it matches the active filter; if so, the
+    // splice-IN branch inserts it at the recency-sorted slot.
+    function rowMatchesFilter(nextRow: ConversationWithRefs): boolean {
+      const f = filterRef.current;
+      if (!f) return true;
+      if (f.kind === "stage") {
+        // Stage filter is keyed off the embedded contact, not the
+        // conversation. Closed status is included on purpose — stage is
+        // contact-lifecycle, orthogonal to chat status.
+        return nextRow.contact.stageId === f.stageId;
+      }
+      // Preset filters.
+      if (f.id === "closed") return nextRow.conversation.status === "closed";
+      const isClosed = nextRow.conversation.status === "closed";
+      if (isClosed) return false;
+      if (f.id === "mine") return nextRow.conversation.assignedUserId === currentUserId;
+      if (f.id === "unassigned") return nextRow.conversation.assignedUserId === null;
+      return true; // "all" — already returned above via empty filter, but here for completeness
+    }
+
+    // Inserts `row` into the recency-sorted list at the position its
+    // `lastMessageAt` belongs. The conversation list is sorted
+    // descending (most recent at index 0); a status/assignment/stage
+    // change doesn't bump `lastMessageAt`, so a naive prepend would
+    // place the row at the top even if it's actually older than other
+    // rows in the filter. ISO-8601 timestamps sort correctly as strings.
+    //
+    // Bails (returns prev unchanged) if the row is already present — the
+    // splice-IN callers already guard against this, but keeping the check
+    // local makes the helper safe to call in any future context.
+    function insertByRecency(
+      list: ConversationWithRefs[],
+      row: ConversationWithRefs,
+    ): ConversationWithRefs[] {
+      if (list.some((c) => c.conversation.id === row.conversation.id)) return list;
+      const rowTs = row.conversation.lastMessageAt;
+      const idx = list.findIndex((c) => c.conversation.lastMessageAt < rowTs);
+      if (idx === -1) return [...list, row];
+      return [...list.slice(0, idx), row, ...list.slice(idx)];
     }
 
     const onConnect = () => {
@@ -346,14 +468,34 @@ export function useTeamEvents(
       const nextAssignedUserId = assignedUser?.id ?? null;
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
-        if (idx === -1) return prev;
+        if (idx === -1) {
+          // Row isn't in the loaded slice. If this is the conversation the
+          // user is currently viewing AND the new assignment makes it match
+          // the active filter (e.g. they just assigned themselves while on
+          // filter=Mine), synthesize the row from the cached active thread
+          // so it appears INSTANTLY. Resync below catches the same case
+          // for teammate-driven changes where we don't hold the data.
+          const active = activeThreadRef.current;
+          if (active && active.conversation.id === conversationId) {
+            const nextRow: ConversationWithRefs = {
+              ...active,
+              conversation: {
+                ...active.conversation,
+                assignedUserId: nextAssignedUserId,
+              },
+              assignedUser,
+            };
+            if (rowMatchesFilter(nextRow)) {
+              return insertByRecency(prev, nextRow);
+            }
+          }
+          return prev;
+        }
         const existing = prev[idx]!;
         // With server-side filtering, an assignment change can knock the
         // row out of the current view (e.g. filter is "mine" and a teammate
         // took the thread). Splice OUT when the new assignment no longer
-        // matches the filter. The matching-into-view case (filter "mine"
-        // and assigned to me — but row not in list) is caught by the
-        // scheduled resync below.
+        // matches the filter.
         const f = filterRef.current;
         const stillMatches =
           !f || f.kind === "stage"
@@ -379,9 +521,9 @@ export function useTeamEvents(
         };
         return next;
       });
-      // Splice-IN catcher: a teammate assigning the thread to me when my
-      // filter is "mine" wouldn't be in the loaded list yet. Resync pulls
-      // it in. Debounced + no-op'd for the unfiltered view.
+      // Splice-IN catcher for the non-displayed case (teammate's change
+      // to a row we don't hold). Tight debounce so the gap between
+      // optimistic above and canonical reconciliation here is invisible.
       scheduleFilterResync();
     };
 
@@ -391,7 +533,23 @@ export function useTeamEvents(
     }) => {
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
-        if (idx === -1) return prev;
+        if (idx === -1) {
+          // Row isn't in the loaded slice. If this is the displayed thread
+          // and the new status moves it INTO the active filter (e.g.
+          // closing a chat while filter=Closed, or reopening while on
+          // any of the open-leaning presets), splice it in instantly.
+          const active = activeThreadRef.current;
+          if (active && active.conversation.id === conversationId) {
+            const nextRow: ConversationWithRefs = {
+              ...active,
+              conversation: { ...active.conversation, status },
+            };
+            if (rowMatchesFilter(nextRow)) {
+              return insertByRecency(prev, nextRow);
+            }
+          }
+          return prev;
+        }
         const existing = prev[idx]!;
         // Status-already-current → bail. Saves a re-render when the same
         // status arrives twice (e.g. a stale tab re-fires after reconnect).
@@ -482,23 +640,42 @@ export function useTeamEvents(
         const f = filterRef.current;
         const isStageFilter = f?.kind === "stage";
         let changed = false;
+        let foundInList = false;
         const next: ConversationWithRefs[] = [];
         for (const c of prev) {
           if (c.contact.id !== contact.id) {
             next.push(c);
             continue;
           }
+          foundInList = true;
           // Splice OUT when this contact's stage no longer matches the
           // active stage filter (e.g. teammate moved the contact to a
-          // different stage). The splice-IN case — a contact JUST entered
-          // this stage but the row isn't in the list — is caught by the
-          // scheduled resync below.
+          // different stage).
           if (isStageFilter && contact.stageId !== f.stageId) {
             changed = true;
             continue;
           }
           changed = true;
           next.push({ ...c, contact });
+        }
+        // Splice-IN: contact wasn't in any row, but on a stage filter the
+        // contact's new stageId may have JUST moved into the filtered view.
+        // If it's the contact behind the displayed thread, synthesize from
+        // the cached thread data so the row appears in the same frame as
+        // the click — no fetch.
+        if (!foundInList && isStageFilter) {
+          const active = activeThreadRef.current;
+          if (
+            active &&
+            active.contact.id === contact.id &&
+            contact.stageId === f.stageId
+          ) {
+            const nextRow: ConversationWithRefs = { ...active, contact };
+            // Insert at the recency-sorted slot rather than prepending —
+            // a stage change doesn't bump lastMessageAt, so the row
+            // shouldn't jump to the top of the filtered view.
+            return insertByRecency(prev, nextRow);
+          }
         }
         return changed ? next : prev;
       });

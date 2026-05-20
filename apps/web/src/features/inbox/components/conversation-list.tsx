@@ -100,19 +100,7 @@ function ConversationListImpl({
   };
   useEffect(() => cancelHoverPrefetch, []);
 
-  // Entrance-animation gating — same pattern as MessageThread. Without this
-  // every row had `animate-enter` unconditionally, so a hard refresh played
-  // a 140ms fade+slideUp on the entire conversation list. Rows the user has
-  // already seen shouldn't re-animate; only genuinely-new rows (a fresh
-  // inbound that pushed a conversation to the top) should. Same trick:
-  // first render mountedRef is false → no animations; after commit we
-  // record the current set of ids; from then on, only ids that weren't in
-  // the previous snapshot get the class.
-  const animateMountedRef = useRef(false);
-  const seenIdsRef = useRef<Set<string>>(new Set());
-
   function toggle(id: string) {
-
     setSelectedIds((prev) => {
       const copy = new Set(prev);
       if (copy.has(id)) copy.delete(id);
@@ -165,14 +153,6 @@ function ConversationListImpl({
       return haystack.includes(q);
     });
   }, [conversations, search]);
-
-  // Record what's currently visible AFTER each render so the next render can
-  // tell which rows are genuinely new and worth animating. No dependency
-  // array — runs every commit, matches MessageThread's pattern.
-  useEffect(() => {
-    animateMountedRef.current = true;
-    seenIdsRef.current = new Set(visible.map((v) => v.conversation.id));
-  });
 
   const headerTitle = useMemo(() => {
     if (filter.kind === "preset") {
@@ -350,15 +330,6 @@ function ConversationListImpl({
               const item = visible[row.index]!;
               const { conversation, contact, assignedUser } = item;
               const checked = selectedIds.has(conversation.id);
-              // Animate only NEW rows after first mount. On initial paint
-              // (mountedRef=false) and for rows already in the seen set, no
-              // animation. With virtualization, a row scrolling INTO the
-              // rendered window for the first time would otherwise replay
-              // its enter animation — the seenIdsRef guard prevents that
-              // because the id is recorded after every commit.
-              const animateIn =
-                animateMountedRef.current &&
-                !seenIdsRef.current.has(conversation.id);
               return (
                 <div
                   key={row.key}
@@ -370,15 +341,6 @@ function ConversationListImpl({
                   className="absolute left-0 top-0 w-full"
                   style={{ transform: `translateY(${row.start}px)` }}
                 >
-                  {/* Inner wrapper for the entrance animation. Keeping it on
-                      a separate element is load-bearing: `.animate-enter`'s
-                      keyframe writes `transform: translateY(4px) → 0`, which
-                      would otherwise OVERRIDE the outer `translateY(row.start)`
-                      that positions the row in the virtualized list. Result:
-                      every animating row briefly stacked at translateY(0) for
-                      140ms. Split between two elements so both transforms
-                      apply cleanly. */}
-                  <div className={cn(animateIn && "animate-enter")}>
                   {selectionMode ? (
                     // <label> wrapping the checkbox is the canonical way to
                     // make the whole row a toggle target — valid HTML, native
@@ -424,7 +386,6 @@ function ConversationListImpl({
                       />
                     </button>
                   )}
-                  </div>
                 </div>
               );
             })}

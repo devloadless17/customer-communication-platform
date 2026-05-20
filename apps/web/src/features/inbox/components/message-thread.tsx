@@ -10,7 +10,7 @@ import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
-import { cn, formatDaySeparator } from "@ccp/shared/utils";
+import { formatDaySeparator } from "@ccp/shared/utils";
 import type {
   ContactStage,
   ConversationWithRefs,
@@ -585,17 +585,6 @@ function MessageThreadImpl({
     return labels;
   }, [timeline, tz, now]);
 
-  // Entrance animation is reserved for genuinely new tail entries (a fresh
-  // send/receive). The initial load and prepended older pages mount without
-  // animation — a bubble sliding in near the top of the viewport during a
-  // load-older would read as a jitter, and that's exactly what we don't want.
-  const mountedRef = useRef(false);
-  const seenKeysRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    mountedRef.current = true;
-    seenKeysRef.current = new Set(timeline.map((e) => `${e.kind}_${e.data.id}`));
-  });
-
   // ---------------------------------------------------------------------
   // Scroll behavior — see `useChatScroll`. All the messy bits (viewport
   // resolution, scroll listener, ResizeObserver for stick-to-bottom,
@@ -718,19 +707,6 @@ function MessageThreadImpl({
               entry.kind === "message" && entry.data.clientTempId
                 ? `message_t_${entry.data.clientTempId}`
                 : `${entry.kind}_${entry.data.id}`;
-            // Skip the entrance animation when this user sent the entry
-            // themselves. The user already knows the message is coming —
-            // animating it in feels like network latency. Inbound and
-            // teammate sends still animate (the motion draws attention).
-            const isOwnEntry =
-              entry.kind === "message"
-                ? entry.data.senderUserId === currentUser.id
-                : entry.data.authorUserId === currentUser.id;
-            const animateIn =
-              mountedRef.current &&
-              idx === timeline.length - 1 &&
-              !seenKeysRef.current.has(entryKey) &&
-              !isOwnEntry;
 
             return (
               <div key={entryKey} className="contents">
@@ -743,19 +719,9 @@ function MessageThreadImpl({
                     <div className="h-px flex-1 bg-border" />
                   </div>
                 )}
-                {/* Plain <div> with a one-off CSS enter class. Was a
-                    framer-motion `motion.div` per entry — fine when there
-                    were 10 messages on screen, expensive on a 500-message
-                    thread receiving inbound traffic. CSS keyframe runs once
-                    on mount, then the class is inert. `animateIn` already
-                    gates this to genuinely new tail entries from someone
-                    else, so the user's own sends still appear instantly. */}
                 <div
                   data-message-id={entry.kind === "message" ? entry.data.id : undefined}
-                  className={cn(
-                    "rounded-2xl transition-shadow",
-                    animateIn && "animate-enter",
-                  )}
+                  className="rounded-2xl transition-shadow"
                 >
                   {/* Local ErrorBoundary per row — without this, a single
                       malformed message payload (or a bug in a sub-component

@@ -347,6 +347,14 @@ export function InboxShell({
   // ---------------------------------------------------------------
   // Live team-wide list (preserved from the previous shell).
   // ---------------------------------------------------------------
+  // Pass the displayed thread's full row so the team-events hook can
+  // optimistically splice it INTO the filtered list when a local change
+  // (status, assignment, stage) makes it newly match the active filter.
+  // Without this the row only appeared after the resync fetch landed —
+  // the visible "1 second lag" the user reported when changing a chat's
+  // stage with a stage filter active, or closing a chat with the Closed
+  // preset active. The hook only reads this when handling such an event;
+  // a fresh ref on cache.patch doesn't cost extra re-renders.
   const live = useTeamEvents(
     team.id,
     initialConversations,
@@ -354,6 +362,7 @@ export function InboxShell({
     activeId,
     currentUser.id,
     filter,
+    displayedThread?.data ?? null,
   );
 
   // Memoized lookup for the cache-miss skeleton (needs the contact for the

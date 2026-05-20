@@ -162,14 +162,4 @@
     background: color-mix(in oklab, var(--foreground) 15%, transparent);
     border-radius: 9999px;
   }
-
-  /* Row entrance is intentionally a no-op — WhatsApp-web-style: new
-     messages and conversation rows snap into place. The earlier fade+
-     slide keyframe added perceived complexity without helping the user
-     locate the new row (which the unread badge + bump-to-top already
-     do). Class kept so call sites don't need to be touched; the rule
-     just doesn't animate. */
-  .animate-enter {
-    animation: none;
-  }
 }

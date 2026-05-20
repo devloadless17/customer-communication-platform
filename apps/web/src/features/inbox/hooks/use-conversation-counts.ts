@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import { getClientSocket } from "@/lib/socket-client";
+
+// How long after a stage change to suppress the GET /counts result so it
+// can't roll back the optimistic byStage patch. Sized to comfortably cover
+// the PATCH commit + server broadcast round-trip (~150-400ms typical in
+// dev, faster in prod), plus headroom. After this window expires, a
+// follow-up refresh fires once to pick up anything we deliberately dropped
+// (e.g. a teammate's stage change for an unrelated contact that arrived
+// while we were settling our own change).
+const STAGE_SETTLING_MS = 1500;
 
 /**
  * Team-wide preset + per-stage counts for the inbox sub-sidebar.
@@ -40,11 +49,36 @@ export interface ConversationCounts {
 export function useConversationCounts(): ConversationCounts | null {
   const [counts, setCounts] = useState<ConversationCounts | null>(null);
 
+  // Stage-delta settling window. While `Date.now() < settlingUntil`, any
+  // refresh that returns is DROPPED — the optimistic byStage patch from
+  // `onStageDelta` is the source of truth during this window. Reason:
+  // dispatchLocalSocketEvent("contact:updated") fires synchronously, which
+  // schedules a refresh BEFORE the PATCH /api/contacts has even started.
+  // The GET /counts that follows often beats the PATCH commit, returns
+  // OLD counts, and would overwrite the optimistic patch → user sees the
+  // badge briefly snap back to the pre-change value before flipping
+  // forward again (= the flicker). Settling pins byStage to the optimistic
+  // value until either the timer expires or the server's confirming
+  // contact:updated arrives (whichever fires the trailing refresh first).
+  const settlingUntilRef = useRef(0);
+  // One trailing refresh, scheduled to fire WHEN settling expires, so any
+  // updates we deliberately dropped during settling (teammate's unrelated
+  // stage change that arrived mid-window) get reconciled. Cleared on
+  // unmount so the timer doesn't leak.
+  const settlingTimerRef = useRef<number | null>(null);
+
   const refresh = useCoalescedAsync(async () => {
     try {
       const res = await fetchWithSessionGuard(`/api/conversations/counts`);
       if (!res.ok) return;
       const body = (await res.json()) as ConversationCounts;
+      // Drop the result if we're still inside the settling window — the
+      // server may not have committed the optimistic stage change yet, and
+      // applying these stale counts would yank byStage back to the old
+      // value just long enough for the user to see it. The trailing
+      // refresh scheduled in `onStageDelta` will run after settling
+      // expires and write the real numbers.
+      if (Date.now() < settlingUntilRef.current) return;
       setCounts(body);
     } catch {
       // Silent — next event re-triggers; a noisy retry loop here would
@@ -72,8 +106,9 @@ export function useConversationCounts(): ConversationCounts | null {
     // this, the badge would lag behind the thread header by one server
     // round-trip (50-300ms) because the `contact:updated` listener only
     // triggers a refetch. Patching byStage in-place makes the badge flip
-    // in the same frame as the rest of the UI; the refetch still fires
-    // and reconciles when it lands.
+    // in the same frame as the rest of the UI; the refetch is forced to
+    // wait out the settling window (see refreshes above) so it can't
+    // briefly overwrite the optimistic value with stale server counts.
     const onStageDelta = (e: Event) => {
       const detail = (e as CustomEvent<{
         contactId: string;
@@ -81,6 +116,7 @@ export function useConversationCounts(): ConversationCounts | null {
         nextStageId: string | null;
       }>).detail;
       if (!detail) return;
+      settlingUntilRef.current = Date.now() + STAGE_SETTLING_MS;
       setCounts((prev) => {
         if (!prev) return prev;
         const byStage = { ...prev.byStage };
@@ -95,6 +131,19 @@ export function useConversationCounts(): ConversationCounts | null {
         }
         return { ...prev, byStage };
       });
+      // Single trailing refresh after settling expires. Catches anything
+      // we dropped during the window (most importantly: a teammate's
+      // stage change for a DIFFERENT contact that arrived while we were
+      // settling our own change — server contact:updated fired, refresh
+      // ran, result was dropped, and without this catch-up the badge
+      // would never see it until the next unrelated event came along).
+      if (settlingTimerRef.current !== null) {
+        window.clearTimeout(settlingTimerRef.current);
+      }
+      settlingTimerRef.current = window.setTimeout(() => {
+        settlingTimerRef.current = null;
+        void refresh();
+      }, STAGE_SETTLING_MS + 50);
     };
 
     socket.on("conversation:assigned", trigger);
@@ -116,6 +165,10 @@ export function useConversationCounts(): ConversationCounts | null {
       socket.off("message:new", onMessageNew);
       if (typeof window !== "undefined") {
         window.removeEventListener("ccp:contact-stage-delta", onStageDelta);
+      }
+      if (settlingTimerRef.current !== null) {
+        window.clearTimeout(settlingTimerRef.current);
+        settlingTimerRef.current = null;
       }
     };
   }, [refresh]);
