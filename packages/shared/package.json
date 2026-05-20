@@ -12,6 +12,7 @@
     "./auth/better-auth-config": "./src/auth/better-auth-config.ts",
     "./auth/password-policy": "./src/auth/password-policy.ts",
     "./api-keys/scopes": "./src/api-keys/scopes.ts",
+    "./contacts/reserved-fields": "./src/contacts/reserved-fields.ts",
     "./providers/types": "./src/providers/types.ts",
     "./team-chat/types": "./src/team-chat/types.ts",
     "./team-chat/permissions": "./src/team-chat/permissions.ts",

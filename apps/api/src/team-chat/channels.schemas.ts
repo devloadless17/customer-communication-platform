@@ -6,8 +6,22 @@ const MAX_EMOJI_BYTES = 32;
 export const CreateChannelSchema = z.object({
   name: z.string(),
   description: z.string().trim().max(280).optional(),
+  /**
+   * Optional initial member ids beyond the creator. The creator is always
+   * added to their new channel, even when this list is empty. Pass an empty
+   * array (or omit) for a "just me" channel; the admin can add people later
+   * via the members dialog.
+   */
+  memberUserIds: z.array(z.string().min(1)).max(200).optional(),
 });
 export type CreateChannelInput = z.infer<typeof CreateChannelSchema>;
+
+export const AddChannelMembersSchema = z.object({
+  // Hard cap matches the team-size scaling cliff in CLAUDE.md (50–200 tenants);
+  // beyond 200 ids per call the request goes through the bulk-add endpoint.
+  userIds: z.array(z.string().min(1)).min(1).max(200),
+});
+export type AddChannelMembersInput = z.infer<typeof AddChannelMembersSchema>;
 
 export const UpdateChannelSchema = z.object({
   name: z.string().optional(),

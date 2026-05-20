@@ -17,6 +17,11 @@ export interface TeamChannelDto {
   updatedAt: string;
   lastMessageAt: string;
   lastMessagePreview: string;
+  /**
+   * Total members in the channel. Populated by list + getById endpoints.
+   * Cheap aggregated COUNT(*) on the membership table; no per-user join.
+   */
+  memberCount: number;
 }
 
 export interface TeamChannelListItemDto extends TeamChannelDto {

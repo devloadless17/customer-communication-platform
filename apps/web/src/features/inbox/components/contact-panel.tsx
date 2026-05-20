@@ -12,7 +12,7 @@ import {
 } from "@/features/contacts/components/field-controls";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
@@ -913,9 +913,12 @@ function AssigneePicker({
         >
           {current ? (
             <>
-              <span className="inline-flex size-5 items-center justify-center rounded-full bg-secondary text-[10px] font-medium">
-                {initials(current.name)}
-              </span>
+              <Avatar className="size-5">
+                {current.avatarUrl ? (
+                  <AvatarImage src={current.avatarUrl} alt={current.name} />
+                ) : null}
+                <AvatarFallback className="text-[10px]">{initials(current.name)}</AvatarFallback>
+              </Avatar>
               <span className="truncate font-normal">{current.name}</span>
             </>
           ) : (
@@ -941,9 +944,10 @@ function AssigneePicker({
             {currentId === u.id ? (
               <Check className="size-3.5" />
             ) : (
-              <span className="inline-flex size-5 items-center justify-center rounded-full bg-secondary text-[10px] font-medium">
-                {initials(u.name)}
-              </span>
+              <Avatar className="size-5">
+                {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
+                <AvatarFallback className="text-[10px]">{initials(u.name)}</AvatarFallback>
+              </Avatar>
             )}
             <span className="truncate">{u.name}</span>
           </DropdownMenuItem>

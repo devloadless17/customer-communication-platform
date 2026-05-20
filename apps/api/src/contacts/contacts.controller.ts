@@ -140,6 +140,37 @@ export class ContactsController {
       .send(csv);
   }
 
+  /**
+   * Blank import template. Header-only CSV listing every column the importer
+   * recognizes (built-in fields + the team's active custom fields). Drives
+   * the "Download template" button in the contact import dialog.
+   */
+  @Get("template")
+  async importTemplate(
+    @CurrentSession() session: ApiSession,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { csv, filename } = await this.contacts.importTemplateCsv(session.teamId);
+    res
+      .status(200)
+      .set("content-type", "text/csv; charset=utf-8")
+      .set("content-disposition", `attachment; filename="${filename}"`)
+      .send(csv);
+  }
+
+  /**
+   * Total contact count for the team. Used by the broadcast wizard's "All
+   * contacts" card. Separate from /count (audience union) on purpose: that
+   * endpoint returns 0 when both tag/contact arrays are empty, which is the
+   * correct contract for "user picked nothing." This route answers "how many
+   * contacts are in this team" with no audience semantics.
+   */
+  @Get("count-all")
+  async countAll(@CurrentSession() session: ApiSession) {
+    const count = await this.contacts.countAll(session.teamId);
+    return { count };
+  }
+
   @Post("count")
   async count(
     @CurrentSession() session: ApiSession,

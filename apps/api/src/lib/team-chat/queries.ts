@@ -39,18 +39,21 @@ type MessageRow = Prisma.TeamChannelMessageGetPayload<{ include: typeof MESSAGE_
 // Mapping
 // ===========================================================================
 
-export function mapChannel(row: {
-  id: string;
-  teamId: string;
-  name: string;
-  description: string | null;
-  isDefault: boolean;
-  createdById: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-  lastMessageAt: Date;
-  lastMessagePreview: string;
-}): TeamChannelDto {
+export function mapChannel(
+  row: {
+    id: string;
+    teamId: string;
+    name: string;
+    description: string | null;
+    isDefault: boolean;
+    createdById: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    lastMessageAt: Date;
+    lastMessagePreview: string;
+  },
+  memberCount = 0,
+): TeamChannelDto {
   return {
     id: row.id,
     teamId: row.teamId,
@@ -62,6 +65,7 @@ export function mapChannel(row: {
     updatedAt: row.updatedAt.toISOString(),
     lastMessageAt: row.lastMessageAt.toISOString(),
     lastMessagePreview: row.lastMessagePreview,
+    memberCount,
   };
 }
 
@@ -150,9 +154,12 @@ export async function listChannelsForUser(
   teamId: string,
   userId: string,
 ): Promise<TeamChannelListItemDto[]> {
-  const [channels, receipts, mentionAgg] = await Promise.all([
+  const [channels, receipts, mentionAgg, memberCounts] = await Promise.all([
+    // Only channels the viewer is a member of. The default channel auto-includes
+    // every team member (enforced at create/team-join time), so users who haven't
+    // been explicitly added to anything still see #general.
     db.teamChannel.findMany({
-      where: { teamId },
+      where: { teamId, members: { some: { userId } } },
       orderBy: [{ isDefault: "desc" }, { name: "asc" }],
     }),
     db.teamChannelReadReceipt.findMany({
@@ -174,11 +181,19 @@ export async function listChannelsForUser(
         AND (r."lastReadAt" IS NULL OR m."createdAt" > r."lastReadAt")
       GROUP BY m."channelId"
     `,
+    db.teamChannelMember.groupBy({
+      by: ["channelId"],
+      where: { channel: { teamId } },
+      _count: { userId: true },
+    }),
   ]);
 
   const receiptByChannel = new Map(receipts.map((r) => [r.channelId, r.lastReadAt]));
   const mentionsByChannel = new Map(
     mentionAgg.map((row) => [row.channelId, Number(row.count)]),
+  );
+  const memberCountByChannel = new Map(
+    memberCounts.map((row) => [row.channelId, row._count.userId]),
   );
 
   return channels.map((ch) => {
@@ -194,7 +209,7 @@ export async function listChannelsForUser(
       ? ch.lastMessageAt > lastRead
       : ch.lastMessageAt.getTime() > ch.createdAt.getTime();
     return {
-      ...mapChannel(ch),
+      ...mapChannel(ch, memberCountByChannel.get(ch.id) ?? 0),
       unreadForMe,
       unreadMentionCount: mentionsByChannel.get(ch.id) ?? 0,
     };
@@ -207,8 +222,9 @@ export async function getChannelById(
 ): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
     where: { id: channelId, teamId },
+    include: { _count: { select: { members: true } } },
   });
-  return row ? mapChannel(row) : null;
+  return row ? mapChannel(row, row._count.members) : null;
 }
 
 /** Resolve a channel by URL slug (name). Returns null when not found. */
@@ -218,8 +234,9 @@ export async function getChannelByName(
 ): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
     where: { teamId, name },
+    include: { _count: { select: { members: true } } },
   });
-  return row ? mapChannel(row) : null;
+  return row ? mapChannel(row, row._count.members) : null;
 }
 
 /** Default channel for a team — the one /team redirects to. */
@@ -227,15 +244,17 @@ export async function getDefaultChannel(teamId: string): Promise<TeamChannelDto 
   const row = await db.teamChannel.findFirst({
     where: { teamId, isDefault: true },
     orderBy: { createdAt: "asc" },
+    include: { _count: { select: { members: true } } },
   });
-  if (row) return mapChannel(row);
+  if (row) return mapChannel(row, row._count.members);
   // Fallback: alphabetically-first channel. Happens if the default was
   // somehow demoted without another being promoted — defensive only.
   const fallback = await db.teamChannel.findFirst({
     where: { teamId },
     orderBy: { name: "asc" },
+    include: { _count: { select: { members: true } } },
   });
-  return fallback ? mapChannel(fallback) : null;
+  return fallback ? mapChannel(fallback, fallback._count.members) : null;
 }
 
 // ===========================================================================

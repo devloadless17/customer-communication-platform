@@ -681,6 +681,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     if (args.kind === "document" && args.filename) {
       sub.filename = args.filename;
     }
+    // Audio voice-note flag — renders with the WhatsApp waveform UI on the
+    // recipient's side. Meta-side flag, not a separate payload type.
+    if (args.kind === "audio" && args.voice) {
+      sub.voice = true;
+    }
 
     const res = await metaFetch(url, {
       method: "POST",

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -42,6 +43,7 @@ export function AssignmentDropdown({
   conversationId,
   currentId,
   currentName,
+  currentAvatarUrl,
   currentStatus,
   teamMembers,
   onAlert,
@@ -50,6 +52,7 @@ export function AssignmentDropdown({
   conversationId: string;
   currentId: string | null;
   currentName: string | null;
+  currentAvatarUrl?: string | null;
   /** Needed to predict the status side-effect of the assign (see
    *  predictNextStatus above). Mirrors the server rule. */
   currentStatus: ConversationStatus;
@@ -137,9 +140,14 @@ export function AssignmentDropdown({
         <Button variant="outline" size="sm" className="h-8 gap-1.5" disabled={pending}>
           {currentName ? (
             <>
-              <span className="inline-flex size-4 items-center justify-center rounded-full bg-secondary text-[9px] font-medium">
-                {initials(currentName)}
-              </span>
+              <Avatar className="size-4">
+                {currentAvatarUrl ? (
+                  <AvatarImage src={currentAvatarUrl} alt={currentName} />
+                ) : null}
+                <AvatarFallback className="text-[8px]">
+                  {initials(currentName)}
+                </AvatarFallback>
+              </Avatar>
               <span className="font-normal">{currentName.split(" ")[0]}</span>
             </>
           ) : (
@@ -162,9 +170,10 @@ export function AssignmentDropdown({
             {currentId === u.id ? (
               <Check className="size-3.5" />
             ) : (
-              <span className="inline-flex size-5 items-center justify-center rounded-full bg-secondary text-[10px] font-medium">
-                {initials(u.name)}
-              </span>
+              <Avatar className="size-5">
+                {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
+                <AvatarFallback className="text-[10px]">{initials(u.name)}</AvatarFallback>
+              </Avatar>
             )}
             <span>{u.name}</span>
           </DropdownMenuItem>

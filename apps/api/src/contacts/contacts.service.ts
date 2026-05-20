@@ -1101,6 +1101,41 @@ export class ContactsService {
     const stamp = new Date().toISOString().slice(0, 10);
     return { csv, filename: `contacts-${stamp}.csv`, truncated };
   }
+
+  /**
+   * Total number of contacts in the team. Used by the broadcast wizard's
+   * "All contacts" card — the existing `countAudience` endpoint returns 0
+   * when called with no filters, by design (it has no "all" mode), so a
+   * dedicated count keeps "all" semantics from leaking into the audience
+   * union logic.
+   */
+  async countAll(teamId: string): Promise<number> {
+    return this.db.contact.count({ where: { teamId } });
+  }
+
+  /**
+   * Blank import template — CSV with header row only. Built from the same
+   * recognized-headers list as the importer, plus any team-defined custom
+   * field labels, so a fresh download always reflects the current schema.
+   * No data rows: empty file == "fill me in" rather than risking the user
+   * importing the example as a real contact.
+   */
+  async importTemplateCsv(teamId: string): Promise<{ csv: string; filename: string }> {
+    const fieldDefs = await this.db.contactFieldDefinition.findMany({
+      where: { teamId, isVisible: true },
+      orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+      select: { label: true },
+    });
+    const baseColumns = ["phone_number", "name", "email", "location"];
+    const customColumns = fieldDefs.map((d) => d.label);
+    const columns = [...baseColumns, ...customColumns];
+    // Single header row terminated with CRLF — matches the Excel-friendly
+    // default the export path uses.
+    const csv = columns
+      .map((c) => (/[",\n\r]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c))
+      .join(",") + "\r\n";
+    return { csv, filename: "contacts-template.csv" };
+  }
 }
 
 // ---------------------------------------------------------------------------

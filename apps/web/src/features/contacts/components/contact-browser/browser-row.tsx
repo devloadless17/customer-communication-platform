@@ -92,8 +92,11 @@ export function BrowserRow({
         {stage && (
           <span
             className={cn(
-              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] sm:inline-flex",
-              tagColorClasses(stage.color).chip,
+              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium sm:inline-flex",
+              // Stage uses the higher-contrast `pill` variant — the lighter
+              // `chip` variant is too washed-out on a white card. Tag chips
+              // continue to use `chip`.
+              tagColorClasses(stage.color).pill,
             )}
             title={`Stage: ${stage.name}`}
           >

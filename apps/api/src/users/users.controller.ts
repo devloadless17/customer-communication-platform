@@ -1,11 +1,34 @@
-import { Body, Controller, Delete, Get, Param, Patch, UseGuards } from "@nestjs/common";
+import { randomUUID } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { diskStorage } from "multer";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
-import { UpdateUserSchema, type UpdateUserInput } from "./users.schemas";
+import {
+  UpdateMyProfileSchema,
+  UpdateUserSchema,
+  type UpdateMyProfileInput,
+  type UpdateUserInput,
+} from "./users.schemas";
 import { UsersService } from "./users.service";
 
 /**
@@ -28,6 +51,58 @@ export class UsersController {
   async list(@CurrentSession() session: ApiSession) {
     const users = await this.users.list(session.teamId);
     return { users };
+  }
+
+  // `me` is a static segment — must appear before `:id` routes so Express
+  // doesn't try to match "me" as a user id (which would route through the
+  // admin-only PATCH guard and 403 the caller's own profile edit).
+  @Patch("me")
+  async updateSelf(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(UpdateMyProfileSchema)) body: UpdateMyProfileInput,
+  ) {
+    const user = await this.users.updateMyProfile(
+      session.teamId,
+      session.userId,
+      body,
+    );
+    return { user };
+  }
+
+  /**
+   * Avatar upload — multipart `file`. 2 MiB ceiling matches the per-image
+   * cap in [avatar.ts](apps/api/src/lib/blob-storage/avatar.ts) so multer
+   * refuses huge bodies before the service even runs. `diskStorage` mirrors
+   * the team-chat media route's pattern (don't pin avatar bytes in V8 heap
+   * on the 4 GB pilot VPS).
+   */
+  @Post("me/avatar")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: 2 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        filename: (_req, file, cb) =>
+          cb(null, `ccp-avatar-${randomUUID()}-${(file.originalname || "img").slice(-32)}`),
+      }),
+    }),
+  )
+  async uploadAvatar(
+    @CurrentSession() session: ApiSession,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    if (!file) throw new BadRequestException({ error: "file required" });
+    try {
+      const bytes = await readFile(file.path);
+      const out = await this.users.uploadMyAvatar(session.teamId, session.userId, {
+        bytes: new Uint8Array(bytes),
+        mimeType: file.mimetype || "application/octet-stream",
+        originalFilename: file.originalname ?? null,
+      });
+      return { ok: true, ...out };
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
   }
 
   @RequireRole("admin")

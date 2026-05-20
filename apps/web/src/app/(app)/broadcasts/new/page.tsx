@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 import {
-  countContacts,
+  countAllContacts,
   getTeamWhatsappConfig,
   listAudienceGroups,
   listContactFieldDefinitions,
@@ -49,7 +49,7 @@ export default async function NewBroadcastPage({
     contactLabels,
   ] = await Promise.all([
     getTeamWhatsappConfig(),
-    countContacts({}),
+    countAllContacts(),
     listTags(),
     listAudienceGroups(),
     listContactFieldDefinitions(),

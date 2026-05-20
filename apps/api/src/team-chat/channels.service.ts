@@ -115,16 +115,49 @@ export class ChannelsService {
     }
     const description = input.description?.length ? input.description : null;
 
+    // Validate the proposed extra members BEFORE the transaction so the
+    // channel-create rollback is clean. Self is added even if not listed,
+    // and duplicates are deduped — we only need to confirm every id is a
+    // real, non-deactivated user on this team.
+    const requestedMemberIds = new Set<string>(input.memberUserIds ?? []);
+    requestedMemberIds.add(userId);
+    const memberIds = [...requestedMemberIds];
+    if (memberIds.length > 1) {
+      const validCount = await this.db.user.count({
+        where: { id: { in: memberIds }, teamId, deactivatedAt: null },
+      });
+      if (validCount !== memberIds.length) {
+        throw new BadRequestException({
+          error: "invalid_member",
+          detail: "One or more selected members aren't on this team.",
+        });
+      }
+    }
+
     try {
-      const created = await this.db.teamChannel.create({
-        data: { teamId, name, description, createdById: userId },
+      const created = await this.db.$transaction(async (tx) => {
+        const channel = await tx.teamChannel.create({
+          data: { teamId, name, description, createdById: userId },
+        });
+        await tx.teamChannelMember.createMany({
+          data: memberIds.map((id) => ({
+            channelId: channel.id,
+            userId: id,
+            addedById: userId,
+          })),
+        });
+        return channel;
       });
       await this.bus.publish({
         type: "team.catalog_changed",
         teamId,
         scope: "team-channels",
       });
-      return mapChannel(created);
+      // Members joining a brand-new channel doesn't need a separate
+      // members_changed fan-out — the catalog_changed event already triggers
+      // every connected client to refetch its channel list, which carries the
+      // new memberCount + visibility for the newly-added members.
+      return mapChannel(created, memberIds.length);
     } catch (err) {
       if (isP2002(err)) {
         throw new ConflictException({
@@ -134,6 +167,153 @@ export class ChannelsService {
       }
       throw err;
     }
+  }
+
+  // ---- Members ----------------------------------------------------------
+
+  /**
+   * List members of a channel. Viewer must be in the team; we don't require
+   * membership-in-channel because the members button is the way someone who
+   * was just removed sees who's still in. Returns rows ordered by addedAt
+   * desc (most-recently-added first).
+   */
+  async listMembers(teamId: string, viewerUserId: string, channelId: string) {
+    await this.requireChannelInTeam(teamId, channelId);
+    const rows = await this.db.teamChannelMember.findMany({
+      where: { channelId },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true, avatarUrl: true },
+        },
+      },
+      orderBy: [{ addedAt: "desc" }, { userId: "asc" }],
+    });
+    return rows.map((r) => ({
+      channelId: r.channelId,
+      userId: r.userId,
+      name: r.user.name,
+      email: r.user.email,
+      role: r.user.role,
+      avatarUrl: r.user.avatarUrl ?? null,
+      addedAt: r.addedAt.toISOString(),
+      addedById: r.addedById,
+      isSelf: r.userId === viewerUserId,
+    }));
+  }
+
+  /**
+   * Add members to a channel. Admin/manager only — checked at the route, but
+   * re-checked here so a future direct caller can't skip the gate. Adds are
+   * idempotent: re-adding someone is a no-op (skipDuplicates), and the event
+   * payload only carries ids that were actually new so the UI doesn't toast
+   * "added 0 people."
+   */
+  async addMembers(
+    teamId: string,
+    actorUserId: string,
+    role: Role,
+    channelId: string,
+    userIds: string[],
+  ): Promise<{ added: string[] }> {
+    if (!canManageChannel(role)) throw new ForbiddenException({ error: "forbidden" });
+    await this.requireChannelInTeam(teamId, channelId);
+
+    const ids = [...new Set(userIds)];
+    if (ids.length === 0) return { added: [] };
+
+    const validUsers = await this.db.user.findMany({
+      where: { id: { in: ids }, teamId, deactivatedAt: null },
+      select: { id: true },
+    });
+    if (validUsers.length !== ids.length) {
+      throw new BadRequestException({
+        error: "invalid_member",
+        detail: "One or more selected users aren't on this team.",
+      });
+    }
+
+    const existing = await this.db.teamChannelMember.findMany({
+      where: { channelId, userId: { in: ids } },
+      select: { userId: true },
+    });
+    const alreadyIn = new Set(existing.map((e) => e.userId));
+    const toAdd = ids.filter((id) => !alreadyIn.has(id));
+
+    if (toAdd.length > 0) {
+      await this.db.teamChannelMember.createMany({
+        data: toAdd.map((id) => ({ channelId, userId: id, addedById: actorUserId })),
+        skipDuplicates: true,
+      });
+      await this.bus.publish({
+        type: "team_channel.members_changed",
+        teamId,
+        channelId,
+        action: "added",
+        userIds: toAdd,
+        changedById: actorUserId,
+      });
+    }
+    return { added: toAdd };
+  }
+
+  /**
+   * Remove a member from a channel. Admin/manager only. Self-removal ("leave
+   * channel") is allowed for any role — the route passes the actor's own
+   * userId and we permit that path even without canManageChannel.
+   *
+   * The default channel is protected: no one — admin or self — can be removed.
+   * This keeps #general as the always-available landing channel for every
+   * team member; demoting it requires deleting/renaming the row.
+   */
+  async removeMember(
+    teamId: string,
+    actorUserId: string,
+    role: Role,
+    channelId: string,
+    targetUserId: string,
+  ): Promise<void> {
+    const channel = await this.requireChannelInTeam(teamId, channelId);
+
+    const isSelfLeave = actorUserId === targetUserId;
+    if (!isSelfLeave && !canManageChannel(role)) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+
+    if (channel.isDefault) {
+      throw new ConflictException({
+        error: "default_channel_locked",
+        detail: "Members can't leave or be removed from the default channel.",
+      });
+    }
+
+    const existing = await this.db.teamChannelMember.findUnique({
+      where: { channelId_userId: { channelId, userId: targetUserId } },
+      select: { userId: true },
+    });
+    if (!existing) {
+      throw new NotFoundException({ error: "not_a_member" });
+    }
+
+    await this.db.teamChannelMember.delete({
+      where: { channelId_userId: { channelId, userId: targetUserId } },
+    });
+    await this.bus.publish({
+      type: "team_channel.members_changed",
+      teamId,
+      channelId,
+      action: "removed",
+      userIds: [targetUserId],
+      changedById: actorUserId,
+    });
+  }
+
+  private async requireChannelInTeam(teamId: string, channelId: string) {
+    const channel = await this.db.teamChannel.findFirst({
+      where: { id: channelId, teamId },
+      select: { id: true, isDefault: true },
+    });
+    if (!channel) throw new NotFoundException({ error: "channel not found" });
+    return channel;
   }
 
   async update(

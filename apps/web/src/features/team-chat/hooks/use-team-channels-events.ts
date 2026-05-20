@@ -107,14 +107,36 @@ export function useTeamChannelsList(
         .catch(() => {});
     };
 
+    const onMembersChanged: Parameters<
+      typeof socket.on<"team:channel:members:changed">
+    >[1] = (payload) => {
+      // Optimistic local prune/add for the affected user — the catalog tick
+      // that rides along will trigger a refetch a few ms later, but acting
+      // immediately removes the "I was just kicked but I can still see it"
+      // window.
+      const meAffected = payload.userIds.includes(currentUserId);
+      if (!meAffected) return;
+      setChannels((prev) => {
+        if (payload.action === "removed") {
+          return prev.filter((ch) => ch.id !== payload.channelId);
+        }
+        // For "added", the catalog refetch will populate full DTO fields
+        // (unreadForMe, mentionCount). No-op here; we don't have a full DTO
+        // for the channel from the event payload.
+        return prev;
+      });
+    };
+
     socket.on("team:channel:message", onMessage);
     socket.on("team:channel:read", onRead);
     socket.on("team:catalog:changed", onCatalog);
+    socket.on("team:channel:members:changed", onMembersChanged);
 
     return () => {
       socket.off("team:channel:message", onMessage);
       socket.off("team:channel:read", onRead);
       socket.off("team:catalog:changed", onCatalog);
+      socket.off("team:channel:members:changed", onMembersChanged);
     };
   }, [currentUserId]);
 

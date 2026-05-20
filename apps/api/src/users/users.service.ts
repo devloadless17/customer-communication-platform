@@ -11,7 +11,21 @@ import type { Role, User } from "@ccp/shared/types";
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
-import type { UpdateUserInput } from "./users.schemas";
+import {
+  AvatarUploadError,
+  uploadAvatar,
+} from "../lib/blob-storage/avatar";
+import type { UpdateMyProfileInput, UpdateUserInput } from "./users.schemas";
+
+/**
+ * Multer-style upload payload for the avatar route. Re-declared here so the
+ * service stays decoupled from Express types.
+ */
+export interface AvatarUploadFile {
+  bytes: Uint8Array;
+  mimeType: string;
+  originalFilename: string | null;
+}
 
 @Injectable()
 export class UsersService {
@@ -29,6 +43,104 @@ export class UsersService {
    * Sort by name to match the historical `listTeamMembers` unstable_cache
    * shape so the post-Step-7b switch is a wire-shape no-op.
    */
+  /**
+   * Self-profile update. Bypasses the admin-only PATCH /:id because the user
+   * is editing themselves — the four-layered admin gate at .update() would
+   * forbid this for non-admin agents who legitimately want to change their
+   * own name or avatar.
+   *
+   * Only mutates the fields actually sent. `avatarUrl: null` clears it,
+   * `avatarUrl: "<url>"` swaps it, omitting the field leaves it alone.
+   */
+  async updateMyProfile(
+    teamId: string,
+    userId: string,
+    input: UpdateMyProfileInput,
+  ): Promise<User> {
+    const data: { name?: string; avatarUrl?: string | null } = {};
+    if (typeof input.name === "string") data.name = input.name;
+    if (input.avatarUrl !== undefined) data.avatarUrl = input.avatarUrl;
+
+    const updated = await this.db.user.update({
+      where: { id: userId },
+      data,
+      select: {
+        id: true,
+        teamId: true,
+        role: true,
+        name: true,
+        email: true,
+        avatarUrl: true,
+        createdAt: true,
+        deactivatedAt: true,
+      },
+    });
+    // Bust the session cache so the next request from this user sees the
+    // new name/avatar without a 15s lag.
+    this.sessionInvalidator.bustCache(userId);
+
+    await this.bus.publish({
+      type: "user.profile_updated",
+      teamId,
+      userId,
+      ...(data.name !== undefined ? { name: data.name } : {}),
+      ...(data.avatarUrl !== undefined ? { avatarUrl: data.avatarUrl } : {}),
+    });
+
+    return {
+      id: updated.id,
+      teamId: updated.teamId,
+      role: updated.role as Role,
+      name: updated.name,
+      email: updated.email,
+      ...(updated.avatarUrl ? { avatarUrl: updated.avatarUrl } : {}),
+      createdAt: updated.createdAt.toISOString(),
+      isActive: updated.deactivatedAt === null,
+    };
+  }
+
+  /**
+   * Upload a new avatar image. Stores via the dedicated avatar blob path
+   * (see lib/blob-storage/avatar.ts for the mime / size constraints) and
+   * writes the resulting URL back onto the user row + publishes the same
+   * `user.profile_updated` event the URL-only path uses, so subscribers
+   * don't need a separate handler.
+   */
+  async uploadMyAvatar(
+    teamId: string,
+    userId: string,
+    file: AvatarUploadFile,
+  ): Promise<{ url: string }> {
+    try {
+      const out = await uploadAvatar({
+        userId,
+        bytes: file.bytes,
+        mimeType: file.mimeType,
+        originalFilename: file.originalFilename,
+      });
+      await this.db.user.update({
+        where: { id: userId },
+        data: { avatarUrl: out.url },
+      });
+      this.sessionInvalidator.bustCache(userId);
+      await this.bus.publish({
+        type: "user.profile_updated",
+        teamId,
+        userId,
+        avatarUrl: out.url,
+      });
+      return { url: out.url };
+    } catch (err) {
+      if (err instanceof AvatarUploadError) {
+        if (err.code === "unsupported_mime" || err.code === "empty_file" || err.code === "too_large") {
+          throw new BadRequestException({ error: err.code, detail: err.message });
+        }
+        throw new BadRequestException({ error: err.code, detail: err.message });
+      }
+      throw err;
+    }
+  }
+
   async list(teamId: string): Promise<User[]> {
     const rows = await this.db.user.findMany({
       where: { teamId },

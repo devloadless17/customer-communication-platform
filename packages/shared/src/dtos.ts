@@ -118,6 +118,27 @@ export interface ListContactsOpts {
 // pre-fill form. Plain values (decrypted server-side), display-only.
 // ---------------------------------------------------------------------------
 
+/**
+ * Channel-member row for the members panel. Mirrors the underlying
+ * `TeamChannelMember` join with the user fields denormalized so the panel
+ * can render without a second round-trip.
+ */
+export interface ChannelMemberDto {
+  channelId: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: import("./types").Role;
+  avatarUrl: string | null;
+  /** ISO. Useful sorting in the list ("most-recently-added first"). */
+  addedAt: string;
+  /** Null when the adding admin has been removed (FK SetNull). */
+  addedById: string | null;
+  /** True when the row represents the current viewer, so the UI can render
+   *  a "Leave" affordance instead of "Remove" + treat it specially. */
+  isSelf: boolean;
+}
+
 export interface WhatsappConfigView {
   phoneNumberId: string | null;
   displayPhoneNumber: string | null;

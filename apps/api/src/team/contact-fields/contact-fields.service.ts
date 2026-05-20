@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 
 import { canManageContactFields } from "@ccp/shared/auth/permissions";
+import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import type { ContactFieldDefinition, Role } from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
@@ -114,6 +115,16 @@ export class ContactFieldsService {
     if (!baseKey) {
       throw new BadRequestException({ error: "label must contain letters or digits" });
     }
+    // Block shadowing of built-in Contact columns ("location", "email",
+    // "first_name", etc). Without this, the custom field saves to
+    // `customFields[key]` but the inbox panel renders it next to the
+    // identically-labeled built-in column, confusing reads + writes.
+    if (isReservedFieldKey(input.label)) {
+      throw new BadRequestException({
+        error: "reserved_field",
+        detail: `"${input.label}" is a built-in contact field — pick a different name.`,
+      });
+    }
 
     // Disambiguate against existing keys — two labels that collapse to the
     // same slug would otherwise hit the [teamId, key] unique index.
@@ -155,6 +166,16 @@ export class ContactFieldsService {
       select: { id: true },
     });
     if (!existing) throw new NotFoundException({ error: "not found" });
+
+    // Same shadow-built-in guard as create. Stops a rename loophole: if a
+    // user couldn't create "Location" they shouldn't be able to rename
+    // "City info" → "Location" either.
+    if (typeof input.label === "string" && isReservedFieldKey(input.label)) {
+      throw new BadRequestException({
+        error: "reserved_field",
+        detail: `"${input.label}" is a built-in contact field — pick a different name.`,
+      });
+    }
 
     const updated = await this.db.contactFieldDefinition.update({
       where: { id },

@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import type {
   ContactFieldDefinition,
   ContactPanelBuiltins,
@@ -257,6 +258,34 @@ export function ContactFieldsSettings({
         </div>
       )}
 
+      {(() => {
+        // One-shot banner for legacy rows that were created before the
+        // collision guard landed. Surfaces the names so the admin can rename
+        // them; the server still serves both the built-in column AND the
+        // custom field, which causes write-vs-read confusion in the panel.
+        const shadowed = defs.filter((d) => isReservedFieldKey(d.label));
+        if (shadowed.length === 0) return null;
+        return (
+          <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs">
+            <div className="font-medium text-amber-700 dark:text-amber-400">
+              {shadowed.length === 1 ? "A custom field" : `${shadowed.length} custom fields`} shadow built-in contact columns.
+            </div>
+            <div className="mt-1 text-muted-foreground">
+              {shadowed.map((d) => (
+                <span
+                  key={d.id}
+                  className="mr-1 inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5"
+                >
+                  {d.label}
+                </span>
+              ))}
+              Rename to avoid two fields with the same meaning in the contact
+              panel.
+            </div>
+          </div>
+        );
+      })()}
+
       <section className="mb-6 overflow-hidden rounded-lg border border-border bg-card">
         <header className="border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">Built-in fields</h2>
@@ -324,6 +353,7 @@ export function ContactFieldsSettings({
                   placeholder="New field name…"
                   className="h-8 max-w-xs text-sm"
                   disabled={busyId === "__new__"}
+                  aria-invalid={isReservedFieldKey(newLabel) || undefined}
                 />
                 <div className="ml-auto flex items-center gap-2">
                   <Button
@@ -337,7 +367,11 @@ export function ContactFieldsSettings({
                   <Button
                     size="sm"
                     onClick={() => void createField()}
-                    disabled={busyId === "__new__" || !newLabel.trim()}
+                    disabled={
+                      busyId === "__new__" ||
+                      !newLabel.trim() ||
+                      isReservedFieldKey(newLabel)
+                    }
                   >
                     {busyId === "__new__" ? (
                       <Loader2 className="size-3.5 animate-spin" />
@@ -348,6 +382,12 @@ export function ContactFieldsSettings({
                   </Button>
                 </div>
               </div>
+              {isReservedFieldKey(newLabel) && (
+                <div className="mt-2 text-[11px] text-destructive">
+                  &ldquo;{newLabel}&rdquo; is a built-in contact field — pick a
+                  different name.
+                </div>
+              )}
             </li>
           )}
         </ul>

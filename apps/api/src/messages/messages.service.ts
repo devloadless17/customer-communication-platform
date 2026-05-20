@@ -749,6 +749,31 @@ export class MessagesService {
         detail: `WhatsApp stickers must be image/webp (got ${mimeType}).`,
       });
     }
+    // Audio: Meta only accepts a specific mime set. `audio/webm` in particular
+    // is a frequent silent failure — Chrome's MediaRecorder defaults to it for
+    // voice notes, uploads succeed, then Meta returns a confusing
+    // `provider_rejected` at send time. Block it here with a clear error.
+    // The blob-storage allowlist still permits webm (so we can debug-replay),
+    // but we won't push it to Meta.
+    if (kind === "audio") {
+      const normalized = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+      const META_AUDIO_ALLOWED = new Set([
+        "audio/aac",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/amr",
+        "audio/ogg",
+      ]);
+      if (!META_AUDIO_ALLOWED.has(normalized)) {
+        throw new BadRequestException({
+          error: "invalid_audio_mime",
+          detail:
+            `WhatsApp doesn't accept ${normalized || "this audio format"}. ` +
+            "Supported: AAC, MP4 (m4a), MP3, AMR, OGG/Opus. " +
+            "If this came from a voice recorder, try a different browser (Chrome 105+, Firefox, Safari).",
+        });
+      }
+    }
 
     // Read the disk-backed multer temp file ONCE into a single Buffer that
     // both Meta upload + blob-storage upload share. file.buffer is empty
@@ -847,6 +872,7 @@ export class MessagesService {
           caption: caption || undefined,
           filename: kind === "document" ? filename : undefined,
           ...(replyToExternalId ? { replyToExternalId } : {}),
+          ...(kind === "audio" && form.voice ? { voice: true } : {}),
         },
         sendConfig,
       );

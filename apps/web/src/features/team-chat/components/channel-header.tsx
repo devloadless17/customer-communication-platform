@@ -33,6 +33,7 @@ export function ChannelHeader({
   onEdit,
   onDelete,
   onOpenSearch,
+  onOpenMembers,
   onOpenChannelList,
 }: {
   channel: TeamChannelDto;
@@ -43,6 +44,8 @@ export function ChannelHeader({
   onEdit: () => void;
   onDelete: () => void;
   onOpenSearch: () => void;
+  /** Opens the channel-members dialog (add / remove people). */
+  onOpenMembers: () => void;
   /** Mobile-only — opens the slide-in channel list sheet. */
   onOpenChannelList?: () => void;
 }) {
@@ -95,12 +98,17 @@ export function ChannelHeader({
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
-          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          <button
+            type="button"
+            onClick={onOpenMembers}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            aria-label="Channel members"
+          >
             <Users className="size-3.5" />
-            <span>{memberCount}</span>
-          </div>
+            <span className="tabular-nums">{memberCount}</span>
+          </button>
         </TooltipTrigger>
-        <TooltipContent>Team members</TooltipContent>
+        <TooltipContent>Channel members</TooltipContent>
       </Tooltip>
       {(canEdit || canDelete) && (
         <DropdownMenu>

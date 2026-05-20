@@ -24,6 +24,7 @@ import { Sheet } from "@/components/ui/sheet";
 import { ChannelComposer } from "./channel-composer";
 import { ChannelHeader } from "./channel-header";
 import { ChannelList } from "./channel-list";
+import { ChannelMembersDialog } from "./channel-members-dialog";
 import { ChannelSearch } from "./channel-search";
 import { ChannelThread } from "./channel-thread";
 import {
@@ -179,6 +180,14 @@ export function TeamChatWorkspace({
   }, [initialChannel.id]);
   const [showNew, setShowNew] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
+  // Live override on top of `initialChannel.memberCount`. Bumped optimistically
+  // when the members dialog adds/removes someone so the header pill updates
+  // immediately, and reset when the parent re-renders against a fresher
+  // initialChannel.
+  const [memberCountOverride, setMemberCountOverride] = useState<number | null>(
+    null,
+  );
   const [channelSearchOpen, setChannelSearchOpen] = useState(false);
   const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
   const [mobileChannelsOpen, setMobileChannelsOpen] = useState(false);
@@ -347,7 +356,7 @@ export function TeamChatWorkspace({
         <ChannelHeader
           channel={initialChannel}
           currentRole={currentUser.role}
-          memberCount={teamMembers.filter((u) => u.isActive).length}
+          memberCount={memberCountOverride ?? initialChannel.memberCount}
           typingUserIds={channelState.typingUserIds}
           teamMemberNameById={namesById}
           onEdit={() => setShowEdit(true)}
@@ -355,8 +364,19 @@ export function TeamChatWorkspace({
             void deleteChannel(initialChannel.id, "/team");
           }}
           onOpenSearch={() => setChannelSearchOpen(true)}
+          onOpenMembers={() => setShowMembers(true)}
           onOpenChannelList={() => setMobileChannelsOpen(true)}
         />
+        {showMembers && (
+          <ChannelMembersDialog
+            channel={initialChannel}
+            currentUser={{ id: currentUser.id }}
+            currentRole={currentUser.role}
+            allTeamMembers={teamMembers}
+            onClose={() => setShowMembers(false)}
+            onChanged={(n) => setMemberCountOverride(n)}
+          />
+        )}
         {channelSearchOpen && (
           <ChannelSearch
             channelId={initialChannel.id}

@@ -450,6 +450,38 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * One or more users were added to / removed from a channel. Fires to every
+   * connected member of the team — clients receiving this event update their
+   * cached members list for the channel, and the affected users (those in
+   * `userIds`) update their own channel-list visibility.
+   *
+   * `userIds` is the full set of changes for the action (batched), not one
+   * event per user. `changedById` is the actor who triggered the change.
+   */
+  "team:channel:members:changed": (payload: {
+    teamId: string;
+    channelId: string;
+    action: "added" | "removed";
+    userIds: string[];
+    changedById: string | null;
+  }) => void;
+
+  /**
+   * A team member updated their profile (name / avatar). Cached sender names
+   * + avatars across the inbox, assignment dropdowns, contact-panel "assigned
+   * to" labels, and team-chat author rows update against this without a
+   * refetch.
+   *
+   * Undefined fields = no change. `avatarUrl: null` = explicitly cleared.
+   */
+  "user:profile:updated": (payload: {
+    teamId: string;
+    userId: string;
+    name?: string;
+    avatarUrl?: string | null;
+  }) => void;
+
+  /**
    * Typing snapshot for a thread. Rides the channel room (so any tab with
    * the channel open can dispatch — only the tab with the matching thread
    * panel open will render). `threadRootId` is the discriminator clients

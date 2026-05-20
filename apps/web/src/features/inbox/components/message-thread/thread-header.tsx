@@ -69,6 +69,7 @@ export function ThreadHeader({
   status,
   assignedUserId,
   assignedUserName,
+  assignedUserAvatarUrl,
   teamMembers,
   otherViewers,
   onAlert,
@@ -87,6 +88,7 @@ export function ThreadHeader({
   status: ConversationStatus;
   assignedUserId: string | null;
   assignedUserName: string | null;
+  assignedUserAvatarUrl?: string | null;
   teamMembers: User[];
   /**
    * Other teammates currently viewing this conversation. Empty array = no
@@ -158,6 +160,7 @@ export function ThreadHeader({
           conversationId={conversationId}
           currentId={assignedUserId}
           currentName={assignedUserName}
+          currentAvatarUrl={assignedUserAvatarUrl ?? null}
           currentStatus={status}
           teamMembers={teamMembers}
           onAlert={onAlert}

@@ -733,6 +733,7 @@ function MessageThreadImpl({
         status={conversation.status}
         assignedUserId={assignedUser?.id ?? null}
         assignedUserName={assignedUser?.name ?? null}
+        assignedUserAvatarUrl={assignedUser?.avatarUrl ?? null}
         teamMembers={teamMembers}
         otherViewers={otherViewers}
         onAlert={alert}
@@ -831,6 +832,11 @@ function MessageThreadImpl({
                         senderName={
                           entry.data.senderUserId
                             ? memberById.get(entry.data.senderUserId)?.name ?? null
+                            : null
+                        }
+                        senderAvatarUrl={
+                          entry.data.senderUserId
+                            ? memberById.get(entry.data.senderUserId)?.avatarUrl ?? null
                             : null
                         }
                         contactName={contact.name}

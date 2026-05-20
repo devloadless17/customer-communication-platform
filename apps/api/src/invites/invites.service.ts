@@ -263,6 +263,24 @@ export class InvitesService {
           data: { acceptedAt: new Date() },
         });
 
+        // Auto-join the default channel so the new teammate sees #general the
+        // moment they log in. Non-default channels stay invite-by-admin; the
+        // members dialog (apps/web/src/features/team-chat/channel-members-*)
+        // is where the admin adds them to specialized rooms.
+        const defaultChannel = await tx.teamChannel.findFirst({
+          where: { teamId: invite.teamId, isDefault: true },
+          select: { id: true },
+        });
+        if (defaultChannel) {
+          await tx.teamChannelMember.create({
+            data: {
+              channelId: defaultChannel.id,
+              userId: user.id,
+              addedById: invite.createdById,
+            },
+          });
+        }
+
         return { email: invite.email, teamId: invite.teamId };
       });
     } catch (err) {

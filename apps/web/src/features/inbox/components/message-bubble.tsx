@@ -23,6 +23,8 @@ interface MessageBubbleProps {
    * (e.g. a teammate's presence flip). Primitive prop = stable shallow-equal.
    */
   senderName: string | null;
+  /** Sender avatar URL. Same primitive-prop discipline as senderName. */
+  senderAvatarUrl?: string | null;
   contactName: string;
   /** Stable id to derive a consistent gradient color for the contact. */
   contactSeed: string;
@@ -115,6 +117,7 @@ function MessageBubbleImpl(props: MessageBubbleProps) {
 function BubbleContent({
   message,
   senderName,
+  senderAvatarUrl,
   contactName,
   contactSeed,
   onReply,
@@ -159,7 +162,12 @@ function BubbleContent({
             alt="sticker"
             className="size-32 rounded-md object-contain"
           />
-          <BubbleMeta message={message} senderName={senderName} isOut={isOut} />
+          <BubbleMeta
+          message={message}
+          senderName={senderName}
+          senderAvatarUrl={senderAvatarUrl ?? null}
+          isOut={isOut}
+        />
         </div>
       </div>
     );
@@ -259,7 +267,12 @@ function BubbleContent({
           )}
         </div>
 
-        <BubbleMeta message={message} senderName={senderName} isOut={isOut} />
+        <BubbleMeta
+          message={message}
+          senderName={senderName}
+          senderAvatarUrl={senderAvatarUrl ?? null}
+          isOut={isOut}
+        />
         {message.failed && (
           <FailedRecovery
             // Both text and media retries are supported. The composer caches

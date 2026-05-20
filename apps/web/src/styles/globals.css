@@ -1,6 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Tailwind v4 only scans the package containing this CSS by default. The
+ * @ccp/shared package ships class-string maps (tag/stage palette, etc.) that
+ * apps/web imports at runtime — without this @source line, JIT prunes every
+ * palette color except the two (amber, emerald) that also happen to be used
+ * inline in apps/web. Confirmed symptom: 7/9 stage swatches render white. */
+@source "../../../../packages/shared/src/**/*.{ts,tsx}";
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

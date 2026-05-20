@@ -340,6 +340,38 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  "team_channel.members_changed": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "team:channel:members:changed", {
+      teamId: e.teamId,
+      channelId: e.channelId,
+      action: e.action,
+      userIds: e.userIds,
+      changedById: e.changedById,
+    });
+    // Catalog tick so the channel list (memberCount, visibility) refreshes
+    // for everyone — including the just-added users who need to start seeing
+    // this channel and the just-removed users who need to stop seeing it.
+    emitter.emitToTeam(e.teamId, "team:catalog:changed", {
+      teamId: e.teamId,
+      scope: "team-channels",
+    });
+  },
+
+  "user.profile_updated": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "user:profile:updated", {
+      teamId: e.teamId,
+      userId: e.userId,
+      ...(e.name !== undefined ? { name: e.name } : {}),
+      ...(e.avatarUrl !== undefined ? { avatarUrl: e.avatarUrl } : {}),
+    });
+    // Members list (assignment dropdown, contact-panel "assigned to", etc.)
+    // refetches against this scope.
+    emitter.emitToTeam(e.teamId, "team:catalog:changed", {
+      teamId: e.teamId,
+      scope: "members",
+    });
+  },
+
   // ---- team-wide --------------------------------------------------------
   "team.catalog_changed": (e, emitter) => {
     emitter.emitToTeam(e.teamId, "team:catalog:changed", {

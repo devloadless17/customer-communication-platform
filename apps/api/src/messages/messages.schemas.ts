@@ -71,6 +71,15 @@ export const SendMediaFormSchema = z.object({
     .transform((v) => (v ?? "").trim()),
   clientTempId: z.string().min(1).optional(),
   replyToMessageId: z.string().min(1).optional(),
+  /**
+   * Audio voice-note marker. Multipart form fields are strings — the recorder
+   * sends `"true"` so we accept that one literal. Service-side, only audio
+   * sends honor it; for anything else it's a no-op.
+   */
+  voice: z
+    .union([z.literal("true"), z.literal("false"), z.boolean()])
+    .optional()
+    .transform((v) => v === true || v === "true"),
 });
 export type SendMediaFormInput = z.infer<typeof SendMediaFormSchema>;
 

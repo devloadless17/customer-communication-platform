@@ -70,8 +70,14 @@ export class RegisterController {
         // Default #general channel. The schema documents this as auto-created
         // at team setup; /team redirects to it on first login. Without this
         // row the team-chat surface lands on the "No channels yet" dead-end.
-        await tx.teamChannel.create({
+        // Auto-membership for the founder so they can see + post immediately;
+        // every future invite-accepted user is also auto-added to the default
+        // channel via apps/api/src/team/invites/.
+        const channel = await tx.teamChannel.create({
           data: { teamId: team.id, name: "general", isDefault: true, createdById: user.id },
+        });
+        await tx.teamChannelMember.create({
+          data: { channelId: channel.id, userId: user.id, addedById: user.id },
         });
         return { email: body.email, teamId: team.id };
       });

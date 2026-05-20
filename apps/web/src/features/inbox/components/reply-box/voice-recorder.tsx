@@ -14,13 +14,18 @@ import { cn } from "@ccp/shared/utils";
  * Send, the recorder yields a File that goes through the normal media
  * upload path — server doesn't know it was recorded inline.
  *
- * Format selection:
+ * Format selection (Meta-acceptable only — see lessons below):
  *   1. audio/ogg;codecs=opus — Meta's preferred voice-note format, also
  *      what WhatsApp itself uses. Firefox + Chrome 105+ produce this.
  *   2. audio/mp4 — Safari's native MediaRecorder output.
- *   3. audio/webm;codecs=opus — Chrome's older default; if we land here
- *      Meta may transcode or may reject (we let the retry flow handle
- *      that rather than block recording on unsupported browsers).
+ *
+ * `audio/webm` is INTENTIONALLY NOT a fallback. Chrome's older default
+ * was webm, but Meta's `sendMedia` endpoint rejects audio/webm at the
+ * provider edge AFTER an apparently-successful upload, producing a
+ * confusing `provider_rejected` with no actionable message at the
+ * agent. If neither ogg/opus nor mp4 is supported (very old Chrome /
+ * Edge), the recorder refuses to start and surfaces a clear error
+ * instead of producing a file the user can't actually send.
  *
  * Mic permissions: getUserMedia prompts on first use; subsequent
  * recordings on the same origin reuse the granted permission silently
@@ -31,7 +36,6 @@ import { cn } from "@ccp/shared/utils";
 const MIME_CANDIDATES = [
   "audio/ogg;codecs=opus",
   "audio/mp4",
-  "audio/webm;codecs=opus",
 ] as const;
 
 function pickRecorderMime(): string | null {
@@ -126,7 +130,8 @@ export function useVoiceRecorder(opts: {
     const mime = pickRecorderMime();
     if (!mime) {
       onErrorRef.current(
-        "This browser can't record audio. Try Chrome, Firefox, or Safari.",
+        "This browser can't record in a WhatsApp-compatible audio format. " +
+          "Please update to a recent Chrome (105+), Firefox, or Safari.",
       );
       return;
     }

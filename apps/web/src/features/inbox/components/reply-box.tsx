@@ -530,10 +530,12 @@ export function ReplyBox({
   // `override.file` lets the voice-recorder path inject a freshly captured
   // audio File without going through `setAttachment` first — React state
   // updates are async, but the recorder wants to send the moment the user
-  // taps the send-recording button.
-  const submit = (override?: { file: File }) => {
+  // taps the send-recording button. `override.voice` rides along to flag
+  // the audio as a WhatsApp voice note (waveform UI on the recipient side).
+  const submit = (override?: { file: File; voice?: boolean }) => {
     if (sendInFlightRef.current) return;
     const overrideFile = override?.file ?? null;
+    const overrideVoice = override?.voice === true;
 
     const trimmed = value.trim();
     const file = overrideFile ?? attachment;
@@ -673,6 +675,7 @@ export function ReplyBox({
           if (effectiveCaption) fd.append("caption", effectiveCaption);
           fd.append("clientTempId", clientTempId);
           if (replyToMessageId) fd.append("replyToMessageId", replyToMessageId);
+          if (overrideVoice) fd.append("voice", "true");
           const res = await fetch("/api/messages/media", {
             method: "POST",
             body: fd,
@@ -918,7 +921,7 @@ export function ReplyBox({
                     setError("Recording was empty — try again.");
                     return;
                   }
-                  submit({ file });
+                  submit({ file, voice: true });
                 })();
               }}
             />

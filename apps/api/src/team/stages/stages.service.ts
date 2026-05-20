@@ -66,12 +66,11 @@ export class StagesService {
     input: CreateStageInput,
   ): Promise<ContactStage> {
     requireManage(role);
-    const color = pickColor(input.color);
 
     // Single read to learn count + next position + whether a default exists.
     const existing = await this.db.contactStage.findMany({
       where: { teamId },
-      select: { id: true, position: true, isDefault: true },
+      select: { id: true, position: true, isDefault: true, color: true },
       orderBy: { position: "desc" },
     });
     if (existing.length >= MAX_STAGES_PER_TEAM) {
@@ -81,6 +80,14 @@ export class StagesService {
     }
     const nextPosition = (existing[0]?.position ?? -1) + 1;
     const isDefault = existing.length === 0;
+    // Round-robin a fresh palette color when the user didn't pick one — so
+    // a fresh team's stages don't all default to slate (which reads as
+    // identical washed-out chips). Stable across runs because the palette
+    // order itself is stable.
+    const color =
+      typeof input.color === "string"
+        ? pickColor(input.color)
+        : pickNextPaletteColor(existing.map((e) => e.color));
 
     try {
       const created = await this.db.contactStage.create({
@@ -241,6 +248,19 @@ function toDto(r: {
 function pickColor(v: unknown): TagColor {
   if (typeof v !== "string") return "slate";
   return (TAG_COLORS as readonly string[]).includes(v) ? (v as TagColor) : "slate";
+}
+
+/**
+ * Choose the first palette color not yet used by an existing stage in the
+ * team. Falls back to slate once all 9 are taken. Pure function — caller
+ * passes the already-used color set.
+ */
+function pickNextPaletteColor(used: string[]): TagColor {
+  const usedSet = new Set(used);
+  for (const c of TAG_COLORS) {
+    if (!usedSet.has(c)) return c;
+  }
+  return "slate";
 }
 
 function requireManage(role: Role): void {

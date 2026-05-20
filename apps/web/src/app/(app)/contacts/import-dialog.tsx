@@ -3,9 +3,10 @@
 import { useRef, useState } from "react";
 
 import { useModalOverlay } from "@/hooks/use-modal-overlay";
-import { FileUp, Loader2, X } from "lucide-react";
+import { Download, FileUp, Loader2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 /**
  * Modal for importing contacts from a CSV. Drives a single multipart POST to
@@ -77,6 +78,20 @@ export function ImportContactsDialog({
     else onClose();
   }
 
+  async function downloadTemplate() {
+    const res = await apiFetch("/api/contacts/template", { method: "GET" });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "contacts-template.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div
       role="dialog"
@@ -112,6 +127,17 @@ export function ImportContactsDialog({
               column. Existing contacts are matched by phone number and left untouched —
               only new rows are added.
             </p>
+            <button
+              type="button"
+              onClick={downloadTemplate}
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <Download className="size-3.5" />
+              Download blank template
+              <span className="text-[10px] text-muted-foreground/60">
+                (built-in + your custom fields)
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}

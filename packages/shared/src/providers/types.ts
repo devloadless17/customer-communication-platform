@@ -180,6 +180,13 @@ export interface SendMediaArgs {
   filename?: string;
   /** Same semantics as SendTextArgs — sends as a quoted reply. */
   replyToExternalId?: string;
+  /**
+   * Audio only: mark the message as a voice note. Meta renders it with the
+   * native WhatsApp waveform UI on the recipient's side (vs. a generic audio
+   * attachment chip). Ignored on non-audio kinds. Set true when the caller
+   * knows the upload came from a microphone recorder, not a file picker.
+   */
+  voice?: boolean;
 }
 
 export interface FetchedMedia {

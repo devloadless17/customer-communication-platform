@@ -258,6 +258,19 @@ export async function countContacts(audience: {
   return count;
 }
 
+/**
+ * Total contacts in the team — distinct from `countContacts` which resolves an
+ * audience union (returns 0 for an empty filter, by design). Used by the
+ * broadcast wizard's "All contacts" card so the recipient count reads the
+ * real team size, not 0.
+ */
+export async function countAllContacts(): Promise<number> {
+  const { count } = await api<{ count: number }>("/api/contacts/count-all", {
+    method: "GET",
+  });
+  return count;
+}
+
 export async function lookupContacts(ids: string[]): Promise<Contact[]> {
   if (ids.length === 0) return [];
   const { contacts } = await api<{ contacts: Contact[] }>("/api/contacts/lookup", {

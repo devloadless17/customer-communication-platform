@@ -584,6 +584,39 @@ export interface TeamChannelReadEvent {
 }
 
 /**
+ * A user was added or removed from a channel. Subscribers fan this out as
+ * `team:channel:member:added` / `:removed` to every connected member of the
+ * team so (a) the affected user's channel list refreshes immediately, and
+ * (b) the members dialog updates live for everyone watching it.
+ *
+ * `userIds` is the full set of changed users for batch ops — adding 8 people
+ * via the picker produces ONE event with all 8 ids, not 8 events.
+ */
+export interface TeamChannelMembersChangedEvent {
+  teamId: string;
+  channelId: string;
+  action: "added" | "removed";
+  userIds: string[];
+  changedById: string | null;
+}
+
+/**
+ * A user updated their own profile (name / avatar). Subscribers fan this to
+ * the team so every cached sender-name + avatar around the inbox + assignment
+ * surfaces reflects the new value without a refetch.
+ *
+ * Only the fields that actually changed are populated — undefined means "no
+ * change", null means "explicitly cleared" (currently only supported for
+ * avatarUrl since name is required).
+ */
+export interface UserProfileUpdatedEvent {
+  teamId: string;
+  userId: string;
+  name?: string;
+  avatarUrl?: string | null;
+}
+
+/**
  * An outbound-webhook subscription was auto-disabled by the circuit breaker
  * after N consecutive failures. Carries the webhook id + a short human-
  * readable reason so the settings UI can toast the team in real time
@@ -675,6 +708,8 @@ export interface DomainEventMap {
   "team_channel.reaction_changed": TeamChannelReactionChangedEvent;
   "team_channel.pin_changed": TeamChannelPinChangedEvent;
   "team_channel.read": TeamChannelReadEvent;
+  "team_channel.members_changed": TeamChannelMembersChangedEvent;
+  "user.profile_updated": UserProfileUpdatedEvent;
   "team.catalog_changed": TeamCatalogChangedEvent;
   "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
   "webhook.subscription_recovered": WebhookSubscriptionRecoveredEvent;

@@ -26,11 +26,13 @@ import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import { ChannelsService } from "./channels.service";
 import {
+  AddChannelMembersSchema,
   CreateChannelSchema,
   EditChannelMessageSchema,
   PostChannelMessageSchema,
   ToggleReactionSchema,
   UpdateChannelSchema,
+  type AddChannelMembersInput,
   type CreateChannelInput,
   type EditChannelMessageInput,
   type PostChannelMessageInput,
@@ -115,6 +117,47 @@ export class ChannelsController {
   ) {
     const pins = await this.channels.listPins(session.teamId, id);
     return { pins };
+  }
+
+  @Get(":id/members")
+  async listMembers(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const members = await this.channels.listMembers(session.teamId, session.userId, id);
+    return { members };
+  }
+
+  @Post(":id/members")
+  async addMembers(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(AddChannelMembersSchema)) body: AddChannelMembersInput,
+  ) {
+    const out = await this.channels.addMembers(
+      session.teamId,
+      session.userId,
+      session.role,
+      id,
+      body.userIds,
+    );
+    return { ok: true, ...out };
+  }
+
+  @Delete(":id/members/:userId")
+  async removeMember(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("userId") userId: string,
+  ) {
+    await this.channels.removeMember(
+      session.teamId,
+      session.userId,
+      session.role,
+      id,
+      userId,
+    );
+    return { ok: true };
   }
 
   @Post()

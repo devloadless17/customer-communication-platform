@@ -332,6 +332,8 @@ model User {
   channelMentions         TeamChannelMention[]      @relation("ChannelMentions")
   pinnedChannelMessages   TeamChannelPin[]          @relation("PinnedMessages")
   channelReadReceipts     TeamChannelReadReceipt[]
+  channelMemberships      TeamChannelMember[]       @relation("ChannelMemberships")
+  addedChannelMembers     TeamChannelMember[]       @relation("AddedChannelMembers")
   sessions                Session[]
   accounts                Account[]
 
@@ -1526,9 +1528,32 @@ model TeamChannel {
   messages  TeamChannelMessage[]
   receipts  TeamChannelReadReceipt[]
   pins      TeamChannelPin[]
+  members   TeamChannelMember[]
 
   @@unique([teamId, name])
   @@index([teamId, lastMessageAt(sort: Desc)])
+}
+
+// Per-channel membership. The default channel ("general") implicitly includes
+// every team member — the service layer auto-inserts on team-join and refuses
+// removals. Non-default channels are members-only: listChannelsForUser filters
+// through this table, so a user only sees channels they're in.
+//
+// Cascade on both sides: deleting a channel or a user purges the rows; no
+// orphan memberships. `addedById` is SetNull so removing an admin doesn't
+// destroy attribution on the rows they added.
+model TeamChannelMember {
+  channelId String
+  userId    String
+  addedAt   DateTime @default(now())
+  addedById String?
+
+  channel TeamChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User        @relation("ChannelMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User?       @relation("AddedChannelMembers", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@id([channelId, userId])
+  @@index([userId])
 }
 
 // One row per top-level channel message OR thread reply. The discriminator is
