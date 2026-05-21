@@ -33,6 +33,14 @@ const AUTO_DISABLE_THRESHOLD = 20;
 
 const MAX_RESPONSE_BODY_BYTES = 4096;
 
+// Inbound media uploads asynchronously (meta.controller commits the message as
+// media-pending and the binary lands a beat later — see completePendingMedia),
+// so a message.received payload built at arrival can carry media.url=null. The
+// worker re-resolves it from the row at SEND time, briefly polling while the
+// background upload is still in flight.
+const MEDIA_RESOLVE_WAIT_MS = 4000;
+const MEDIA_RESOLVE_POLL_MS = 400;
+
 interface WorkerGlobals {
   worker?: Worker<WebhookDeliverJobData>;
 }
@@ -152,6 +160,12 @@ async function deliverOnce(
     throw err;
   }
 
+  // Inbound media uploads async, so a message.received payload built at arrival
+  // can carry media.url=null. Fill it from the row now (the background upload
+  // has almost always finished by delivery time); defer to a BullMQ retry if a
+  // large file is still uploading. Mutates delivery.payload in place.
+  await resolvePendingMediaUrl(delivery.payload, attempt, maxAttempts);
+
   const body = JSON.stringify(delivery.payload);
   const signature = signWebhookBody(secret, body);
 
@@ -229,6 +243,11 @@ async function deliverOnce(
           deliveredAt: new Date(),
           failedAt: null,
           errorMessage: null,
+          // Persist the as-sent payload so the delivery log matches what the
+          // receiver got (media.url was resolved at send time, above).
+          payload: delivery.payload as unknown as Parameters<
+            typeof db.outboundWebhookDelivery.update
+          >[0]["data"]["payload"],
         },
       }),
       db.outboundWebhook.update({
@@ -271,6 +290,63 @@ async function deliverOnce(
     attempt >= maxAttempts,
   );
   throw new Error(`receiver returned ${response.status}`);
+}
+
+/**
+ * Fill `media.url` + `media.thumbnail_url` on a message-bearing payload from the
+ * message row at SEND time. Inbound media uploads asynchronously, so the payload
+ * built when the message arrived can carry `media.url=null`; by delivery time
+ * the background upload has almost always finished. Briefly polls while it's
+ * still in flight, then defers to a BullMQ retry for an unusually slow upload
+ * (large video). Mutates `payload` in place; no-op when there's no media or the
+ * url is already set (e.g. outbound sends, whose media is uploaded before the
+ * row is created).
+ */
+async function resolvePendingMediaUrl(
+  payload: unknown,
+  attempt: number,
+  maxAttempts: number,
+): Promise<void> {
+  const message = (
+    payload as {
+      data?: {
+        message?: {
+          id?: string;
+          media?: { url?: string | null; thumbnail_url?: string | null } | null;
+        };
+      };
+    }
+  )?.data?.message;
+  const media = message?.media;
+  const messageId = message?.id;
+  if (!media || !messageId || media.url) return;
+
+  const deadline = Date.now() + MEDIA_RESOLVE_WAIT_MS;
+  for (;;) {
+    const row = await db.message.findUnique({
+      where: { id: messageId },
+      select: { mediaUrl: true, mediaThumbnailUrl: true, mediaKind: true },
+    });
+    if (row?.mediaUrl) {
+      media.url = row.mediaUrl;
+      media.thumbnail_url = row.mediaThumbnailUrl ?? media.thumbnail_url ?? null;
+      return;
+    }
+    // mediaKind cleared → the download failed and the message fell back to
+    // text-only; there will never be a url, so send the documented null.
+    if (!row || !row.mediaKind) return;
+    if (Date.now() >= deadline) {
+      // Still uploading (large file). Let a BullMQ retry pick up the url within
+      // the backoff window; on the final attempt, send null rather than loop.
+      if (attempt < maxAttempts) {
+        throw new Error(
+          `media still uploading for message ${messageId}; deferring delivery`,
+        );
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, MEDIA_RESOLVE_POLL_MS));
+  }
 }
 
 async function recordFailure(
