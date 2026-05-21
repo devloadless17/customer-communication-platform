@@ -34,6 +34,12 @@ concurrency:
 
 env:
   APP_IMAGE_NAME: customer-communication-platform
+  # Opt the remaining Node-20 JS actions (pnpm/action-setup, docker/login-action,
+  # dorny/paths-filter) onto Node.js 24 ahead of GitHub's 2026-06-02 forced
+  # cutover — silences the deprecation warnings. Runner-level override, so it
+  # works regardless of each action's pinned `runs.using`; covers every job
+  # (incl. typecheck's pnpm setup). Drop once all three ship a Node-24 release.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   typecheck:
