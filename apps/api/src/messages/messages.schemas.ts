@@ -53,6 +53,17 @@ export const SendInteractiveSchema = z
   .refine(
     (b) => new Set(b.options.map((o) => o.id)).size === b.options.length,
     { message: "option ids must be unique" },
+  )
+  .refine(
+    // Meta rejects interactive buttons/rows that reuse a title (error 131009
+    // "Duplicate button title"). Catch it here so the API returns a clean 422
+    // instead of bubbling up the raw Meta error. Trimmed + case-insensitive
+    // so "Yes" / "yes " can't both slip through.
+    (b) => {
+      const titles = b.options.map((o) => o.title.trim().toLowerCase());
+      return new Set(titles).size === titles.length;
+    },
+    { message: "button titles must be unique" },
   );
 export type SendInteractiveInput = z.infer<typeof SendInteractiveSchema>;
 

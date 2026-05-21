@@ -49,6 +49,12 @@ export interface WorkflowMessageSnapshot {
   id: string;
   conversationId: string;
   externalId: string;
+  /** Channel this message came through (`meta_cloud` = WhatsApp today).
+   *  Always present — every message row carries a non-null provider — so
+   *  authors branch on it directly instead of inferring from the contact
+   *  (whose `identityProvider` is null for phone-keyed WhatsApp contacts).
+   *  Mirrors @ccp/shared/workflows/events. */
+  provider: ProviderName;
   direction: "in" | "out";
   body: string;
   mediaKind: MediaKind | null;
@@ -70,6 +76,9 @@ export interface WorkflowMessageSnapshot {
 
 export interface WorkflowConversationSnapshot {
   id: string;
+  /** Channel this thread lives on (`meta_cloud` = WhatsApp). Source of truth
+   *  for the conversation's channel — mirrors Conversation.provider. */
+  provider: ProviderName;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -118,7 +127,6 @@ export interface WorkflowContactSnapshot {
   countryCode?: string | null;
   avatarUrl?: string | null;
   location?: string | null;
-  assignedUserId?: string | null;
   createdAt?: string;
   // PR 2.4 additions — loadable / derivable on demand. None of these are
   // required at the builder boundary; the call site passes them when it
@@ -137,8 +145,6 @@ export interface WorkflowContactSnapshot {
   tagNames?: string[];
   /** Lifecycle stage display name. Loaded when the call site JOINed Stage. */
   stageName?: string | null;
-  /** Full agent object when the call site JOINed User on assignedUserId. */
-  assignedAgent?: WorkflowUserSnapshot | null;
 }
 
 /**
@@ -150,6 +156,7 @@ export interface WorkflowContactSnapshot {
  */
 export function workflowConversationSnapshot(c: {
   id: string;
+  provider: ProviderName;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -172,6 +179,7 @@ export function workflowConversationSnapshot(c: {
 }): WorkflowConversationSnapshot {
   return {
     id: c.id,
+    provider: c.provider,
     status: c.status,
     assignedUserId: c.assignedUserId,
     unreadCount: c.unreadCount,
@@ -212,12 +220,10 @@ export function workflowContactSnapshot(c: {
   countryCode?: string | null;
   avatarUrl?: string | null;
   location?: string | null;
-  assignedUserId?: string | null;
   createdAt?: Date | string | null;
   // PR 2.4 inputs — all optional.
   lastInboundAt?: Date | string | null;
   stage?: { name: string } | null;
-  assignedUser?: { id: string; name: string; email: string } | null;
 }): WorkflowContactSnapshot {
   const tags = c.tags ?? [];
   const tagIds = tags.map((t) => t.id);
@@ -253,7 +259,6 @@ export function workflowContactSnapshot(c: {
     countryCode: c.countryCode ?? null,
     avatarUrl: c.avatarUrl ?? null,
     location: c.location ?? null,
-    assignedUserId: c.assignedUserId ?? null,
     createdAt:
       c.createdAt instanceof Date
         ? c.createdAt.toISOString()
@@ -262,9 +267,6 @@ export function workflowContactSnapshot(c: {
     windowState,
     ...(tagNames ? { tagNames } : {}),
     stageName: c.stage?.name ?? null,
-    assignedAgent: c.assignedUser
-      ? { id: c.assignedUser.id, name: c.assignedUser.name, email: c.assignedUser.email }
-      : null,
   };
 }
 

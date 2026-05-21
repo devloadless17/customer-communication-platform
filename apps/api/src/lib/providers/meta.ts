@@ -149,6 +149,13 @@ interface MetaStatus {
   status?: string;
   timestamp?: string;
   recipient_id?: string;
+  /** Present on `status: "failed"` — the actual delivery-rejection reason. */
+  errors?: Array<{
+    code?: number;
+    title?: string;
+    message?: string;
+    error_data?: { details?: string };
+  }>;
 }
 
 interface MetaContact {
@@ -358,6 +365,18 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
         for (const s of value.statuses ?? []) {
           const status = mapMetaStatus(s.status);
+          // Surface WHY Meta failed delivery — otherwise a `failed` status is a
+          // silent red icon with no reason. These are the (#13xxxx) codes from
+          // Meta's status webhook (rate/quality limits, undeliverable, etc.).
+          if (status === "failed" && s.errors?.length) {
+            for (const e of s.errors) {
+              console.error(
+                `[meta] message ${s.id} delivery FAILED: (#${e.code ?? "?"}) ${
+                  e.title ?? ""
+                } — ${e.error_data?.details ?? e.message ?? "no detail"}`,
+              );
+            }
+          }
           if (!status || !s.id) continue;
           const tsSecs = s.timestamp ? Number(s.timestamp) : NaN;
           const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
@@ -1002,6 +1021,7 @@ export type MetaErrorCode =
   | "rate_limited"         // 4 / 80007 — Meta rate limit hit
   | "auth_expired"         // 190 — access token expired
   | "unsupported_message"  // 131009 — content type not supported on this account
+  | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
   | "provider_rejected";   // catch-all for anything else MetaSendError-shaped
 
 export interface NormalizedSendError {
@@ -1067,6 +1087,20 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
     };
   }
   if (numericCode === 131009) {
+    // 131009 is a catch-all "Parameter value is not valid". Meta puts the
+    // specific reason in error_data.details. Interactive button sends with
+    // repeated titles surface as "Duplicate button title" — map that to an
+    // actionable message instead of the generic "unsupported" copy. The UI
+    // already blocks dupes, so reaching here means a non-browser caller
+    // (external API / workflow step) sent them.
+    if (/duplicate\s+button\s+title/i.test(body)) {
+      return {
+        code: "duplicate_button_title",
+        message: "Each button needs a unique title — WhatsApp rejects duplicates.",
+        detail,
+        httpStatus,
+      };
+    }
     return {
       code: "unsupported_message",
       message: "This message type isn't supported on this WhatsApp number.",
@@ -1183,33 +1217,11 @@ function mapTemplateCategory(c: string | undefined): TemplateCategory | null {
   }
 }
 
-/**
- * Counts the highest `{{n}}` placeholder in a template body. Used by the UI
- * picker and the send route to figure out how many variables an agent needs
- * to fill in. Doesn't care about gaps — `"Hi {{1}}, see {{3}}"` returns 3,
- * matching Meta's own rule (you must supply 1..N consecutively).
- */
-export function countTemplatePlaceholders(text: string): number {
-  let max = 0;
-  const re = /\{\{(\d+)\}\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max;
-}
-
-/**
- * Renders a preview string by replacing `{{n}}` with the provided values.
- * Missing positions are left as `{{n}}` so the agent can spot which one
- * they forgot before sending.
- */
-export function renderTemplateBody(text: string, vars: string[]): string {
-  return text.replace(/\{\{(\d+)\}\}/g, (_match, idxStr) => {
-    const idx = Number(idxStr) - 1;
-    const v = vars[idx];
-    return v && v.length > 0 ? v : `{{${idxStr}}}`;
-  });
-}
+// Template placeholder rendering/counting moved to @ccp/shared so the client
+// optimistic preview can't drift from the server-stored body. Re-exported here
+// so existing `@/lib/providers/meta` import sites keep working.
+export {
+  countTemplatePlaceholders,
+  renderTemplateBody,
+} from "@ccp/shared/template-render";
 

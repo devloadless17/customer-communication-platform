@@ -81,6 +81,15 @@ const ContactDetailDrawer = dynamic(
 );
 
 /**
+ * Render-cap, mirroring ContactBrowser (the picker). The contacts list isn't
+ * virtualized; past ~2000 rich DOM rows the page gets laggy, so we stop
+ * auto-loading and steer the user to refine filters instead of accumulating
+ * unbounded pages. Lift this only by switching to the use-virtualizer pattern
+ * (see conversation-list.tsx).
+ */
+const CONTACTS_RENDER_CAP = 2000;
+
+/**
  * Contacts directory.
  *
  * Search / filter / pagination all live in the shared `useContactList` hook
@@ -119,7 +128,7 @@ export function ContactsClient({
   // Auto-load the next page as the sentinel nears the viewport. `loadMore`
   // self-guards while a page is already in flight.
   const loadMoreRef = useInfiniteScroll({
-    hasMore: Boolean(list.nextCursor),
+    hasMore: Boolean(list.nextCursor) && items.length < CONTACTS_RENDER_CAP,
     onLoadMore: list.loadMore,
   });
   // Lifted to state so dialogs can splice in newly-created definitions
@@ -424,7 +433,7 @@ export function ContactsClient({
             </ul>
           </>
         )}
-        {list.nextCursor && (
+        {list.nextCursor && items.length < CONTACTS_RENDER_CAP && (
           <div
             ref={loadMoreRef}
             className="flex items-center justify-center border-t border-border p-3 text-xs text-muted-foreground"
@@ -435,6 +444,15 @@ export function ContactsClient({
                 Loading more…
               </>
             )}
+          </div>
+        )}
+        {/* Cap reached — stop auto-loading and nudge toward filters. Matches
+            the picker's behaviour so both contact surfaces stay responsive. */}
+        {list.nextCursor && items.length >= CONTACTS_RENDER_CAP && (
+          <div className="border-t border-border p-3 text-center text-[12px] text-muted-foreground">
+            Showing {items.length.toLocaleString()} contacts. Refine the filters
+            or search to see more — the list is capped to keep the page
+            responsive.
           </div>
         )}
       </div>

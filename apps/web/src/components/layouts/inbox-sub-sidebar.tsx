@@ -269,7 +269,7 @@ export function InboxSubSidebar({
                   >
                     <div className="relative">
                       <Avatar className="size-5">
-                        <AvatarFallback className="text-[9px]">
+                        <AvatarFallback seed={u.id} className="text-[9px]">
                           {initials(u.name)}
                         </AvatarFallback>
                       </Avatar>

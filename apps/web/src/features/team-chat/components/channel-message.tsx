@@ -248,7 +248,7 @@ function ChannelMessageImpl({
         {message.authorAvatarUrl ? (
           <AvatarImage src={message.authorAvatarUrl} alt={authorName} />
         ) : null}
-        <AvatarFallback className="text-xs">{initials(authorName)}</AvatarFallback>
+        <AvatarFallback seed={authorName} className="text-xs">{initials(authorName)}</AvatarFallback>
       </Avatar>
 
       <div className="min-w-0 flex-1">

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { onOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
 import type { ConversationWithRefs, CursorPage } from "@ccp/shared/types";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 
@@ -53,9 +54,8 @@ export function useTeamEvents(
   initialNextCursor: string | null,
   activeConversationId: string | null = null,
   /**
-   * Signed-in agent id. Used to maintain per-agent `unreadForMe` alongside
-   * team-wide `unreadCount` — a teammate's read clears the team counter but
-   * NOT my "I haven't seen this" flag, while my own read clears both.
+   * Signed-in agent id. Used to evaluate the `mine` preset filter (rows
+   * where assignedUserId === me). Unread itself is team-wide only.
    */
   currentUserId: string,
   /**
@@ -133,6 +133,37 @@ export function useTeamEvents(
     setConversations(initialConversations);
     setNextCursor(initialNextCursor);
   }, [teamId, initialConversations, initialNextCursor]);
+
+  // Optimistic LIST bump for the sender's OWN send. Every send site (reply
+  // box text/media/voice, template, interactive) fires this so the row jumps
+  // to the top with the right preview INSTANTLY, independent of the server
+  // `message:new` round-trip — the half of the optimistic story the list was
+  // missing (the thread bubble was already optimistic via addOptimistic).
+  // Mirrors onMessageNew's outbound branch: overwrite preview + lastMessageAt
+  // and re-sort. Bails when the row isn't in the loaded slice (idx === -1) —
+  // the server frame will splice it in. The real frame that follows is
+  // idempotent here (absolute overwrite, not a delta).
+  useEffect(() => {
+    return onOptimisticListBump(({ conversationId, preview, lastMessageAt }) => {
+      setConversations((prev) => {
+        const idx = prev.findIndex((c) => c.conversation.id === conversationId);
+        if (idx === -1) return prev;
+        const existing = prev[idx]!;
+        const updated: ConversationWithRefs = {
+          ...existing,
+          conversation: {
+            ...existing.conversation,
+            lastMessageAt,
+            lastMessagePreview: preview,
+          },
+        };
+        const next = [...prev];
+        next.splice(idx, 1);
+        next.unshift(updated);
+        return next;
+      });
+    });
+  }, []);
 
   // loadMore is stable across renders — useCallback so the component can put
   // it in an effect dep array without re-running on every paint.
@@ -422,33 +453,37 @@ export function useTeamEvents(
           message.direction === "in" && !isActive
             ? unreadCount
             : existing.conversation.unreadCount;
-        // Per-agent "I haven't seen this" — flip true on inbound for any
-        // non-active thread (active = I'm viewing, so I'm reading it now).
-        // Outbound never changes unreadForMe (matches the team-wide
-        // semantics: only customer messages count as "unread").
-        const nextUnreadForMe =
-          message.direction === "in" && !isActive
-            ? true
-            : existing.conversation.unreadForMe;
+        // Recency guard — only advance the preview / lastMessageAt / sort
+        // position when this frame is at least as new as what the row already
+        // shows. The server now sends the effective-newest summary, but
+        // Socket.io connection-state-recovery can REPLAY buffered frames on
+        // reconnect, and an out-of-order replay must not regress the row to an
+        // older message (the same class of bug the inbound ingest guard fixes
+        // server-side). Counts/flags below still apply unconditionally —
+        // they're tallies, not a "latest" pointer.
+        const advances = lastMessageAt >= existing.conversation.lastMessageAt;
         const updated: ConversationWithRefs = {
           ...existing,
           conversation: {
             ...existing.conversation,
-            lastMessageAt,
-            lastMessagePreview: preview,
+            ...(advances ? { lastMessageAt, lastMessagePreview: preview } : {}),
             unreadCount: nextUnread,
-            ...(nextUnreadForMe !== undefined ? { unreadForMe: nextUnreadForMe } : {}),
           },
           // Inbound messages reset the 24h customer-service window. The
           // conversation list uses this for its window chip; outbound
-          // messages don't move the clock.
+          // messages don't move the clock. Don't let an older replayed frame
+          // rewind the window either.
           lastInboundAt:
-            message.direction === "in" ? lastMessageAt : existing.lastInboundAt,
+            message.direction === "in" && advances
+              ? lastMessageAt
+              : existing.lastInboundAt,
         };
-        // Re-sort by recency so the touched conversation jumps to the top.
+        // Re-sort by recency: a newer frame jumps the row to the top; an
+        // older replayed frame keeps its current slot.
         const next = [...prev];
         next.splice(idx, 1);
-        next.unshift(updated);
+        if (advances) next.unshift(updated);
+        else next.splice(idx, 0, updated);
         return next;
       });
     };
@@ -585,27 +620,18 @@ export function useTeamEvents(
 
     const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = ({
       conversationId,
-      readByUserId,
     }) => {
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
-        // Team-wide always clears; per-agent only clears if the reader
-        // is me. A teammate reading doesn't mean I've seen it.
-        const teamChange = existing.conversation.unreadCount !== 0;
-        const myChange =
-          readByUserId === currentUserId &&
-          existing.conversation.unreadForMe === true;
-        if (!teamChange && !myChange) return prev;
+        // Unread is team-wide only — any member's read zeroes the counter
+        // for everyone.
+        if (existing.conversation.unreadCount === 0) return prev;
         const next = prev.slice();
         next[idx] = {
           ...existing,
-          conversation: {
-            ...existing.conversation,
-            ...(teamChange ? { unreadCount: 0 } : {}),
-            ...(myChange ? { unreadForMe: false } : {}),
-          },
+          conversation: { ...existing.conversation, unreadCount: 0 },
         };
         return next;
       });
@@ -725,11 +751,26 @@ export function useTeamEvents(
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
 
+    // Foreground resync. A backgrounded / throttled tab can miss live frames
+    // (most importantly a teammate reading a thread → `conversation:read`)
+    // while the socket stays nominally connected, so `connect` never re-fires
+    // and the reconnect resync above never runs — leaving a stale unread badge
+    // on the list until a new message lands or the page reloads. Pull a fresh
+    // (filter-aware, tail-merged) head page the moment the tab returns to the
+    // foreground, mirroring the active-thread backfill in useConversationEvents.
+    // Since unread is team-wide, this is how another agent's "read" disappears
+    // here even though we never saw the frame.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void runCoalescedResync();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       if (resyncTimer !== null) {
         window.clearTimeout(resyncTimer);
         resyncTimer = null;
       }
+      document.removeEventListener("visibilitychange", onVisible);
       socket.off("connect", onConnect);
       socket.off("message:new", onMessageNew);
       socket.off("conversation:assigned", onAssigned);

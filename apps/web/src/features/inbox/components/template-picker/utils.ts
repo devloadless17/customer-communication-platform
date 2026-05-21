@@ -11,24 +11,14 @@ export function labelCategory(c: string): string {
   }
 }
 
-export function countPlaceholders(text: string): number {
-  let max = 0;
-  const re = /\{\{(\d+)\}\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max;
-}
-
-export function renderPlaceholders(text: string, vars: string[]): string {
-  return text.replace(/\{\{(\d+)\}\}/g, (_match, idxStr) => {
-    const idx = Number(idxStr) - 1;
-    const v = vars[idx];
-    return v && v.length > 0 ? v : `{{${idxStr}}}`;
-  });
-}
+// Placeholder rendering/counting is shared with the server (it stores the
+// rendered body) so the optimistic preview can't drift — see
+// @ccp/shared/template-render. Re-exported under the picker's local names so
+// existing call sites stay unchanged.
+export {
+  countTemplatePlaceholders as countPlaceholders,
+  renderTemplateBody as renderPlaceholders,
+} from "@ccp/shared/template-render";
 
 export function firstEmptyIndex(values: string[]): number {
   for (let i = 0; i < values.length; i += 1) {

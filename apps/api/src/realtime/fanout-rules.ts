@@ -183,7 +183,6 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // just double the reducer cost on the frontend.
   "contact.tag_changed": null,
   "contact.lifecycle_changed": null,
-  "contact.assignee_changed": null,
 
   // One socket frame for an N-contact bulk mutation. Frontend invalidates
   // the affected rows in one query rather than receiving N patches.

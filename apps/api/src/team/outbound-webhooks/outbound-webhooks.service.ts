@@ -192,15 +192,19 @@ export class OutboundWebhooksService {
     // Stamp the channel block here too so the test payload matches the real
     // production shape — receivers wiring their parser against the test event
     // should not get a partial envelope.
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: { metaPhoneNumberId: true, metaDisplayPhoneNumber: true },
+    const conn = await this.db.channelConnection.findUnique({
+      where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+      select: { config: true },
     });
-    const channel = team
+    const ccfg = (conn?.config ?? {}) as {
+      phoneNumberId?: string;
+      displayPhoneNumber?: string;
+    };
+    const channel = conn
       ? {
           source: "meta_cloud" as const,
-          phone_number_id: team.metaPhoneNumberId,
-          display_phone_number: team.metaDisplayPhoneNumber,
+          phone_number_id: ccfg.phoneNumberId ?? null,
+          display_phone_number: ccfg.displayPhoneNumber ?? null,
         }
       : null;
 

@@ -63,8 +63,6 @@ const CONTACT_SHAPE: FieldShape = {
     tag_names: leafString("Comma-separated tag names"),
     window_state: leafString("open | closing-soon | closed | never"),
     last_inbound_at: leafString("ISO timestamp"),
-    assigned_agent_name: leafString(),
-    assigned_agent_email: leafString(),
   },
 };
 

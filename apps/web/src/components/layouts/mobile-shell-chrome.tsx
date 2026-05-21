@@ -26,6 +26,21 @@ import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
 
 /**
+ * Fired by descendants (e.g. the team-chat channel header on mobile) to open
+ * the shell's nav drawer — which carries the section sub-sidebar (channel
+ * list, filters). Decoupled via a window event so the drawer's open state
+ * doesn't have to thread through a context across the server-component shell
+ * boundary (SectionShell renders the chrome + page content as siblings).
+ */
+const OPEN_MOBILE_NAV_EVENT = "ccp:open-mobile-nav";
+
+export function openMobileNav() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(OPEN_MOBILE_NAV_EVENT));
+  }
+}
+
+/**
  * Mobile chrome shared by every authenticated section. On desktop (md+)
  * the AppRail and SubSidebar live as fixed columns and this whole tree
  * is `hidden`. Below md, the columns disappear and this renders:
@@ -97,6 +112,14 @@ export function MobileShellChrome({
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
+
+  // Open on the cross-tree signal (e.g. the channel header's mobile "browse
+  // channels" button, which lives in a sibling subtree).
+  useEffect(() => {
+    const onOpen = () => setOpen(true);
+    window.addEventListener(OPEN_MOBILE_NAV_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_MOBILE_NAV_EVENT, onOpen);
+  }, []);
 
   const items = useMemo<NavItem[]>(() => {
     const out = [...PRIMARY_ITEMS];
@@ -176,7 +199,7 @@ export function MobileShellChrome({
           <div className="mt-auto border-t border-border p-2">
             <div className="flex items-center gap-2 px-2 py-1.5">
               <Avatar className="size-7">
-                <AvatarFallback className="text-[10px]">
+                <AvatarFallback seed={currentUser.id} className="text-[10px]">
                   {initials(currentUser.name)}
                 </AvatarFallback>
               </Avatar>

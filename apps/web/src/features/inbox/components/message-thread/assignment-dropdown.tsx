@@ -144,7 +144,7 @@ export function AssignmentDropdown({
                 {currentAvatarUrl ? (
                   <AvatarImage src={currentAvatarUrl} alt={currentName} />
                 ) : null}
-                <AvatarFallback className="text-[8px]">
+                <AvatarFallback seed={currentId ?? currentName} className="text-[8px]">
                   {initials(currentName)}
                 </AvatarFallback>
               </Avatar>
@@ -172,7 +172,7 @@ export function AssignmentDropdown({
             ) : (
               <Avatar className="size-5">
                 {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                <AvatarFallback className="text-[10px]">{initials(u.name)}</AvatarFallback>
+                <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
               </Avatar>
             )}
             <span>{u.name}</span>

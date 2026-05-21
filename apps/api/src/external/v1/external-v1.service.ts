@@ -307,17 +307,6 @@ export class ExternalV1Service {
       stageId = await ensureDefaultStage(teamId);
     }
 
-    // Account-manager validation — must be an active User on this team.
-    let assignedUserId: string | null = null;
-    if (input.assignedUserId) {
-      const user = await this.db.user.findFirst({
-        where: { id: input.assignedUserId, teamId, deactivatedAt: null },
-        select: { id: true },
-      });
-      if (!user) throw new BadRequestException({ error: "assignedUserId not a member of this team" });
-      assignedUserId = user.id;
-    }
-
     // Tag validation: only keep tag ids that exist on this team — defense
     // against an integration sending stale / cross-team ids.
     let validTagIds: string[] = [];
@@ -340,7 +329,6 @@ export class ExternalV1Service {
           lastName: trimmedLast,
           language,
           countryCode,
-          assignedUserId,
           email: email ?? undefined,
           location: location ?? undefined,
           customFields,
@@ -378,7 +366,6 @@ export class ExternalV1Service {
       lastName: created.lastName,
       language: created.language,
       countryCode: created.countryCode,
-      assignedUserId: created.assignedUserId,
       avatarUrl: created.avatarUrl ?? undefined,
       email: created.email ?? undefined,
       location: created.location ?? undefined,
@@ -439,7 +426,6 @@ export class ExternalV1Service {
       lastName,
       language,
       countryCode,
-      assignedUserId,
       email,
       location,
       customFields: customFieldsPatch,
@@ -452,28 +438,6 @@ export class ExternalV1Service {
         select: { id: true },
       });
       if (!ok) throw new BadRequestException({ error: "stage not found" });
-    }
-
-    // Validate + hydrate the new assignee (if set). null clears; cuid sets.
-    // We fetch the User row up front so the contact.assignee_changed event
-    // carries a fully-hydrated `afterUser` for webhook payload structure.
-    let afterAssignee: User | null = null;
-    if (typeof assignedUserId === "string") {
-      const u = await this.db.user.findFirst({
-        where: { id: assignedUserId, teamId, deactivatedAt: null },
-        select: { id: true, name: true, email: true, role: true, teamId: true, avatarUrl: true, createdAt: true, deactivatedAt: true },
-      });
-      if (!u) throw new BadRequestException({ error: "assignedUserId not a member of this team" });
-      afterAssignee = {
-        id: u.id,
-        teamId: u.teamId,
-        role: u.role,
-        name: u.name,
-        email: u.email,
-        ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
-        ...(u.createdAt ? { createdAt: u.createdAt.toISOString() } : {}),
-        isActive: u.deactivatedAt === null,
-      };
     }
 
     let result;
@@ -515,7 +479,6 @@ export class ExternalV1Service {
             ...(lastName !== undefined ? { lastName } : {}),
             ...(language !== undefined ? { language } : {}),
             ...(countryCode !== undefined ? { countryCode } : {}),
-            ...(assignedUserId !== undefined ? { assignedUserId } : {}),
             ...(email !== undefined ? { email } : {}),
             ...(location !== undefined ? { location } : {}),
             ...(stageId !== undefined ? { stageId } : {}),
@@ -560,7 +523,6 @@ export class ExternalV1Service {
       lastName: updated.lastName,
       language: updated.language,
       countryCode: updated.countryCode,
-      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,
@@ -593,18 +555,6 @@ export class ExternalV1Service {
         contactId: updated.id,
         before: { stageId: existing.stageId },
         after: { stageId: updated.stageId },
-        changedByUserId: null,
-        changedByApiKeyId: apiKeyId,
-      });
-    }
-    if (existing.assignedUserId !== updated.assignedUserId) {
-      await this.bus.publish({
-        type: "contact.assignee_changed",
-        teamId,
-        contactId: updated.id,
-        before: { assignedUserId: existing.assignedUserId },
-        after: { assignedUserId: updated.assignedUserId },
-        afterUser: afterAssignee,
         changedByUserId: null,
         changedByApiKeyId: apiKeyId,
       });
@@ -718,6 +668,10 @@ export class ExternalV1Service {
     return {
       items: [
         {
+          // Read-only DESCRIPTION of this contact's own (siloed, immutable)
+          // channel — NOT a send-routing decision. Send paths route by
+          // `Conversation.provider`; never derive a channel from the contact.
+          // Don't copy this `identityProvider ?? "meta_cloud"` into a send site.
           channel: c.identityProvider ?? "meta_cloud",
           phoneNumber: c.phoneNumber,
           externalContactId: c.externalContactId,
@@ -967,7 +921,6 @@ export class ExternalV1Service {
         lastName: c.lastName,
         language: c.language,
         countryCode: c.countryCode,
-        assignedUserId: c.assignedUserId,
         avatarUrl: c.avatarUrl ?? undefined,
         email: c.email ?? undefined,
         location: c.location ?? undefined,
@@ -1246,27 +1199,26 @@ export class ExternalV1Service {
   // ===========================================================================
 
   async listChannels(teamId: string) {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: {
-        id: true,
-        name: true,
-        metaPhoneNumberId: true,
-        metaDisplayPhoneNumber: true,
-      },
+    // One active connection per provider today; lists all the team's channels.
+    const conns = await this.db.channelConnection.findMany({
+      where: { teamId, isActive: true },
+      select: { provider: true, config: true },
     });
-    if (!team || !team.metaPhoneNumberId) {
-      return { items: [] };
-    }
-    return {
-      items: [
-        {
-          id: team.metaPhoneNumberId,
-          channel: "meta_cloud",
-          display: team.metaDisplayPhoneNumber ?? team.metaPhoneNumberId,
-        },
-      ],
-    };
+    const items = conns
+      .map((c) => {
+        const cfg = (c.config ?? {}) as {
+          phoneNumberId?: string;
+          displayPhoneNumber?: string;
+        };
+        if (!cfg.phoneNumberId) return null;
+        return {
+          id: cfg.phoneNumberId,
+          channel: c.provider,
+          display: cfg.displayPhoneNumber ?? cfg.phoneNumberId,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    return { items };
   }
 
   // Conversation/message/note/send methods now live on
@@ -1299,7 +1251,6 @@ export class ExternalV1Service {
       lastName: updated.lastName,
       language: updated.language,
       countryCode: updated.countryCode,
-      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,

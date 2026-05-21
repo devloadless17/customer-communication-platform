@@ -60,7 +60,7 @@ export default async function TeamSettingsIndex() {
             icon: ListChecks,
             title: "Contact fields",
             description:
-              "Custom fields shown on every contact (order ID, plan, account manager…). Add or remove the field once for the whole team.",
+              "Custom fields shown on every contact (order ID, plan, company size…). Add or remove the field once for the whole team.",
           } satisfies Card,
         ]
       : []),

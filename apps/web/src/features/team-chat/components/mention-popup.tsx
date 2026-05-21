@@ -81,7 +81,7 @@ export function MentionPopup({
             )}
           >
             <Avatar className="size-6">
-              <AvatarFallback className="text-[10px]">{initials(u.name)}</AvatarFallback>
+              <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
             </Avatar>
             <div className="min-w-0 flex-1">
               <div className="truncate font-medium">{u.name}</div>

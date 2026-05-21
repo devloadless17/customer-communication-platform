@@ -94,7 +94,6 @@ export class ConversationsController {
       before: query.before ?? null,
       after: query.after ?? null,
       take: query.take,
-      viewerUserId: session.userId,
     });
   }
 
@@ -166,16 +165,6 @@ export class ConversationsController {
     @Param("id") id: string,
   ) {
     await this.conversations.markRead(session.teamId, session.userId, id);
-    return { ok: true };
-  }
-
-  @Post(":id/unread")
-  @HttpCode(200)
-  async markUnread(
-    @CurrentSession() session: ApiSession,
-    @Param("id") id: string,
-  ) {
-    await this.conversations.markUnread(session.teamId, id);
     return { ok: true };
   }
 

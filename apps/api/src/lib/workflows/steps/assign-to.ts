@@ -122,31 +122,6 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
         }
       : null;
 
-    // Mirror onto Contact.assignedUserId — see conversations.service.assign()
-    // for the reasoning. Same write here so workflow-driven assignments stay
-    // in sync with the external API. Also publish the contact-level event so
-    // partners watching `contact.assignee_changed` are notified.
-    await db.contact
-      .update({
-        where: { id: conversation.contact.id },
-        data: { assignedUserId: targetUserId },
-      })
-      .catch((err) => {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") return;
-        throw err;
-      });
-    if (conversation.assignedUserId !== targetUserId) {
-      await publish({
-        type: "contact.assignee_changed",
-        teamId: ctx.teamId,
-        contactId: conversation.contact.id,
-        before: { assignedUserId: conversation.assignedUserId },
-        after: { assignedUserId: targetUserId },
-        afterUser: assignedUser,
-        changedByUserId: null,
-      });
-    }
-
     // `silent: true` — step-driven assignment. Without this, workflow-
     // dispatch would fire `conversation_assigned` and the next workflow
     // could re-assign → loop. Audit + socket-fanout + analytics still run.

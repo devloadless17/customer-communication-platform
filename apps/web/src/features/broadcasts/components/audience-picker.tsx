@@ -1,36 +1,49 @@
 "use client";
 
-import { ChevronRight, FolderHeart, Loader2, Tag as TagIcon, Users, UserPlus } from "lucide-react";
+import { useState } from "react";
+import {
+  Check,
+  ChevronRight,
+  FolderHeart,
+  Loader2,
+  SlidersHorizontal,
+  Users,
+} from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 
 import { cn } from "@ccp/shared/utils";
-import { TagFilterControl } from "@/features/contacts/components/contact-browser";
-import { ContactMultiSelectField } from "@/features/contacts/components/contact-multi-select-field";
+import { toast } from "@/lib/toast";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { AudienceBuilder } from "@/features/broadcasts/components/audience-builder";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
 import type { AudienceGroupDto } from "@ccp/shared/dtos";
 
 /**
- * Audience picker for the broadcast wizard. Four modes:
+ * Audience picker for the broadcast wizard. Three choices:
  *
- *   "all"      — every contact in the team. Expanded server-side at send time.
- *   "by_tag"   — contacts carrying ANY of the chosen tags. The recipient
- *                count is resolved server-side (the parent owns the fetch).
- *   "group"    — a saved audience group.
- *   "selected" — a hand-picked list, via the shared contact picker dialog.
+ *   "all"    — every contact in the team. Expanded server-side at send time.
+ *   "group"  — a saved audience group (reusable).
+ *   "custom" — a one-off audience built inline with the shared
+ *              {@link AudienceBuilder}: tag membership ∪ hand-picked contacts.
+ *              The same union a group stores, just not saved — with a
+ *              "save as group" shortcut for when it's worth keeping.
  *
- * Fully presentational: the parent owns the selected ids/tags and supplies
- * any server-resolved counts. No team-wide contact list is ever loaded here
- * — it doesn't scale.
+ * Fully presentational: the parent owns the selected ids/tags/group and the
+ * resolved counts. No team-wide contact list is ever loaded here.
  */
 
-export type AudienceMode = "all" | "selected" | "by_tag" | "group";
+export type AudienceMode = "all" | "group" | "custom";
 
 export interface AudienceState {
   mode: AudienceMode;
+  /** custom: hand-picked contact ids. */
   selectedIds: string[];
+  /** custom: tag ids (dynamic membership). */
   selectedTagIds: string[];
+  /** group: the chosen saved group. */
   selectedGroupId: string | null;
 }
 
@@ -40,30 +53,24 @@ export function AudiencePicker({
   stages = [],
   groups,
   totalContactCount,
-  taggedRecipientCount,
-  taggedRecipientLoading = false,
   initialContactLabels = [],
   value,
   onChange,
+  onCustomCountChange,
+  onGroupSaved,
 }: {
-  /** All team tags — used both for by-tag mode and for filtering in the picker. */
   tags: Tag[];
-  /** Custom-field defs — used for the "filter by field" pills in the picker. */
   fieldDefinitions?: ContactFieldDefinition[];
-  /** Lifecycle stages — used for the stage filter inside the "Pick contacts" dialog. */
   stages?: ContactStage[];
-  /** All saved audience groups for "from group" mode. */
   groups: AudienceGroupDto[];
-  /** Total contacts in the team — the "All contacts" recipient count. */
   totalContactCount: number;
-  /** Server-resolved count of contacts matching `value.selectedTagIds`. */
-  taggedRecipientCount: number;
-  /** True while the parent is (re)fetching `taggedRecipientCount`. */
-  taggedRecipientLoading?: boolean;
-  /** Seed labels for any preselected contact ids (avoids a chip-label flash). */
   initialContactLabels?: ContactLabel[];
   value: AudienceState;
   onChange: (next: AudienceState) => void;
+  /** Mirror the live custom-audience count up to the parent's send summary. */
+  onCustomCountChange?: (count: number, loading: boolean) => void;
+  /** Called after "Save as group" succeeds, so the parent can show it. */
+  onGroupSaved?: (group: AudienceGroupDto) => void;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -71,65 +78,57 @@ export function AudiencePicker({
 
       <AnimatePresence mode="wait" initial={false}>
         {value.mode === "all" ? (
-          <motion.div
-            key="all"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.15 }}
-          >
+          <ModePanel key="all">
             <AllContactsCard count={totalContactCount} />
-          </motion.div>
-        ) : value.mode === "by_tag" ? (
-          <motion.div
-            key="by_tag"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.15 }}
-          >
-            <TagAudienceSelector
-              tags={tags}
-              selectedTagIds={value.selectedTagIds}
-              onChange={(selectedTagIds) => onChange({ ...value, selectedTagIds })}
-              recipientCount={taggedRecipientCount}
-              recipientLoading={taggedRecipientLoading}
-            />
-          </motion.div>
+          </ModePanel>
         ) : value.mode === "group" ? (
-          <motion.div
-            key="group"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.15 }}
-          >
+          <ModePanel key="group">
             <GroupSelector
               groups={groups}
               selectedGroupId={value.selectedGroupId}
               onChange={(selectedGroupId) => onChange({ ...value, selectedGroupId })}
             />
-          </motion.div>
+          </ModePanel>
         ) : (
-          <motion.div
-            key="selected"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.15 }}
-          >
-            <SelectedContactsInput
+          <ModePanel key="custom">
+            <AudienceBuilder
+              value={{ tagIds: value.selectedTagIds, contactIds: value.selectedIds }}
+              onChange={(v) =>
+                onChange({ ...value, selectedTagIds: v.tagIds, selectedIds: v.contactIds })
+              }
               tags={tags}
               fieldDefinitions={fieldDefinitions}
               stages={stages}
               initialContactLabels={initialContactLabels}
-              selectedIds={value.selectedIds}
-              onChange={(selectedIds) => onChange({ ...value, selectedIds })}
+              noun="recipient"
+              contactDialogTitle="Pick broadcast recipients"
+              contactConfirmLabel="Use these recipients"
+              showPreview={false}
+              onCountChange={onCustomCountChange}
             />
-          </motion.div>
+            <SaveAudienceAsGroup
+              tagIds={value.selectedTagIds}
+              contactIds={value.selectedIds}
+              onSaved={onGroupSaved}
+            />
+          </ModePanel>
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+function ModePanel({ children }: { children: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -4 }}
+      transition={{ duration: 0.15 }}
+      className="flex flex-col gap-3"
+    >
+      {children}
+    </motion.div>
   );
 }
 
@@ -142,17 +141,18 @@ function ModeToggle({
 }) {
   return (
     <div className="inline-flex w-fit flex-wrap rounded-md border border-border bg-muted/40 p-0.5">
+      <ModeButton active={value === "all"} onClick={() => onChange("all")} icon={Users}>
+        Everyone
+      </ModeButton>
       <ModeButton active={value === "group"} onClick={() => onChange("group")} icon={FolderHeart}>
         Saved group
       </ModeButton>
-      <ModeButton active={value === "selected"} onClick={() => onChange("selected")} icon={UserPlus}>
-        Pick contacts
-      </ModeButton>
-      <ModeButton active={value === "by_tag"} onClick={() => onChange("by_tag")} icon={TagIcon}>
-        By tag
-      </ModeButton>
-      <ModeButton active={value === "all"} onClick={() => onChange("all")} icon={Users}>
-        All contacts
+      <ModeButton
+        active={value === "custom"}
+        onClick={() => onChange("custom")}
+        icon={SlidersHorizontal}
+      >
+        Custom
       </ModeButton>
     </div>
   );
@@ -191,59 +191,108 @@ function ModeButton({
   );
 }
 
-function TagAudienceSelector({
-  tags,
-  selectedTagIds,
-  onChange,
-  recipientCount,
-  recipientLoading,
+/**
+ * "Save this one-off audience for reuse." Collapsed by default; expands to a
+ * name field that POSTs the current `{ tagIds, contactIds }` to the same
+ * endpoint the group form uses. On success the parent gets the new group so it
+ * appears (and is selectable) in "Saved group" mode immediately.
+ */
+function SaveAudienceAsGroup({
+  tagIds,
+  contactIds,
+  onSaved,
 }: {
-  tags: Tag[];
-  selectedTagIds: string[];
-  onChange: (next: string[]) => void;
-  recipientCount: number;
-  recipientLoading: boolean;
+  tagIds: string[];
+  contactIds: string[];
+  onSaved?: (group: AudienceGroupDto) => void;
 }) {
-  if (tags.length === 0) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const empty = tagIds.length === 0 && contactIds.length === 0;
+  if (empty) return null;
+
+  async function save() {
+    if (!name.trim()) {
+      setError("Give the group a name");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/team/audience-groups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), tagIds, contactIds }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        group?: AudienceGroupDto;
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok || !data.group) {
+        setError(
+          [data.error, data.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`,
+        );
+        return;
+      }
+      toast.success(`Saved "${data.group.name}" — reusable from "Saved group"`);
+      onSaved?.(data.group);
+      setOpen(false);
+      setName("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
     return (
-      <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-4 text-center text-[12px] text-muted-foreground">
-        No tags yet. Tag some contacts first (Contacts page) then come back.
-      </div>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex w-fit items-center gap-1.5 text-[11px] font-medium text-primary hover:underline"
+      >
+        <FolderHeart className="size-3.5" />
+        Save this audience as a reusable group
+      </button>
     );
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <TagFilterControl
-        tags={tags}
-        selectedTagIds={selectedTagIds}
-        onChange={onChange}
-        label=""
-        emptyTriggerLabel="Search & add tags"
-      />
-
-      <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3">
-        <div className="flex items-center gap-2 text-sm">
-          <TagIcon className="size-4 text-sky-700 dark:text-sky-300" />
-          <span className="flex items-center gap-1.5 font-medium text-sky-700 dark:text-sky-300">
-            {selectedTagIds.length === 0 ? (
-              "Pick at least one tag"
-            ) : recipientLoading ? (
-              <>
-                <Loader2 className="size-3.5 animate-spin" />
-                Counting recipients…
-              </>
-            ) : (
-              `Broadcast to ${recipientCount} contact${recipientCount === 1 ? "" : "s"}`
-            )}
-          </span>
-        </div>
-        <p className="mt-1 text-[11px] text-muted-foreground">
-          {selectedTagIds.length > 1
-            ? "Contacts carrying ANY of the selected tags will receive the broadcast."
-            : "Snapshot is taken when you send — contacts re-tagged later won't be added retroactively."}
-        </p>
+    <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void save();
+            }
+          }}
+          placeholder="Group name, e.g. Ramadan customers"
+          maxLength={80}
+          autoFocus
+          className="h-8 flex-1"
+        />
+        <Button type="button" size="sm" onClick={save} disabled={saving} className="h-8 gap-1.5">
+          {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+          Save
+        </Button>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setError(null);
+          }}
+          className="text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          Cancel
+        </button>
       </div>
+      {error && <span className="text-[11px] text-destructive">{error}</span>}
     </div>
   );
 }
@@ -263,7 +312,7 @@ function GroupSelector({
         <FolderHeart className="mx-auto mb-1 size-5 text-muted-foreground" />
         <div className="text-foreground">No saved groups yet.</div>
         <p className="mt-1 text-muted-foreground">
-          Create a reusable audience first.
+          Build a custom audience below and save it, or create one from scratch.
         </p>
         <Link
           href="/broadcasts/groups/new"
@@ -318,9 +367,7 @@ function GroupSelector({
                         {g.tagIds.length} tag{g.tagIds.length === 1 ? "" : "s"}
                       </span>
                     )}
-                    {g.tagIds.length > 0 && g.contactIds.length > 0 && (
-                      <span> · </span>
-                    )}
+                    {g.tagIds.length > 0 && g.contactIds.length > 0 && <span> · </span>}
                     {g.contactIds.length > 0 && (
                       <span>
                         {g.contactIds.length} manual contact
@@ -344,10 +391,7 @@ function GroupSelector({
           Members are resolved at send time — newly-tagged contacts added later
           don&apos;t join in-flight broadcasts.
         </span>
-        <Link
-          href="/broadcasts/groups"
-          className="text-primary hover:underline"
-        >
+        <Link href="/broadcasts/groups" className="text-primary hover:underline">
           Manage groups →
         </Link>
       </div>
@@ -374,43 +418,6 @@ function AllContactsCard({ count }: { count: number }) {
           </p>
         </div>
       </div>
-    </div>
-  );
-}
-
-function SelectedContactsInput({
-  tags,
-  fieldDefinitions,
-  stages,
-  initialContactLabels,
-  selectedIds,
-  onChange,
-}: {
-  tags: Tag[];
-  fieldDefinitions: ContactFieldDefinition[];
-  stages: ContactStage[];
-  initialContactLabels: ContactLabel[];
-  selectedIds: string[];
-  onChange: (next: string[]) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <ContactMultiSelectField
-        tags={tags}
-        fieldDefinitions={fieldDefinitions}
-        stages={stages}
-        initialLabels={initialContactLabels}
-        selectedIds={selectedIds}
-        onChange={onChange}
-        dialogTitle="Pick broadcast recipients"
-        dialogDescription="Filter by name, number, tag, or any field — same view as the Contacts page."
-        confirmLabel="Use these recipients"
-        emptyHint="No recipients picked yet — click below to choose."
-      />
-      <p className="text-[11px] text-muted-foreground">
-        {selectedIds.length} recipient{selectedIds.length === 1 ? "" : "s"} selected ·
-        snapshot is taken when you send.
-      </p>
     </div>
   );
 }

@@ -21,6 +21,7 @@
     "./events/types": "./src/events/types.ts",
     "./field-tokens": "./src/field-tokens.ts",
     "./template-bindings": "./src/template-bindings.ts",
+    "./template-render": "./src/template-render.ts",
     "./utils": "./src/utils.ts",
     "./utils/avatar-color": "./src/utils/avatar-color.ts",
     "./utils/tag-colors": "./src/utils/tag-colors.ts",

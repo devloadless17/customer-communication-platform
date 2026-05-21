@@ -25,10 +25,12 @@ import type {
   Conversation,
   ConversationStatus,
   ConversationWithRefs,
+  MediaKind,
   Message,
   ProviderName,
   ReplySnapshot,
 } from "@ccp/shared/types";
+import { mediaPreviewLabel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
 
 /**
@@ -276,22 +278,15 @@ export async function drainParkedStatus(
   });
 }
 
-/** Conversation-list preview text for media-only messages (no caption). */
-export function mediaPreview(kind: import("@ccp/shared/types").MediaKind | undefined): string {
-  switch (kind) {
-    case "image":
-      return "📷 Photo";
-    case "video":
-      return "🎥 Video";
-    case "audio":
-      return "🎤 Voice message";
-    case "document":
-      return "📄 Document";
-    case "sticker":
-      return "🌟 Sticker";
-    default:
-      return "";
-  }
+/**
+ * Conversation-list preview text for media-only messages (no caption).
+ * Delegates to the shared `mediaPreviewLabel` so the server and the client's
+ * optimistic list bump can never drift apart. Kept as a named re-export here
+ * because call sites across the api (messages.service, broadcast-runner, …)
+ * already import `mediaPreview` from this module.
+ */
+export function mediaPreview(kind: MediaKind | undefined): string {
+  return mediaPreviewLabel(kind);
 }
 
 function statusRank(s: Message["status"]): number {
@@ -427,6 +422,8 @@ async function ingestInboundMessage(
           data: {
             teamId,
             contactId: contact.id,
+            // The thread's channel is the provider whose webhook created it.
+            provider,
             // New chats land in `pending` so they sit in the triage column
             // until an agent claims them (→ open) or closes them out.
             status: "pending",
@@ -524,16 +521,46 @@ async function ingestInboundMessage(
       // while DB ended up at `snapshot+2`, drifting every client's unread
       // badge low by 1. The atomic `{ increment }` handles the DB write
       // correctly; we just need to broadcast the truth.
+      // Monotonicity guard. Meta delivers at-least-once with NO ordering
+      // guarantee — retries and webhook replay can land an OLDER message
+      // after a newer one. Read the current summary inside the tx and only
+      // ADVANCE lastMessageAt/lastMessagePreview when this message is the
+      // newest the conversation has seen; otherwise leave the summary alone
+      // so a late older inbound can't clobber the list preview (the bug that
+      // left "Cont" pinned after "A"/"P" arrived). unreadCount +
+      // incomingMessagesCount still increment for EVERY inbound regardless of
+      // order — they're counts, not a "latest" pointer. Mirrors the outbound
+      // guard in commitOutboundEvent / send-text-internal, which the inbound
+      // path was missing. `>=` (not `>`) so a brand-new conversation, whose
+      // create set lastMessageAt = this same evt.timestamp, still writes its
+      // first preview.
+      const summaryBefore = await tx.conversation.findUnique({
+        where: { id: conversation.id },
+        select: { lastMessageAt: true, lastMessagePreview: true },
+      });
+      const advancesSummary =
+        !summaryBefore || evt.timestamp >= summaryBefore.lastMessageAt;
       const bumped = await tx.conversation.update({
         where: { id: conversation.id },
         data: {
-          lastMessageAt: evt.timestamp,
-          lastMessagePreview: preview,
+          ...(advancesSummary
+            ? { lastMessageAt: evt.timestamp, lastMessagePreview: preview }
+            : {}),
           unreadCount: { increment: 1 },
           incomingMessagesCount: { increment: 1 },
         },
         select: { unreadCount: true },
       });
+
+      // The realtime frame + workflow snapshot must carry the EFFECTIVE newest
+      // summary, not this (possibly older) message's, so an out-of-order
+      // inbound never pushes a stale preview to the inbox list.
+      const effectiveLastMessageAt =
+        advancesSummary || !summaryBefore
+          ? evt.timestamp
+          : summaryBefore.lastMessageAt;
+      const effectivePreview =
+        advancesSummary || !summaryBefore ? preview : summaryBefore.lastMessagePreview;
       await tx.contact.updateMany({
         where: {
           id: contact.id,
@@ -574,7 +601,7 @@ async function ingestInboundMessage(
         : undefined;
       const conversationSnapshot = toWorkflowConversation({
         ...conversation,
-        lastMessageAt: evt.timestamp,
+        lastMessageAt: effectiveLastMessageAt,
         unreadCount: bumped.unreadCount,
       });
       const contactSnapshot = toWorkflowContact(contact);
@@ -582,6 +609,9 @@ async function ingestInboundMessage(
         id: created.id,
         conversationId: conversation.id,
         externalId: evt.externalId,
+        // Inbound message's channel == the provider whose webhook we're
+        // ingesting (the `provider` arg to ingestInboundMessage).
+        provider,
         senderUserId: null,
         body: evt.body,
         direction: "in",
@@ -609,8 +639,8 @@ async function ingestInboundMessage(
         isNewConversation,
         reopened,
         ...(newConversation ? { newConversation } : {}),
-        preview,
-        lastMessageAt: evt.timestamp.toISOString(),
+        preview: effectivePreview,
+        lastMessageAt: effectiveLastMessageAt.toISOString(),
         // Absolute team-wide unread post-increment, read from the UPDATE
         // return above so two concurrent inbounds publish distinct values
         // (snapshot+1 was the source of an off-by-one drift when two
@@ -771,6 +801,7 @@ function toWorkflowMessage(m: {
   id: string;
   conversationId: string;
   externalId: string;
+  provider: ProviderName;
   direction: "in" | "out";
   body: string;
   mediaKind: import("@ccp/shared/types").MediaKind | null;
@@ -782,6 +813,7 @@ function toWorkflowMessage(m: {
     id: m.id,
     conversationId: m.conversationId,
     externalId: m.externalId,
+    provider: m.provider,
     direction: m.direction,
     body: m.body,
     mediaKind: m.mediaKind,
@@ -793,6 +825,7 @@ function toWorkflowMessage(m: {
 
 function toWorkflowConversation(c: {
   id: string;
+  provider: ProviderName;
   status: string;
   assignedUserId: string | null;
   unreadCount: number;
@@ -813,6 +846,7 @@ function toWorkflowConversation(c: {
 }): WorkflowConversationSnapshot {
   return {
     id: c.id,
+    provider: c.provider,
     status: c.status as WorkflowConversationSnapshot["status"],
     assignedUserId: c.assignedUserId,
     unreadCount: c.unreadCount,
@@ -852,7 +886,6 @@ function toWorkflowContact(c: {
   countryCode?: string | null;
   avatarUrl?: string | null;
   location?: string | null;
-  assignedUserId?: string | null;
   createdAt?: Date | string | null;
 }): WorkflowContactSnapshot {
   return {
@@ -871,7 +904,6 @@ function toWorkflowContact(c: {
     countryCode: c.countryCode ?? null,
     avatarUrl: c.avatarUrl ?? null,
     location: c.location ?? null,
-    assignedUserId: c.assignedUserId ?? null,
     createdAt:
       c.createdAt instanceof Date
         ? c.createdAt.toISOString()
@@ -924,6 +956,7 @@ async function loadRecentForWorkflow(
       id: true,
       conversationId: true,
       externalId: true,
+      provider: true,
       direction: true,
       body: true,
       mediaKind: true,
@@ -937,6 +970,7 @@ async function loadRecentForWorkflow(
       id: r.id,
       conversationId: r.conversationId,
       externalId: r.externalId,
+      provider: r.provider,
       direction: r.direction as "in" | "out",
       body: r.body,
       mediaKind: r.mediaKind as import("@ccp/shared/types").MediaKind | null,
@@ -987,7 +1021,6 @@ function toDomainContact(c: {
   lastName?: string | null;
   language?: string | null;
   countryCode?: string | null;
-  assignedUserId?: string | null;
   avatarUrl: string | null;
   email?: string | null;
   location?: string | null;
@@ -1006,7 +1039,6 @@ function toDomainContact(c: {
     lastName: c.lastName ?? null,
     language: c.language ?? null,
     countryCode: c.countryCode ?? null,
-    assignedUserId: c.assignedUserId ?? null,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,

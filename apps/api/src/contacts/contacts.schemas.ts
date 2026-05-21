@@ -100,8 +100,6 @@ export const CreateContactSchema = z.object({
   email: z.string().trim().max(MAX_TEXT).optional(),
   location: z.string().trim().max(MAX_TEXT).optional(),
   customFields: CustomFieldsCreateSchema.optional(),
-  /** Account-manager — must be a member of the team. Validated at the service. */
-  assignedUserId: z.string().min(1).optional(),
 });
 export type CreateContactInput = z.infer<typeof CreateContactSchema>;
 
@@ -140,8 +138,6 @@ export const UpdateContactSchema = z
       .optional(),
     customFields: CustomFieldsPatchSchema.optional(),
     stageId: z.union([z.string().min(1), z.null()]).optional(),
-    /** Account-manager. `null` clears, cuid sets. Member of the team. */
-    assignedUserId: z.union([z.string().min(1), z.null()]).optional(),
   })
   .passthrough();
 export type UpdateContactInput = z.infer<typeof UpdateContactSchema>;

@@ -1,10 +1,10 @@
 /**
- * Inbox loading shell — renders inside `app/(app)/layout.tsx`'s children
- * slot, AFTER the AppRail. The shared (app) layout keeps the AppRail
- * mounted across every suspense boundary, so clicking the Inbox icon
- * from any other section no longer flashes a white screen — only the
- * area to the right of the rail swaps to this skeleton, then to the
- * real shell.
+ * Inbox loading shell — the fallback for the inbox PAGE only. It renders
+ * inside `app/(app)/inbox/layout.tsx`'s `<main>`, AFTER the AppRail (from the
+ * (app) layout) AND the inbox sub-sidebar (from the inbox layout). Both stay
+ * mounted across this suspense boundary, so clicking the Inbox icon paints the
+ * stable rail + sub-sidebar immediately and only the conversation list + thread
+ * swap to this skeleton, then to the real shell — matching every other section.
  *
  * The columns + per-row heights below mirror inbox-shell + conversation-list
  * exactly so the swap from skeleton → real list has zero vertical jump.
@@ -18,11 +18,6 @@ export default function Loading() {
       aria-label="Loading inbox"
       className="flex h-svh w-full overflow-hidden bg-background text-foreground"
     >
-      {/* InboxSubSidebar column — only shown at lg+ (1024px); below that
-          it lives in the hamburger drawer. w-40 at lg, w-52 at xl+.
-          Matches sub-sidebar.tsx. */}
-      <div className="hidden h-full shrink-0 border-r border-border bg-muted/20 lg:block lg:w-40 xl:w-52" />
-
       {/* Conversation list column — width matches conversation-list.tsx
           exactly: w-64 below xl, w-80 at xl+. The inner structure mirrors
           the real list (header → search → rows of ~76px each) so when the

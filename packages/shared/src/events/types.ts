@@ -344,27 +344,6 @@ export interface ContactLifecycleChangedEvent {
   changedByApiKeyId?: string | null;
 }
 
-/**
- * Account-manager assignment on the contact (cross-thread) changed.
- * Distinct from `conversation.assigned` — that's per-thread assignment;
- * this is "who owns this person at the team level."
- *
- * `afterUser` is the hydrated User row for the new assignee (when set).
- * Lets the webhook subscriber populate `assignee: { type, id, name, email }`
- * without an extra query.
- */
-export interface ContactAssigneeChangedEvent {
-  teamId: string;
-  contactId: string;
-  before: { assignedUserId: string | null };
-  after: { assignedUserId: string | null };
-  afterUser: User | null;
-  /** null when triggered by the external API. */
-  changedByUserId: string | null;
-  /** Set on /v1 mutations for audit attribution. */
-  changedByApiKeyId?: string | null;
-}
-
 export interface NoteCreatedEvent {
   teamId: string;
   conversationId: string;
@@ -693,7 +672,6 @@ export interface DomainEventMap {
   "contact.updated": ContactUpdatedEvent;
   "contact.tag_changed": ContactTagChangedEvent;
   "contact.lifecycle_changed": ContactLifecycleChangedEvent;
-  "contact.assignee_changed": ContactAssigneeChangedEvent;
   "contact.bulk_updated": ContactBulkUpdatedEvent;
   "contact.deleted": ContactDeletedEvent;
   "note.created": NoteCreatedEvent;

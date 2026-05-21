@@ -3,6 +3,7 @@
 import { Hash, PanelLeft, Pencil, Search, Trash2, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { openMobileNav } from "@/components/layouts/mobile-shell-chrome";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,7 +35,6 @@ export function ChannelHeader({
   onDelete,
   onOpenSearch,
   onOpenMembers,
-  onOpenChannelList,
 }: {
   channel: TeamChannelDto;
   currentRole: Role;
@@ -46,23 +46,20 @@ export function ChannelHeader({
   onOpenSearch: () => void;
   /** Opens the channel-members dialog (add / remove people). */
   onOpenMembers: () => void;
-  /** Mobile-only — opens the slide-in channel list sheet. */
-  onOpenChannelList?: () => void;
 }) {
   const canEdit = canManageChannel(currentRole);
   const canDelete = canDeleteChannel(currentRole) && !channel.isDefault;
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-3 md:gap-3 md:px-4">
-      {onOpenChannelList && (
-        <button
-          type="button"
-          onClick={onOpenChannelList}
-          aria-label="Browse channels"
-          className="-ml-1 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
-        >
-          <PanelLeft className="size-4" />
-        </button>
-      )}
+      {/* Mobile-only: opens the nav drawer, which carries the channel list. */}
+      <button
+        type="button"
+        onClick={openMobileNav}
+        aria-label="Browse channels"
+        className="-ml-1 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+      >
+        <PanelLeft className="size-4" />
+      </button>
       <Hash className="size-4 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">

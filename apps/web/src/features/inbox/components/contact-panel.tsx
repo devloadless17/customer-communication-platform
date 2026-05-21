@@ -917,7 +917,7 @@ function AssigneePicker({
                 {current.avatarUrl ? (
                   <AvatarImage src={current.avatarUrl} alt={current.name} />
                 ) : null}
-                <AvatarFallback className="text-[10px]">{initials(current.name)}</AvatarFallback>
+                <AvatarFallback seed={current.id} className="text-[10px]">{initials(current.name)}</AvatarFallback>
               </Avatar>
               <span className="truncate font-normal">{current.name}</span>
             </>
@@ -931,7 +931,7 @@ function AssigneePicker({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel>Account manager</DropdownMenuLabel>
+        <DropdownMenuLabel>Assigned agent</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => onChange(null)}>
           {currentId === null && <Check className="size-3.5" />}
@@ -946,7 +946,7 @@ function AssigneePicker({
             ) : (
               <Avatar className="size-5">
                 {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                <AvatarFallback className="text-[10px]">{initials(u.name)}</AvatarFallback>
+                <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
               </Avatar>
             )}
             <span className="truncate">{u.name}</span>

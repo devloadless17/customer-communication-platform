@@ -95,13 +95,6 @@ export interface Contact {
    * later deleted; the UI renders an "Unassigned" pill in that case.
    */
   stageId?: string | null;
-  /**
-   * Account-manager: who owns this contact across all their conversations.
-   * Distinct from `Conversation.assignedUserId` (per-thread). Null when
-   * unassigned. Adding an AI agent assignee in the future will add a
-   * parallel `assignedAiAgentId` field with a CHECK that exactly one is set.
-   */
-  assignedUserId?: string | null;
   /** ISO row-creation timestamp. Exposed for webhook payloads and the /v1 contact GET. */
   createdAt?: string;
 }
@@ -189,9 +182,43 @@ export interface Tag {
   teamId: string;
   name: string;
   color: TagColor;
+  /**
+   * ISO-8601 creation timestamp. Optional because display-only construction
+   * sites (contact chips, audience previews) don't carry it; the tags catalog
+   * REST endpoint always populates it so the settings page can sort by recency.
+   */
+  createdAt?: string;
 }
 
 export type MediaKind = "image" | "video" | "audio" | "document" | "sticker";
+
+/**
+ * Conversation-list preview text for a media message that carries no caption.
+ *
+ * SINGLE SOURCE OF TRUTH — shared by the server (which writes
+ * `Conversation.lastMessagePreview` on send/ingest, see
+ * `apps/api/src/lib/providers/ingest.ts` `mediaPreview`) and the client (which
+ * paints the same label optimistically before the `message:new` frame lands,
+ * see the reply-box send path). These two must produce identical strings: if
+ * they drift, the sender's list preview flickers from one label to the other
+ * when the real server frame arrives.
+ */
+export function mediaPreviewLabel(kind: MediaKind | undefined): string {
+  switch (kind) {
+    case "image":
+      return "📷 Photo";
+    case "video":
+      return "🎥 Video";
+    case "audio":
+      return "🎤 Voice message";
+    case "document":
+      return "📄 Document";
+    case "sticker":
+      return "🌟 Sticker";
+    default:
+      return "";
+  }
+}
 
 /**
  * DTO returned by `/api/team/whatsapp/templates` for the picker UI. Lives
@@ -343,26 +370,15 @@ export interface Conversation {
   assignedUserId: string | null;
   status: ConversationStatus;
   /**
-   * Team-wide unread counter. Currently the source of truth for both the
-   * row badge AND the bold-text "unread" cue across the inbox UI.
-   *
-   * Historically the inbox planned to surface a per-agent "unread for me"
-   * signal (separate from team-wide) using the `ConversationReadReceipt`
-   * table, but no consumer was ever wired — see `unreadForMe` below.
+   * Team-wide unread counter — the single source of truth for both the row
+   * badge AND the bold-text "unread" cue across the inbox UI. Unread is
+   * team-wide by design (collab inbox): any member opening a thread zeroes
+   * this and it clears for everyone. There is no per-agent inbox read state
+   * (team chat has its own; see TeamChannelReadReceipt).
    */
   unreadCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
-  /**
-   * Reserved for a future per-agent "unread for me" feature. Currently
-   * UNPOPULATED — the server-side computation in `listConversations` was
-   * removed after audit-2 found no UI consumer. `ConversationReadReceipt`
-   * rows are still upserted on `markRead`, so re-enabling means: (a)
-   * restore the receipt join in the query, (b) wire a per-user reducer
-   * for `conversation:read` (currentUserId-aware), and (c) a per-user
-   * transition on `message:new` for non-active inbounds.
-   */
-  unreadForMe?: boolean;
 }
 
 /**

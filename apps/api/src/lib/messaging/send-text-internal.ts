@@ -6,8 +6,12 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding } from "@/lib/providers";
+import {
+  NoChannelDestinationError,
+  resolveContactChannel,
+} from "@/lib/providers/channel";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 
@@ -73,10 +77,20 @@ export async function sendTextInternal(
     select: {
       id: true,
       contactId: true,
+      // Channel is conversation-owned — bind + stamp the send from here, not
+      // from the contact (resolveContactChannel only supplies the destination).
+      provider: true,
       // lastMessageAt feeds the timestamp-ordering guard below. Pulling it
       // here avoids a second roundtrip after the Meta send returns.
       lastMessageAt: true,
-      contact: { select: { phoneNumber: true, lastInboundAt: true } },
+      contact: {
+        select: {
+          phoneNumber: true,
+          identityProvider: true,
+          externalContactId: true,
+          lastInboundAt: true,
+        },
+      },
     },
   });
   if (!conversation) {
@@ -85,28 +99,48 @@ export async function sendTextInternal(
       "conversation not found",
     );
   }
-  if (!conversation.contact.phoneNumber) {
-    throw new SendTextValidationError(
-      "contact_has_no_phone",
-      "contact has no WhatsApp number",
-    );
-  }
 
-  // 24h window — pre-check on our side so we surface a clean error code
-  // instead of letting Meta 422 us with their cryptic body.
-  const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-  const win = computeWindowStatus(lastInboundAt);
-  if (win.state === "closed" || win.state === "never") {
-    throw new SendTextValidationError(
-      "outside_24h_window",
-      "outside_24h_window",
-      "24h customer-service window closed — use a template step instead.",
-    );
+  // Resolve the destination ADDRESS from the contact's identity (replaces the
+  // bare `phoneNumber` read so non-phone channels route too). The PROVIDER is
+  // owned by the conversation row — the source of truth for which channel this
+  // thread sends on. They're equal by construction today (siloed, immutable-
+  // identity contacts), so this is a WhatsApp no-op; it keeps the conversation
+  // authoritative if a contact's channel ever diverges.
+  let channel;
+  try {
+    channel = resolveContactChannel(conversation.contact);
+  } catch (err) {
+    if (err instanceof NoChannelDestinationError) {
+      throw new SendTextValidationError(
+        "contact_has_no_phone",
+        "contact has no reachable address",
+      );
+    }
+    throw err;
+  }
+  const provider = conversation.provider;
+  const binding = getProviderBinding(provider);
+
+  // Free-form send window — pre-check on our side so we surface a clean error
+  // code instead of letting the provider reject with a cryptic body. Driven by
+  // the provider's declared window; `null` means the channel has no free-form
+  // window restriction (e.g. Telegram), so the check is skipped entirely.
+  const windowMs = binding.provider.capabilities.freeFormWindowMs;
+  if (windowMs !== null) {
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+    const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
+    if (win.state === "closed" || win.state === "never") {
+      throw new SendTextValidationError(
+        "outside_24h_window",
+        "outside_24h_window",
+        "24h customer-service window closed — use a template step instead.",
+      );
+    }
   }
 
   let sendConfig;
   try {
-    sendConfig = await getMetaSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.teamId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTextValidationError(
@@ -118,8 +152,8 @@ export async function sendTextInternal(
     throw err;
   }
 
-  const send = await getMetaProvider().sendText(
-    { to: conversation.contact.phoneNumber, body },
+  const send = await binding.provider.sendText(
+    { to: channel.to, body },
     sendConfig,
   );
 
@@ -149,7 +183,7 @@ export async function sendTextInternal(
     senderUserId: null,
     body,
     direction: "out",
-    provider: "meta_cloud",
+    provider,
     status: "sent",
     rawPayload: { sentVia: args.sentVia } as Prisma.InputJsonValue,
     timestamp: messageTimestamp,
@@ -191,7 +225,7 @@ export async function sendTextInternal(
     senderUserId: null,
     body,
     direction: "out",
-    provider: "meta_cloud",
+    provider,
     status: "sent",
     rawPayload: { sentVia: args.sentVia },
     timestamp: messageTimestamp.toISOString(),

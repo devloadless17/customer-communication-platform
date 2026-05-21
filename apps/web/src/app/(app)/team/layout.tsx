@@ -1,21 +1,22 @@
 import { SectionShell } from "@/components/layouts/section-shell";
 import { TeamChatLayoutDataProvider } from "@/features/team-chat/contexts/team-chat-data";
+import { TeamChannelSidebar } from "@/features/team-chat/components/team-channel-sidebar";
+import { getSession } from "@/lib/auth/current-user";
 import { listChannelsForUser, listTeamMembers } from "@/lib/api/queries";
 
 /**
- * Team chat shell. The channels list and team roster are fetched HERE
- * (layout level) so that switching between channels — which re-runs
- * /team/[channelId]/page.tsx — does NOT refetch them. Next.js caches
- * layouts across nested route changes; per-channel data stays in the
- * page, channel-agnostic data lives up here.
+ * Team chat shell. The channel list + team roster are fetched HERE (layout
+ * level) and seeded into a LIVE provider, so switching channels — which
+ * re-runs /team/[channelId]/page.tsx — doesn't refetch them and the
+ * channel-list socket subscription runs once for the whole section.
  *
- * Before this, the page fetched 5 things in parallel on every channel
- * switch (channel meta + messages + pins + channels list + members);
- * now it's 3, ~40% less network on each click.
+ * The channel-list sidebar is rendered in the `SectionShell` sub-sidebar slot
+ * (not inside the workspace), so it paints instantly on a rail click and stays
+ * mounted across channel switches and the `/team` → default-channel redirect —
+ * only the feed (the page) streams in behind `loading.tsx`.
  *
- * The channel list rendering still lives inside TeamChatWorkspace
- * (which carries live socket state for unread badges + presence) — only
- * the SSR seed moved up here. The workspace reads it via context.
+ * The provider wraps SectionShell (not just `{children}`) so BOTH the sidebar
+ * slot and the workspace read the same live channel list.
  *
  * `min-w-0` on main lets the workspace own its own internal scroll.
  */
@@ -24,16 +25,21 @@ export default async function TeamLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const [channels, teamMembers] = await Promise.all([
+  const [{ user }, channels, teamMembers] = await Promise.all([
+    getSession(),
     listChannelsForUser(),
     listTeamMembers(),
   ]);
 
   return (
-    <SectionShell mainClassName="min-w-0">
-      <TeamChatLayoutDataProvider channels={channels} teamMembers={teamMembers}>
+    <TeamChatLayoutDataProvider
+      initialChannels={channels}
+      teamMembers={teamMembers}
+      currentUserId={user.id}
+    >
+      <SectionShell mainClassName="min-w-0" subSidebar={<TeamChannelSidebar currentUser={user} />}>
         {children}
-      </TeamChatLayoutDataProvider>
-    </SectionShell>
+      </SectionShell>
+    </TeamChatLayoutDataProvider>
   );
 }

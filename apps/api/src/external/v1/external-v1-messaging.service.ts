@@ -27,10 +27,14 @@ import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
 } from "@/lib/messaging/conversation-send-budget";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding } from "@/lib/providers";
+import {
+  NoChannelDestinationError,
+  resolveContactChannel,
+} from "@/lib/providers/channel";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import type { Message, User } from "@ccp/shared/types";
+import type { Message, ProviderName, User } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
@@ -405,21 +409,50 @@ export class ExternalV1MessagingService {
       select: {
         id: true,
         contactId: true,
-        contact: { select: { phoneNumber: true, lastInboundAt: true } },
+        // Channel is conversation-owned — bind + stamp from here.
+        provider: true,
+        contact: {
+          select: {
+            phoneNumber: true,
+            identityProvider: true,
+            externalContactId: true,
+            lastInboundAt: true,
+          },
+        },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-    const win = computeWindowStatus(lastInboundAt);
-    if (win.state === "closed" || win.state === "never") {
-      throw new UnprocessableEntityException({
-        error: "outside_24h_window",
-        detail:
-          "free-form messages are only allowed within 24h of the contact's last inbound. " +
-          "use a pre-approved template for cold outbound (not yet exposed via the external API).",
-        lastInboundAt,
-      });
+    let channel;
+    try {
+      channel = resolveContactChannel(conversation.contact);
+    } catch (err) {
+      if (err instanceof NoChannelDestinationError) {
+        throw new BadRequestException({
+          error: "contact_has_no_phone",
+          detail: "This contact has no reachable address.",
+        });
+      }
+      throw err;
+    }
+    const provider = conversation.provider;
+    const binding = getProviderBinding(provider);
+
+    // Free-form send window — driven by the provider capability; `null` skips
+    // it (channel with no window restriction).
+    const windowMs = binding.provider.capabilities.freeFormWindowMs;
+    if (windowMs !== null) {
+      const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+      const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
+      if (win.state === "closed" || win.state === "never") {
+        throw new UnprocessableEntityException({
+          error: "outside_24h_window",
+          detail:
+            "free-form messages are only allowed within 24h of the contact's last inbound. " +
+            "use a pre-approved template for cold outbound (not yet exposed via the external API).",
+          lastInboundAt,
+        });
+      }
     }
 
     let replyToMessageId: string | null = null;
@@ -447,12 +480,6 @@ export class ExternalV1MessagingService {
       }
     }
 
-    if (!conversation.contact.phoneNumber) {
-      throw new BadRequestException({
-        error: "contact_has_no_phone",
-        detail: "This contact has no WhatsApp number.",
-      });
-    }
 
     // Per-conversation send ceiling. Bounds a partner-driven hot-potato
     // (their automation reacts to its own `message.sent` webhook and POSTs
@@ -495,10 +522,10 @@ export class ExternalV1MessagingService {
 
     let send;
     try {
-      const config = await getMetaSendConfig(teamId);
-      send = await getMetaProvider().sendText(
+      const config = await binding.getSendConfig(teamId);
+      send = await binding.provider.sendText(
         {
-          to: conversation.contact.phoneNumber,
+          to: channel.to,
           body: input.body,
           ...(replyToExternalId ? { replyToExternalId } : {}),
         },
@@ -551,7 +578,7 @@ export class ExternalV1MessagingService {
       senderUserId: null,
       body: input.body,
       direction: "out",
-      provider: "meta_cloud",
+      provider,
       status: "sent",
       rawPayload: { sentVia: "api/external/v1", apiKeyId } as Prisma.InputJsonValue,
       timestamp: send.timestamp,
@@ -592,7 +619,7 @@ export class ExternalV1MessagingService {
       senderUserId: null,
       body: input.body,
       direction: "out",
-      provider: "meta_cloud",
+      provider,
       status: "sent",
       rawPayload: { sentVia: "api/external/v1", apiKeyId },
       timestamp: send.timestamp.toISOString(),
@@ -773,10 +800,29 @@ export class ExternalV1MessagingService {
       select: { id: true, status: true },
     });
     if (!conv) {
+      // Stamp the new thread's channel from the contact's identity — the
+      // source of truth at creation (contacts are siloed + immutable-identity).
+      // Load-bearing now that the send paths stamp Message.provider FROM the
+      // conversation: a wrong @default(meta_cloud) here would propagate to
+      // every message on a future non-phone contact's thread.
+      const contactChannel = await this.db.contact.findUnique({
+        where: { id: contactId },
+        select: { phoneNumber: true, identityProvider: true, externalContactId: true },
+      });
+      let provider: ProviderName = "meta_cloud";
+      if (contactChannel) {
+        try {
+          provider = resolveContactChannel(contactChannel).provider;
+        } catch {
+          // No reachable address — keep the default; the downstream send will
+          // surface the proper "contact has no reachable address" error.
+        }
+      }
       const created = await this.db.conversation.create({
         data: {
           teamId,
           contactId,
+          provider,
           status: "pending",
           lastMessageAt: new Date(),
           lastMessagePreview: "",

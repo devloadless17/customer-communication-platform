@@ -351,7 +351,7 @@ function UserRow({
   return (
     <li className="flex items-center gap-3 px-4 py-3">
       <Avatar className="size-8">
-        <AvatarFallback className="text-[11px]">{initials(user.name)}</AvatarFallback>
+        <AvatarFallback seed={user.id} className="text-[11px]">{initials(user.name)}</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">

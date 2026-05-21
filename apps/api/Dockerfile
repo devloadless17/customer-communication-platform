@@ -14,7 +14,7 @@
 FROM node:22-slim AS base
 WORKDIR /app
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl ca-certificates wget \
+ && apt-get install -y --no-install-recommends openssl ca-certificates wget ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
 

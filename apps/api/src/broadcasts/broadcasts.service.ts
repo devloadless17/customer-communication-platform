@@ -208,6 +208,22 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
       resolvedGroupId = group.id;
       resolvedGroupName = group.name;
+    } else if (audience.mode === "custom") {
+      // One-off audience built inline — same UNION semantics as a saved group
+      // (contacts carrying ANY chosen tag, OR hand-picked by id), resolved and
+      // snapshotted now. Tags are validated for the stored audit set; foreign
+      // contact ids drop out automatically (the resolver scopes by teamId).
+      const tagRows = audience.tagIds.length
+        ? await this.db.tag.findMany({
+            where: { teamId, id: { in: audience.tagIds } },
+            select: { id: true },
+          })
+        : [];
+      validatedTagIds = tagRows.map((t) => t.id);
+      recipientIds = await resolveAudienceGroupMembers(teamId, {
+        tagIds: validatedTagIds,
+        manualContactIds: audience.contactIds,
+      });
     } else {
       // mode === "selected"
       recipientIds = Array.from(

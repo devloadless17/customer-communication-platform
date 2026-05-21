@@ -16,11 +16,11 @@ import type {
  */
 
 /**
- * A team member referenced from a payload (assignee / account-manager).
- * Hydrated so integrators don't have to call GET /v1/users/:id to label a
- * row "assigned to Sara" — they get the name + email inline. `null` means
- * unassigned. We deliberately do NOT carry a bare `assignedUserId` alongside
- * this — the object IS the reference; `assignee.id` is the id.
+ * A team member referenced from a payload (the per-thread conversation
+ * assignee). Hydrated so integrators don't have to call GET /v1/users/:id to
+ * label a row "assigned to Sara" — they get the name + email inline. `null`
+ * means unassigned. We deliberately do NOT carry a bare `assignedUserId`
+ * alongside this — the object IS the reference; `assignee.id` is the id.
  */
 export interface ExternalAssignee {
   id: string;
@@ -69,8 +69,6 @@ export interface ExternalContact {
   language: string | null;
   /** ISO 3166-1 alpha-2, derived from phone number on inbound + /v1 writes. */
   countryCode: string | null;
-  /** Account-manager (cross-thread). Distinct from per-thread Conversation assignee. */
-  assignee: ExternalAssignee | null;
   /** Avatar URL — usually null today; populated when an avatar is uploaded. */
   avatarUrl: string | null;
   email: string | null;
@@ -84,6 +82,13 @@ export interface ExternalContact {
 export interface ExternalConversation {
   id: string;
   contactId: string;
+  /**
+   * Channel of the thread (`meta_cloud` = WhatsApp). A conversation is bound
+   * to one contact and therefore one channel. Surfaced here so integrators can
+   * route/filter threads without inferring it from the embedded contact's
+   * `identityProvider` (which is null for phone-keyed WhatsApp contacts).
+   */
+  provider: "meta_cloud";
   status: "open" | "pending" | "closed";
   /** Per-thread assignee. Hydrated; null when unassigned. */
   assignee: ExternalAssignee | null;
@@ -102,6 +107,13 @@ export interface ExternalMessage {
   id: string;
   conversationId: string;
   externalId: string;
+  /**
+   * Channel this message was sent/received on (`meta_cloud` = WhatsApp).
+   * Always present. Integrators that handle multiple channels should key off
+   * this rather than the contact's `identityProvider` (which is null for
+   * phone-keyed WhatsApp contacts). Expands to a union as channels are added.
+   */
+  provider: "meta_cloud";
   direction: "in" | "out";
   body: string;
   status: "sent" | "delivered" | "read" | "failed";
@@ -119,7 +131,6 @@ export interface ExternalMessage {
  */
 export const EXTERNAL_CONTACT_INCLUDE = {
   tags: { select: { id: true } },
-  assignedUser: { select: { id: true, name: true, email: true } },
 } as const;
 
 export const EXTERNAL_CONVERSATION_INCLUDE = {
@@ -135,7 +146,7 @@ export function toExternalAssignee(u: AssigneeRow): ExternalAssignee | null {
 }
 
 export function toExternalContact(
-  c: DbContact & { assignedUser?: AssigneeRow },
+  c: DbContact,
   tagIds: string[] = [],
 ): ExternalContact {
   return {
@@ -148,7 +159,6 @@ export function toExternalContact(
     lastName: c.lastName ?? null,
     language: c.language ?? null,
     countryCode: c.countryCode ?? null,
-    assignee: toExternalAssignee(c.assignedUser),
     avatarUrl: c.avatarUrl ?? null,
     email: c.email ?? null,
     location: c.location ?? null,
@@ -165,7 +175,7 @@ export function toExternalContact(
  * sites don't repeat `.tags.map(...)`.
  */
 export function contactRowToExternal(
-  r: DbContact & { tags?: { id: string }[]; assignedUser?: AssigneeRow },
+  r: DbContact & { tags?: { id: string }[] },
 ): ExternalContact {
   return toExternalContact(r, (r.tags ?? []).map((t) => t.id));
 }
@@ -178,7 +188,7 @@ export function contactRowToExternal(
 export function conversationRowToExternal(
   r: DbConversation & {
     assignedUser?: AssigneeRow;
-    contact: DbContact & { tags?: { id: string }[]; assignedUser?: AssigneeRow };
+    contact: DbContact & { tags?: { id: string }[] };
   },
 ): ExternalConversation {
   return toExternalConversation(r, contactRowToExternal(r.contact));
@@ -191,6 +201,8 @@ export function toExternalConversation(
   return {
     id: c.id,
     contactId: c.contactId,
+    // Channel is owned by the conversation row, not derived from the contact.
+    provider: c.provider as ExternalConversation["provider"],
     status: c.status as ExternalConversation["status"],
     assignee: toExternalAssignee(c.assignedUser),
     unreadCount: c.unreadCount,
@@ -234,6 +246,7 @@ export function toExternalMessage(
     id: m.id,
     conversationId: m.conversationId,
     externalId: m.externalId,
+    provider: m.provider as ExternalMessage["provider"],
     direction: m.direction as ExternalMessage["direction"],
     body: m.body,
     status: m.status as ExternalMessage["status"],

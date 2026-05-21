@@ -85,10 +85,14 @@ export const getCurrentTeam = cache(
   },
 );
 
-export async function listTeamMembers(): Promise<User[]> {
+// Wrapped in `React.cache` so a section's layout (e.g. the inbox sub-sidebar's
+// teammate list) and its page (message attribution / @-picker) share one
+// `/api/users` round-trip per render instead of fetching twice on every nav.
+// Per-render dedupe only — a fresh navigation still re-fetches.
+export const listTeamMembers = cache(async (): Promise<User[]> => {
   const { users } = await api<{ users: User[] }>("/api/users");
   return users;
-}
+});
 
 // ---------------------------------------------------------------------------
 // Super-admin (cross-team)
@@ -197,9 +201,14 @@ export interface ListConversationsOpts {
   search?: string;
 }
 
-export async function listConversations(
+// Wrapped in `React.cache` so the inbox layout (sub-sidebar count fallback)
+// and the inbox page (conversation list seed) share one `/api/conversations`
+// round-trip per render. React.cache keys on the arguments, so the no-arg
+// calls both sides make dedupe to a single fetch; callers passing distinct
+// `opts` objects are unaffected (fresh fetch, as before).
+export const listConversations = cache(async (
   opts: ListConversationsOpts = {},
-): Promise<CursorPage<ConversationWithRefs>> {
+): Promise<CursorPage<ConversationWithRefs>> => {
   return api<CursorPage<ConversationWithRefs>>("/api/conversations", {
     query: {
       take: opts.take,
@@ -207,7 +216,7 @@ export async function listConversations(
       search: opts.search ?? undefined,
     },
   });
-}
+});
 
 export async function getConversationWithRefs(
   conversationId: string,

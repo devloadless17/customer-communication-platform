@@ -122,6 +122,42 @@ export function ContactFieldsSettings({
     [builtins],
   );
 
+  // Visibility is a pure optimistic toggle — mirrors `toggleBuiltin` above, NOT
+  // `patchField`. patchField's setBusyId disables + dims the row for the whole
+  // PATCH round-trip, which made the eye icon flip then grey out for ~100-300ms
+  // (read as lag). Here the icon flips instantly and stays interactive; the
+  // value rolls back only if the server rejects. router.refresh() from
+  // useCatalogSync still re-syncs the canonical state afterward.
+  const toggleVisibility = useCallback(
+    async (field: ContactFieldDefinition) => {
+      const next = !field.isVisible;
+      const prev = defs;
+      setError(null);
+      setDefs((cur) =>
+        cur.map((f) => (f.id === field.id ? { ...f, isVisible: next } : f)),
+      );
+      try {
+        const res = await fetch(`/api/team/contact-fields/${field.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ isVisible: next }),
+        });
+        if (!res.ok) {
+          setDefs(prev);
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          setError(body.detail || body.error || `Update failed (HTTP ${res.status})`);
+        }
+      } catch {
+        setDefs(prev);
+        setError("Network error");
+      }
+    },
+    [defs],
+  );
+
   const patchField = useCallback(
     async (
       id: string,
@@ -328,9 +364,7 @@ export function ContactFieldsSettings({
               onRename={(label) => patchField(field.id, { label })}
               onMoveUp={() => reorder(field.id, "up")}
               onMoveDown={() => reorder(field.id, "down")}
-              onToggleVisibility={() =>
-                patchField(field.id, { isVisible: !field.isVisible })
-              }
+              onToggleVisibility={() => toggleVisibility(field)}
               onDelete={() => deleteField(field)}
             />
           ))}

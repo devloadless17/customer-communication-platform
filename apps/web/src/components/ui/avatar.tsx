@@ -4,6 +4,7 @@ import * as AvatarPrimitive from "@radix-ui/react-avatar";
 import type { ComponentProps } from "react";
 
 import { cn } from "@ccp/shared/utils";
+import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 
 // React 19: ref is a regular prop. `ComponentProps<typeof Primitive>`
 // already carries the ref type, so no forwardRef wrapper and no separate
@@ -31,7 +32,13 @@ export function AvatarImage({
 }: ComponentProps<typeof AvatarPrimitive.Image>) {
   return (
     <AvatarPrimitive.Image
-      className={cn("aspect-square size-full", className)}
+      // Inset ring (not outset) so the parent's overflow-hidden doesn't clip
+      // it; rounded-full so the hairline traces the circle instead of touching
+      // it at 4 points. Gives white-background profile images visible edges.
+      className={cn(
+        "aspect-square size-full rounded-full ring-1 ring-inset ring-black/10 dark:ring-white/15",
+        className,
+      )}
       {...props}
     />
   );
@@ -39,14 +46,27 @@ export function AvatarImage({
 
 export function AvatarFallback({
   className,
+  seed,
+  style,
   ...props
-}: ComponentProps<typeof AvatarPrimitive.Fallback>) {
+}: ComponentProps<typeof AvatarPrimitive.Fallback> & {
+  /** When set, paints a deterministic color gradient + white initials instead
+   *  of flat gray, so people without a profile photo read as identity rather
+   *  than a row of identical gray circles. Pass a stable per-person seed
+   *  (user id, or name when no id is available). Omit it to keep the gray
+   *  fallback (e.g. a "?" placeholder). */
+  seed?: string;
+}) {
+  const colored = !!seed;
   return (
     <AvatarPrimitive.Fallback
       className={cn(
-        "flex size-full items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground",
+        "flex size-full items-center justify-center rounded-full text-xs font-medium",
+        colored ? "text-white" : "bg-muted text-muted-foreground",
         className,
       )}
+      // Spread consumer `style` last so an explicit override still wins.
+      style={colored ? { backgroundImage: avatarGradient(seed), ...style } : style}
       {...props}
     />
   );

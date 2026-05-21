@@ -143,7 +143,7 @@ export function AppRail({
             aria-label="Open account menu"
           >
             <Avatar className="size-8 ring-2 ring-sidebar transition-shadow hover:ring-foreground/20">
-              <AvatarFallback className="text-[11px]">
+              <AvatarFallback seed={currentUser.id} className="text-[11px]">
                 {initials(currentUser.name)}
               </AvatarFallback>
             </Avatar>

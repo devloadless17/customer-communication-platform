@@ -158,7 +158,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
         <div className="relative">
           <Avatar className="size-20">
             {avatarUrl ? <AvatarImage src={avatarUrl} alt={user.name} /> : null}
-            <AvatarFallback className="text-base">
+            <AvatarFallback seed={user.id} className="text-base">
               {initials(name || user.name)}
             </AvatarFallback>
           </Avatar>

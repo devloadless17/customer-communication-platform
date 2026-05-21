@@ -144,9 +144,11 @@ export function EmojiPopover({
   return (
     <motion.div
       ref={popoverRef}
-      initial={{ opacity: 0, y: 6, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.12 }}
+      // Opacity-only fade (no scale/translate): the previous scale 0.98→1 read
+      // as the popover "growing" after it appeared, especially janky in dev.
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.1, ease: "easeOut" }}
       className={cn(
         "absolute bottom-full left-0 z-50 mb-2 w-72 rounded-xl border border-border bg-popover shadow-xl",
         className,

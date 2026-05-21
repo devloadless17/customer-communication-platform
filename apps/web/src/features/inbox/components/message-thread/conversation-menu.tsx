@@ -29,10 +29,11 @@ export function ConversationMenu({
   // Mark-as-unread was removed 2026-05-19 — operators reported it as
   // not useful in practice (the unread badge is driven by inbound
   // messages, not by manual toggles, and bumping a thread back to
-  // "unread" after reading didn't match anyone's workflow). The
-  // /api/conversations/:id/unread endpoint remains in case a future
-  // re-introduction wants it; deleting the server route can wait until
-  // we're sure no embedded integration relies on it.
+  // "unread" after reading didn't match anyone's workflow). The server
+  // route + service were deleted 2026-05-21 (they published no fanout
+  // event, so a re-introduction would have silently failed to update
+  // other clients). If re-adding: add a `conversation.unread` domain
+  // event + fanout rule + optimistic dispatch alongside the endpoint.
 
   async function deleteConversation() {
     const ok = await confirm({

@@ -6,8 +6,12 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
+import {
+  NoChannelDestinationError,
+  resolveContactChannel,
+} from "@/lib/providers/channel";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Message } from "@ccp/shared/types";
 import type { InteractiveOption } from "@ccp/shared/providers/types";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
@@ -60,32 +64,55 @@ export async function sendInteractiveInternal(
     select: {
       id: true,
       contactId: true,
+      // Channel is conversation-owned — bind + stamp from here, not the contact.
+      provider: true,
       lastMessageAt: true,
-      contact: { select: { phoneNumber: true, lastInboundAt: true } },
+      contact: {
+        select: {
+          phoneNumber: true,
+          identityProvider: true,
+          externalContactId: true,
+          lastInboundAt: true,
+        },
+      },
     },
   });
   if (!conversation) {
     throw new SendTextValidationError("conversation_not_found", "conversation not found");
   }
-  if (!conversation.contact.phoneNumber) {
-    throw new SendTextValidationError("contact_has_no_phone", "contact has no WhatsApp number");
-  }
 
-  // 24h window — same gate as plain text. Outside the window, free-form
-  // interactive is also rejected by Meta.
-  const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-  const win = computeWindowStatus(lastInboundAt);
-  if (win.state === "closed" || win.state === "never") {
-    throw new SendTextValidationError(
-      "outside_24h_window",
-      "outside_24h_window",
-      "24h customer-service window closed — use a template step instead.",
-    );
+  let channel;
+  try {
+    channel = resolveContactChannel(conversation.contact);
+  } catch (err) {
+    if (err instanceof NoChannelDestinationError) {
+      throw new SendTextValidationError("contact_has_no_phone", "contact has no reachable address");
+    }
+    throw err;
+  }
+  // Channel is conversation-owned — bind + stamp from the conversation row;
+  // resolveContactChannel only supplies the destination address.
+  const provider = conversation.provider;
+  const binding = getProviderBinding(provider);
+
+  // Free-form send window — same gate as plain text. Driven by the provider's
+  // declared window; `null` skips the check (channel has no window).
+  const windowMs = binding.provider.capabilities.freeFormWindowMs;
+  if (windowMs !== null) {
+    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+    const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
+    if (win.state === "closed" || win.state === "never") {
+      throw new SendTextValidationError(
+        "outside_24h_window",
+        "outside_24h_window",
+        "24h customer-service window closed — use a template step instead.",
+      );
+    }
   }
 
   let sendConfig;
   try {
-    sendConfig = await getMetaSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.teamId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTextValidationError(
@@ -97,11 +124,16 @@ export async function sendInteractiveInternal(
     throw err;
   }
 
-  const provider = getMetaProvider();
-  if (!provider.sendInteractive) {
-    // Defensive — Meta does implement sendInteractive in this codebase, but
-    // if the provider abstraction is ever swapped (e.g. an SMS provider)
-    // surface a typed error rather than crashing on undefined.
+  // Optional method — providers without interactive support (e.g. SMS) raise a
+  // typed UnsupportedProviderOperationError the caller can fall back on.
+  let sendInteractive;
+  try {
+    sendInteractive = requireProviderMethod(
+      binding.provider,
+      "sendInteractive",
+      provider,
+    );
+  } catch {
     throw new SendTextValidationError(
       "provider_not_configured",
       "interactive_not_supported",
@@ -109,9 +141,9 @@ export async function sendInteractiveInternal(
     );
   }
 
-  const send = await provider.sendInteractive(
+  const send = await sendInteractive(
     {
-      to: conversation.contact.phoneNumber,
+      to: channel.to,
       bodyText,
       kind: args.kind,
       options: args.options,
@@ -138,7 +170,7 @@ export async function sendInteractiveInternal(
     senderUserId: args.senderUserId ?? null,
     body: bodyText,
     direction: "out",
-    provider: "meta_cloud",
+    provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,
@@ -187,7 +219,7 @@ export async function sendInteractiveInternal(
     senderUserId,
     body: bodyText,
     direction: "out",
-    provider: "meta_cloud",
+    provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,

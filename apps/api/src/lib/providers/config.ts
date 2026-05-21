@@ -2,15 +2,32 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { db } from "@/lib/db";
 
 /**
- * Per-team provider configuration. CLAUDE.md rule #6: secrets live on the
- * Team row, not in env vars, so each customer can plug in their own Meta
- * app without us redeploying.
+ * Per-team provider configuration. CLAUDE.md rule #6: secrets live in the DB,
+ * not in env vars, so each customer can plug in their own Meta app without us
+ * redeploying. They live on a `ChannelConnection` row keyed by (teamId,
+ * provider) — `config` holds non-secret fields, `secrets` holds the
+ * envelope-encrypted ciphertext per field. Adding a channel = a new row, not
+ * a new column-set on Team.
  *
  * The config is split into two shapes because the webhook route only needs
  * the verifier secret + verify token (it doesn't send), while the send/read
  * routes only need the access token + phone number id (they don't verify).
  * Splitting keeps each call site honest about what it actually touches.
  */
+
+/** Shape of `ChannelConnection.config` (non-secret) for the meta_cloud provider. */
+interface MetaChannelConfig {
+  phoneNumberId?: string;
+  displayPhoneNumber?: string;
+  wabaId?: string;
+  appId?: string;
+  verifyToken?: string;
+}
+/** Shape of `ChannelConnection.secrets` — envelope-encrypted ciphertext per field. */
+interface MetaChannelSecrets {
+  accessToken?: string;
+  appSecret?: string;
+}
 
 export interface MetaSendConfig {
   phoneNumberId: string;
@@ -141,30 +158,27 @@ export function invalidateProviderConfig(teamId: string): void {
 }
 
 async function loadSendCipher(teamId: string): Promise<CachedSend> {
-  const team = await db.team.findUnique({
-    where: { id: teamId },
-    select: {
-      metaPhoneNumberId: true,
-      metaAccessToken: true,
-      metaWabaId: true,
-      metaAppId: true,
-    },
+  const conn = await db.channelConnection.findUnique({
+    where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+    select: { config: true, secrets: true, isActive: true },
   });
-  if (!team) return { kind: "err", missing: ["team-not-found"] };
+  if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
+  const config = (conn.config ?? {}) as MetaChannelConfig;
+  const secrets = (conn.secrets ?? {}) as MetaChannelSecrets;
   const missing: string[] = [];
-  if (!team.metaPhoneNumberId) missing.push("phoneNumberId");
-  if (!team.metaAccessToken) missing.push("accessToken");
+  if (!config.phoneNumberId) missing.push("phoneNumberId");
+  if (!secrets.accessToken) missing.push("accessToken");
   if (missing.length > 0) return { kind: "err", missing };
   return {
     kind: "ok",
     cipher: {
-      phoneNumberId: team.metaPhoneNumberId!,
+      phoneNumberId: config.phoneNumberId!,
       // Store the CIPHERTEXT in cache, not the decrypted token. Decrypt
       // per-call so plaintext never lives longer than the request that
       // uses it. See the cache header comment for the security rationale.
-      accessTokenCipher: team.metaAccessToken!,
-      ...(team.metaWabaId ? { wabaId: team.metaWabaId } : {}),
-      ...(team.metaAppId ? { appId: team.metaAppId } : {}),
+      accessTokenCipher: secrets.accessToken!,
+      ...(config.wabaId ? { wabaId: config.wabaId } : {}),
+      ...(config.appId ? { appId: config.appId } : {}),
     },
   };
 }
@@ -248,20 +262,18 @@ export async function getMetaWebhookConfig(
   if (hit && hit.exp > Date.now()) {
     cipher = hit.value;
   } else {
-    const team = await db.team.findUnique({
-      where: { id: teamId },
-      select: {
-        metaAppSecret: true,
-        metaVerifyToken: true,
-        metaPhoneNumberId: true,
-      },
+    const conn = await db.channelConnection.findUnique({
+      where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+      select: { config: true, secrets: true, isActive: true },
     });
+    const config = (conn?.config ?? {}) as MetaChannelConfig;
+    const secrets = (conn?.secrets ?? {}) as MetaChannelSecrets;
     cipher =
-      team && team.metaAppSecret && team.metaVerifyToken
+      conn && conn.isActive && secrets.appSecret && config.verifyToken
         ? {
-            appSecretCipher: team.metaAppSecret,
-            verifyToken: team.metaVerifyToken,
-            phoneNumberId: team.metaPhoneNumberId ?? null,
+            appSecretCipher: secrets.appSecret,
+            verifyToken: config.verifyToken,
+            phoneNumberId: config.phoneNumberId ?? null,
           }
         : null;
     evictOldestIfOverCap(webhookCache, CONFIG_CACHE_MAX);

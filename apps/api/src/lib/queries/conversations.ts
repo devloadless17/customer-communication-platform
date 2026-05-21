@@ -57,13 +57,9 @@ export async function listConversations(
     cursor?: string | null;
     search?: string;
     /**
-     * The signed-in agent. When set we populate `conversation.unreadForMe`
-     * by comparing their ConversationReadReceipt against each row's
-     * lastMessageAt. Omit for server-to-server reads where per-agent unread
-     * is meaningless (broadcasts, automations, external API).
-     *
-     * Also required to evaluate the `mine` preset filter — the WHERE
-     * clause narrows by `assignedUserId = viewerUserId`.
+     * The signed-in agent. Required to evaluate the `mine` preset filter —
+     * the WHERE clause narrows by `assignedUserId = viewerUserId`. Omit for
+     * server-to-server reads (broadcasts, automations, external API).
      */
     viewerUserId?: string;
     /**
@@ -175,7 +171,6 @@ export async function listConversations(
           lastName: true,
           language: true,
           countryCode: true,
-          assignedUserId: true,
           phoneNumber: true,
           identityProvider: true,
           externalContactId: true,
@@ -216,46 +211,21 @@ export async function listConversations(
     ]),
   );
 
-  // Per-agent unread. Derived from `ConversationReadReceipt` rows: a
-  // conversation is "unread for me" iff its `lastMessageAt` is newer than
-  // my receipt's `lastReadAt` (or I have no receipt). One indexed read
-  // scoped to this page — no N+1.
-  //
-  // Semantically distinct from team-wide `unreadCount`: the badge number
-  // still reflects team-wide ("team has 3 unread"), while the row's
-  // bold-text now reflects per-agent ("I haven't seen this"). A teammate
-  // marking read zeroes the team counter but doesn't clear my per-agent
-  // flag — matches WhatsApp / Slack / Front semantics.
-  const sliceIds = sliced.map((r) => r.id);
-  const receiptMap = new Map<string, Date>();
-  if (opts.viewerUserId && sliceIds.length > 0) {
-    const receipts = await db.conversationReadReceipt.findMany({
-      where: { userId: opts.viewerUserId, conversationId: { in: sliceIds } },
-      select: { conversationId: true, lastReadAt: true },
-    });
-    for (const r of receipts) receiptMap.set(r.conversationId, r.lastReadAt);
-  }
-
-  const items = sliced.map((row) => {
-    const seenAt = receiptMap.get(row.id);
-    const unreadForMe = opts.viewerUserId
-      ? !seenAt || seenAt.getTime() < row.lastMessageAt.getTime()
-      : undefined;
-    return {
-      conversation: {
-        ...mapConversation(row),
-        ...(unreadForMe !== undefined ? { unreadForMe } : {}),
-      },
-      contact: {
-        ...mapContactListItem(row.contact),
-        tagIds: row.contact.tags.map((t) => t.id),
-      },
-      assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
-      messages: [],
-      notes: [],
-      lastInboundAt: inboundMap.get(row.contact.id) ?? null,
-    };
-  });
+  // Unread is team-wide only — the row badge + bold cue both read the
+  // `unreadCount` counter carried by `mapConversation`. There is no
+  // per-agent read state for the inbox (team chat has its own; see
+  // TeamChannelReadReceipt). Any member opening a thread clears it for all.
+  const items = sliced.map((row) => ({
+    conversation: mapConversation(row),
+    contact: {
+      ...mapContactListItem(row.contact),
+      tagIds: row.contact.tags.map((t) => t.id),
+    },
+    assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
+    messages: [],
+    notes: [],
+    lastInboundAt: inboundMap.get(row.contact.id) ?? null,
+  }));
 
   return { items, nextCursor };
 }
@@ -270,7 +240,7 @@ export async function listConversations(
 export async function getConversationWithRefs(
   teamId: string,
   conversationId: string,
-  opts: { messageLimit?: number; viewerUserId?: string } = {},
+  opts: { messageLimit?: number } = {},
 ): Promise<{ data: ConversationWithRefs; nextOlderCursor: string | null } | null> {
   const limit = clampTake(opts.messageLimit, MESSAGES_PAGE);
 
@@ -304,34 +274,17 @@ export async function getConversationWithRefs(
   // `Contact.lastInboundAt` column maintained by the ingest path — the
   // previous Message scan with a join through Conversation seq-scanned
   // a heavy contact's entire history on every thread open.
-  // Per-agent unread + counts fan in parallel (counts are independent;
-  // receipt is one indexed read).
-  const [messageCount, noteCount, receipt] = await Promise.all([
+  const [messageCount, noteCount] = await Promise.all([
     db.message.count({ where: { conversationId } }),
     db.internalNote.count({ where: { conversationId } }),
-    opts.viewerUserId
-      ? db.conversationReadReceipt.findUnique({
-          where: {
-            userId_conversationId: { userId: opts.viewerUserId, conversationId },
-          },
-          select: { lastReadAt: true },
-        })
-      : Promise.resolve(null),
   ]);
   const lastInboundAtIso = row.contact.lastInboundAt
     ? row.contact.lastInboundAt.toISOString()
     : null;
 
-  const unreadForMe = opts.viewerUserId
-    ? !receipt || receipt.lastReadAt.getTime() < row.lastMessageAt.getTime()
-    : undefined;
-
   return {
     data: {
-      conversation: {
-        ...mapConversation(row),
-        ...(unreadForMe !== undefined ? { unreadForMe } : {}),
-      },
+      conversation: mapConversation(row),
       contact: {
         ...mapContact(row.contact),
         tagIds: row.contact.tags.map((t) => t.id),
@@ -413,7 +366,7 @@ export async function listOlderMessages(
 export async function listNewerMessages(
   teamId: string,
   conversationId: string,
-  opts: { after: string; take?: number; viewerUserId?: string },
+  opts: { after: string; take?: number },
 ): Promise<{
   items: Message[];
   state?: {
@@ -421,7 +374,6 @@ export async function listNewerMessages(
     assignedUserId: string | null;
     assignedUser: import("@ccp/shared/types").User | null;
     unreadCount: number;
-    unreadForMe?: boolean;
   };
 }> {
   const afterDate = new Date(opts.after);
@@ -430,22 +382,11 @@ export async function listNewerMessages(
   // Same tenant gate as listOlderMessages — silent empty page so we don't
   // leak which conversation IDs exist in other teams. Pull the header
   // fields the reconnect-resync needs in the same round-trip; selected
-  // fields are cheap and avoid a second query. Per-agent receipt is one
-  // extra indexed lookup when a viewer is set.
-  const [owns, receipt] = await Promise.all([
-    db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      include: { assignedUser: true },
-    }),
-    opts.viewerUserId
-      ? db.conversationReadReceipt.findUnique({
-          where: {
-            userId_conversationId: { userId: opts.viewerUserId, conversationId },
-          },
-          select: { lastReadAt: true },
-        })
-      : Promise.resolve(null),
-  ]);
+  // fields are cheap and avoid a second query.
+  const owns = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    include: { assignedUser: true },
+  });
   if (!owns) return { items: [] };
 
   const take = clampTake(opts.take, MESSAGES_PAGE);
@@ -457,10 +398,6 @@ export async function listNewerMessages(
     take,
   });
 
-  const unreadForMe = opts.viewerUserId
-    ? !receipt || receipt.lastReadAt.getTime() < owns.lastMessageAt.getTime()
-    : undefined;
-
   return {
     items: rows.map(mapMessage),
     state: {
@@ -468,7 +405,6 @@ export async function listNewerMessages(
       assignedUserId: owns.assignedUserId,
       assignedUser: owns.assignedUser ? mapUser(owns.assignedUser) : null,
       unreadCount: owns.unreadCount,
-      ...(unreadForMe !== undefined ? { unreadForMe } : {}),
     },
   };
 }

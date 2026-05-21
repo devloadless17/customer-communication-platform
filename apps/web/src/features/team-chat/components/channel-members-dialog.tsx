@@ -292,7 +292,7 @@ export function ChannelMembersDialog({
                               </span>
                               <Avatar className="size-6">
                                 {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                                <AvatarFallback className="text-[10px]">
+                                <AvatarFallback seed={u.id} className="text-[10px]">
                                   {initials(u.name)}
                                 </AvatarFallback>
                               </Avatar>
@@ -367,7 +367,7 @@ export function ChannelMembersDialog({
                   >
                     <Avatar className="size-7">
                       {m.avatarUrl ? <AvatarImage src={m.avatarUrl} alt={m.name} /> : null}
-                      <AvatarFallback className="text-[10px]">{initials(m.name)}</AvatarFallback>
+                      <AvatarFallback seed={m.userId} className="text-[10px]">{initials(m.name)}</AvatarFallback>
                     </Avatar>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">

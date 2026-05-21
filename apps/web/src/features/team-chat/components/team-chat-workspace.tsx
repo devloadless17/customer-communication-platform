@@ -3,10 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { usePresence } from "@/hooks/use-presence";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useTeamChannelEvents } from "@/features/team-chat/hooks/use-team-channel-events";
-import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
 import { useTeamChatLayoutData } from "@/features/team-chat/contexts/team-chat-data";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { getClientSocket } from "@/lib/socket-client";
@@ -19,38 +17,27 @@ import type {
 } from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
 
-import { Sheet } from "@/components/ui/sheet";
-
 import { ChannelComposer } from "./channel-composer";
 import { ChannelHeader } from "./channel-header";
-import { ChannelList } from "./channel-list";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 import { ChannelSearch } from "./channel-search";
 import { ChannelThread } from "./channel-thread";
-import {
-  EditChannelDialog,
-  NewChannelDialog,
-  useDeleteChannel,
-} from "./channel-dialogs";
-import dynamic from "next/dynamic";
+import { EditChannelDialog, useDeleteChannel } from "./channel-dialogs";
 
 import { PinnedBar } from "./pinned-bar";
 import { ThreadPanel } from "./thread-panel";
 import { TypingIndicator } from "./typing-indicator";
-// Workspace search ships its own debounced fetcher + result-card chrome;
-// only renders when the user opens it from the cmd-k shortcut. SSR-off.
-const WorkspaceSearchDialog = dynamic(
-  () => import("./workspace-search-dialog").then((m) => m.WorkspaceSearchDialog),
-  { ssr: false },
-);
 
 /**
- * Top-level client component for /team/[channelId]. Orchestrates:
- *   - the channel list sidebar (with live unread badges)
- *   - the active channel feed + composer
+ * Top-level client component for /team/[channelId]. Orchestrates the active
+ * channel only:
+ *   - the channel feed + composer
  *   - the optional thread side panel
- *   - presence (online dots in the sidebar header)
- *   - new / edit / delete dialogs
+ *   - the channel header + edit / members / delete dialogs
+ *
+ * The channel-list sidebar (with live unread badges + presence) and the
+ * new-channel / workspace-search dialogs live in /team/layout.tsx now
+ * (TeamChannelSidebar), so they stay mounted across channel switches.
  *
  * Server props are the SSR seed; everything else is live socket state.
  */
@@ -69,12 +56,12 @@ export function TeamChatWorkspace({
 }) {
   const router = useRouter();
   const softRefresh = useSoftRefresh();
-  const { onlineUserIds } = usePresence(currentUser.teamId, currentUser.id);
-  // Channel list + team members come from the /team layout-level context
-  // so they don't refetch on channel switch. See /app/team/layout.tsx for
-  // the rationale.
-  const { channels: initialChannels, teamMembers } = useTeamChatLayoutData();
-  const channels = useTeamChannelsList(initialChannels, currentUser.id, initialChannel.id);
+  // Live channel list + team members come from the /team layout-level context.
+  // The channel-list SIDEBAR (rendered in /team/layout.tsx) owns the socket
+  // subscription; here we just read the live list — for the "active channel
+  // deleted out from under me" redirect below — plus the roster for the
+  // @-picker and member-name lookups.
+  const { channels, teamMembers } = useTeamChatLayoutData();
   const channelState = useTeamChannelEvents(
     initialChannel.id,
     initialMessages,
@@ -178,7 +165,6 @@ export function TeamChatWorkspace({
   useEffect(() => {
     setThread(null);
   }, [initialChannel.id]);
-  const [showNew, setShowNew] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   // Live override on top of `initialChannel.memberCount`. Bumped optimistically
@@ -189,14 +175,6 @@ export function TeamChatWorkspace({
     null,
   );
   const [channelSearchOpen, setChannelSearchOpen] = useState(false);
-  const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
-  const [mobileChannelsOpen, setMobileChannelsOpen] = useState(false);
-  // Close the mobile channel sheet whenever the active channel switches —
-  // navigation happens via Link inside ChannelList, so we react to the new
-  // initialChannel.id rather than threading a callback through the list.
-  useEffect(() => {
-    setMobileChannelsOpen(false);
-  }, [initialChannel.id]);
   const [channelSearchQuery, setChannelSearchQuery] = useState("");
 
   // `?q=` on the URL keeps inline highlight active when the user lands here
@@ -313,45 +291,10 @@ export function TeamChatWorkspace({
   }, [channelExists, router]);
 
   return (
+    // The channel-list sidebar lives in /team/layout.tsx (SectionShell slot)
+    // now — both the desktop column and the mobile hamburger drawer. This
+    // workspace is just the active channel's feed + composer + thread panel.
     <div className="flex h-svh">
-      {/* Desktop column. Below md the channel list lives inside the mobile
-          nav drawer (rendered by SectionShell/MobileShellChrome) — keeping
-          it out of the workspace tree on small screens. */}
-      <div className="hidden md:flex">
-        <ChannelList
-          channels={channels}
-          activeChannelId={initialChannel.id}
-          currentRole={currentUser.role}
-          onlinePresenceCount={onlineUserIds.size}
-          onCreate={() => setShowNew(true)}
-          onOpenWorkspaceSearch={() => setWorkspaceSearchOpen(true)}
-        />
-      </div>
-      {/* Mobile slide-in: triggered from the channel header on mobile, or
-          from the hamburger. Hidden on desktop where the column is visible. */}
-      <Sheet
-        open={mobileChannelsOpen}
-        onOpenChange={setMobileChannelsOpen}
-        side="left"
-        contentClassName="w-72 max-w-[85vw] md:hidden"
-        hideCloseButton
-      >
-        <ChannelList
-          channels={channels}
-          activeChannelId={initialChannel.id}
-          currentRole={currentUser.role}
-          onlinePresenceCount={onlineUserIds.size}
-          onCreate={() => {
-            setShowNew(true);
-            setMobileChannelsOpen(false);
-          }}
-          onOpenWorkspaceSearch={() => {
-            setWorkspaceSearchOpen(true);
-            setMobileChannelsOpen(false);
-          }}
-        />
-      </Sheet>
-
       <div className="flex min-w-0 flex-1 flex-col">
         <ChannelHeader
           channel={initialChannel}
@@ -365,7 +308,6 @@ export function TeamChatWorkspace({
           }}
           onOpenSearch={() => setChannelSearchOpen(true)}
           onOpenMembers={() => setShowMembers(true)}
-          onOpenChannelList={() => setMobileChannelsOpen(true)}
         />
         {showMembers && (
           <ChannelMembersDialog
@@ -441,15 +383,6 @@ export function TeamChatWorkspace({
         />
       )}
 
-      {showNew && (
-        <NewChannelDialog
-          onClose={() => setShowNew(false)}
-          onCreated={(ch) => {
-            setShowNew(false);
-            router.push(`/team/${ch.id}`);
-          }}
-        />
-      )}
       {showEdit && (
         <EditChannelDialog
           channel={initialChannel}
@@ -462,10 +395,6 @@ export function TeamChatWorkspace({
         />
       )}
       {deleteChannelDialog}
-      <WorkspaceSearchDialog
-        open={workspaceSearchOpen}
-        onClose={() => setWorkspaceSearchOpen(false)}
-      />
     </div>
   );
 }

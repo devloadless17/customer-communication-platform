@@ -27,7 +27,6 @@
  */
 
 import type {
-  ContactAssigneeChangedEvent,
   ContactCreatedEvent,
   ContactLifecycleChangedEvent,
   ContactTagChangedEvent,
@@ -64,7 +63,6 @@ export const PUBLIC_EVENT_TYPES = [
   "contact.updated",
   "contact.tag_changed",
   "contact.lifecycle_changed",
-  "contact.assignee_changed",
   "contact.deleted",
   "note.created",
 ] as const;
@@ -95,20 +93,30 @@ export const PUBLIC_EVENT_GROUPS: Array<{
       {
         type: "message.received",
         label: "On Message received",
-        description: "Fires when a contact sends a WhatsApp message.",
+        description: "Fires when a contact sends a WhatsApp message (text or file).",
         samplePayload: {
           message: {
             id: "cmpmsg_01",
             conversation_id: "cmpconv_01",
             contact_id: "cmpcnt_01",
             direction: "in",
-            body: "Hi, are you open today?",
+            body: "",
             timestamp: "2026-05-20T11:00:00.000Z",
             status: "sent",
             sender: { type: "contact", id: null, name: null },
             sender_api_key_id: null,
-            media_kind: null,
-            media_caption: null,
+            // File messages carry the full attachment block — `url` is a
+            // directly-downloadable CDN link (no session auth). null for text.
+            media: {
+              kind: "image",
+              url: "https://cdn.example.com/media/cmpmsg_01.jpg",
+              mime_type: "image/jpeg",
+              filename: "receipt.jpg",
+              size_bytes: 184320,
+              duration_ms: null,
+              thumbnail_url: "https://cdn.example.com/media/cmpmsg_01_thumb.jpg",
+              caption: "Here's the receipt",
+            },
           },
           contact: {
             id: "cmpcnt_01",
@@ -142,7 +150,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
       {
         type: "message.sent",
         label: "On Message sent",
-        description: "Fires when an agent or API sends a message.",
+        description: "Fires when an agent or API sends a message. Carries the same contact + conversation + assignee context as `message.received`.",
         samplePayload: {
           message: {
             id: "cmpmsg_02",
@@ -152,12 +160,35 @@ export const PUBLIC_EVENT_GROUPS: Array<{
             body: "Yes! Open until 8pm.",
             timestamp: "2026-05-20T11:00:05.000Z",
             status: "sent",
-            sender: { type: "user", id: "cmpusr_01", name: null },
+            // `sender.name` is the agent who sent it — hydrated from the user row.
+            sender: { type: "user", id: "cmpusr_01", name: "Ali" },
             sender_api_key_id: null,
-            media_kind: null,
-            media_caption: null,
+            media: null,
           },
-          conversation: { id: "cmpconv_01", contact_id: "cmpcnt_01" },
+          contact: {
+            id: "cmpcnt_01",
+            phone_number: "+15555550100",
+            name: "Jane Doe",
+            first_name: "Jane",
+            last_name: "Doe",
+            language: "en",
+            country_code: "US",
+            avatar_url: null,
+            email: null,
+            location: null,
+            stage_id: "cmpstg_01",
+            tag_ids: [],
+            custom_fields: {},
+            created_at: "2026-05-19T08:30:00.000Z",
+          },
+          conversation: {
+            id: "cmpconv_01",
+            contact_id: "cmpcnt_01",
+            status: "open",
+            unread_count: 0,
+            last_message_at: "2026-05-20T11:00:05.000Z",
+            assignee: { type: "user", id: "cmpusr_01", name: "Ali", email: "ali@example.com" },
+          },
         },
       },
       {
@@ -306,18 +337,6 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         },
       },
       {
-        type: "contact.assignee_changed",
-        label: "On Contact Assignee updated",
-        description: "Account-manager for this contact changed.",
-        samplePayload: {
-          contact_id: "cmpcnt_01",
-          before: null,
-          after: { type: "user", id: "cmpusr_01", name: "Ali", email: "ali@example.com" },
-          changed_by_user_id: "cmpusr_02",
-          changed_by_api_key_id: null,
-        },
-      },
-      {
         type: "contact.deleted",
         label: "Contact deleted",
         description: "Hard delete; conversationIds are included for cleanup.",
@@ -383,7 +402,6 @@ export interface SenderInfo {
 
 /**
  * Structured assignee. Same forward-compat rationale as SenderInfo. Used on
- * both `contact.assignee` (account-manager across all threads) and
  * `conversation.assignee` (who's handling the current thread).
  */
 export interface AssigneeInfo {
@@ -454,8 +472,6 @@ export interface PublicContact {
   location: string | null;
   stage_id: string | null;
   tag_ids: string[];
-  /** Account-manager for this contact (cross-thread). Null when unassigned. */
-  assignee: AssigneeInfo | null;
   custom_fields: Record<string, string>;
   /** Row-creation timestamp. Null when the source event didn't carry it. */
   created_at: string | null;
@@ -472,6 +488,33 @@ export interface PublicConversation {
   last_message_at: string;
   /** Who's handling this thread. Null when unassigned. */
   assignee: AssigneeInfo | null;
+}
+
+/**
+ * `message.sent` payload. Deliberately mirrors `message.received` so a single
+ * n8n / Zapier branch can handle both directions off `message.direction`
+ * instead of parsing two unrelated shapes.
+ *
+ * `contact`, plus the conversation's `status` / `unread_count` / `assignee`,
+ * are stamped by the subscriber from the DB — the framework-agnostic mapper
+ * can't query for them (same enrichment role as `PublicMedia.url`). They
+ * arrive `null` only when that lookup fails (e.g. the conversation was deleted
+ * between send and dispatch); receivers should treat null as "unknown, call
+ * GET /v1/contacts/:id". `id` / `contact_id` / `last_message_at` are always
+ * known from the event.
+ */
+export interface PublicMessageSentData {
+  message: PublicMessage;
+  contact: PublicContact | null;
+  conversation: {
+    id: string;
+    contact_id: string;
+    status: PublicConversation["status"] | null;
+    unread_count: number | null;
+    last_message_at: string;
+    /** Who's handling this thread — hydrated by the subscriber. Null when unassigned. */
+    assignee: AssigneeInfo | null;
+  };
 }
 
 export interface PublicNote {
@@ -537,8 +580,19 @@ export function toPublicEnvelopes(
         type: "message.sent",
         envelope: build(e.teamId, occurredAt, "message.sent", {
           message: messageFromDomain(e.message, "out", e.senderApiKeyId ?? null, e.contactId),
-          conversation: { id: e.conversationId, contact_id: e.contactId },
-        }),
+          // `contact` + the conversation's status/unread_count/assignee are
+          // stamped by the subscriber (DB-derived; this mapper can't query).
+          // ids + last_message_at are known here.
+          contact: null,
+          conversation: {
+            id: e.conversationId,
+            contact_id: e.contactId,
+            status: null,
+            unread_count: null,
+            last_message_at: e.message.timestamp,
+            assignee: null,
+          },
+        } satisfies PublicMessageSentData),
       });
       break;
     }
@@ -670,24 +724,6 @@ export function toPublicEnvelopes(
       });
       break;
     }
-    case "contact.assignee_changed": {
-      const e = event as ContactAssigneeChangedEvent;
-      out.push({
-        type: "contact.assignee_changed",
-        envelope: build(e.teamId, occurredAt, "contact.assignee_changed", {
-          contact_id: e.contactId,
-          before: e.before.assignedUserId ? assigneeRef(e.before.assignedUserId) : null,
-          after: e.after.assignedUserId
-            ? (e.afterUser
-                ? { type: "user" as const, id: e.afterUser.id, name: e.afterUser.name, email: e.afterUser.email }
-                : assigneeRef(e.after.assignedUserId))
-            : null,
-          changed_by_user_id: e.changedByUserId,
-          changed_by_api_key_id: e.changedByApiKeyId ?? null,
-        }),
-      });
-      break;
-    }
     case "contact.deleted": {
       const e = event as ContactDeletedEvent;
       out.push({
@@ -737,7 +773,6 @@ export function busEventTypesToSubscribe(): DomainEventType[] {
     "contact.updated",
     "contact.tag_changed",
     "contact.lifecycle_changed",
-    "contact.assignee_changed",
     "contact.deleted",
     "note.created",
   ];
@@ -820,7 +855,6 @@ function contactRowToPublic(c: import("../types").Contact & {
   lastName?: string | null;
   language?: string | null;
   countryCode?: string | null;
-  assignedUserId?: string | null;
   createdAt?: string | null;
 }): PublicContact {
   return {
@@ -836,7 +870,6 @@ function contactRowToPublic(c: import("../types").Contact & {
     location: c.location ?? null,
     stage_id: c.stageId ?? null,
     tag_ids: c.tagIds ?? [],
-    assignee: c.assignedUserId ? assigneeRef(c.assignedUserId) : null,
     custom_fields: c.customFields ?? {},
     created_at: c.createdAt ?? null,
   };
@@ -853,7 +886,6 @@ function contactFromSnapshot(e: MessageReceivedEvent): PublicContact {
     lastName?: string | null;
     language?: string | null;
     countryCode?: string | null;
-    assignedUserId?: string | null;
     avatarUrl?: string | null;
     location?: string | null;
     createdAt?: string | null;
@@ -871,7 +903,6 @@ function contactFromSnapshot(e: MessageReceivedEvent): PublicContact {
     location: c.location ?? null,
     stage_id: c.stageId ?? null,
     tag_ids: c.tagIds ?? [],
-    assignee: c.assignedUserId ? assigneeRef(c.assignedUserId) : null,
     custom_fields: c.customFields ?? {},
     created_at: c.createdAt ?? null,
   };

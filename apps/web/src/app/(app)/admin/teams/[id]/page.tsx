@@ -117,7 +117,7 @@ export default async function AdminTeamDetailPage({
                 )}
               >
                 <Avatar className="size-8 shrink-0">
-                  <AvatarFallback className="text-[10px]">
+                  <AvatarFallback seed={m.id} className="text-[10px]">
                     {initials(m.name)}
                   </AvatarFallback>
                 </Avatar>

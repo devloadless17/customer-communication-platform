@@ -54,7 +54,7 @@ export function NewBroadcastForm({
   tags,
   fieldDefinitions,
   stages,
-  groups,
+  groups: initialGroups,
   hasWabaId,
   preselectedContactIds,
   preselectedTagIds,
@@ -73,9 +73,13 @@ export function NewBroadcastForm({
 }) {
   const router = useRouter();
 
-  // Pre-fill audience from the URL the agent arrived from. If they landed
-  // via "Send template" on the contacts page, that's a list of contact ids.
-  // If they clicked "Send broadcast" from a group page, it's a groupId.
+  // Local copy so a "save as group" from the custom builder can append the new
+  // group and select it without a round-trip.
+  const [groups, setGroups] = useState<AudienceGroupDto[]>(initialGroups);
+
+  // Pre-fill audience from the URL the agent arrived from. A groupId lands on
+  // "saved group"; preselected tags/contacts (from the contacts page) land on
+  // the custom builder pre-loaded. Default is the custom builder.
   const [audience, setAudience] = useState<AudienceState>(() => {
     if (preselectedGroupId) {
       return {
@@ -85,24 +89,16 @@ export function NewBroadcastForm({
         selectedGroupId: preselectedGroupId,
       };
     }
-    if (preselectedTagIds.length > 0) {
+    if (preselectedTagIds.length > 0 || preselectedContactIds.length > 0) {
       return {
-        mode: "by_tag",
-        selectedIds: [],
+        mode: "custom",
+        selectedIds: preselectedContactIds,
         selectedTagIds: preselectedTagIds,
         selectedGroupId: null,
       };
     }
-    if (preselectedContactIds.length > 0) {
-      return {
-        mode: "selected",
-        selectedIds: preselectedContactIds,
-        selectedTagIds: [],
-        selectedGroupId: null,
-      };
-    }
     return {
-      mode: "selected",
+      mode: "custom",
       selectedIds: [],
       selectedTagIds: [],
       selectedGroupId: null,
@@ -120,41 +116,26 @@ export function NewBroadcastForm({
   const [sendError, setSendError] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
 
-  // Live "by tag" recipient count, resolved server-side — the team contact
-  // list is no longer loaded into the browser. Debounced; only fetched while
-  // tag mode is active.
-  const [taggedCount, setTaggedCount] = useState(0);
-  const [taggedCountLoading, setTaggedCountLoading] = useState(false);
-  const tagKey = audience.selectedTagIds.join(",");
-  useEffect(() => {
-    if (audience.mode !== "by_tag" || audience.selectedTagIds.length === 0) {
-      setTaggedCount(0);
-      setTaggedCountLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setTaggedCountLoading(true);
-    const t = window.setTimeout(async () => {
-      try {
-        const res = await fetch("/api/contacts/count", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ tagIds: audience.selectedTagIds }),
-        });
-        const data = (await res.json()) as { count?: number };
-        if (!cancelled) setTaggedCount(data.count ?? 0);
-      } catch {
-        if (!cancelled) setTaggedCount(0);
-      } finally {
-        if (!cancelled) setTaggedCountLoading(false);
-      }
-    }, 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audience.mode, tagKey]);
+  // Live custom-audience recipient count. The shared AudienceBuilder owns the
+  // (debounced, server-resolved) count and mirrors it up via this callback so
+  // the send summary + readiness gate stay in sync. Stable identity so the
+  // builder's effect doesn't re-fire on every parent render.
+  const [customCount, setCustomCount] = useState(0);
+  // Track the builder's in-flight count too: while a recount is pending the
+  // mirrored `customCount` is stale (holds the previous value), so the
+  // readiness gate must not treat a custom audience as "done" mid-recount.
+  const [customCountLoading, setCustomCountLoading] = useState(false);
+  const handleCustomCount = useCallback((count: number, loading: boolean) => {
+    setCustomCount(count);
+    setCustomCountLoading(loading);
+  }, []);
+
+  // Save-as-group from the custom builder: add the new group locally and
+  // switch the wizard onto it so it's the active (reusable) selection.
+  const handleGroupSaved = useCallback((group: AudienceGroupDto) => {
+    setGroups((cur) => (cur.some((g) => g.id === group.id) ? cur : [group, ...cur]));
+    setAudience((cur) => ({ ...cur, mode: "group", selectedGroupId: group.id }));
+  }, []);
 
   // -------------------------------------------------------------------------
   // Template fetch + sync
@@ -252,34 +233,33 @@ export function NewBroadcastForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTemplateId, bodyVarCount, headerVarCount]);
 
-  // Live-count for the "By tag" mode — contacts whose tagIds overlap the
-  // selected tag ids. Same set the server will compute at create time, so
-  // the agent gets a faithful preview.
+  // Recipient count for the active mode. Custom mode's count comes from the
+  // shared builder (server-resolved union); all/group are known up front.
   const audienceCount = useMemo(() => {
     if (audience.mode === "all") return totalContactCount;
-    if (audience.mode === "selected") return audience.selectedIds.length;
     if (audience.mode === "group") {
       const g = groups.find((x) => x.id === audience.selectedGroupId);
       return g?.memberCount ?? 0;
     }
-    return taggedCount;
-  }, [audience, groups, totalContactCount, taggedCount]);
+    return customCount;
+  }, [audience, groups, totalContactCount, customCount]);
 
-  const audienceDone = audienceCount > 0;
+  const audienceDone =
+    audienceCount > 0 && !(audience.mode === "custom" && customCountLoading);
 
-  // What "Preview recipients" resolves against. Null for "all" (no point) and
-  // for an as-yet-empty selection. Group mode reuses the group dto's snapshot
-  // of tag + manual membership.
+  // What "Preview recipients" resolves against — the same { tagIds, contactIds }
+  // union the server expands. Null for "all" (no point) and for an empty
+  // selection. Group mode reuses the group dto's tag + manual snapshot.
   const selectedGroup =
     audience.mode === "group"
       ? groups.find((g) => g.id === audience.selectedGroupId) ?? null
       : null;
   const previewPayload: { tagIds: string[]; contactIds: string[] } | null = (() => {
-    if (audience.mode === "selected" && audience.selectedIds.length > 0) {
-      return { tagIds: [], contactIds: audience.selectedIds };
-    }
-    if (audience.mode === "by_tag" && audience.selectedTagIds.length > 0) {
-      return { tagIds: audience.selectedTagIds, contactIds: [] };
+    if (
+      audience.mode === "custom" &&
+      (audience.selectedTagIds.length > 0 || audience.selectedIds.length > 0)
+    ) {
+      return { tagIds: audience.selectedTagIds, contactIds: audience.selectedIds };
     }
     if (audience.mode === "group" && selectedGroup) {
       return { tagIds: selectedGroup.tagIds, contactIds: selectedGroup.contactIds };
@@ -287,11 +267,9 @@ export function NewBroadcastForm({
     return null;
   })();
   const previewSubtitle =
-    audience.mode === "by_tag"
-      ? `${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"} · contacts carrying any of them`
-      : audience.mode === "group"
-        ? `Saved group: ${selectedGroup?.name ?? "—"}`
-        : `${audience.selectedIds.length} hand-picked contact${audience.selectedIds.length === 1 ? "" : "s"}`;
+    audience.mode === "group"
+      ? `Saved group: ${selectedGroup?.name ?? "—"}`
+      : `${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"} · ${audience.selectedIds.length} hand-picked`;
 
   const templateDone = selectedTemplate !== null;
   const variablesDone =
@@ -331,11 +309,13 @@ export function NewBroadcastForm({
           audience:
             audience.mode === "all"
               ? { mode: "all" }
-              : audience.mode === "by_tag"
-                ? { mode: "by_tag", tagIds: audience.selectedTagIds }
-                : audience.mode === "group"
-                  ? { mode: "group", groupId: audience.selectedGroupId }
-                  : { mode: "selected", contactIds: audience.selectedIds },
+              : audience.mode === "group"
+                ? { mode: "group", groupId: audience.selectedGroupId }
+                : {
+                    mode: "custom",
+                    tagIds: audience.selectedTagIds,
+                    contactIds: audience.selectedIds,
+                  },
         }),
       });
       if (!res.ok) {
@@ -377,11 +357,9 @@ export function NewBroadcastForm({
           audienceDone
             ? audience.mode === "all"
               ? `All ${totalContactCount} contact${totalContactCount === 1 ? "" : "s"}`
-              : audience.mode === "by_tag"
-                ? `${audienceCount} via ${audience.selectedTagIds.length} tag${audience.selectedTagIds.length === 1 ? "" : "s"}`
-                : audience.mode === "group"
-                  ? `${groups.find((g) => g.id === audience.selectedGroupId)?.name ?? "group"} · ${audienceCount} member${audienceCount === 1 ? "" : "s"}`
-                  : `${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
+              : audience.mode === "group"
+                ? `${groups.find((g) => g.id === audience.selectedGroupId)?.name ?? "group"} · ${audienceCount} member${audienceCount === 1 ? "" : "s"}`
+                : `${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
             : undefined
         }
         done={audienceDone}
@@ -392,11 +370,11 @@ export function NewBroadcastForm({
           stages={stages}
           groups={groups}
           totalContactCount={totalContactCount}
-          taggedRecipientCount={taggedCount}
-          taggedRecipientLoading={taggedCountLoading}
           initialContactLabels={initialContactLabels}
           value={audience}
           onChange={setAudience}
+          onCustomCountChange={handleCustomCount}
+          onGroupSaved={handleGroupSaved}
         />
       </StepCard>
 

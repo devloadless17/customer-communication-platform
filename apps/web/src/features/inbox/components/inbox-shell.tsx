@@ -22,21 +22,18 @@ import type {
 } from "@ccp/shared/types";
 import { useTeamEvents } from "@/features/team-chat/hooks/use-team-events";
 import { useConnectionStatus } from "@/hooks/use-connection-status";
-import { usePresence } from "@/hooks/use-presence";
 import { useConversationSearch } from "@/features/inbox/hooks/use-conversation-search";
-import { getClientSocket } from "@/lib/socket-client";
+import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
+import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
 import { THREAD_REDUCER_EVENTS } from "@/features/inbox/lib/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 
 import dynamic from "next/dynamic";
 
-import { InboxSubSidebar } from "@/components/layouts/inbox-sub-sidebar";
-import { MobileShellChrome } from "@/components/layouts/mobile-shell-chrome";
 import { cn } from "@ccp/shared/utils";
 import { ConnectionBanner } from "./connection-banner";
 import { ConversationList } from "./conversation-list";
-import { type Filter } from "./inbox-controls";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
@@ -132,7 +129,10 @@ export function InboxShell({
   initialActiveConversationId: string | null;
   initialThread: CachedThread | null;
 }) {
-  const [filter, setFilter] = useState<Filter>({ kind: "preset", id: "all" });
+  // Filter lives in the layout-level InboxFilterProvider so it's shared with
+  // the sub-sidebar (which now renders in /inbox/layout.tsx and owns the
+  // setter). Read-only here — the conversation list + live hook consume it.
+  const { filter } = useInboxFilter();
   const [search, setSearch] = useState("");
 
   // -----------------------------------------------------------------
@@ -476,7 +476,6 @@ export function InboxShell({
     // `target: "all"` (e.g. `contact:updated`, which carries no
     // conversationId) walks every cached thread and lets the reducer's
     // identity bail decide which entries actually mutate.
-    const reducerCtx = { currentUserId: currentUser.id };
     const reducerHandlers = THREAD_REDUCER_EVENTS.map(({ event, apply, target }) => {
       const handler = (payload: { conversationId?: string } & Record<string, unknown>) => {
         // Reducer try/catch — without it, a malformed payload from a
@@ -487,14 +486,14 @@ export function InboxShell({
           if ((target ?? "conversation") === "all") {
             cache.patchAll((curr) => {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const next = (apply as any)(curr.data, payload, reducerCtx);
+              const next = (apply as any)(curr.data, payload);
               return next === curr.data ? null : { ...curr, data: next };
             });
             return;
           }
           if (!payload?.conversationId) return;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          patchData(payload.conversationId, (d) => (apply as any)(d, payload, reducerCtx));
+          patchData(payload.conversationId, (d) => (apply as any)(d, payload));
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error(`[inbox-shell] reducer for "${event}" threw`, err);
@@ -553,26 +552,58 @@ export function InboxShell({
   }, [cache, currentUser.id]);
 
   // ---------------------------------------------------------------
-  // Mark-read cache patch — T2.1.
+  // Mark-read local convergence — T2.1.
   //
-  // useConversationEvents fires the mark-read POST on each MessageThread
-  // mount when initial.conversation.unreadCount > 0. The cached thread
-  // snapshot is the source of `initial` for the mount, so once we patch
-  // unreadCount = 0 here, re-mounting MessageThread for the same id (chat
-  // switch back) reads 0 from the cache and skips the redundant POST.
+  // useConversationEvents fires the mark-read POST when the agent opens a
+  // thread with unread > 0 (and on inbound / backfill). On success it calls
+  // this back. We DON'T just patch the cache here — we dispatch the same
+  // `conversation:read` frame the server broadcasts, so every existing
+  // subscriber converges in one pass:
+  //   1. useTeamEvents.onRead         → clears the LIST badge
+  //   2. inbox-shell reducer (cache)  → patches the cached snapshot to 0
+  //   3. useConversationEvents reducer→ zeros the live thread's unreadCount
+  //      (so snapshot-on-leave can't write a stale 1 back into the cache)
+  //
+  // Why this matters: the LIST badge previously cleared ONLY via the server's
+  // one-shot `conversation:read` socket frame. Once the DB unread is zeroed,
+  // the CAS in markRead never publishes that frame again — so a SINGLE missed
+  // delivery (socket not yet joined to the team room on a fresh open, a
+  // throttled/backgrounded tab, a transient drop) left the badge stuck at >0
+  // forever, reappearing on every chat-switch / navigation even though the DB
+  // said read. Dispatching locally makes the clear deterministic and frame-
+  // independent — the real server frame arriving later is absorbed by each
+  // reducer's identity bail. Mirrors the optimistic dispatch every other inbox
+  // mutation (status / assignment / contact) already does.
   // ---------------------------------------------------------------
   const handleMarkRead = useCallback(
     (conversationId: string) => {
-      cache.patch(conversationId, (curr) => {
-        if (curr.data.conversation.unreadCount === 0) return null;
-        return {
-          ...curr,
-          data: {
-            ...curr.data,
-            conversation: { ...curr.data.conversation, unreadCount: 0 },
-          },
-        };
+      dispatchLocalSocketEvent("conversation:read", {
+        teamId: team.id,
+        conversationId,
+        readByUserId: currentUser.id,
       });
+    },
+    [team.id, currentUser.id],
+  );
+
+  // ---------------------------------------------------------------
+  // Snapshot-on-leave cache write-back.
+  //
+  // While a thread is displayed, MessageThread owns the live message slice
+  // (sends, inbound, status, loaded older pages) — but the cached snapshot the
+  // shell holds is never updated with those messages (message:new only EVICTS
+  // background threads; the displayed thread is skipped). So a chat-switch-back
+  // re-seeded MessageThread from the stale snapshot, and the `?after=` backfill
+  // popped the missing messages in 0–1.5s later — a visible flash, most obvious
+  // on a short emoji bubble. On unmount we write the live slice + cursor back.
+  //
+  // `patch` no-ops if the entry was evicted (don't resurrect a dropped thread)
+  // and writes silently (no cacheTick bump): the displayed thread renders from
+  // MessageThread's own state, only the NEXT mount reads the cache.
+  // ---------------------------------------------------------------
+  const handleThreadSnapshot = useCallback(
+    (data: ConversationWithRefs, nextOlderCursor: string | null) => {
+      cache.patch(data.conversation.id, () => ({ data, nextOlderCursor }));
     },
     [cache],
   );
@@ -587,26 +618,17 @@ export function InboxShell({
   const loadingMore = searchState.active ? searchState.loadingMore : live.loadingMore;
   const loadMore = searchState.active ? searchState.loadMore : live.loadMore;
 
-  // useConnectionStatus is mounted for its side effect only — the AppRail
-  // (which consumed `connected`) lives in /inbox/layout.tsx now and reads
-  // it via its own hook call. ConnectionBanner reads it the same way.
+  // useConnectionStatus is mounted for its side effect only; ConnectionBanner
+  // reads the same hook to surface disconnect state.
   //
-  // usePresence still joins the presence room so other clients see this
-  // user as online, AND drives the green/grey dots next to each teammate
-  // in the InboxSubSidebar.
+  // Presence + the teammate roster moved to InboxSubSidebarLive (rendered by
+  // /inbox/layout.tsx) along with the rest of the sub-sidebar — that component
+  // owns `usePresence` now. The user still shows as online here because the
+  // sub-sidebar is always mounted on /inbox.
   //
   // useCatalogSync is provided by the layout's CatalogSyncBoundary now;
   // mounting it here would fire two refreshes per catalog change.
   useConnectionStatus();
-  const { onlineUserIds } = usePresence(team.id, currentUser.id);
-
-  // Sidebar teammates list: active members only (deactivated users still
-  // appear in `teamMembers` so historical message attribution survives,
-  // but the sidebar shouldn't list them).
-  const teammates = useMemo(
-    () => teamMembers.filter((u) => u.isActive),
-    [teamMembers],
-  );
 
   // Warm the cache for the top N conversations on mount so the agent's first
   // click never hits a cold cache. The hover-prefetch on rows covers anything
@@ -667,40 +689,13 @@ export function InboxShell({
 
   return (
     <SnippetsProvider snippets={snippets}>
-      <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
+      {/* AppRail + the inbox sub-sidebar + mobile chrome all live in
+          /inbox/layout.tsx now (via SectionShell). This island is just the
+          conversation list + thread workspace, mounted inside the layout's
+          <main>, so a rail click paints the stable sub-sidebar instantly and
+          only this region streams in behind loading.tsx. */}
+      <div className="relative flex h-svh w-full overflow-hidden bg-background text-foreground">
         <ConnectionBanner />
-        {/* Mobile chrome: hamburger + inbox filters drawer. The drawer
-            embeds the same InboxSubSidebar tree the desktop column uses. */}
-        <MobileShellChrome
-          currentUser={currentUser}
-          team={team}
-          title={activeId && displayedThread ? displayedThread.data.contact.name : "Inbox"}
-          subSidebar={
-            <InboxSubSidebar
-              currentUser={currentUser}
-              conversations={live.conversations}
-              stages={stages}
-              teammates={teammates}
-              onlineUserIds={onlineUserIds}
-              filter={filter}
-              onFilterChange={setFilter}
-            />
-          }
-        />
-        {/* AppRail moved to /inbox/layout.tsx so it persists across the
-            inbox's loading.tsx — clicking the Inbox icon from another
-            section no longer flashes a white screen. Connection / presence
-            dots that used to show here are now surfaced via
-            ConnectionBanner (visible only when disconnected). */}
-        <InboxSubSidebar
-          currentUser={currentUser}
-          conversations={live.conversations}
-          stages={stages}
-          teammates={teammates}
-          onlineUserIds={onlineUserIds}
-          filter={filter}
-          onFilterChange={setFilter}
-        />
         <div className="flex min-w-0 flex-1 overflow-hidden">
           {/* Mobile: ConversationList takes full width when no thread is
               active; hidden when a thread is open. Desktop: always visible
@@ -750,6 +745,7 @@ export function InboxShell({
                 canManageContactFields={canManageContactFields}
                 tags={tags}
                 onMarkRead={handleMarkRead}
+                onThreadSnapshot={handleThreadSnapshot}
                 onMobileBack={onMobileBack}
               />
             ) : activeId && skeletonContact ? (
@@ -782,6 +778,7 @@ function ThreadWorkspace({
   canManageContactFields,
   tags,
   onMarkRead,
+  onThreadSnapshot,
   onMobileBack,
 }: {
   thread: CachedThread;
@@ -794,6 +791,10 @@ function ThreadWorkspace({
   canManageContactFields: boolean;
   tags: Tag[];
   onMarkRead: (conversationId: string) => void;
+  onThreadSnapshot: (
+    data: ConversationWithRefs,
+    nextOlderCursor: string | null,
+  ) => void;
   onMobileBack: () => void;
 }) {
   return (
@@ -806,6 +807,7 @@ function ThreadWorkspace({
         stageCatalog={stageCatalog}
         canManageStages={canManageStages}
         onMarkRead={onMarkRead}
+        onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}
       />
       <ContactPanel

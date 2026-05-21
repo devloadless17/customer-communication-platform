@@ -127,19 +127,6 @@ export class ContactsService {
     const countryCode = input.countryCode ?? getCountryFromPhone(phone);
     const customFields = normalizeCreateCustomFields(input.customFields ?? {});
 
-    // Account-manager validation — must be an active User on this team.
-    let assignedUserId: string | null = null;
-    if (input.assignedUserId) {
-      const user = await this.db.user.findFirst({
-        where: { id: input.assignedUserId, teamId, deactivatedAt: null },
-        select: { id: true },
-      });
-      if (!user) {
-        throw new BadRequestException({ error: "assignedUserId not a member of this team" });
-      }
-      assignedUserId = user.id;
-    }
-
     // Every contact lands in the team's default stage on create — lazy-init
     // covers older teams + admins who deleted the seeded default.
     const stageId = await ensureDefaultStage(teamId);
@@ -155,7 +142,6 @@ export class ContactsService {
           lastName: trimmedLast,
           language,
           countryCode,
-          assignedUserId,
           email: email ?? undefined,
           location: location ?? undefined,
           customFields,
@@ -190,7 +176,6 @@ export class ContactsService {
       lastName: created.lastName,
       language: created.language,
       countryCode: created.countryCode,
-      assignedUserId: created.assignedUserId,
       avatarUrl: created.avatarUrl ?? undefined,
       email: created.email ?? undefined,
       location: created.location ?? undefined,
@@ -234,7 +219,6 @@ export class ContactsService {
       lastName,
       language,
       countryCode,
-      assignedUserId,
       email,
       location,
       customFields: customFieldsPatch,
@@ -250,38 +234,6 @@ export class ContactsService {
       });
       if (!ok) {
         throw new BadRequestException({ error: "stage not found" });
-      }
-    }
-
-    // Hydrate the new assignee (if set) up-front so the contact.assignee_changed
-    // event payload carries a fully-typed User row for webhook receivers.
-    type AssigneeSelect = {
-      id: string;
-      teamId: string;
-      role: import("@prisma/client").Role;
-      name: string;
-      email: string;
-      avatarUrl: string | null;
-      createdAt: Date;
-      deactivatedAt: Date | null;
-    };
-    let afterAssignee: AssigneeSelect | null = null;
-    if (typeof assignedUserId === "string") {
-      afterAssignee = await this.db.user.findFirst({
-        where: { id: assignedUserId, teamId, deactivatedAt: null },
-        select: {
-          id: true,
-          teamId: true,
-          role: true,
-          name: true,
-          email: true,
-          avatarUrl: true,
-          createdAt: true,
-          deactivatedAt: true,
-        },
-      });
-      if (!afterAssignee) {
-        throw new BadRequestException({ error: "assignedUserId not a member of this team" });
       }
     }
 
@@ -324,7 +276,6 @@ export class ContactsService {
             ...(lastName !== undefined ? { lastName } : {}),
             ...(language !== undefined ? { language } : {}),
             ...(countryCode !== undefined ? { countryCode } : {}),
-            ...(assignedUserId !== undefined ? { assignedUserId } : {}),
             ...(email !== undefined ? { email } : {}),
             ...(location !== undefined ? { location } : {}),
             ...(stageId !== undefined ? { stageId } : {}),
@@ -362,7 +313,6 @@ export class ContactsService {
       lastName: updated.lastName,
       language: updated.language,
       countryCode: updated.countryCode,
-      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,
@@ -395,8 +345,8 @@ export class ContactsService {
       workflowContact: workflowContactSnapshot(updated),
     });
 
-    // Narrow first-class events for the n8n "On Contact Lifecycle/Assignee
-    // updated" triggers — only fire when the relevant field actually changed.
+    // Narrow first-class event for the n8n "On Contact Lifecycle updated"
+    // trigger — only fire when the stage actually changed.
     if (existing.stageId !== updated.stageId) {
       await this.bus.publish({
         type: "contact.lifecycle_changed",
@@ -404,30 +354,6 @@ export class ContactsService {
         contactId: updated.id,
         before: { stageId: existing.stageId },
         after: { stageId: updated.stageId },
-        changedByUserId: userId,
-      });
-    }
-    if (existing.assignedUserId !== updated.assignedUserId) {
-      await this.bus.publish({
-        type: "contact.assignee_changed",
-        teamId,
-        contactId: updated.id,
-        before: { assignedUserId: existing.assignedUserId },
-        after: { assignedUserId: updated.assignedUserId },
-        afterUser: afterAssignee
-          ? {
-              id: afterAssignee.id,
-              teamId: afterAssignee.teamId,
-              role: afterAssignee.role,
-              name: afterAssignee.name,
-              email: afterAssignee.email,
-              ...(afterAssignee.avatarUrl ? { avatarUrl: afterAssignee.avatarUrl } : {}),
-              ...(afterAssignee.createdAt
-                ? { createdAt: afterAssignee.createdAt.toISOString() }
-                : {}),
-              isActive: afterAssignee.deactivatedAt === null,
-            }
-          : null,
         changedByUserId: userId,
       });
     }
@@ -638,7 +564,6 @@ export class ContactsService {
           lastName: c.lastName,
           language: c.language,
           countryCode: c.countryCode,
-          assignedUserId: c.assignedUserId,
           avatarUrl: c.avatarUrl ?? undefined,
           email: c.email ?? undefined,
           location: c.location ?? undefined,
@@ -976,7 +901,6 @@ export class ContactsService {
       lastName: updated.lastName,
       language: updated.language,
       countryCode: updated.countryCode,
-      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,

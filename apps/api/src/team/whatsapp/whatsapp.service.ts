@@ -52,6 +52,27 @@ const UPLOAD_ALLOWED_MIME = new Set<string>([
   "application/pdf",
 ]);
 
+// Credentials live on a `ChannelConnection` row keyed by (teamId, provider).
+// `config` = non-secret fields; `secrets` = envelope-encrypted ciphertext.
+const META_PROVIDER = "meta_cloud" as const;
+interface MetaChannelConfig {
+  phoneNumberId?: string;
+  displayPhoneNumber?: string;
+  wabaId?: string;
+  appId?: string;
+  verifyToken?: string;
+}
+interface MetaChannelSecrets {
+  accessToken?: string;
+  appSecret?: string;
+}
+/** Drop undefined keys so the stored JSON stays clean (mirrors backfill). */
+function pruneUndefined<T extends object>(o: T): T {
+  return Object.fromEntries(
+    Object.entries(o).filter(([, v]) => v !== undefined),
+  ) as T;
+}
+
 @Injectable()
 export class WhatsappService {
   private readonly logger = new Logger(WhatsappService.name);
@@ -78,62 +99,45 @@ export class WhatsappService {
    * which is why the envelope key no longer needs to live in the web image.
    */
   async getConfig(teamId: string): Promise<WhatsappConfigView> {
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: {
-        metaPhoneNumberId: true,
-        metaDisplayPhoneNumber: true,
-        metaWabaId: true,
-        metaAppId: true,
-        metaVerifyToken: true,
-        metaAccessToken: true,
-        metaAppSecret: true,
-      },
+    const conn = await this.db.channelConnection.findUnique({
+      where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+      select: { config: true, secrets: true },
     });
-    if (!team) {
-      return {
-        phoneNumberId: null,
-        displayPhoneNumber: null,
-        wabaId: null,
-        appId: null,
-        verifyToken: null,
-        accessToken: null,
-        appSecret: null,
-        credentialsUndecryptable: false,
-      };
-    }
+    const config = (conn?.config ?? {}) as MetaChannelConfig;
+    const secrets = (conn?.secrets ?? {}) as MetaChannelSecrets;
+
     // Tolerate decrypt failure here (key rotated, value corrupt, wrong env):
     // surface it via the `credentialsUndecryptable` flag so the page can ask
     // the admin to re-paste. The send path in lib/providers/config.ts stays
     // strict — there, a failed decrypt is loud (silent send-nothing is worse).
-    const accessToken = this.tryDecrypt(team.metaAccessToken, "metaAccessToken");
-    const appSecret = this.tryDecrypt(team.metaAppSecret, "metaAppSecret");
+    const accessToken = this.tryDecrypt(secrets.accessToken ?? null, "accessToken");
+    const appSecret = this.tryDecrypt(secrets.appSecret ?? null, "appSecret");
     const credentialsUndecryptable =
-      (team.metaAccessToken != null && accessToken === null) ||
-      (team.metaAppSecret != null && appSecret === null);
+      (secrets.accessToken != null && accessToken === null) ||
+      (secrets.appSecret != null && appSecret === null);
 
     // Pre-mint a verify token on first read so the onboarding UI can show
-    // "Step 1 — paste this into Meta" before any credentials are saved.
-    // Race-safe via `metaVerifyToken: null` predicate — a concurrent first
-    // load becomes a no-op write. Failure degrades to "shown next load",
-    // not a page error.
-    let verifyToken = team.metaVerifyToken;
+    // "Step 1 — paste this into Meta" before any credentials are saved. The
+    // row is created inactive (no creds yet); updateConfig flips isActive.
+    // Concurrent first-loads can mint twice — benign before any Meta
+    // subscription exists. Failure degrades to "shown next load".
+    let verifyToken = config.verifyToken ?? null;
     if (verifyToken == null) {
       const minted = randomBytes(24).toString("hex");
       try {
-        const res = await this.db.team.updateMany({
-          where: { id: teamId, metaVerifyToken: null },
-          data: { metaVerifyToken: minted },
+        const mergedConfig = pruneUndefined({ ...config, verifyToken: minted });
+        await this.db.channelConnection.upsert({
+          where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+          create: {
+            teamId,
+            provider: META_PROVIDER,
+            config: mergedConfig as Prisma.InputJsonValue,
+            secrets: {},
+            isActive: false,
+          },
+          update: { config: mergedConfig as Prisma.InputJsonValue },
         });
-        if (res.count > 0) {
-          verifyToken = minted;
-        } else {
-          const refreshed = await this.db.team.findUnique({
-            where: { id: teamId },
-            select: { metaVerifyToken: true },
-          });
-          verifyToken = refreshed?.metaVerifyToken ?? minted;
-        }
+        verifyToken = minted;
       } catch (err) {
         this.logger.warn(
           `could not pre-mint verify token: ${err instanceof Error ? err.message : String(err)}`,
@@ -142,10 +146,10 @@ export class WhatsappService {
     }
 
     return {
-      phoneNumberId: team.metaPhoneNumberId,
-      displayPhoneNumber: team.metaDisplayPhoneNumber,
-      wabaId: team.metaWabaId,
-      appId: team.metaAppId,
+      phoneNumberId: config.phoneNumberId ?? null,
+      displayPhoneNumber: config.displayPhoneNumber ?? null,
+      wabaId: config.wabaId ?? null,
+      appId: config.appId ?? null,
       verifyToken,
       accessToken,
       appSecret,
@@ -216,58 +220,72 @@ export class WhatsappService {
       });
     }
 
+    const existing = await this.db.channelConnection.findUnique({
+      where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+      select: { config: true },
+    });
+    const existingConfig = (existing?.config ?? {}) as MetaChannelConfig;
+
     // Verify-token resolution order:
     //   1. Explicit value from input (legacy callers / future re-rotate UI).
-    //   2. Existing team row value (pre-minted by getConfig on first load,
+    //   2. Existing connection value (pre-minted by getConfig on first load,
     //      or set on a prior save). Stable across re-saves — critical so
     //      Meta's stored verify token stays valid when an admin clicks
     //      "Validate & save" again.
     //   3. Fresh random (defensive — getConfig pre-mints, so this branch
     //      shouldn't fire in practice).
-    let verifyToken = input.verifyToken;
-    if (!verifyToken) {
-      const existing = await this.db.team.findUnique({
-        where: { id: teamId },
-        select: { metaVerifyToken: true },
+    const verifyToken =
+      input.verifyToken || existingConfig.verifyToken || randomBytes(24).toString("hex");
+
+    // Phone-number uniqueness across teams. The old `Team.metaPhoneNumberId
+    // @unique` constraint can't live on a JSON field, so guard at the app
+    // layer: reject if another team already connected this number. (Pilot is
+    // single-tenant; this preserves the same user-facing error for later.)
+    const clash = await this.db.channelConnection.findFirst({
+      where: {
+        provider: META_PROVIDER,
+        teamId: { not: teamId },
+        config: { path: ["phoneNumberId"], equals: phoneNumberId },
+      },
+      select: { id: true },
+    });
+    if (clash) {
+      throw new ConflictException({
+        error: "this phone number id is already connected to another team",
       });
-      verifyToken = existing?.metaVerifyToken ?? randomBytes(24).toString("hex");
     }
 
-    try {
-      await this.db.team.update({
-        where: { id: teamId },
-        data: {
-          metaPhoneNumberId: phoneNumberId,
-          // Encrypted at rest with the app-wide ENCRYPTION_KEY
-          // (lib/crypto/envelope.ts). Read paths (getMetaSendConfig /
-          // getMetaWebhookConfig) decrypt transparently — nothing reads
-          // these columns raw, so rewrites stay safe.
-          metaAccessToken: encryptSecret(accessToken),
-          metaAppSecret: encryptSecret(appSecret),
-          metaVerifyToken: verifyToken,
-          metaDisplayPhoneNumber: displayNumber ?? null,
-          // wabaId / appId use optional-update semantics — see schema doc.
-          ...(input.wabaId === undefined
-            ? {}
-            : { metaWabaId: input.wabaId || null }),
-          ...(input.appId === undefined
-            ? {}
-            : { metaAppId: input.appId || null }),
-        },
-      });
-    } catch (err) {
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        "code" in err &&
-        (err as { code?: string }).code === "P2002"
-      ) {
-        throw new ConflictException({
-          error: "this phone number id is already connected to another team",
-        });
-      }
-      throw err;
-    }
+    const newConfig = pruneUndefined<MetaChannelConfig>({
+      phoneNumberId,
+      verifyToken,
+      displayPhoneNumber: displayNumber ?? undefined,
+      // wabaId / appId use optional-update semantics: undefined input preserves
+      // the existing value; empty string clears it.
+      wabaId: input.wabaId === undefined ? existingConfig.wabaId : input.wabaId || undefined,
+      appId: input.appId === undefined ? existingConfig.appId : input.appId || undefined,
+    });
+    // Encrypted at rest with the app-wide ENCRYPTION_KEY (lib/crypto/envelope.ts).
+    // Read paths (getMetaSendConfig / getMetaWebhookConfig) decrypt transparently.
+    const newSecrets: MetaChannelSecrets = {
+      accessToken: encryptSecret(accessToken),
+      appSecret: encryptSecret(appSecret),
+    };
+
+    await this.db.channelConnection.upsert({
+      where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+      create: {
+        teamId,
+        provider: META_PROVIDER,
+        config: newConfig as Prisma.InputJsonValue,
+        secrets: newSecrets as Prisma.InputJsonValue,
+        isActive: true,
+      },
+      update: {
+        config: newConfig as Prisma.InputJsonValue,
+        secrets: newSecrets as Prisma.InputJsonValue,
+        isActive: true,
+      },
+    });
 
     invalidateProviderConfig(teamId);
 
@@ -285,17 +303,12 @@ export class WhatsappService {
    * rule #2 — integration toggles must not erase audit trail).
    */
   async disconnect(teamId: string): Promise<void> {
-    await this.db.team.update({
-      where: { id: teamId },
-      data: {
-        metaPhoneNumberId: null,
-        metaAccessToken: null,
-        metaAppSecret: null,
-        metaVerifyToken: null,
-        metaDisplayPhoneNumber: null,
-        metaWabaId: null,
-        metaAppId: null,
-      },
+    // Drop the connection row entirely (wipes creds + verify token, matching
+    // the old "null every meta_* column" behavior). Historical messages are
+    // untouched — they live on their own tables. deleteMany so a
+    // not-yet-connected team is a no-op rather than a 404.
+    await this.db.channelConnection.deleteMany({
+      where: { teamId, provider: META_PROVIDER },
     });
     invalidateProviderConfig(teamId);
   }
@@ -315,21 +328,22 @@ export class WhatsappService {
     hasAppId: boolean;
     connected: boolean;
   }> {
-    const [rows, team] = await Promise.all([
+    const [rows, conn] = await Promise.all([
       this.db.messageTemplate.findMany({
         where: { teamId },
         orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
       }),
-      this.db.team.findUnique({
-        where: { id: teamId },
-        select: { metaWabaId: true, metaAppId: true, metaPhoneNumberId: true },
+      this.db.channelConnection.findUnique({
+        where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+        select: { config: true },
       }),
     ]);
+    const config = (conn?.config ?? {}) as MetaChannelConfig;
     return {
       templates: rows.map(toTemplateDto),
-      hasWabaId: Boolean(team?.metaWabaId),
-      hasAppId: Boolean(team?.metaAppId),
-      connected: Boolean(team?.metaPhoneNumberId),
+      hasWabaId: Boolean(config.wabaId),
+      hasAppId: Boolean(config.appId),
+      connected: Boolean(config.phoneNumberId),
     };
   }
 

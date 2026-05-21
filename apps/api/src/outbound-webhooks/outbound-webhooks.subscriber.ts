@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 
 import { subscribe } from "@/lib/events/bus";
-import type { ChannelInfo } from "@ccp/shared/outbound-webhooks/public-events";
+import type {
+  AssigneeInfo,
+  ChannelInfo,
+  PublicContact,
+  PublicEventType,
+} from "@ccp/shared/outbound-webhooks/public-events";
 import {
   busEventTypesToSubscribe,
   toPublicEnvelopes,
@@ -11,6 +16,11 @@ import {
 
 import { DbService } from "../db/db.service";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
+import {
+  EXTERNAL_CONVERSATION_INCLUDE,
+  conversationRowToExternal,
+  type ExternalContact,
+} from "@/lib/external-shapes";
 
 /**
  * Bus subscriber that fans each allowlisted DomainEvent out to every
@@ -90,13 +100,9 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     const envelopes = toPublicEnvelopes(event as Parameters<typeof toPublicEnvelopes>[0]);
     if (envelopes.length === 0) return;
 
-    // Resolve public CDN URLs for any media-bearing message payloads. The
-    // mapper leaves `media.url` null because it can't query the DB; we fill
-    // it here from Message.mediaUrl (the raw CDN url) so the receiver can
-    // download the file directly — same enrichment role as resolveChannel().
-    await this.enrichMediaUrls(envelopes);
-
-    // Single SQL query per event for all matching public event names.
+    // Single SQL query per event for all matching public event names. Done
+    // FIRST so we skip every enrichment lookup below when no webhook is
+    // subscribed to this event for this team (the overwhelmingly common case).
     const publicTypes = Array.from(new Set(envelopes.map((e) => e.type)));
     const webhooks = await this.db.outboundWebhook.findMany({
       where: {
@@ -107,6 +113,17 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
       select: { id: true, eventTypes: true },
     });
     if (webhooks.length === 0) return;
+
+    // Enrich each public payload with everything the framework-agnostic mapper
+    // couldn't derive (it has no DB access). Best-effort: a failed lookup
+    // leaves the documented `null` in place rather than dropping the delivery.
+    //   1. media CDN urls on file messages (image/video/doc links)
+    //   2. full contact + conversation (status, assignee) on message.sent so
+    //      it matches message.received's context
+    //   3. assignee + sender display names / emails wherever they're id-only
+    await this.enrichMediaUrls(envelopes);
+    await this.enrichSentMessageContext(envelopes);
+    await this.hydrateUsers(envelopes);
 
     const channel = await this.resolveChannel(event.teamId);
 
@@ -187,6 +204,113 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
   }
 
   /**
+   * Stamp the full contact + conversation (status, unread, hydrated assignee)
+   * onto every `message.sent` envelope. The mapper emits these `null` because
+   * it can't query; an outbound-webhook receiver needs the same contact +
+   * assignment context that `message.received` already carries, so one n8n
+   * branch can handle both directions. One conversation read per distinct
+   * conversation in the batch (≤1 in practice).
+   */
+  private async enrichSentMessageContext(
+    envelopes: Array<{ type: PublicEventType; envelope: { data: unknown } }>,
+  ): Promise<void> {
+    type SentConversation = {
+      id: string;
+      contact_id: string;
+      status: string | null;
+      unread_count: number | null;
+      last_message_at: string;
+      assignee: AssigneeInfo | null;
+    };
+    type SentData = { contact: PublicContact | null; conversation: SentConversation };
+
+    const byConversation = new Map<string, SentData[]>();
+    for (const { type, envelope } of envelopes) {
+      if (type !== "message.sent") continue;
+      const data = envelope.data as SentData;
+      const id = data.conversation?.id;
+      if (!id) continue;
+      const list = byConversation.get(id) ?? [];
+      list.push(data);
+      byConversation.set(id, list);
+    }
+    if (byConversation.size === 0) return;
+
+    const rows = await this.db.conversation.findMany({
+      where: { id: { in: [...byConversation.keys()] } },
+      include: EXTERNAL_CONVERSATION_INCLUDE,
+    });
+    for (const row of rows) {
+      const targets = byConversation.get(row.id);
+      if (!targets) continue;
+      const ext = conversationRowToExternal(row);
+      const contact = externalContactToPublic(ext.contact);
+      const conversation: SentConversation = {
+        id: ext.id,
+        contact_id: ext.contactId,
+        status: ext.status,
+        unread_count: ext.unreadCount,
+        last_message_at: ext.lastMessageAt,
+        assignee: ext.assignee
+          ? { type: "user", id: ext.assignee.id, name: ext.assignee.name, email: ext.assignee.email }
+          : null,
+      };
+      for (const data of targets) {
+        data.contact = contact;
+        data.conversation = conversation;
+      }
+    }
+  }
+
+  /**
+   * Fill display names (and emails, for assignees) on every user reference the
+   * mapper left id-only — one batched `user.findMany` across all envelopes:
+   *   - `conversation.assignee` on message.received (mapper emits id only)
+   *   - `previous_assignee` / `assignee` on conversation.assigned
+   *   - `message.sender` on outbound agent sends ("who sent it")
+   * Skips refs already hydrated (e.g. the conversation.assignee on message.sent,
+   * which `enrichSentMessageContext` filled with name+email from the include).
+   */
+  private async hydrateUsers(
+    envelopes: Array<{ envelope: { data: unknown } }>,
+  ): Promise<void> {
+    type UserRef = { type?: string; id?: string | null; name?: string | null; email?: string | null };
+    const refs: Array<{ ref: UserRef; withEmail: boolean }> = [];
+    const collect = (ref: UserRef | null | undefined, withEmail: boolean) => {
+      // Only `user`-typed refs map to a User row; `ai_agent` lives elsewhere
+      // (future), `contact` / `api` / `workflow` have no name to hydrate.
+      if (!ref || !ref.id || ref.type !== "user" || ref.name != null) return;
+      refs.push({ ref, withEmail });
+    };
+    for (const { envelope } of envelopes) {
+      const data = envelope.data as {
+        message?: { sender?: UserRef };
+        conversation?: { assignee?: UserRef | null };
+        assignee?: UserRef | null;
+        previous_assignee?: UserRef | null;
+      };
+      collect(data.message?.sender, false);
+      collect(data.conversation?.assignee, true);
+      collect(data.assignee, true);
+      collect(data.previous_assignee, true);
+    }
+    if (refs.length === 0) return;
+
+    const ids = Array.from(new Set(refs.map((r) => r.ref.id as string)));
+    const users = await this.db.user.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, name: true, email: true },
+    });
+    const byId = new Map(users.map((u) => [u.id, u]));
+    for (const { ref, withEmail } of refs) {
+      const u = byId.get(ref.id as string);
+      if (!u) continue;
+      ref.name = u.name;
+      if (withEmail) ref.email = u.email;
+    }
+  }
+
+  /**
    * Resolve the team's Meta config into a public ChannelInfo. Cached per-team
    * for the process lifetime — Meta phone numbers rarely change, and a fresh
    * lookup on every event burns budget on a hot bus subscriber. On cache miss,
@@ -196,18 +320,47 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     const cached = this.channelCache.get(teamId);
     if (cached) return cached;
 
-    const team = await this.db.team.findUnique({
-      where: { id: teamId },
-      select: { metaPhoneNumberId: true, metaDisplayPhoneNumber: true },
+    const conn = await this.db.channelConnection.findUnique({
+      where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+      select: { config: true },
     });
-    if (!team) return null;
+    if (!conn) return null;
+    const config = (conn.config ?? {}) as {
+      phoneNumberId?: string;
+      displayPhoneNumber?: string;
+    };
 
     const channel: ChannelInfo = {
       source: "meta_cloud",
-      phone_number_id: team.metaPhoneNumberId,
-      display_phone_number: team.metaDisplayPhoneNumber,
+      phone_number_id: config.phoneNumberId ?? null,
+      display_phone_number: config.displayPhoneNumber ?? null,
     };
     this.channelCache.set(teamId, channel);
     return channel;
   }
+}
+
+/**
+ * Adapt the camelCase `ExternalContact` (already normalized: tagIds resolved,
+ * customFields coerced, createdAt ISO) to the snake_case `PublicContact` wire
+ * shape webhooks use. Pure — reuses the canonical /v1 serializer for the
+ * heavy lifting so this is just a key rename.
+ */
+function externalContactToPublic(c: ExternalContact): PublicContact {
+  return {
+    id: c.id,
+    phone_number: c.phoneNumber,
+    name: c.name,
+    first_name: c.firstName,
+    last_name: c.lastName,
+    language: c.language,
+    country_code: c.countryCode,
+    avatar_url: c.avatarUrl,
+    email: c.email,
+    location: c.location,
+    stage_id: c.stageId,
+    tag_ids: c.tagIds,
+    custom_fields: c.customFields,
+    created_at: c.createdAt,
+  };
 }

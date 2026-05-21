@@ -12,31 +12,44 @@ import { getServerTimezone } from "@/lib/server-tz";
 
 import "@/styles/globals.css";
 
-// `display: "optional"` eliminates the font-swap reflow that "swap" causes.
-// With swap: browser paints in fallback, then re-renders in Inter when the
-// font arrives → bubble heights shift → the snapped-to-bottom message drifts
-// up → useChatScroll has to re-snap. The user sees this as a small "lag"
-// after first paint on hard refresh.
+// `display: "swap"`, not "optional" — chosen for cross-refresh consistency.
+// Both fonts self-host via next/font and both get next/font's metric-matched
+// fallback (size-adjust + ascent/descent overrides), so the fallback→Inter
+// handoff is ~zero CLS either way. The real difference is *which font you end
+// up on*, and how stable that is between page loads:
 //
-// With optional: the browser keeps the fallback for this page load if Inter
-// doesn't arrive within ~100ms. Inter caches for next time, so every
-// subsequent visit (including normal navigations within a session) gets the
-// custom font without any CLS. First cold visit on a slow connection shows
-// the fallback — acceptable trade for zero layout shift inside the inbox.
+//   optional: gives the web font only a ~100ms window. Miss it (cold or busy
+//             load) and the page renders in the fallback for that ENTIRE load
+//             and never swaps. So the font visibly alternates refresh-to-
+//             refresh, and because the fallback is metric-matched but not
+//             metric-IDENTICAL, some elements grow/shrink a hair depending on
+//             which font won that load. That coin-flip reads as the
+//             flicker/"vibration" on refresh.
+//   swap:     paint the fallback immediately, then ALWAYS swap Inter in once
+//             it arrives. subsets:["latin"] makes next/font emit a
+//             <link rel=preload> for the woff2, and it's served from our own
+//             origin, so on a warm cache the swap is a few ms — imperceptible.
+//             End state is always Inter, identical on every refresh.
 //
-// next/font already injects size-adjust + ascent/descent overrides so the
-// fallback and Inter have closely matched metrics; "optional" plus that
-// metric-matching is the modern best-practice combo for chat-style UIs.
+// Chat-scroll note: inbox bubbles render in font-sans (Inter), whose metric
+// fallback match is tight enough that the swap doesn't drift the snapped-to-
+// bottom scroll. (font-mono / JetBrains is only used in scattered badges + IDs,
+// never the bubble body, so its looser mono-fallback match doesn't reach the
+// scroll-sensitive surface.)
+//
+// NOTE: `next dev` injects global CSS via JS, so it shows a brief first-paint
+// flash regardless of font-display. Judge this in a production build
+// (`npm run build && npm run start`), not `npm run dev`.
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
-  display: "optional",
+  display: "swap",
 });
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
-  display: "optional",
+  display: "swap",
 });
 
 export const metadata: Metadata = {

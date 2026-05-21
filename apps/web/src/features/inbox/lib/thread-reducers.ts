@@ -87,25 +87,14 @@ export function applyContactUpdate(
 
 export function applyConversationRead(
   prev: ConversationWithRefs,
-  payload: { conversationId: string; readByUserId: string; teamId: string },
-  ctx?: ReducerContext,
+  _payload: { conversationId: string; readByUserId: string; teamId: string },
 ): ConversationWithRefs {
-  // Team-wide counter always clears — any user marking read zeroes it.
-  // Per-agent `unreadForMe` only clears when the READER is me; another
-  // teammate reading doesn't affect my "I haven't seen this" state.
-  const teamChange = prev.conversation.unreadCount !== 0;
-  const myChange =
-    ctx?.currentUserId !== undefined &&
-    payload.readByUserId === ctx.currentUserId &&
-    prev.conversation.unreadForMe === true;
-  if (!teamChange && !myChange) return prev;
+  // Unread is team-wide only — any member marking read zeroes the counter
+  // and it clears for everyone. There is no per-agent read state.
+  if (prev.conversation.unreadCount === 0) return prev;
   return {
     ...prev,
-    conversation: {
-      ...prev.conversation,
-      ...(teamChange ? { unreadCount: 0 } : {}),
-      ...(myChange ? { unreadForMe: false } : {}),
-    },
+    conversation: { ...prev.conversation, unreadCount: 0 },
   };
 }
 
@@ -185,23 +174,11 @@ export function applyNoteDeleted(
  */
 export type ThreadReducerTarget = "conversation" | "all";
 
-/**
- * Optional context handed to reducers that need viewer-aware behavior.
- * Today only `applyConversationRead` reads `currentUserId` (to decide
- * whether a `conversation:read` event clears MY per-agent `unreadForMe`,
- * or just the team-wide counter). Reducers that don't need context ignore
- * the parameter entirely.
- */
-export type ReducerContext = {
-  currentUserId: string;
-};
-
 export type ThreadReducerEntry<E extends keyof ServerToClientEvents> = {
   readonly event: E;
   readonly apply: (
     prev: ConversationWithRefs,
     payload: Parameters<ServerToClientEvents[E]>[0],
-    ctx?: ReducerContext,
   ) => ConversationWithRefs;
   readonly target?: ThreadReducerTarget;
 };

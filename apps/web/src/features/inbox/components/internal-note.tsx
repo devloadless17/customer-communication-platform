@@ -27,7 +27,7 @@ function InternalNoteImpl({
             <span className="text-[11px] font-semibold uppercase tracking-wider">Internal note</span>
             <span className="ml-auto flex items-center gap-1.5 text-[11px] opacity-80">
               <Avatar className="size-4">
-                <AvatarFallback className="text-[8px]">{initials(author.name)}</AvatarFallback>
+                <AvatarFallback seed={author.id} className="text-[8px]">{initials(author.name)}</AvatarFallback>
               </Avatar>
               <span>{author.name}</span>
               <span className="opacity-60">·</span>

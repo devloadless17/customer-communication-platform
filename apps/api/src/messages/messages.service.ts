@@ -19,6 +19,7 @@ import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
 import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
+import { transcodeToOggOpus } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
@@ -30,8 +31,13 @@ import {
   SendTemplateValidationError,
   sendTemplateInternal,
 } from "@/lib/messaging/send-template-internal";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
+import {
+  NoChannelDestinationError,
+  resolveContactChannel,
+} from "@/lib/providers/channel";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import type { ProviderName } from "@ccp/shared/types";
 import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import { getConversationWithRefs } from "@/lib/queries";
@@ -188,6 +194,7 @@ export class MessagesService {
           teamId,
           userId,
           conversationId: input.conversationId,
+          provider: pre.provider,
           phoneNumber: pre.phoneNumber,
           body: input.body,
           replyToMessageId: pre.replyToMessageId,
@@ -220,17 +227,28 @@ export class MessagesService {
     teamId: string,
     input: SendTextInput,
   ): Promise<{
+    provider: ProviderName;
     phoneNumber: string;
     replyToMessageId: string | null;
     replyToExternalId?: string;
   }> {
     const { conversationId, replyToMessageId: replyToMessageIdRaw } = input;
-    const [conversation, replyToRow, configOrErr] = await Promise.all([
+    const [conversation, replyToRow] = await Promise.all([
       this.db.conversation.findFirst({
         where: { id: conversationId, teamId },
         select: {
           id: true,
-          contact: { select: { phoneNumber: true, lastInboundAt: true } },
+          // Channel is conversation-owned — the preflight returns this provider
+          // (resolveContactChannel below only supplies the destination address).
+          provider: true,
+          contact: {
+            select: {
+              phoneNumber: true,
+              identityProvider: true,
+              externalContactId: true,
+              lastInboundAt: true,
+            },
+          },
         },
       }),
       replyToMessageIdRaw
@@ -239,32 +257,56 @@ export class MessagesService {
             select: { id: true, externalId: true },
           })
         : Promise.resolve(null),
-      getMetaSendConfig(teamId).catch((err: unknown) => {
-        if (err instanceof ProviderNotConfiguredError) return err;
-        throw err;
-      }),
     ]);
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-    if (configOrErr instanceof ProviderNotConfiguredError) {
-      throw new ConflictException({
-        error: "whatsapp_not_connected",
-        detail: configOrErr.message,
-      });
+
+    // Resolve the destination ADDRESS from the contact identity. The PROVIDER
+    // is conversation-owned (the row is the source of truth for which channel
+    // this thread sends on); equal to the contact's by construction today.
+    let channel;
+    try {
+      channel = resolveContactChannel(conversation.contact);
+    } catch (err) {
+      if (err instanceof NoChannelDestinationError) {
+        throw new BadRequestException({
+          error: "contact_has_no_phone",
+          detail: "This contact has no reachable address.",
+        });
+      }
+      throw err;
     }
-    if (!conversation.contact.phoneNumber) {
-      throw new BadRequestException({
-        error: "contact_has_no_phone",
-        detail: "This contact has no WhatsApp number.",
-      });
+    const provider = conversation.provider;
+    const binding = getProviderBinding(provider);
+
+    // Fail fast on a not-connected provider so the 4xx surfaces in the POST
+    // response instead of as a queued job that fails in the worker. (The
+    // config can't be prefetched in parallel with the conversation lookup
+    // anymore — we need the contact's channel first — but a cached config is
+    // a Map read, so the serialization cost is sub-millisecond steady-state.)
+    try {
+      await binding.getSendConfig(teamId);
+    } catch (err) {
+      if (err instanceof ProviderNotConfiguredError) {
+        throw new ConflictException({
+          error: "whatsapp_not_connected",
+          detail: err.message,
+        });
+      }
+      throw err;
     }
-    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-    const win = computeWindowStatus(lastInboundAt);
-    if (win.state === "closed" || win.state === "never") {
-      throw new UnprocessableEntityException({
-        error: "outside_24h_window",
-        detail: "24-hour window closed — send an approved template to re-engage this contact.",
-        lastInboundAt,
-      });
+
+    // Free-form send window — driven by the provider capability; `null` skips.
+    const windowMs = binding.provider.capabilities.freeFormWindowMs;
+    if (windowMs !== null) {
+      const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+      const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
+      if (win.state === "closed" || win.state === "never") {
+        throw new UnprocessableEntityException({
+          error: "outside_24h_window",
+          detail: "24-hour window closed — send an approved template to re-engage this contact.",
+          lastInboundAt,
+        });
+      }
     }
     // Resolve the reply target FIRST. A flood of replies pointing at a
     // deleted message id would otherwise drain the per-conversation send
@@ -306,7 +348,8 @@ export class MessagesService {
       throw err;
     }
     return {
-      phoneNumber: conversation.contact.phoneNumber,
+      provider,
+      phoneNumber: channel.to,
       replyToMessageId,
       ...(replyToExternalId ? { replyToExternalId } : {}),
     };
@@ -354,6 +397,10 @@ export class MessagesService {
       replyToExternalId,
     } = data;
     const receivedAt = new Date(data.receivedAt);
+    // `provider` may be absent on jobs enqueued before the field existed —
+    // default to Meta. The binding gives us provider + config loader.
+    const provider: ProviderName = data.provider ?? "meta_cloud";
+    const binding = getProviderBinding(provider);
 
     // Cheap indexed existence check (no contact join, no select-all).
     // Conversation row gone → fail non-recoverable BEFORE we hit Meta so
@@ -364,7 +411,7 @@ export class MessagesService {
         where: { id: conversationId, teamId },
         select: { id: true, lastMessageAt: true, contactId: true },
       }),
-      getMetaSendConfig(teamId).catch((err: unknown) => {
+      binding.getSendConfig(teamId).catch((err: unknown) => {
         if (err instanceof ProviderNotConfiguredError) return err;
         throw err;
       }),
@@ -419,7 +466,7 @@ export class MessagesService {
             const existing = await this.db.message.findFirst({
               where: {
                 teamId,
-                provider: "meta_cloud",
+                provider,
                 externalId: prior.externalId,
               },
             });
@@ -487,7 +534,7 @@ export class MessagesService {
 
     let send;
     try {
-      send = await getMetaProvider().sendText(
+      send = await binding.provider.sendText(
         {
           to: phoneNumber,
           body,
@@ -573,7 +620,7 @@ export class MessagesService {
         senderUserId: userId,
         body,
         direction: "out",
-        provider: "meta_cloud",
+        provider,
         status: "sent",
         rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
         timestamp: messageTimestamp,
@@ -591,7 +638,7 @@ export class MessagesService {
       senderUserId: userId,
       body,
       direction: "out",
-      provider: "meta_cloud",
+      provider,
       status: "sent",
       rawPayload: { sentVia: "api/messages" },
       timestamp: messageTimestamp.toISOString(),
@@ -706,26 +753,53 @@ export class MessagesService {
       select: {
         id: true,
         contactId: true,
+        // Channel is conversation-owned — bind + stamp the send from here.
+        provider: true,
         // For the timestamp monotonicity guard further down — outbound
         // must sort strictly after any inbound it might be responding to.
         lastMessageAt: true,
         contact: {
-          select: { phoneNumber: true, name: true, lastInboundAt: true },
+          select: {
+            phoneNumber: true,
+            identityProvider: true,
+            externalContactId: true,
+            name: true,
+            lastInboundAt: true,
+          },
         },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    // 24h window — media (like free-form text) is template-only outside it.
-    const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
-    const win = computeWindowStatus(lastInboundAt);
-    if (win.state === "closed" || win.state === "never") {
-      throw new UnprocessableEntityException({
-        error: "outside_24h_window",
-        detail:
-          "24-hour window closed — media can't be sent freely. Use an approved template to re-engage.",
-        lastInboundAt,
-      });
+    let channel;
+    try {
+      channel = resolveContactChannel(conversation.contact);
+    } catch (err) {
+      if (err instanceof NoChannelDestinationError) {
+        throw new BadRequestException({
+          error: "contact_has_no_phone",
+          detail: "This contact has no reachable address.",
+        });
+      }
+      throw err;
+    }
+    const provider = conversation.provider;
+    const binding = getProviderBinding(provider);
+
+    // Free-form send window — media (like free-form text) is template-only
+    // outside it. Driven by the provider capability; `null` skips the check.
+    const windowMs = binding.provider.capabilities.freeFormWindowMs;
+    if (windowMs !== null) {
+      const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
+      const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
+      if (win.state === "closed" || win.state === "never") {
+        throw new UnprocessableEntityException({
+          error: "outside_24h_window",
+          detail:
+            "24-hour window closed — media can't be sent freely. Use an approved template to re-engage.",
+          lastInboundAt,
+        });
+      }
     }
 
     let replyToMessageId: string | null = null;
@@ -752,7 +826,8 @@ export class MessagesService {
     // payload with a non-obvious error. Blob storage was already tolerant
     // (splits on `;` for its allowlist check) — Meta isn't.
     const rawMime = file.mimetype || "application/octet-stream";
-    const mimeType =
+    // `let` so the voice-note transcode below can rewrite it to audio/ogg.
+    let mimeType =
       rawMime.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
     const kind = kindFromMime(mimeType);
     const cap = MEDIA_SIZE_CAPS[kind];
@@ -795,27 +870,54 @@ export class MessagesService {
     // once here + reusing the buffer drops peak to ~1x while the two
     // providers run, since both internal Blobs copy from the same source
     // synchronously per provider but the source itself is shared.
-    const bytes = new Uint8Array(await readFile(file.path));
-    const filename = file.originalname || "upload";
+    let bytes = new Uint8Array(await readFile(file.path));
+    // `let` so the transcode below can rename the extension to match the new
+    // container — Meta keys media type partly off the filename extension, and a
+    // `.m4a` name on transcoded ogg bytes makes it reject as octet-stream.
+    let filename = file.originalname || "upload";
 
-    if (!conversation.contact.phoneNumber) {
-      throw new BadRequestException({
-        error: "contact_has_no_phone",
-        detail: "This contact has no WhatsApp number.",
-      });
+    // Voice notes must be ogg/opus to DELIVER on WhatsApp. Firefox records that
+    // natively; Chrome/Safari can only record audio/mp4, which Meta accepts then
+    // fails to DELIVER. Transcode genuine recordings (`form.voice` is the FE's
+    // "this is a recording" marker) that aren't already ogg → ogg/opus so they
+    // deliver on every browser. We send them as a regular audio clip (NOT a
+    // voice note — see the sendMedia call below for why). Uploaded audio FILES
+    // (form.voice=false — a user picked an mp3/m4a) are left alone: they deliver
+    // fine already. Best-effort: if ffmpeg is missing/fails we log + send original.
+    const isRecording = kind === "audio" && form.voice === true;
+    if (isRecording && mimeType !== "audio/ogg") {
+      try {
+        bytes = await transcodeToOggOpus(bytes);
+        mimeType = "audio/ogg";
+        // Rename the extension to match the new container. Without this the
+        // file keeps its recorder extension (e.g. Chrome's `.m4a`) on ogg
+        // bytes, and Meta rejects it as application/octet-stream (#131053).
+        filename = filename.replace(/\.[^./\\]+$/, "") + ".ogg";
+      } catch (err) {
+        this.logger.warn(
+          `voice transcode to ogg/opus failed; sending original ${mimeType}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
-    const toPhone = conversation.contact.phoneNumber;
+
+    const toPhone = channel.to;
     const toName = conversation.contact.name;
 
     let sendConfig;
     try {
-      sendConfig = await getMetaSendConfig(teamId);
+      sendConfig = await binding.getSendConfig(teamId);
     } catch (err) {
       throw new ConflictException({
         error: "WhatsApp is not connected for this team",
         detail: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // Optional methods — a channel without media support raises a typed error.
+    const uploadMedia = requireProviderMethod(binding.provider, "uploadMedia", provider);
+    const sendMedia = requireProviderMethod(binding.provider, "sendMedia", provider);
 
     // Parallel: Meta /media upload AND blob-storage upload. Both pure
     // functions of `bytes`. The team lookup that the blob context needs
@@ -850,7 +952,7 @@ export class MessagesService {
     // 1) Upload to Meta. Pre-send: throwing is safe — nothing went out yet.
     let mediaId: string;
     try {
-      const uploaded = await getMetaProvider().uploadMedia!(
+      const uploaded = await uploadMedia(
         { bytes, mimeType, filename },
         sendConfig,
       );
@@ -884,7 +986,7 @@ export class MessagesService {
     //    pre-send is fine.
     let send;
     try {
-      send = await getMetaProvider().sendMedia!(
+      send = await sendMedia(
         {
           to: toPhone,
           kind,
@@ -892,13 +994,11 @@ export class MessagesService {
           caption: caption || undefined,
           filename: kind === "document" ? filename : undefined,
           ...(replyToExternalId ? { replyToExternalId } : {}),
-          // Meta voice-note rendering requires audio/ogg specifically. Safari
-          // records audio/mp4; setting voice:true on that comes back as a
-          // 400 from Meta. Quietly drop the flag for non-ogg recordings —
-          // they still send as a regular audio attachment.
-          ...(kind === "audio" && form.voice && mimeType === "audio/ogg"
-            ? { voice: true }
-            : {}),
+          // Recordings are sent as a normal audio clip — we don't set
+          // `voice: true`. The transcode above (mp4 → clean ogg/opus) is what
+          // makes them deliver on every browser. `voice: true` (waveform
+          // voice-note rendering) is left off for now; it can be revisited on
+          // top of the clean ogg if the waveform UI is wanted.
         },
         sendConfig,
       );
@@ -952,7 +1052,7 @@ export class MessagesService {
       senderUserId: userId,
       body: caption,
       direction: "out",
-      provider: "meta_cloud",
+      provider,
       status: "sent",
       rawPayload: {
         sentVia: "api/messages/media",
@@ -1017,7 +1117,7 @@ export class MessagesService {
       senderUserId: userId,
       body: caption,
       direction: "out",
-      provider: "meta_cloud",
+      provider,
       status: "sent",
       rawPayload: {
         sentVia: "api/messages/media",
@@ -1118,19 +1218,11 @@ export class MessagesService {
       });
     }
 
-    let sendConfig;
-    try {
-      sendConfig = await getMetaSendConfig(teamId);
-    } catch (err) {
-      if (err instanceof ProviderNotConfiguredError) {
-        throw new ConflictException({
-          error: "whatsapp not connected",
-          detail: err.message,
-        });
-      }
-      throw err;
-    }
-
+    // Config + provider are resolved PER target contact below — each contact
+    // can be on its own channel. (Was a single pre-loop Meta fetch + 409 when
+    // unconnected; now an unconnected provider surfaces as a per-contact
+    // failure in the results, consistent with the existing per-contact
+    // "no phone number" failure path.)
     const contacts = await this.db.contact.findMany({
       where: { id: { in: contactIds }, teamId },
       include: { tags: { select: { id: true } } },
@@ -1189,17 +1281,39 @@ export class MessagesService {
     const processContact = async (
       contact: (typeof contacts)[number],
     ): Promise<ForwardResult> => {
-      if (!contact.phoneNumber) {
+      let channel;
+      try {
+        channel = resolveContactChannel(contact);
+      } catch {
         return {
           contactId: contact.id,
           contactName: contact.name,
           ok: false,
           sent: 0,
           failed: sourceRows.length,
-          error: "contact has no WhatsApp phone number",
+          error: "contact has no reachable address",
         };
       }
-      const contactPhone = contact.phoneNumber;
+      const binding = getProviderBinding(channel.provider);
+      let sendConfig;
+      try {
+        sendConfig = await binding.getSendConfig(teamId);
+      } catch (err) {
+        return {
+          contactId: contact.id,
+          contactName: contact.name,
+          ok: false,
+          sent: 0,
+          failed: sourceRows.length,
+          error:
+            err instanceof ProviderNotConfiguredError
+              ? "channel not connected"
+              : err instanceof Error
+                ? err.message
+                : "send config error",
+        };
+      }
+      const contactPhone = channel.to;
 
       // One-contact-one-conversation invariant. Closed → pending (same
       // semantics as webhook ingest + broadcast runner reopen-on-send).
@@ -1212,6 +1326,8 @@ export class MessagesService {
             data: {
               teamId,
               contactId: contact.id,
+              // Thread channel = the channel resolved for this send.
+              provider: channel.provider,
               status: "pending",
               lastMessagePreview: "",
             },
@@ -1283,6 +1399,19 @@ export class MessagesService {
       for (const src of sourceRows) {
         try {
           if (src.mediaKind) {
+            // Required lazily (inside the per-message try) so a channel without
+            // media support fails just THIS media message, not the whole
+            // forward — text messages in the same batch still go through.
+            const uploadMedia = requireProviderMethod(
+              binding.provider,
+              "uploadMedia",
+              channel.provider,
+            );
+            const sendMedia = requireProviderMethod(
+              binding.provider,
+              "sendMedia",
+              channel.provider,
+            );
             const mb = await loadMediaBytes(src);
             if (!mb) {
               failed++;
@@ -1304,7 +1433,7 @@ export class MessagesService {
             // UploadThing's side); the canonical link to Meta lives on
             // the Message row via `externalId` after the send completes.
             const [uploaded, saved] = await Promise.all([
-              getMetaProvider().uploadMedia!(
+              uploadMedia(
                 { bytes: mb.bytes, mimeType: mb.mime, filename },
                 sendConfig,
               ),
@@ -1332,7 +1461,7 @@ export class MessagesService {
                   return null;
                 }),
             ]);
-            const send = await getMetaProvider().sendMedia!(
+            const send = await sendMedia(
               {
                 to: contactPhone,
                 kind: mb.kind,
@@ -1360,7 +1489,7 @@ export class MessagesService {
               senderUserId: userId,
               body: withCaption ?? "",
               direction: "out",
-              provider: "meta_cloud",
+              provider: channel.provider,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",
@@ -1414,7 +1543,7 @@ export class MessagesService {
               senderUserId: userId,
               body: withCaption ?? "",
               direction: "out",
-              provider: "meta_cloud",
+              provider: channel.provider,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",
@@ -1433,8 +1562,8 @@ export class MessagesService {
             const body = (src.body ?? "").trim();
             if (!body) continue; // nothing to forward (shouldn't happen)
 
-            // Pre-send.
-            const send = await getMetaProvider().sendText(
+            // Pre-send. sendText is a required provider method (always present).
+            const send = await binding.provider.sendText(
               { to: contactPhone, body },
               sendConfig,
             );
@@ -1451,7 +1580,7 @@ export class MessagesService {
               senderUserId: userId,
               body,
               direction: "out",
-              provider: "meta_cloud",
+              provider: channel.provider,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",
@@ -1480,7 +1609,7 @@ export class MessagesService {
               senderUserId: userId,
               body,
               direction: "out",
-              provider: "meta_cloud",
+              provider: channel.provider,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",

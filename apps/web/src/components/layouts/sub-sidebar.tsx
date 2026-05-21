@@ -30,6 +30,16 @@ export function MobileSubSidebarProvider({
 }
 
 /**
+ * True when the current sub-sidebar tree is rendered inside the mobile
+ * navigation drawer (vs. the desktop fixed column). Sub-sidebars that don't
+ * compose the {@link SubSidebar} shell — e.g. the team channel list — read
+ * this to apply the same desktop-hide / drawer-show gating themselves.
+ */
+export function useIsMobileSubSidebar(): boolean {
+  return useContext(MobileSubSidebarContext);
+}
+
+/**
  * Shared building blocks for every section's contextual sidebar (the column
  * that lives between the AppRail and the main content). Pages compose these
  * to match their nav shape — settings has groups of links, contacts has

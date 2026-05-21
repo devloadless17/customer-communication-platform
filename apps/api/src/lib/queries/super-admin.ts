@@ -23,8 +23,10 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
       id: true,
       name: true,
       createdAt: true,
-      metaPhoneNumberId: true,
-      metaDisplayPhoneNumber: true,
+      channelConnections: {
+        where: { provider: "meta_cloud" },
+        select: { config: true },
+      },
       _count: {
         select: {
           users: true,
@@ -36,18 +38,24 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
       },
     },
   });
-  return teams.map((t) => ({
+  return teams.map((t) => {
+    const cfg = (t.channelConnections[0]?.config ?? {}) as {
+      phoneNumberId?: string;
+      displayPhoneNumber?: string;
+    };
+    return {
     id: t.id,
     name: t.name,
     createdAt: t.createdAt.toISOString(),
-    whatsappConnected: Boolean(t.metaPhoneNumberId),
-    whatsappDisplayNumber: t.metaDisplayPhoneNumber ?? null,
+    whatsappConnected: Boolean(cfg.phoneNumberId),
+    whatsappDisplayNumber: cfg.displayPhoneNumber ?? null,
     userCount: t._count.users,
     contactCount: t._count.contacts,
     conversationCount: t._count.conversations,
     messageCount: t._count.messages,
     broadcastCount: t._count.broadcasts,
-  }));
+    };
+  });
 }
 
 export async function getTeamDetailForSuperAdmin(
@@ -59,8 +67,10 @@ export async function getTeamDetailForSuperAdmin(
       id: true,
       name: true,
       createdAt: true,
-      metaPhoneNumberId: true,
-      metaDisplayPhoneNumber: true,
+      channelConnections: {
+        where: { provider: "meta_cloud" },
+        select: { config: true },
+      },
       _count: {
         select: {
           users: true,
@@ -73,6 +83,10 @@ export async function getTeamDetailForSuperAdmin(
     },
   });
   if (!team) return null;
+  const waCfg = (team.channelConnections[0]?.config ?? {}) as {
+    phoneNumberId?: string;
+    displayPhoneNumber?: string;
+  };
 
   // Members only. Conversations are intentionally NOT fetched here —
   // superAdmin's visibility ends at aggregate counts + the member roster,
@@ -96,8 +110,8 @@ export async function getTeamDetailForSuperAdmin(
       id: team.id,
       name: team.name,
       createdAt: team.createdAt.toISOString(),
-      whatsappConnected: Boolean(team.metaPhoneNumberId),
-      whatsappDisplayNumber: team.metaDisplayPhoneNumber ?? null,
+      whatsappConnected: Boolean(waCfg.phoneNumberId),
+      whatsappDisplayNumber: waCfg.displayPhoneNumber ?? null,
       userCount: team._count.users,
       contactCount: team._count.contacts,
       conversationCount: team._count.conversations,

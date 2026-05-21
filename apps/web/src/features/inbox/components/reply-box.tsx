@@ -25,6 +25,8 @@ import type {
   TemplateDto,
   User,
 } from "@ccp/shared/types";
+import { mediaPreviewLabel } from "@ccp/shared/types";
+import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
@@ -41,6 +43,7 @@ const TemplatePicker = dynamic(
 );
 import { SnippetPopup } from "./snippet-popup";
 import { useSnippets } from "./snippets-context";
+import { renderPlaceholders } from "./template-picker/utils";
 
 import { AttachmentPreview } from "./reply-box/attachment-preview";
 import { InteractivePopover } from "./interactive-popover";
@@ -454,6 +457,17 @@ export function ReplyBox({
           const msg = await safeReadError(res);
           return { ok: false as const, error: msg };
         }
+        // Bump the list on success (not before — a template send is
+        // synchronous and can be rejected, and unlike the reply box it paints
+        // no optimistic bubble, so we don't want a phantom preview on failure).
+        // The rendered body matches what the server stores as the preview
+        // (same renderPlaceholders the picker uses), so this won't flicker
+        // when the real `message:new` arrives.
+        emitOptimisticListBump({
+          conversationId,
+          preview: renderPlaceholders(args.template.bodyText, args.variables.body).slice(0, 200),
+          lastMessageAt: new Date().toISOString(),
+        });
         return { ok: true as const };
       } catch (err) {
         return {
@@ -571,6 +585,8 @@ export function ReplyBox({
     // -----------------------------------------------------------------------
     if (!isNote && onOptimistic) {
       const ts = new Date().toISOString();
+      let optimisticMessage: Message | null = null;
+      let listPreview = "";
       if (file) {
         const mimeType = file.type || "application/octet-stream";
         const kind: MediaKind = kindFromMimeClient(mimeType);
@@ -578,7 +594,7 @@ export function ReplyBox({
         // reply swaps in /api/media/<id>. The browser keeps the blob alive
         // as long as some element references it.
         const blobUrl = URL.createObjectURL(file);
-        onOptimistic({
+        optimisticMessage = {
           id: clientTempId,
           teamId: currentUser.teamId,
           conversationId,
@@ -601,9 +617,12 @@ export function ReplyBox({
             ...(effectiveCaption ? { caption: effectiveCaption } : {}),
             ...(kind === "document" ? { filename: file.name } : {}),
           },
-        });
+        };
+        // Caption-less media has an empty body — use the same media label the
+        // server writes so the list preview reads "🎤 Voice message" etc.
+        listPreview = (effectiveCaption || mediaPreviewLabel(kind)).slice(0, 200);
       } else if (trimmed) {
-        onOptimistic({
+        optimisticMessage = {
           id: clientTempId,
           teamId: currentUser.teamId,
           conversationId,
@@ -618,7 +637,22 @@ export function ReplyBox({
           clientTempId,
           pending: true,
           ...(reply ? { replyToMessageId: reply.id, replyTo: reply } : {}),
-        });
+        };
+        listPreview = trimmed.slice(0, 200);
+      }
+
+      if (optimisticMessage) {
+        onOptimistic(optimisticMessage);
+        // Optimistically bump the conversation LIST (left sidebar) for the
+        // sender's OWN send. The thread bubble above (addOptimistic) was the
+        // only optimistic path; the list row (preview + recency sort) waited
+        // on the server's `message:new` round-trip. On a long-lived tab whose
+        // socket missed that frame (sleep/reconnect gap), the sender's list
+        // preview stayed pinned to the previous message — most visibly a
+        // stale text preview when the new message is a caption-less voice
+        // note. The list-only channel avoids the other `message:new`
+        // subscribers (notably the contact panel's un-deduped message tally).
+        emitOptimisticListBump({ conversationId, preview: listPreview, lastMessageAt: ts });
       }
     }
 
@@ -921,15 +955,14 @@ export function ReplyBox({
                     setError("Recording was empty — try again.");
                     return;
                   }
-                  // Send as a plain audio attachment — identical to a picked
-                  // audio file, which delivers reliably. We deliberately do
-                  // NOT request voice-note rendering (`voice: true`): Meta's
-                  // voice-note validator is stricter than its regular-audio
-                  // one and rejects MediaRecorder's ogg/mp4 output, which is
-                  // what was failing every recorded send. Reliability over
-                  // the waveform UI. Revisit once we transcode to spec-
-                  // compliant ogg/opus. See [[meta-audio-mime-rules]].
-                  submit({ file });
+                  // `voice: true` flags this as a RECORDING so the api transcodes
+                  // it to ogg/opus before the Meta send (Chrome records audio/mp4
+                  // which Meta accepts then fails to DELIVER; Firefox's ogg passes
+                  // through). It is sent as a regular audio clip, NOT a waveform
+                  // voice note — Meta's voice-note validator rejects browser
+                  // recordings intermittently even as proper ogg. Reliability over
+                  // the waveform UI. See [[meta-audio-mime-rules]].
+                  submit({ file, voice: true });
                 })();
               }}
             />

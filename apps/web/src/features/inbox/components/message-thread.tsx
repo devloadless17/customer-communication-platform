@@ -62,6 +62,7 @@ function MessageThreadImpl({
   stageCatalog,
   canManageStages,
   onMarkRead,
+  onSnapshot,
   onMobileBack,
 }: {
   data: ConversationWithRefs;
@@ -76,6 +77,10 @@ function MessageThreadImpl({
    *  unreadCount=0 after the mark-read POST resolves. Optional so tests and
    *  other mount points don't need to thread it. */
   onMarkRead?: (conversationId: string) => void;
+  /** Forwarded to useConversationEvents: on unmount, hands the live slice +
+   *  cursor back to the shell so the LRU snapshot reflects this visit (no
+   *  switch-back flash). Optional for the same reason as onMarkRead. */
+  onSnapshot?: (data: ConversationWithRefs, nextOlderCursor: string | null) => void;
   /** Below md the inbox single-panes between conversation list and thread.
    *  When set, ThreadHeader renders a back-arrow that returns to the list. */
   onMobileBack?: () => void;
@@ -89,7 +94,7 @@ function MessageThreadImpl({
     markOptimisticFailed,
     removeOptimistic,
     replaceWithContext,
-  } = useConversationEvents(initialData, nextOlderCursor, currentUser.id, onMarkRead);
+  } = useConversationEvents(initialData, nextOlderCursor, onMarkRead, onSnapshot);
   const { conversation, contact, assignedUser, messages, notes } = data;
   const { confirm, alert, confirmDialog } = useConfirm();
 

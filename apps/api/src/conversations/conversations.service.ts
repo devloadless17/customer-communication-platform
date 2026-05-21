@@ -9,8 +9,9 @@ import {
 // (BadRequestException already imported above — used by listMessages cursor guard.)
 
 import { blobStorage } from "@/lib/blob-storage";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding } from "@/lib/providers";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import type { ProviderName } from "@ccp/shared/types";
 import {
   getConversationWithRefs,
   listConversations,
@@ -135,8 +136,8 @@ export class ConversationsService {
    * into its in-memory Map and render without a route navigation. Returns
    * null if the conversation isn't in the team's scope.
    */
-  getInboxConversation(teamId: string, conversationId: string, viewerUserId: string) {
-    return getConversationWithRefs(teamId, conversationId, { viewerUserId });
+  getInboxConversation(teamId: string, conversationId: string) {
+    return getConversationWithRefs(teamId, conversationId);
   }
 
   /** Older or newer page. Exactly one of `before` / `after` must be set. */
@@ -147,16 +148,12 @@ export class ConversationsService {
       before?: string | null;
       after?: string | null;
       take?: number;
-      viewerUserId?: string;
     },
   ) {
     if (opts.after) {
       return listNewerMessages(teamId, conversationId, {
         after: opts.after,
         take: opts.take,
-        // Threaded so the reconnect state-resync also returns fresh
-        // per-agent unreadForMe alongside team-wide unreadCount.
-        ...(opts.viewerUserId ? { viewerUserId: opts.viewerUserId } : {}),
       });
     }
     if (!opts.before) {
@@ -357,34 +354,6 @@ export class ConversationsService {
         }
       : null;
 
-    // Mirror onto Contact.assignedUserId so the external `/v1` API + contact
-    // CRUD reflect the same owner the inbox shows. The two columns are one
-    // logical field for this product (one phone = one active relationship);
-    // the inbox writes through the conversation, the API reads from the
-    // contact, and this keeps them in sync without a read-time JOIN. Also
-    // publish `contact.assignee_changed` so partners subscribed to the
-    // contact-level webhook see the assignment without having to also
-    // subscribe to `conversation.assigned`.
-    if (previousAssignedUserId !== assignedUserId) {
-      await this.db.contact
-        .update({
-          where: { id: conversation.contact.id },
-          data: { assignedUserId },
-        })
-        .catch((err) => {
-          if (!isP2025(err)) throw err;
-        });
-      await this.bus.publish({
-        type: "contact.assignee_changed",
-        teamId,
-        contactId: conversation.contact.id,
-        before: { assignedUserId: previousAssignedUserId },
-        after: { assignedUserId },
-        afterUser: assignedUser,
-        changedByUserId: actorUserId,
-      });
-    }
-
     await this.bus.publish({
       type: "conversation.assigned",
       teamId,
@@ -509,10 +478,11 @@ export class ConversationsService {
   }
 
   /**
-   * Mark conversation read: per-user receipt upsert + team-wide unread
-   * counter CAS-zero + Meta read receipt (best-effort). The CAS protects
-   * against the read-vs-incoming-bump race; loser skips the publish and
-   * the next message:received re-syncs the badge.
+   * Mark conversation read: team-wide unread counter CAS-zero + Meta read
+   * receipt (best-effort). Unread is team-wide only — there is no per-agent
+   * read state for the inbox, so any member reading clears it for everyone.
+   * The CAS protects against the read-vs-incoming-bump race; loser skips the
+   * publish and the next message:received re-syncs the badge.
    */
   async markRead(teamId: string, userId: string, conversationId: string): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
@@ -520,14 +490,6 @@ export class ConversationsService {
       select: { id: true, unreadCount: true, lastMessageAt: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-
-    // Per-agent receipt (idempotent upsert). Sidebar's per-me badge reads
-    // against this row, not the team-wide counter.
-    await this.db.conversationReadReceipt.upsert({
-      where: { userId_conversationId: { userId, conversationId } },
-      create: { userId, conversationId, lastReadAt: conversation.lastMessageAt },
-      update: { lastReadAt: conversation.lastMessageAt },
-    });
 
     // Always look up the latest inbound — a teammate may have local-marked
     // without notifying Meta. Skip only when there's no inbound at all.
@@ -552,38 +514,13 @@ export class ConversationsService {
       }
     }
 
-    if (latestInbound && latestInbound.provider === "meta_cloud") {
-      void this.markIncomingReadBestEffort(teamId, latestInbound.externalId);
+    if (latestInbound) {
+      void this.markIncomingReadBestEffort(
+        teamId,
+        latestInbound.externalId,
+        latestInbound.provider,
+      );
     }
-  }
-
-  /**
-   * Mark a conversation as unread for the team. Inverse of markRead: bumps
-   * `unreadCount` from 0 → 1 so the conversation list re-surfaces the row
-   * with an unread badge even though every existing inbound has technically
-   * been seen. Does NOT touch the per-agent ConversationReadReceipt — those
-   * already correctly reflect when each agent last opened the thread; this
-   * is a team-level "needs another look" signal, mirroring WhatsApp Web's
-   * Mark as unread right-click action.
-   *
-   * No-op when unreadCount is already > 0 (real unread already exists).
-   * Doesn't call Meta — there's no "mark unread" in the Cloud API; the
-   * customer's blue tick stays as-is.
-   */
-  async markUnread(teamId: string, conversationId: string): Promise<void> {
-    const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      select: { id: true, unreadCount: true },
-    });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-    if (conversation.unreadCount > 0) return;
-
-    // CAS so a concurrent inbound that already bumped the counter doesn't
-    // get clobbered back down.
-    await this.db.conversation.updateMany({
-      where: { id: conversationId, teamId, unreadCount: 0 },
-      data: { unreadCount: 1 },
-    });
   }
 
   /**
@@ -607,13 +544,16 @@ export class ConversationsService {
       orderBy: { timestamp: "desc" },
       select: { externalId: true, provider: true },
     });
-    if (!latestInbound || latestInbound.provider !== "meta_cloud") {
+    if (!latestInbound) {
       return { ok: true, skipped: "no-inbound" };
     }
 
     try {
-      const config = await getMetaSendConfig(teamId);
-      await getMetaProvider().sendTypingIndicator?.(latestInbound.externalId, config);
+      // Route by the inbound's own channel; a provider without typing support
+      // no-ops via the optional `?.`.
+      const binding = getProviderBinding(latestInbound.provider);
+      const config = await binding.getSendConfig(teamId);
+      await binding.provider.sendTypingIndicator?.(latestInbound.externalId, config);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) {
         return { ok: true, skipped: "provider-not-configured" };
@@ -623,10 +563,15 @@ export class ConversationsService {
     return { ok: true };
   }
 
-  private async markIncomingReadBestEffort(teamId: string, externalId: string): Promise<void> {
+  private async markIncomingReadBestEffort(
+    teamId: string,
+    externalId: string,
+    provider: ProviderName,
+  ): Promise<void> {
     try {
-      const config = await getMetaSendConfig(teamId);
-      await getMetaProvider().markIncomingRead?.(externalId, config);
+      const binding = getProviderBinding(provider);
+      const config = await binding.getSendConfig(teamId);
+      await binding.provider.markIncomingRead?.(externalId, config);
     } catch (err) {
       if (err instanceof ProviderNotConfiguredError) return;
       this.logger.warn(`markIncomingRead failed: ${err instanceof Error ? err.message : err}`);

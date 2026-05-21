@@ -7,8 +7,12 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
+import {
+  NoChannelDestinationError,
+  resolveContactChannel,
+} from "@/lib/providers/channel";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
   renderTemplateBody,
@@ -142,17 +146,27 @@ export async function sendTemplateInternal(
     );
   }
 
-  if (!conversation.contact.phoneNumber) {
-    throw new SendTemplateValidationError(
-      "contact_has_no_phone",
-      "contact_has_no_phone",
-      "This contact has no WhatsApp number.",
-    );
+  let channel;
+  try {
+    channel = resolveContactChannel(conversation.contact);
+  } catch (err) {
+    if (err instanceof NoChannelDestinationError) {
+      throw new SendTemplateValidationError(
+        "contact_has_no_phone",
+        "contact_has_no_phone",
+        "This contact has no reachable address.",
+      );
+    }
+    throw err;
   }
+  // Channel is conversation-owned — bind + stamp from the conversation row;
+  // resolveContactChannel above only supplies the destination address.
+  const provider = conversation.provider;
+  const binding = getProviderBinding(provider);
 
   let sendConfig;
   try {
-    sendConfig = await getMetaSendConfig(args.teamId);
+    sendConfig = await binding.getSendConfig(args.teamId);
   } catch (err) {
     if (err instanceof ProviderNotConfiguredError) {
       throw new SendTemplateValidationError(
@@ -164,8 +178,12 @@ export async function sendTemplateInternal(
     throw err;
   }
 
-  const provider = getMetaProvider();
-  if (!provider.sendTemplate) {
+  // Templates are a provider capability — channels without a template catalog
+  // (SMS, Telegram) raise a typed error here.
+  let sendTemplate;
+  try {
+    sendTemplate = requireProviderMethod(binding.provider, "sendTemplate", provider);
+  } catch {
     throw new SendTemplateValidationError(
       "provider_no_template_support",
       "provider does not support templates",
@@ -175,9 +193,9 @@ export async function sendTemplateInternal(
   // Throws on provider error. Caller decides: route maps to 422/502;
   // automation handler turns it into a 422-shaped ActionResult so BullMQ
   // doesn't retry a permanent Meta rejection.
-  const send = await provider.sendTemplate(
+  const send = await sendTemplate(
     {
-      to: conversation.contact.phoneNumber,
+      to: channel.to,
       name: template.name,
       language: template.language,
       variables: {
@@ -211,7 +229,7 @@ export async function sendTemplateInternal(
     senderUserId: args.senderUserId,
     body: renderedBody,
     direction: "out",
-    provider: "meta_cloud",
+    provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,
@@ -259,7 +277,7 @@ export async function sendTemplateInternal(
     senderUserId: args.senderUserId,
     body: renderedBody,
     direction: "out",
-    provider: "meta_cloud",
+    provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,

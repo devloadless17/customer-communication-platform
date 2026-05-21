@@ -43,16 +43,11 @@ function ConversationListItemImpl({
    *  Adds a subtle visual cue so the click doesn't feel ignored. */
   pending: boolean;
 }) {
-  // Per-agent "I haven't seen this yet". Drives bold-text + the left-rail
-  // indicator. Falls back to team-wide unreadCount when the server hasn't
-  // populated unreadForMe (server-to-server reads, future code paths). A
-  // teammate marking read clears the team-wide counter but leaves my
-  // unreadForMe alone — collab-inbox semantics.
-  const unreadForMe = conversation.unreadForMe ?? conversation.unreadCount > 0;
-  // Team-wide counter — drives the badge number. "3" means the team has
-  // 3 unacked customer messages on this thread, regardless of whether
-  // I've personally seen them yet.
-  const teamUnread = conversation.unreadCount > 0;
+  // Unread is TEAM-WIDE by design (collab inbox): the bold styling AND the
+  // badge both read Conversation.unreadCount. When ANY member opens the thread,
+  // markAsRead zeroes that counter and it clears for EVERYONE. There is no
+  // per-agent read state for the inbox — "read" means read for all.
+  const unread = conversation.unreadCount > 0;
 
   return (
     <div
@@ -82,7 +77,7 @@ function ConversationListItemImpl({
           <span
             className={cn(
               "truncate text-sm",
-              unreadForMe ? "font-semibold text-foreground" : "font-medium text-foreground",
+              unread ? "font-semibold text-foreground" : "font-medium text-foreground",
             )}
           >
             {contact.name}
@@ -98,7 +93,7 @@ function ConversationListItemImpl({
           <p
             className={cn(
               "min-w-0 flex-1 truncate text-xs",
-              unreadForMe ? "text-foreground" : "text-muted-foreground",
+              unread ? "text-foreground" : "text-muted-foreground",
             )}
           >
             {conversation.lastMessagePreview}
@@ -108,7 +103,7 @@ function ConversationListItemImpl({
               className="ml-1 size-3 shrink-0 animate-spin text-muted-foreground"
               aria-label="Loading conversation"
             />
-          ) : teamUnread ? (
+          ) : unread ? (
             <span className="ml-1 flex size-4.5 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] font-semibold tabular-nums text-primary-foreground">
               {conversation.unreadCount}
             </span>
@@ -153,7 +148,6 @@ export const ConversationListItem = memo(
     prev.conversation.lastMessageAt === next.conversation.lastMessageAt &&
     prev.conversation.lastMessagePreview === next.conversation.lastMessagePreview &&
     prev.conversation.unreadCount === next.conversation.unreadCount &&
-    prev.conversation.unreadForMe === next.conversation.unreadForMe &&
     prev.conversation.status === next.conversation.status &&
     prev.conversation.assignedUserId === next.conversation.assignedUserId,
 );

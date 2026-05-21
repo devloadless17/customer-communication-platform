@@ -1,4 +1,18 @@
+import { resolve } from "node:path";
+
+import { loadEnvConfig } from "@next/env";
 import type { NextConfig } from "next";
+
+// Single source of env truth is the repo-root `.env`. `next dev`/`next start`
+// run with cwd=apps/web and only auto-load `apps/web/.env*`, so the root file
+// is invisible to the web process — the custom `server.ts` that used to load
+// it was removed in the NestJS migration, which is why local login started
+// throwing "BETTER_AUTH_SECRET must be set". Load the root explicitly here
+// (mirrors the api's `node --env-file=../../.env`). Safe under Docker:
+// loadEnvConfig never overrides a value already in process.env, so
+// compose-injected vars win. Also restores NEXT_PUBLIC_* (e.g. the socket
+// client's NEXT_PUBLIC_API_URL) for host dev.
+loadEnvConfig(resolve(process.cwd(), "../.."));
 
 const isProd = process.env.NODE_ENV === "production";
 
@@ -150,11 +164,15 @@ const nextConfig: NextConfig = {
   // local dev. The parity risk with the Caddyfile (drift between this
   // list and the Caddyfile route table) is the lesser evil.
   //
-  // Reuses INTERNAL_API_URL (already wired in docker-compose at
-  // http://api:4000) — same target the RSC layer uses for server→api
-  // calls, so we don't grow another env var for the same address.
+  // Reuses INTERNAL_API_URL — same target the RSC layer uses for server→api
+  // calls, so we don't grow another env var for the same address. In Docker,
+  // compose always sets it to http://api:4000 (the service hostname). The
+  // fallback below is the HOST-dev value (api on localhost:4000) — matching
+  // api-client.ts and the webhook proxy route, both of which already default
+  // to 127.0.0.1:4000. Defaulting to "http://api:4000" here broke host dev
+  // with EAI_AGAIN since `api` only resolves inside the compose network.
   async rewrites() {
-    const apiUpstream = process.env.INTERNAL_API_URL ?? "http://api:4000";
+    const apiUpstream = process.env.INTERNAL_API_URL ?? "http://127.0.0.1:4000";
     return {
       beforeFiles: [
         // Lives on NestJS, but Next.js's `/api/auth/[...all]` Better Auth

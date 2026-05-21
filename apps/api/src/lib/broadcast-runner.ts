@@ -3,14 +3,26 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
-import { getMetaProvider } from "@/lib/providers";
-import { getMetaSendConfig, ProviderNotConfiguredError } from "@/lib/providers/config";
+import { getProviderBinding } from "@/lib/providers";
+import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
   countTemplatePlaceholders,
   MetaSendError,
   normalizeMetaSendError,
   renderTemplateBody,
 } from "@/lib/providers/meta";
+import type { MessagingProvider } from "@ccp/shared/providers/types";
+import type { ProviderName } from "@ccp/shared/types";
+
+/**
+ * Broadcasts send pre-approved WhatsApp templates, so they're bound to the
+ * Meta channel by definition — templates are a Meta capability and the
+ * recipient destination is a phone number. A future "broadcast over Telegram"
+ * would be its own feature (different message shape, no template catalog), not
+ * a per-recipient channel resolution here. Routed through the registry so the
+ * provider/config indirection is uniform with the per-contact send paths.
+ */
+const BROADCAST_PROVIDER: ProviderName = "meta_cloud";
 import {
   parseVariableBindings,
   resolveBinding,
@@ -213,9 +225,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
+  const binding = getProviderBinding(BROADCAST_PROVIDER);
   let config;
   try {
-    config = await getMetaSendConfig(broadcast.teamId);
+    config = await binding.getSendConfig(broadcast.teamId);
   } catch (err) {
     const msg =
       err instanceof ProviderNotConfiguredError
@@ -227,7 +240,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
-  const provider = getMetaProvider();
+  const provider = binding.provider;
   if (!provider.sendTemplate) {
     await fail(broadcast.id, "provider does not support templates");
     return;
@@ -489,14 +502,19 @@ async function processOneRecipient(
       customFields: Prisma.JsonValue;
     };
   },
-  provider: ReturnType<typeof getMetaProvider>,
-  config: Awaited<ReturnType<typeof getMetaSendConfig>>,
+  provider: MessagingProvider,
+  config: unknown,
   bindings: VariableBindings,
   variables: BroadcastVariables,
   templateBody: string,
   pendingBumps: Set<Promise<unknown>>,
 ): Promise<void> {
-  if (!provider.sendTemplate) {
+  // Capture the optional method once — providers without a template catalog
+  // fail the recipient gracefully (vs throwing) so the rest of the broadcast
+  // continues. Using the local const also keeps `sendTemplate` typed as
+  // defined across the await points below.
+  const sendTemplate = provider.sendTemplate;
+  if (!sendTemplate) {
     await markRecipientFailed(recipient.id, "provider does not support templates");
     bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
     return;
@@ -524,6 +542,9 @@ async function processOneRecipient(
           data: {
             teamId: broadcast.teamId,
             contactId: recipient.contactId,
+            // Broadcasts are WhatsApp-only by design; stamp the same channel
+            // the recipient messages carry so conv.provider == msg.provider.
+            provider: BROADCAST_PROVIDER,
             status: "pending",
             lastMessagePreview: "",
           },
@@ -574,9 +595,9 @@ async function processOneRecipient(
 
     // The send itself. Anything that throws here counts as a failed recipient
     // — Meta either rejected us or the network died, no message went out.
-    let send: Awaited<ReturnType<typeof provider.sendTemplate>>;
+    let send: Awaited<ReturnType<typeof sendTemplate>>;
     try {
-      send = await provider.sendTemplate(
+      send = await sendTemplate(
         {
           to: toPhone,
           name: broadcast.templateName,
@@ -612,7 +633,7 @@ async function processOneRecipient(
         }
         await sleep(3_000 + Math.floor(Math.random() * 1_000));
         try {
-          send = await provider.sendTemplate(
+          send = await sendTemplate(
             {
               to: toPhone,
               name: broadcast.templateName,
@@ -689,7 +710,7 @@ async function processOneRecipient(
         senderUserId: broadcast.createdById,
         body: renderedBody,
         direction: "out",
-        provider: "meta_cloud",
+        provider: BROADCAST_PROVIDER,
         status: "sent",
         rawPayload: {
           sentVia: "broadcast",
@@ -730,7 +751,7 @@ async function processOneRecipient(
         senderUserId: broadcast.createdById,
         body: renderedBody,
         direction: "out",
-        provider: "meta_cloud",
+        provider: BROADCAST_PROVIDER,
         status: "sent",
         rawPayload: { sentVia: "broadcast", broadcastId: broadcast.id },
         timestamp: send.timestamp.toISOString(),

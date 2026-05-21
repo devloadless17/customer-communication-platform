@@ -13,6 +13,7 @@ import {
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
 import type { ConversationWithRefs, CursorPage, Message } from "@ccp/shared/types";
+import { mediaPreviewLabel } from "@ccp/shared/types";
 
 /**
  * Canonical sort for a conversation's message slice. Server-confirmed rows
@@ -75,6 +76,31 @@ function sortKey(m: Message): number {
   return new Date(m.timestamp).getTime();
 }
 
+/**
+ * Drop optimistic pending OUT rows that a recovery fetch (backfill / full
+ * refetch) is about to re-add as confirmed server rows. The live `onMessageNew`
+ * reconciles an own-send optimistic by `clientTempId`, but recovery items don't
+ * carry it — so when a disconnect swallowed the confirming frame, the
+ * externalId dedupe alone leaves the optimistic bubble in place AND appends the
+ * server copy: the message renders twice, and the 30s send watchdog then flips
+ * the orphan to a phantom "failed" with a Retry button (an invitation to
+ * double-send). We match the confirmation on (non-empty) body — the simplest
+ * signal present on both sides. Empty bodies (media without caption) are skipped
+ * so distinct attachments aren't collapsed.
+ */
+function reconcileOptimisticAgainst(
+  existing: Message[],
+  fresh: Message[],
+): Message[] {
+  const confirmed = new Set(
+    fresh.filter((m) => m.direction === "out" && m.body).map((m) => m.body),
+  );
+  if (confirmed.size === 0) return existing;
+  return existing.filter(
+    (m) => !(m.pending && m.direction === "out" && m.body && confirmed.has(m.body)),
+  );
+}
+
 export interface ConversationEventsState {
   data: ConversationWithRefs;
   hasMoreOlder: boolean;
@@ -134,23 +160,31 @@ export interface ConversationEventsState {
 export function useConversationEvents(
   initial: ConversationWithRefs,
   initialNextOlderCursor: string | null,
-  /**
-   * Signed-in agent id. Threaded into reducers via `ReducerContext` so the
-   * `conversation:read` handler can distinguish "I read this" (clears my
-   * per-agent `unreadForMe`) from "a teammate read this" (only clears
-   * team-wide `unreadCount`).
-   */
-  currentUserId: string,
   // Called after the mark-read POST resolves so the shell can patch its
   // cached thread snapshot (unreadCount → 0). Without this, switching back
   // to a thread already viewed this session would re-fire the POST every
   // time MessageThread re-mounts.
   onMarkRead?: (conversationId: string) => void,
+  // Called on unmount (chat switch / mobile-back / leaving the inbox) with the
+  // latest live data + older-cursor so the shell can write it back into its LRU
+  // snapshot. Without this, the cache keeps the stale SSR/fetch snapshot and a
+  // switch-back renders the thread missing every message sent/received this
+  // visit — the `?after=` backfill then pops them in 0–1.5s later (the flash
+  // the user sees, most noticeable on a short emoji-only bubble).
+  onSnapshot?: (data: ConversationWithRefs, nextOlderCursor: string | null) => void,
 ): ConversationEventsState {
   const router = useRouter();
   const [data, setData] = useState<ConversationWithRefs>(initial);
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextOlderCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
+
+  // True while the loaded slice ends at the live tail (initial load, sends,
+  // inbound, load-older — all keep the bottom). Flipped false by a search-jump
+  // (`replaceWithContext` swaps in a context window around an OLD message, and
+  // the inbox has no load-newer), which gates the snapshot-on-leave below: we
+  // must NOT persist a context window into the cache, or switch-back would
+  // strand the agent at the old message instead of the recent tail.
+  const tailAnchoredRef = useRef(true);
 
   // Render-time prop sync. Using useEffect for this leaves a paint cycle where
   // MessageThread renders the OLD conversation's messages under the NEW URL —
@@ -161,6 +195,8 @@ export function useConversationEvents(
     setTrackedId(initial.conversation.id);
     setData(initial);
     setOlderCursor(initialNextOlderCursor);
+    // Fresh conversation slice = tail-anchored again.
+    tailAnchoredRef.current = true;
   }
 
   const conversationId = initial.conversation.id;
@@ -180,12 +216,46 @@ export function useConversationEvents(
     dataRef.current = data;
   });
 
+  // Snapshot-on-leave. `dataRef`/`cursorRef` hold the most-recent committed
+  // values, so on unmount we hand the shell the full live slice (every message
+  // from this visit, plus any loaded older pages) + the current older-cursor.
+  // Empty deps → the cleanup fires exactly once, at unmount, which is the only
+  // moment the next visit will re-read the cache.
+  const onSnapshotRef = useRef(onSnapshot);
+  onSnapshotRef.current = onSnapshot;
+  useEffect(() => {
+    return () => {
+      // Skip when the slice is a search-jump context window (not the tail) —
+      // persisting it would land the next visit on an old message. Leaving the
+      // cache's prior tail snapshot is the correct fallback (backfill reconciles
+      // anything newer), matching pre-snapshot behavior for that rare path.
+      if (!tailAnchoredRef.current) return;
+      onSnapshotRef.current?.(dataRef.current, cursorRef.current);
+    };
+  }, []);
+
   // Set when a connect (or reconnect) fired while the tab was hidden — we
   // skipped the backfill at that moment to avoid joining the thundering
   // herd, and the visibility listener will fire it the moment the user
   // returns. Lives in a ref because the connect / visibility / unmount
   // closures all need to read the same flag without re-running the effect.
   const backfillNeededRef = useRef(false);
+
+  // Set when an inbound landed while the tab was hidden. We deliberately do
+  // NOT mark read in that case — a background tab parked on this thread must
+  // not silently clear team-wide unread for a message nobody actually saw.
+  // The visibility listener fires the deferred markRead when the agent returns.
+  const sawInboundWhileHiddenRef = useRef(false);
+
+  // First socket connect of THIS hook instance = thread open / SSR-hydration
+  // gap, where the lightweight `?after=` delta is enough. A SUBSEQUENT connect
+  // is a real reconnect after a drop, where arbitrary thread state (notes,
+  // contact rename/tags/stage, message statuses, media) may have changed while
+  // we were offline — the delta can't carry those, so we full-refetch the
+  // thread instead. `reconnectRecoveryRef` carries that decision into the
+  // deferred (hidden → visible) recovery path.
+  const hasConnectedOnceRef = useRef(false);
+  const reconnectRecoveryRef = useRef(false);
 
   const inFlightOlder = useRef(false);
   const loadOlder = useCallback(
@@ -266,7 +336,17 @@ export function useConversationEvents(
   // (conversation × unread-cycle), even with rapid chat switching.
   const initialUnread = initial.conversation.unreadCount;
   useEffect(() => {
-    if (initialUnread > 0) void markRead();
+    if (initialUnread <= 0) return;
+    // Only mark read when the agent is actually looking. If the thread mounts
+    // while the tab is hidden (e.g. cmd-click into a background tab), defer —
+    // onVisibility clears it on return, same rule as live inbounds. Without
+    // this, opening a thread into a background tab would clear team-wide unread
+    // for a thread nobody actually viewed.
+    if (typeof document === "undefined" || document.visibilityState === "visible") {
+      void markRead();
+    } else {
+      sawInboundWhileHiddenRef.current = true;
+    }
   }, [markRead, initialUnread]);
 
   useEffect(() => {
@@ -287,21 +367,29 @@ export function useConversationEvents(
     const onConnect = () => {
       socket.emit("subscribe:conversation", { conversationId });
 
-      // Skip the backfill when the tab isn't visible. A team of N agents
-      // with M tabs each → N·M parallel `?after=…` queries on every Caddy
-      // bounce / deploy — and most of those tabs are background or sleeping.
-      // The visibility-change listener below picks the backfill back up the
-      // moment the user returns to the tab.
+      // First connect = open/hydration (delta is enough); later = real
+      // reconnect (full refetch to recover state the delta can't carry).
+      const isReconnect = hasConnectedOnceRef.current;
+      hasConnectedOnceRef.current = true;
+
+      // Skip the recovery when the tab isn't visible. A team of N agents
+      // with M tabs each → N·M parallel queries on every Caddy bounce /
+      // deploy — and most of those tabs are background or sleeping. The
+      // visibility-change listener below picks it back up the moment the
+      // user returns to the tab; `reconnectRecoveryRef` remembers whether
+      // that deferred run should be a full refetch or a delta.
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         backfillNeededRef.current = true;
+        reconnectRecoveryRef.current = isReconnect;
         return;
       }
 
       // Random jitter (0–1500ms) breaks the synchronized reconnect storm
       // after a deploy. Without it, every open tab in the team fires its
-      // backfill GET at the same instant, dog-piling Postgres.
+      // recovery GET at the same instant, dog-piling Postgres.
+      const recover = isReconnect ? runFullRefetch : runBackfill;
       const delay = Math.floor(Math.random() * 1500);
-      window.setTimeout(() => runBackfill(), delay);
+      window.setTimeout(() => recover(), delay);
     };
 
     // Pulled out so the visibility-change listener below can re-fire it
@@ -336,7 +424,6 @@ export function useConversationEvents(
                   assignedUserId: string | null;
                   assignedUser: ConversationWithRefs["assignedUser"];
                   unreadCount: number;
-                  unreadForMe?: boolean;
                 };
               }>)
             : null,
@@ -358,7 +445,6 @@ export function useConversationEvents(
                 next.conversation.status !== freshState.status ||
                 next.conversation.assignedUserId !== freshState.assignedUserId ||
                 next.conversation.unreadCount !== freshState.unreadCount ||
-                next.conversation.unreadForMe !== freshState.unreadForMe ||
                 (next.assignedUser?.id ?? null) !==
                   (freshState.assignedUser?.id ?? null);
               if (headerChanged) {
@@ -369,9 +455,6 @@ export function useConversationEvents(
                     status: freshState.status,
                     assignedUserId: freshState.assignedUserId,
                     unreadCount: freshState.unreadCount,
-                    ...(freshState.unreadForMe !== undefined
-                      ? { unreadForMe: freshState.unreadForMe }
-                      : {}),
                   },
                   assignedUser: freshState.assignedUser,
                 };
@@ -381,11 +464,25 @@ export function useConversationEvents(
             const have = new Set(next.messages.map((m) => m.externalId));
             const fresh = freshItems.filter((m) => !have.has(m.externalId));
             if (!fresh.length) return next;
+            // Reconcile own optimistic sends whose confirming frame the gap
+            // swallowed, so they don't duplicate + go phantom-failed.
+            const reconciled = reconcileOptimisticAgainst(next.messages, fresh);
             return {
               ...next,
-              messages: sortByTimestamp([...next.messages, ...fresh]),
+              messages: sortByTimestamp([...reconciled, ...fresh]),
             };
           });
+
+          // runBackfill only runs while the tab is visible (see onConnect /
+          // onVisibility), so reaching here means the user is actively viewing
+          // this thread. Clear any unread that accumulated during the socket
+          // gap / hydration window — mirrors the live onMessageNew markRead.
+          // Without this, an inbound that lands during a reconnect blip (wifi
+          // hop, laptop sleep) leaves the team-wide badge stuck at >0 until a
+          // new message arrives or the user navigates away and back.
+          if (freshState && freshState.unreadCount > 0) {
+            void markRead();
+          }
         })
         .catch(() => {
           // Silent — the next reconnect or thread navigation re-fetches
@@ -394,17 +491,111 @@ export function useConversationEvents(
         });
     };
 
-    // If a connect happened while the tab was hidden, re-run the backfill
+    // Full thread refetch — used on a real RECONNECT (vs the delta backfill
+    // used on first connect). A drop can have missed arbitrary thread state
+    // (notes, contact rename/tags/stage, message statuses, media) that the
+    // `?after=` delta doesn't carry. We MERGE the fresh snapshot rather than
+    // replace it: blindly swapping in the latest page would unmount any older
+    // pages the user scrolled to and yank their scroll. Refetch, don't build a
+    // replay layer (CLAUDE.md). Only when anchored at the live tail — a
+    // search-context window keeps its position and refreshes on the next
+    // navigation, so fall back to the lightweight delta there.
+    const runFullRefetch = () => {
+      backfillNeededRef.current = false;
+      reconnectRecoveryRef.current = false;
+      if (!tailAnchoredRef.current) {
+        runBackfill();
+        return;
+      }
+      void fetchWithSessionGuard(`/api/inbox/conversation/${conversationId}`)
+        .then((r) =>
+          r.ok
+            ? (r.json() as Promise<{
+                data: ConversationWithRefs;
+                nextOlderCursor: string | null;
+              }>)
+            : null,
+        )
+        .then((res) => {
+          if (!res) return;
+          const fresh = res.data;
+          setData((prev) => {
+            // Keep the user's loaded message slice (incl. older pages they
+            // scrolled to → preserves scroll position). Reconcile server-owned
+            // fields (status/media) for messages we already have, append any
+            // fresh ones we're missing, and replace the rest of the snapshot
+            // (header, contact, notes) which the delta can't carry. olderCursor
+            // is left untouched — prev may hold pages deeper than fresh's
+            // window, so its cursor is the correct "load older" anchor.
+            const freshById = new Map(fresh.messages.map((m) => [m.id, m]));
+            const have = new Set(prev.messages.map((m) => m.externalId));
+            const reconciled = prev.messages.map((m) => {
+              const f = freshById.get(m.id);
+              if (!f) return m; // optimistic, or older than fresh's window
+              return f.status !== m.status || (f.media && !m.media)
+                ? { ...m, status: f.status, ...(f.media ? { media: f.media } : {}) }
+                : m;
+            });
+            const appended = fresh.messages.filter((m) => !have.has(m.externalId));
+            // Same optimistic-vs-recovery reconcile as runBackfill: a refetch
+            // can re-add our own send (missed live frame) as a confirmed row
+            // while the pending optimistic still sits in `reconciled`. Drop the
+            // pending OUT twin so it doesn't duplicate + go phantom-failed.
+            const deduped = reconcileOptimisticAgainst(reconciled, appended);
+            const messages = appended.length
+              ? sortByTimestamp([...deduped, ...appended])
+              : deduped;
+            return {
+              ...prev,
+              conversation: fresh.conversation,
+              contact: fresh.contact,
+              assignedUser: fresh.assignedUser,
+              notes: fresh.notes,
+              messages,
+              lastInboundAt: fresh.lastInboundAt,
+              ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
+              ...(fresh.noteCount !== undefined ? { noteCount: fresh.noteCount } : {}),
+            };
+          });
+          // Same visibility guarantee as runBackfill (only reached while the
+          // tab is visible) — clear any unread the gap left behind.
+          if (
+            (typeof document === "undefined" ||
+              document.visibilityState === "visible") &&
+            fresh.conversation.unreadCount > 0
+          ) {
+            void markRead();
+          }
+        })
+        .catch(() => {
+          // Silent — next reconnect / navigation re-fetches authoritatively.
+        });
+    };
+
+    // If a connect happened while the tab was hidden, re-run the recovery
     // when the user returns. This is what makes "open laptop after lunch"
     // recover the gap without forcing a manual reload.
     const onVisibility = () => {
-      if (
-        typeof document !== "undefined" &&
-        document.visibilityState === "visible" &&
-        backfillNeededRef.current &&
-        socket.connected
-      ) {
-        runBackfill();
+      if (typeof document === "undefined" || document.visibilityState !== "visible") {
+        return;
+      }
+      if (backfillNeededRef.current && socket.connected) {
+        // A (re)connect happened while hidden; recover now that the agent is
+        // looking. A real reconnect full-refetches (recovers notes / contact /
+        // statuses the delta can't); a first connect just deltas. Either path
+        // resyncs missed messages AND clears unread, so it subsumes the
+        // deferred-read case below.
+        sawInboundWhileHiddenRef.current = false;
+        if (reconnectRecoveryRef.current) {
+          runFullRefetch();
+        } else {
+          runBackfill();
+        }
+      } else if (sawInboundWhileHiddenRef.current) {
+        // Socket stayed connected, but inbound(s) arrived while the tab was
+        // hidden and we deferred the read. The agent is looking now — clear it.
+        sawInboundWhileHiddenRef.current = false;
+        void markRead();
       }
     };
     if (typeof document !== "undefined") {
@@ -517,11 +708,17 @@ export function useConversationEvents(
         };
       });
 
-      // The user is looking at this thread — bounce unread back to zero so
-      // other clients clear their badge too. Inbound only; outbound doesn't
-      // bump unread.
+      // Bounce unread back to zero so other clients clear their badge too —
+      // but ONLY when the agent is actually looking. A hidden tab parked on
+      // this thread must not clear team-wide unread for a message nobody saw;
+      // defer to onVisibility, which fires the read when the tab returns.
+      // Inbound only; outbound doesn't bump unread.
       if (payload.message.direction === "in") {
-        void markRead();
+        if (typeof document === "undefined" || document.visibilityState === "visible") {
+          void markRead();
+        } else {
+          sawInboundWhileHiddenRef.current = true;
+        }
       }
     };
 
@@ -620,7 +817,6 @@ export function useConversationEvents(
     //   - target: "all" — payload has no conversationId (e.g. contact:updated
     //     fires team-wide). The reducer's own identity bail decides whether
     //     it applies to this thread.
-    const reducerCtx = { currentUserId };
     const reducerHandlers = THREAD_REDUCER_EVENTS.filter(
       (e) => !COALESCED_LIVE_HOOK_EVENTS.has(e.event),
     ).map(({ event, apply, target }) => {
@@ -634,7 +830,7 @@ export function useConversationEvents(
             if (payload?.conversationId !== conversationId) return;
           }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          setData((prev) => (apply as any)(prev, payload, reducerCtx));
+          setData((prev) => (apply as any)(prev, payload));
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error(`[use-conversation-events] reducer for "${event}" threw`, err);
@@ -668,7 +864,7 @@ export function useConversationEvents(
         document.removeEventListener("visibilitychange", onVisibility);
       }
     };
-  }, [conversationId, currentUserId, markRead, router]);
+  }, [conversationId, markRead, router]);
 
   // -------------------------------------------------------------------------
   // Optimistic helpers — exposed to ReplyBox so a click-to-send paints the
@@ -681,7 +877,13 @@ export function useConversationEvents(
       conversation: {
         ...prev.conversation,
         lastMessageAt: message.timestamp,
-        lastMessagePreview: (message.body || "").slice(0, 200),
+        // Media-only sends (notably caption-less voice notes) have an empty
+        // body — fall back to the same "🎤 Voice message" / "📷 Photo" label
+        // the server writes, so the snapshot this thread leaves in the LRU
+        // cache doesn't carry a blank preview that would flash a stale row.
+        lastMessagePreview: (
+          message.body || (message.media ? mediaPreviewLabel(message.media.kind) : "")
+        ).slice(0, 200),
       },
       // Sort pins pending bubbles at the bottom (sortKey = ∞) regardless of
       // their local-clock timestamp, so a slow-system-clock or rapid-fire
@@ -737,6 +939,9 @@ export function useConversationEvents(
     (input: { messages: Message[]; nextOlderCursor: string | null }) => {
       setData((prev) => ({ ...prev, messages: input.messages }));
       setOlderCursor(input.nextOlderCursor);
+      // Slice is now a window around an old message, not the live tail — gate
+      // the snapshot-on-leave so we don't cache a non-tail slice.
+      tailAnchoredRef.current = false;
     },
     [],
   );

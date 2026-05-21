@@ -60,6 +60,11 @@ export function ContactStagePicker({
   }, [open]);
 
   const current = stages.find((s) => s.id === currentStageId) ?? null;
+  // The `md` picker lives in the contact panel/drawer where the trigger sits
+  // at the panel's left edge — anchor the popover left so it opens *into* the
+  // panel. Compact pickers (`xs` row right-cluster, `sm` inbox header) sit at
+  // the right, so they anchor right to stay on-screen.
+  const popoverAlign = size === "md" ? "left-0" : "right-0";
   const triggerHeight = size === "xs" ? "h-6" : size === "sm" ? "h-7" : "h-8";
   const dotSize = size === "xs" ? "size-2" : "size-2.5";
   const textSize = size === "xs" ? "text-[11px]" : "text-xs";
@@ -124,7 +129,7 @@ export function ContactStagePicker({
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-30 mt-1 w-60 overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
+        <div className={cn("absolute top-full z-30 mt-1 w-60 overflow-hidden rounded-xl border border-border bg-popover shadow-xl", popoverAlign)}>
           <div className="border-b border-border px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             Customer stage
           </div>

@@ -66,7 +66,7 @@ export function PinnedBar({
                 )}
               >
                 <Avatar className="size-5 shrink-0">
-                  <AvatarFallback className="text-[9px]">{initials(author)}</AvatarFallback>
+                  <AvatarFallback seed={author} className="text-[9px]">{initials(author)}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{author}</div>

@@ -2,17 +2,28 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUpDown,
   Check,
   CheckCircle2,
+  ChevronDown,
   Loader2,
   Pencil,
   Plus,
+  Search,
   Trash2,
   Users,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
@@ -27,9 +38,11 @@ import { cn } from "@ccp/shared/utils";
  *   - delete button (always safe — just unlinks contacts; the tag itself
  *     vanishes from their chip rows on the next page render)
  *
- * No reorder UI (tags are alphabetical, not positional) and no "default tag"
- * (the catalog has no implicit default — contacts start with an empty tag
- * set).
+ * The list has a search box (filter by name) and a sort control (newest /
+ * oldest / name / usage); the choice persists per-browser in localStorage.
+ * Default order is newest-first by creation time. No reorder UI (ordering is
+ * by sort key, not positional) and no "default tag" (the catalog has no
+ * implicit default — contacts start with an empty tag set).
  */
 export function TagsSettings({
   initialTags,
@@ -55,6 +68,25 @@ export function TagsSettings({
   const [newColor, setNewColor] = useState<TagColor>("sky");
   const [busyId, setBusyId] = useState<string | null>(null);
   const newInputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [sortBy, setSortBy] = useState<SortKey>("newest");
+  // Restore the saved sort after mount (not via a lazy initializer) so the
+  // SSR markup and first client render agree on "newest" — reading
+  // localStorage during render would hydration-mismatch.
+  useEffect(() => {
+    const saved = localStorage.getItem(SORT_STORAGE_KEY);
+    if (saved && SORT_OPTIONS.some((o) => o.key === saved)) {
+      setSortBy(saved as SortKey);
+    }
+  }, []);
+  const changeSort = useCallback((key: SortKey) => {
+    setSortBy(key);
+    try {
+      localStorage.setItem(SORT_STORAGE_KEY, key);
+    } catch {
+      // storage disabled (private mode) — sort still works for the session
+    }
+  }, []);
 
   const totalUsage = useMemo(
     () => Object.values(usage).reduce((a, b) => a + b, 0),
@@ -92,7 +124,7 @@ export function TagsSettings({
         setError(body.detail || body.error || `Couldn't create (HTTP ${res.status})`);
         return;
       }
-      setTags((cur) => [...cur, body.tag!].sort(byName));
+      setTags((cur) => [body.tag!, ...cur]);
       setUsage((cur) => ({ ...cur, [body.tag!.id]: 0 }));
       setCreating(false);
       setNewName("");
@@ -110,7 +142,7 @@ export function TagsSettings({
       // momentarily disagree with the server.
       const prev = tags;
       setTags((cur) =>
-        cur.map((t) => (t.id === id ? { ...t, ...patch } : t)).sort(byName),
+        cur.map((t) => (t.id === id ? { ...t, ...patch } : t)),
       );
       try {
         const res = await fetch(`/api/team/tags/${id}`, {
@@ -174,7 +206,16 @@ export function TagsSettings({
     [confirm, usage],
   );
 
-  const sortedTags = useMemo(() => [...tags].sort(byName), [tags]);
+  const visibleTags = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? tags.filter((t) => t.name.toLowerCase().includes(q))
+      : tags;
+    return sortTags(filtered, sortBy, usage);
+  }, [tags, query, sortBy, usage]);
+
+  const sortLabel =
+    SORT_OPTIONS.find((o) => o.key === sortBy)?.label ?? "Newest first";
 
   return (
     <div>
@@ -194,6 +235,51 @@ export function TagsSettings({
         </Button>
       </header>
 
+      {tags.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="relative min-w-50 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search tags…"
+              className="h-9 pl-8 pr-8"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            )}
+          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-9 shrink-0">
+                <ArrowUpDown className="size-4" />
+                {sortLabel}
+                <ChevronDown className="size-3.5 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-44">
+              <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+              {SORT_OPTIONS.map((opt) => (
+                <DropdownMenuCheckboxItem
+                  key={opt.key}
+                  checked={sortBy === opt.key}
+                  onCheckedChange={() => changeSort(opt.key)}
+                >
+                  {opt.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      )}
+
       {error && (
         <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {error}
@@ -202,17 +288,6 @@ export function TagsSettings({
 
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         <ul className="divide-y divide-border">
-          {sortedTags.map((tag) => (
-            <TagRow
-              key={tag.id}
-              tag={tag}
-              count={usage[tag.id] ?? 0}
-              busy={busyId === tag.id}
-              onRename={(name) => patchTag(tag.id, { name })}
-              onRecolor={(color) => patchTag(tag.id, { color })}
-              onDelete={() => deleteTag(tag)}
-            />
-          ))}
           {creating && (
             <li className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -261,18 +336,36 @@ export function TagsSettings({
               </div>
             </li>
           )}
+          {visibleTags.map((tag) => (
+            <TagRow
+              key={tag.id}
+              tag={tag}
+              count={usage[tag.id] ?? 0}
+              busy={busyId === tag.id}
+              onRename={(name) => patchTag(tag.id, { name })}
+              onRecolor={(color) => patchTag(tag.id, { color })}
+              onDelete={() => deleteTag(tag)}
+            />
+          ))}
         </ul>
-        {sortedTags.length === 0 && !creating && (
+        {tags.length === 0 && !creating && (
           <div className="px-6 py-10 text-center text-sm text-muted-foreground">
             No tags yet. Click <span className="font-medium">Add tag</span> to create one.
+          </div>
+        )}
+        {tags.length > 0 && visibleTags.length === 0 && !creating && (
+          <div className="px-6 py-10 text-center text-sm text-muted-foreground">
+            No tags match <span className="font-medium">“{query.trim()}”</span>.
           </div>
         )}
       </div>
 
       <div className="mt-6 text-xs text-muted-foreground">
         <p>
-          {sortedTags.length} tag{sortedTags.length === 1 ? "" : "s"} ·{" "}
-          {totalUsage} total contact-tag link{totalUsage === 1 ? "" : "s"}.
+          {query.trim()
+            ? `${visibleTags.length} of ${tags.length} tag${tags.length === 1 ? "" : "s"}`
+            : `${tags.length} tag${tags.length === 1 ? "" : "s"}`}{" "}
+          · {totalUsage} total contact-tag link{totalUsage === 1 ? "" : "s"}.
         </p>
       </div>
 
@@ -415,6 +508,57 @@ function ColorSwatches({
   );
 }
 
-function byName(a: Tag, b: Tag): number {
-  return a.name.localeCompare(b.name);
+// ---------------------------------------------------------------------------
+// Search + sort
+// ---------------------------------------------------------------------------
+
+type SortKey =
+  | "newest"
+  | "oldest"
+  | "name-asc"
+  | "name-desc"
+  | "usage-desc"
+  | "usage-asc";
+
+const SORT_STORAGE_KEY = "tags-settings:sort";
+
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: "newest", label: "Newest first" },
+  { key: "oldest", label: "Oldest first" },
+  { key: "name-asc", label: "Name (A–Z)" },
+  { key: "name-desc", label: "Name (Z–A)" },
+  { key: "usage-desc", label: "Most used" },
+  { key: "usage-asc", label: "Least used" },
+];
+
+/**
+ * Pure sort over a copy. `createdAt` is an ISO-8601 string, so a lexical
+ * compare is chronological. Usage sorts tie-break on name so equal-count tags
+ * stay stable and alphabetical.
+ */
+function sortTags(
+  tags: Tag[],
+  sortBy: SortKey,
+  usage: Record<string, number>,
+): Tag[] {
+  const out = [...tags];
+  switch (sortBy) {
+    case "newest":
+      return out.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+    case "oldest":
+      return out.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+    case "name-asc":
+      return out.sort((a, b) => a.name.localeCompare(b.name));
+    case "name-desc":
+      return out.sort((a, b) => b.name.localeCompare(a.name));
+    case "usage-desc":
+      return out.sort(
+        (a, b) => (usage[b.id] ?? 0) - (usage[a.id] ?? 0) || a.name.localeCompare(b.name),
+      );
+    case "usage-asc":
+      return out.sort(
+        (a, b) => (usage[a.id] ?? 0) - (usage[b.id] ?? 0) || a.name.localeCompare(b.name),
+      );
+  }
 }
+

@@ -23,6 +23,12 @@ export interface WorkflowMessageSnapshot {
   id: string;
   conversationId: string;
   externalId: string;
+  /** Channel this message came through (`meta_cloud` = WhatsApp today).
+   *  Always present — every message row carries a non-null provider — so
+   *  authors can branch "is this from WhatsApp" without inferring it from
+   *  the contact. The contact-level `identityProvider` is null for phone-
+   *  keyed (WhatsApp) contacts, so this is the reliable per-message source. */
+  provider: ProviderName;
   direction: "in" | "out";
   body: string;
   mediaKind: MediaKind | null;
@@ -33,6 +39,9 @@ export interface WorkflowMessageSnapshot {
 
 export interface WorkflowConversationSnapshot {
   id: string;
+  /** Channel this thread lives on (`meta_cloud` = WhatsApp). Source of truth
+   *  for the conversation's channel — see Conversation.provider. */
+  provider: ProviderName;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -71,6 +80,5 @@ export interface WorkflowContactSnapshot {
   countryCode?: string | null;
   avatarUrl?: string | null;
   location?: string | null;
-  assignedUserId?: string | null;
   createdAt?: string;
 }

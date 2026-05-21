@@ -105,7 +105,6 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
       lastName: updated.lastName,
       language: updated.language,
       countryCode: updated.countryCode,
-      assignedUserId: updated.assignedUserId,
       avatarUrl: updated.avatarUrl ?? undefined,
       email: updated.email ?? undefined,
       location: updated.location ?? undefined,

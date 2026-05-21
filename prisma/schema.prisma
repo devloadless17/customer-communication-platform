@@ -227,26 +227,11 @@ model Team {
   // is not wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
   plan      Plan     @default(starter)
 
-  // Per-team Meta WhatsApp Cloud API credentials. Nullable because freshly
-  // registered teams haven't connected their WhatsApp number yet — they paste
-  // these into /settings/whatsapp. CLAUDE.md rule #6.
-  //
-  // metaAccessToken + metaAppSecret are stored envelope-encrypted by
-  // lib/crypto/envelope.ts (AES-256-GCM with the app-wide ENCRYPTION_KEY).
-  // Column type stays String? — the wire format is `enc:v1:<base64>`.
-  // Legacy plaintext rows written before this rollout decrypt through
-  // unchanged; scripts/encrypt-legacy-secrets.ts rewrites them in place.
-  metaPhoneNumberId      String? @unique
-  metaDisplayPhoneNumber String?
-  metaWabaId             String?
-  metaAccessToken        String?
-  metaAppSecret          String?
-  metaVerifyToken        String?
-  // Meta App ID — required by the resumable upload endpoint when creating a
-  // template with a media header (image/video/document). The endpoint is
-  // `/{appId}/uploads`, not WABA-scoped. Nullable like the other Meta fields
-  // so a team without media-header templates can ignore it.
-  metaAppId              String?
+  // Per-team channel credentials moved OFF this model into `ChannelConnection`
+  // (one row per provider, keyed by (teamId, provider)) so adding a channel is
+  // a new row, not a new column-set. CLAUDE.md rule #6. The old `meta*` columns
+  // were dropped in migration 20260521..._drop_team_meta_columns; the encrypted
+  // secrets relocated verbatim into `ChannelConnection.secrets`.
 
   // Contact panel built-in field visibility. JSON map of built-in field key →
   // boolean. Missing key = visible (preserves backwards compat: existing teams
@@ -282,6 +267,27 @@ model Team {
   teamChannelMessages     TeamChannelMessage[]
   outboundEvents          OutboundEvent[]
   outboundSendAttempts    OutboundSendAttempt[]
+  channelConnections      ChannelConnection[]
+}
+
+// Per-(team, channel) connection: credentials + settings for one provider.
+// Replaces the flat `Team.meta*` columns so adding a channel = insert a row,
+// not add a column-set. `config` holds non-secret values (phone number id,
+// waba id, app id, verify token, display number); `secrets` holds the
+// envelope-encrypted ciphertext per field (access token, app secret) — same
+// crypto boundary as before, just relocated. One row per channel per team.
+model ChannelConnection {
+  id        String       @id @default(cuid())
+  teamId    String
+  provider  ProviderName
+  config    Json         @default("{}")
+  secrets   Json         @default("{}")
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, provider])
 }
 
 model User {
@@ -307,18 +313,10 @@ model User {
   authoredMsgs            Message[]                 @relation("AuthoredMessages")
   authoredNotes           InternalNote[]
   assignedConvos          Conversation[]            @relation("AssignedConversations")
-  // Account-manager assignment at the contact level (cross-thread). Distinct
-  // from `assignedConvos` (per-thread). SetNull on delete so removing a user
-  // clears assignment without nuking the contact row.
-  assignedContacts        Contact[]                 @relation("AssignedContacts")
   createdInvites          Invite[]                  @relation("InvitedBy")
   createdBroadcasts       Broadcast[]               @relation("CreatedBroadcasts")
   createdAudienceGroups   AudienceGroup[]           @relation("CreatedAudienceGroups")
   createdSnippets         Snippet[]                 @relation("CreatedSnippets")
-  // Per-agent read state. One row per (user, conversation) the agent has
-  // ever read. Cascading from User: when a user is hard-deleted their
-  // receipts go too (they're personal state, not audit data).
-  readReceipts            ConversationReadReceipt[]
   // Audit-log authorship. Nullable on the event row + SetNull so deleting a
   // user keeps the audit trail; the timeline just renders "Removed user".
   authoredEvents          ConversationEvent[]
@@ -468,12 +466,6 @@ model Contact {
   // ISO 3166-1 alpha-2 (e.g. "LB"). Derived from `phoneNumber` via libphonenumber
   // at inbound time. Optional — non-WhatsApp / unparseable numbers leave null.
   countryCode       String?
-  // Account-manager: who owns this contact across all their conversations.
-  // Distinct from Conversation.assignedUserId (per-thread). SetNull so removing
-  // a user clears assignment instead of nuking the contact. When AI agents
-  // ship, a parallel assignedAiAgentId column joins this with a CHECK that
-  // exactly one is set.
-  assignedUserId    String?
   avatarUrl         String?
   // Optional profile fields surfaced in the right-rail contact panel.
   email             String?
@@ -516,9 +508,6 @@ model Contact {
 
   team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
   stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
-  // Account-manager FK. SetNull on user delete so removing an agent clears
-  // assignment instead of destroying the contact row.
-  assignedUser        User?                @relation("AssignedContacts", fields: [assignedUserId], references: [id], onDelete: SetNull)
   conversations       Conversation[]
   broadcastRecipients BroadcastRecipient[]
   workflowAwaitingReplies WorkflowAwaitingReply[]
@@ -543,8 +532,6 @@ model Contact {
   @@index([teamId])
   @@index([teamId, source])
   @@index([teamId, stageId])
-  // Account-manager filter ("show contacts assigned to me").
-  @@index([teamId, assignedUserId])
   // "Contacts by recency of last inbound" — inbox-sidebar surfaces.
   @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
   // pg_trgm GIN index for substring ILIKE search on contact name.
@@ -627,6 +614,16 @@ model Conversation {
   id                 String             @id @default(cuid())
   teamId             String
   contactId          String
+  // Channel this thread lives on, and the SOURCE OF TRUTH for "which channel"
+  // — NOT the contact (contacts are siloed per channel today, but channel
+  // ownership belongs to the thread). A conversation is bound to ONE channel
+  // for its lifetime. Needed even with zero messages (a thread created on
+  // first outbound), to route sends and list/filter threads. Stamped at
+  // creation: inbound = the ingesting provider; outbound-initiated threads
+  // default to the team's WhatsApp channel. `Message.provider` always equals
+  // this but exists for a different reason (the dedup key — see its comment);
+  // the equality is a consistency invariant, not duplicated data.
+  provider           ProviderName       @default(meta_cloud)
   assignedUserId     String?
   // New chats land in `pending` so they sit in the triage column until an
   // agent claims them (→ open) or closes them out. The webhook ingest, the
@@ -671,10 +668,6 @@ model Conversation {
   assignedUser User?                     @relation("AssignedConversations", fields: [assignedUserId], references: [id], onDelete: SetNull)
   messages     Message[]
   notes        InternalNote[]
-  // Per-agent read state. The team-wide `unreadCount` on this row is still
-  // the source of truth for "are there messages here nobody has acked," but
-  // an agent's personal badge is computed against their receipt row.
-  readReceipts ConversationReadReceipt[]
   // Audit timeline rows for this conversation. Cascade with the parent —
   // a deleted conversation drops its history. Team-level audit (if we want
   // a global "show me everything" feed) lives on the ConversationEvent.teamId
@@ -716,6 +709,15 @@ model Message {
   // the caption (or empty) so search keeps matching across both kinds.
   body           String
   direction      MessageDirection
+  // Half of the dedup key `@@unique([teamId, provider, externalId])` below —
+  // that's its job, NOT to classify the channel. It is enforced at INSERT,
+  // before any conversation link exists (dedupe runs first in ingest), and a
+  // DB unique index can't span a JOIN, so provider must live on this row.
+  // Channel OWNERSHIP is `Conversation.provider`; this always equals it
+  // (a thread is single-channel) — a consistency invariant, not redundancy.
+  // Don't "simplify" by dropping either: lose this and dedup breaks once a
+  // 2nd channel exists; lose Conversation.provider and empty threads (no
+  // messages yet) have no channel.
   provider       ProviderName
   status         MessageStatus    @default(sent)
   // Original webhook payload kept verbatim for debugging.
@@ -1393,51 +1395,23 @@ model OutboundWebhookDelivery {
 }
 
 // ---------------------------------------------------------------------------
-// Per-agent read state
+// Inbox unread = team-wide ONLY
 // ---------------------------------------------------------------------------
 //
-// The platform DELIBERATELY runs two unread tiers — they answer different
-// product questions, both are read by different parts of the UI, and merging
-// them would break one of those use cases:
+// There is exactly ONE unread tier for the inbox: Conversation.unreadCount
+// (team-wide INT counter). Written by ingest (+1 per inbound), markRead (→0),
+// markUnread (→1); read by the conversation-list badges, document.title total,
+// outbound-webhook payloads, and the workflow envelope. Any member opening a
+// thread zeroes it for EVERYONE — "read" means read for the whole team.
 //
-//   1. Conversation.unreadCount (team-wide, INT counter, this file ~line 591).
-//      Question answered: "does ANY agent need to look at this thread?"
-//      Written by: ingest (+1 per inbound), markRead (→0), markUnread (→1).
-//      Read by: inbox conversation list badges (triage view), document.title
-//      total, n8n/outbound-webhook payloads, workflow envelope.
-//      Source-of-truth for: "the inbox needs work."
-//
-//   2. ConversationReadReceipt.lastReadAt (per-user, this model below).
-//      Question answered: "have I personally seen this thread's latest?"
-//      Maintained by: markRead per-user write (upsert with userId scope).
-//      Read by: `unreadForMe` derived field on list endpoints
-//      (lib/queries/conversations.ts) and the section sub-sidebar.
-//      Source-of-truth for: "have I, the signed-in agent, seen this?"
-//
-// Do NOT collapse these. A shared-inbox SaaS needs BOTH the team triage
-// signal AND the personal-attention signal. A previous audit recommended
-// "pick one and delete the other" — that audit was wrong; this comment is
-// the response. If you're reading this because the two seem redundant,
-// trace the consumers above and you'll see they don't overlap.
-//
-// We don't shadow every message read state; the per-message read receipts
-// model is heavier and we don't have a UX for it yet. Threshold-style
-// receipts cover the inbox-badge use case at 1/10th the row count.
-model ConversationReadReceipt {
-  id             String   @id @default(cuid())
-  userId         String
-  conversationId String
-  // The lastMessageAt the user had seen at the moment they marked-read.
-  // Comparing to Conversation.lastMessageAt yields "unread for me" without
-  // a separate counter to drift out of sync on race.
-  lastReadAt     DateTime @default(now())
-
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, conversationId])
-  @@index([conversationId])
-}
+// There is deliberately NO per-agent inbox read state. A prior iteration
+// added a `ConversationReadReceipt` table + an `unreadForMe` derived field,
+// but no UI ever consumed it (the list item always rendered against
+// unreadCount) — it was computed, shipped to the client, and dropped. Both
+// the table and the field were removed. Do NOT re-introduce per-agent inbox
+// unread without a real per-agent inbox UX to justify it. Team chat already
+// has its own per-user receipts (TeamChannelReadReceipt) for the cases where
+// personal read state genuinely matters.
 
 // ---------------------------------------------------------------------------
 // Conversation audit log
@@ -1691,10 +1665,11 @@ model TeamChannelPin {
   @@index([channelId, pinnedAt(sort: Desc)])
 }
 
-// Per-(user, channel) read state. Same shape as ConversationReadReceipt —
-// `lastReadAt` vs `channel.lastMessageAt` yields "unread for me" without a
-// per-message receipt row. Mention-with-unread is a JOIN against
-// TeamChannelMention.
+// Per-(user, channel) read state. `lastReadAt` vs `channel.lastMessageAt`
+// yields "unread for me" without a per-message receipt row. Mention-with-
+// unread is a JOIN against TeamChannelMention. Team chat is the ONLY surface
+// with per-user read state — the customer inbox is team-wide (see the
+// "Inbox unread = team-wide ONLY" note above Conversation's audit log).
 model TeamChannelReadReceipt {
   id         String   @id @default(cuid())
   userId     String

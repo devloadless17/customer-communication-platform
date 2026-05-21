@@ -5,6 +5,7 @@ import { Loader2, MousePointerClick, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
 
 /**
  * Inbox-side composer for WhatsApp interactive messages (buttons).
@@ -99,12 +100,27 @@ export function InteractivePopover({
 
   const ids = options.map((o) => o.id.trim());
   const titles = options.map((o) => o.title.trim());
+  const idsUnique = new Set(ids).size === ids.length;
+  // Case-insensitive so "Yes"/"yes" are caught — Meta rejects duplicate
+  // titles (error 131009 "Duplicate button title") and two near-identical
+  // titles are confusing for the recipient regardless.
+  const titlesUnique =
+    new Set(titles.map((t) => t.toLowerCase())).size === titles.length;
+
+  // Surfaced as a hint so a disabled Send button always has a visible reason.
+  const validationHint = !idsUnique
+    ? "Button IDs must be unique."
+    : !titlesUnique
+      ? "Button titles must be unique — WhatsApp rejects duplicates."
+      : null;
+
   const canSend =
     body.trim().length > 0 &&
     options.length >= 1 &&
     titles.every((t) => t.length > 0) &&
     ids.every((id) => id.length > 0) &&
-    new Set(ids).size === ids.length &&
+    idsUnique &&
+    titlesUnique &&
     !busy;
 
   async function send() {
@@ -136,6 +152,15 @@ export function InteractivePopover({
         setError(msg);
         return;
       }
+      // Bump the list on success — the interactive send is synchronous and
+      // paints no optimistic bubble, so this keeps the sidebar row fresh even
+      // if the socket misses the server `message:new`. Preview matches what the
+      // server stores (the body text, sliced to 200).
+      emitOptimisticListBump({
+        conversationId,
+        preview: body.trim().slice(0, 200),
+        lastMessageAt: new Date().toISOString(),
+      });
       onSent();
       onClose();
     } catch (err) {
@@ -225,6 +250,12 @@ export function InteractivePopover({
       {error && (
         <div className="mb-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
           {error}
+        </div>
+      )}
+
+      {!error && validationHint && (
+        <div className="mb-2 rounded border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400">
+          {validationHint}
         </div>
       )}
 

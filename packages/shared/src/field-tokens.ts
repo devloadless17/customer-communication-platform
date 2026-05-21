@@ -40,8 +40,6 @@ const BUILTIN_CONTACT_KEYS = [
   "window_state",
   "stage_name",
   "tag_names",
-  "assigned_agent_name",
-  "assigned_agent_email",
 ] as const;
 type BuiltinContactKey = (typeof BUILTIN_CONTACT_KEYS)[number];
 
@@ -54,6 +52,7 @@ const MESSAGE_KEYS = [
   "direction",
   "id",
   "external_id",
+  "provider",
   "media_kind",
   "media_caption",
   // PR 2.4 additions.
@@ -118,7 +117,6 @@ const BUILTIN_CONTACT_TOKENS: TokenSpec[] = [
   { token: "$var.contact.window_state", label: "Window state (open/closed/…)", group: "builtin" },
   { token: "$var.contact.stage_name", label: "Lifecycle stage", group: "builtin" },
   { token: "$var.contact.tag_names", label: "Tag names (comma-separated)", group: "builtin" },
-  { token: "$var.contact.assigned_agent_name", label: "Account manager name", group: "builtin" },
 ];
 
 const AGENT_TOKENS: TokenSpec[] = [
@@ -133,6 +131,7 @@ const MESSAGE_TOKENS: TokenSpec[] = [
   { token: "$var.message.direction", label: "Direction (in/out)", group: "message" },
   { token: "$var.message.id", label: "Message id", group: "message" },
   { token: "$var.message.external_id", label: "External id (wamid)", group: "message" },
+  { token: "$var.message.provider", label: "Channel (e.g. meta_cloud)", group: "message" },
   { token: "$var.message.media_kind", label: "Media kind", group: "message" },
   { token: "$var.message.media_caption", label: "Media caption", group: "message" },
   { token: "$var.message.media_url", label: "Media URL", group: "message" },
@@ -288,7 +287,6 @@ export interface ContactLike {
   windowState?: "open" | "closing-soon" | "closed" | "never";
   stageName?: string | null;
   tagNames?: string[];
-  assignedAgent?: { id: string; name: string; email: string } | null;
 }
 
 /**
@@ -308,6 +306,7 @@ export interface AgentLike {
 export interface MessageLike {
   id?: string;
   externalId?: string;
+  provider?: string | null;
   body?: string;
   direction?: "in" | "out";
   timestamp?: string;
@@ -486,10 +485,6 @@ function resolveContact(key: string, contact: ContactLike): string {
         return contact.stageName ?? "";
       case "tag_names":
         return (contact.tagNames ?? []).join(", ");
-      case "assigned_agent_name":
-        return contact.assignedAgent?.name ?? "";
-      case "assigned_agent_email":
-        return contact.assignedAgent?.email ?? "";
       default:
         return "";
     }
@@ -531,6 +526,8 @@ function resolveMessage(key: string, message: MessageLike | null): string {
       return message.id ?? "";
     case "external_id":
       return message.externalId ?? "";
+    case "provider":
+      return message.provider ?? "";
     case "media_kind":
       return message.mediaKind ?? "";
     case "media_caption":

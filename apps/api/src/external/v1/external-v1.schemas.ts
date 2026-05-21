@@ -184,8 +184,6 @@ export const ExternalCreateContactSchema = z.object({
   location: z.string().trim().max(MAX_TEXT).optional(),
   customFields: CustomFieldsSchema.optional(),
   stageId: z.string().min(1).optional(),
-  /** Account-manager (cross-thread) — cuid of a User on the team. */
-  assignedUserId: z.string().min(1).optional(),
   /** Optional initial tag set (tag ids, must belong to the team). */
   tagIds: z.array(z.string().min(1)).max(50).optional(),
 });
@@ -218,8 +216,6 @@ export const ExternalUpdateContactSchema = z
       .optional(),
     customFields: CustomFieldsSchema.optional(),
     stageId: z.union([z.string().min(1), z.null()]).optional(),
-    /** Set/clear the account-manager assignment. `null` clears, cuid sets. */
-    assignedUserId: z.union([z.string().min(1), z.null()]).optional(),
   })
   .passthrough();
 export type ExternalUpdateContactInput = z.infer<typeof ExternalUpdateContactSchema>;

@@ -48,13 +48,14 @@ export class TagsService {
   async list(teamId: string): Promise<Tag[]> {
     const rows = await this.db.tag.findMany({
       where: { teamId },
-      orderBy: { name: "asc" },
+      orderBy: { createdAt: "desc" },
     });
     return rows.map((r) => ({
       id: r.id,
       teamId: r.teamId,
       name: r.name,
       color: normalizeColor(r.color),
+      createdAt: r.createdAt.toISOString(),
     }));
   }
 
@@ -70,6 +71,7 @@ export class TagsService {
         teamId: created.teamId,
         name: created.name,
         color: normalizeColor(created.color),
+        createdAt: created.createdAt.toISOString(),
       };
     } catch (err) {
       throwIfUniqueViolation(err, `A tag named "${input.name}" already exists.`);
@@ -89,6 +91,7 @@ export class TagsService {
         teamId: updated.teamId,
         name: updated.name,
         color: normalizeColor(updated.color),
+        createdAt: updated.createdAt.toISOString(),
       };
     } catch (err) {
       throwIfUniqueViolation(err, "A tag with that name already exists.");
