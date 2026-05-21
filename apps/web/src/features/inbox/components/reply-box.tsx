@@ -921,7 +921,15 @@ export function ReplyBox({
                     setError("Recording was empty — try again.");
                     return;
                   }
-                  submit({ file, voice: true });
+                  // Send as a plain audio attachment — identical to a picked
+                  // audio file, which delivers reliably. We deliberately do
+                  // NOT request voice-note rendering (`voice: true`): Meta's
+                  // voice-note validator is stricter than its regular-audio
+                  // one and rejects MediaRecorder's ogg/mp4 output, which is
+                  // what was failing every recorded send. Reliability over
+                  // the waveform UI. Revisit once we transcode to spec-
+                  // compliant ogg/opus. See [[meta-audio-mime-rules]].
+                  submit({ file });
                 })();
               }}
             />

@@ -341,12 +341,12 @@ export function RecordingBar({
         <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-foreground">
           {formatDuration(durationSec)}
         </span>
-        <div className="flex h-6 flex-1 items-center gap-[2px]">
+        <div className="flex h-6 flex-1 items-center gap-0.5">
           {levels.map((v, i) => (
             <span
               key={i}
               className={cn(
-                "w-[3px] rounded-full bg-foreground/70",
+                "w-.75 rounded-full bg-foreground/70",
                 "transition-[height] duration-75",
               )}
               style={{ height: `${Math.max(8, v * 100)}%` }}

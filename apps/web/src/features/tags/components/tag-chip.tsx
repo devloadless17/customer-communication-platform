@@ -75,9 +75,11 @@ export function TagChip({
 export function TagAddButton({
   onClick,
   size = "sm",
+  className,
 }: {
   onClick: () => void;
   size?: "xs" | "sm";
+  className?: string;
 }) {
   const sizing =
     size === "xs" ? "h-5 px-1.5 text-[10px]" : "h-6 px-2 text-[11px]";
@@ -88,6 +90,7 @@ export function TagAddButton({
       className={cn(
         "inline-flex cursor-pointer items-center gap-1 rounded-full border border-dashed border-border bg-transparent font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground",
         sizing,
+        className,
       )}
     >
       <TagIcon className="size-2.5" />

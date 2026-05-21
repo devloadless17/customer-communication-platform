@@ -405,6 +405,25 @@ export interface PublicEnvelope<T extends PublicEventType, P> {
   data: P;
 }
 
+/**
+ * Attachment on a webhook message payload. `url` is the public CDN URL —
+ * directly downloadable by the receiver (n8n/Zapier), NOT the session-gated
+ * /api/media proxy. It's filled by the subscriber (the framework-agnostic
+ * mapper can't query the DB for it); `null` means either text-only or the
+ * media's 2-phase upload hadn't completed when the event fired.
+ */
+export interface PublicMedia {
+  /** "image" | "video" | "audio" | "document" | "sticker". */
+  kind: string;
+  url: string | null;
+  mime_type: string | null;
+  filename: string | null;
+  size_bytes: number | null;
+  duration_ms: number | null;
+  thumbnail_url: string | null;
+  caption: string | null;
+}
+
 export interface PublicMessage {
   id: string;
   conversation_id: string;
@@ -416,8 +435,8 @@ export interface PublicMessage {
   sender: SenderInfo;
   /** Set on /v1 / workflow sends so receivers can pivot on attribution. */
   sender_api_key_id: string | null;
-  media_kind: string | null;
-  media_caption: string | null;
+  /** Attachment details, or null for a text-only message. */
+  media: PublicMedia | null;
 }
 
 export interface PublicContact {
@@ -777,8 +796,22 @@ function messageFromDomain(
     status: m.status,
     sender,
     sender_api_key_id: senderApiKeyId,
-    media_kind: m.media?.kind ?? null,
-    media_caption: m.media?.caption ?? null,
+    // Everything except `url`/`thumbnail_url` is known from the domain event;
+    // the subscriber fills the public CDN URLs (it has DB access; this mapper
+    // doesn't). `m.media.url` is the /api/media proxy — useless externally —
+    // so we don't carry it here.
+    media: m.media
+      ? {
+          kind: m.media.kind,
+          url: null,
+          mime_type: m.media.mimeType ?? null,
+          filename: m.media.filename ?? null,
+          size_bytes: m.media.sizeBytes ?? null,
+          duration_ms: m.media.durationMs ?? null,
+          thumbnail_url: null,
+          caption: m.media.caption ?? null,
+        }
+      : null,
   };
 }
 

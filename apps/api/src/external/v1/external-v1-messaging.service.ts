@@ -11,9 +11,9 @@ import {
 } from "@nestjs/common";
 
 import {
-  toExternalConversation,
-  toExternalContact,
+  conversationRowToExternal,
   toExternalMessage,
+  EXTERNAL_CONVERSATION_INCLUDE,
   type ExternalMessage,
 } from "@/lib/external-shapes";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
@@ -79,11 +79,12 @@ export class ExternalV1MessagingService {
         ...(q.status ? { status: q.status } : {}),
         ...(q.phone ? { contact: { phoneNumber: q.phone } } : {}),
       },
+      include: EXTERNAL_CONVERSATION_INCLUDE,
       orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
       take: q.limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
-    const items = rows.slice(0, q.limit).map(toExternalConversation);
+    const items = rows.slice(0, q.limit).map(conversationRowToExternal);
     const lastItem = items[items.length - 1];
     const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
     return { items, nextCursor };
@@ -92,13 +93,14 @@ export class ExternalV1MessagingService {
   async getConversation(teamId: string, id: string) {
     const row = await this.db.conversation.findFirst({
       where: { id, teamId },
-      include: { contact: { include: { tags: { select: { id: true } } } } },
+      include: EXTERNAL_CONVERSATION_INCLUDE,
     });
     if (!row) throw new NotFoundException({ error: "conversation not found" });
-    return {
-      conversation: toExternalConversation(row),
-      contact: toExternalContact(row.contact, row.contact.tags.map((t) => t.id)),
-    };
+    // `conversation.contact` is embedded; the top-level `contact` is kept as a
+    // convenience alias so the single-conversation response still surfaces it
+    // at the root for callers that read response.contact directly.
+    const conversation = conversationRowToExternal(row);
+    return { conversation, contact: conversation.contact };
   }
 
   async assign(
@@ -247,16 +249,20 @@ export class ExternalV1MessagingService {
     conversationId: string,
     q: ListMessagesQueryInput,
   ) {
+    // The existence check doubles as the conversation context we return
+    // alongside the messages, so a page of messages always tells the caller
+    // who the thread is with (contact + assignee embedded) without a separate
+    // GET /v1/conversations/:id.
     const conv = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      select: { id: true },
+      include: EXTERNAL_CONVERSATION_INCLUDE,
     });
     if (!conv) throw new NotFoundException({ error: "conversation not found" });
 
     const rows = await this.db.message.findMany({
       where: { conversationId },
-      // toExternalMessage uses 8 fields; rawPayload (Meta JSONB, 5-20KB/row)
-      // would ship to the integrator on every page otherwise.
+      // toExternalMessage reads scalar + media columns only; rawPayload
+      // (Meta JSONB, 5-20KB/row) would ship to the integrator on every page.
       omit: { rawPayload: true },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: q.limit + 1,
@@ -265,16 +271,22 @@ export class ExternalV1MessagingService {
     const items = rows.slice(0, q.limit).map(toExternalMessage);
     const lastItem = items[items.length - 1];
     const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
-    return { items, nextCursor };
+    return { conversation: conversationRowToExternal(conv), items, nextCursor };
   }
 
   async findMessage(teamId: string, id: string) {
     const row = await this.db.message.findFirst({
       where: { id, teamId },
       omit: { rawPayload: true },
+      // Embed the parent conversation (which itself embeds contact + assignee)
+      // so a single message fetch carries who it's with — no follow-up call.
+      include: { conversation: { include: EXTERNAL_CONVERSATION_INCLUDE } },
     });
     if (!row) throw new NotFoundException({ error: "message not found" });
-    return { message: toExternalMessage(row) };
+    return {
+      message: toExternalMessage(row),
+      conversation: conversationRowToExternal(row.conversation),
+    };
   }
 
   async sendMessage(

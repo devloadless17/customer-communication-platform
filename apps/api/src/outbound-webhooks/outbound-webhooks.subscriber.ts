@@ -90,6 +90,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     const envelopes = toPublicEnvelopes(event as Parameters<typeof toPublicEnvelopes>[0]);
     if (envelopes.length === 0) return;
 
+    // Resolve public CDN URLs for any media-bearing message payloads. The
+    // mapper leaves `media.url` null because it can't query the DB; we fill
+    // it here from Message.mediaUrl (the raw CDN url) so the receiver can
+    // download the file directly — same enrichment role as resolveChannel().
+    await this.enrichMediaUrls(envelopes);
+
     // Single SQL query per event for all matching public event names.
     const publicTypes = Array.from(new Set(envelopes.map((e) => e.type)));
     const webhooks = await this.db.outboundWebhook.findMany({
@@ -141,6 +147,42 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
           }),
         ),
       );
+    }
+  }
+
+  /**
+   * Fill `media.url` + `media.thumbnail_url` on message-bearing envelopes from
+   * the raw CDN columns. One batched lookup across all media messages in the
+   * event (≤2 in practice). Best-effort: a missing row or a not-yet-uploaded
+   * media leaves the url null, which the payload already documents.
+   */
+  private async enrichMediaUrls(
+    envelopes: Array<{ envelope: { data: unknown } }>,
+  ): Promise<void> {
+    type MediaShape = {
+      url: string | null;
+      thumbnail_url: string | null;
+    };
+    type MsgData = { message?: { id?: string; media?: MediaShape | null } };
+
+    const mediaByMessageId = new Map<string, MediaShape>();
+    for (const { envelope } of envelopes) {
+      const data = envelope.data as MsgData;
+      const id = data.message?.id;
+      const media = data.message?.media;
+      if (id && media) mediaByMessageId.set(id, media);
+    }
+    if (mediaByMessageId.size === 0) return;
+
+    const rows = await this.db.message.findMany({
+      where: { id: { in: [...mediaByMessageId.keys()] } },
+      select: { id: true, mediaUrl: true, mediaThumbnailUrl: true },
+    });
+    for (const row of rows) {
+      const media = mediaByMessageId.get(row.id);
+      if (!media) continue;
+      media.url = row.mediaUrl ?? null;
+      media.thumbnail_url = row.mediaThumbnailUrl ?? null;
     }
   }
 

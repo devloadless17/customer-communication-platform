@@ -859,6 +859,15 @@ export class MessagesService {
       // Don't let the parallel blob upload leak as an unhandledRejection on
       // the early-return path.
       blobUploadPromise.catch(() => {});
+      // Audio is the format-fragile path (MediaRecorder containers, codec
+      // params, voice-note encoding rules). Log the raw Meta error verbatim
+      // so a failed voice note is diagnosable from journald instead of the
+      // generic normalized code the agent sees.
+      if (kind === "audio") {
+        this.logger.error(
+          `audio uploadMedia failed: mime=${mimeType} size=${file.size} voice=${form.voice} :: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       const normalized = normalizeMetaSendError(err);
       if (normalized) {
         throw new UnprocessableEntityException({
@@ -895,6 +904,11 @@ export class MessagesService {
       );
     } catch (err) {
       blobUploadPromise.catch(() => {});
+      if (kind === "audio") {
+        this.logger.error(
+          `audio sendMedia failed: mime=${mimeType} mediaId=${mediaId} voice=${form.voice} :: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       const normalized = normalizeMetaSendError(err);
       if (normalized) {
         throw new UnprocessableEntityException({

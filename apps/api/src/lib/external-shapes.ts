@@ -15,6 +15,41 @@ import type {
  *   - All timestamps are ISO strings, never Date — JSON-stable
  */
 
+/**
+ * A team member referenced from a payload (assignee / account-manager).
+ * Hydrated so integrators don't have to call GET /v1/users/:id to label a
+ * row "assigned to Sara" — they get the name + email inline. `null` means
+ * unassigned. We deliberately do NOT carry a bare `assignedUserId` alongside
+ * this — the object IS the reference; `assignee.id` is the id.
+ */
+export interface ExternalAssignee {
+  id: string;
+  name: string;
+  email: string;
+}
+
+/**
+ * Media attached to a message. Replaces the old flat `mediaKind` /
+ * `mediaCaption` pair so an integrator can actually fetch + label the file:
+ *   - `url`        — public CDN URL, directly downloadable by the integrator
+ *                    (no session auth needed; API-key holders are trusted).
+ *   - `mimeType`   — e.g. "image/png", "application/pdf" → derive the extension.
+ *   - `filename`   — original filename (documents); null for camera media.
+ * `null` on the message means it's text-only.
+ */
+export interface ExternalMedia {
+  /** "image" | "video" | "audio" | "document" | "sticker". */
+  kind: string;
+  url: string | null;
+  mimeType: string | null;
+  filename: string | null;
+  sizeBytes: number | null;
+  /** Audio / video only. */
+  durationMs: number | null;
+  thumbnailUrl: string | null;
+  caption: string | null;
+}
+
 export interface ExternalContact {
   id: string;
   /**
@@ -35,7 +70,7 @@ export interface ExternalContact {
   /** ISO 3166-1 alpha-2, derived from phone number on inbound + /v1 writes. */
   countryCode: string | null;
   /** Account-manager (cross-thread). Distinct from per-thread Conversation assignee. */
-  assignedUserId: string | null;
+  assignee: ExternalAssignee | null;
   /** Avatar URL — usually null today; populated when an avatar is uploaded. */
   avatarUrl: string | null;
   email: string | null;
@@ -50,10 +85,17 @@ export interface ExternalConversation {
   id: string;
   contactId: string;
   status: "open" | "pending" | "closed";
-  assignedUserId: string | null;
+  /** Per-thread assignee. Hydrated; null when unassigned. */
+  assignee: ExternalAssignee | null;
   unreadCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
+  /**
+   * The contact this conversation is with — always embedded. A conversation
+   * without its contact forced every integrator into a second GET; carrying
+   * it inline is the single biggest "contact info is missing" fix.
+   */
+  contact: ExternalContact;
 }
 
 export interface ExternalMessage {
@@ -65,12 +107,35 @@ export interface ExternalMessage {
   status: "sent" | "delivered" | "read" | "failed";
   timestamp: string;
   senderUserId: string | null;
-  mediaKind: string | null;
-  mediaCaption: string | null;
+  /** Attachment details, or null for a text-only message. */
+  media: ExternalMedia | null;
+}
+
+/**
+ * Prisma `include` fragments that hydrate everything the serializers need.
+ * Reused across every /v1 read so assignee + tags are populated consistently
+ * — the root cause of "contact info is missing on some endpoints" was each
+ * query hand-picking a different include.
+ */
+export const EXTERNAL_CONTACT_INCLUDE = {
+  tags: { select: { id: true } },
+  assignedUser: { select: { id: true, name: true, email: true } },
+} as const;
+
+export const EXTERNAL_CONVERSATION_INCLUDE = {
+  assignedUser: { select: { id: true, name: true, email: true } },
+  contact: { include: EXTERNAL_CONTACT_INCLUDE },
+} as const;
+
+/** Shape of the `assignedUser` relation when included on a row. */
+type AssigneeRow = { id: string; name: string; email: string } | null | undefined;
+
+export function toExternalAssignee(u: AssigneeRow): ExternalAssignee | null {
+  return u ? { id: u.id, name: u.name, email: u.email } : null;
 }
 
 export function toExternalContact(
-  c: DbContact,
+  c: DbContact & { assignedUser?: AssigneeRow },
   tagIds: string[] = [],
 ): ExternalContact {
   return {
@@ -83,7 +148,7 @@ export function toExternalContact(
     lastName: c.lastName ?? null,
     language: c.language ?? null,
     countryCode: c.countryCode ?? null,
-    assignedUserId: c.assignedUserId ?? null,
+    assignee: toExternalAssignee(c.assignedUser),
     avatarUrl: c.avatarUrl ?? null,
     email: c.email ?? null,
     location: c.location ?? null,
@@ -94,15 +159,71 @@ export function toExternalContact(
   };
 }
 
-export function toExternalConversation(c: DbConversation): ExternalConversation {
+/**
+ * Map a contact row fetched with `EXTERNAL_CONTACT_INCLUDE` straight to the
+ * wire shape — reads tag ids + assignee off the included relations so call
+ * sites don't repeat `.tags.map(...)`.
+ */
+export function contactRowToExternal(
+  r: DbContact & { tags?: { id: string }[]; assignedUser?: AssigneeRow },
+): ExternalContact {
+  return toExternalContact(r, (r.tags ?? []).map((t) => t.id));
+}
+
+/**
+ * Map a conversation row fetched with `EXTERNAL_CONVERSATION_INCLUDE` to the
+ * wire shape, embedding its contact. The contact relation is required by the
+ * include, so this is always safe.
+ */
+export function conversationRowToExternal(
+  r: DbConversation & {
+    assignedUser?: AssigneeRow;
+    contact: DbContact & { tags?: { id: string }[]; assignedUser?: AssigneeRow };
+  },
+): ExternalConversation {
+  return toExternalConversation(r, contactRowToExternal(r.contact));
+}
+
+export function toExternalConversation(
+  c: DbConversation & { assignedUser?: AssigneeRow },
+  contact: ExternalContact,
+): ExternalConversation {
   return {
     id: c.id,
     contactId: c.contactId,
     status: c.status as ExternalConversation["status"],
-    assignedUserId: c.assignedUserId,
+    assignee: toExternalAssignee(c.assignedUser),
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
+    contact,
+  };
+}
+
+/** Media columns present on every Message row (text-only rows leave them null). */
+type MediaColumns = Pick<
+  DbMessage,
+  | "mediaKind"
+  | "mediaUrl"
+  | "mediaMimeType"
+  | "mediaFilename"
+  | "mediaSizeBytes"
+  | "mediaDurationMs"
+  | "mediaThumbnailUrl"
+  | "mediaCaption"
+>;
+
+export function toExternalMedia(m: MediaColumns): ExternalMedia | null {
+  if (!m.mediaKind) return null;
+  return {
+    kind: m.mediaKind,
+    url: m.mediaUrl ?? null,
+    mimeType: m.mediaMimeType ?? null,
+    filename: m.mediaFilename ?? null,
+    sizeBytes: m.mediaSizeBytes ?? null,
+    durationMs: m.mediaDurationMs ?? null,
+    thumbnailUrl: m.mediaThumbnailUrl ?? null,
+    caption: m.mediaCaption ?? null,
   };
 }
 
@@ -118,8 +239,7 @@ export function toExternalMessage(
     status: m.status as ExternalMessage["status"],
     timestamp: m.timestamp.toISOString(),
     senderUserId: m.senderUserId,
-    mediaKind: m.mediaKind,
-    mediaCaption: m.mediaCaption,
+    media: toExternalMedia(m),
   };
 }
 

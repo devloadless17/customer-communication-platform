@@ -9,7 +9,7 @@ import {
   ListChecks,
   Loader2,
   MessageSquare,
-  Pencil,
+  MoreHorizontal,
   Plus,
   Search,
   Send,
@@ -21,8 +21,13 @@ import {
 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { LocalTime } from "@/components/local-time";
@@ -39,7 +44,6 @@ import type {
   Contact,
   ContactFieldDefinition,
   ContactListItem,
-  ContactSource,
   ContactStage,
   Tag,
 } from "@ccp/shared/types";
@@ -50,7 +54,9 @@ import {
   type StageFilter,
 } from "@/features/contacts/components/contact-browser";
 import { SelectAllRow } from "@/features/contacts/components/contact-browser/select-all-row";
+import { ContactRowsSkeleton } from "@/features/contacts/components/contact-browser/row-skeleton";
 import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
+import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
 import dynamic from "next/dynamic";
@@ -66,8 +72,11 @@ const NewContactDialog = dynamic(
   () => import("./new-contact-dialog").then((m) => m.NewContactDialog),
   { ssr: false },
 );
-const EditContactDialog = dynamic(
-  () => import("./edit-contact-dialog").then((m) => m.EditContactDialog),
+const ContactDetailDrawer = dynamic(
+  () =>
+    import("@/features/contacts/components/contact-detail-drawer").then(
+      (m) => m.ContactDetailDrawer,
+    ),
   { ssr: false },
 );
 
@@ -107,6 +116,12 @@ export function ContactsClient({
     initialStageFilter,
   });
   const { items, setItems, setError, reconcileContactUpdate, refetch } = list;
+  // Auto-load the next page as the sentinel nears the viewport. `loadMore`
+  // self-guards while a page is already in flight.
+  const loadMoreRef = useInfiniteScroll({
+    hasMore: Boolean(list.nextCursor),
+    onLoadMore: list.loadMore,
+  });
   // Lifted to state so dialogs can splice in newly-created definitions
   // without waiting on a router.refresh round trip.
   //
@@ -150,9 +165,9 @@ export function ContactsClient({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
-  // Contact id currently being edited — null = dialog closed. Storing the id
-  // (not the row) means a list refetch mid-edit doesn't lose the dialog.
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // Contact id whose detail drawer is open — null = closed. Storing the id
+  // (not the row) means a list reconcile mid-edit doesn't lose the drawer.
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   // Drop any selected ids that aren't in the current items (filter changed).
   useEffect(() => {
@@ -221,6 +236,53 @@ export function ContactsClient({
     );
   }
 
+  // Single delete from the detail drawer. Mirrors the bulk-delete confirm +
+  // local removal; the server also fans `contact:deleted` to other tabs.
+  async function deleteOne(contactId: string) {
+    const ok = await confirm({
+      title: "Delete contact?",
+      description:
+        "This also removes their conversations, messages, and notes. This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/contacts/${contactId}`, { method: "DELETE" });
+    if (!res.ok) {
+      setError(await safeReadError(res));
+      return;
+    }
+    setItems((prev) => prev.filter((row) => row.contact.id !== contactId));
+    setSelectedIds((prev) => {
+      if (!prev.has(contactId)) return prev;
+      const copy = new Set(prev);
+      copy.delete(contactId);
+      return copy;
+    });
+    setDetailId(null);
+  }
+
+  // Press "/" to jump to search — unless the user is already typing somewhere.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (
+        el &&
+        (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)
+      ) {
+        return;
+      }
+      const search = document.querySelector<HTMLInputElement>("[data-contacts-search]");
+      if (search) {
+        e.preventDefault();
+        search.focus();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
   // The search is broad enough — also matches inside customFields JSON — that
   // we don't need a "no results" hint per filter dimension. Just empty state.
   const showEmpty = !list.loading && items.length === 0;
@@ -234,27 +296,38 @@ export function ContactsClient({
             People who messaged your team, plus anyone you add manually.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {canManageFields && (
-            <Button variant="outline" asChild>
-              <Link href="/settings/contact-fields">
-                <ListChecks className="size-4" />
-                Manage fields
-              </Link>
-            </Button>
-          )}
-          <Button variant="outline" asChild>
-            {/* Plain anchor: lets the browser handle Content-Disposition and
-                save the file directly without a fetch + Blob round-trip. */}
-            <a href="/api/contacts/export" download>
-              <Download className="size-4" />
-              Export
-            </a>
-          </Button>
-          <Button variant="outline" onClick={() => setImporting(true)}>
-            <Upload className="size-4" />
-            Import
-          </Button>
+        <div className="flex items-center gap-2">
+          {/* Secondary actions tucked behind one menu so the header stays
+              calm — only the primary "New contact" CTA sits in the open. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="icon" aria-label="More contact actions">
+                <MoreHorizontal className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              {canManageFields && (
+                <DropdownMenuItem asChild>
+                  <Link href="/settings/contact-fields">
+                    <ListChecks className="size-4" />
+                    Manage fields
+                  </Link>
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem asChild>
+                {/* Plain anchor: lets the browser handle Content-Disposition
+                    and save the file without a fetch + Blob round-trip. */}
+                <a href="/api/contacts/export" download>
+                  <Download className="size-4" />
+                  Export CSV
+                </a>
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setImporting(true)}>
+                <Upload className="size-4" />
+                Import CSV
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button onClick={() => setCreating(true)}>
             <Plus className="size-4" />
             New contact
@@ -290,10 +363,7 @@ export function ContactsClient({
 
       <div className="rounded-lg border border-border bg-card">
         {list.loading && items.length === 0 ? (
-          <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
-            <Loader2 className="mr-2 size-4 animate-spin" />
-            Loading…
-          </div>
+          <ContactRowsSkeleton />
         ) : showEmpty ? (
           <div className="px-6 py-16 text-center">
             <p className="text-sm text-muted-foreground">
@@ -328,7 +398,6 @@ export function ContactsClient({
                 <ContactRow
                   key={item.contact.id}
                   item={item}
-                  fieldDefinitions={fieldDefinitions}
                   tagCatalog={tags}
                   tagById={tagById}
                   stageCatalog={stages}
@@ -349,24 +418,23 @@ export function ContactsClient({
                     );
                   }}
                   onStageChanged={(stageId) => patchContactStage(item.contact.id, stageId)}
-                  onEdit={() => setEditingId(item.contact.id)}
+                  onOpen={() => setDetailId(item.contact.id)}
                 />
               ))}
             </ul>
           </>
         )}
         {list.nextCursor && (
-          <div className="border-t border-border p-3 text-center">
-            <Button variant="ghost" size="sm" onClick={list.loadMore} disabled={list.loadingMore}>
-              {list.loadingMore ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Loading…
-                </>
-              ) : (
-                "Load more"
-              )}
-            </Button>
+          <div
+            ref={loadMoreRef}
+            className="flex items-center justify-center border-t border-border p-3 text-xs text-muted-foreground"
+          >
+            {list.loadingMore && (
+              <>
+                <Loader2 className="mr-2 size-3.5 animate-spin" />
+                Loading more…
+              </>
+            )}
           </div>
         )}
       </div>
@@ -475,26 +543,27 @@ export function ContactsClient({
         }}
       />
 
-      {editingId && (() => {
-        const target = items.find((x) => x.contact.id === editingId)?.contact;
-        if (!target) return null;
+      {detailId && (() => {
+        const row = items.find((x) => x.contact.id === detailId);
+        if (!row) return null;
         return (
-          <EditContactDialog
-            contact={target}
+          <ContactDetailDrawer
+            contact={row.contact}
             fieldDefinitions={fieldDefinitions}
+            tagCatalog={tags}
+            stageCatalog={stages}
             canManageFields={canManageFields}
-            onClose={() => setEditingId(null)}
-            onSaved={(updated) => {
-              // Patch the row in place — keeps the agent's scroll position
-              // and any selected-row state.
-              setItems((prev) =>
-                prev.map((row) =>
-                  row.contact.id === updated.id
-                    ? { ...row, contact: { ...row.contact, ...updated } }
-                    : row,
-                ),
+            canManageStages={canManageStages}
+            activeConversationId={row.activeConversationId}
+            lastInboundAt={row.lastInboundAt}
+            onClose={() => setDetailId(null)}
+            onDelete={() => void deleteOne(detailId)}
+            onTagCreated={(t) => {
+              setTags((prev) =>
+                prev.some((x) => x.id === t.id)
+                  ? prev
+                  : [...prev, t].sort((a, b) => a.name.localeCompare(b.name)),
               );
-              setEditingId(null);
             }}
             onTeamWideFieldAdded={(def) => {
               setFieldDefinitions((prev) =>
@@ -545,7 +614,6 @@ export function ContactsClient({
 
 function ContactRow({
   item,
-  fieldDefinitions,
   tagCatalog,
   tagById,
   stageCatalog,
@@ -555,10 +623,9 @@ function ContactRow({
   onTagsChanged,
   onTagCreated,
   onStageChanged,
-  onEdit,
+  onOpen,
 }: {
   item: ContactListItem;
-  fieldDefinitions: ContactFieldDefinition[];
   tagCatalog: Tag[];
   tagById: Map<string, Tag>;
   stageCatalog: ContactStage[];
@@ -568,7 +635,8 @@ function ContactRow({
   onTagsChanged: (tagIds: string[]) => void;
   onTagCreated: (tag: Tag) => void;
   onStageChanged: (stageId: string | null) => void;
-  onEdit: () => void;
+  /** Open the detail drawer for this contact. */
+  onOpen: () => void;
 }) {
   const { contact, activeConversationId, lastMessageAt, lastInboundAt } = item;
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
@@ -587,13 +655,12 @@ function ContactRow({
     return () => document.removeEventListener("mousedown", handler);
   }, [tagPickerOpen]);
 
-  const filledFields = fieldDefinitions
-    .map((def) => ({ def, value: contact.customFields[def.key] }))
-    .filter((f): f is { def: ContactFieldDefinition; value: string } => Boolean(f.value));
-
   const contactTags = (contact.tagIds ?? [])
     .map((id) => tagById.get(id))
     .filter((t): t is Tag => Boolean(t));
+  // Lean rows show at most two tags; the rest live in the drawer.
+  const shownTags = contactTags.slice(0, 2);
+  const extraTags = contactTags.length - shownTags.length;
 
   async function persistTagIds(nextIds: string[]) {
     // Optimistic: parent already painted the new state; rollback on failure.
@@ -628,71 +695,74 @@ function ContactRow({
 
   return (
     <li
+      onClick={onOpen}
       className={cn(
-        "group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40",
+        "group flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/40",
         selected && "bg-primary/5 hover:bg-primary/5",
       )}
     >
-      {/* Selection checkbox — keyboard accessible via the native control. */}
-      <label className="flex shrink-0 cursor-pointer items-center justify-center">
+      {/* Selection checkbox — its own click never opens the drawer. */}
+      <label
+        onClick={(e) => e.stopPropagation()}
+        className="flex shrink-0 cursor-pointer items-center justify-center"
+      >
         <input
           type="checkbox"
           className="size-4 cursor-pointer accent-primary"
           checked={selected}
           onChange={(e) => onSelectChange(e.target.checked)}
-          aria-label={`Select ${contact.name}`}
+          aria-label={`Select ${contact.name || contact.phoneNumber}`}
         />
       </label>
 
-      <Avatar className="size-9 shrink-0">
+      <Avatar className="size-8 shrink-0">
         <AvatarFallback
-          className="text-sm text-white"
+          className="text-xs text-white"
           style={{ backgroundImage: avatarGradient(contact.id) }}
         >
-          {initials(contact.name)}
+          {initials(contact.name || contact.phoneNumber || "?")}
         </AvatarFallback>
       </Avatar>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{contact.name}</span>
-          <span className="font-mono text-[11px] text-muted-foreground">
-            {formatPhone(contact.phoneNumber)}
-          </span>
-          <SourceBadge source={contact.source} />
-        </div>
-        <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
-          {contact.email && <span className="truncate">{contact.email}</span>}
-          {contact.email && contact.location && <span>·</span>}
-          {contact.location && <span className="truncate">{contact.location}</span>}
-        </div>
-        {filledFields.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            {filledFields.map(({ def, value }) => (
-              <Badge key={def.id} variant="muted" className="text-[10px]">
-                <span className="opacity-60">{def.label}:</span>
-                <span className="ml-1">{value}</span>
-              </Badge>
-            ))}
-          </div>
-        )}
-        {/* Tag row: chips + inline "add" trigger that opens the multi-picker. */}
-        <div ref={tagBoxRef} className="relative mt-1.5 flex flex-wrap items-center gap-1">
-          {contactTags.map((t) => (
-            <TagChip
-              key={t.id}
-              tag={t}
-              size="xs"
-              onRemove={() =>
-                void persistTagIds((contact.tagIds ?? []).filter((id) => id !== t.id))
-              }
-            />
+
+      {/* Name + phone — the keyboard-accessible "open contact" control. */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpen();
+        }}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+      >
+        <span className="truncate text-sm font-medium">
+          {contact.name || formatPhone(contact.phoneNumber)}
+        </span>
+        <span className="hidden shrink-0 font-mono text-[11px] text-muted-foreground sm:inline">
+          {formatPhone(contact.phoneNumber)}
+        </span>
+      </button>
+
+      {/* Interactive right cluster — clicks here never open the drawer. */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground"
+      >
+        <div ref={tagBoxRef} className="relative hidden items-center gap-1 md:flex">
+          {shownTags.map((t) => (
+            <TagChip key={t.id} tag={t} size="xs" />
           ))}
-          <TagAddButton size="xs" onClick={() => setTagPickerOpen((v) => !v)} />
+          {extraTags > 0 && (
+            <span className="text-[10px] text-muted-foreground">+{extraTags}</span>
+          )}
+          <TagAddButton
+            size="xs"
+            className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+            onClick={() => setTagPickerOpen((v) => !v)}
+          />
           {tagSaveError && (
             <span className="text-[10px] text-destructive">{tagSaveError}</span>
           )}
           {tagPickerOpen && (
-            <div className="absolute left-0 top-full z-20 mt-1">
+            <div className="absolute right-0 top-full z-20 mt-1">
               <TagMultiPicker
                 tags={tagCatalog}
                 selectedIds={contact.tagIds ?? []}
@@ -705,58 +775,38 @@ function ContactRow({
             </div>
           )}
         </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-        <div className="hidden md:inline-flex">
-          <ContactStagePicker
-            stages={stageCatalog}
-            currentStageId={contact.stageId}
-            onChange={persistStage}
-            canManage={canManageStages}
-            size="xs"
-          />
-        </div>
-        <WindowBadge lastInboundAt={lastInboundAt} size="xs" className="hidden md:inline-flex" />
+
+        <ContactStagePicker
+          stages={stageCatalog}
+          currentStageId={contact.stageId}
+          onChange={persistStage}
+          canManage={canManageStages}
+          size="xs"
+        />
+
+        <WindowBadge
+          lastInboundAt={lastInboundAt}
+          size="xs"
+          className="hidden lg:inline-flex"
+        />
+
         {lastMessageAt && (
           <LocalTime
             iso={lastMessageAt}
             format="listTime"
-            className="hidden tabular-nums lg:inline"
+            className="hidden w-12 text-right tabular-nums xl:inline"
           />
         )}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onEdit();
-          }}
-          className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100"
-          title="Edit this contact"
-        >
-          <Pencil className="size-3" />
-          Edit
-        </button>
-        <Link
-          href={`/broadcasts/new?contactIds=${contact.id}`}
-          className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100"
-          title="Send a pre-approved template to this contact"
-        >
-          <Send className="size-3" />
-          Template
-        </Link>
-        {activeConversationId ? (
+
+        {activeConversationId && (
           <Link
             href={`/inbox/${activeConversationId}`}
-            className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs hover:bg-accent hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+            title="Open chat"
           >
             <MessageSquare className="size-3" />
-            Open chat
+            <span className="hidden sm:inline">Open chat</span>
           </Link>
-        ) : (
-          <span className="rounded-md border border-dashed border-border px-2.5 py-1 text-xs">
-            No thread yet
-          </span>
         )}
       </div>
     </li>
@@ -1064,18 +1114,4 @@ function BulkTagMenu({
   );
 }
 
-function SourceBadge({ source }: { source: ContactSource }) {
-  if (source === "manual") {
-    return (
-      <Badge variant="muted" className="text-[10px]">
-        Added by you
-      </Badge>
-    );
-  }
-  return (
-    <Badge variant="success" className="text-[10px]">
-      Messaged you
-    </Badge>
-  );
-}
 

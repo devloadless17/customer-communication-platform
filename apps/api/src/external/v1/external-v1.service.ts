@@ -7,7 +7,9 @@ import {
 } from "@nestjs/common";
 
 import {
+  contactRowToExternal,
   toExternalContact,
+  EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
 } from "@/lib/external-shapes";
 import { ensureDefaultStage } from "@/lib/queries";
@@ -168,10 +170,10 @@ export class ExternalV1Service {
   async getContact(teamId: string, id: string) {
     const row = await this.db.contact.findFirst({
       where: { id, teamId },
-      include: { tags: { select: { id: true } } },
+      include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!row) throw new NotFoundException({ error: "contact not found" });
-    return toExternalContact(row, row.tags.map((t) => t.id));
+    return contactRowToExternal(row);
   }
 
   /**
@@ -189,28 +191,28 @@ export class ExternalV1Service {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
         where: { teamId, phoneNumber: normalized },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
-      const items = rows.map((r) => toExternalContact(r, r.tags.map((t) => t.id)));
+      const items = rows.map((r) => contactRowToExternal(r));
       return { items, nextCursor: null };
     }
     if (q.email) {
       const rows = await this.db.contact.findMany({
         where: { teamId, email: { equals: q.email.trim(), mode: "insensitive" } },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
-      const items = rows.map((r) => toExternalContact(r, r.tags.map((t) => t.id)));
+      const items = rows.map((r) => contactRowToExternal(r));
       return { items, nextCursor: null };
     }
     if (q.externalContactId) {
       const rows = await this.db.contact.findMany({
         where: { teamId, externalContactId: q.externalContactId },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
-      const items = rows.map((r) => toExternalContact(r, r.tags.map((t) => t.id)));
+      const items = rows.map((r) => contactRowToExternal(r));
       return { items, nextCursor: null };
     }
 
@@ -233,14 +235,12 @@ export class ExternalV1Service {
             }
           : {}),
       },
-      include: { tags: { select: { id: true } } },
+      include: EXTERNAL_CONTACT_INCLUDE,
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: q.limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
-    const items = rows.slice(0, q.limit).map((r) =>
-      toExternalContact(r, r.tags.map((t) => t.id)),
-    );
+    const items = rows.slice(0, q.limit).map((r) => contactRowToExternal(r));
     const lastItem = items[items.length - 1];
     const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
     return { items, nextCursor };
@@ -350,7 +350,7 @@ export class ExternalV1Service {
             ? { tags: { connect: validTagIds.map((id) => ({ id })) } }
             : {}),
         },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
       });
     } catch (err) {
       if (
@@ -481,7 +481,7 @@ export class ExternalV1Service {
       result = await this.db.$transaction(async (tx) => {
         const existing = await tx.contact.findFirst({
           where: { id: contactId, teamId },
-          include: { tags: { select: { id: true } } },
+          include: EXTERNAL_CONTACT_INCLUDE,
         });
         if (!existing) return null;
 
@@ -522,7 +522,7 @@ export class ExternalV1Service {
             ...(nextCustom !== undefined ? { customFields: nextCustom } : {}),
             version: { increment: 1 },
           },
-          include: { tags: { select: { id: true } } },
+          include: EXTERNAL_CONTACT_INCLUDE,
         });
         return { existing, updated };
       });
@@ -738,7 +738,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
-      include: { tags: { select: { id: true } } },
+      include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
@@ -762,7 +762,7 @@ export class ExternalV1Service {
           tags: { connect: newIds.map((id) => ({ id })) },
           version: { increment: 1 },
         },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
       });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
@@ -799,7 +799,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
-      include: { tags: { select: { id: true } } },
+      include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
@@ -817,7 +817,7 @@ export class ExternalV1Service {
           tags: { disconnect: toRemove.map((id) => ({ id })) },
           version: { increment: 1 },
         },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
       });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
@@ -847,7 +847,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
-      include: { tags: { select: { id: true } } },
+      include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
@@ -864,7 +864,7 @@ export class ExternalV1Service {
           tags: { disconnect: { id: tagId } },
           version: { increment: 1 },
         },
-        include: { tags: { select: { id: true } } },
+        include: EXTERNAL_CONTACT_INCLUDE,
       });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
@@ -949,7 +949,7 @@ export class ExternalV1Service {
     // n8n "On Contact Tag updated" trigger fires per affected contact.
     const updated = await this.db.contact.findMany({
       where: { teamId, id: { in: ownedIds } },
-      include: { tags: { select: { id: true } } },
+      include: EXTERNAL_CONTACT_INCLUDE,
     });
     // Bounded 16-lane fanout — see contacts.service.ts for rationale. An
     // unbounded Promise.all over 500 ids × 6 sequential subscribers pinned

@@ -1,29 +1,37 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Loader2, Plus, Search, X } from "lucide-react";
+import { Loader2, Plus, Search, X } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover } from "@/components/ui/popover";
+import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { TagChip } from "@/features/tags/components/tag-chip";
 import { cn } from "@ccp/shared/utils";
 import type {
   Contact,
   ContactFieldDefinition,
   ContactListItem,
-  ContactSource,
   ContactStage,
   CursorPage,
   Tag,
 } from "@ccp/shared/types";
 
 import { BrowserRow } from "./contact-browser/browser-row";
-import { Chip } from "./contact-browser/chip";
-import { FieldFilterRow, type FieldFilter } from "./contact-browser/field-filter-row";
 import { SelectAllRow } from "./contact-browser/select-all-row";
-import { StageFilterControl, type StageFilter } from "./contact-browser/stage-filter-control";
+import { FilterButton } from "./contact-browser/filter-button";
+import { TagFilterList } from "./contact-browser/tag-filter-list";
+import { StageFilterMenu, MoreFilterMenu } from "./contact-browser/filter-menus";
+import { ActiveFilterChips } from "./contact-browser/active-filter-chips";
+import { ContactRowsSkeleton } from "./contact-browser/row-skeleton";
+import type {
+  FieldFilter,
+  SourceFilter,
+  StageFilter,
+  WindowFilter,
+} from "./contact-browser/filter-types";
 
-export type { FieldFilter, StageFilter };
+export type { FieldFilter, SourceFilter, StageFilter, WindowFilter };
 
 /**
  * The one and only contact-browsing surface.
@@ -50,10 +58,6 @@ export type { FieldFilter, StageFilter };
 // ---------------------------------------------------------------------------
 // Filter types + fetcher
 // ---------------------------------------------------------------------------
-
-export type SourceFilter = "all" | ContactSource;
-/** 24h customer-service window filter. "any" = no filter. */
-export type WindowFilter = "any" | "open" | "closed";
 
 export interface ContactListFilters {
   search: string;
@@ -446,84 +450,136 @@ export function ContactFilterBar({
   onStageFilterChange?: (next: StageFilter) => void;
   searchPlaceholder?: string;
 }) {
+  const [openMenu, setOpenMenu] = useState<"stage" | "tags" | "more" | null>(null);
+
+  const stageActive = stageFilter !== "any";
+  const moreActive =
+    sourceFilter !== "all" ||
+    (Boolean(onWindowChange) && windowFilter !== "any") ||
+    fieldFilter !== null;
+
+  function clearAll() {
+    onSearchChange("");
+    onSourceChange("all");
+    onWindowChange?.("any");
+    onStageFilterChange?.("any");
+    onTagsChange?.([]);
+    onFieldChange(null);
+    setOpenMenu(null);
+  }
+
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
-        <div className="flex items-center gap-1.5">
-          <span className="text-muted-foreground">Show:</span>
-          <Chip active={sourceFilter === "all"} onClick={() => onSourceChange("all")} label="All" />
-          <Chip
-            active={sourceFilter === "inbound"}
-            onClick={() => onSourceChange("inbound")}
-            label="Messaged me"
+    <div className="flex flex-col gap-2">
+      {/* One calm toolbar: prominent search + a few smart filter buttons.
+          Each button opens a portal popover (works inside the picker modal),
+          and active filters surface below as removable chips. */}
+      <div className="flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder={searchPlaceholder}
+            className="h-9 pl-8"
+            data-contacts-search=""
           />
-          <Chip
-            active={sourceFilter === "manual"}
-            onClick={() => onSourceChange("manual")}
-            label="Added by me"
-          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => onSearchChange("")}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <X className="size-3" />
+            </button>
+          )}
         </div>
-        {onWindowChange && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-muted-foreground">24h window:</span>
-            <Chip active={windowFilter === "any"} onClick={() => onWindowChange("any")} label="Any" />
-            <Chip
-              active={windowFilter === "open"}
-              onClick={() => onWindowChange("open")}
-              label="Open"
-            />
-            <Chip
-              active={windowFilter === "closed"}
-              onClick={() => onWindowChange("closed")}
-              label="Closed"
-            />
-          </div>
-        )}
-      </div>
 
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={search}
-          onChange={(e) => onSearchChange(e.target.value)}
-          placeholder={searchPlaceholder}
-          className="pl-8"
-        />
-        {search && (
-          <button
-            type="button"
-            onClick={() => onSearchChange("")}
-            aria-label="Clear search"
-            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        {onStageFilterChange && stages.length > 0 && (
+          <Popover
+            open={openMenu === "stage"}
+            onOpenChange={(o) => setOpenMenu(o ? "stage" : null)}
+            content={
+              <StageFilterMenu
+                stages={stages}
+                value={stageFilter}
+                onChange={(v) => {
+                  onStageFilterChange(v);
+                  setOpenMenu(null);
+                }}
+              />
+            }
           >
-            <X className="size-3" />
-          </button>
+            <FilterButton
+              label="Stage"
+              active={stageActive}
+              open={openMenu === "stage"}
+              onClick={() => setOpenMenu((m) => (m === "stage" ? null : "stage"))}
+            />
+          </Popover>
         )}
+
+        {onTagsChange && tags.length > 0 && (
+          <Popover
+            open={openMenu === "tags"}
+            onOpenChange={(o) => setOpenMenu(o ? "tags" : null)}
+            content={
+              <TagFilterList
+                tags={tags}
+                selectedTagIds={selectedTagIds}
+                onChange={onTagsChange}
+              />
+            }
+          >
+            <FilterButton
+              label="Tags"
+              count={selectedTagIds.length}
+              open={openMenu === "tags"}
+              onClick={() => setOpenMenu((m) => (m === "tags" ? null : "tags"))}
+            />
+          </Popover>
+        )}
+
+        <Popover
+          open={openMenu === "more"}
+          onOpenChange={(o) => setOpenMenu(o ? "more" : null)}
+          content={
+            <MoreFilterMenu
+              sourceFilter={sourceFilter}
+              onSourceChange={onSourceChange}
+              windowFilter={windowFilter}
+              onWindowChange={onWindowChange}
+              fieldFilter={fieldFilter}
+              onFieldChange={onFieldChange}
+              fieldDefinitions={fieldDefinitions}
+            />
+          }
+        >
+          <FilterButton
+            label="More"
+            active={moreActive}
+            open={openMenu === "more"}
+            onClick={() => setOpenMenu((m) => (m === "more" ? null : "more"))}
+          />
+        </Popover>
       </div>
 
-      {onTagsChange && tags.length > 0 && (
-        <TagFilterControl
-          tags={tags}
-          selectedTagIds={selectedTagIds}
-          onChange={onTagsChange}
-        />
-      )}
-
-      {onStageFilterChange && stages.length > 0 && (
-        <StageFilterControl
-          stages={stages}
-          value={stageFilter}
-          onChange={onStageFilterChange}
-        />
-      )}
-
-      {fieldDefinitions.length > 0 && (
-        <FieldFilterRow
-          fieldDefinitions={fieldDefinitions}
-          value={fieldFilter}
-          onChange={onFieldChange}
-        />
-      )}
+      <ActiveFilterChips
+        sourceFilter={sourceFilter}
+        onSourceChange={onSourceChange}
+        windowFilter={windowFilter}
+        onWindowChange={onWindowChange}
+        stageFilter={stageFilter}
+        onStageFilterChange={onStageFilterChange ?? (() => {})}
+        stages={stages}
+        tagIds={selectedTagIds}
+        onTagsChange={onTagsChange ?? (() => {})}
+        tags={tags}
+        fieldFilter={fieldFilter}
+        onFieldChange={onFieldChange}
+        fieldDefinitions={fieldDefinitions}
+        onClearAll={clearAll}
+      />
     </div>
   );
 }
@@ -549,18 +605,12 @@ export function TagFilterControl({
   emptyTriggerLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    inputRef.current?.focus();
     function handler(e: MouseEvent) {
-      if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setQuery("");
-      }
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
     }
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -571,24 +621,16 @@ export function TagFilterControl({
     .map((id) => byId.get(id))
     .filter((t): t is Tag => Boolean(t));
 
-  const suggestions = (() => {
-    const q = query.trim().toLowerCase();
-    return tags.filter((t) => (q.length === 0 ? true : t.name.toLowerCase().includes(q)));
-  })();
-
-  function toggle(id: string) {
-    onChange(
-      selectedTagIds.includes(id)
-        ? selectedTagIds.filter((x) => x !== id)
-        : [...selectedTagIds, id],
-    );
-  }
-
   return (
     <div ref={boxRef} className="relative flex flex-wrap items-center gap-1.5 text-xs">
       {label && <span className="text-muted-foreground">{label}</span>}
       {selectedTags.map((t) => (
-        <TagChip key={t.id} tag={t} size="xs" onRemove={() => toggle(t.id)} />
+        <TagChip
+          key={t.id}
+          tag={t}
+          size="xs"
+          onRemove={() => onChange(selectedTagIds.filter((x) => x !== t.id))}
+        />
       ))}
       <button
         type="button"
@@ -614,52 +656,8 @@ export function TagFilterControl({
       )}
 
       {open && (
-        <div className="absolute left-0 top-full z-30 mt-1.5 flex max-h-75 w-64 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
-          <div className="border-b border-border px-2.5 py-2">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                ref={inputRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search tags…"
-                className="h-8 pl-7 text-xs"
-              />
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto py-1">
-            {suggestions.length === 0 ? (
-              <div className="px-3 py-4 text-center text-[12px] text-muted-foreground">
-                No tags match &quot;{query}&quot;.
-              </div>
-            ) : (
-              <ul>
-                {suggestions.map((t) => {
-                  const isSelected = selectedTagIds.includes(t.id);
-                  return (
-                    <li key={t.id}>
-                      <button
-                        type="button"
-                        onClick={() => toggle(t.id)}
-                        className={cn(
-                          "flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-accent/60",
-                          isSelected && "bg-accent/30",
-                        )}
-                      >
-                        <TagChip tag={t} size="xs" />
-                        <span className="flex-1" />
-                        {isSelected ? (
-                          <Check className="size-3.5 text-primary" />
-                        ) : (
-                          <span className="size-3.5" />
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+        <div className="absolute left-0 top-full z-30 mt-1.5 overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
+          <TagFilterList tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
         </div>
       )}
     </div>
@@ -707,6 +705,15 @@ export function ContactBrowser({
     if (items.length > 0) onItemsLoaded?.(items);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
+
+  // The picker list scrolls inside its own container, so the sentinel is
+  // observed against that `ul` (not the viewport) for a clean prefetch margin.
+  const scrollRef = useRef<HTMLUListElement>(null);
+  const loadMoreRef = useInfiniteScroll<HTMLLIElement>({
+    hasMore: Boolean(list.nextCursor) && items.length < 2000,
+    onLoadMore: list.loadMore,
+    root: scrollRef,
+  });
 
   function toggle(id: string, next: boolean) {
     const copy = new Set(selectedIds);
@@ -756,10 +763,7 @@ export function ContactBrowser({
 
       <div className="rounded-lg border border-border bg-card">
         {list.loading && items.length === 0 ? (
-          <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
-            <Loader2 className="mr-2 size-4 animate-spin" />
-            Loading…
-          </div>
+          <ContactRowsSkeleton count={6} />
         ) : showEmpty ? (
           <div className="px-6 py-16 text-center text-sm text-muted-foreground">
             {list.search ||
@@ -781,51 +785,46 @@ export function ContactBrowser({
                 </span>
               }
             />
-            <ul className={cn("divide-y divide-border overflow-y-auto", listClassName)}>
+            <ul
+              ref={scrollRef}
+              className={cn("divide-y divide-border overflow-y-auto", listClassName)}
+            >
               {items.map((item) => (
                 <BrowserRow
                   key={item.contact.id}
                   item={item}
-                  fieldDefinitions={fieldDefinitions}
                   tagById={tagById}
                   stageById={stageById}
                   selected={selectedIds.has(item.contact.id)}
                   onSelectChange={(next) => toggle(item.contact.id, next)}
                 />
               ))}
+              {/* Auto-load sentinel — observed against the scrolling ul. */}
+              {list.nextCursor && items.length < 2000 && (
+                <li
+                  ref={loadMoreRef}
+                  className="flex items-center justify-center px-4 py-3 text-xs text-muted-foreground"
+                >
+                  {list.loadingMore && (
+                    <>
+                      <Loader2 className="mr-2 size-3.5 animate-spin" />
+                      Loading more…
+                    </>
+                  )}
+                </li>
+              )}
             </ul>
           </>
         )}
-        {list.nextCursor && (
-          <div className="border-t border-border p-3 text-center">
-            {items.length >= 2000 ? (
-              // Render-cap. The list isn't virtualized today; past ~2000
-              // DOM rows the page becomes laggy and past ~5000 it freezes.
-              // Steer the user to refine filters instead of loading
-              // unbounded pages. The cap can be lifted once virtualization
-              // lands (use-virtualizer pattern from conversation-list.tsx).
-              <div className="text-[12px] text-muted-foreground">
-                Showing {items.length.toLocaleString()} contacts. Refine the
-                filters or search to see more — the list is capped to keep
-                the page responsive.
-              </div>
-            ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={list.loadMore}
-                disabled={list.loadingMore}
-              >
-                {list.loadingMore ? (
-                  <>
-                    <Loader2 className="size-3.5 animate-spin" />
-                    Loading…
-                  </>
-                ) : (
-                  "Load more"
-                )}
-              </Button>
-            )}
+        {/* Render-cap. The list isn't virtualized today; past ~2000 DOM rows
+            the page gets laggy. Steer the user to refine filters instead of
+            loading unbounded pages. (use-virtualizer pattern from
+            conversation-list.tsx if this cap ever needs lifting.) */}
+        {list.nextCursor && items.length >= 2000 && (
+          <div className="border-t border-border p-3 text-center text-[12px] text-muted-foreground">
+            Showing {items.length.toLocaleString()} contacts. Refine the filters
+            or search to see more — the list is capped to keep the page
+            responsive.
           </div>
         )}
       </div>
