@@ -462,12 +462,7 @@ export function ContactPanel({
    * the other UI surface within a beat.
    */
   async function persistAssignee(nextId: string | null) {
-    if (nextId === assigneeId || assigneePending) return;
-    setAssigneePending(true);
-    setAssigneeError(null);
-    const prevId = assigneeId;
-    const prevUser = prevId ? teamMembers.find((u) => u.id === prevId) ?? null : null;
-    const nextUser = nextId ? teamMembers.find((u) => u.id === nextId) ?? null : null;
+    if (assigneePending) return;
     // Mirror conversations.service.ts:assign's status side-effect — kept
     // identical to assignment-dropdown.tsx so a header change and a panel
     // change produce the same end state.
@@ -483,6 +478,14 @@ export function ContactPanel({
           ? "pending"
           : liveStatus;
     const statusWillChange = predictedNextStatus !== liveStatus;
+    // Re-picking the CURRENT assignee is a no-op UNLESS it would still flip
+    // status (claim an assigned-but-pending chat → open).
+    if (nextId === assigneeId && !statusWillChange) return;
+    setAssigneePending(true);
+    setAssigneeError(null);
+    const prevId = assigneeId;
+    const prevUser = prevId ? teamMembers.find((u) => u.id === prevId) ?? null : null;
+    const nextUser = nextId ? teamMembers.find((u) => u.id === nextId) ?? null : null;
     // Optimistic: paint locally + fan the same socket frames the server
     // will broadcast so every surface flips instantly. Order matches the
     // server publish order: assigned first, then status.

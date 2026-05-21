@@ -62,7 +62,13 @@ export function AssignmentDropdown({
   const [pending, setPending] = useState(false);
 
   const assign = async (assignedUserId: string | null) => {
-    if (assignedUserId === currentId || pending) return;
+    if (pending) return;
+    const nextStatus = predictNextStatus(currentStatus, assignedUserId);
+    const statusWillChange = nextStatus !== currentStatus;
+    // Re-picking the CURRENT assignee is a no-op UNLESS it would still flip
+    // status — e.g. claiming an assigned-but-pending chat (bulk-assigned, or
+    // manually set back to pending) should still move it to open.
+    if (assignedUserId === currentId && !statusWillChange) return;
     setPending(true);
     const prevUser = currentId
       ? teamMembers.find((u) => u.id === currentId) ?? null
@@ -70,8 +76,6 @@ export function AssignmentDropdown({
     const nextUser = assignedUserId
       ? teamMembers.find((u) => u.id === assignedUserId) ?? null
       : null;
-    const nextStatus = predictNextStatus(currentStatus, assignedUserId);
-    const statusWillChange = nextStatus !== currentStatus;
     // Optimistic: fan the same socket frames the server will broadcast so
     // the sidebar assignee chip, list row, status pill, and panel picker
     // all flip instantly. Order matters — assigned BEFORE status, matching

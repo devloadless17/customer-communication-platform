@@ -246,9 +246,9 @@ export class ConversationsService {
 
   /**
    * Assign / unassign a conversation. CAS on the previous assignee + status
-   * — racing clients get 409 and re-render. Publishes
-   * `conversation.assigned` so socket-fanout, audit, analytics, and
-   * workflow-dispatch all react.
+   * — racing clients get 409 and re-render. Publishes `conversation.assigned`
+   * (only when the assignee actually changes) so socket-fanout, audit,
+   * analytics, and workflow-dispatch all react.
    *
    * **Status side-effect** (product rule, see thread w/ user on 2026-05-20):
    * Assignment carries an ownership signal — closed chats getting picked
@@ -256,9 +256,15 @@ export class ConversationsService {
    * back to "waiting" state. Applied atomically with the assignment write
    * so the two never desync:
    *
-   *   - Assign to a user + status was `closed`    →  status becomes `open`
-   *   - Unassign (→ null) + status was `open`     →  status becomes `pending`
-   *   - All other combinations                    →  status unchanged
+   *   - Assign to a user + status was `pending`/`closed`  →  becomes `open`
+   *   - Unassign (→ null) + status was `open`             →  becomes `pending`
+   *   - All other combinations                            →  status unchanged
+   *
+   * The side-effect is keyed on STATUS, not on whether the assignee changed:
+   * re-assigning the SAME already-assigned user while the chat is `pending`
+   * (or `closed`) still promotes it to `open`. In that case only
+   * `conversation.status_changed` fires — `conversation.assigned` is gated on
+   * an actual assignee change, so on-assignment workflows don't re-run.
    *
    * Both transitions are bounded (`closed → open` and `open → pending` are
    * single-step), so an explicit "after one auto-promote, the next won't
@@ -354,16 +360,22 @@ export class ConversationsService {
         }
       : null;
 
-    await this.bus.publish({
-      type: "conversation.assigned",
-      teamId,
-      conversationId,
-      assignedUser,
-      previousAssignedUserId,
-      newAssignedUserId: assignedUserId,
-      changedByUserId: actorUserId,
-      contact: workflowContactSnapshot(conversation.contact),
-    });
+    // Only when the assignee actually changed — re-picking the SAME user to
+    // claim an assigned-but-pending chat (→ open) must not re-trigger
+    // on-assignment workflows / audit rows; only the status_changed side-
+    // effect below should fire.
+    if (assignedUserId !== previousAssignedUserId) {
+      await this.bus.publish({
+        type: "conversation.assigned",
+        teamId,
+        conversationId,
+        assignedUser,
+        previousAssignedUserId,
+        newAssignedUserId: assignedUserId,
+        changedByUserId: actorUserId,
+        contact: workflowContactSnapshot(conversation.contact),
+      });
+    }
 
     if (statusChanged) {
       // Fired AFTER conversation.assigned so a consumer that watches both

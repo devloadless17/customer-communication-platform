@@ -41,6 +41,7 @@ import type {
   MessageStatusChangedEvent,
   NoteCreatedEvent,
 } from "../events/types";
+import { publicChannel } from "../channel";
 
 /**
  * Stable identifiers partners subscribe to. Must NOT change once shipped —
@@ -99,6 +100,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
             id: "cmpmsg_01",
             conversation_id: "cmpconv_01",
             contact_id: "cmpcnt_01",
+            channel: "whatsapp",
             direction: "in",
             body: "",
             timestamp: "2026-05-20T11:00:00.000Z",
@@ -156,6 +158,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
             id: "cmpmsg_02",
             conversation_id: "cmpconv_01",
             contact_id: "cmpcnt_01",
+            channel: "whatsapp",
             direction: "out",
             body: "Yes! Open until 8pm.",
             timestamp: "2026-05-20T11:00:05.000Z",
@@ -446,6 +449,14 @@ export interface PublicMessage {
   id: string;
   conversation_id: string;
   contact_id: string;
+  /**
+   * Messaging channel — the MEDIUM ("whatsapp", "instagram", "telegram", …).
+   * Deliberately NOT our `provider`: one provider serves several channels —
+   * `meta_cloud` (the Meta Cloud API) carries BOTH WhatsApp and Instagram — so
+   * the channel canNOT be derived from the provider. Pivot on this when a team
+   * runs more than one channel. Today always "whatsapp" (the only live channel).
+   */
+  channel: string;
   direction: "in" | "out";
   body: string;
   timestamp: string;
@@ -825,6 +836,7 @@ function messageFromDomain(
     id: m.id,
     conversation_id: m.conversationId,
     contact_id: contactId,
+    channel: publicChannel(),
     direction: m.direction,
     body: m.body,
     timestamp: m.timestamp,

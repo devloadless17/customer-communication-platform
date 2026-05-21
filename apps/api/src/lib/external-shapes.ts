@@ -4,6 +4,8 @@ import type {
   Message as DbMessage,
 } from "@prisma/client";
 
+import { publicChannel } from "@ccp/shared/channel";
+
 /**
  * Wire shapes the external API (/api/external/v1) returns. Stable contract
  * for n8n / partner integrations — once consumers start parsing these, the
@@ -89,6 +91,13 @@ export interface ExternalConversation {
    * `identityProvider` (which is null for phone-keyed WhatsApp contacts).
    */
   provider: "meta_cloud";
+  /**
+   * Channel (the MEDIUM) — "whatsapp", "instagram", "telegram", …. Distinct
+   * from `provider`: one provider serves several channels (`meta_cloud` carries
+   * BOTH WhatsApp and Instagram), so route/filter on this, not on `provider`.
+   * Today always "whatsapp".
+   */
+  channel: string;
   status: "open" | "pending" | "closed";
   /** Per-thread assignee. Hydrated; null when unassigned. */
   assignee: ExternalAssignee | null;
@@ -114,6 +123,12 @@ export interface ExternalMessage {
    * phone-keyed WhatsApp contacts). Expands to a union as channels are added.
    */
   provider: "meta_cloud";
+  /**
+   * Channel (the MEDIUM) — "whatsapp", "instagram", "telegram", …. Distinct
+   * from `provider` (one provider serves several channels). Key off this when
+   * handling multiple channels. Today always "whatsapp".
+   */
+  channel: string;
   direction: "in" | "out";
   body: string;
   status: "sent" | "delivered" | "read" | "failed";
@@ -203,6 +218,7 @@ export function toExternalConversation(
     contactId: c.contactId,
     // Channel is owned by the conversation row, not derived from the contact.
     provider: c.provider as ExternalConversation["provider"],
+    channel: publicChannel(),
     status: c.status as ExternalConversation["status"],
     assignee: toExternalAssignee(c.assignedUser),
     unreadCount: c.unreadCount,
@@ -247,6 +263,7 @@ export function toExternalMessage(
     conversationId: m.conversationId,
     externalId: m.externalId,
     provider: m.provider as ExternalMessage["provider"],
+    channel: publicChannel(),
     direction: m.direction as ExternalMessage["direction"],
     body: m.body,
     status: m.status as ExternalMessage["status"],
