@@ -1,4 +1,4 @@
-/* eslint-disable no-console */
+ 
 /**
  * One-shot rewrite of saved workflow tokens to the canonical new
  * namespaces. The PR 2 resolver keeps the legacy 2-deep paths working

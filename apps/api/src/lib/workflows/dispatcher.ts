@@ -277,7 +277,7 @@ export async function dispatchManualTrigger(args: {
     contact: {
       id: contact.id,
       phoneNumber: contact.phoneNumber,
-      identityProvider: contact.identityProvider,
+      identityChannel: contact.identityChannel,
       externalContactId: contact.externalContactId,
       name: contact.name,
       email: contact.email,

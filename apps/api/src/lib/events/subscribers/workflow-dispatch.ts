@@ -9,11 +9,12 @@
  * place — adding a new trigger to a domain event = one new case here, NOT
  * a new call site somewhere upstream.
  *
- * Order in the subscriber chain: LAST. By the time this runs, socket-fanout
- * has lit up live clients, audit has written the timeline row, and analytics
- * has bumped the conversation counters / firstResponseAt / closedAt. The
- * workflow snapshot reads fresh state from the DB so it sees the
- * analytics-updated row.
+ * Order in the subscriber chain: WORKFLOW_DISPATCH tier (after analytics).
+ * By the time this runs, socket-fanout has lit up live clients, audit has
+ * written the timeline row, and analytics has bumped the conversation
+ * counters / firstResponseAt / closedAt. The workflow snapshot reads fresh
+ * state from the DB so it sees the analytics-updated row. (outbound-webhooks
+ * runs after this one — neither depends on the other.)
  *
  * `dispatch()` already swallows its own errors and applies retry-with-backoff
  * around the Redis enqueue, so this subscriber doesn't need extra guarding.
@@ -30,8 +31,10 @@
  * broadcast). See CLAUDE.md "Bus events introduced for the cleanup".
  */
 
+import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
+
 import { db } from "@/lib/db";
-import { subscribe } from "@/lib/events/bus";
+import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { dispatch } from "@/lib/workflows/dispatcher";
 import {
   workflowConversationSnapshot,
@@ -39,6 +42,13 @@ import {
 } from "@/lib/workflows/events";
 
 export function registerWorkflowDispatchSubscribers(): void {
+  // WORKFLOW_DISPATCH tier — runs after analytics so the snapshot reads the
+  // counters/closedAt analytics just wrote.
+  const subscribe = <K extends DomainEventType>(
+    type: K,
+    handler: (e: DomainEventOf<K>) => void | Promise<void>,
+  ) => busSubscribe(type, handler, SubscriberPriority.WORKFLOW_DISPATCH);
+
   // ---- message.received → message_received (+ conversation_created on first) ----
   subscribe("message.received", async (e) => {
     if (e.isNewConversation) {

@@ -52,7 +52,7 @@ const MESSAGE_KEYS = [
   "direction",
   "id",
   "external_id",
-  "provider",
+  "channel",
   "media_kind",
   "media_caption",
   // PR 2.4 additions.
@@ -131,7 +131,7 @@ const MESSAGE_TOKENS: TokenSpec[] = [
   { token: "$var.message.direction", label: "Direction (in/out)", group: "message" },
   { token: "$var.message.id", label: "Message id", group: "message" },
   { token: "$var.message.external_id", label: "External id (wamid)", group: "message" },
-  { token: "$var.message.provider", label: "Channel (e.g. meta_cloud)", group: "message" },
+  { token: "$var.message.channel", label: "Channel (e.g. meta_cloud)", group: "message" },
   { token: "$var.message.media_kind", label: "Media kind", group: "message" },
   { token: "$var.message.media_caption", label: "Media caption", group: "message" },
   { token: "$var.message.media_url", label: "Media URL", group: "message" },
@@ -306,7 +306,7 @@ export interface AgentLike {
 export interface MessageLike {
   id?: string;
   externalId?: string;
-  provider?: string | null;
+  channel?: string | null;
   body?: string;
   direction?: "in" | "out";
   timestamp?: string;
@@ -526,8 +526,8 @@ function resolveMessage(key: string, message: MessageLike | null): string {
       return message.id ?? "";
     case "external_id":
       return message.externalId ?? "";
-    case "provider":
-      return message.provider ?? "";
+    case "channel":
+      return message.channel ?? "";
     case "media_kind":
       return message.mediaKind ?? "";
     case "media_caption":

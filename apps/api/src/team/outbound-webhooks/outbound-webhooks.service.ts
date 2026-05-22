@@ -193,7 +193,7 @@ export class OutboundWebhooksService {
     // production shape — receivers wiring their parser against the test event
     // should not get a partial envelope.
     const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+      where: { teamId_channel: { teamId, channel: "whatsapp" } },
       select: { config: true },
     });
     const ccfg = (conn?.config ?? {}) as {
@@ -202,7 +202,7 @@ export class OutboundWebhooksService {
     };
     const channel = conn
       ? {
-          source: "meta_cloud" as const,
+          source: "whatsapp" as const,
           phone_number_id: ccfg.phoneNumberId ?? null,
           display_phone_number: ccfg.displayPhoneNumber ?? null,
         }

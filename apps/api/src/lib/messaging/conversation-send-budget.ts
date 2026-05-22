@@ -13,10 +13,24 @@ import { createTokenBucket } from "@/common/token-bucket";
  * still bounding a runaway integration to ~1k sends/hour/thread instead
  * of the 3.6k/hour the per-key cap alone allows.
  *
- * Applied at every outbound send entry point that produces a customer-
- * visible WhatsApp message: internal `sendText` preflight, external
- * `/v1/messages` send. Template sends + media sends + forwards live on the
- * same buckets via their respective preflight call sites.
+ * Consumed at every customer-facing send entry point (grep `consumeConversationSendBudget`):
+ *   - the UI `messages.send` HTTP path        (messages.service.ts)
+ *   - the external `/v1/messages` send         (external-v1-messaging.service.ts)
+ *   - the workflow `send_message` step         (steps/send-message.ts)
+ *   - the workflow `send_template` step        (steps/send-template.ts)
+ *   - the workflow `ask_question` step         (steps/ask-question.ts)
+ *
+ * The workflow steps were wired in the 2026-05-22 event-safety audit — they
+ * were previously the unmetered leg of the partner/integration feedback-loop
+ * class (an auto-reply loop reached Meta with no per-thread ceiling). A
+ * rate-limited workflow send records a clean 429 step result and advances
+ * rather than throwing, so the cap stops a loop without stalling the run.
+ *
+ * Deliberately NOT consumed by the broadcast runner — broadcasts intentionally
+ * drive many distinct threads at one send each, so a per-conversation ceiling
+ * is the wrong axis there (each recipient is a different conversation). UI/v1
+ * template + media + forward sends remain on their own controller-level
+ * per-key / per-user buckets.
  *
  * Single-process by design (CLAUDE.md: one VPS). Moves to Redis on the
  * same trigger as every other in-process bucket — second app instance.

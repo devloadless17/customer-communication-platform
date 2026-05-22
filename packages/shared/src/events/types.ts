@@ -23,7 +23,7 @@ import type {
   InternalNote,
   MediaAttachment,
   MessageStatus,
-  ProviderName,
+  Channel,
   User,
 } from "../types";
 import type { TeamChannelMessageDto } from "../socket/events";
@@ -342,6 +342,15 @@ export interface ContactLifecycleChangedEvent {
   changedByUserId: string | null;
   /** Set on /v1 mutations for audit attribution. */
   changedByApiKeyId?: string | null;
+  /**
+   * Workflow steps set this to skip chain-trigger dispatch. Today the
+   * workflow-dispatch subscriber doesn't subscribe to this event, so the
+   * flag is dormant — but a future PR that wires a lifecycle-changed trigger
+   * MUST honor this or the `update_lifecycle` step infinite-loops into
+   * itself. Mirrors the identical guard on `ContactTagChangedEvent.silent`;
+   * this was the one contact-mutation event missing it (audit 2026-05-22).
+   */
+  silent?: boolean;
 }
 
 export interface NoteCreatedEvent {
@@ -702,7 +711,7 @@ export type DomainEvent = {
 }[DomainEventType];
 
 /**
- * Provider hint — `ProviderName` lives in the Prisma client enum. Surface
+ * Provider hint — `Channel` lives in the Prisma client enum. Surface
  * it here so subscribers can pivot on channel without re-importing Prisma.
  */
-export type EventProvider = ProviderName;
+export type EventProvider = Channel;

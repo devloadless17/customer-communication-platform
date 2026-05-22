@@ -13,7 +13,7 @@ export type Plan = "free" | "starter" | "advanced" | "enterprise";
 export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";
-export type ProviderName = "meta_cloud";
+export type Channel = "whatsapp";
 
 export interface Team {
   id: string;
@@ -46,7 +46,7 @@ export interface Contact {
   teamId: string;
   /**
    * WhatsApp/SMS contacts carry a phone number; Instagram/Telegram contacts
-   * don't (their identity lives in `identityProvider` + `externalContactId`).
+   * don't (their identity lives in `identityChannel` + `externalContactId`).
    * Nullable end-to-end so the UI degrades to "show what identity we have."
    */
   phoneNumber: string | null;
@@ -54,10 +54,10 @@ export interface Contact {
    * Multi-channel identity. Set together with `externalContactId` when the
    * contact's natural id isn't a phone number — Instagram scoped-user-id,
    * Telegram chat-id, etc. WhatsApp contacts leave both null and use
-   * phoneNumber. The DB enforces `(teamId, identityProvider, externalContactId)`
+   * phoneNumber. The DB enforces `(teamId, identityChannel, externalContactId)`
    * uniqueness so a contact can be deduped on either key.
    */
-  identityProvider?: ProviderName | null;
+  identityChannel?: Channel | null;
   externalContactId?: string | null;
   /**
    * Canonical display name. Derived from `firstName + lastName` when both
@@ -305,7 +305,7 @@ export interface Message {
   /** For media messages: the caption (or empty). For text: the message body. */
   body: string;
   direction: MessageDirection;
-  provider: ProviderName;
+  channel: Channel;
   status: MessageStatus;
   /**
    * Original webhook payload, kept verbatim in the DB for debugging

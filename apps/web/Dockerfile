@@ -20,7 +20,7 @@
 # rationale.
 # =============================================================================
 
-FROM node:22-slim AS base
+FROM node:24-slim AS base
 WORKDIR /app
 # openssl: required by Prisma's query engine.
 # ca-certificates: HTTPS to Meta, HIBP, UploadThing.
@@ -116,17 +116,18 @@ RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","
 # pg'` — Next.js's standalone tracer at /app/node_modules carries
 # only what the page bundle imports, and these three aren't reached
 # from any page (the only consumer is the one-shot seed script).
-# bcrypt ships native bindings; node:22-slim glibc + node 22 matches
-# bcrypt 6's prebuild lineup so no compile step is needed.
+# bcrypt ships native bindings; bcrypt 6 uses N-API (node-addon-api),
+# so its prebuilds are ABI-stable across Node majors — node:24-slim
+# glibc resolves the same prebuild with no compile step.
 
 # -----------------------------------------------------------------------------
 # runtime — slim image with the standalone bundle + the CLI tools. No pnpm
 # store, no apps/api, no dev deps.
 # -----------------------------------------------------------------------------
-FROM node:22-slim AS runtime
+FROM node:24-slim AS runtime
 WORKDIR /app
 # `apt-get upgrade` patches stale debian packages (libc6, libcap2,
-# libsystemd0, libudev1, …) at image-build time — node:22-slim is
+# libsystemd0, libudev1, …) at image-build time — node:24-slim is
 # rebuilt periodically but lags debian security updates by days, and
 # the docker-build-push GHA cache can re-use a still-older base layer.
 # Pins us to the current debian security feed at the moment of build.

@@ -35,7 +35,7 @@ export class ErrorBoundary extends Component<Props, State> {
     // Surface to the console; in prod this is the operator's only signal
     // unless we wire telemetry. Don't rethrow — the whole point is to
     // contain the failure to this subtree.
-    // eslint-disable-next-line no-console
+     
     console.error(`[ErrorBoundary${this.props.label ? `:${this.props.label}` : ""}]`, error, info.componentStack);
   }
 

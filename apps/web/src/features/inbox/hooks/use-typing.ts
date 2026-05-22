@@ -28,7 +28,11 @@ import { getClientSocket } from "@/lib/socket-client";
  * reach Meta; sustained typing does and then refreshes itself.
  */
 const META_TYPING_REFRESH_MS = 20_000;
-const META_TYPING_START_DELAY_MS = 100;
+// Hold the first Meta ping until the agent has typed continuously for this
+// long, so a brief keystroke burst can't pin the customer's phone to a 25s
+// typing bubble (Meta has no "stop typing" call). The whole rationale below
+// is written around this 800ms window — keep them in sync.
+const META_TYPING_START_DELAY_MS = 800;
 
 export function useTyping(
   conversationId: string,

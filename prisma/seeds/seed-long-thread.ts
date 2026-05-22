@@ -96,9 +96,9 @@ async function main() {
 
     await db.message.upsert({
       where: {
-        teamId_provider_externalId: {
+        teamId_channel_externalId: {
           teamId: conversation.teamId,
-          provider: "meta_cloud",
+          channel: "whatsapp",
           externalId,
         },
       },
@@ -109,7 +109,7 @@ async function main() {
         senderUserId: null, // outbound dev messages keep null sender to keep the script simple
         body,
         direction,
-        provider: "meta_cloud",
+        channel: "whatsapp",
         status: direction === "in" ? "delivered" : "sent",
         rawPayload: { source: "dev-long-thread" } as Prisma.InputJsonValue,
         timestamp: ts,

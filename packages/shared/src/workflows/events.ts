@@ -1,7 +1,7 @@
 import type {
   ConversationStatus,
   MediaKind,
-  ProviderName,
+  Channel,
 } from "../types";
 
 /**
@@ -24,11 +24,11 @@ export interface WorkflowMessageSnapshot {
   conversationId: string;
   externalId: string;
   /** Channel this message came through (`meta_cloud` = WhatsApp today).
-   *  Always present — every message row carries a non-null provider — so
+   *  Always present — every message row carries a non-null channel — so
    *  authors can branch "is this from WhatsApp" without inferring it from
-   *  the contact. The contact-level `identityProvider` is null for phone-
+   *  the contact. The contact-level `identityChannel` is null for phone-
    *  keyed (WhatsApp) contacts, so this is the reliable per-message source. */
-  provider: ProviderName;
+  channel: Channel;
   direction: "in" | "out";
   body: string;
   mediaKind: MediaKind | null;
@@ -40,8 +40,8 @@ export interface WorkflowMessageSnapshot {
 export interface WorkflowConversationSnapshot {
   id: string;
   /** Channel this thread lives on (`meta_cloud` = WhatsApp). Source of truth
-   *  for the conversation's channel — see Conversation.provider. */
-  provider: ProviderName;
+   *  for the conversation's channel — see Conversation.channel. */
+  channel: Channel;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -64,7 +64,7 @@ export interface WorkflowConversationSnapshot {
 export interface WorkflowContactSnapshot {
   id: string;
   phoneNumber: string | null;
-  identityProvider: ProviderName | null;
+  identityChannel: Channel | null;
   externalContactId: string | null;
   name: string;
   email: string | null;

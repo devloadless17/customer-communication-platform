@@ -30,7 +30,7 @@ export function BodyRenderer({
   const tokens = tokenizeBody(body);
   const q = searchQuery?.trim() ?? "";
   return (
-    <span className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+    <span className="whitespace-pre-wrap wrap-break-words text-sm leading-relaxed">
       {tokens.map((tok, i) =>
         tok.kind === "text" ? (
           <span key={i}>

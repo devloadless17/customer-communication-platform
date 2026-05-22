@@ -18,7 +18,7 @@ import {
   redactGraph,
   type WorkflowBody,
 } from "@/lib/workflows/parse";
-import { enqueueWorkflowRun } from "@/lib/workflows/queue";
+import { enqueueWorkflowRun, getRedisConnection } from "@/lib/workflows/queue";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -32,6 +32,27 @@ import type {
 // otherwise flood the api log with the same line forever. Once the operator
 // has seen it once they have what they need to migrate the caller.
 const loggedLegacyTimestampWarn = new Set<string>();
+
+// Cross-system chain-depth ceiling for the incoming_webhook trigger. Our own
+// http_request step stamps `X-CCP-Depth: depth+1`; an external system that
+// bounces back into this webhook carries the header along. At/above this we
+// drop the request (no run) so http_request -> external -> incoming_webhook ->
+// http_request -> ... can't sustain. Matches the in-process trigger_workflow
+// TRIGGER_DEPTH_MAX so both chain axes share one ceiling (audit 2026-05-22).
+const MAX_WEBHOOK_CHAIN_DEPTH = 8;
+
+// Opt-in idempotency window for the incoming_webhook trigger. When a caller
+// supplies an `Idempotency-Key` header we dedupe run creation in Redis (SET NX)
+// for this long, so a partner double-delivery / retry doesn't double-fire the
+// workflow (double Meta sends, double tag changes). 24h matches the /v1
+// idempotency TTL. No schema change — Redis is already required for the queue.
+const WEBHOOK_IDEMPOTENCY_TTL_S = 24 * 60 * 60;
+
+function parseChainDepth(raw: string | undefined): number {
+  if (!raw) return 0;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
 
 @Injectable()
 export class WorkflowsService {
@@ -74,7 +95,7 @@ export class WorkflowsService {
         };
         const startNode = graph.nodes?.find((n) => n.id === graph.startNodeId);
         const firstStepLabel = startNode
-          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ?  
             describeStep(startNode.type as any, startNode.config)
           : "(empty graph)";
         const stepCount = graph.nodes?.length ?? 0;
@@ -538,7 +559,7 @@ export class WorkflowsService {
         contact: {
           id: contact.id,
           phoneNumber: contact.phoneNumber,
-          identityProvider: contact.identityProvider,
+          identityChannel: contact.identityChannel,
           externalContactId: contact.externalContactId,
           name: contact.name,
           email: contact.email,
@@ -566,7 +587,7 @@ export class WorkflowsService {
         contact: {
           id: "test_contact",
           phoneNumber: "10000000000",
-          identityProvider: null,
+          identityChannel: null,
           externalContactId: null,
           name: "Test Contact",
           email: null,
@@ -620,7 +641,7 @@ export class WorkflowsService {
     signatureHeader: string,
     timestampHeader: string | undefined,
     headers: Record<string, string>,
-  ): Promise<{ runId: string }> {
+  ): Promise<{ runId: string | null; duplicate?: boolean; dropped?: string }> {
     const wf = await this.db.workflow.findFirst({
       where: { id },
       select: {
@@ -729,6 +750,58 @@ export class WorkflowsService {
       throw new ForbiddenException({ error: "invalid signature" });
     }
 
+    // ---- Signature verified past this point. Loop + dedupe guards only run
+    // on authenticated requests so an unsigned flood can't poison either. ----
+
+    // Cross-system loop guard. Our own http_request step stamps X-CCP-Depth on
+    // outbound calls; if an external system bounces back into this webhook the
+    // header rides along. Drop (200, no run) at/above the ceiling so the
+    // http_request -> external -> incoming_webhook -> http_request cycle can't
+    // sustain. The resulting run carries depth+1 forward via eventPayload._depth.
+    const inboundDepth = parseChainDepth(headers["x-ccp-depth"]);
+    if (inboundDepth >= MAX_WEBHOOK_CHAIN_DEPTH) {
+      console.warn(
+        `[workflow-webhook] workflow ${id} dropped: chain depth ${inboundDepth} >= ` +
+          `${MAX_WEBHOOK_CHAIN_DEPTH} — likely an http_request <-> incoming_webhook loop`,
+      );
+      return { runId: null, dropped: "chain_depth_exceeded" };
+    }
+
+    // Opt-in idempotency. When the caller supplies an Idempotency-Key we claim
+    // it in Redis (SET NX) BEFORE creating the run; a duplicate within the
+    // window returns the prior runId without firing a second run. Without the
+    // header, behavior is unchanged (every signed request creates a run).
+    const idempotencyKey = headers["idempotency-key"]?.slice(0, 255);
+    const redisKey = idempotencyKey ? `wf-idem:${wf.id}:${idempotencyKey}` : null;
+    if (redisKey) {
+      try {
+        const redis = getRedisConnection();
+        const acquired = await redis.set(
+          redisKey,
+          "pending",
+          "EX",
+          WEBHOOK_IDEMPOTENCY_TTL_S,
+          "NX",
+        );
+        if (acquired === null) {
+          const prior = await redis.get(redisKey);
+          return {
+            runId: prior && prior !== "pending" ? prior : null,
+            duplicate: true,
+          };
+        }
+      } catch (err) {
+        // Redis hiccup — fail OPEN (create the run) rather than dropping a
+        // legitimately-signed webhook. At-most-once dedupe is best-effort;
+        // double-fire on a Redis outage is the lesser evil than silent loss.
+        console.warn(
+          `[workflow-webhook] idempotency claim failed for ${id}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
+    }
+
     let parsedBody: unknown = null;
     try {
       parsedBody = rawBody ? JSON.parse(rawBody) : null;
@@ -747,6 +820,8 @@ export class WorkflowsService {
       contact: null,
       body: parsedBody,
       headers: passthroughHeaders,
+      // Seed the chain depth so this run's http_request steps stamp depth+1.
+      _depth: inboundDepth,
     };
 
     const run = await this.db.workflowRun.create({
@@ -762,6 +837,15 @@ export class WorkflowsService {
       select: { id: true },
     });
     await enqueueWorkflowRun(run.id);
+    // Record the runId against the idempotency key so a later duplicate returns
+    // it (overwrites the "pending" sentinel, keeps the TTL window).
+    if (redisKey) {
+      try {
+        await getRedisConnection().set(redisKey, run.id, "EX", WEBHOOK_IDEMPOTENCY_TTL_S);
+      } catch {
+        /* best-effort — the run is already created + enqueued */
+      }
+    }
     return { runId: run.id };
   }
 

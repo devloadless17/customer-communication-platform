@@ -107,7 +107,7 @@ export function getClientSocket(): ClientSocket {
     ) {
       if (!warned) {
         warned = true;
-        // eslint-disable-next-line no-console
+         
         console.warn(
           `[socket] transient connect_error: ${err.message}. ` +
             `Backing off and reconnecting.`,
@@ -118,7 +118,7 @@ export function getClientSocket(): ClientSocket {
     if (warned || teardown) return;
     warned = true;
     const target = apiUrl || `${window.location.origin} (same-origin fallback)`;
-    // eslint-disable-next-line no-console
+     
     console.warn(
       `[socket] connect_error against ${target}: ${err.message}. ` +
         (apiUrl
@@ -138,57 +138,21 @@ export function getClientSocket(): ClientSocket {
 }
 
 // -----------------------------------------------------------------------
-// Local event bus — backstop path for optimistic dispatches.
+// Optimistic local dispatch.
 //
 // The original implementation iterated `socket.listeners(event)` and fired
 // each handler directly. That worked for the right-rail panel + thread
-// header (their listeners ran sync), but the conversation list sidebar
-// kept lagging by ~1s — the user reported it consistently, even when the
-// other surfaces flipped within a frame.
-//
-// The relevant difference: the sidebar's listener (useTeamEvents) updates
-// state at the InboxShell root, which is a large render. The right-rail's
-// listener updates a state local to ContactPanel, which is a tiny render.
-// Both setStates ARE scheduled in the same batch, but React 18's
-// concurrent renderer is free to pre-empt the InboxShell render between
-// commits if it considers it lower-priority — so the right rail's tiny
-// re-render commits in the same frame as the click while the heavy
-// inbox-shell tree slips into a later frame.
+// header (their listeners ran sync), but the conversation list sidebar kept
+// lagging by ~1s. The sidebar's listener (useTeamEvents) updates state at
+// the InboxShell root (a large render); React's concurrent renderer could
+// pre-empt that between commits while the right rail's tiny ContactPanel
+// re-render committed in the same frame as the click.
 //
 // flushSync forces the listener loop to run inside a synchronous commit:
 // every setState fired by the dispatched listeners is flushed before the
-// dispatch function returns. The two surfaces commit together.
-//
-// The localBus also gives us a second, socket-independent subscription
-// path so any consumer that wants to be 100% sure to receive optimistic
-// frames can subscribe via `onLocalSocketEvent` instead of (or in
-// addition to) `socket.on`. Useful if a future change moves a listener
-// outside React tree where socket.io's lifecycle becomes opaque.
+// dispatch returns, so all the surfaces commit together.
 // -----------------------------------------------------------------------
 type AnyListener = (payload: unknown) => void;
-const localBus = new Map<string, Set<AnyListener>>();
-
-export function onLocalSocketEvent<E extends keyof ServerToClientEvents>(
-  event: E,
-  fn: (payload: Parameters<ServerToClientEvents[E]>[0]) => void,
-): void {
-  const key = event as string;
-  let set = localBus.get(key);
-  if (!set) {
-    set = new Set();
-    localBus.set(key, set);
-  }
-  set.add(fn as AnyListener);
-}
-
-export function offLocalSocketEvent<E extends keyof ServerToClientEvents>(
-  event: E,
-  fn: (payload: Parameters<ServerToClientEvents[E]>[0]) => void,
-): void {
-  const set = localBus.get(event as string);
-  if (!set) return;
-  set.delete(fn as AnyListener);
-}
 
 /**
  * Fire a `ServerToClient` event LOCALLY (no network round-trip). Used for
@@ -211,14 +175,12 @@ export function dispatchLocalSocketEvent<E extends keyof ServerToClientEvents>(
   payload: Parameters<ServerToClientEvents[E]>[0],
 ): void {
   const s = socket;
-  // Collect every listener once so the iteration is stable even if a handler
-  // mutates the listener arrays (e.g. a useEffect cleanup fires mid-loop).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const socketListeners: AnyListener[] = s ? (s.listeners(event as any) as AnyListener[]).slice() : [];
-  const localListeners = localBus.get(event as string);
-  const localCopy: AnyListener[] = localListeners ? Array.from(localListeners) : [];
-  const all = socketListeners.length + localCopy.length;
-  if (all === 0) return;
+  if (!s) return;
+  // Snapshot the listeners once so iteration is stable even if a handler
+  // mutates the listener array (e.g. a useEffect cleanup fires mid-loop).
+
+  const socketListeners: AnyListener[] = (s.listeners(event as any) as AnyListener[]).slice();
+  if (socketListeners.length === 0) return;
 
   const run = () => {
     for (const fn of socketListeners) {
@@ -226,16 +188,8 @@ export function dispatchLocalSocketEvent<E extends keyof ServerToClientEvents>(
         fn(payload);
       } catch (err) {
         // A misbehaving subscriber must not break the optimistic UX.
-        // eslint-disable-next-line no-console
+
         console.error(`[socket] local dispatch ${String(event)} subscriber threw`, err);
-      }
-    }
-    for (const fn of localCopy) {
-      try {
-        fn(payload);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error(`[socket] local-bus dispatch ${String(event)} subscriber threw`, err);
       }
     }
   };

@@ -9,7 +9,7 @@ import type {
   Message,
   MessageDirection,
   MessageStatus,
-  ProviderName,
+  Channel,
   ReplySnapshot,
   Role,
   User,
@@ -85,7 +85,7 @@ export function mapContact(c: PrismaContact): Contact {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
-    identityProvider: c.identityProvider as ProviderName | null,
+    identityChannel: c.identityChannel as Channel | null,
     externalContactId: c.externalContactId,
     name: c.name,
     firstName: c.firstName,
@@ -116,15 +116,20 @@ export function mapContact(c: PrismaContact): Contact {
  */
 // `version` is the optimistic-concurrency token on the row — it never
 // reaches the wire (clients don't need it; the server-side CAS handles
-// races) so we omit it from the mapper's input type too. Listing it
-// alongside `customFields` keeps the strict shape's `Omit` tractable.
-type PrismaContactListItem = Omit<PrismaContact, "customFields" | "version">;
+// races) so we omit it from the mapper's input type too. `deletedAt` is the
+// soft-delete tombstone — likewise an internal column that never reaches the
+// wire. Listing them alongside `customFields` keeps the strict shape's `Omit`
+// tractable.
+type PrismaContactListItem = Omit<
+  PrismaContact,
+  "customFields" | "version" | "deletedAt"
+>;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   return {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
-    identityProvider: c.identityProvider as ProviderName | null,
+    identityChannel: c.identityChannel as Channel | null,
     externalContactId: c.externalContactId,
     name: c.name,
     firstName: c.firstName,
@@ -188,7 +193,7 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     senderUserId: m.senderUserId,
     body: m.body,
     direction: m.direction as MessageDirection,
-    provider: m.provider as ProviderName,
+    channel: m.channel as Channel,
     status: m.status as MessageStatus,
     timestamp: m.timestamp.toISOString(),
     ...(m.replyToMessageId

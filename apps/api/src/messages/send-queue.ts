@@ -1,7 +1,7 @@
 import { Queue } from "bullmq";
 
 import { connectionOptions } from "@/lib/workflows/queue";
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 
 /**
  * Outbound text/template send queue.
@@ -50,7 +50,7 @@ interface BaseSendJob {
    *  provider up in the registry instead of assuming Meta. Optional for
    *  forward-compat with jobs enqueued before this field existed — the worker
    *  defaults to `meta_cloud`. */
-  provider?: ProviderName;
+  channel?: Channel;
   /** Pre-resolved local id when the user is replying to a quoted message. */
   replyToMessageId?: string | null;
   /** Pre-resolved wamid for Meta's `context.message_id`; absent when parent

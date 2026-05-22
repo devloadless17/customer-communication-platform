@@ -4,7 +4,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -20,14 +19,29 @@ interface TzContextValue {
   now: number;
 }
 
-const TzContext = createContext<TzContextValue>({ tz: "UTC", now: 0 });
+// Two SEPARATE contexts on purpose. `tz` is effectively immutable for a
+// session; `now` ticks every 60s. If both lived on one context value, the
+// 60s tick would re-render EVERY consumer — and because context bypasses
+// React.memo, that means every <LocalTime> in every list row (worst on the
+// contacts directory) re-rendering on a minute heartbeat. Splitting them
+// lets absolute-timestamp consumers subscribe to the stable TzContext only
+// and never re-render on the tick; only live relative-time consumers
+// subscribe to NowContext. See LocalTime for how the split is applied.
+const TzContext = createContext<string>("UTC");
+const NowContext = createContext<number>(0);
 
+/** Stable IANA zone — never changes on the 60s tick. Subscribe to this from
+ *  anything rendering an ABSOLUTE timestamp so the tick can't re-render it. */
 export function useTimezone(): string {
-  return useContext(TzContext).tz;
+  return useContext(TzContext);
 }
 
+/** tz + the ticking wall-clock "now" (ms). Subscribes to NowContext, so a
+ *  consumer re-renders every 60s — only use it where live relative time is
+ *  needed ("12m ago", the thread's day separators). For absolute timestamps
+ *  use `useTimezone()` instead. */
 export function useTzNow(): TzContextValue {
-  return useContext(TzContext);
+  return { tz: useContext(TzContext), now: useContext(NowContext) };
 }
 
 /**
@@ -74,6 +88,12 @@ export function TimezoneProvider({
     // picks it up.
   }, [tz]);
 
-  const value = useMemo(() => ({ tz, now }), [tz, now]);
-  return <TzContext.Provider value={value}>{children}</TzContext.Provider>;
+  // `tz` rides its own provider so the 60s `now` tick can't re-render the
+  // (large) set of absolute-timestamp consumers. `now` is a bare number, so
+  // its provider re-renders only the few live-relative-time subscribers.
+  return (
+    <TzContext.Provider value={tz}>
+      <NowContext.Provider value={now}>{children}</NowContext.Provider>
+    </TzContext.Provider>
+  );
 }

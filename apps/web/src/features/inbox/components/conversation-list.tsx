@@ -1,6 +1,14 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -139,8 +147,12 @@ function ConversationListImpl({
     }
   }
 
+  // Defer the client-side filter so a fast typist's keystrokes paint the
+  // input immediately while the (virtualized) list re-filters at lower
+  // priority — same pattern as the team channel-list search.
+  const deferredSearch = useDeferredValue(search);
   const visible = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     if (!q) return conversations;
     // Preset / stage filtering is server-side now (useTeamEvents drives a
     // filter-aware fetch). Only the search box stays client-side because
@@ -152,7 +164,7 @@ function ConversationListImpl({
         `${contact.name} ${contact.phoneNumber} ${c.lastMessagePreview}`.toLowerCase();
       return haystack.includes(q);
     });
-  }, [conversations, search]);
+  }, [conversations, deferredSearch]);
 
   const headerTitle = useMemo(() => {
     if (filter.kind === "preset") {

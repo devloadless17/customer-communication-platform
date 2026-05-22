@@ -172,7 +172,7 @@ function EditorForNode({
   trigger: Trigger;
   onChangeConfig: (config: Record<string, unknown>) => void;
 }) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const c = node.config as any;
   switch (node.type) {
     case "send_message":

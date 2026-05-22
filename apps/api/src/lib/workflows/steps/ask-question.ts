@@ -6,6 +6,10 @@ import {
   sendTextInternal,
 } from "@/lib/messaging/send-text-internal";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
+import {
+  ConversationSendRateLimitedError,
+  consumeConversationSendBudget,
+} from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
 import type { InteractiveOption } from "@ccp/shared/providers/types";
@@ -373,6 +377,10 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
     const body = resolveFieldTokens(config.question, contact, envelopeExtras(envelope));
 
     try {
+      // Per-conversation send ceiling — same loop backstop as send_message.
+      // A rate-limited question routes to the timeout edge (below) so the
+      // author's fallback branch still runs instead of stalling the run.
+      consumeConversationSendBudget(ctx.teamId, conversationId);
       if (config.answerKind === "buttons" || config.answerKind === "list") {
         // Interactive — buttons (1-3) or list (1-10). The contact's tap
         // round-trips as `interactiveReply.id` which the runner exposes
@@ -395,6 +403,18 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
         });
       }
     } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        // Per-conversation budget exhausted — route to timeout like the
+        // closed-window case so the author's fallback branch still runs.
+        return {
+          kind: "branch",
+          status: 429,
+          body: truncateBody(
+            JSON.stringify({ selected: "timeout", error: "conversation_send_rate_limited" }),
+          ),
+          selectedLabel: "timeout",
+        };
+      }
       if (err instanceof SendTextValidationError) {
         // Closed window etc. — fall through to the timeout edge so the
         // workflow author can wire a fallback (send_template, etc.).

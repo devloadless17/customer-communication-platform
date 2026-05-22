@@ -29,14 +29,16 @@ export class EventBus {
   }
 
   /**
-   * Register a subscriber. Returns an unsubscribe function — useful in
-   * `OnModuleDestroy` hooks for clean shutdown.
+   * Register a subscriber. `priority` fixes the execution tier (lower runs
+   * first; see `SubscriberPriority`). Returns an unsubscribe function —
+   * useful in `OnModuleDestroy` hooks for clean shutdown.
    */
   subscribe<K extends DomainEventType>(
     type: K,
     handler: (event: DomainEventOf<K>) => void | Promise<void>,
+    priority?: number,
   ): () => void {
-    return busSubscribe(type, handler);
+    return busSubscribe(type, handler, priority);
   }
 
   /**

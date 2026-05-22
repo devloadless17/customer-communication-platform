@@ -5,10 +5,11 @@
 // before the process exits.
 
 import { Worker, type Job } from "bullmq";
+import type IORedis from "ioredis";
 
 import {
   WEBHOOK_DELIVER_QUEUE_NAME,
-  webhookConnectionOptions,
+  createWebhookWorkerConnection,
   type WebhookDeliverJobData,
 } from "./queue";
 import { db } from "@/lib/db";
@@ -43,6 +44,8 @@ const MEDIA_RESOLVE_POLL_MS = 400;
 
 interface WorkerGlobals {
   worker?: Worker<WebhookDeliverJobData>;
+  connection?: IORedis;
+  shuttingDown?: boolean;
 }
 const g = globalThis as unknown as { __ccpWebhookWorker?: WorkerGlobals };
 const state: WorkerGlobals = (g.__ccpWebhookWorker ??= {});
@@ -54,6 +57,12 @@ function concurrency(): number {
 
 export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
   if (state.worker) return state.worker;
+  state.shuttingDown = false;
+
+  // Dedicated blocking connection (NOT the shared producer) — see
+  // createWorkerConnection in lib/workflows/queue.ts.
+  const connection = createWebhookWorkerConnection("webhooks-worker");
+  state.connection = connection;
 
   const worker = new Worker<WebhookDeliverJobData>(
     WEBHOOK_DELIVER_QUEUE_NAME,
@@ -65,7 +74,7 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
       await deliverOnce(job.data.deliveryId, attempt, maxAttempts);
     },
     {
-      connection: webhookConnectionOptions(),
+      connection,
       concurrency: concurrency(),
       // Each delivery is a single fetch + a tiny DB update — BUT under DB
       // contention (100 concurrent failures all queued on the same
@@ -88,6 +97,26 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
 
   worker.on("error", (err) => {
     console.error("[webhooks] worker error", err);
+    // Fatal classes (Redis socket closed, auth) leave the worker wedged with
+    // state.worker still set. Close + null the slot and self-respawn on a delay
+    // so deliveries resume without operator intervention — the workflow worker
+    // is re-armed by its sweeper; this one has none, so it re-arms itself.
+    // Skipped during shutdown so it doesn't fight stop().
+    const msg = err instanceof Error ? err.message : String(err);
+    const fatal =
+      msg.includes("Connection is closed") ||
+      msg.includes("WRONGPASS") ||
+      msg.includes("NOAUTH");
+    if (fatal && !state.shuttingDown) {
+      console.warn("[webhooks] worker entered unrecoverable state; re-spawning");
+      worker.close().catch(() => undefined);
+      connection.disconnect();
+      state.worker = undefined;
+      state.connection = undefined;
+      setTimeout(() => {
+        if (!state.shuttingDown) startWebhookDeliverWorker();
+      }, 1_000).unref();
+    }
   });
 
   state.worker = worker;
@@ -96,8 +125,13 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
 }
 
 export async function stopWebhookDeliverWorker(): Promise<void> {
+  state.shuttingDown = true;
   if (!state.worker) return;
   await state.worker.close();
+  // Close the worker's dedicated blocking connection (BullMQ doesn't, since we
+  // handed it the instance). disconnect() is synchronous + can't hang.
+  state.connection?.disconnect();
+  state.connection = undefined;
   state.worker = undefined;
 }
 

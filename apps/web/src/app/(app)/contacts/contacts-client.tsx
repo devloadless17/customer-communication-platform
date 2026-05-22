@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
@@ -160,15 +160,21 @@ export function ContactsClient({
     [tags],
   );
 
-  function patchContactStage(contactId: string, stageId: string | null) {
-    setItems((prev) =>
-      prev.map((row) =>
-        row.contact.id === contactId
-          ? { ...row, contact: { ...row.contact, stageId } }
-          : row,
-      ),
-    );
-  }
+  // Stable across renders (setItems from useContactList is stable) so the
+  // memoized ContactRow doesn't bust on every parent render — a single
+  // checkbox toggle then re-renders only the toggled row, not all ~2000.
+  const patchContactStage = useCallback(
+    (contactId: string, stageId: string | null) => {
+      setItems((prev) =>
+        prev.map((row) =>
+          row.contact.id === contactId
+            ? { ...row, contact: { ...row.contact, stageId } }
+            : row,
+        ),
+      );
+    },
+    [setItems],
+  );
   // Selection state for bulk actions. Set<string> keeps add/remove O(1) and
   // makes "select all on this page" a simple union.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -235,15 +241,42 @@ export function ContactsClient({
 
   // Patch a single contact's tag list in-place — used when the per-row tag
   // picker saves. Avoids a router.refresh that would also reset selection.
-  function patchContactTags(contactId: string, tagIds: string[]) {
-    setItems((prev) =>
-      prev.map((row) =>
-        row.contact.id === contactId
-          ? { ...row, contact: { ...row.contact, tagIds } }
-          : row,
-      ),
+  // useCallback for the same memo-stability reason as patchContactStage.
+  const patchContactTags = useCallback(
+    (contactId: string, tagIds: string[]) => {
+      setItems((prev) =>
+        prev.map((row) =>
+          row.contact.id === contactId
+            ? { ...row, contact: { ...row.contact, tagIds } }
+            : row,
+        ),
+      );
+    },
+    [setItems],
+  );
+
+  // Stable row callbacks — these + the two patchers above are what let
+  // ContactRow's React.memo actually fire. Each takes the contact id as an
+  // argument instead of closing over it, so one function instance serves
+  // every row.
+  const handleSelectChange = useCallback((contactId: string, next: boolean) => {
+    setSelectedIds((prev) => {
+      const copy = new Set(prev);
+      if (next) copy.add(contactId);
+      else copy.delete(contactId);
+      return copy;
+    });
+  }, []);
+  const handleTagCreated = useCallback((t: Tag) => {
+    setTags((prev) =>
+      prev.some((x) => x.id === t.id)
+        ? prev
+        : [...prev, t].sort((a, b) => a.name.localeCompare(b.name)),
     );
-  }
+  }, []);
+  const handleOpenDetail = useCallback((contactId: string) => {
+    setDetailId(contactId);
+  }, []);
 
   // Single delete from the detail drawer. Mirrors the bulk-delete confirm +
   // local removal; the server also fans `contact:deleted` to other tabs.
@@ -412,22 +445,11 @@ export function ContactsClient({
                   stageCatalog={stages}
                   canManageStages={canManageStages}
                   selected={selectedIds.has(item.contact.id)}
-                  onSelectChange={(next) => {
-                    setSelectedIds((prev) => {
-                      const copy = new Set(prev);
-                      if (next) copy.add(item.contact.id);
-                      else copy.delete(item.contact.id);
-                      return copy;
-                    });
-                  }}
-                  onTagsChanged={(ids) => patchContactTags(item.contact.id, ids)}
-                  onTagCreated={(t) => {
-                    setTags((prev) =>
-                      prev.some((x) => x.id === t.id) ? prev : [...prev, t].sort((a, b) => a.name.localeCompare(b.name)),
-                    );
-                  }}
-                  onStageChanged={(stageId) => patchContactStage(item.contact.id, stageId)}
-                  onOpen={() => setDetailId(item.contact.id)}
+                  onSelectChange={handleSelectChange}
+                  onTagsChanged={patchContactTags}
+                  onTagCreated={handleTagCreated}
+                  onStageChanged={patchContactStage}
+                  onOpen={handleOpenDetail}
                 />
               ))}
             </ul>
@@ -630,7 +652,7 @@ export function ContactsClient({
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function ContactRow({
+const ContactRow = memo(function ContactRow({
   item,
   tagCatalog,
   tagById,
@@ -649,12 +671,15 @@ function ContactRow({
   stageCatalog: ContactStage[];
   canManageStages: boolean;
   selected: boolean;
-  onSelectChange: (next: boolean) => void;
-  onTagsChanged: (tagIds: string[]) => void;
+  // Callbacks take the contact id so the parent can pass ONE stable
+  // function per callback (not a per-row closure) — that's what makes the
+  // surrounding React.memo effective.
+  onSelectChange: (id: string, next: boolean) => void;
+  onTagsChanged: (id: string, tagIds: string[]) => void;
   onTagCreated: (tag: Tag) => void;
-  onStageChanged: (stageId: string | null) => void;
+  onStageChanged: (id: string, stageId: string | null) => void;
   /** Open the detail drawer for this contact. */
-  onOpen: () => void;
+  onOpen: (id: string) => void;
 }) {
   const { contact, activeConversationId, lastMessageAt, lastInboundAt } = item;
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
@@ -683,7 +708,7 @@ function ContactRow({
   async function persistTagIds(nextIds: string[]) {
     // Optimistic: parent already painted the new state; rollback on failure.
     const prevIds = contact.tagIds ?? [];
-    onTagsChanged(nextIds);
+    onTagsChanged(contact.id, nextIds);
     setTagSaveError(null);
     try {
       const res = await fetch(`/api/contacts/${contact.id}/tags`, {
@@ -693,27 +718,27 @@ function ContactRow({
       });
       if (!res.ok) throw new Error(await safeReadError(res));
     } catch (err) {
-      onTagsChanged(prevIds);
+      onTagsChanged(contact.id, prevIds);
       setTagSaveError(err instanceof Error ? err.message : "Failed");
     }
   }
 
   async function persistStage(nextStageId: string) {
     const prev = contact.stageId ?? null;
-    onStageChanged(nextStageId);
+    onStageChanged(contact.id, nextStageId);
     const res = await fetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ stageId: nextStageId }),
     });
     if (!res.ok) {
-      onStageChanged(prev);
+      onStageChanged(contact.id, prev);
     }
   }
 
   return (
     <li
-      onClick={onOpen}
+      onClick={() => onOpen(contact.id)}
       className={cn(
         "group flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-accent/40",
         selected && "bg-primary/5 hover:bg-primary/5",
@@ -728,7 +753,7 @@ function ContactRow({
           type="checkbox"
           className="size-4 cursor-pointer accent-primary"
           checked={selected}
-          onChange={(e) => onSelectChange(e.target.checked)}
+          onChange={(e) => onSelectChange(contact.id, e.target.checked)}
           aria-label={`Select ${contact.name || contact.phoneNumber}`}
         />
       </label>
@@ -747,7 +772,7 @@ function ContactRow({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          onOpen();
+          onOpen(contact.id);
         }}
         className="flex min-w-0 flex-1 items-center gap-2 text-left"
       >
@@ -829,7 +854,7 @@ function ContactRow({
       </div>
     </li>
   );
-}
+});
 
 async function safeReadError(res: Response): Promise<string> {
   try {

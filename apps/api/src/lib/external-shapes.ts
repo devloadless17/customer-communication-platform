@@ -4,7 +4,6 @@ import type {
   Message as DbMessage,
 } from "@prisma/client";
 
-import { publicChannel } from "@ccp/shared/channel";
 
 /**
  * Wire shapes the external API (/api/external/v1) returns. Stable contract
@@ -56,11 +55,11 @@ export interface ExternalContact {
   id: string;
   /**
    * Null for non-phone channels (Instagram/Telegram). Integrators that key
-   * by phone should fall back to identityProvider+externalContactId or skip
+   * by phone should fall back to identityChannel+externalContactId or skip
    * the row.
    */
   phoneNumber: string | null;
-  identityProvider: "meta_cloud" | null;
+  identityChannel: "whatsapp" | null;
   externalContactId: string | null;
   /** Canonical display name. Derived from firstName + lastName when both set. */
   name: string;
@@ -85,17 +84,9 @@ export interface ExternalConversation {
   id: string;
   contactId: string;
   /**
-   * Channel of the thread (`meta_cloud` = WhatsApp). A conversation is bound
-   * to one contact and therefore one channel. Surfaced here so integrators can
-   * route/filter threads without inferring it from the embedded contact's
-   * `identityProvider` (which is null for phone-keyed WhatsApp contacts).
-   */
-  provider: "meta_cloud";
-  /**
-   * Channel (the MEDIUM) — "whatsapp", "instagram", "telegram", …. Distinct
-   * from `provider`: one provider serves several channels (`meta_cloud` carries
-   * BOTH WhatsApp and Instagram), so route/filter on this, not on `provider`.
-   * Today always "whatsapp".
+   * Channel the thread lives on — "whatsapp", "instagram", "telegram", …. A
+   * conversation is bound to one contact and therefore one channel; route /
+   * filter threads on this. Today always "whatsapp".
    */
   channel: string;
   status: "open" | "pending" | "closed";
@@ -117,16 +108,9 @@ export interface ExternalMessage {
   conversationId: string;
   externalId: string;
   /**
-   * Channel this message was sent/received on (`meta_cloud` = WhatsApp).
-   * Always present. Integrators that handle multiple channels should key off
-   * this rather than the contact's `identityProvider` (which is null for
-   * phone-keyed WhatsApp contacts). Expands to a union as channels are added.
-   */
-  provider: "meta_cloud";
-  /**
-   * Channel (the MEDIUM) — "whatsapp", "instagram", "telegram", …. Distinct
-   * from `provider` (one provider serves several channels). Key off this when
-   * handling multiple channels. Today always "whatsapp".
+   * Channel this message was sent/received on — "whatsapp", "instagram", … .
+   * Always present; key off this when handling multiple channels. Today always
+   * "whatsapp".
    */
   channel: string;
   direction: "in" | "out";
@@ -167,7 +151,7 @@ export function toExternalContact(
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
-    identityProvider: c.identityProvider,
+    identityChannel: c.identityChannel,
     externalContactId: c.externalContactId,
     name: c.name,
     firstName: c.firstName ?? null,
@@ -217,8 +201,7 @@ export function toExternalConversation(
     id: c.id,
     contactId: c.contactId,
     // Channel is owned by the conversation row, not derived from the contact.
-    provider: c.provider as ExternalConversation["provider"],
-    channel: publicChannel(),
+    channel: c.channel,
     status: c.status as ExternalConversation["status"],
     assignee: toExternalAssignee(c.assignedUser),
     unreadCount: c.unreadCount,
@@ -262,8 +245,7 @@ export function toExternalMessage(
     id: m.id,
     conversationId: m.conversationId,
     externalId: m.externalId,
-    provider: m.provider as ExternalMessage["provider"],
-    channel: publicChannel(),
+    channel: m.channel,
     direction: m.direction as ExternalMessage["direction"],
     body: m.body,
     status: m.status as ExternalMessage["status"],

@@ -11,7 +11,7 @@ A web platform where multiple internal agents collaborate on WhatsApp conversati
 - Building on the **official Meta WhatsApp Cloud API**. Evolution / Baileys / unofficial bridges have been removed from this project on purpose — the ban risk for self-hosted bridges isn't acceptable for a SaaS.
 
 ## Stack
-- **Frontend:** Next.js (App Router, RSC, Zustand) — **owns rendering + auth pages only** post-migration.
+- **Frontend:** Next.js (App Router, RSC) — **owns rendering + auth pages only** post-migration. Client state is plain React (`useState` + pure reducers in `thread-reducers.ts` + a few small contexts) driven by Socket.io frames; **no Zustand, no React Query** (both were considered, neither is installed — don't reach for them).
 - **Backend:** **NestJS** (HTTP + Socket.io gateway + webhook ingest + BullMQ workers + workflow engine). Currently mid-migration from Next.js API routes. Until migration completes both processes run side-by-side behind Caddy.
 - **Database:** PostgreSQL (via Prisma). One `PrismaService` shared between Next.js (auth + RSC reads) and NestJS (everything else).
 - **Realtime:** Socket.io. Browser connects via Caddy → NestJS gateway (single-process with the event sources = zero cross-process emit latency).
@@ -66,6 +66,8 @@ NestJS owns every backend concern that isn't auth pages. Socket.io lives in the 
 5. **Webhook security.** Meta webhook authenticity is proven by HMAC-SHA256 of the raw body using the app secret (header `X-Hub-Signature-256`). Verify on every POST; reject malformed signatures with 403. The verify-token flow is only used at subscription setup.
 
 6. **Per-team secrets when we go multi-tenant.** Today `META_*` secrets live in `process.env`. When customer #2 onboards, those move to nullable columns on the `Team` table — read by the provider via a `getProviderConfig(teamId)` helper. This is the migration alluded to in rule #2; flagging now so it's not a surprise.
+
+7. **`Contact` = a channel identity, NOT a human; a `Conversation` is one-per-contact; the discriminator is `channel` (NO `provider`).** A WhatsApp account and a Telegram account are independent `Contact`s with independent `Conversation`s even for the same human — accounts differ, so records differ. NEVER add a `Person`/`Customer` super-entity or cross-channel merge (locked decision, re-ratified 2026-05-22). Because a Contact is already channel-scoped, "one conversation per channel per contact" = **one conversation per contact** (closed threads REOPEN, never fragment) — **DB-enforced** via `@@unique([teamId, contactId])` on Conversation (done 2026-05-22). **There is NO "provider"/"vendor" concept in the data model** (removed 2026-05-22): the one discriminator is `Channel { whatsapp }` (the MEDIUM), on `Conversation.channel` / `Message.channel` / `Contact.identityChannel` / `ChannelConnection.channel` (keyed `@@unique([teamId, channel])`). `meta_cloud` served BOTH WhatsApp and Instagram, so a vendor field couldn't tell them apart — the channel does. The `MessagingProvider` interface + `getProviderBinding(channel)` are the impl layer (one impl per vendor, registered per channel) — keep those names; just never store a "provider" on a row. Adding a channel = a new `Channel` value + a registered `MessagingProvider` + a `ChannelConnection` row.
 
 ## Things to know about Meta Cloud API specifically
 
@@ -143,21 +145,25 @@ Two services on one internal network: `postgres` and `app`. Only `app` publishes
 **Dev is lower on purpose** (2026-05-21): web `dev` = 3072, api `dev` = 2048. Reason: the dev box is a 15.4 GB Windows host giving WSL ~9.7 GB. Running BOTH dev servers at a 4 GB heap (8 GB combined) overcommitted during a webpack compile spike and the Linux OOM-killer killed the api (`exited (137)` — SIGKILL), which manifested as cascading flakiness (proxy `ECONNRESET`, socket dropping `message:new` → optimistic send bubbles hitting the 30s watchdog and going red). 3 GB + 2 GB fits in 9.7 GB with headroom. A big `.wslconfig` `memory=` bump is NOT the fix here — the host is too small to give WSL more without starving Windows (browser + VS Code + Docker Desktop). If a dev server ever throws a *V8* "JavaScript heap out of memory" (distinct from 137), bump that one's dev cap back up a notch.
 
 ### Before pilot launch (must-do)
-1. **systemd unit** on the VPS, NOT pm2. Single VPS, no clustering, systemd is already there. Live unit at [deploy/ccp.service](deploy/ccp.service). Set `Restart=always`, `RestartSec=3`, and rely on the Dockerfile's `ENV NODE_OPTIONS=--max-old-space-size=4096` (systemd env vars on the host don't propagate through `docker compose up`). **`TimeoutStopSec=120`** so systemd waits long enough for `app.enableShutdownHooks()` to drain BullMQ workers — must exceed the 90s `lockDuration` in [lib/workflows/worker.ts](apps/api/src/lib/workflows/worker.ts) plus the sweeper-stop tail. Lowering this re-executes Meta sends on every restart. See "Graceful shutdown" below.
+1. **systemd unit** on the VPS, NOT pm2. Single VPS, no clustering, systemd is already there. Live unit at [deploy/ccp.service](deploy/ccp.service). Set `Restart=always`, `RestartSec=3`, and rely on the Dockerfile's `ENV NODE_OPTIONS=--max-old-space-size=4096` (systemd env vars on the host don't propagate through `docker compose up`). **`TimeoutStopSec=120`** so systemd waits long enough for main.ts's manual shutdown handler (`server.close → app.close`) to drain BullMQ workers — must exceed the 90s `lockDuration` in [lib/workflows/worker.ts](apps/api/src/lib/workflows/worker.ts) plus the sweeper-stop tail. Lowering this re-executes Meta sends on every restart. See "Graceful shutdown" below.
 2. **Caddy reverse proxy** in front for HTTPS (not nginx — Caddy handles Let's Encrypt automatically and forwards WebSocket upgrade headers by default, which Socket.io needs). Bonus: during the rare app restart, the proxy returns 502 for ~3s instead of a hard "connection refused."
 3. **VPS sizing**: ≥4GB RAM for the app, +2GB for Postgres, +headroom. 8GB total is the floor.
 
 ### Graceful shutdown — load-bearing for workers
-`apps/api/src/main.ts` calls `app.enableShutdownHooks()`. Without it, NestJS does NOT fire `OnModuleDestroy` on SIGTERM. The `WorkflowWorkerService` lifecycle hook stops the BullMQ worker via `worker.close()` (BullMQ awaits the in-flight job, then releases the Redis lock cleanly), stops the sweepers, and closes the queue. The chain is:
+`apps/api/src/main.ts` installs its OWN `SIGTERM`/`SIGINT` handlers (NOT `app.enableShutdownHooks()` — that was replaced because the bundled hook fires `OnModuleDestroy` BEFORE the HTTP server closes, leaving a window where the api still accepts requests that get SIGKILL'd when `TimeoutStopSec` expires). The manual handler inverts that order: stop accepting connections first, then drain. `app.close()` fires the full NestJS lifecycle (`OnModuleDestroy` etc.) on its own — `enableShutdownHooks()` only wires the signal listeners, which we now do ourselves — so the `WorkflowWorkerService` hook still stops the BullMQ worker via `worker.close()` (BullMQ awaits the in-flight job, then releases the Redis lock cleanly), stops the sweepers, and closes the queue. The chain is:
 
 ```
-SIGTERM → enableShutdownHooks → OnModuleDestroy hooks fire in reverse-init order →
-  stopContactDriftSweeper → stopWorkflowWaitingSweeper → stopInboundMediaSweeper →
-  stopWorkflowWorker (awaits in-flight job; bounded by BullMQ lockDuration=90s) →
-  closeWorkflowQueue
+SIGTERM → main.ts shutdown() →
+  server.close() + closeIdleConnections()   (stop accepting; Caddy sees us down fast)
+  → ~3s flush budget for in-flight responses
+  → app.close() → OnModuleDestroy hooks fire in reverse-init order →
+       stopContactDriftSweeper → stopWorkflowWaitingSweeper → stopInboundMediaSweeper →
+       stopWorkflowWorker (awaits in-flight job; bounded by BullMQ lockDuration=90s) →
+       closeWorkflowQueue
+  → process.exit(0)
 ```
 
-If you skip `enableShutdownHooks()` (or systemd's `TimeoutStopSec` is too low), the worker dies mid-job, Redis releases the lock after 90s, the new process picks the same job up and re-executes — irreversible Meta sends, tag changes, etc. double-fire. Don't strip the call.
+If you remove the manual handlers (or systemd's `TimeoutStopSec` is too low), the worker dies mid-job, Redis releases the lock after 90s, the new process picks the same job up and re-executes — irreversible Meta sends, tag changes, etc. double-fire. Don't strip the handlers, and keep `server.close()` ordered BEFORE `app.close()`.
 
 ### Per-user rate limiting
 `RateLimitGuard` (in CommonModule, applied globally via `APP_GUARD`) buckets every session-authenticated mutation at **300 req/min per user** by default, with `@RateLimit({ perMinute: 60 })` overriding `MessagesController` (text/media/template/forward share the same bucket so a single user can't multiply quota by hitting different routes). API-key routes have their own per-key limit upstream (`ApiKeyGuard`); guard no-ops on requests without `req.session`. Tune by adding the `@RateLimit` decorator at the controller or handler level. In-memory only — moves to Redis on the same trigger as everything else (second app instance).
@@ -243,7 +249,7 @@ Phases 1–5 all landed. Both typechecks green; both processes (Next.js + NestJS
 | 3d | Broadcasts: create + list + get + delete + media/[messageId]. Runner stays in [lib/broadcast-runner.ts](lib/broadcast-runner.ts) (framework-agnostic). | ✅ |
 | 3e | External `/v1` API: all 6 endpoints | ✅ |
 | 4 | Workflow engine in NestJS: `WorkflowWorkerService`, `WorkflowSubscribersService`, `WorkflowDispatcherService`. Engine in [lib/workflows/](lib/workflows/). | ✅ |
-| 5 | Cleanup: ~82 files deleted (server.ts, worker.ts, lib/socket/server.ts, lib/events/redis-bridge.ts, lib/api/*, lib/events/subscribers/{socket-fanout,index}.ts, every migrated `app/api/**/route.ts`). New `instrumentation.ts` registers cache-revalidate on Next.js boot. Dev tool ported to NestJS as `DevEmitController`. | ✅ |
+| 5 | Cleanup: ~82 files deleted (server.ts, worker.ts, lib/socket/server.ts, lib/events/redis-bridge.ts, lib/api/*, lib/events/subscribers/{socket-fanout,index}.ts, every migrated `app/api/**/route.ts`). New `instrumentation.ts` runs fail-fast env validation on Next.js boot (cross-process cache-revalidate is the `/api/internal/revalidate` bridge, not instrumentation). Dev tool ported to NestJS as `DevEmitController`. | ✅ |
 
 **Runtime stack** — `@swc-node/register` powers `api:dev` / `api:start` (NOT `tsx`; see lessons below). Next.js dev/start use `next dev` / `next start` — no more custom `server.ts`.
 
@@ -279,7 +285,7 @@ Remaining steps for the actual deploy:
    ```
    `.env` should set `NEXT_PUBLIC_API_URL=http://localhost:4000` so the browser Socket.io client points at NestJS.
 
-2. **Caddy routing**: see [deploy/Caddyfile.example](deploy/Caddyfile.example) — commit-controlled config so the rule ordering doesn't live only in this prose. The non-obvious lines:
+2. **Caddy routing**: see [deploy/Caddyfile.template](deploy/Caddyfile.template) — commit-controlled config so the rule ordering doesn't live only in this prose. The non-obvious lines:
    - `/api/auth/change-password` → NestJS (moved off Better Auth). Must come BEFORE the `/api/auth/*` → Next.js wildcard or change-password 404s.
    - `/api/webhooks/meta/*` → Next.js (the legacy URL is handled by the proxy at [apps/web/src/app/api/webhooks/meta/[teamId]/route.ts](apps/web/src/app/api/webhooks/meta/[teamId]/route.ts) which forwards bytes verbatim to NestJS so HMAC integrity is preserved).
    - Default for everything else: `/`, `/_next/*`, `/api/auth/*` → Next.js; `/api/*`, `/webhooks/*` → NestJS. (The Socket.io client connects on `/api/socket/*` and is caught by the `/api/*` matcher; no separate `/socket.io/*` rule is needed.)

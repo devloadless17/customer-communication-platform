@@ -159,7 +159,7 @@ export function invalidateProviderConfig(teamId: string): void {
 
 async function loadSendCipher(teamId: string): Promise<CachedSend> {
   const conn = await db.channelConnection.findUnique({
-    where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+    where: { teamId_channel: { teamId, channel: "whatsapp" } },
     select: { config: true, secrets: true, isActive: true },
   });
   if (!conn || !conn.isActive) return { kind: "err", missing: ["not-connected"] };
@@ -263,7 +263,7 @@ export async function getMetaWebhookConfig(
     cipher = hit.value;
   } else {
     const conn = await db.channelConnection.findUnique({
-      where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+      where: { teamId_channel: { teamId, channel: "whatsapp" } },
       select: { config: true, secrets: true, isActive: true },
     });
     const config = (conn?.config ?? {}) as MetaChannelConfig;

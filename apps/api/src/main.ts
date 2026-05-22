@@ -224,6 +224,24 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   }
 
+  // Same posture for the SSRF escape hatch. INTEGRATIONS_ALLOW_PRIVATE_HOSTS
+  // is a dev-only convenience that lets safe-fetch reach private/loopback
+  // addresses; in production it lets a tenant-configured webhook / workflow
+  // http_request hit internal services or the cloud metadata endpoint. The
+  // compose default is "0", but a misconfigured prod env must fail loudly,
+  // not silently disarm the SSRF guard.
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.INTEGRATIONS_ALLOW_PRIVATE_HOSTS === "1"
+  ) {
+    console.error(
+      "FATAL: INTEGRATIONS_ALLOW_PRIVATE_HOSTS=1 in production. This disables " +
+        "the safe-fetch SSRF guard, letting tenant webhooks/http-requests reach " +
+        "internal hosts + cloud metadata. Refusing to boot.",
+    );
+    process.exit(1);
+  }
+
   const productionOrigin = process.env.APP_PUBLIC_URL;
   app.enableCors({
     origin:

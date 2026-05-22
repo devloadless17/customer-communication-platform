@@ -47,8 +47,38 @@ type Handler<K extends DomainEventType> = (
   event: DomainEventOf<K>,
 ) => void | Promise<void>;
 
+/**
+ * Subscriber execution tiers. LOWER runs first. The order is LOAD-BEARING,
+ * not cosmetic:
+ *   - `workflow-dispatch` re-reads conversation state that `analytics`
+ *     writes (closedCategory / counters), so it must run AFTER analytics.
+ *   - `outbound-webhooks` ships partner payloads carrying those same
+ *     post-mutation fields (closedAt, firstResponseAt), so it must run
+ *     AFTER analytics too.
+ * Encoding the order as an explicit priority — rather than relying on
+ * module import order / `OnModuleInit` registration timing — makes it
+ * impossible for a reorder of `AppModule.imports` to silently break it.
+ * REALTIME MUST stay 0: `runSubscribers` fires the first record
+ * fire-and-forget so a slow downstream subscriber can't delay the socket
+ * emit the inbox UI is waiting on.
+ */
+export const SubscriberPriority = {
+  REALTIME: 0,
+  AUDIT: 10,
+  ANALYTICS: 20,
+  WORKFLOW_DISPATCH: 30,
+  WEB_CACHE_REVALIDATE: 40,
+  OUTBOUND_WEBHOOKS: 50,
+  DEFAULT: 100,
+} as const;
+
+interface SubscriberRecord {
+  handler: Handler<DomainEventType>;
+  priority: number;
+}
+
 interface BusState {
-  handlers: Map<DomainEventType, Handler<DomainEventType>[]>;
+  handlers: Map<DomainEventType, SubscriberRecord[]>;
 }
 
 const g = globalThis as unknown as { __ccpEventBus?: BusState };
@@ -57,33 +87,49 @@ const state: BusState = (g.__ccpEventBus ??= {
 });
 
 /**
- * Register a subscriber for a single event type. Returns an unsubscribe
- * function — handy for tests, not used in normal app code.
+ * Register a subscriber for a single event type. `priority` fixes the
+ * execution tier (lower runs first; see `SubscriberPriority`) so order is
+ * independent of registration timing. Returns an unsubscribe function —
+ * handy for tests + `OnModuleDestroy`.
  */
 export function subscribe<K extends DomainEventType>(
   type: K,
   handler: Handler<K>,
+  priority: number = SubscriberPriority.DEFAULT,
 ): () => void {
   const list = state.handlers.get(type) ?? [];
-  const record = handler as Handler<DomainEventType>;
-  list.push(record);
+  const record: SubscriberRecord = {
+    handler: handler as Handler<DomainEventType>,
+    priority,
+  };
+  // Insert keeping the list sorted by ascending priority, STABLE within a
+  // tier (insert after all existing records of equal-or-lower priority).
+  let idx = list.length;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i]!.priority > priority) {
+      idx = i;
+      break;
+    }
+  }
+  list.splice(idx, 0, record);
   state.handlers.set(type, list);
   return () => {
     const current = state.handlers.get(type);
     if (!current) return;
-    const idx = current.indexOf(record);
-    if (idx >= 0) current.splice(idx, 1);
+    const at = current.indexOf(record);
+    if (at >= 0) current.splice(at, 1);
   };
 }
 
 /**
  * Publish a domain event.
  *
- * Runs every subscriber in parallel, then writes a single durable audit
- * row to the outbox with the final state (`publishedAt` always set, plus
- * `failedAt`+`lastError` if any subscriber threw). The row is written
- * AFTER dispatch — never before — so the outbox drainer's 100ms poll
- * cannot grab it mid-dispatch and re-fire every subscriber.
+ * Runs subscribers SEQUENTIALLY in priority order (see `SubscriberPriority`
+ * + `runSubscribers`), then writes a single durable audit row to the outbox
+ * with the final state (`publishedAt` always set, plus `failedAt`+`lastError`
+ * if any subscriber threw). The row is written AFTER dispatch — never before
+ * — so the outbox drainer's 100ms poll cannot grab it mid-dispatch and
+ * re-fire every subscriber.
  *
  * Each subscriber gets its own try/catch inside `runSubscribers` so a
  * broken one can't cascade.
@@ -155,15 +201,12 @@ async function runSubscribers<K extends DomainEventType>(
   // outside the try/catch sequence. Subsequent subscribers still need
   // the ordering invariant (workflow-dispatch reads analytics' writes).
   //
-  // Identified by registration name convention: the realtime subscriber
-  // is always registered first AND its handler is fast. We don't have
-  // a tag system yet, so we treat handler #0 as the realtime tier.
-  // RealtimeFanoutService MUST be the first subscribe(...) for each
-  // event type — verified by the registration site in
-  // realtime-fanout.service.ts (subscribers register at module init).
+  // The list is kept sorted by `SubscriberPriority` on insert, so `list[0]`
+  // is always the REALTIME tier (priority 0) regardless of registration
+  // order — no name/registration-timing convention to break.
   const first = list[0]!;
   try {
-    const maybe = first(event as DomainEventOf<DomainEventType>);
+    const maybe = first.handler(event as DomainEventOf<DomainEventType>);
     if (maybe && typeof (maybe as Promise<void>).then === "function") {
       void (maybe as Promise<void>).catch((err) => {
         console.error(
@@ -179,16 +222,16 @@ async function runSubscribers<K extends DomainEventType>(
     );
   }
 
-  // Remaining subscribers: sequential dispatch in registration order.
+  // Remaining subscribers: sequential dispatch in priority order.
   // workflow-dispatch reads post-mutation state that analytics writes;
   // outbound-webhooks ships partner payloads carrying those same fields.
   // Parallel dispatch made both races inevitable in proportion to
   // subscriber latency. Each handler gets its own try/catch so a broken
   // subscriber can't poison the chain.
   for (let i = 1; i < list.length; i++) {
-    const handler = list[i]!;
+    const record = list[i]!;
     try {
-      await handler(event as DomainEventOf<DomainEventType>);
+      await record.handler(event as DomainEventOf<DomainEventType>);
     } catch (err) {
       console.error(
         withCorrelation(`[bus] subscriber #${i} for "${event.type}" threw:`),

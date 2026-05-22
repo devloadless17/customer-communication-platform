@@ -111,7 +111,7 @@ async function runTagMutation(
     id: updated.id,
     teamId: updated.teamId,
     phoneNumber: updated.phoneNumber,
-    identityProvider: updated.identityProvider,
+    identityChannel: updated.identityChannel,
     externalContactId: updated.externalContactId,
     name: updated.name,
     firstName: updated.firstName,

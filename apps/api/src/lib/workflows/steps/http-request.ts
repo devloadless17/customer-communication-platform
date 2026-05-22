@@ -122,6 +122,12 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
         )
       : undefined;
 
+    // Cross-system loop guard: stamp the incremented chain depth so that if
+    // this call lands on a system that bounces back into our own
+    // incoming_webhook, that handler can cap the cycle. Custom headers can't
+    // override it — spread first, then set X-CCP-Depth last.
+    const nextDepth = (envelope.depth ?? 0) + 1;
+
     let res: Response;
     try {
       res = await safeFetch(resolvedUrl, {
@@ -131,6 +137,7 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
           "User-Agent": "ccp-workflows/1",
           ...(resolvedToken ? { Authorization: `Bearer ${resolvedToken}` } : {}),
           ...(resolvedHeaders ?? {}),
+          "X-CCP-Depth": String(nextDepth),
         },
         body: JSON.stringify(envelope),
         timeoutMs: timeout,

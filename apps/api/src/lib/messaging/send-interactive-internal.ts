@@ -65,12 +65,12 @@ export async function sendInteractiveInternal(
       id: true,
       contactId: true,
       // Channel is conversation-owned — bind + stamp from here, not the contact.
-      provider: true,
+      channel: true,
       lastMessageAt: true,
       contact: {
         select: {
           phoneNumber: true,
-          identityProvider: true,
+          identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
         },
@@ -92,7 +92,7 @@ export async function sendInteractiveInternal(
   }
   // Channel is conversation-owned — bind + stamp from the conversation row;
   // resolveContactChannel only supplies the destination address.
-  const provider = conversation.provider;
+  const provider = conversation.channel;
   const binding = getProviderBinding(provider);
 
   // Free-form send window — same gate as plain text. Driven by the provider's
@@ -170,7 +170,7 @@ export async function sendInteractiveInternal(
     senderUserId: args.senderUserId ?? null,
     body: bodyText,
     direction: "out",
-    provider,
+    channel: provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,
@@ -219,7 +219,7 @@ export async function sendInteractiveInternal(
     senderUserId,
     body: bodyText,
     direction: "out",
-    provider,
+    channel: provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,

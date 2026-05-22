@@ -30,7 +30,9 @@ const STAGE_SETTLING_MS = 1500;
  *   - contact:updated         — stage edits change byStage; cheaper to
  *                                refetch than to inspect the payload
  *                                (the event fires for every field edit)
- *   - contacts:bulk_updated   — same, coalesced bulk version
+ *   - contacts:bulk_updated   — only when changeKind is stage/mixed; tag &
+ *                                field bulk ops don't move any bucket, so the
+ *                                common 500-contact tag bulk fires no GET
  *
  * All triggers route through one coalesced refetch so a burst of events
  * fires a single GET. Initial value `null` lets the consumer fall back
@@ -101,6 +103,18 @@ export function useConversationCounts(): ConversationCounts | null {
       if (payload.newConversation) void refresh();
     };
 
+    // Bulk contact mutation. Only stage (and the mixed bucket that may
+    // include a stage move) changes byStage; tag-only and field-only bulk
+    // ops touch no count bucket, so the common 500-contact tag bulk should
+    // fire zero GETs instead of one coalesced no-op refetch.
+    const onBulkUpdated: Parameters<typeof socket.on<"contacts:bulk_updated">>[1] = (
+      payload,
+    ) => {
+      if (payload.changeKind === "stage" || payload.changeKind === "mixed") {
+        void refresh();
+      }
+    };
+
     // Optimistic stage-delta. Fired from `persistStageId` in
     // message-thread.tsx when a user changes a contact's stage. Without
     // this, the badge would lag behind the thread header by one server
@@ -150,7 +164,7 @@ export function useConversationCounts(): ConversationCounts | null {
     socket.on("conversation:status", trigger);
     socket.on("conversation:deleted", trigger);
     socket.on("contact:updated", trigger);
-    socket.on("contacts:bulk_updated", trigger);
+    socket.on("contacts:bulk_updated", onBulkUpdated);
     socket.on("message:new", onMessageNew);
     if (typeof window !== "undefined") {
       window.addEventListener("ccp:contact-stage-delta", onStageDelta);
@@ -161,7 +175,7 @@ export function useConversationCounts(): ConversationCounts | null {
       socket.off("conversation:status", trigger);
       socket.off("conversation:deleted", trigger);
       socket.off("contact:updated", trigger);
-      socket.off("contacts:bulk_updated", trigger);
+      socket.off("contacts:bulk_updated", onBulkUpdated);
       socket.off("message:new", onMessageNew);
       if (typeof window !== "undefined") {
         window.removeEventListener("ccp:contact-stage-delta", onStageDelta);

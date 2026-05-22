@@ -34,9 +34,9 @@ services:
     #   - work_mem: per sort/hash, not per query — multiplied by parallel
     #     workers × concurrent connections; 8MB × 35 pool slots = 280MB
     #     worst case, well inside the cap
-    #   - max_connections: 120, leaves headroom past the 60 the two pools
-    #     reserve so a one-off psql or `prisma migrate deploy` doesn't
-    #     hit the cap
+    #   - max_connections: 120, leaves headroom past the 35 the two pg.Pools
+    #     reserve (api max=25 + web max=10) so a one-off psql or
+    #     `prisma migrate deploy` doesn't hit the cap
     # log_min_duration_statement = 250ms surfaces slow queries to docker
     # logs without flooding on normal traffic.
     command:
@@ -157,8 +157,10 @@ services:
       api: { condition: service_healthy }
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public&connection_limit=30&pool_timeout=10
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
+      # No REDIS_URL here on purpose: the web process serves RSC reads + Better
+      # Auth pages only. BullMQ + Socket.io live in the api service. validateEnv
+      # treats REDIS_URL as api-only, so web boots without it.
       # Better Auth uses these to sign session cookies and validate the
       # request origin. BETTER_AUTH_URL must match the public Caddy origin
       # exactly (scheme + host) — anything else fails the trustedOrigins
@@ -262,11 +264,11 @@ services:
       redis: { condition: service_healthy }
     environment:
       NODE_ENV: production
-      # Separate pool from `app`'s — both processes share the same Postgres
-      # but get their own connections. Sized for the api's eventual share of
-      # traffic (all of it, post Phase 5). Until then it can be lower; revisit
-      # at Phase 3 when REST starts moving over.
-      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public&connection_limit=30&pool_timeout=10
+      # Separate pg.Pool from `app`'s (both hit the same Postgres). The api
+      # owns all REST + Socket.io + workers, so its pool is the larger one
+      # (max: 25 in db.service.ts vs web's 10). Pool size lives in code, not
+      # this URL — see the DATABASE_URL note on the `app` service above.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
       REDIS_URL: redis://redis:6379
       # Better Auth secrets — used by SessionGuard to call auth.api.getSession
       # against the same Session table the Next.js side writes to. Both must
@@ -331,8 +333,8 @@ services:
     #      for @swc-node/register; we leave the runtime CWD there and
     #      switch only for the prisma CLI invocation.
     #   2. `exec node …` — replaces the shell with node so PID 1 is node,
-    #      not sh. SIGTERM from docker stop reaches node directly and
-    #      `app.enableShutdownHooks()` fires; BullMQ workers drain
+    #      not sh. SIGTERM from docker stop reaches node directly and the
+    #      manual shutdown handler in main.ts fires; BullMQ workers drain
     #      cleanly (lockDuration=90s, see lib/workflows/worker.ts). Without
     #      `exec`, sh sits as PID 1 and SIGTERM forwarding becomes
     #      shell-implementation-dependent — irreversible Meta sends would

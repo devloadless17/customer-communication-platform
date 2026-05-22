@@ -47,7 +47,9 @@ export class StagesService {
   ): Promise<{ countsByStageId: Record<string, number>; unassignedCount: number }> {
     const rows = await this.db.contact.groupBy({
       by: ["stageId"],
-      where: { teamId },
+      // Soft-deleted contacts are out of the directory, so they must not
+      // inflate the per-stage badge counts.
+      where: { teamId, deletedAt: null },
       _count: { _all: true },
     });
     const countsByStageId: Record<string, number> = {};
@@ -161,7 +163,9 @@ export class StagesService {
     // Refuse delete-while-in-use; carry the count back so the UI can
     // render "12 contacts still here — move them first".
     const contactCount = await this.db.contact.count({
-      where: { teamId, stageId: id },
+      // Only live contacts block stage deletion — a tombstoned contact that
+      // still carries this stageId shouldn't keep the stage un-deletable.
+      where: { teamId, stageId: id, deletedAt: null },
     });
     if (contactCount > 0) {
       throw new ConflictException({

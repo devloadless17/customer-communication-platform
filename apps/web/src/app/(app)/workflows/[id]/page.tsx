@@ -43,7 +43,7 @@ export default async function WorkflowPage({
             : {},
         triggerConditions: (wf.triggerConditions ?? null) as never,
         triggerOncePerContact: (wf.triggerOncePerContact ?? false) as boolean,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         
         graph: wf.graph as any,
       }}
     />

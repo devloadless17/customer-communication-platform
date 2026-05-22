@@ -1,6 +1,8 @@
 // Note: no `server-only` import — boots from the BullMQ worker outside the
 // Next.js bundler context, same as the other step helpers.
 
+import { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 
@@ -170,10 +172,23 @@ export async function resolveStepTarget(
       conversationCreated: false,
     };
   }
-  const newConv = await db.conversation.create({
-    data: { teamId, contactId, status: "open" },
-    select: { id: true },
-  });
+  let newConv: { id: string };
+  try {
+    newConv = await db.conversation.create({
+      data: { teamId, contactId, status: "open" },
+      select: { id: true },
+    });
+  } catch (err) {
+    // Lost the race for this contact's single conversation (unique
+    // [teamId, contactId]) to a concurrent path — reuse the winner.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      newConv = await db.conversation.findFirstOrThrow({
+        where: { teamId, contactId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+    } else throw err;
+  }
   return {
     contactId,
     conversationId: newConv.id,

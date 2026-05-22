@@ -48,6 +48,10 @@ import {
   startOutboundSendAttemptRetentionSweeper,
   stopOutboundSendAttemptRetentionSweeper,
 } from "@/lib/sweepers/outbound-send-attempt-retention";
+import {
+  startWorkflowRunRetentionSweeper,
+  stopWorkflowRunRetentionSweeper,
+} from "@/lib/sweepers/workflow-run-retention";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -77,6 +81,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private blobOrphanSweeperStarted = false;
   private outboundEventRetentionStarted = false;
   private outboundSendAttemptRetentionStarted = false;
+  private workflowRunRetentionStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -182,9 +187,26 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
         err,
       );
     }
+    try {
+      // Daily retention on WorkflowRun rows — fattest-growing table at
+      // automation volume (one fat-JSON row per execution). 30-day cutoff
+      // matches the runs-UI window; in-flight (queued/running/waiting) kept.
+      startWorkflowRunRetentionSweeper();
+      this.workflowRunRetentionStarted = true;
+      this.logger.log("Workflow run retention sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start workflow-run retention sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.workflowRunRetentionStarted) stopWorkflowRunRetentionSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopWorkflowRunRetentionSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     try {
       if (this.outboundSendAttemptRetentionStarted)
         stopOutboundSendAttemptRetentionSweeper();

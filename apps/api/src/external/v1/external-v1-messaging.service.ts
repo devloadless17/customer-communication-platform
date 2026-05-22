@@ -34,7 +34,7 @@ import {
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import type { Message, ProviderName, User } from "@ccp/shared/types";
+import type { Message, Channel, User } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
@@ -52,6 +52,14 @@ import type {
   ListConversationsQueryInput,
   ListMessagesQueryInput,
 } from "./external-v1.schemas";
+
+// Idempotency claim sentinels — shared by every /v1 send path so the text and
+// template flows can't drift. `responseStatus: 0` marks a pending claim; a
+// crashed handler's pending row is GC'd after PENDING_TTL by the sweeper at
+// lib/sweepers/api-idempotency-cleanup. Completed rows live COMPLETED_TTL.
+const IDEMPOTENCY_PENDING_STATUS = 0;
+const IDEMPOTENCY_PENDING_TTL_MS = 5 * 60_000;
+const IDEMPOTENCY_COMPLETED_TTL_MS = 24 * 60 * 60_000;
 
 /**
  * Extracted from the original `external-v1.service.ts` to keep file sizes
@@ -71,6 +79,135 @@ export class ExternalV1MessagingService {
     private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
+
+  // ===========================================================================
+  // IDEMPOTENCY (shared by text + template /v1 send paths)
+  // ===========================================================================
+
+  /**
+   * CLAIM-then-execute idempotency on the (teamId, apiKeyId, key) unique index.
+   *
+   * Returns:
+   *   - { kind: "claimed" }      → caller OWNS a pending sentinel row and MUST
+   *                                resolve it (`completeIdempotency` on success,
+   *                                `releaseIdempotency` on failure) before
+   *                                returning. Proceed with the real work.
+   *   - { kind: "replay", result } → a prior identical request already
+   *                                completed; return it verbatim (zero side
+   *                                effects, API-key token refunded).
+   *
+   * Throws ConflictException(409) when a concurrent request with the same key
+   * is still in flight. Centralizing this is what closes the template
+   * double-send gap (audit 2026-05-22): previously only the text path had it.
+   */
+  private async claimIdempotency<T>(
+    teamId: string,
+    apiKeyId: string,
+    key: string,
+  ): Promise<{ kind: "claimed" } | { kind: "replay"; result: T }> {
+    const claimPending = () =>
+      this.db.apiIdempotencyKey.create({
+        data: {
+          teamId,
+          apiKeyId,
+          key,
+          responseBody: { _pending: true } as Prisma.InputJsonValue,
+          responseStatus: IDEMPOTENCY_PENDING_STATUS,
+          expiresAt: new Date(Date.now() + IDEMPOTENCY_PENDING_TTL_MS),
+        },
+      });
+    try {
+      await claimPending();
+      return { kind: "claimed" };
+    } catch (err) {
+      if (
+        !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+        err.code !== "P2002"
+      ) {
+        throw err;
+      }
+      // Another request already claimed this key. Read its state.
+      const cached = await this.db.apiIdempotencyKey.findUnique({
+        where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
+        select: { responseBody: true, responseStatus: true, expiresAt: true },
+      });
+      if (!cached) {
+        // Vanished between P2002 and the read (sweeper / manual delete).
+        throw new ConflictException({
+          error: "idempotency_in_progress",
+          detail: "Concurrent retry race — try again in a moment.",
+        });
+      }
+      if (cached.responseStatus === IDEMPOTENCY_PENDING_STATUS) {
+        if (cached.expiresAt > new Date()) {
+          throw new ConflictException({
+            error: "idempotency_in_progress",
+            detail:
+              "A previous request with this Idempotency-Key is still in flight. " +
+              "Retry in a few seconds.",
+          });
+        }
+        // Stale pending past TTL — clear and tell the partner to re-claim.
+        await this.db.apiIdempotencyKey.deleteMany({
+          where: { teamId, apiKeyId, key },
+        });
+        throw new ConflictException({
+          error: "idempotency_in_progress",
+          detail: "Stale pending claim cleared — retry.",
+        });
+      }
+      if (cached.expiresAt > new Date()) {
+        // Completed + still fresh — replay. Refund the API-key token: the
+        // request did zero real work, so it shouldn't burn quota.
+        refundApiKeyBucket(apiKeyId);
+        return { kind: "replay", result: cached.responseBody as unknown as T };
+      }
+      // Expired completed row — delete + re-claim, then proceed.
+      await this.db.apiIdempotencyKey.deleteMany({ where: { teamId, apiKeyId, key } });
+      await claimPending();
+      return { kind: "claimed" };
+    }
+  }
+
+  /** Flip a claimed pending row to the completed response (24h TTL). */
+  private async completeIdempotency<T>(
+    teamId: string,
+    apiKeyId: string,
+    key: string,
+    result: T,
+  ): Promise<void> {
+    try {
+      await this.db.apiIdempotencyKey.update({
+        where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
+        data: {
+          responseBody: result as unknown as Prisma.InputJsonValue,
+          responseStatus: 200,
+          expiresAt: new Date(Date.now() + IDEMPOTENCY_COMPLETED_TTL_MS),
+        },
+      });
+    } catch (err) {
+      // Row should exist (we just claimed it). If the sweeper got aggressive,
+      // log + continue so the partner still gets their success response.
+      this.logger.warn(
+        `idempotency-key completion failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /** Release a claimed pending row on failure so a retry can re-claim fresh. */
+  private async releaseIdempotency(
+    teamId: string,
+    apiKeyId: string,
+    key: string,
+  ): Promise<void> {
+    await this.db.apiIdempotencyKey
+      .deleteMany({
+        where: { teamId, apiKeyId, key, responseStatus: IDEMPOTENCY_PENDING_STATUS },
+      })
+      .catch(() => {
+        /* best-effort */
+      });
+  }
 
   // ===========================================================================
   // CONVERSATIONS
@@ -301,107 +438,18 @@ export class ExternalV1MessagingService {
     /** Optional idempotency key from the `Idempotency-Key` request header. */
     idempotencyKey?: string,
   ) {
-    // Idempotency — CLAIM-then-execute, not execute-then-record.
-    //
-    // The prior pattern (read cache → send to Meta → fire-and-forget upsert)
-    // left a wide race window: a partner retry between the Meta call and the
-    // background upsert would not see the cache yet, re-send the message,
-    // and produce a duplicate customer-facing WhatsApp delivery.
-    //
-    // Now: insert a row with `responseStatus: 0` (sentinel = pending) before
-    // any side effect. The unique index on (teamId, apiKeyId, key) makes
-    // the insert serve as a row-level lock — concurrent retries see P2002
-    // and read whatever row the winner committed. After the Meta send +
-    // DB writes, we UPDATE the row with the real response body + status
-    // + extend expiresAt to 24h. On send failure, DELETE so a retry can
-    // claim fresh.
-    //
-    // Pending TTL is short (5min) so a crashed handler doesn't permanently
-    // shadow the key — the sweeper at lib/sweepers/api-idempotency-cleanup
-    // garbage-collects expired pending rows too.
-    const PENDING_STATUS = 0;
-    const PENDING_TTL_MS = 5 * 60_000;
-    const COMPLETED_TTL_MS = 24 * 60 * 60_000;
+    // Idempotency — CLAIM-then-execute via the shared `claimIdempotency`
+    // helper (also used by the template path so the two can't drift). A
+    // replay returns the prior response with zero side effects; a fresh
+    // claim means we own the pending row and MUST resolve it below
+    // (releaseIdempotency on any failure, completeIdempotency on success).
     if (idempotencyKey) {
-      try {
-        await this.db.apiIdempotencyKey.create({
-          data: {
-            teamId,
-            apiKeyId,
-            key: idempotencyKey,
-            responseBody: { _pending: true } as Prisma.InputJsonValue,
-            responseStatus: PENDING_STATUS,
-            expiresAt: new Date(Date.now() + PENDING_TTL_MS),
-          },
-        });
-      } catch (err) {
-        if (
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          err.code === "P2002"
-        ) {
-          // Another request already claimed this key. Read its state.
-          const cached = await this.db.apiIdempotencyKey.findUnique({
-            where: {
-              teamId_apiKeyId_key: { teamId, apiKeyId, key: idempotencyKey },
-            },
-            select: { responseBody: true, responseStatus: true, expiresAt: true },
-          });
-          if (!cached) {
-            // Vanished between P2002 and the read (sweeper / manual delete).
-            // Surface as 409 — partner can retry, which will re-claim cleanly.
-            throw new ConflictException({
-              error: "idempotency_in_progress",
-              detail: "Concurrent retry race — try again in a moment.",
-            });
-          }
-          if (cached.responseStatus === PENDING_STATUS) {
-            if (cached.expiresAt > new Date()) {
-              throw new ConflictException({
-                error: "idempotency_in_progress",
-                detail:
-                  "A previous request with this Idempotency-Key is still in flight. " +
-                  "Retry in a few seconds.",
-              });
-            }
-            // Stale pending row past TTL — clear and re-claim. Race with the
-            // sweeper is harmless because deleteMany is no-op when zero rows.
-            await this.db.apiIdempotencyKey.deleteMany({
-              where: { teamId, apiKeyId, key: idempotencyKey },
-            });
-            // Loop back into the create path on caller retry; simplest is to
-            // tell the partner so the next request gets a clean claim.
-            throw new ConflictException({
-              error: "idempotency_in_progress",
-              detail: "Stale pending claim cleared — retry.",
-            });
-          }
-          if (cached.expiresAt > new Date()) {
-            // Refund the API-key token — the request did zero real work,
-            // so it shouldn't burn quota. A partner with a crashing
-            // handler retrying the same Idempotency-Key for 24h would
-            // otherwise drain 60 tokens/min on cache reads alone.
-            refundApiKeyBucket(apiKeyId);
-            return cached.responseBody as unknown as { message: ExternalMessage };
-          }
-          // Expired completed row — fall through to re-claim. Delete first
-          // so the create below doesn't P2002 again.
-          await this.db.apiIdempotencyKey.deleteMany({
-            where: { teamId, apiKeyId, key: idempotencyKey },
-          });
-          await this.db.apiIdempotencyKey.create({
-            data: {
-              teamId,
-              apiKeyId,
-              key: idempotencyKey,
-              responseBody: { _pending: true } as Prisma.InputJsonValue,
-              responseStatus: PENDING_STATUS,
-              expiresAt: new Date(Date.now() + PENDING_TTL_MS),
-            },
-          });
-        } else {
-          throw err;
-        }
-      }
+      const claim = await this.claimIdempotency<{ message: ExternalMessage }>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+      );
+      if (claim.kind === "replay") return claim.result;
     }
 
     const conversation = await this.db.conversation.findFirst({
@@ -410,11 +458,11 @@ export class ExternalV1MessagingService {
         id: true,
         contactId: true,
         // Channel is conversation-owned — bind + stamp from here.
-        provider: true,
+        channel: true,
         contact: {
           select: {
             phoneNumber: true,
-            identityProvider: true,
+            identityChannel: true,
             externalContactId: true,
             lastInboundAt: true,
           },
@@ -435,7 +483,7 @@ export class ExternalV1MessagingService {
       }
       throw err;
     }
-    const provider = conversation.provider;
+    const provider = conversation.channel;
     const binding = getProviderBinding(provider);
 
     // Free-form send window — driven by the provider capability; `null` skips
@@ -495,18 +543,7 @@ export class ExternalV1MessagingService {
         // Release the idempotency claim so the partner's retry after
         // Retry-After expires can re-claim a fresh slot.
         if (idempotencyKey) {
-          await this.db.apiIdempotencyKey
-            .deleteMany({
-              where: {
-                teamId,
-                apiKeyId,
-                key: idempotencyKey,
-                responseStatus: PENDING_STATUS,
-              },
-            })
-            .catch(() => {
-              /* best-effort */
-            });
+          await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
         }
         throw new HttpException(
           {
@@ -534,20 +571,9 @@ export class ExternalV1MessagingService {
     } catch (err) {
       // Send failed — release the idempotency claim so the partner can
       // retry. Without this, the row stays in `pending` state for the full
-      // PENDING_TTL_MS and every retry inside that window gets 409.
+      // PENDING_TTL and every retry inside that window gets 409.
       if (idempotencyKey) {
-        await this.db.apiIdempotencyKey
-          .deleteMany({
-            where: {
-              teamId,
-              apiKeyId,
-              key: idempotencyKey,
-              responseStatus: PENDING_STATUS,
-            },
-          })
-          .catch(() => {
-            /* best-effort */
-          });
+        await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
       }
       if (err instanceof ProviderNotConfiguredError) {
         throw new ConflictException({
@@ -578,7 +604,7 @@ export class ExternalV1MessagingService {
       senderUserId: null,
       body: input.body,
       direction: "out",
-      provider,
+      channel: provider,
       status: "sent",
       rawPayload: { sentVia: "api/external/v1", apiKeyId } as Prisma.InputJsonValue,
       timestamp: send.timestamp,
@@ -619,7 +645,7 @@ export class ExternalV1MessagingService {
       senderUserId: null,
       body: input.body,
       direction: "out",
-      provider,
+      channel: provider,
       status: "sent",
       rawPayload: { sentVia: "api/external/v1", apiKeyId },
       timestamp: send.timestamp.toISOString(),
@@ -645,31 +671,12 @@ export class ExternalV1MessagingService {
 
     const result = { message: toExternalMessage(created) };
 
+    // Complete the claim — flip the pending sentinel to the real response.
+    // AWAITED (not fire-and-forget) so concurrent retries arriving at the
+    // claim path immediately see the completed row instead of racing the
+    // partner into a duplicate send.
     if (idempotencyKey) {
-      // Complete the claim — flip the pending sentinel to the real response.
-      // AWAITED (not fire-and-forget) so concurrent retries arriving at the
-      // claim path immediately see the completed row instead of racing the
-      // partner into a duplicate send.
-      try {
-        await this.db.apiIdempotencyKey.update({
-          where: {
-            teamId_apiKeyId_key: { teamId, apiKeyId, key: idempotencyKey },
-          },
-          data: {
-            responseBody: result as unknown as Prisma.InputJsonValue,
-            responseStatus: 200,
-            expiresAt: new Date(Date.now() + COMPLETED_TTL_MS),
-          },
-        });
-      } catch (err) {
-        // The row should always exist here (we just claimed it). If it's
-        // gone the sweeper got aggressive; log + continue so the partner
-        // still gets their successful response. A subsequent retry will
-        // re-send because the cache is missing — acceptable tail case.
-        this.logger.warn(
-          `idempotency-key completion failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
+      await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, result);
     }
 
     return result;
@@ -802,34 +809,46 @@ export class ExternalV1MessagingService {
     if (!conv) {
       // Stamp the new thread's channel from the contact's identity — the
       // source of truth at creation (contacts are siloed + immutable-identity).
-      // Load-bearing now that the send paths stamp Message.provider FROM the
+      // Load-bearing now that the send paths stamp Message.channel FROM the
       // conversation: a wrong @default(meta_cloud) here would propagate to
       // every message on a future non-phone contact's thread.
       const contactChannel = await this.db.contact.findUnique({
         where: { id: contactId },
-        select: { phoneNumber: true, identityProvider: true, externalContactId: true },
+        select: { phoneNumber: true, identityChannel: true, externalContactId: true },
       });
-      let provider: ProviderName = "meta_cloud";
+      let channel: Channel = "whatsapp";
       if (contactChannel) {
         try {
-          provider = resolveContactChannel(contactChannel).provider;
+          channel = resolveContactChannel(contactChannel).channel;
         } catch {
           // No reachable address — keep the default; the downstream send will
           // surface the proper "contact has no reachable address" error.
         }
       }
-      const created = await this.db.conversation.create({
-        data: {
-          teamId,
-          contactId,
-          provider,
-          status: "pending",
-          lastMessageAt: new Date(),
-          lastMessagePreview: "",
-        },
-        select: { id: true, status: true },
-      });
-      conv = created;
+      try {
+        conv = await this.db.conversation.create({
+          data: {
+            teamId,
+            contactId,
+            channel,
+            status: "pending",
+            lastMessageAt: new Date(),
+            lastMessagePreview: "",
+          },
+          select: { id: true, status: true },
+        });
+      } catch (err) {
+        // Lost the race for this contact's single conversation (unique
+        // [teamId, contactId]) to a concurrent inbound/forward — reuse the
+        // winner's row (it was just created `pending`, so no reopen needed).
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          conv = await this.db.conversation.findFirstOrThrow({
+            where: { teamId, contactId },
+            orderBy: { lastMessageAt: "desc" },
+            select: { id: true, status: true },
+          });
+        } else throw err;
+      }
     } else if (conv.status === "closed") {
       // Reopen via setStatus so the audit + analytics counters fire correctly.
       await this.setStatus(teamId, apiKeyId, conv.id, { status: "pending" });
@@ -851,6 +870,22 @@ export class ExternalV1MessagingService {
         });
       }
 
+      // Idempotency — same claim-then-execute as the text path (shared
+      // helpers). Templates are billed cold-outbound, so a partner retry
+      // double-send is the most expensive duplicate; this closes the gap
+      // where the template branch ignored the Idempotency-Key entirely
+      // (audit 2026-05-22). Claimed AFTER the template lookup so a bad
+      // template name doesn't strand a pending row.
+      if (idempotencyKey) {
+        const claim = await this.claimIdempotency<{ ok: true; message: ExternalMessage }>(
+          teamId,
+          apiKeyId,
+          idempotencyKey,
+        );
+        if (claim.kind === "replay") return claim.result;
+      }
+
+      let out: { ok: true; message: ExternalMessage };
       try {
         const result = await sendTemplateInternal({
           teamId,
@@ -864,9 +899,14 @@ export class ExternalV1MessagingService {
         const message = await this.db.message.findUniqueOrThrow({
           where: { id: result.messageId },
         });
-        return { ok: true, message: toExternalMessage(message) };
+        out = { ok: true, message: toExternalMessage(message) };
       } catch (err) {
         if (err instanceof SendTemplateValidationError) {
+          // Pre-delivery validation failure — nothing was sent. Release the
+          // claim so a corrected retry can re-claim fresh.
+          if (idempotencyKey) {
+            await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+          }
           throw new BadRequestException({
             error: err.code,
             ...(err.detail ? { detail: err.detail } : {}),
@@ -874,14 +914,26 @@ export class ExternalV1MessagingService {
         }
         const normalized = normalizeMetaSendError(err);
         if (normalized) {
+          // Meta rejected — nothing delivered. Release so a retry can re-claim.
+          if (idempotencyKey) {
+            await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+          }
           throw new UnprocessableEntityException({
             error: normalized.code,
             message: normalized.message,
             detail: normalized.detail,
           });
         }
+        // Unknown / ambiguous error that may have landed AFTER Meta accepted
+        // the send — do NOT release. Leave the pending claim so a retry gets
+        // 409 rather than risking a duplicate billed template send. Mirrors
+        // the text path, which never releases once past the Meta call.
         throw err;
       }
+      if (idempotencyKey) {
+        await this.completeIdempotency(teamId, apiKeyId, idempotencyKey, out);
+      }
+      return out;
     }
 
     // ---- Text send (default) ---------------------------------------------

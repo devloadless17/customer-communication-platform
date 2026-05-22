@@ -1,4 +1,4 @@
-import type { MediaKind, MessageStatus, ProviderName } from "../types";
+import type { MediaKind, MessageStatus, Channel } from "../types";
 
 /**
  * Provider-agnostic shapes the ingest pipeline consumes.
@@ -350,7 +350,7 @@ export interface ProviderCapabilities {
 }
 
 export interface MessagingProvider<SendConfig = unknown> {
-  name: ProviderName;
+  name: Channel;
   /** Feature flags channel-agnostic code branches on. */
   capabilities: ProviderCapabilities;
   /**

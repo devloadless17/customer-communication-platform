@@ -11,7 +11,7 @@
 # ~100–300 MB vs the previous monolithic image that shipped both.
 # =============================================================================
 
-FROM node:22-slim AS base
+FROM node:24-slim AS base
 WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates wget ffmpeg \
@@ -48,7 +48,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
 FROM deps AS runtime
 
 # Patch debian OS packages (libc6, libcap2, libsystemd0, libudev1, …) at
-# image-build time so Trivy doesn't flag the stale base. node:22-slim is
+# image-build time so Trivy doesn't flag the stale base. node:24-slim is
 # rebuilt periodically but lags actual debian security updates by days,
 # and CI's docker-build-push cache can re-use a still-older base layer.
 # Running `apt-get upgrade` here pins us to the current debian
@@ -83,8 +83,9 @@ EXPOSE 4000
 HEALTHCHECK --start-interval=500ms --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1
 # Direct node invocation — no pnpm/sh wrapper. Three reasons:
-#  1) Node runs as PID 1, so SIGTERM from systemd/docker reaches
-#     `app.enableShutdownHooks()` immediately. The previous
+#  1) Node runs as PID 1, so SIGTERM from systemd/docker reaches the
+#     manual shutdown handler in src/main.ts (server.close → app.close)
+#     immediately. The previous
 #     `pnpm --filter @ccp/api start` chain (pnpm → sh → node, because
 #     the `start` script uses inline `VAR=value` prefix syntax) made
 #     signal forwarding shell-implementation-dependent. BullMQ's

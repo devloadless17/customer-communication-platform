@@ -15,7 +15,9 @@
  * subscriber that follows reads fresh state.
  */
 
-import { subscribe } from "@/lib/events/bus";
+import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
+
+import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import {
   trackOnAssigned,
   trackOnStatusChanged,
@@ -23,6 +25,13 @@ import {
 } from "@/lib/conversations/analytics";
 
 export function registerAnalyticsSubscribers(): void {
+  // ANALYTICS tier — runs after audit, before workflow-dispatch +
+  // outbound-webhooks (both re-read the state these handlers write).
+  const subscribe = <K extends DomainEventType>(
+    type: K,
+    handler: (e: DomainEventOf<K>) => void | Promise<void>,
+  ) => busSubscribe(type, handler, SubscriberPriority.ANALYTICS);
+
   subscribe("conversation.assigned", async (e) => {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
     await trackOnAssigned({

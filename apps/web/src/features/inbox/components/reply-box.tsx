@@ -602,7 +602,7 @@ export function ReplyBox({
           senderUserId: currentUser.id,
           body: effectiveCaption,
           direction: "out",
-          provider: "meta_cloud",
+          channel: "whatsapp",
           status: "sent",
           rawPayload: {},
           timestamp: ts,
@@ -630,7 +630,7 @@ export function ReplyBox({
           senderUserId: currentUser.id,
           body: trimmed,
           direction: "out",
-          provider: "meta_cloud",
+          channel: "whatsapp",
           status: "sent",
           rawPayload: {},
           timestamp: ts,
@@ -749,12 +749,14 @@ export function ReplyBox({
       } catch (err) {
         // Normalize the AbortError so the toast doesn't say "The user aborted
         // a request" — it wasn't the user, it was our timeout.
-        if (err instanceof Error && err.name === "AbortError") {
-          err = new Error(
-            "send timed out — the server didn't respond in time. Tap Retry.",
-          );
-        }
-        const message = err instanceof Error ? err.message : "failed to send";
+        const normalized =
+          err instanceof Error && err.name === "AbortError"
+            ? new Error(
+                "send timed out — the server didn't respond in time. Tap Retry.",
+              )
+            : err;
+        const message =
+          normalized instanceof Error ? normalized.message : "failed to send";
         setError(message);
         toast.error(isNote ? "Couldn't save note" : "Couldn't send message", {
           description: message,

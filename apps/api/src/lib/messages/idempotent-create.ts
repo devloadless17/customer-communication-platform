@@ -1,7 +1,7 @@
 import { Prisma, type Message } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 
 import { getCorrelationId } from "@/common/correlation";
 import { drainParkedStatus } from "@/lib/providers/ingest";
@@ -42,7 +42,7 @@ export async function createOutboundMessageIdempotent(
       // One retry on transient failure — a Redis hiccup at exactly this
       // millisecond would otherwise lose the parked status (GETDEL is
       // atomic, so by the time the catch runs the entry is already gone).
-      if (created.externalId && created.provider) {
+      if (created.externalId && created.channel) {
         // contactId lookup is unconditional but cheap (indexed PK) — needed
         // so the parked-status publish carries contact_id for outbound webhooks.
         const convo = await db.conversation.findUnique({
@@ -52,7 +52,7 @@ export async function createOutboundMessageIdempotent(
         if (convo) {
           void drainWithRetry(
             created.teamId,
-            created.provider as ProviderName,
+            created.channel as Channel,
             created.externalId,
             created.id,
             created.conversationId,
@@ -64,16 +64,16 @@ export async function createOutboundMessageIdempotent(
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError) {
         // P2002: duplicate externalId — legitimate, return existing row.
-        // Uniqueness is now compound on (teamId, provider, externalId)
+        // Uniqueness is now compound on (teamId, channel, externalId)
         // (post the multi-channel refactor) so cross-tenant collisions
         // can't surface here in the first place; the lookup mirrors the
         // unique key.
-        if (err.code === "P2002" && data.externalId && data.provider) {
+        if (err.code === "P2002" && data.externalId && data.channel) {
           const existing = await db.message.findUnique({
             where: {
-              teamId_provider_externalId: {
+              teamId_channel_externalId: {
                 teamId: data.teamId,
-                provider: data.provider,
+                channel: data.channel,
                 externalId: data.externalId,
               },
             },
@@ -110,19 +110,19 @@ export async function createOutboundMessageIdempotent(
  */
 async function drainWithRetry(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   externalId: string,
   messageId: string,
   conversationId: string,
   contactId: string,
 ): Promise<void> {
   try {
-    await drainParkedStatus(teamId, provider, externalId, messageId, conversationId, contactId);
+    await drainParkedStatus(teamId, channel, externalId, messageId, conversationId, contactId);
     return;
   } catch (firstErr) {
     await new Promise((r) => setTimeout(r, 250));
     try {
-      await drainParkedStatus(teamId, provider, externalId, messageId, conversationId, contactId);
+      await drainParkedStatus(teamId, channel, externalId, messageId, conversationId, contactId);
       return;
     } catch (secondErr) {
       console.error(
@@ -131,7 +131,7 @@ async function drainWithRetry(
           severity: "error",
           correlationId: getCorrelationId() ?? null,
           teamId,
-          provider,
+          channel,
           externalId,
           messageId,
           firstAttemptMessage: firstErr instanceof Error ? firstErr.message : String(firstErr),

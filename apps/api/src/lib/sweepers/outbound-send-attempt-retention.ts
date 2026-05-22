@@ -2,10 +2,13 @@ import { db } from "@/lib/db";
 
 /**
  * Retention sweeper for OutboundSendAttempt rows. The model is bookkeeping
- * for the BEFORE-Meta-call idempotency check in
- * `MessagesService.executeTextSendJob` — once a job is past BullMQ's
- * `removeOnFail` window (7 days), there can be no more retries using the
- * same jobId, so the attempt row's "block double-send" purpose is moot.
+ * for the BEFORE-Meta-call idempotency check in two places:
+ *   - `MessagesService.executeTextSendJob` (jobId `msg-send-*`) — once a job is
+ *     past BullMQ's `removeOnFail` window (7 days) there can be no more retries
+ *     using the same jobId, so the row's "block double-send" purpose is moot.
+ *   - the broadcast runner's per-recipient guard (jobId `bc-recipient-*`,
+ *     added 2026-05-22) — completed rows are reconcile breadcrumbs; the rare
+ *     stuck/incomplete row (crash mid-send) is GC'd here after 7 days too.
  *
  * Without cleanup, the table grows monotonically (1 row per outbound text
  * send per attempt × team × forever). At pilot scale that's slow, but the

@@ -1,22 +1,22 @@
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 
 /**
- * Resolve the provider-side destination ADDRESS to send to (and, for
+ * Resolve the channel-side destination ADDRESS to send to (and, for
  * conversation-creating sends, the channel to stamp on the new row).
  *
- * Channel OWNERSHIP lives on `Conversation.provider` — the conversation is the
+ * Channel OWNERSHIP lives on `Conversation.channel` — the conversation is the
  * source of truth for "which channel" (see schema.prisma + the read paths).
  * This helper's job is the destination address, which IS contact-owned. The
- * `provider` it returns equals the conversation's by construction: a contact's
+ * `channel` it returns equals the conversation's by construction: a contact's
  * channel is immutable (phone / identity never change) and contacts are siloed
  * one-per-channel, so the conversation was stamped from this same value at
  * creation. Existing-conversation sends use it for `to`; conversation-creating
- * sends also use its `provider` to stamp the new `Conversation.provider`.
+ * sends also use its `channel` to stamp the new `Conversation.channel`.
  *
  * This is the single place the "phone number == identity" assumption is
  * allowed to live. WhatsApp contacts carry a `phoneNumber` and a null
- * `identityProvider` (the phone IS the identity). Future channels (Instagram
- * scoped-user-id, Telegram chat-id) carry `identityProvider` +
+ * `identityChannel` (the phone IS the identity). Future channels (Instagram
+ * scoped-user-id, Telegram chat-id) carry `identityChannel` +
  * `externalContactId` and a null phone. Send paths call this instead of
  * reading `contact.phoneNumber` directly, so adding a channel doesn't mean
  * hunting down every `to: contact.phoneNumber`.
@@ -25,12 +25,12 @@ import type { ProviderName } from "@ccp/shared/types";
 /** Minimal contact shape needed to route a send. */
 export interface ChannelResolvable {
   phoneNumber: string | null;
-  identityProvider: ProviderName | null;
+  identityChannel: Channel | null;
   externalContactId: string | null;
 }
 
 export interface ResolvedChannel {
-  provider: ProviderName;
+  channel: Channel;
   /** Provider-side destination — WhatsApp phone number, IG/Telegram id, etc. */
   to: string;
 }
@@ -48,13 +48,13 @@ export class NoChannelDestinationError extends Error {
 }
 
 export function resolveContactChannel(contact: ChannelResolvable): ResolvedChannel {
-  // Non-phone channel: identity is the provider's external id.
-  if (contact.identityProvider && contact.externalContactId) {
-    return { provider: contact.identityProvider, to: contact.externalContactId };
+  // Non-phone channel: identity is the channel's external id.
+  if (contact.identityChannel && contact.externalContactId) {
+    return { channel: contact.identityChannel, to: contact.externalContactId };
   }
   // WhatsApp (and any phone-keyed channel): the phone number is the identity.
   if (contact.phoneNumber) {
-    return { provider: "meta_cloud", to: contact.phoneNumber };
+    return { channel: "whatsapp", to: contact.phoneNumber };
   }
   throw new NoChannelDestinationError();
 }

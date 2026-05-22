@@ -79,14 +79,14 @@ export async function sendTextInternal(
       contactId: true,
       // Channel is conversation-owned — bind + stamp the send from here, not
       // from the contact (resolveContactChannel only supplies the destination).
-      provider: true,
+      channel: true,
       // lastMessageAt feeds the timestamp-ordering guard below. Pulling it
       // here avoids a second roundtrip after the Meta send returns.
       lastMessageAt: true,
       contact: {
         select: {
           phoneNumber: true,
-          identityProvider: true,
+          identityChannel: true,
           externalContactId: true,
           lastInboundAt: true,
         },
@@ -118,7 +118,7 @@ export async function sendTextInternal(
     }
     throw err;
   }
-  const provider = conversation.provider;
+  const provider = conversation.channel;
   const binding = getProviderBinding(provider);
 
   // Free-form send window — pre-check on our side so we surface a clean error
@@ -183,7 +183,7 @@ export async function sendTextInternal(
     senderUserId: null,
     body,
     direction: "out",
-    provider,
+    channel: provider,
     status: "sent",
     rawPayload: { sentVia: args.sentVia } as Prisma.InputJsonValue,
     timestamp: messageTimestamp,
@@ -225,7 +225,7 @@ export async function sendTextInternal(
     senderUserId: null,
     body,
     direction: "out",
-    provider,
+    channel: provider,
     status: "sent",
     rawPayload: { sentVia: args.sentVia },
     timestamp: messageTimestamp.toISOString(),

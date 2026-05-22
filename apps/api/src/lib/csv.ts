@@ -40,7 +40,7 @@ export function serializeCsv(columns: string[], rows: Array<Record<string, strin
   for (const row of rows) {
     lines.push(columns.map((c) => escapeCell(row[c] ?? "")).join(","));
   }
-  return "﻿" + lines.join("\r\n") + "\r\n";
+  return "\uFEFF" + lines.join("\r\n") + "\r\n";
 }
 
 export interface ParsedCsv {
@@ -58,7 +58,7 @@ export interface ParsedCsv {
  */
 export function parseCsv(input: string): ParsedCsv {
   // Strip a UTF-8 BOM if present — Excel writes one on save.
-  const cleaned = input.replace(/^﻿/, "");
+  const cleaned = input.replace(/^\uFEFF/, "");
   const parsed = Papa.parse<string[]>(cleaned, {
     skipEmptyLines: true,
     // We want raw arrays so we control header dedup and trimming below.

@@ -60,7 +60,7 @@ export function emitOptimisticListBump(bump: OptimisticListBump): void {
         cb(bump);
       } catch (err) {
         // A misbehaving subscriber must not break the optimistic UX.
-        // eslint-disable-next-line no-console
+         
         console.error("[optimistic-list-bump] subscriber threw", err);
       }
     }

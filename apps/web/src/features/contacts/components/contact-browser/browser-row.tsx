@@ -1,5 +1,7 @@
 "use client";
 
+import { memo } from "react";
+
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { WindowBadge } from "@/features/inbox/components/window-badge";
 import { TagChip } from "@/features/tags/components/tag-chip";
@@ -13,7 +15,7 @@ import type { ContactListItem, ContactStage, Tag } from "@ccp/shared/types";
  * the Contacts page row, minus the inline editing — picking is the only job
  * here, so the whole row is one big checkbox label.
  */
-export function BrowserRow({
+export const BrowserRow = memo(function BrowserRow({
   item,
   tagById,
   stageById,
@@ -24,7 +26,8 @@ export function BrowserRow({
   tagById: Map<string, Tag>;
   stageById: Map<string, ContactStage>;
   selected: boolean;
-  onSelectChange: (next: boolean) => void;
+  // id-parameterized so the parent passes one stable callback for all rows.
+  onSelectChange: (id: string, next: boolean) => void;
 }) {
   const { contact, lastInboundAt } = item;
   const contactTags = (contact.tagIds ?? [])
@@ -47,7 +50,7 @@ export function BrowserRow({
           type="checkbox"
           className="size-4 shrink-0 cursor-pointer accent-primary"
           checked={selected}
-          onChange={(e) => onSelectChange(e.target.checked)}
+          onChange={(e) => onSelectChange(contact.id, e.target.checked)}
           aria-label={`Select ${label}`}
         />
         <Avatar className="size-8 shrink-0">
@@ -97,4 +100,4 @@ export function BrowserRow({
       </label>
     </li>
   );
-}
+});

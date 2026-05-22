@@ -16,9 +16,6 @@
     "start": {
       "cache": false,
       "persistent": true
-    },
-    "lint": {
-      "outputs": []
     }
   }
 }

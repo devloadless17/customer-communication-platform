@@ -41,7 +41,6 @@ import type {
   MessageStatusChangedEvent,
   NoteCreatedEvent,
 } from "../events/types";
-import { publicChannel } from "../channel";
 
 /**
  * Stable identifiers partners subscribe to. Must NOT change once shipped —
@@ -382,7 +381,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
  * the team's Meta config (it's stable per team; mapper doesn't know it).
  */
 export interface ChannelInfo {
-  source: "meta_cloud";
+  source: "whatsapp";
   phone_number_id: string | null;
   display_phone_number: string | null;
 }
@@ -836,7 +835,7 @@ function messageFromDomain(
     id: m.id,
     conversation_id: m.conversationId,
     contact_id: contactId,
-    channel: publicChannel(),
+    channel: m.channel,
     direction: m.direction,
     body: m.body,
     timestamp: m.timestamp,

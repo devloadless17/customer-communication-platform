@@ -190,7 +190,7 @@ export class ExternalV1Service {
     if (q.phone) {
       const normalized = normalizePhoneE164(q.phone) ?? q.phone;
       const rows = await this.db.contact.findMany({
-        where: { teamId, phoneNumber: normalized },
+        where: { teamId, deletedAt: null, phoneNumber: normalized },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -199,7 +199,7 @@ export class ExternalV1Service {
     }
     if (q.email) {
       const rows = await this.db.contact.findMany({
-        where: { teamId, email: { equals: q.email.trim(), mode: "insensitive" } },
+        where: { teamId, deletedAt: null, email: { equals: q.email.trim(), mode: "insensitive" } },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -208,7 +208,7 @@ export class ExternalV1Service {
     }
     if (q.externalContactId) {
       const rows = await this.db.contact.findMany({
-        where: { teamId, externalContactId: q.externalContactId },
+        where: { teamId, deletedAt: null, externalContactId: q.externalContactId },
         include: EXTERNAL_CONTACT_INCLUDE,
         take: 1,
       });
@@ -223,6 +223,7 @@ export class ExternalV1Service {
     const rows = await this.db.contact.findMany({
       where: {
         teamId,
+        deletedAt: null,
         ...(q.stageId ? { stageId: q.stageId } : {}),
         ...(tagIds.length > 0 ? { tags: { some: { id: { in: tagIds } } } } : {}),
         ...(q.search
@@ -347,6 +348,27 @@ export class ExternalV1Service {
         "code" in err &&
         (err as { code?: string }).code === "P2002"
       ) {
+        // A soft-deleted contact still holds this phone's unique slot. Revive
+        // it (and its preserved conversation) instead of 409-ing on a row the
+        // directory no longer shows — mirrors ContactsService.create.
+        const revived = await this.reviveSoftDeletedByPhone(
+          teamId,
+          apiKeyId,
+          phone,
+          {
+            name,
+            firstName: trimmedFirst,
+            lastName: trimmedLast,
+            language,
+            countryCode,
+            email,
+            location,
+            customFields,
+            stageId,
+            tagIds: validTagIds,
+          },
+        );
+        if (revived) return revived;
         throw new ConflictException({
           error: "a contact with this phone number already exists",
         });
@@ -359,7 +381,7 @@ export class ExternalV1Service {
       id: created.id,
       teamId: created.teamId,
       phoneNumber: created.phoneNumber,
-      identityProvider: created.identityProvider,
+      identityChannel: created.identityChannel,
       externalContactId: created.externalContactId,
       name: created.name,
       firstName: created.firstName,
@@ -406,6 +428,109 @@ export class ExternalV1Service {
     });
 
     return toExternalContact(created, tagIds);
+  }
+
+  /**
+   * Revive a soft-deleted contact occupying `phone`'s unique slot. Clears the
+   * tombstone, overwrites directory fields + tag set with the re-add payload,
+   * and republishes the same `contact.created` + `contact.updated` pair the
+   * create path fires (a revived contact is a fresh directory appearance).
+   * Returns `null` when there's no soft-deleted row, so the caller falls
+   * through to a real 409 for a live duplicate. Conversation history is
+   * preserved — mirror of ContactsService.reviveSoftDeletedByPhone.
+   */
+  private async reviveSoftDeletedByPhone(
+    teamId: string,
+    apiKeyId: string,
+    phone: string,
+    data: {
+      name: string;
+      firstName: string | null;
+      lastName: string | null;
+      language: string | null;
+      countryCode: string | null;
+      email: string | null;
+      location: string | null;
+      customFields: Record<string, string>;
+      stageId: string | null;
+      tagIds: string[];
+    },
+  ): Promise<ExternalContact | null> {
+    const existing = await this.db.contact.findFirst({
+      where: { teamId, phoneNumber: phone, deletedAt: { not: null } },
+      select: { id: true },
+    });
+    if (!existing) return null;
+
+    const updated = await this.db.contact.update({
+      where: { id: existing.id },
+      data: {
+        name: data.name,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        language: data.language,
+        countryCode: data.countryCode,
+        email: data.email ?? null,
+        location: data.location ?? null,
+        customFields: data.customFields,
+        stageId: data.stageId,
+        source: "manual",
+        deletedAt: null,
+        version: { increment: 1 },
+        tags: { set: data.tagIds.map((id) => ({ id })) },
+      },
+      include: EXTERNAL_CONTACT_INCLUDE,
+    });
+
+    const tagIds = updated.tags.map((t) => t.id);
+    const contact: DomainContact = {
+      id: updated.id,
+      teamId: updated.teamId,
+      phoneNumber: updated.phoneNumber,
+      identityChannel: updated.identityChannel,
+      externalContactId: updated.externalContactId,
+      name: updated.name,
+      firstName: updated.firstName,
+      lastName: updated.lastName,
+      language: updated.language,
+      countryCode: updated.countryCode,
+      avatarUrl: updated.avatarUrl ?? undefined,
+      email: updated.email ?? undefined,
+      location: updated.location ?? undefined,
+      customFields: normalizeStringMap(updated.customFields),
+      source: updated.source,
+      stageId: updated.stageId,
+      tagIds,
+      createdAt: updated.createdAt.toISOString(),
+    };
+
+    await this.bus.publish({
+      type: "contact.created",
+      teamId,
+      contact,
+      source: "api",
+      createdByUserId: null,
+      createdByApiKeyId: apiKeyId,
+    });
+
+    await this.bus.publish({
+      type: "contact.updated",
+      teamId,
+      contact,
+      previousStageId: null,
+      fieldChanges: Object.entries(contact.customFields).map(([key, next]) => ({
+        key,
+        previous: null,
+        next,
+      })),
+      tagChanges: tagIds.length > 0 ? { added: tagIds, removed: [] } : undefined,
+      changedByUserId: null,
+      changedByApiKeyId: apiKeyId,
+      kind: "created",
+      workflowContact: workflowContactSnapshot(updated),
+    });
+
+    return toExternalContact(updated, tagIds);
   }
 
   /**
@@ -516,7 +641,7 @@ export class ExternalV1Service {
       id: updated.id,
       teamId: updated.teamId,
       phoneNumber: updated.phoneNumber,
-      identityProvider: updated.identityProvider,
+      identityChannel: updated.identityChannel,
       externalContactId: updated.externalContactId,
       name: updated.name,
       firstName: updated.firstName,
@@ -581,9 +706,13 @@ export class ExternalV1Service {
     }
     const existing = await this.db.contact.findFirst({
       where: { teamId, phoneNumber: phone },
-      select: { id: true },
+      select: { id: true, deletedAt: true },
     });
-    if (!existing) {
+    // Not found OR soft-deleted → go through createContact. For a tombstoned
+    // row create() hits P2002 and reviveSoftDeletedByPhone restores it (firing
+    // contact.created), so re-upserting a removed contact behaves like a fresh
+    // add rather than silently patching a hidden row.
+    if (!existing || existing.deletedAt) {
       const contact = await this.createContact(teamId, apiKeyId, input);
       return { contact, created: true };
     }
@@ -598,9 +727,11 @@ export class ExternalV1Service {
   }
 
   /**
-   * Hard-delete. Cascade clears Conversation / Message / InternalNote /
-   * BroadcastRecipient / Tag joins via FK. Blob unlink is best-effort
-   * AFTER the DB commit — a stuck blob is preferable to a half-committed delete.
+   * Soft-delete: tombstone the contact but PRESERVE its conversations,
+   * messages, and media — removing a contact must NOT delete its chat. The
+   * contact just leaves the directory; its thread stays in the inbox, and a
+   * returning contact is revived (ingest upsert / create-by-phone). Mirrors
+   * ContactsService.remove. A hard GDPR purge is a separate, explicit path.
    */
   async deleteContact(
     teamId: string,
@@ -608,42 +739,22 @@ export class ExternalV1Service {
     contactId: string,
   ): Promise<void> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
-      select: {
-        id: true,
-        conversations: {
-          select: {
-            id: true,
-            messages: {
-              where: { mediaKey: { not: null } },
-              select: { mediaKey: true },
-            },
-          },
-        },
-      },
+      where: { id: contactId, teamId, deletedAt: null },
+      select: { id: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
-    const mediaKeys = contact.conversations
-      .flatMap((c) => c.messages)
-      .map((m) => m.mediaKey)
-      .filter((k): k is string => Boolean(k));
-    const conversationIds = contact.conversations.map((c) => c.id);
-
-    await this.db.contact.delete({ where: { id: contactId } });
-
-    if (mediaKeys.length > 0) {
-      // Lazy-import to keep startup graph small; blob-storage init touches
-      // env / providers we don't want on every delete-less request.
-      const { blobStorage } = await import("@/lib/blob-storage");
-      await blobStorage.delete(mediaKeys);
-    }
+    await this.db.contact.update({
+      where: { id: contactId },
+      data: { deletedAt: new Date() },
+    });
 
     await this.bus.publish({
       type: "contact.deleted",
       teamId,
       contactId,
-      conversationIds,
+      // Conversations are preserved on soft-delete — none to splice from lists.
+      conversationIds: [],
       deletedByUserId: null,
       deletedByApiKeyId: apiKeyId,
     });
@@ -661,7 +772,7 @@ export class ExternalV1Service {
   async getContactChannels(teamId: string, contactId: string) {
     const c = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
-      select: { id: true, phoneNumber: true, identityProvider: true, externalContactId: true },
+      select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!c) throw new NotFoundException({ error: "contact not found" });
     if (!c.phoneNumber) return { items: [] };
@@ -670,9 +781,9 @@ export class ExternalV1Service {
         {
           // Read-only DESCRIPTION of this contact's own (siloed, immutable)
           // channel — NOT a send-routing decision. Send paths route by
-          // `Conversation.provider`; never derive a channel from the contact.
-          // Don't copy this `identityProvider ?? "meta_cloud"` into a send site.
-          channel: c.identityProvider ?? "meta_cloud",
+          // `Conversation.channel`; never derive a channel from the contact.
+          // Don't copy this `identityChannel ?? "whatsapp"` into a send site.
+          channel: c.identityChannel ?? "whatsapp",
           phoneNumber: c.phoneNumber,
           externalContactId: c.externalContactId,
         },
@@ -914,7 +1025,7 @@ export class ExternalV1Service {
         id: c.id,
         teamId: c.teamId,
         phoneNumber: c.phoneNumber,
-        identityProvider: c.identityProvider,
+        identityChannel: c.identityChannel,
         externalContactId: c.externalContactId,
         name: c.name,
         firstName: c.firstName,
@@ -1202,7 +1313,7 @@ export class ExternalV1Service {
     // One active connection per provider today; lists all the team's channels.
     const conns = await this.db.channelConnection.findMany({
       where: { teamId, isActive: true },
-      select: { provider: true, config: true },
+      select: { channel: true, config: true },
     });
     const items = conns
       .map((c) => {
@@ -1213,7 +1324,7 @@ export class ExternalV1Service {
         if (!cfg.phoneNumberId) return null;
         return {
           id: cfg.phoneNumberId,
-          channel: c.provider,
+          channel: c.channel,
           display: cfg.displayPhoneNumber ?? cfg.phoneNumberId,
         };
       })
@@ -1244,7 +1355,7 @@ export class ExternalV1Service {
       id: updated.id,
       teamId: updated.teamId,
       phoneNumber: updated.phoneNumber,
-      identityProvider: updated.identityProvider,
+      identityChannel: updated.identityChannel,
       externalContactId: updated.externalContactId,
       name: updated.name,
       firstName: updated.firstName,

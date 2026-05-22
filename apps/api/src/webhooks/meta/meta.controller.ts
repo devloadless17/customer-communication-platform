@@ -168,7 +168,7 @@ export class MetaWebhookController {
     const downloadPromise = this.downloadInboundMedia(teamId, events, downloadOutcomes);
 
     try {
-      await ingestEvents(teamId, "meta_cloud", events);
+      await ingestEvents(teamId, "whatsapp", events);
     } catch (err) {
       // Meta retries on any non-2xx. Map error classes to the response that
       // actually matches the intent:

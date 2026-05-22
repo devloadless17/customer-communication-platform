@@ -1,4 +1,4 @@
-import { subscribe } from "@/lib/events/bus";
+import { subscribe, SubscriberPriority } from "@/lib/events/bus";
 import type { TeamCatalogChangedEvent } from "@ccp/shared/events/types";
 
 /**
@@ -110,5 +110,5 @@ export function registerWebCacheRevalidateSubscriber(): void {
           `[web-cache-revalidate] fetch failed: ${err instanceof Error ? err.message : err}`,
         );
       });
-  });
+  }, SubscriberPriority.WEB_CACHE_REVALIDATE);
 }

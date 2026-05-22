@@ -27,7 +27,7 @@ import type {
   ConversationWithRefs,
   MediaKind,
   Message,
-  ProviderName,
+  Channel,
   ReplySnapshot,
 } from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
@@ -48,7 +48,7 @@ import { getCountryFromPhone } from "@ccp/shared/utils";
 
 export async function ingestEvents(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   events: NormalizedEvent[],
 ): Promise<void> {
   if (events.length === 0) return;
@@ -69,9 +69,9 @@ export async function ingestEvents(
   const runOne = async (evt: NormalizedEvent): Promise<void> => {
     try {
       if (evt.kind === "message") {
-        await ingestInboundMessage(teamId, provider, evt);
+        await ingestInboundMessage(teamId, channel, evt);
       } else {
-        await ingestStatusUpdate(teamId, provider, evt);
+        await ingestStatusUpdate(teamId, channel, evt);
       }
     } catch (err) {
         // Structured log — fields chosen so a flood of identical errors is
@@ -86,7 +86,7 @@ export async function ingestEvents(
             event: "ingest.event_failed",
             severity: "error",
             teamId,
-            provider,
+            channel,
             kind: evt.kind,
             externalId,
             message: err instanceof Error ? err.message : String(err),
@@ -112,18 +112,18 @@ export async function ingestEvents(
 
 async function ingestStatusUpdate(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   evt: NormalizedStatusUpdate,
 ): Promise<void> {
-  // (teamId, provider, externalId) is the compound unique key post the
-  // multi-channel refactor. teamId + provider come from the webhook route
-  // (the URL is per-team and the route is per-provider); the wire payload
+  // (teamId, channel, externalId) is the compound unique key post the
+  // multi-channel refactor. teamId + channel come from the webhook route
+  // (the URL is per-team and the route is per-channel); the wire payload
   // carries only the externalId.
   const existing = await db.message.findUnique({
     where: {
-      teamId_provider_externalId: {
+      teamId_channel_externalId: {
         teamId,
-        provider,
+        channel,
         externalId: evt.externalId,
       },
     },
@@ -142,7 +142,7 @@ async function ingestStatusUpdate(
   // it drains the parked status and applies it. After TTL we drop — at that
   // point either the create failed permanently or Meta's clock is way off.
   if (!existing) {
-    await parkUnknownWamidStatus(teamId, provider, evt.externalId, evt.status);
+    await parkUnknownWamidStatus(teamId, channel, evt.externalId, evt.status);
     return;
   }
 
@@ -183,7 +183,7 @@ async function ingestStatusUpdate(
 
 /**
  * Park-and-replay table for status updates that arrived before the message
- * row was committed. Keyed by `(teamId|provider|externalId)` and stored in
+ * row was committed. Keyed by `(teamId|channel|externalId)` and stored in
  * Redis with a 15-minute TTL so:
  *   - state survives process restart (deploys + crashes)
  *   - two api processes can park on A and drain on B without losing replay
@@ -200,19 +200,19 @@ const UNKNOWN_WAMID_TTL_MS = 15 * 60_000;
 
 function parkKey(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   externalId: string,
 ): string {
-  return `ccp:parked-status:${teamId}|${provider}|${externalId}`;
+  return `ccp:parked-status:${teamId}|${channel}|${externalId}`;
 }
 
 async function parkUnknownWamidStatus(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   externalId: string,
   status: Message["status"],
 ): Promise<void> {
-  const key = parkKey(teamId, provider, externalId);
+  const key = parkKey(teamId, channel, externalId);
   const redis = getRedisConnection();
   try {
     if (status === "failed") {
@@ -245,13 +245,13 @@ async function parkUnknownWamidStatus(
  */
 export async function drainParkedStatus(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   externalId: string,
   messageId: string,
   conversationId: string,
   contactId: string,
 ): Promise<void> {
-  const key = parkKey(teamId, provider, externalId);
+  const key = parkKey(teamId, channel, externalId);
   const redis = getRedisConnection();
   let parked: Message["status"] | null = null;
   try {
@@ -304,17 +304,17 @@ function statusRank(s: Message["status"]): number {
 
 async function ingestInboundMessage(
   teamId: string,
-  provider: ProviderName,
+  channel: Channel,
   evt: NormalizedInboundMessage,
 ): Promise<void> {
   // Rule #3 dedupe gate. Cheap pre-check; the compound unique
-  // (teamId, provider, externalId) is the actual race guard via the P2002
+  // (teamId, channel, externalId) is the actual race guard via the P2002
   // catch below.
   const existing = await db.message.findUnique({
     where: {
-      teamId_provider_externalId: {
+      teamId_channel_externalId: {
         teamId,
-        provider,
+        channel,
         externalId: evt.externalId,
       },
     },
@@ -330,7 +330,7 @@ async function ingestInboundMessage(
   if (evt.replyToExternalId) {
     replySnapshot = await loadReplySnapshotByExternalId(evt.replyToExternalId, {
       teamId,
-      provider,
+      channel,
     });
   }
 
@@ -396,11 +396,18 @@ async function ingestInboundMessage(
           stageId: defaultStageId,
         },
         update: {
-          // Intentionally empty: do NOT touch the name OR the stage. The
-          // agent's manually entered name (or the first-contact profile
-          // name) stays put, and a contact who progressed past the default
-          // stage isn't pulled back to it just because they sent another
-          // message.
+          // Revive a soft-deleted contact: they're messaging again, so they
+          // belong back in the directory. The soft-deleted row still holds
+          // this phone's unique slot (one contact = one phone), so the upsert
+          // lands on it — clearing the tombstone reconnects them to their
+          // preserved conversation history. No-op when already active.
+          //
+          // Everything else is intentionally untouched: do NOT touch the name
+          // OR the stage. The agent's manually entered name (or the
+          // first-contact profile name) stays put, and a contact who
+          // progressed past the default stage isn't pulled back to it just
+          // because they sent another message.
+          deletedAt: null,
         },
       });
 
@@ -422,8 +429,8 @@ async function ingestInboundMessage(
           data: {
             teamId,
             contactId: contact.id,
-            // The thread's channel is the provider whose webhook created it.
-            provider,
+            // The thread's channel is the channel whose webhook created it.
+            channel,
             // New chats land in `pending` so they sit in the triage column
             // until an agent claims them (→ open) or closes them out.
             status: "pending",
@@ -476,7 +483,7 @@ async function ingestInboundMessage(
           senderUserId: null,
           body: evt.body,
           direction: "in",
-          provider,
+          channel,
           status: "delivered",
           rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           timestamp: evt.timestamp,
@@ -576,7 +583,7 @@ async function ingestInboundMessage(
       const messagePayload = buildMessageDomain({
         createdId: created.id,
         teamId,
-        provider,
+        channel,
         conversation,
         evt,
         replySnapshot,
@@ -609,9 +616,9 @@ async function ingestInboundMessage(
         id: created.id,
         conversationId: conversation.id,
         externalId: evt.externalId,
-        // Inbound message's channel == the provider whose webhook we're
-        // ingesting (the `provider` arg to ingestInboundMessage).
-        provider,
+        // Inbound message's channel == the channel whose webhook we're
+        // ingesting (the `channel` arg to ingestInboundMessage).
+        channel,
         senderUserId: null,
         body: evt.body,
         direction: "in",
@@ -742,13 +749,13 @@ async function ingestInboundMessage(
 function buildMessageDomain(args: {
   createdId: string;
   teamId: string;
-  provider: ProviderName;
+  channel: Channel;
   conversation: { id: string };
   evt: NormalizedInboundMessage;
   replySnapshot: ReplySnapshot | null;
   mediaPending: boolean;
 }): Message {
-  const { createdId, teamId, provider, conversation, evt, replySnapshot, mediaPending } = args;
+  const { createdId, teamId, channel, conversation, evt, replySnapshot, mediaPending } = args;
   return {
     id: createdId,
     teamId,
@@ -757,7 +764,7 @@ function buildMessageDomain(args: {
     senderUserId: null,
     body: evt.body,
     direction: "in",
-    provider,
+    channel,
     status: "delivered",
     // raw_payload stays in the DB row (created above) but is deliberately
     // left off the socket payload — no client needs the verbatim Meta body.
@@ -801,7 +808,7 @@ function toWorkflowMessage(m: {
   id: string;
   conversationId: string;
   externalId: string;
-  provider: ProviderName;
+  channel: Channel;
   direction: "in" | "out";
   body: string;
   mediaKind: import("@ccp/shared/types").MediaKind | null;
@@ -813,7 +820,7 @@ function toWorkflowMessage(m: {
     id: m.id,
     conversationId: m.conversationId,
     externalId: m.externalId,
-    provider: m.provider,
+    channel: m.channel,
     direction: m.direction,
     body: m.body,
     mediaKind: m.mediaKind,
@@ -825,7 +832,7 @@ function toWorkflowMessage(m: {
 
 function toWorkflowConversation(c: {
   id: string;
-  provider: ProviderName;
+  channel: Channel;
   status: string;
   assignedUserId: string | null;
   unreadCount: number;
@@ -846,7 +853,7 @@ function toWorkflowConversation(c: {
 }): WorkflowConversationSnapshot {
   return {
     id: c.id,
-    provider: c.provider,
+    channel: c.channel,
     status: c.status as WorkflowConversationSnapshot["status"],
     assignedUserId: c.assignedUserId,
     unreadCount: c.unreadCount,
@@ -870,7 +877,7 @@ function toWorkflowConversation(c: {
 function toWorkflowContact(c: {
   id: string;
   phoneNumber: string | null;
-  identityProvider?: ProviderName | null;
+  identityChannel?: Channel | null;
   externalContactId?: string | null;
   name: string;
   email?: string | null;
@@ -891,7 +898,7 @@ function toWorkflowContact(c: {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
-    identityProvider: c.identityProvider ?? null,
+    identityChannel: c.identityChannel ?? null,
     externalContactId: c.externalContactId ?? null,
     name: c.name,
     email: c.email ?? null,
@@ -956,7 +963,7 @@ async function loadRecentForWorkflow(
       id: true,
       conversationId: true,
       externalId: true,
-      provider: true,
+      channel: true,
       direction: true,
       body: true,
       mediaKind: true,
@@ -970,7 +977,7 @@ async function loadRecentForWorkflow(
       id: r.id,
       conversationId: r.conversationId,
       externalId: r.externalId,
-      provider: r.provider,
+      channel: r.channel,
       direction: r.direction as "in" | "out",
       body: r.body,
       mediaKind: r.mediaKind as import("@ccp/shared/types").MediaKind | null,
@@ -1014,7 +1021,7 @@ function toDomainContact(c: {
   id: string;
   teamId: string;
   phoneNumber: string | null;
-  identityProvider?: ProviderName | null;
+  identityChannel?: Channel | null;
   externalContactId?: string | null;
   name: string;
   firstName?: string | null;
@@ -1032,7 +1039,7 @@ function toDomainContact(c: {
     id: c.id,
     teamId: c.teamId,
     phoneNumber: c.phoneNumber,
-    identityProvider: c.identityProvider ?? null,
+    identityChannel: c.identityChannel ?? null,
     externalContactId: c.externalContactId ?? null,
     name: c.name,
     firstName: c.firstName ?? null,
@@ -1070,16 +1077,16 @@ function normalizeCustomFields(raw: unknown): Record<string, string> {
  */
 export async function loadReplySnapshotByExternalId(
   externalId: string,
-  scope: { teamId: string; provider: ProviderName },
+  scope: { teamId: string; channel: Channel },
 ): Promise<ReplySnapshot | null> {
-  // Post the (teamId, provider, externalId) compound unique migration,
+  // Post the (teamId, channel, externalId) compound unique migration,
   // externalId alone isn't unique; pass the scope explicitly so cross-team
   // / cross-channel replies can't accidentally resolve to a different row.
   const row = await db.message.findUnique({
     where: {
-      teamId_provider_externalId: {
+      teamId_channel_externalId: {
         teamId: scope.teamId,
-        provider: scope.provider,
+        channel: scope.channel,
         externalId,
       },
     },

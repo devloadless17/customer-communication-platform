@@ -3,6 +3,10 @@ import {
   SendTextValidationError,
   sendTextInternal,
 } from "@/lib/messaging/send-text-internal";
+import {
+  ConversationSendRateLimitedError,
+  consumeConversationSendBudget,
+} from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
 
@@ -120,6 +124,11 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
     const body = resolveFieldTokens(config.body, contact, envelopeExtras(envelope));
 
     try {
+      // Per-conversation send ceiling — the loop backstop for workflow auto-
+      // replies (the unmetered leg flagged in the 2026-05-22 audit). A runaway
+      // automation hammering one thread records a clean 429 and advances
+      // instead of spending unbounded customer-facing Meta sends.
+      consumeConversationSendBudget(ctx.teamId, conversationId);
       const result = await sendTextInternal({
         teamId: ctx.teamId,
         conversationId,
@@ -128,6 +137,9 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
       });
       return advance({ messageId: result.messageId, externalId: result.externalId });
     } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        return advanceWithError(429, "conversation_send_rate_limited", err.message);
+      }
       if (err instanceof SendTextValidationError) {
         return {
           kind: "advance",

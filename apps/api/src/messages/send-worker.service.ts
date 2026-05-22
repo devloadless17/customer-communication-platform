@@ -7,10 +7,11 @@ import {
   Inject,
 } from "@nestjs/common";
 import { UnrecoverableError, Worker } from "bullmq";
+import type IORedis from "ioredis";
 
 import { publish } from "@/lib/events/bus";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
-import { connectionOptions } from "@/lib/workflows/queue";
+import { createWorkerConnection } from "@/lib/workflows/queue";
 
 import { MessagesService } from "./messages.service";
 import {
@@ -42,6 +43,8 @@ import {
 export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SendWorkerService.name);
   private worker: Worker<MessageSendJobData> | null = null;
+  private connection: IORedis | null = null;
+  private shuttingDown = false;
 
   constructor(
     // forwardRef avoids the cyclical import: MessagesService → SendWorkerService
@@ -62,6 +65,19 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
+    this.start();
+  }
+
+  /**
+   * Build the worker + its dedicated blocking connection. Re-callable: the
+   * fatal-error handler closes the wedged worker and calls this again (the
+   * workflow worker is re-armed by its sweeper; this one re-arms itself).
+   */
+  private start(): void {
+    // Dedicated blocking connection (NOT the shared producer) — see
+    // createWorkerConnection in lib/workflows/queue.ts.
+    const connection = createWorkerConnection("send-worker");
+    this.connection = connection;
     this.worker = new Worker<MessageSendJobData>(
       MESSAGE_SEND_QUEUE_NAME,
       // `job.id` is BullMQ's stable identifier — same value across all 3
@@ -70,7 +86,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       // id, which prevents a mid-fetch Meta retry from double-sending.
       async (job) => this.handle(job.data, job.id),
       {
-        connection: connectionOptions(),
+        connection,
         concurrency: 5,
         // Same lockDuration as the workflows worker (CLAUDE.md TimeoutStopSec
         // depends on this). 90s comfortably exceeds Meta's per-call timeout
@@ -82,9 +98,25 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("message-sends worker ready");
     });
     this.worker.on("error", (err) => {
-      this.logger.error(
-        `worker error: ${err instanceof Error ? err.message : err}`,
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`worker error: ${msg}`);
+      // Fatal classes (Redis socket closed, auth) leave the worker wedged with
+      // this.worker still set. Close + self-respawn on a delay so sends resume
+      // without operator intervention. Skipped during shutdown.
+      const fatal =
+        msg.includes("Connection is closed") ||
+        msg.includes("WRONGPASS") ||
+        msg.includes("NOAUTH");
+      if (fatal && !this.shuttingDown) {
+        this.logger.warn("message-sends worker unrecoverable; re-spawning");
+        this.worker?.close().catch(() => undefined);
+        this.connection?.disconnect();
+        this.worker = null;
+        this.connection = null;
+        setTimeout(() => {
+          if (!this.shuttingDown) this.start();
+        }, 1_000).unref();
+      }
     });
     this.worker.on("failed", (job, err) => {
       // BullMQ logs the final failure after retries are exhausted. Per-attempt
@@ -108,6 +140,7 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
     // Hard cap on the await so a single send stuck mid-Meta-fetch can't keep
     // the close hanging until SIGKILL. Past 85s the BullMQ lock has expired
     // anyway — another worker will pick it up cleanly after restart.
+    this.shuttingDown = true;
     if (this.worker) {
       const closeTimeoutMs = 85_000;
       const worker = this.worker;
@@ -129,6 +162,10 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       });
       this.worker = null;
     }
+    // Close the dedicated blocking connection (BullMQ doesn't close a handed-in
+    // instance). disconnect() is synchronous + can't hang.
+    this.connection?.disconnect();
+    this.connection = null;
   }
 
   /**

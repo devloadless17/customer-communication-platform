@@ -52,7 +52,7 @@ function maybeReload(): void {
     // sessionStorage disabled — proceed anyway; once per page-load is
     // acceptable in the worst case.
   }
-  // eslint-disable-next-line no-console
+   
   console.warn("[chunk-reload] detected stale chunk reference, reloading");
   window.location.reload();
 }

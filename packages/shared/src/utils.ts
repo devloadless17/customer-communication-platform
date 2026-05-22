@@ -163,12 +163,12 @@ export function getCountryFromPhone(raw: string | null | undefined): string | nu
  */
 export function formatContactIdentity(contact: {
   phoneNumber: string | null;
-  identityProvider?: string | null;
+  identityChannel?: string | null;
   externalContactId?: string | null;
 }): string {
   if (contact.phoneNumber) return formatPhone(contact.phoneNumber);
-  if (contact.identityProvider && contact.externalContactId) {
-    const channel = contact.identityProvider.replace(/_/g, " ");
+  if (contact.identityChannel && contact.externalContactId) {
+    const channel = contact.identityChannel.replace(/_/g, " ");
     return `${channel}:${contact.externalContactId}`;
   }
   return "—";

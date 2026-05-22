@@ -247,8 +247,18 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // Broadcast-only mirrors of message.sent / conversation.status_changed.
   // Live on their own types so analytics + audit subscribers stay out (see
   // lib/broadcast-runner.ts head comment for rationale).
+  //
+  // SCOPED TO THE CONVERSATION ROOM, not the team room (audit 2026-05-22).
+  // The normal `message.sent` path fans `message:new` team-wide so every
+  // agent's inbox list reorders live — fine at human cadence. A broadcast
+  // fires this once PER RECIPIENT (~25/sec, up to 10k), so a team-wide blast
+  // is a ~625-frame/sec storm on every connected tab. Emitting to the
+  // recipient's conversation room means only an agent actually viewing THAT
+  // thread gets the live append (the common-case empty room is a no-op);
+  // other agents' list rows refresh on next navigation. Outbound sends don't
+  // bump unread, so the only thing skipped team-wide is cosmetic reordering.
   "broadcast.recipient_message_sent": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:new", {
+    emitter.emitToConversation(e.conversationId, "message:new", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       message: stripForWire(e.message),

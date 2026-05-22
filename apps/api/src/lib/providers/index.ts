@@ -1,6 +1,6 @@
 import { getMetaSendConfig, type MetaSendConfig } from "@/lib/providers/config";
 import { metaProvider } from "@/lib/providers/meta";
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
 
 /**
@@ -59,8 +59,8 @@ export class UnsupportedProviderOperationError extends Error {
   }
 }
 
-const REGISTRY: Record<ProviderName, ProviderBinding> = {
-  meta_cloud: {
+const REGISTRY: Record<Channel, ProviderBinding> = {
+  whatsapp: {
     provider: metaProvider,
     getSendConfig: getMetaSendConfig,
   } as ProviderBinding,
@@ -73,7 +73,7 @@ const REGISTRY: Record<ProviderName, ProviderBinding> = {
  * pass a value the schema allows, but a stale/forged row shouldn't crash with
  * an undefined-method TypeError.
  */
-export function getProviderBinding(provider: ProviderName): ProviderBinding {
+export function getProviderBinding(provider: Channel): ProviderBinding {
   const binding = REGISTRY[provider];
   if (!binding) throw new UnsupportedProviderError(provider);
   return binding;
@@ -88,7 +88,7 @@ export function getProviderBinding(provider: ProviderName): ProviderBinding {
 export function requireProviderMethod<K extends keyof MessagingProvider>(
   provider: MessagingProvider,
   method: K,
-  providerName: ProviderName,
+  providerName: Channel,
 ): NonNullable<MessagingProvider[K]> {
   const fn = provider[method];
   if (!fn) throw new UnsupportedProviderOperationError(providerName, String(method));

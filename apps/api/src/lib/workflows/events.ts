@@ -17,7 +17,7 @@
  */
 import type {
   ConversationStatus,
-  ProviderName,
+  Channel,
   WorkflowTriggerEvent,
 } from "@prisma/client";
 import type { MediaKind } from "@ccp/shared/types";
@@ -31,6 +31,16 @@ export interface WorkflowEventEnvelope<P = EventPayload> {
   teamId: string;
   occurredAt: string;
   data: P;
+  /**
+   * Cross-system chain depth. The `http_request` step stamps `X-CCP-Depth:
+   * depth+1` on every outbound call; if an external system bounces back into
+   * our per-workflow `incoming_webhook`, that handler reads the header, caps
+   * it, and seeds the resulting run's envelope with the incremented value.
+   * Bounds the http_request → external → incoming_webhook → http_request
+   * cycle that the in-process trigger_workflow depth-cap can't see across the
+   * HTTP boundary (audit 2026-05-22). 0 for top-level / non-chained runs.
+   */
+  depth?: number;
   /** URLs n8n / external apps can call back to fetch more context. */
   _links: {
     conversation: string;
@@ -50,11 +60,11 @@ export interface WorkflowMessageSnapshot {
   conversationId: string;
   externalId: string;
   /** Channel this message came through (`meta_cloud` = WhatsApp today).
-   *  Always present — every message row carries a non-null provider — so
+   *  Always present — every message row carries a non-null channel — so
    *  authors branch on it directly instead of inferring from the contact
-   *  (whose `identityProvider` is null for phone-keyed WhatsApp contacts).
+   *  (whose `identityChannel` is null for phone-keyed WhatsApp contacts).
    *  Mirrors @ccp/shared/workflows/events. */
-  provider: ProviderName;
+  channel: Channel;
   direction: "in" | "out";
   body: string;
   mediaKind: MediaKind | null;
@@ -77,8 +87,8 @@ export interface WorkflowMessageSnapshot {
 export interface WorkflowConversationSnapshot {
   id: string;
   /** Channel this thread lives on (`meta_cloud` = WhatsApp). Source of truth
-   *  for the conversation's channel — mirrors Conversation.provider. */
-  provider: ProviderName;
+   *  for the conversation's channel — mirrors Conversation.channel. */
+  channel: Channel;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -111,7 +121,7 @@ export interface WorkflowConversationSnapshot {
 export interface WorkflowContactSnapshot {
   id: string;
   phoneNumber: string | null;
-  identityProvider: ProviderName | null;
+  identityChannel: Channel | null;
   externalContactId: string | null;
   name: string;
   email: string | null;
@@ -156,7 +166,7 @@ export interface WorkflowContactSnapshot {
  */
 export function workflowConversationSnapshot(c: {
   id: string;
-  provider: ProviderName;
+  channel: Channel;
   status: ConversationStatus;
   assignedUserId: string | null;
   unreadCount: number;
@@ -179,7 +189,7 @@ export function workflowConversationSnapshot(c: {
 }): WorkflowConversationSnapshot {
   return {
     id: c.id,
-    provider: c.provider,
+    channel: c.channel,
     status: c.status,
     assignedUserId: c.assignedUserId,
     unreadCount: c.unreadCount,
@@ -207,7 +217,7 @@ export function workflowConversationSnapshot(c: {
 export function workflowContactSnapshot(c: {
   id: string;
   phoneNumber: string | null;
-  identityProvider?: ProviderName | null;
+  identityChannel?: Channel | null;
   externalContactId?: string | null;
   name: string;
   email?: string | null;
@@ -246,7 +256,7 @@ export function workflowContactSnapshot(c: {
   return {
     id: c.id,
     phoneNumber: c.phoneNumber,
-    identityProvider: c.identityProvider ?? null,
+    identityChannel: c.identityChannel ?? null,
     externalContactId: c.externalContactId ?? null,
     name: c.name,
     email: c.email ?? null,

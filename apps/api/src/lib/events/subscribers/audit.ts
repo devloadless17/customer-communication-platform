@@ -19,10 +19,20 @@
  * to prevent. See CLAUDE.md "Bus events introduced for the cleanup".
  */
 
-import { subscribe } from "@/lib/events/bus";
+import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
+
+import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { recordConversationEvent } from "@/lib/inbox/events";
 
 export function registerAuditSubscribers(): void {
+  // All audit handlers run at the AUDIT tier (after realtime, before
+  // analytics / workflow-dispatch). Bind the priority once so each call
+  // below stays terse and the tier can't be forgotten on a new handler.
+  const subscribe = <K extends DomainEventType>(
+    type: K,
+    handler: (e: DomainEventOf<K>) => void | Promise<void>,
+  ) => busSubscribe(type, handler, SubscriberPriority.AUDIT);
+
   subscribe("conversation.assigned", async (e) => {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
     await recordConversationEvent({

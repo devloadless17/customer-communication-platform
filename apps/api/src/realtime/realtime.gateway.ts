@@ -285,7 +285,6 @@ export class RealtimeGateway
     @MessageBody() body: { conversationId: string },
   ): Promise<void> {
     if (!isValidBody(body, "conversationId")) return;
-    if (!checkSubscribeBudget(client, "subscribe:conversation")) return;
     const teamId = client.data.teamId as string | undefined;
     const userId = client.data.userId as string | undefined;
     if (!teamId || !userId) return;
@@ -295,14 +294,21 @@ export class RealtimeGateway
     // reconnect path when socket.io's connectionStateRecovery restored the
     // room membership) skips the DB ownership check + the team-broadcast
     // but STILL re-emits fresh typing + viewer snapshots to this socket.
-    // Without the snapshot re-emit, a long reconnect (>2 min, or a
-    // suspended laptop) would leave the client showing stale presence/
-    // typing pills until the next change ticked — the audit called this
-    // out as a desync window. Cheap fix: emit always; the snapshots are
-    // O(viewers) and capped by team size.
+    // Without the snapshot re-emit, a long reconnect (past the
+    // connectionStateRecovery window, or a suspended laptop) would leave
+    // the client showing stale presence/typing pills until the next change
+    // ticked — the audit called this out as a desync window. Cheap fix:
+    // emit always; the snapshots are O(viewers) and capped by team size.
     const alreadyJoined = client.rooms.has(room);
 
     if (!alreadyJoined) {
+      // Charge the rate-limit budget ONLY on the expensive first-join path
+      // (the DB ownership check + team broadcast below). A re-subscribe is
+      // cheap and MUST always reach the snapshot re-emit — otherwise a
+      // team-wide reconnect storm could exhaust the shared subscribe bucket
+      // and silently drop the typing/viewer snapshot on the displayed
+      // thread, the exact desync the always-emit design exists to prevent.
+      if (!checkSubscribeBudget(client, "subscribe:conversation")) return;
       try {
         const owns = await this.db.conversation.findFirst({
           where: { id: body.conversationId, teamId },
@@ -641,7 +647,7 @@ const SUB_CAP = 30;
 const SUB_REFILL_PER_MS = 30 / 10_000;
 function checkSubscribeBudget(client: Socket, label: string): boolean {
   const now = Date.now();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const data = client.data as any;
   let bucket = data.__subBucket as { tokens: number; ts: number } | undefined;
   if (!bucket) {

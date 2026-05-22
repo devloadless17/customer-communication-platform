@@ -56,6 +56,19 @@ export function webhookConnectionOptions(): ConnectionOptions {
 }
 
 /**
+ * Dedicated connection for the delivery Worker's blocking commands — see
+ * `createWorkerConnection` in lib/workflows/queue.ts for why a Worker must not
+ * share the producer connection. Caller owns + closes it.
+ */
+export function createWebhookWorkerConnection(label: string): IORedis {
+  const conn = getWebhookRedisConnection().duplicate();
+  conn.on("error", (err) => {
+    console.error(`[${label}][redis]`, err.message);
+  });
+  return conn;
+}
+
+/**
  * Retry profile: 4 attempts with exponential backoff starting at 30s
  * (30s → ~2m → ~8m → ~30m). After the final attempt the worker stamps
  * `lastErrorAt` on the webhook row + bumps `consecutiveFailures`; the

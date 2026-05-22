@@ -54,7 +54,7 @@ const UPLOAD_ALLOWED_MIME = new Set<string>([
 
 // Credentials live on a `ChannelConnection` row keyed by (teamId, provider).
 // `config` = non-secret fields; `secrets` = envelope-encrypted ciphertext.
-const META_PROVIDER = "meta_cloud" as const;
+const META_PROVIDER = "whatsapp" as const;
 interface MetaChannelConfig {
   phoneNumberId?: string;
   displayPhoneNumber?: string;
@@ -100,7 +100,7 @@ export class WhatsappService {
    */
   async getConfig(teamId: string): Promise<WhatsappConfigView> {
     const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+      where: { teamId_channel: { teamId, channel: META_PROVIDER } },
       select: { config: true, secrets: true },
     });
     const config = (conn?.config ?? {}) as MetaChannelConfig;
@@ -127,10 +127,10 @@ export class WhatsappService {
       try {
         const mergedConfig = pruneUndefined({ ...config, verifyToken: minted });
         await this.db.channelConnection.upsert({
-          where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+          where: { teamId_channel: { teamId, channel: META_PROVIDER } },
           create: {
             teamId,
-            provider: META_PROVIDER,
+            channel: META_PROVIDER,
             config: mergedConfig as Prisma.InputJsonValue,
             secrets: {},
             isActive: false,
@@ -221,7 +221,7 @@ export class WhatsappService {
     }
 
     const existing = await this.db.channelConnection.findUnique({
-      where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+      where: { teamId_channel: { teamId, channel: META_PROVIDER } },
       select: { config: true },
     });
     const existingConfig = (existing?.config ?? {}) as MetaChannelConfig;
@@ -243,7 +243,7 @@ export class WhatsappService {
     // single-tenant; this preserves the same user-facing error for later.)
     const clash = await this.db.channelConnection.findFirst({
       where: {
-        provider: META_PROVIDER,
+        channel: META_PROVIDER,
         teamId: { not: teamId },
         config: { path: ["phoneNumberId"], equals: phoneNumberId },
       },
@@ -272,10 +272,10 @@ export class WhatsappService {
     };
 
     await this.db.channelConnection.upsert({
-      where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+      where: { teamId_channel: { teamId, channel: META_PROVIDER } },
       create: {
         teamId,
-        provider: META_PROVIDER,
+        channel: META_PROVIDER,
         config: newConfig as Prisma.InputJsonValue,
         secrets: newSecrets as Prisma.InputJsonValue,
         isActive: true,
@@ -308,7 +308,7 @@ export class WhatsappService {
     // untouched — they live on their own tables. deleteMany so a
     // not-yet-connected team is a no-op rather than a 404.
     await this.db.channelConnection.deleteMany({
-      where: { teamId, provider: META_PROVIDER },
+      where: { teamId, channel: META_PROVIDER },
     });
     invalidateProviderConfig(teamId);
   }
@@ -334,7 +334,7 @@ export class WhatsappService {
         orderBy: [{ status: "asc" }, { name: "asc" }, { language: "asc" }],
       }),
       this.db.channelConnection.findUnique({
-        where: { teamId_provider: { teamId, provider: META_PROVIDER } },
+        where: { teamId_channel: { teamId, channel: META_PROVIDER } },
         select: { config: true },
       }),
     ]);

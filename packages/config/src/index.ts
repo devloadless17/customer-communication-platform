@@ -1,10 +1,12 @@
 /**
  * Fail-fast environment validation, shared between the api and web processes.
  *
- * Three categories of env var:
- *   - required:    missing → exit(1). The process physically can't function.
+ * Categories of env var:
+ *   - required:     missing → exit(1). The process physically can't function.
+ *   - apiRequired:  required only in the api process (e.g. REDIS_URL — the web
+ *                   process never connects to Redis). Missing in api → exit(1).
  *   - prodRequired: missing in production → exit(1); warn in development.
- *   - recommended: missing → warn in production. Boots but features degrade.
+ *   - recommended:  missing → warn in production. Boots but features degrade.
  *
  * Rationale: it's cheaper to crash at boot with a clear message than to start
  * up "successfully" and 500 on the first request that hits an unconfigured
@@ -35,10 +37,6 @@ const required: Check[] = [
     hint: "Postgres connection string. See .env.example.",
   },
   {
-    name: "REDIS_URL",
-    hint: "BullMQ broker (workflow queue). See docker-compose.yml.",
-  },
-  {
     name: "BETTER_AUTH_SECRET",
     hint:
       "Better Auth signing secret. Generate with: openssl rand -base64 32.",
@@ -50,6 +48,15 @@ const required: Check[] = [
       "(accessToken, appSecret). Must be base64 of 32 random bytes. " +
       "Generate with: openssl rand -base64 32. Rotating this without " +
       "re-encrypting Team rows breaks every team's WhatsApp integration.",
+  },
+];
+
+// Required only in the api process — the web process never connects to Redis
+// (it serves RSC reads + Better Auth pages; BullMQ + Socket.io live in api).
+const apiRequired: Check[] = [
+  {
+    name: "REDIS_URL",
+    hint: "BullMQ broker (workflow + webhook queues). See docker-compose.yml.",
   },
 ];
 
@@ -111,11 +118,14 @@ function describe(c: Check): string {
 export function validateEnv(label: "api" | "web" = "api"): void {
   const tag = `[${label}:env]`;
   const missingRequired = required.filter((c) => !present(c));
+  const missingApiRequired =
+    label === "api" ? apiRequired.filter((c) => !present(c)) : [];
   const missingProdRequired = prodRequired.filter((c) => !present(c));
   const missingRecommended = recommended.filter((c) => !present(c));
 
   const fatals = [
     ...missingRequired,
+    ...missingApiRequired,
     ...(PROD ? missingProdRequired : []),
   ];
 
@@ -183,6 +193,32 @@ export function validateEnv(label: "api" | "web" = "api"): void {
           `(e.g. "v25.0"). Got ${JSON.stringify(raw)}.`,
       );
       process.exit(1);
+    }
+  }
+
+  // Numeric tunables (api process): validate-if-present. A typo like "5x"
+  // silently becomes NaN downstream (NaN BullMQ concurrency, a server bound
+  // to port 0, a sweeper that never fires), so fail loudly at boot instead.
+  if (label === "api") {
+    const positiveIntVars: Array<{ name: string; min: number; max: number }> = [
+      { name: "API_PORT", min: 1, max: 65_535 },
+      { name: "WORKFLOW_WORKER_CONCURRENCY", min: 1, max: 1000 },
+      { name: "WORKFLOW_PER_TEAM_CONCURRENCY", min: 1, max: 1000 },
+      { name: "WEBHOOK_WORKER_CONCURRENCY", min: 1, max: 1000 },
+      { name: "WEBHOOK_DELIVERY_RETENTION_DAYS", min: 1, max: 3650 },
+      { name: "WEBHOOK_ORPHAN_GRACE_MS", min: 1000, max: 86_400_000 },
+    ];
+    for (const v of positiveIntVars) {
+      const raw = process.env[v.name];
+      if (raw === undefined || raw === "") continue;
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < v.min || n > v.max) {
+        console.error(
+          `${tag} fatal: ${v.name} must be an integer in [${v.min}, ${v.max}], ` +
+            `got ${JSON.stringify(raw)}.`,
+        );
+        process.exit(1);
+      }
     }
   }
 }

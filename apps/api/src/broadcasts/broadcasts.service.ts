@@ -150,7 +150,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (audience.mode === "all") {
       recipientIds = (
         await this.db.contact.findMany({
-          where: { teamId },
+          where: { teamId, deletedAt: null },
           select: { id: true },
         })
       ).map((c) => c.id);
@@ -175,7 +175,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         });
       }
       const taggedContacts = await this.db.contact.findMany({
-        where: { teamId, tags: { some: { id: { in: validatedTagIds } } } },
+        where: { teamId, deletedAt: null, tags: { some: { id: { in: validatedTagIds } } } },
         select: { id: true },
       });
       recipientIds = taggedContacts.map((c) => c.id);
@@ -230,7 +230,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         new Set(
           (
             await this.db.contact.findMany({
-              where: { teamId, id: { in: audience.contactIds } },
+              where: { teamId, deletedAt: null, id: { in: audience.contactIds } },
               select: { id: true },
             })
           ).map((c) => c.id),
@@ -276,7 +276,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
   async list(teamId: string) {
     const rows = await this.db.broadcast.findMany({
-      where: { teamId },
+      where: { teamId, deletedAt: null },
       orderBy: { createdAt: "desc" },
       take: 100,
       include: { createdBy: { select: { id: true, name: true } } },

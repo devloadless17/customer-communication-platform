@@ -59,7 +59,7 @@ export interface WorkflowCanvasProps {
   /** Label shown on the trigger node. */
   triggerLabel: string;
   triggerDescription: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   triggerType: any;
   onChange: (graph: WorkflowGraph) => void;
   onSelectStep: (id: string | null) => void;

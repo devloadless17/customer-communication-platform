@@ -60,7 +60,7 @@ export async function listContacts(
       id: string;
       teamId: string;
       phoneNumber: string | null;
-      identityProvider: "meta_cloud" | null;
+      identityChannel: "whatsapp" | null;
       externalContactId: string | null;
       name: string;
       avatarUrl: string | null;
@@ -79,7 +79,7 @@ export async function listContacts(
       c.id,
       c."teamId",
       c."phoneNumber",
-      c."identityProvider",
+      c."identityChannel",
       c."externalContactId",
       c.name,
       c."avatarUrl",
@@ -106,6 +106,7 @@ export async function listContacts(
     -- previous LEFT JOIN LATERAL scanned the contact's full message
     -- history once per row — fine in dev, ugly at scale.
     WHERE c."teamId" = ${teamId}
+      AND c."deletedAt" IS NULL
       ${
         search
           ? Prisma.sql`AND (
@@ -193,7 +194,7 @@ export async function listContacts(
       id: r.id,
       teamId: r.teamId,
       phoneNumber: r.phoneNumber,
-      identityProvider: r.identityProvider,
+      identityChannel: r.identityChannel,
       externalContactId: r.externalContactId,
       name: r.name,
       avatarUrl: r.avatarUrl ?? undefined,
@@ -233,9 +234,9 @@ export async function listContactFieldDefinitions(
   }));
 }
 
-/** Total number of contacts in a team. */
+/** Total number of (non-deleted) contacts in a team. */
 export async function countContacts(teamId: string): Promise<number> {
-  return db.contact.count({ where: { teamId } });
+  return db.contact.count({ where: { teamId, deletedAt: null } });
 }
 
 /**

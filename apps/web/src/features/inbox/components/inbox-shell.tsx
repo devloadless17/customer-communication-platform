@@ -485,21 +485,21 @@ export function InboxShell({
         try {
           if ((target ?? "conversation") === "all") {
             cache.patchAll((curr) => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+               
               const next = (apply as any)(curr.data, payload);
               return next === curr.data ? null : { ...curr, data: next };
             });
             return;
           }
           if (!payload?.conversationId) return;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+           
           patchData(payload.conversationId, (d) => (apply as any)(d, payload));
         } catch (err) {
-          // eslint-disable-next-line no-console
+           
           console.error(`[inbox-shell] reducer for "${event}" threw`, err);
         }
       };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       socket.on(event as any, handler as any);
       return { event, handler };
     });
@@ -545,7 +545,7 @@ export function InboxShell({
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
       for (const { event, handler } of reducerHandlers) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         
         socket.off(event as any, handler as any);
       }
     };

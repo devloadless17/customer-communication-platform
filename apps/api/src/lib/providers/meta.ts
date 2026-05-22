@@ -224,7 +224,7 @@ function mapMetaStatus(s: string | undefined): MessageStatus | null {
 }
 
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
-  name: "meta_cloud",
+  name: "whatsapp",
 
   capabilities: {
     // WhatsApp's customer-service window: 24h since last inbound. Outside

@@ -68,8 +68,15 @@ enum MessageStatus {
   failed
 }
 
-enum ProviderName {
-  meta_cloud
+// The messaging CHANNEL (the medium a conversation lives on). This is the
+// single "where is this conversation from" discriminator — there is NO separate
+// "provider/vendor" concept in the data model (a Meta-vs-Twilio distinction is
+// an implementation detail of the MessagingProvider impl, not stored). Adding a
+// channel = a new value here + a registered MessagingProvider + a
+// ChannelConnection row. Meta Cloud serves both `whatsapp` and (future)
+// `instagram` — they are DISTINCT channels even though one API delivers them.
+enum Channel {
+  whatsapp
 }
 
 // Mirrors Meta's template review states. We cache every status so admins can
@@ -279,7 +286,7 @@ model Team {
 model ChannelConnection {
   id        String       @id @default(cuid())
   teamId    String
-  provider  ProviderName
+  channel   Channel
   config    Json         @default("{}")
   secrets   Json         @default("{}")
   isActive  Boolean      @default(true)
@@ -287,7 +294,7 @@ model ChannelConnection {
   updatedAt DateTime     @updatedAt
   team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
-  @@unique([teamId, provider])
+  @@unique([teamId, channel])
 }
 
 model User {
@@ -448,7 +455,7 @@ model Contact {
   // (Instagram scoped-user-id, Telegram chat-id). For WhatsApp these are
   // null and phoneNumber is the identity. The compound unique below allows
   // future Instagram/Telegram ingest to dedupe contacts by their native id.
-  identityProvider  ProviderName?
+  identityChannel   Channel?
   externalContactId String?
   // Canonical display name. Derived from `firstName + lastName` when both
   // are populated; otherwise whatever the create path stored (inbound
@@ -505,6 +512,14 @@ model Contact {
   // in contact-panel surfaces 409s as a "teammate just edited this" banner
   // so the agent can choose to reload or overwrite.
   version           Int           @default(0)
+  // Soft-delete tombstone. Deleting a contact is NON-destructive: the row + its
+  // conversations/messages are PRESERVED (a contact delete must NOT take the
+  // conversation with it). Set = hidden from the contacts DIRECTORY (list /
+  // search / count / audience targeting / forward) but the conversation stays
+  // in the inbox and by-id lookups still resolve. Cleared (re-activated) by the
+  // ingest upsert when a tombstoned contact messages again. A true hard purge
+  // (GDPR) is a separate explicit action that cascades.
+  deletedAt         DateTime?
 
   team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
   stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
@@ -528,10 +543,13 @@ model Contact {
   // Compound identity for non-phone channels. Only enforced when both fields
   // are set — Postgres treats NULL as distinct in unique constraints, so
   // WhatsApp-only contacts (both nulls) coexist freely.
-  @@unique([teamId, identityProvider, externalContactId])
+  @@unique([teamId, identityChannel, externalContactId])
   @@index([teamId])
   @@index([teamId, source])
   @@index([teamId, stageId])
+  // Directory reads filter `deletedAt IS NULL`; index it so the common
+  // "active contacts" scan stays cheap as tombstones accumulate.
+  @@index([teamId, deletedAt])
   // "Contacts by recency of last inbound" — inbox-sidebar surfaces.
   @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
   // pg_trgm GIN index for substring ILIKE search on contact name.
@@ -623,7 +641,7 @@ model Conversation {
   // default to the team's WhatsApp channel. `Message.provider` always equals
   // this but exists for a different reason (the dedup key — see its comment);
   // the equality is a consistency invariant, not duplicated data.
-  provider           ProviderName       @default(meta_cloud)
+  channel            Channel            @default(whatsapp)
   assignedUserId     String?
   // New chats land in `pending` so they sit in the triage column until an
   // agent claims them (→ open) or closes them out. The webhook ingest, the
@@ -681,13 +699,15 @@ model Conversation {
   // (open / pending / closed) but doesn't help the unfiltered list — the
   // planner needs status to participate in WHERE for that one to be useful.
   @@index([teamId, lastMessageAt(sort: Desc), id(sort: Desc)])
-  // Per-recipient broadcast lookup + per-contact navigation: the broadcast
-  // runner does `findFirst({ where: { teamId, contactId } })` once per
-  // recipient, and contact-detail pages list a contact's conversations.
-  // Without this the planner falls back to the (teamId, status, ...) index
-  // and filters contactId in the heap — fine at <1k conversations per team,
-  // a seq-scan-per-recipient at 50k.
-  @@index([teamId, contactId])
+  // ONE conversation per contact — the core invariant, DB-enforced (a Contact
+  // is already channel-siloed, so this is "one conversation per channel per
+  // contact"). Closed threads REOPEN (→ pending) rather than fragment. Code
+  // upholds it too — ingest via a Serializable retry, the find-or-create sites
+  // (forward / broadcast / external-v1 / workflow target) via catch-P2002→
+  // refetch — but this constraint is the backstop that makes a fragmented
+  // inbox structurally impossible. Doubles as the index the broadcast runner's
+  // per-recipient `findFirst({ teamId, contactId })` + contact-detail pages use.
+  @@unique([teamId, contactId])
   // pg_trgm GIN for the inbox-list search bar's ILIKE on lastMessagePreview.
   @@index([lastMessagePreview(ops: raw("gin_trgm_ops"))], type: Gin, map: "Conversation_lastMessagePreview_trgm_idx")
 }
@@ -718,7 +738,7 @@ model Message {
   // Don't "simplify" by dropping either: lose this and dedup breaks once a
   // 2nd channel exists; lose Conversation.provider and empty threads (no
   // messages yet) have no channel.
-  provider       ProviderName
+  channel        Channel
   status         MessageStatus    @default(sent)
   // Original webhook payload kept verbatim for debugging.
   rawPayload     Json
@@ -772,7 +792,7 @@ model Message {
   // (24h-window UI + lastInboundAt drift sweeper) without scanning outbound
   // rows.
 
-  @@unique([teamId, provider, externalId])
+  @@unique([teamId, channel, externalId])
   @@index([conversationId, timestamp])
   @@index([teamId])
   @@index([replyToMessageId])

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 
-import { subscribe } from "@/lib/events/bus";
+import { subscribe, SubscriberPriority } from "@/lib/events/bus";
 import type {
   AssigneeInfo,
   ChannelInfo,
@@ -38,11 +38,10 @@ import {
  *
  * Order vs. other subscribers: this one fires AFTER audit + analytics +
  * workflow-dispatch — those subscribers might mutate state that should be
- * reflected in the outbound payload (close summary, firstResponseAt). Bus
- * `subscribe()` order is registration order, and `WorkflowSubscribersService`
- * registers audit/analytics/dispatch on its module init; by registering
- * after that module's onModuleInit runs (this module imports after), we
- * land last in the chain.
+ * reflected in the outbound payload (close summary, firstResponseAt). That
+ * order is now FIXED by `SubscriberPriority.OUTBOUND_WEBHOOKS` (the highest
+ * tier), so it holds regardless of module import / registration order — a
+ * reorder of `AppModule.imports` can no longer silently break it.
  *
  * Failures here MUST NOT throw to the bus — the per-handler try/catch in
  * `bus.ts` already isolates a thrown handler, but we want to log + carry on
@@ -71,26 +70,34 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     this.registered = true;
 
     for (const eventType of busEventTypesToSubscribe()) {
-      subscribe(eventType, async (event) => {
-        try {
-          await this.handle(event);
-        } catch (err) {
-          this.logger.error(
-            `outbound-webhook dispatch failed for ${eventType}: ${
-              err instanceof Error ? err.message : err
-            }`,
-          );
-        }
-      });
+      subscribe(
+        eventType,
+        async (event) => {
+          try {
+            await this.handle(event);
+          } catch (err) {
+            this.logger.error(
+              `outbound-webhook dispatch failed for ${eventType}: ${
+                err instanceof Error ? err.message : err
+              }`,
+            );
+          }
+        },
+        SubscriberPriority.OUTBOUND_WEBHOOKS,
+      );
     }
     // Cache invalidator: a team-catalog change is the closest reliable
     // signal that the Meta phone number (the only team-row field we cache)
     // may have changed. Drop the row so the next event re-reads from DB.
-    subscribe("team.catalog_changed", (event) => {
-      if (this.channelCache.has(event.teamId)) {
-        this.channelCache.delete(event.teamId);
-      }
-    });
+    subscribe(
+      "team.catalog_changed",
+      (event) => {
+        if (this.channelCache.has(event.teamId)) {
+          this.channelCache.delete(event.teamId);
+        }
+      },
+      SubscriberPriority.OUTBOUND_WEBHOOKS,
+    );
     this.logger.log(
       `Outbound webhook subscriber registered for ${busEventTypesToSubscribe().length} event types`,
     );
@@ -321,7 +328,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     if (cached) return cached;
 
     const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_provider: { teamId, provider: "meta_cloud" } },
+      where: { teamId_channel: { teamId, channel: "whatsapp" } },
       select: { config: true },
     });
     if (!conn) return null;
@@ -331,7 +338,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     };
 
     const channel: ChannelInfo = {
-      source: "meta_cloud",
+      source: "whatsapp",
       phone_number_id: config.phoneNumberId ?? null,
       display_phone_number: config.displayPhoneNumber ?? null,
     };

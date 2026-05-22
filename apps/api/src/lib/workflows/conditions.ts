@@ -229,7 +229,7 @@ function validateLeaf(
   }
   if (c.op === "regex" && c.value) {
     try {
-      // eslint-disable-next-line no-new
+       
       new RegExp(c.value);
     } catch {
       errors.push(`${path}: invalid regex "${c.value}"`);

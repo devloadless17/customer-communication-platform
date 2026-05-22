@@ -98,7 +98,7 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
       id: updated.id,
       teamId: updated.teamId,
       phoneNumber: updated.phoneNumber,
-      identityProvider: updated.identityProvider,
+      identityChannel: updated.identityChannel,
       externalContactId: updated.externalContactId,
       name: updated.name,
       firstName: updated.firstName,
@@ -134,6 +134,9 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
     // chain-triggering; the outbound-webhook subscriber doesn't read `silent`
     // because partners DO want to know the stage just moved — that's literally
     // why they subscribed. n8n flows can decide what to do with the signal.
+    // `silent: true` is defensive (mirrors `tag.ts`'s contact.tag_changed):
+    // no workflow trigger subscribes to this event today, but if one ever
+    // does it MUST skip step-driven changes or this step loops into itself.
     await publish({
       type: "contact.lifecycle_changed",
       teamId: ctx.teamId,
@@ -141,6 +144,7 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
       before: { stageId: previousStageId },
       after: { stageId: updated.stageId },
       changedByUserId: null,
+      silent: true,
     });
 
     return advance({ contactId, previousStageId, newStageId: stage.id });

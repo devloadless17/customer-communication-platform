@@ -2,11 +2,12 @@
 // Next bundler context. Same convention as lib/socket/server.ts.
 
 import { DelayedError, Worker, type Job } from "bullmq";
+import type IORedis from "ioredis";
 
 import { db } from "@/lib/db";
 import {
   WORKFLOW_QUEUE_NAME,
-  connectionOptions,
+  createWorkerConnection,
   type WorkflowJobData,
 } from "@/lib/workflows/queue";
 import { failRunFromRetryExhaustion, runWorkflow } from "@/lib/workflows/runner";
@@ -38,6 +39,7 @@ if (WORKFLOW_LOCK_DURATION_MS <= MAX_STEP_TIMEOUT_MS + WORKFLOW_LOCK_MARGIN_MS) 
 
 interface WorkerGlobals {
   worker?: Worker<WorkflowJobData>;
+  connection?: IORedis;
 }
 const g = globalThis as unknown as { __ccpWorkflowWorker?: WorkerGlobals };
 const state: WorkerGlobals = (g.__ccpWorkflowWorker ??= {});
@@ -108,6 +110,11 @@ function releaseTeamSlot(teamId: string): void {
 export function startWorkflowWorker(): Worker<WorkflowJobData> {
   if (state.worker) return state.worker;
 
+  // Dedicated blocking connection (NOT the shared producer) — see
+  // createWorkerConnection. Stored so stop / respawn can close it.
+  const connection = createWorkerConnection("workflows-worker");
+  state.connection = connection;
+
   const worker = new Worker<WorkflowJobData>(
     WORKFLOW_QUEUE_NAME,
     async (job: Job<WorkflowJobData>, token?: string) => {
@@ -144,7 +151,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
       }
     },
     {
-      connection: connectionOptions(),
+      connection,
       concurrency: concurrency(),
       // BullMQ's default lock (30s) is shorter than our slowest step. A
       // `http_request` step allowed up to MAX_STEP_TIMEOUT_MS would lose
@@ -199,7 +206,9 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
       );
       // Best-effort close; ignore errors since the connection is already broken.
       worker.close().catch(() => undefined);
+      connection.disconnect();
       state.worker = undefined;
+      state.connection = undefined;
     }
   });
 
@@ -234,5 +243,9 @@ export async function stopWorkflowWorker(): Promise<void> {
     // want the rest of onModuleDestroy (queue close, etc.) to still run.
     console.error(err instanceof Error ? err.message : err);
   });
+  // Close the worker's dedicated blocking connection (BullMQ doesn't, since we
+  // handed it the instance). disconnect() is synchronous + can't hang.
+  state.connection?.disconnect();
+  state.connection = undefined;
   state.worker = undefined;
 }

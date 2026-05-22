@@ -41,8 +41,8 @@ import { EventBus } from "./event-bus.service";
  * dispatch synchronously and are not bounded by this.
  *
  * Lifecycle: started on module init, stopped on shutdown via
- * `OnModuleDestroy` (the NestJS shutdown hooks fire on SIGTERM thanks to
- * `app.enableShutdownHooks()` in `main.ts`).
+ * `OnModuleDestroy` (main.ts's manual SIGTERM/SIGINT handler calls
+ * `app.close()`, which fires the NestJS lifecycle hooks).
  */
 @Injectable()
 export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {

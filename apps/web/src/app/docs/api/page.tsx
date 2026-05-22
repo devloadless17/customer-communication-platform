@@ -284,7 +284,7 @@ export default function ApiDocsPage() {
   "occurred_at": "2026-05-20T11:00:00.000Z",
   "team_id": "cmpteam_…",
   "channel": {                      // null until you've connected WhatsApp
-    "source": "meta_cloud",
+    "source": "whatsapp",
     "phone_number_id": "…",
     "display_phone_number": "+1…"
   },

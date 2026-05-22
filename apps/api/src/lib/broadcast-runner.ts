@@ -12,7 +12,7 @@ import {
   renderTemplateBody,
 } from "@/lib/providers/meta";
 import type { MessagingProvider } from "@ccp/shared/providers/types";
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 
 /**
  * Broadcasts send pre-approved WhatsApp templates, so they're bound to the
@@ -22,7 +22,7 @@ import type { ProviderName } from "@ccp/shared/types";
  * a per-recipient channel resolution here. Routed through the registry so the
  * provider/config indirection is uniform with the per-contact send paths.
  */
-const BROADCAST_PROVIDER: ProviderName = "meta_cloud";
+const BROADCAST_CHANNEL: Channel = "whatsapp";
 import {
   parseVariableBindings,
   resolveBinding,
@@ -225,7 +225,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     return;
   }
 
-  const binding = getProviderBinding(BROADCAST_PROVIDER);
+  const binding = getProviderBinding(BROADCAST_CHANNEL);
   let config;
   try {
     config = await binding.getSendConfig(broadcast.teamId);
@@ -538,17 +538,28 @@ async function processOneRecipient(
       });
       let conversation = existing;
       if (!conversation) {
-        conversation = await db.conversation.create({
-          data: {
-            teamId: broadcast.teamId,
-            contactId: recipient.contactId,
-            // Broadcasts are WhatsApp-only by design; stamp the same channel
-            // the recipient messages carry so conv.provider == msg.provider.
-            provider: BROADCAST_PROVIDER,
-            status: "pending",
-            lastMessagePreview: "",
-          },
-        });
+        try {
+          conversation = await db.conversation.create({
+            data: {
+              teamId: broadcast.teamId,
+              contactId: recipient.contactId,
+              // Broadcasts are WhatsApp-only by design; stamp the same channel
+              // the recipient messages carry so conv.channel == msg.channel.
+              channel: BROADCAST_CHANNEL,
+              status: "pending",
+              lastMessagePreview: "",
+            },
+          });
+        } catch (err) {
+          // Lost the race for this contact's single conversation (unique
+          // [teamId, contactId]) to a concurrent inbound — reuse the winner.
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+            conversation = await db.conversation.findFirstOrThrow({
+              where: { teamId: broadcast.teamId, contactId: recipient.contactId },
+              orderBy: { lastMessageAt: "desc" },
+            });
+          } else throw err;
+        }
       } else if (conversation.status === "closed") {
         conversation = await db.conversation.update({
           where: { id: conversation.id },
@@ -593,62 +604,96 @@ async function processOneRecipient(
     }
     const toPhone = recipient.contact.phoneNumber;
 
+    // Double-send guard — claim a per-recipient OutboundSendAttempt BEFORE
+    // touching Meta. On a resumed re-entry the prior row tells us whether the
+    // send already reached Meta, so a crash between the Meta accept and the
+    // `queued → sent` flip can't re-send a billed template (audit 2026-05-22;
+    // see claimBroadcastSendAttempt).
+    const attemptClaim = await claimBroadcastSendAttempt(
+      recipient.id,
+      broadcast.teamId,
+      conversationId,
+    );
+    if (attemptClaim.kind === "abort") {
+      await markRecipientFailed(recipient.id, attemptClaim.reason);
+      bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+      return;
+    }
+
     // The send itself. Anything that throws here counts as a failed recipient
     // — Meta either rejected us or the network died, no message went out.
     let send: Awaited<ReturnType<typeof sendTemplate>>;
-    try {
-      send = await sendTemplate(
-        {
-          to: toPhone,
-          name: broadcast.templateName,
-          language: broadcast.templateLanguage,
-          variables: {
-            body: perRecipientVars.body,
-            ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
-          },
-        },
-        config,
-      );
-    } catch (err) {
-      // Meta rate-limit handling: a flagged number / rapid burst can produce
-      // a 4/80007 response. Without a backoff, the entire broadcast becomes
-      // a wall of "rate_limited"-failed recipients — and Meta charges
-      // quality score for it. One sleep+retry is the cheapest mitigation:
-      // we wait for ~3s of cooldown then send the same recipient again.
-      // Only ONE retry — a permanently-flagged number shouldn't loop.
-      if (normalizeMetaSendError(err)?.code === "rate_limited") {
-        // Global per-broadcast 429 streak: when Meta rate-limits N
-        // consecutive sends within ~30s the number's quality rating is
-        // sliding — keep hammering at 25 msg/sec and we drain quality
-        // AND mark thousands of recipients as false-failed. Pause the
-        // broadcast for 60s before retrying this recipient so the rate
-        // limit window has time to clear.
-        track429Hit(broadcast.id);
-        if (rate429Streak(broadcast.id) >= 10) {
-          console.warn(
-            `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing 60s`,
-          );
-          await sleep(60_000);
-          reset429Streak(broadcast.id);
-        }
-        await sleep(3_000 + Math.floor(Math.random() * 1_000));
-        try {
-          send = await sendTemplate(
-            {
-              to: toPhone,
-              name: broadcast.templateName,
-              language: broadcast.templateLanguage,
-              variables: {
-                body: perRecipientVars.body,
-                ...(perRecipientVars.header
-                  ? { header: perRecipientVars.header }
-                  : {}),
-              },
+    if (attemptClaim.kind === "reconcile") {
+      // A prior (crashed) attempt already reached Meta — skip the Meta call and
+      // fall through to the recipient-lock + idempotent bookkeeping using the
+      // stored externalId (createOutboundMessageIdempotent dedupes on it).
+      send = { externalId: attemptClaim.externalId, timestamp: attemptClaim.timestamp };
+    } else {
+      try {
+        send = await sendTemplate(
+          {
+            to: toPhone,
+            name: broadcast.templateName,
+            language: broadcast.templateLanguage,
+            variables: {
+              body: perRecipientVars.body,
+              ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
             },
-            config,
-          );
-        } catch (retryErr) {
-          await markRecipientFailed(recipient.id, errorDetail(retryErr));
+          },
+          config,
+        );
+      } catch (err) {
+        // Meta rate-limit handling: a flagged number / rapid burst can produce
+        // a 4/80007 response. Without a backoff, the entire broadcast becomes
+        // a wall of "rate_limited"-failed recipients — and Meta charges
+        // quality score for it. One sleep+retry is the cheapest mitigation:
+        // we wait for ~3s of cooldown then send the same recipient again.
+        // Only ONE retry — a permanently-flagged number shouldn't loop.
+        if (normalizeMetaSendError(err)?.code === "rate_limited") {
+          // Global per-broadcast 429 streak: when Meta rate-limits N
+          // consecutive sends within ~30s the number's quality rating is
+          // sliding — keep hammering at 25 msg/sec and we drain quality
+          // AND mark thousands of recipients as false-failed. Pause the
+          // broadcast for 60s before retrying this recipient so the rate
+          // limit window has time to clear.
+          track429Hit(broadcast.id);
+          if (rate429Streak(broadcast.id) >= 10) {
+            console.warn(
+              `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing 60s`,
+            );
+            await sleep(60_000);
+            reset429Streak(broadcast.id);
+          }
+          await sleep(3_000 + Math.floor(Math.random() * 1_000));
+          try {
+            send = await sendTemplate(
+              {
+                to: toPhone,
+                name: broadcast.templateName,
+                language: broadcast.templateLanguage,
+                variables: {
+                  body: perRecipientVars.body,
+                  ...(perRecipientVars.header
+                    ? { header: perRecipientVars.header }
+                    : {}),
+                },
+              },
+              config,
+            );
+          } catch (retryErr) {
+            await releaseBroadcastSendAttempt(recipient.id);
+            await markRecipientFailed(recipient.id, errorDetail(retryErr));
+            bumpCountersFireAndForget(
+              broadcast.id,
+              broadcast.teamId,
+              { failed: 1 },
+              pendingBumps,
+            );
+            return;
+          }
+        } else {
+          await releaseBroadcastSendAttempt(recipient.id);
+          await markRecipientFailed(recipient.id, errorDetail(err));
           bumpCountersFireAndForget(
             broadcast.id,
             broadcast.teamId,
@@ -657,16 +702,11 @@ async function processOneRecipient(
           );
           return;
         }
-      } else {
-        await markRecipientFailed(recipient.id, errorDetail(err));
-        bumpCountersFireAndForget(
-          broadcast.id,
-          broadcast.teamId,
-          { failed: 1 },
-          pendingBumps,
-        );
-        return;
       }
+      // Meta accepted — stamp the attempt `completed` (with the wamid) BEFORE
+      // the recipient `queued → sent` flip so a crash in that window resumes
+      // into the reconcile path instead of re-sending to Meta.
+      await completeBroadcastSendAttempt(recipient.id, send.externalId);
     }
 
     // Send SUCCEEDED. Lock in the recipient as `sent` BEFORE doing any
@@ -710,7 +750,7 @@ async function processOneRecipient(
         senderUserId: broadcast.createdById,
         body: renderedBody,
         direction: "out",
-        provider: BROADCAST_PROVIDER,
+        channel: BROADCAST_CHANNEL,
         status: "sent",
         rawPayload: {
           sentVia: "broadcast",
@@ -751,7 +791,7 @@ async function processOneRecipient(
         senderUserId: broadcast.createdById,
         body: renderedBody,
         direction: "out",
-        provider: BROADCAST_PROVIDER,
+        channel: BROADCAST_CHANNEL,
         status: "sent",
         rawPayload: { sentVia: "broadcast", broadcastId: broadcast.id },
         timestamp: send.timestamp.toISOString(),
@@ -784,6 +824,88 @@ async function markRecipientFailed(recipientId: string, message: string): Promis
     where: { id: recipientId, status: "queued" },
     data: { status: "failed", errorMessage: message.slice(0, 500) },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Per-recipient double-send guard (audit 2026-05-22)
+// ---------------------------------------------------------------------------
+//
+// The recipient `queued → sent` CAS happens AFTER Meta accepts the send, so a
+// hard crash in that window left the recipient `queued`; the resume reconciler
+// then re-called Meta → a duplicate billed template send. We close that window
+// with the same OutboundSendAttempt jobId gate the text-queue path uses
+// (messages.service.ts): claim a row keyed on the recipient BEFORE the Meta
+// call, stamp it `completed`+externalId AFTER Meta accepts (still before the
+// recipient flip). On a resumed re-entry the prior row tells us whether the
+// send already reached Meta.
+type BroadcastAttemptClaim =
+  | { kind: "proceed" }
+  | { kind: "reconcile"; externalId: string; timestamp: Date }
+  | { kind: "abort"; reason: string };
+
+function broadcastAttemptJobId(recipientId: string): string {
+  return `bc-recipient-${recipientId}`;
+}
+
+async function claimBroadcastSendAttempt(
+  recipientId: string,
+  teamId: string,
+  conversationId: string,
+): Promise<BroadcastAttemptClaim> {
+  const jobId = broadcastAttemptJobId(recipientId);
+  try {
+    await db.outboundSendAttempt.create({ data: { jobId, teamId, conversationId } });
+    return { kind: "proceed" };
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const prior = await db.outboundSendAttempt.findUnique({
+        where: { jobId },
+        select: { completedAt: true, externalId: true, failedAt: true, failureReason: true },
+      });
+      if (prior?.completedAt && prior.externalId) {
+        // Prior attempt already reached Meta — reconcile WITHOUT re-sending.
+        return { kind: "reconcile", externalId: prior.externalId, timestamp: prior.completedAt };
+      }
+      if (prior?.failedAt) {
+        return {
+          kind: "abort",
+          reason: prior.failureReason ?? "previous send attempt failed at the provider",
+        };
+      }
+      // Neither completed nor failed: a prior attempt called Meta and crashed
+      // mid-send. Refuse to re-send — one missing message beats a duplicate
+      // billed template. The row stays for an operator to reconcile.
+      return {
+        kind: "abort",
+        reason:
+          "previous send attempt may have reached Meta; not retrying to avoid a duplicate",
+      };
+    }
+    // Unexpected DB error claiming — fail closed (don't risk a send we can't
+    // track). Same posture as the conversation-resolution catch above.
+    return { kind: "abort", reason: errorDetail(err) };
+  }
+}
+
+async function completeBroadcastSendAttempt(
+  recipientId: string,
+  externalId: string,
+): Promise<void> {
+  await db.outboundSendAttempt.updateMany({
+    where: { jobId: broadcastAttemptJobId(recipientId) },
+    data: { completedAt: new Date(), externalId },
+  });
+}
+
+async function releaseBroadcastSendAttempt(recipientId: string): Promise<void> {
+  // Meta rejected / network died — nothing sent. Delete the claim so a manual
+  // broadcast retry can re-claim cleanly (the recipient is marked `failed`
+  // and won't be re-pulled by a resume, so leaving it would only leak a row).
+  await db.outboundSendAttempt
+    .deleteMany({ where: { jobId: broadcastAttemptJobId(recipientId) } })
+    .catch(() => {
+      /* best-effort */
+    });
 }
 
 /**

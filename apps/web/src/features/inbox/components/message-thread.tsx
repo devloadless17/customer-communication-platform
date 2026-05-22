@@ -673,17 +673,33 @@ function MessageThreadImpl({
   // `tz` + `now` come from TimezoneProvider — same values on server and
   // client, so "Today" / "Yesterday" buckets agree across hydration.
   const { tz, now } = useTzNow();
+  // The labels only change at *local* midnight, but `now` ticks every 60s.
+  // Key the memo on the calendar day in the provider tz so it rebuilds once
+  // a day instead of ~1000 Intl calls/min across a 500-message thread.
+  // (UTC-day bucketing would flip the labels hours off local midnight in
+  // non-UTC zones — a real staleness bug — so we format in `tz`.) `now` is
+  // read through a ref: refs aren't memo deps, and any `now` within the same
+  // day yields identical Today/Yesterday output.
+  const nowRef = useRef(now);
+  nowRef.current = now;
+  const todayKey = useMemo(() => {
+    try {
+      return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(now);
+    } catch {
+      return new Intl.DateTimeFormat("en-CA").format(now);
+    }
+  }, [tz, now]);
   const dayLabels = useMemo(() => {
     const labels: Array<string | null> = new Array(timeline.length);
     let prevLabel: string | null = null;
     for (let i = 0; i < timeline.length; i++) {
       const entry = timeline[i]!;
-      const label = formatDaySeparator(entry.data.timestamp, tz, now);
+      const label = formatDaySeparator(entry.data.timestamp, tz, nowRef.current);
       labels[i] = label !== prevLabel ? label : null;
       prevLabel = label;
     }
     return labels;
-  }, [timeline, tz, now]);
+  }, [timeline, tz, todayKey]);
 
   // ---------------------------------------------------------------------
   // Scroll behavior — see `useChatScroll`. All the messy bits (viewport

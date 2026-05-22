@@ -24,7 +24,7 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
       name: true,
       createdAt: true,
       channelConnections: {
-        where: { provider: "meta_cloud" },
+        where: { channel: "whatsapp" },
         select: { config: true },
       },
       _count: {
@@ -68,7 +68,7 @@ export async function getTeamDetailForSuperAdmin(
       name: true,
       createdAt: true,
       channelConnections: {
-        where: { provider: "meta_cloud" },
+        where: { channel: "whatsapp" },
         select: { config: true },
       },
       _count: {

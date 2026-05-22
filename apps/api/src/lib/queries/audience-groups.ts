@@ -42,7 +42,7 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
   const tagCarriers =
     usedTagIds.length > 0
       ? await db.contact.findMany({
-          where: { teamId, tags: { some: { id: { in: usedTagIds } } } },
+          where: { teamId, deletedAt: null, tags: { some: { id: { in: usedTagIds } } } },
           select: {
             id: true,
             // Scope the tag list to the ids we care about; otherwise Prisma
@@ -137,12 +137,13 @@ export async function resolveAudienceGroupMembers(
     tagIds.length > 0
       ? {
           teamId,
+          deletedAt: null,
           OR: [
             { id: { in: manualContactIds } },
             { tags: { some: { id: { in: tagIds } } } },
           ],
         }
-      : { teamId, id: { in: manualContactIds } };
+      : { teamId, deletedAt: null, id: { in: manualContactIds } };
 
   const rows = await db.contact.findMany({
     where,
@@ -179,11 +180,12 @@ export async function countAudienceContacts(
     tags.length > 0 && ids.length > 0
       ? {
           teamId,
+          deletedAt: null,
           OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }],
         }
       : tags.length > 0
-        ? { teamId, tags: { some: { id: { in: tags } } } }
-        : { teamId, id: { in: ids } };
+        ? { teamId, deletedAt: null, tags: { some: { id: { in: tags } } } }
+        : { teamId, deletedAt: null, id: { in: ids } };
   return db.contact.count({ where });
 }
 
@@ -211,10 +213,10 @@ export async function previewAudienceContacts(
   if (tags.length === 0 && ids.length === 0) return { total: 0, sample: [] };
   const where: Prisma.ContactWhereInput =
     tags.length > 0 && ids.length > 0
-      ? { teamId, OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }] }
+      ? { teamId, deletedAt: null, OR: [{ id: { in: ids } }, { tags: { some: { id: { in: tags } } } }] }
       : tags.length > 0
-        ? { teamId, tags: { some: { id: { in: tags } } } }
-        : { teamId, id: { in: ids } };
+        ? { teamId, deletedAt: null, tags: { some: { id: { in: tags } } } }
+        : { teamId, deletedAt: null, id: { in: ids } };
   const [total, sample] = await Promise.all([
     db.contact.count({ where }),
     db.contact.findMany({

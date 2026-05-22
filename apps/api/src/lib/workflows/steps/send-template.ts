@@ -2,6 +2,10 @@ import {
   SendTemplateValidationError,
   sendTemplateInternal,
 } from "@/lib/messaging/send-template-internal";
+import {
+  ConversationSendRateLimitedError,
+  consumeConversationSendBudget,
+} from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
 
@@ -79,6 +83,10 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
     };
 
     try {
+      // Per-conversation send ceiling — same loop backstop as send_message.
+      // Templates are billed cold-outbound, so a runaway template loop is the
+      // most expensive variant; cap it per thread before reaching Meta.
+      consumeConversationSendBudget(ctx.teamId, conversationId);
       const result = await sendTemplateInternal({
         teamId: ctx.teamId,
         conversationId,
@@ -93,6 +101,9 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
         preview: result.previewBody,
       });
     } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        return advanceWithError(429, "conversation_send_rate_limited", err.message);
+      }
       if (err instanceof SendTemplateValidationError) {
         return {
           kind: "advance",

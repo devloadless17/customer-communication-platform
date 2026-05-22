@@ -715,12 +715,20 @@ export function ContactBrowser({
     root: scrollRef,
   });
 
-  function toggle(id: string, next: boolean) {
-    const copy = new Set(selectedIds);
+  // Stable `toggle` so the memoized BrowserRow doesn't re-render every row on
+  // each selection. selectedIds + onSelectedChange are read through refs (kept
+  // current below) instead of closed over, so the callback identity never
+  // changes — passing it straight to each row keeps the memo intact.
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
+  const onSelectedChangeRef = useRef(onSelectedChange);
+  onSelectedChangeRef.current = onSelectedChange;
+  const toggle = useCallback((id: string, next: boolean) => {
+    const copy = new Set(selectedIdsRef.current);
     if (next) copy.add(id);
     else copy.delete(id);
-    onSelectedChange(copy);
-  }
+    onSelectedChangeRef.current(copy);
+  }, []);
 
   // "Select all visible" preserves picks from prior pages — additive, not
   // a replace, so loading more then toggling doesn't drop earlier choices.
@@ -796,7 +804,7 @@ export function ContactBrowser({
                   tagById={tagById}
                   stageById={stageById}
                   selected={selectedIds.has(item.contact.id)}
-                  onSelectChange={(next) => toggle(item.contact.id, next)}
+                  onSelectChange={toggle}
                 />
               ))}
               {/* Auto-load sentinel — observed against the scrolling ul. */}

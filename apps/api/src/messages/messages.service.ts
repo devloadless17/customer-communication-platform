@@ -37,7 +37,7 @@ import {
   resolveContactChannel,
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 import { loadReplySnapshotById, mediaPreview } from "@/lib/providers/ingest";
 import { MetaSendError, normalizeMetaSendError } from "@/lib/providers/meta";
 import { getConversationWithRefs } from "@/lib/queries";
@@ -194,7 +194,7 @@ export class MessagesService {
           teamId,
           userId,
           conversationId: input.conversationId,
-          provider: pre.provider,
+          channel: pre.channel,
           phoneNumber: pre.phoneNumber,
           body: input.body,
           replyToMessageId: pre.replyToMessageId,
@@ -227,7 +227,7 @@ export class MessagesService {
     teamId: string,
     input: SendTextInput,
   ): Promise<{
-    provider: ProviderName;
+    channel: Channel;
     phoneNumber: string;
     replyToMessageId: string | null;
     replyToExternalId?: string;
@@ -240,11 +240,11 @@ export class MessagesService {
           id: true,
           // Channel is conversation-owned — the preflight returns this provider
           // (resolveContactChannel below only supplies the destination address).
-          provider: true,
+          channel: true,
           contact: {
             select: {
               phoneNumber: true,
-              identityProvider: true,
+              identityChannel: true,
               externalContactId: true,
               lastInboundAt: true,
             },
@@ -275,7 +275,7 @@ export class MessagesService {
       }
       throw err;
     }
-    const provider = conversation.provider;
+    const provider = conversation.channel;
     const binding = getProviderBinding(provider);
 
     // Fail fast on a not-connected provider so the 4xx surfaces in the POST
@@ -348,7 +348,7 @@ export class MessagesService {
       throw err;
     }
     return {
-      provider,
+      channel: provider,
       phoneNumber: channel.to,
       replyToMessageId,
       ...(replyToExternalId ? { replyToExternalId } : {}),
@@ -399,8 +399,8 @@ export class MessagesService {
     const receivedAt = new Date(data.receivedAt);
     // `provider` may be absent on jobs enqueued before the field existed —
     // default to Meta. The binding gives us provider + config loader.
-    const provider: ProviderName = data.provider ?? "meta_cloud";
-    const binding = getProviderBinding(provider);
+    const channel: Channel = data.channel ?? "whatsapp";
+    const binding = getProviderBinding(channel);
 
     // Cheap indexed existence check (no contact join, no select-all).
     // Conversation row gone → fail non-recoverable BEFORE we hit Meta so
@@ -466,7 +466,7 @@ export class MessagesService {
             const existing = await this.db.message.findFirst({
               where: {
                 teamId,
-                provider,
+                channel,
                 externalId: prior.externalId,
               },
             });
@@ -480,7 +480,7 @@ export class MessagesService {
                 senderUserId: existing.senderUserId,
                 body: existing.body,
                 direction: existing.direction,
-                provider: existing.provider,
+                channel: existing.channel,
                 status: existing.status,
                 rawPayload: existing.rawPayload as Record<string, unknown>,
                 timestamp: existing.timestamp.toISOString(),
@@ -620,7 +620,7 @@ export class MessagesService {
         senderUserId: userId,
         body,
         direction: "out",
-        provider,
+        channel,
         status: "sent",
         rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
         timestamp: messageTimestamp,
@@ -638,7 +638,7 @@ export class MessagesService {
       senderUserId: userId,
       body,
       direction: "out",
-      provider,
+      channel,
       status: "sent",
       rawPayload: { sentVia: "api/messages" },
       timestamp: messageTimestamp.toISOString(),
@@ -754,14 +754,14 @@ export class MessagesService {
         id: true,
         contactId: true,
         // Channel is conversation-owned — bind + stamp the send from here.
-        provider: true,
+        channel: true,
         // For the timestamp monotonicity guard further down — outbound
         // must sort strictly after any inbound it might be responding to.
         lastMessageAt: true,
         contact: {
           select: {
             phoneNumber: true,
-            identityProvider: true,
+            identityChannel: true,
             externalContactId: true,
             name: true,
             lastInboundAt: true,
@@ -783,7 +783,7 @@ export class MessagesService {
       }
       throw err;
     }
-    const provider = conversation.provider;
+    const provider = conversation.channel;
     const binding = getProviderBinding(provider);
 
     // Free-form send window — media (like free-form text) is template-only
@@ -1052,7 +1052,7 @@ export class MessagesService {
       senderUserId: userId,
       body: caption,
       direction: "out",
-      provider,
+      channel: provider,
       status: "sent",
       rawPayload: {
         sentVia: "api/messages/media",
@@ -1117,7 +1117,7 @@ export class MessagesService {
       senderUserId: userId,
       body: caption,
       direction: "out",
-      provider,
+      channel: provider,
       status: "sent",
       rawPayload: {
         sentVia: "api/messages/media",
@@ -1224,7 +1224,7 @@ export class MessagesService {
     // failure in the results, consistent with the existing per-contact
     // "no phone number" failure path.)
     const contacts = await this.db.contact.findMany({
-      where: { id: { in: contactIds }, teamId },
+      where: { id: { in: contactIds }, teamId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
     if (contacts.length === 0) {
@@ -1294,7 +1294,7 @@ export class MessagesService {
           error: "contact has no reachable address",
         };
       }
-      const binding = getProviderBinding(channel.provider);
+      const binding = getProviderBinding(channel.channel);
       let sendConfig;
       try {
         sendConfig = await binding.getSendConfig(teamId);
@@ -1321,23 +1321,37 @@ export class MessagesService {
         where: { teamId, contactId: contact.id },
         orderBy: { lastMessageAt: "desc" },
       });
-      const conversation = !existing
-        ? await this.db.conversation.create({
+      let conversation;
+      if (!existing) {
+        try {
+          conversation = await this.db.conversation.create({
             data: {
               teamId,
               contactId: contact.id,
               // Thread channel = the channel resolved for this send.
-              provider: channel.provider,
+              channel: channel.channel,
               status: "pending",
               lastMessagePreview: "",
             },
-          })
-        : existing.status === "closed"
-          ? await this.db.conversation.update({
-              where: { id: existing.id },
-              data: { status: "pending" },
-            })
-          : existing;
+          });
+        } catch (err) {
+          // Lost the race for this contact's single conversation (unique
+          // [teamId, contactId]) to a concurrent inbound — reuse the winner.
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+            conversation = await this.db.conversation.findFirstOrThrow({
+              where: { teamId, contactId: contact.id },
+              orderBy: { lastMessageAt: "desc" },
+            });
+          } else throw err;
+        }
+      } else if (existing.status === "closed") {
+        conversation = await this.db.conversation.update({
+          where: { id: existing.id },
+          data: { status: "pending" },
+        });
+      } else {
+        conversation = existing;
+      }
       // Reopen broadcast — see method docstring for the `silent: true`
       // rationale (workflow chain-trigger avoidance; audit + analytics
       // still fire).
@@ -1405,12 +1419,12 @@ export class MessagesService {
             const uploadMedia = requireProviderMethod(
               binding.provider,
               "uploadMedia",
-              channel.provider,
+              channel.channel,
             );
             const sendMedia = requireProviderMethod(
               binding.provider,
               "sendMedia",
-              channel.provider,
+              channel.channel,
             );
             const mb = await loadMediaBytes(src);
             if (!mb) {
@@ -1489,7 +1503,7 @@ export class MessagesService {
               senderUserId: userId,
               body: withCaption ?? "",
               direction: "out",
-              provider: channel.provider,
+              channel: channel.channel,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",
@@ -1543,7 +1557,7 @@ export class MessagesService {
               senderUserId: userId,
               body: withCaption ?? "",
               direction: "out",
-              provider: channel.provider,
+              channel: channel.channel,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",
@@ -1580,7 +1594,7 @@ export class MessagesService {
               senderUserId: userId,
               body,
               direction: "out",
-              provider: channel.provider,
+              channel: channel.channel,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",
@@ -1609,7 +1623,7 @@ export class MessagesService {
               senderUserId: userId,
               body,
               direction: "out",
-              provider: channel.provider,
+              channel: channel.channel,
               status: "sent",
               rawPayload: {
                 sentVia: "api/messages/forward",

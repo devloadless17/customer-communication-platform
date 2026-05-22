@@ -829,14 +829,14 @@ export function useConversationEvents(
           if ((target ?? "conversation") === "conversation") {
             if (payload?.conversationId !== conversationId) return;
           }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+           
           setData((prev) => (apply as any)(prev, payload));
         } catch (err) {
-          // eslint-disable-next-line no-console
+           
           console.error(`[use-conversation-events] reducer for "${event}" threw`, err);
         }
       };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       socket.on(event as any, handler as any);
       return { event, handler };
     });
@@ -857,7 +857,7 @@ export function useConversationEvents(
       socket.off("note:new", onNoteNew);
       socket.off("conversation:deleted", onConversationDeleted);
       for (const { event, handler } of reducerHandlers) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         
         socket.off(event as any, handler as any);
       }
       if (typeof document !== "undefined") {

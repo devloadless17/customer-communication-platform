@@ -23,7 +23,7 @@ CREATE TYPE "MessageDirection" AS ENUM ('in', 'out');
 CREATE TYPE "MessageStatus" AS ENUM ('sent', 'delivered', 'read', 'failed');
 
 -- CreateEnum
-CREATE TYPE "ProviderName" AS ENUM ('meta_cloud');
+CREATE TYPE "Channel" AS ENUM ('whatsapp');
 
 -- CreateEnum
 CREATE TYPE "TemplateStatus" AS ENUM ('approved', 'pending', 'rejected', 'paused', 'disabled');
@@ -67,7 +67,7 @@ CREATE TABLE "Team" (
 CREATE TABLE "ChannelConnection" (
     "id" TEXT NOT NULL,
     "teamId" TEXT NOT NULL,
-    "provider" "ProviderName" NOT NULL,
+    "channel" "Channel" NOT NULL,
     "config" JSONB NOT NULL DEFAULT '{}',
     "secrets" JSONB NOT NULL DEFAULT '{}',
     "isActive" BOOLEAN NOT NULL DEFAULT true,
@@ -157,7 +157,7 @@ CREATE TABLE "Contact" (
     "id" TEXT NOT NULL,
     "teamId" TEXT NOT NULL,
     "phoneNumber" TEXT,
-    "identityProvider" "ProviderName",
+    "identityChannel" "Channel",
     "externalContactId" TEXT,
     "name" TEXT NOT NULL,
     "firstName" TEXT,
@@ -173,6 +173,7 @@ CREATE TABLE "Contact" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastInboundAt" TIMESTAMP(3),
     "version" INTEGER NOT NULL DEFAULT 0,
+    "deletedAt" TIMESTAMP(3),
 
     CONSTRAINT "Contact_pkey" PRIMARY KEY ("id")
 );
@@ -208,7 +209,7 @@ CREATE TABLE "Conversation" (
     "id" TEXT NOT NULL,
     "teamId" TEXT NOT NULL,
     "contactId" TEXT NOT NULL,
-    "provider" "ProviderName" NOT NULL DEFAULT 'meta_cloud',
+    "channel" "Channel" NOT NULL DEFAULT 'whatsapp',
     "assignedUserId" TEXT,
     "status" "ConversationStatus" NOT NULL DEFAULT 'pending',
     "unreadCount" INTEGER NOT NULL DEFAULT 0,
@@ -241,7 +242,7 @@ CREATE TABLE "Message" (
     "senderUserId" TEXT,
     "body" TEXT NOT NULL,
     "direction" "MessageDirection" NOT NULL,
-    "provider" "ProviderName" NOT NULL,
+    "channel" "Channel" NOT NULL,
     "status" "MessageStatus" NOT NULL DEFAULT 'sent',
     "rawPayload" JSONB NOT NULL,
     "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -673,7 +674,7 @@ CREATE TABLE "_AudienceGroupContacts" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ChannelConnection_teamId_provider_key" ON "ChannelConnection"("teamId", "provider");
+CREATE UNIQUE INDEX "ChannelConnection_teamId_channel_key" ON "ChannelConnection"("teamId", "channel");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
@@ -712,6 +713,9 @@ CREATE INDEX "Contact_teamId_source_idx" ON "Contact"("teamId", "source");
 CREATE INDEX "Contact_teamId_stageId_idx" ON "Contact"("teamId", "stageId");
 
 -- CreateIndex
+CREATE INDEX "Contact_teamId_deletedAt_idx" ON "Contact"("teamId", "deletedAt");
+
+-- CreateIndex
 CREATE INDEX "Contact_teamId_lastInboundAt_idx" ON "Contact"("teamId", "lastInboundAt" DESC);
 
 -- CreateIndex
@@ -721,7 +725,7 @@ CREATE INDEX "Contact_name_trgm_idx" ON "Contact" USING GIN ("name" gin_trgm_ops
 CREATE UNIQUE INDEX "Contact_teamId_phoneNumber_key" ON "Contact"("teamId", "phoneNumber");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Contact_teamId_identityProvider_externalContactId_key" ON "Contact"("teamId", "identityProvider", "externalContactId");
+CREATE UNIQUE INDEX "Contact_teamId_identityChannel_externalContactId_key" ON "Contact"("teamId", "identityChannel", "externalContactId");
 
 -- CreateIndex
 CREATE INDEX "ContactStage_teamId_position_idx" ON "ContactStage"("teamId", "position");
@@ -745,10 +749,10 @@ CREATE INDEX "Conversation_teamId_assignedUserId_idx" ON "Conversation"("teamId"
 CREATE INDEX "Conversation_teamId_lastMessageAt_id_idx" ON "Conversation"("teamId", "lastMessageAt" DESC, "id" DESC);
 
 -- CreateIndex
-CREATE INDEX "Conversation_teamId_contactId_idx" ON "Conversation"("teamId", "contactId");
+CREATE INDEX "Conversation_lastMessagePreview_trgm_idx" ON "Conversation" USING GIN ("lastMessagePreview" gin_trgm_ops);
 
 -- CreateIndex
-CREATE INDEX "Conversation_lastMessagePreview_trgm_idx" ON "Conversation" USING GIN ("lastMessagePreview" gin_trgm_ops);
+CREATE UNIQUE INDEX "Conversation_teamId_contactId_key" ON "Conversation"("teamId", "contactId");
 
 -- CreateIndex
 CREATE INDEX "Message_conversationId_timestamp_idx" ON "Message"("conversationId", "timestamp");
@@ -763,7 +767,7 @@ CREATE INDEX "Message_replyToMessageId_idx" ON "Message"("replyToMessageId");
 CREATE INDEX "Message_conversationId_timestamp_id_idx" ON "Message"("conversationId", "timestamp" DESC, "id" DESC);
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Message_teamId_provider_externalId_key" ON "Message"("teamId", "provider", "externalId");
+CREATE UNIQUE INDEX "Message_teamId_channel_externalId_key" ON "Message"("teamId", "channel", "externalId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "OutboundSendAttempt_jobId_key" ON "OutboundSendAttempt"("jobId");
@@ -1145,9 +1149,5 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fk
 
 
 -- CreateIndex
--- Hand-written: a jsonb_path_ops GIN index on Contact.customFields for the
--- contact custom-field search/filter path. Prisma's schema DSL can't model
--- jsonb_path_ops (the raw("jsonb_path_ops") emitter appends a redundant ASC
--- that breaks), so this lives here, NOT in schema.prisma. See the Contact
--- model comment. Keep this on every squash/regeneration of the init.
+-- Hand-written jsonb_path_ops GIN (Prisma DSL can't model it). Keep on regen.
 CREATE INDEX "Contact_customFields_gin_idx" ON "Contact" USING GIN ("customFields" jsonb_path_ops);

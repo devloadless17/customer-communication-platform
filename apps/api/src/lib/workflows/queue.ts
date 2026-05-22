@@ -63,6 +63,25 @@ export function connectionOptions(): ConnectionOptions {
   return getRedisConnection();
 }
 
+/**
+ * A DEDICATED connection for a BullMQ Worker's blocking commands (bzpopmin).
+ * Workers must NOT share the producer connection (`getRedisConnection`, used by
+ * every Queue + every enqueue) or each other's: a blocking poll stalls every
+ * command queued behind it on the same socket, one dropped socket would take
+ * producers + all workers down together, and `closeWorkflowQueue()`'s
+ * `disconnect()` could yank a worker mid-drain. `.duplicate()` clones the
+ * producer's options (maxRetriesPerRequest:null, timeouts) onto a fresh socket
+ * the CALLER owns and MUST close — BullMQ never closes a connection it was
+ * handed rather than created.
+ */
+export function createWorkerConnection(label: string): IORedis {
+  const conn = getRedisConnection().duplicate();
+  conn.on("error", (err) => {
+    console.error(`[${label}][redis]`, err.message);
+  });
+  return conn;
+}
+
 export function getWorkflowQueue(): Queue<WorkflowJobData> {
   if (state.queue) return state.queue;
   state.queue = new Queue<WorkflowJobData>(WORKFLOW_QUEUE_NAME, {

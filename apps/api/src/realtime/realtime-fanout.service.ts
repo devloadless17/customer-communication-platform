@@ -2,6 +2,8 @@ import { Injectable } from "@nestjs/common";
 
 import type { DomainEventType } from "@ccp/shared/events/types";
 
+import { SubscriberPriority } from "@/lib/events/bus";
+
 import { EventBus } from "../events/event-bus.module";
 import { RealtimeEmitter } from "./emitter.service";
 import { FANOUT_RULES } from "./fanout-rules";
@@ -9,10 +11,10 @@ import { FANOUT_RULES } from "./fanout-rules";
 /**
  * Subscribes the bus → wire-emit rules to the domain event bus.
  *
- * Registered FIRST in the chain (see WorkflowSubscribersService) so live
- * clients see state mutations before audit/analytics/workflow-dispatch
- * sequence their slower writes. The bus runs subscribers sequentially in
- * registration order — see `bus.ts` head comment for the ordering
+ * Registered at the REALTIME priority tier (0) so live clients see state
+ * mutations before audit/analytics/workflow-dispatch sequence their slower
+ * writes. The bus runs subscribers sequentially in PRIORITY order (not
+ * registration order) — see `bus.ts` `SubscriberPriority` for the ordering
  * invariant downstream subscribers rely on.
  *
  * Central registration here just keeps wire-emit rules together in one
@@ -38,6 +40,7 @@ export class RealtimeFanoutService {
       this.bus.subscribe(
         type,
         (e) => (handler as (e: unknown, emitter: RealtimeEmitter) => void)(e, this.emitter),
+        SubscriberPriority.REALTIME,
       );
     }
   }

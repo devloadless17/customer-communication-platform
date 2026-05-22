@@ -11,7 +11,7 @@ import {
 import { blobStorage } from "@/lib/blob-storage";
 import { getProviderBinding } from "@/lib/providers";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
-import type { ProviderName } from "@ccp/shared/types";
+import type { Channel } from "@ccp/shared/types";
 import {
   getConversationWithRefs,
   listConversations,
@@ -82,13 +82,16 @@ export class ConversationsService {
    * to the team and the viewer, fixes the badge truthfulness without
    * forcing the list to load every conversation.
    *
-   * Five queries fan out in parallel; the per-stage one walks every
-   * conversation (open + closed) so the badge reflects the contact's
-   * lifecycle stage regardless of chat status. At pilot scale (sub-
-   * thousand conversations) this is sub-millisecond against the
+   * Five queries fan out in parallel. The preset counts hit the
    * (teamId, status, lastMessageAt) + (teamId, assignedUserId) indexes.
-   * Past ~10k conversations the findMany walk dominates and we'd want
-   * a raw GROUP BY through Contact.
+   * The per-stage count is a server-side GROUP BY through Contact (NOT a
+   * full-table walk into JS): one conversation per contact is DB-enforced
+   * (@@unique([teamId, contactId])), so counting contacts that have a
+   * conversation, grouped by stageId, equals counting conversations by
+   * their contact's stage. The aggregate runs on the (teamId, stageId)
+   * index and returns one row per stage instead of every conversation row.
+   * This endpoint re-fires on every count-changing socket event, so the
+   * walk it replaced was on a genuinely hot path.
    */
   async counts(
     teamId: string,
@@ -100,7 +103,7 @@ export class ConversationsService {
     closed: number;
     byStage: Record<string, number>;
   }> {
-    const [all, mine, unassigned, closed, stageRows] = await Promise.all([
+    const [all, mine, unassigned, closed, stageGroups] = await Promise.all([
       this.db.conversation.count({
         where: { teamId, status: { not: "closed" } },
       }),
@@ -113,17 +116,16 @@ export class ConversationsService {
       this.db.conversation.count({
         where: { teamId, status: "closed" },
       }),
-      this.db.conversation.findMany({
-        where: { teamId },
-        select: { contact: { select: { stageId: true } } },
+      this.db.contact.groupBy({
+        by: ["stageId"],
+        where: { teamId, stageId: { not: null }, conversations: { some: {} } },
+        _count: true,
       }),
     ]);
 
     const byStage: Record<string, number> = {};
-    for (const r of stageRows) {
-      const sid = r.contact?.stageId;
-      if (!sid) continue;
-      byStage[sid] = (byStage[sid] ?? 0) + 1;
+    for (const g of stageGroups) {
+      if (g.stageId) byStage[g.stageId] = g._count;
     }
 
     return { all, mine, unassigned, closed, byStage };
@@ -508,7 +510,7 @@ export class ConversationsService {
     const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
-      select: { externalId: true, provider: true },
+      select: { externalId: true, channel: true },
     });
 
     if (conversation.unreadCount > 0) {
@@ -530,7 +532,7 @@ export class ConversationsService {
       void this.markIncomingReadBestEffort(
         teamId,
         latestInbound.externalId,
-        latestInbound.provider,
+        latestInbound.channel,
       );
     }
   }
@@ -554,7 +556,7 @@ export class ConversationsService {
     const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
-      select: { externalId: true, provider: true },
+      select: { externalId: true, channel: true },
     });
     if (!latestInbound) {
       return { ok: true, skipped: "no-inbound" };
@@ -563,7 +565,7 @@ export class ConversationsService {
     try {
       // Route by the inbound's own channel; a provider without typing support
       // no-ops via the optional `?.`.
-      const binding = getProviderBinding(latestInbound.provider);
+      const binding = getProviderBinding(latestInbound.channel);
       const config = await binding.getSendConfig(teamId);
       await binding.provider.sendTypingIndicator?.(latestInbound.externalId, config);
     } catch (err) {
@@ -578,10 +580,10 @@ export class ConversationsService {
   private async markIncomingReadBestEffort(
     teamId: string,
     externalId: string,
-    provider: ProviderName,
+    channel: Channel,
   ): Promise<void> {
     try {
-      const binding = getProviderBinding(provider);
+      const binding = getProviderBinding(channel);
       const config = await binding.getSendConfig(teamId);
       await binding.provider.markIncomingRead?.(externalId, config);
     } catch (err) {

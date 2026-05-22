@@ -153,7 +153,7 @@ export async function listConversations(
     take: take + 1,
     include: {
       // Explicit select keeps the per-row payload lean — adding heavier
-      // relations to Contact (customFields, identityProvider, etc.) doesn't
+      // relations to Contact (customFields, identityChannel, etc.) doesn't
       // automatically bloat every inbox-list response. Tags come back via
       // the nested `tags` include since they live on Contact in this app
       // (one contact = one conversation, so per-thread tags would be dead
@@ -172,7 +172,7 @@ export async function listConversations(
           language: true,
           countryCode: true,
           phoneNumber: true,
-          identityProvider: true,
+          identityChannel: true,
           externalContactId: true,
           avatarUrl: true,
           email: true,

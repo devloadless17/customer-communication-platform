@@ -184,9 +184,9 @@ async function main() {
       const externalId = `${conversationId}_msg_${String(i).padStart(3, "0")}`;
       await db.message.upsert({
         where: {
-          teamId_provider_externalId: {
+          teamId_channel_externalId: {
             teamId: team.id,
-            provider: "meta_cloud",
+            channel: "whatsapp",
             externalId,
           },
         },
@@ -197,7 +197,7 @@ async function main() {
           senderUserId: null,
           body: m.body,
           direction: m.direction,
-          provider: "meta_cloud",
+          channel: "whatsapp",
           status: m.direction === "in" ? "delivered" : "sent",
           rawPayload: { source: "dev-closed-window" } as Prisma.InputJsonValue,
           timestamp: ts,

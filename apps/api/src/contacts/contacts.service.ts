@@ -6,7 +6,6 @@ import {
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
-import { blobStorage } from "@/lib/blob-storage";
 import { serializeCsv, parseCsv } from "@/lib/csv";
 import type { ContactFieldChange } from "@ccp/shared/events/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
@@ -158,6 +157,21 @@ export class ContactsService {
         "code" in err &&
         (err as { code?: string }).code === "P2002"
       ) {
+        // A soft-deleted contact still holds this phone's unique slot. Re-adding
+        // the number should revive that tombstoned row (and its preserved
+        // conversation) rather than 409 on a contact the agent can't even see.
+        const revived = await this.reviveSoftDeletedByPhone(teamId, userId, phone, {
+          name,
+          firstName: trimmedFirst,
+          lastName: trimmedLast,
+          language,
+          countryCode,
+          email,
+          location,
+          customFields,
+          stageId,
+        });
+        if (revived) return revived;
         throw new ConflictException({
           error: "a contact with this phone number already exists",
         });
@@ -169,7 +183,7 @@ export class ContactsService {
       id: created.id,
       teamId: created.teamId,
       phoneNumber: created.phoneNumber,
-      identityProvider: created.identityProvider,
+      identityChannel: created.identityChannel,
       externalContactId: created.externalContactId,
       name: created.name,
       firstName: created.firstName,
@@ -184,6 +198,89 @@ export class ContactsService {
       stageId: created.stageId,
       tagIds: [],
       createdAt: created.createdAt.toISOString(),
+    };
+
+    await this.bus.publish({
+      type: "contact.created",
+      teamId,
+      contact,
+      source: "manual",
+      createdByUserId: userId,
+    });
+
+    return contact;
+  }
+
+  /**
+   * Revive a soft-deleted contact occupying `phone`'s unique slot. Clears the
+   * tombstone, overwrites the directory fields with the re-add payload, and
+   * republishes `contact.created` — to every subscriber a revived contact is a
+   * fresh appearance in the directory. Returns `null` when no soft-deleted row
+   * exists (so the caller falls through to a real 409 for a live duplicate).
+   *
+   * The conversation + message history hanging off the row are untouched: this
+   * is the manual-create mirror of the ingest upsert's `deletedAt: null` revive.
+   */
+  private async reviveSoftDeletedByPhone(
+    teamId: string,
+    userId: string,
+    phone: string,
+    data: {
+      name: string;
+      firstName: string | null;
+      lastName: string | null;
+      language: string | null;
+      countryCode: string | null;
+      email: string | null;
+      location: string | null;
+      customFields: Record<string, string>;
+      stageId: string | null;
+    },
+  ): Promise<Contact | null> {
+    const existing = await this.db.contact.findFirst({
+      where: { teamId, phoneNumber: phone, deletedAt: { not: null } },
+      select: { id: true },
+    });
+    if (!existing) return null;
+
+    const updated = await this.db.contact.update({
+      where: { id: existing.id },
+      data: {
+        name: data.name,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        language: data.language,
+        countryCode: data.countryCode,
+        email: data.email ?? null,
+        location: data.location ?? null,
+        customFields: data.customFields,
+        stageId: data.stageId,
+        source: "manual",
+        deletedAt: null,
+        version: { increment: 1 },
+      },
+      include: { tags: { select: { id: true } } },
+    });
+
+    const contact: Contact = {
+      id: updated.id,
+      teamId: updated.teamId,
+      phoneNumber: updated.phoneNumber,
+      identityChannel: updated.identityChannel,
+      externalContactId: updated.externalContactId,
+      name: updated.name,
+      firstName: updated.firstName,
+      lastName: updated.lastName,
+      language: updated.language,
+      countryCode: updated.countryCode,
+      avatarUrl: updated.avatarUrl ?? undefined,
+      email: updated.email ?? undefined,
+      location: updated.location ?? undefined,
+      customFields: normalizeStringMap(updated.customFields),
+      source: updated.source,
+      stageId: updated.stageId,
+      tagIds: updated.tags.map((t) => t.id),
+      createdAt: updated.createdAt.toISOString(),
     };
 
     await this.bus.publish({
@@ -306,7 +403,7 @@ export class ContactsService {
       id: updated.id,
       teamId: updated.teamId,
       phoneNumber: updated.phoneNumber,
-      identityProvider: updated.identityProvider,
+      identityChannel: updated.identityChannel,
       externalContactId: updated.externalContactId,
       name: updated.name,
       firstName: updated.firstName,
@@ -368,40 +465,27 @@ export class ContactsService {
    * preferable to a half-committed delete.
    */
   async remove(teamId: string, userId: string, contactId: string): Promise<void> {
+    // Soft-delete: tombstone the contact but PRESERVE its conversations,
+    // messages, and media — removing a contact must NOT delete its chat. The
+    // contact just leaves the directory; its thread stays in the inbox, and a
+    // returning contact is re-activated by the ingest upsert.
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
-      select: {
-        id: true,
-        conversations: {
-          select: {
-            id: true,
-            messages: {
-              where: { mediaKey: { not: null } },
-              select: { mediaKey: true },
-            },
-          },
-        },
-      },
+      where: { id: contactId, teamId, deletedAt: null },
+      select: { id: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
-    const mediaKeys = contact.conversations
-      .flatMap((c) => c.messages)
-      .map((m) => m.mediaKey)
-      .filter((k): k is string => Boolean(k));
-    const conversationIds = contact.conversations.map((c) => c.id);
-
-    await this.db.contact.delete({ where: { id: contactId } });
-
-    if (mediaKeys.length > 0) {
-      await blobStorage.delete(mediaKeys);
-    }
+    await this.db.contact.update({
+      where: { id: contactId },
+      data: { deletedAt: new Date() },
+    });
 
     await this.bus.publish({
       type: "contact.deleted",
       teamId,
       contactId,
-      conversationIds,
+      // Conversations are preserved on soft-delete — none to splice from lists.
+      conversationIds: [],
       deletedByUserId: userId,
     });
   }
@@ -441,38 +525,12 @@ export class ContactsService {
     }
 
     if (input.action === "delete") {
-      const conversationsWithMedia = await this.db.conversation.findMany({
-        where: { teamId, contactId: { in: ownedIds } },
-        select: {
-          id: true,
-          contactId: true,
-          messages: {
-            where: { mediaKey: { not: null } },
-            select: { mediaKey: true },
-          },
-        },
+      // Soft-delete: tombstone the contacts but PRESERVE conversations +
+      // messages + media — a contact delete must not take its chat with it.
+      await this.db.contact.updateMany({
+        where: { teamId, id: { in: ownedIds }, deletedAt: null },
+        data: { deletedAt: new Date() },
       });
-      const mediaKeys = conversationsWithMedia
-        .flatMap((c) => c.messages)
-        .map((m) => m.mediaKey)
-        .filter((k): k is string => Boolean(k));
-
-      // Group convo ids per-contact so each contact.deleted event carries
-      // its own cascade list — mirrors the single-contact DELETE event.
-      const conversationsByContact = new Map<string, string[]>();
-      for (const c of conversationsWithMedia) {
-        const list = conversationsByContact.get(c.contactId) ?? [];
-        list.push(c.id);
-        conversationsByContact.set(c.contactId, list);
-      }
-
-      await this.db.contact.deleteMany({
-        where: { teamId, id: { in: ownedIds } },
-      });
-
-      if (mediaKeys.length > 0) {
-        await blobStorage.delete(mediaKeys);
-      }
 
       // Bounded fanout: 500 ids × 6 sequential subscribers via Promise.all
       // pinned the event loop and blocked unrelated requests on the single
@@ -484,7 +542,8 @@ export class ContactsService {
           type: "contact.deleted",
           teamId,
           contactId: id,
-          conversationIds: conversationsByContact.get(id) ?? [],
+          // Conversations preserved on soft-delete — none to splice.
+          conversationIds: [],
           deletedByUserId: userId,
         });
       });
@@ -557,7 +616,7 @@ export class ContactsService {
           id: c.id,
           teamId: c.teamId,
           phoneNumber: c.phoneNumber,
-          identityProvider: c.identityProvider,
+          identityChannel: c.identityChannel,
           externalContactId: c.externalContactId,
           name: c.name,
           firstName: c.firstName,
@@ -894,7 +953,7 @@ export class ContactsService {
       id: updated.id,
       teamId: updated.teamId,
       phoneNumber: updated.phoneNumber,
-      identityProvider: updated.identityProvider,
+      identityChannel: updated.identityChannel,
       externalContactId: updated.externalContactId,
       name: updated.name,
       firstName: updated.firstName,
@@ -954,7 +1013,8 @@ export class ContactsService {
     const EXPORT_HARD_CAP = 50_000;
     const [contacts, fieldDefs] = await Promise.all([
       this.db.contact.findMany({
-        where: { teamId },
+        // Export is a directory dump — soft-deleted contacts stay out.
+        where: { teamId, deletedAt: null },
         select: {
           phoneNumber: true,
           name: true,
@@ -1034,7 +1094,7 @@ export class ContactsService {
    * union logic.
    */
   async countAll(teamId: string): Promise<number> {
-    return this.db.contact.count({ where: { teamId } });
+    return this.db.contact.count({ where: { teamId, deletedAt: null } });
   }
 
   /**

@@ -161,7 +161,7 @@ export async function sendTemplateInternal(
   }
   // Channel is conversation-owned — bind + stamp from the conversation row;
   // resolveContactChannel above only supplies the destination address.
-  const provider = conversation.provider;
+  const provider = conversation.channel;
   const binding = getProviderBinding(provider);
 
   let sendConfig;
@@ -229,7 +229,7 @@ export async function sendTemplateInternal(
     senderUserId: args.senderUserId,
     body: renderedBody,
     direction: "out",
-    provider,
+    channel: provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,
@@ -277,7 +277,7 @@ export async function sendTemplateInternal(
     senderUserId: args.senderUserId,
     body: renderedBody,
     direction: "out",
-    provider,
+    channel: provider,
     status: "sent",
     rawPayload: {
       sentVia: args.sentVia,
