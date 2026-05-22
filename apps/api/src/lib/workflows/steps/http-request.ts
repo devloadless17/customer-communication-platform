@@ -9,6 +9,7 @@ import {
   StepConfigError,
   advanceWithError,
   envelopeContact,
+  envelopeExtras,
   truncateBody,
 } from "./types";
 
@@ -77,7 +78,7 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
   describeConfig(c) {
     return `POST ${c.url}`;
   },
-  async run(envelope, config): Promise<StepResult> {
+  async run(envelope, config, ctx): Promise<StepResult> {
     // 30s default. Real customer APIs (CRMs, billing systems, data
     // enrichment) routinely take 5-20s on cold paths. The previous 8s
     // default tripped legitimate slow endpoints into BullMQ retries, and
@@ -98,7 +99,11 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
         }
       : { name: "", phoneNumber: null, email: null, location: null, customFields: {} };
 
-    const resolvedUrl = resolveFieldTokens(config.url, contact);
+    // Full token context so URL / token / header values can use the same
+    // namespaces the editor offers — `$var.sender.*`, `$var.message.*`,
+    // `$var.previousStep.*`, `$var.steps.*` — not just `$var.contact.*`.
+    const extras = envelopeExtras(envelope, ctx);
+    const resolvedUrl = resolveFieldTokens(config.url, contact, extras);
     // bearerToken is envelope-encrypted at rest (workflows.service ->
     // encryptGraphStepSecrets). decryptSecret() is a no-op for plaintext
     // so legacy graphs from before this rollout keep working unchanged.
@@ -114,11 +119,11 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
       }
     }
     const resolvedToken = plaintextToken
-      ? resolveFieldTokens(plaintextToken, contact)
+      ? resolveFieldTokens(plaintextToken, contact, extras)
       : undefined;
     const resolvedHeaders = config.customHeaders
       ? Object.fromEntries(
-          Object.entries(config.customHeaders).map(([k, v]) => [k, resolveFieldTokens(v, contact)]),
+          Object.entries(config.customHeaders).map(([k, v]) => [k, resolveFieldTokens(v, contact, extras)]),
         )
       : undefined;
 

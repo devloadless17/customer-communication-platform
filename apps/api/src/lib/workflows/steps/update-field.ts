@@ -12,6 +12,7 @@ import {
   StepConfigError,
   advance,
   advanceWithError,
+  envelopeExtras,
 } from "./types";
 import {
   type StepTarget,
@@ -91,7 +92,15 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       location: contact.location,
       customFields: normalizeStringMap(contact.customFields),
     };
-    const resolvedValue = resolveFieldTokens(config.value, contactLike);
+    // `contactLike` is the TARGET (may be a custom-phone contact, not the
+    // trigger sender). Pass extras so `$var.sender.*` / `$var.trigger.contact.*`
+    // still resolve to the original sender and `$var.message.*` /
+    // `$var.previousStep.*` work — e.g. "set B's field = the sender's phone".
+    const resolvedValue = resolveFieldTokens(
+      config.value,
+      contactLike,
+      envelopeExtras(envelope, ctx),
+    );
 
     const currentFields = normalizeStringMap(contact.customFields);
     const previousValue = currentFields[config.fieldKey] ?? null;

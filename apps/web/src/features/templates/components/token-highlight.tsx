@@ -327,11 +327,17 @@ export function TokenHighlightTextarea({
         value={value}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
         className={cn(
-          "flex min-h-15 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors",
+          // `leading-relaxed` + `wrap-break-word` MUST match the overlay div
+          // above exactly. The overlay paints the visible text; the textarea
+          // only holds the (transparent) caret + owns the scroll. If their
+          // line-height or word-wrap differ, the painted text drifts away
+          // from the caret line by line and slides out of the box. Keep them
+          // identical whenever you touch either.
+          "flex min-h-15 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm leading-relaxed shadow-xs transition-colors",
           "placeholder:text-muted-foreground",
           "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          "resize-none",
+          "resize-none wrap-break-word",
           "text-transparent caret-foreground selection:bg-blue-500/30 selection:text-transparent",
           className,
         )}

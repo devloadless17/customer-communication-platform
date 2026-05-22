@@ -213,6 +213,20 @@ export function envelopeExtras(
   const extras: ResolverExtras = {};
   if (message) extras.message = message as MessageLike;
   if (conversation) extras.conversation = conversation as ConversationLike;
+  // The ORIGINAL trigger sender, kept separate from the `contact` first-arg
+  // that handlers swap for a custom-phone target. Lets `$var.sender.*` /
+  // `$var.trigger.contact.*` keep pointing at who triggered the run even when
+  // the step sends to a different number. See ResolverExtras.triggerContact.
+  const triggerContact = envelopeContact(envelope);
+  if (triggerContact) {
+    extras.triggerContact = {
+      name: triggerContact.name ?? "",
+      phoneNumber: triggerContact.phoneNumber ?? null,
+      email: triggerContact.email ?? null,
+      location: triggerContact.location ?? null,
+      customFields: triggerContact.customFields ?? {},
+    };
+  }
   // Thread per-step outputs + previousStepId through so the resolver can
   // expand `$var.previousStep.X` and `$var.steps.<id>.X`. Optional —
   // non-workflow callers (broadcasts, snippets) don't pass ctx and these

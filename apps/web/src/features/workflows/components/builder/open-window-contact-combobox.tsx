@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronsUpDown, Search, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { formatPhone } from "@ccp/shared/utils";
 import {
   computeWindowStatus,
   formatWindowRemaining,
@@ -124,10 +125,10 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
           aria-label="Change contact"
         >
           <div className="truncate font-medium">
-            {value.name ?? value.phoneNumber}
+            {value.name ?? formatPhone(value.phoneNumber)}
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-            <span className="font-mono">{value.phoneNumber}</span>
+            <span className="font-mono">{formatPhone(value.phoneNumber)}</span>
             {statusLabel && (
               <>
                 <span aria-hidden>·</span>
@@ -232,7 +233,7 @@ function ContactRow({
       <div className="min-w-0 flex-1">
         <div className="truncate font-medium">{item.contact.name}</div>
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <span className="font-mono">{item.contact.phoneNumber}</span>
+          <span className="font-mono">{formatPhone(item.contact.phoneNumber)}</span>
           <span aria-hidden>·</span>
           <span
             className={

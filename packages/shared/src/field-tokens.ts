@@ -359,6 +359,14 @@ export interface ResolverExtras {
   /** Step the runner advanced from to reach the current step. When set,
    *  `$var.previousStep.X` resolves to `stepOutputs[previousStepId][X]`. */
   previousStepId?: string | null;
+  /** The contact that TRIGGERED the run (the original message sender), kept
+   *  SEPARATE from the `contact` first-arg. A step that sends to a different
+   *  target swaps `contact` for that target — but `$var.sender.*` and
+   *  `$var.trigger.contact.*` resolve against THIS so the original sender's
+   *  info stays reachable (e.g. "forward who messaged us to another number /
+   *  a webhook"). Falls back to `contact` when unset, so templates,
+   *  broadcasts, and default trigger-contact steps behave exactly as before. */
+  triggerContact?: ContactLike | null;
 }
 
 export function resolveFieldTokens(
@@ -432,19 +440,26 @@ function resolvePath(
         ? resolveConversation(rest[0]!, extras.conversation ?? null)
         : "";
     case "trigger":
-      // trigger.<sub>.<field> → recurse with the inner namespace.
+      // trigger.contact.<field> → the ORIGINAL trigger sender, independent of
+      // the step's send target (which drives the bare `contact` namespace).
+      // This is what lets a step that sends to a DIFFERENT customer still
+      // reference who triggered the run. Other trigger.<sub> paths
+      // (message / conversation) recurse to their already-trigger-scoped
+      // extras unchanged.
+      if (rest[0] === "contact" && rest.length === 2) {
+        return resolveContact(rest[1]!, extras.triggerContact ?? contact);
+      }
       return resolvePath(rest, contact, extras);
     case "sender": {
-      // Sender alias. For message-driven triggers the sender IS the
-      // contact; agent-driven (assignment/close) prefer the agent. Today
-      // we don't have an explicit trigger-kind discriminator in extras,
-      // so we use a simple precedence: contact first (most common), then
-      // agent. Both keys ("name", "phone", "email") have parallel paths
-      // on each shape — contact.name vs agent.name — so the resolution
-      // works for either snapshot.
+      // Sender alias = the trigger ACTOR. Resolve against the trigger contact
+      // (NOT the step's send target), then fall back to the agent for
+      // agent-driven triggers (assignment/close). `triggerContact` falls back
+      // to `contact` when unset, so non-target callers behave as before. Both
+      // shapes expose parallel keys (contact.name vs agent.name).
       if (rest.length !== 1) return "";
       const k = rest[0]!;
-      const fromContact = resolveContact(k, contact);
+      const base = extras.triggerContact ?? contact;
+      const fromContact = resolveContact(k, base);
       if (fromContact !== "") return fromContact;
       return resolveAgent(k, extras.agent ?? null);
     }
