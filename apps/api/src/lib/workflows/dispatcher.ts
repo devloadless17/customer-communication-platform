@@ -36,6 +36,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
           where: { teamId, trigger: event, enabled: true, published: true },
           select: {
             id: true,
+            graph: true,
             triggerConditions: true,
             triggerOncePerContact: true,
           },
@@ -82,6 +83,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
           contactId,
           conversationId,
           payload,
+          graph: w.graph as Prisma.InputJsonValue,
           oncePerContact: w.triggerOncePerContact,
         }),
       ),
@@ -110,6 +112,8 @@ interface CreateAndEnqueueArgs {
   contactId: string | null;
   conversationId: string | null;
   payload: unknown;
+  // Snapshot of the workflow's graph at dispatch time, pinned onto the run.
+  graph: Prisma.InputJsonValue;
   oncePerContact: boolean;
 }
 
@@ -138,6 +142,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
             contactId: args.contactId,
             conversationId: args.conversationId,
             eventPayload: args.payload as Prisma.InputJsonValue,
+            graphSnapshot: args.graph,
             status: "queued",
           },
           select: { id: true },
@@ -162,6 +167,7 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
         contactId: args.contactId,
         conversationId: args.conversationId,
         eventPayload: args.payload as Prisma.InputJsonValue,
+        graphSnapshot: args.graph,
         status: "queued",
       },
       select: { id: true },
@@ -245,6 +251,7 @@ export async function dispatchManualTrigger(args: {
     where: { id: args.workflowId, teamId: args.teamId },
     select: {
       id: true,
+      graph: true,
       enabled: true,
       published: true,
       triggerOncePerContact: true,
@@ -340,6 +347,7 @@ export async function dispatchManualTrigger(args: {
             contactId: args.contactId,
             conversationId: args.conversationId,
             eventPayload: payload as unknown as Prisma.InputJsonValue,
+            graphSnapshot: wf.graph as Prisma.InputJsonValue,
             status: "queued",
           },
           select: { id: true },
@@ -368,6 +376,7 @@ export async function dispatchManualTrigger(args: {
       contactId: args.contactId,
       conversationId: args.conversationId,
       eventPayload: payload as unknown as Prisma.InputJsonValue,
+      graphSnapshot: wf.graph as Prisma.InputJsonValue,
       status: "queued",
     },
     select: { id: true },

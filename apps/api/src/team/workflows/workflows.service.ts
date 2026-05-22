@@ -529,7 +529,7 @@ export class WorkflowsService {
   ): Promise<{ runId: string; jobId: string | null }> {
     const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
-      select: { id: true, trigger: true, enabled: true },
+      select: { id: true, graph: true, trigger: true, enabled: true },
     });
     if (!wf) throw new NotFoundException({ error: "not found" });
     if (!wf.enabled) {
@@ -613,6 +613,7 @@ export class WorkflowsService {
         contactId,
         conversationId,
         eventPayload: eventPayload as Prisma.InputJsonValue,
+        graphSnapshot: wf.graph as Prisma.InputJsonValue,
         status: "queued",
       },
       select: { id: true },
@@ -646,6 +647,7 @@ export class WorkflowsService {
       where: { id },
       select: {
         id: true,
+        graph: true,
         teamId: true,
         trigger: true,
         enabled: true,
@@ -832,6 +834,7 @@ export class WorkflowsService {
         contactId: null,
         conversationId: null,
         eventPayload: eventPayload as Prisma.InputJsonValue,
+        graphSnapshot: wf.graph as Prisma.InputJsonValue,
         status: "queued",
       },
       select: { id: true },

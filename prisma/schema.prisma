@@ -1187,6 +1187,15 @@ model WorkflowRun {
   // evaluation throughout the run AND by the runs UI to show "why did this fire."
   eventPayload Json
 
+  // Immutable snapshot of Workflow.graph taken at run-creation time. The runner
+  // executes THIS, never the live Workflow.graph — so editing a workflow while a
+  // run is paused (wait / ask_question) can't corrupt the in-flight run
+  // (orphaned currentStepId, wrong branch). Nullable only for runs created before
+  // this column existed; the runner falls back to the live graph for those (see
+  // runner.ts). The enabled/published kill switch is still read live — only the
+  // graph is pinned.
+  graphSnapshot Json?
+
   // DAG state. `currentStepId` is the step that will run NEXT (queued state),
   // or the step that's PAUSED (waiting state), or NULL (completed/failed).
   currentStepId String?

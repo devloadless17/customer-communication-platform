@@ -63,7 +63,11 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
     return { runId: run.id, status: "skipped" };
   }
 
-  const graph = toGraph(wf.graph);
+  // Execute the snapshot pinned at run-creation, NOT the live Workflow.graph —
+  // editing a workflow while this run is paused must not change its remaining
+  // path. Fall back to the live graph only for pre-migration runs whose
+  // graphSnapshot is null; remove the fallback once those have drained.
+  const graph = toGraph(run.graphSnapshot ?? wf.graph);
   if (!graph.startNodeId || graph.nodes.length === 0) {
     await markFailed(run.id, "workflow graph is empty");
     return { runId: run.id, status: "failed" };
