@@ -1,9 +1,11 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  ChevronLeft,
+  ChevronRight,
   ContactRound,
   Inbox,
   LogOut,
@@ -31,25 +33,29 @@ import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
 
-/**
- * Far-left icon-only main nav. Every authenticated page renders this. Pair
- * with a section-specific sub-sidebar (settings / contacts / inbox / etc.)
- * for the contextual nav that lives one column to the right.
- *
- * Items here are the top-level "sections" of the app. Sub-feature navigation
- * (audience groups, templates, snippets, tags, etc.) lives in the sub-sidebars.
- *
- * Optional props:
- *  - connected: realtime dot on the team badge. Only meaningful inside /inbox
- *    today; omit elsewhere and the indicator disappears.
- *  - onlineUserIds: drives the green dot on the user's own avatar.
- */
+const STORAGE_KEY = "app-rail-collapsed";
 
+const EXPANDED_WIDTH = 232;
+const COLLAPSED_WIDTH = 64;
+
+/**
+ * Far-left main navigation rail.
+ *
+ * Collapsible: 232px (icons + labels) ↔ 64px (icons only).
+ * State persisted in localStorage. Width animates via CSS transition on the
+ * inline `width` style; `overflow: hidden` clips labels during the animation
+ * so they never wrap or push content. Labels are rendered unconditionally with
+ * `whitespace-nowrap` — the shrinking container clips them without any
+ * conditional render thrash during the transition.
+ *
+ * On first render the width is derived from localStorage so there's no
+ * animated jump. On SSR the fallback is expanded (false) which is safe since
+ * the rail is desktop-only (`md:flex`).
+ */
 interface RailItem {
   href: string;
   label: string;
   icon: LucideIcon;
-  /** Extra route prefixes that should also highlight this item. */
   match?: string[];
 }
 
@@ -61,7 +67,6 @@ const PRIMARY_ITEMS: RailItem[] = [
     href: "/broadcasts",
     label: "Broadcasts",
     icon: Megaphone,
-    // Templates + audience groups live conceptually under Broadcasts.
     match: ["/templates", "/broadcasts/groups"],
   },
   { href: "/workflows", label: "Workflows", icon: Workflow },
@@ -82,8 +87,45 @@ export function AppRail({
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
 
-  // Settings entry point is always visible (account settings work for any
-  // role); per-item permission gates live in SettingsSubSidebar.
+  // Read from localStorage on first client render to avoid flash.
+  // SSR always starts expanded (false) which is the safe default.
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(STORAGE_KEY) === "true";
+  });
+
+  // Labels render conditionally: hide immediately on collapse, show after a
+  // short delay on expand so the width animation has time to start first.
+  const [showLabels, setShowLabels] = useState<boolean>(!collapsed);
+  const labelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Transition guard: skip the CSS transition on the very first mount so
+  // that restoring a collapsed state from localStorage is instantaneous
+  // rather than an animated jump on page load.
+  const [transitionEnabled, setTransitionEnabled] = useState(false);
+  useEffect(() => {
+    // Enable transition on the next frame after mount
+    const raf = requestAnimationFrame(() => setTransitionEnabled(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  function toggleCollapsed() {
+    const next = !collapsed;
+    setCollapsed(next);
+    localStorage.setItem(STORAGE_KEY, String(next));
+
+    if (labelTimerRef.current) clearTimeout(labelTimerRef.current);
+
+    if (next) {
+      // Collapsing: hide labels immediately so they don't clip awkwardly
+      setShowLabels(false);
+    } else {
+      // Expanding: wait for the width animation to start (100ms) before
+      // fading labels in — prevents labels from appearing in a 64px rail
+      labelTimerRef.current = setTimeout(() => setShowLabels(true), 110);
+    }
+  }
+
   const items = useMemo<RailItem[]>(() => {
     const out = [...PRIMARY_ITEMS];
     out.push({
@@ -98,63 +140,154 @@ export function AppRail({
     return out;
   }, [currentUser.role]);
 
+  const railStyle: React.CSSProperties = {
+    width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,
+    transition: transitionEnabled
+      ? "width 250ms cubic-bezier(0.4, 0, 0.2, 1)"
+      : "none",
+  };
+
   return (
-    <aside className="hidden h-svh w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/60 py-3 text-sidebar-foreground md:flex">
-      {/* Team badge */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Link
-            href="/inbox"
-            className="relative flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm transition-transform hover:scale-105"
-            aria-label={team.name}
-          >
-            <span className="text-sm font-semibold">
-              {team.name.charAt(0).toUpperCase()}
-            </span>
-            {connected !== undefined && (
+    <aside
+      className="hidden h-svh shrink-0 flex-col overflow-hidden border-r border-sidebar-border bg-sidebar py-3 text-sidebar-foreground md:flex"
+      style={railStyle}
+    >
+      {/* ── Team badge ────────────────────────────────────────────────────── */}
+      <div className={cn("px-3 mb-1", collapsed && "flex justify-center")}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Link
+              href="/inbox"
+              className={cn(
+                "relative flex items-center rounded-xl bg-primary text-primary-foreground shadow-sm transition-opacity hover:opacity-90 active:opacity-80",
+                collapsed
+                  ? "size-9 justify-center"
+                  : "h-9 w-full gap-2.5 px-2.5",
+              )}
+              aria-label={team.name}
+            >
+              <span className="shrink-0 text-sm font-bold leading-none">
+                {team.name.charAt(0).toUpperCase()}
+              </span>
               <span
-                className={cn(
-                  "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
-                  connected ? "bg-emerald-500" : "bg-muted-foreground/40",
-                )}
-                aria-label={connected ? "Realtime connected" : "Realtime disconnected"}
-              />
-            )}
-          </Link>
-        </TooltipTrigger>
-        <TooltipContent side="right">{team.name}</TooltipContent>
-      </Tooltip>
+                className="truncate text-sm font-semibold whitespace-nowrap"
+                style={{
+                  opacity: showLabels ? 1 : 0,
+                  transition: "opacity 120ms ease",
+                  width: showLabels ? undefined : 0,
+                  overflow: "hidden",
+                }}
+              >
+                {team.name}
+              </span>
+              {connected !== undefined && (
+                <span
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
+                    connected ? "bg-emerald-500" : "bg-muted-foreground/40",
+                  )}
+                  aria-label={connected ? "Realtime connected" : "Realtime disconnected"}
+                />
+              )}
+            </Link>
+          </TooltipTrigger>
+          {collapsed && <TooltipContent side="right">{team.name}</TooltipContent>}
+        </Tooltip>
+      </div>
 
-      <div className="mt-4 h-px w-8 bg-sidebar-border" />
+      <div className={cn("my-2 h-px bg-sidebar-border", collapsed ? "mx-3" : "mx-4")} />
 
-      {/* Primary section nav */}
-      <nav className="mt-3 flex flex-col items-center gap-1.5">
+      {/* ── Primary nav ───────────────────────────────────────────────────── */}
+      <nav className="flex flex-1 flex-col gap-0.5 px-2">
         {items.map((item) => (
-          <RailLink key={item.href} item={item} pathname={pathname} />
+          <RailLink
+            key={item.href}
+            item={item}
+            pathname={pathname}
+            collapsed={collapsed}
+            showLabels={showLabels}
+          />
         ))}
       </nav>
 
-      {/* Footer: user menu */}
-      <div className="mt-auto flex flex-col items-center gap-2 pb-1">
-        <UserMenu currentUser={currentUser}>
+      {/* ── Footer ────────────────────────────────────────────────────────── */}
+      <div
+        className={cn(
+          "mt-2 flex flex-col gap-0.5 border-t border-sidebar-border pt-2 px-2",
+        )}
+      >
+        {/* Collapse / expand toggle */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              className={cn(
+                "flex h-9 w-full items-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground active:scale-[0.97]",
+                collapsed ? "justify-center" : "gap-2.5 px-2.5",
+              )}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {collapsed ? (
+                <ChevronRight className="size-4 shrink-0" />
+              ) : (
+                <>
+                  <ChevronLeft className="size-4 shrink-0" />
+                  {showLabels && (
+                    <span
+                      className="whitespace-nowrap text-[13px]"
+                      style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
+                    >
+                      Collapse
+                    </span>
+                  )}
+                </>
+              )}
+            </button>
+          </TooltipTrigger>
+          {collapsed && (
+            <TooltipContent side="right">Expand sidebar</TooltipContent>
+          )}
+        </Tooltip>
+
+        {/* User menu */}
+        <UserMenu currentUser={currentUser} collapsed={collapsed}>
           <button
             type="button"
-            className="relative mt-1 flex cursor-pointer items-center justify-center"
+            className={cn(
+              "group flex h-10 w-full cursor-pointer items-center rounded-lg transition-colors hover:bg-accent/60",
+              collapsed ? "justify-center" : "gap-2.5 px-2",
+            )}
             aria-label="Open account menu"
           >
-            <Avatar className="size-8 ring-2 ring-sidebar transition-shadow hover:ring-foreground/20">
-              <AvatarFallback seed={currentUser.id} className="text-[11px]">
-                {initials(currentUser.name)}
-              </AvatarFallback>
-            </Avatar>
-            {hasPresence && (
-              <span
-                className={cn(
-                  "absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-sidebar transition-colors",
-                  isOnline ? "bg-emerald-500" : "bg-muted-foreground/40",
-                )}
-                aria-label={isOnline ? "Online" : "Offline"}
-              />
+            <div className="relative shrink-0">
+              <Avatar className="size-7 ring-1 ring-sidebar-border transition-shadow group-hover:ring-foreground/20">
+                <AvatarFallback seed={currentUser.id} className="text-[10px]">
+                  {initials(currentUser.name)}
+                </AvatarFallback>
+              </Avatar>
+              {hasPresence && (
+                <span
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar transition-colors",
+                    isOnline ? "bg-emerald-500" : "bg-muted-foreground/40",
+                  )}
+                  aria-label={isOnline ? "Online" : "Offline"}
+                />
+              )}
+            </div>
+            {showLabels && (
+              <div
+                className="min-w-0 flex-1 overflow-hidden text-left"
+                style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
+              >
+                <p className="truncate text-[13px] font-medium leading-tight text-sidebar-foreground whitespace-nowrap">
+                  {currentUser.name}
+                </p>
+                <p className="truncate text-[11px] leading-tight text-muted-foreground whitespace-nowrap">
+                  {roleLabel(currentUser.role)}
+                </p>
+              </div>
             )}
           </button>
         </UserMenu>
@@ -163,67 +296,93 @@ export function AppRail({
   );
 }
 
-function RailLink({ item, pathname }: { item: RailItem; pathname: string }) {
+function RailLink({
+  item,
+  pathname,
+  collapsed,
+  showLabels,
+}: {
+  item: RailItem;
+  pathname: string;
+  collapsed: boolean;
+  showLabels: boolean;
+}) {
   const { href, label, icon: Icon, match } = item;
-  // /inbox highlights for /inbox/[id], /settings for /settings/workspace, etc.
-  // Each extra `match` prefix also lights up the item.
   const matchAll = useMemo(() => [href, ...(match ?? [])], [href, match]);
   const active = matchAll.some(
     (p) => pathname === p || pathname.startsWith(p + "/"),
   );
   const isAdmin = href === "/admin";
 
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Link
-          href={href}
-          className={cn(
-            "group relative flex size-10 items-center justify-center rounded-lg transition-colors",
-            isAdmin
-              ? cn(
-                  "border border-dashed border-amber-500/30",
-                  active
-                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-300"
-                    : "text-amber-700/80 hover:bg-amber-500/10 hover:text-foreground dark:text-amber-300/80",
-                )
-              : cn(
-                  active
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                ),
-          )}
-          aria-current={active ? "page" : undefined}
-          aria-label={label}
+  const link = (
+    <Link
+      href={href}
+      className={cn(
+        "group relative flex h-9 w-full items-center rounded-lg transition-colors",
+        collapsed ? "justify-center" : "gap-2.5 px-2.5",
+        isAdmin
+          ? cn(
+              "border border-dashed border-amber-500/30",
+              active
+                ? "bg-amber-500/10 text-amber-600 dark:text-amber-300"
+                : "text-amber-700/80 hover:bg-amber-500/10 hover:text-foreground dark:text-amber-300/80",
+            )
+          : cn(
+              active
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            ),
+      )}
+      aria-current={active ? "page" : undefined}
+      aria-label={label}
+    >
+      <Icon className="size-4.5 shrink-0" />
+      {showLabels && (
+        <span
+          className="truncate text-[13px] whitespace-nowrap"
+          style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
         >
-          <Icon className="size-4.5" />
-          {active && !isAdmin && (
-            <span className="absolute left-0 top-1.5 h-7 w-0.5 -translate-x-2 rounded-r-full bg-primary" />
-          )}
-        </Link>
-      </TooltipTrigger>
-      <TooltipContent side="right">{label}</TooltipContent>
-    </Tooltip>
+          {label}
+        </span>
+      )}
+      {/* Active indicator — lives at the inner left edge of the rail */}
+      {active && !isAdmin && (
+        <span className="absolute left-0 top-1.5 h-6 w-0.5 -translate-x-2 rounded-r-full bg-primary" />
+      )}
+    </Link>
   );
+
+  if (collapsed) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>{link}</TooltipTrigger>
+        <TooltipContent side="right">{label}</TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return link;
 }
 
 function UserMenu({
   currentUser,
+  collapsed,
   children,
 }: {
   currentUser: User;
+  collapsed: boolean;
   children: React.ReactNode;
 }) {
-  // Sign out shows a full-screen "Signing out…" overlay during the hard nav
-  // to /logout. Without it, the blank-screen window between /logout and
-  // /login feels broken on slow connections — the overlay turns it into a
-  // brief polished spinner.
   const { trigger: signOut, overlay } = useSignOutOverlay();
   return (
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-        <DropdownMenuContent align="end" side="right" className="min-w-52">
+        <DropdownMenuContent
+          align="end"
+          side={collapsed ? "right" : "top"}
+          className="min-w-52"
+        >
           <DropdownMenuLabel>
             <div className="flex flex-col">
               <span className="text-sm font-medium">{currentUser.name}</span>

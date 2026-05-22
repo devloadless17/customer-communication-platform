@@ -56,28 +56,34 @@ function ConversationListItemImpl({
         active
           ? "bg-primary/10"
           : pending
-            ? "bg-accent/60"
-            : "hover:bg-accent/60",
+            ? "bg-accent/50"
+            : "hover:bg-accent/50",
       )}
     >
+      {/* Selected-row left accent bar */}
       {active && (
-        <span className="absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-r-full bg-primary" />
+        <span className="absolute left-0 top-1/2 h-7 w-0.5 -translate-y-1/2 rounded-r-full bg-primary" />
       )}
-      <Avatar className="size-10">
+
+      {/* Avatar */}
+      <Avatar className="mt-0.5 size-9 shrink-0">
         <AvatarFallback
-          className="text-xs text-white"
+          className="text-xs font-semibold text-white"
           style={{ backgroundImage: avatarGradient(contact.id) }}
         >
           {initials(contact.name)}
         </AvatarFallback>
       </Avatar>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-baseline gap-2">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {/* Row 1: name + timestamp */}
+        <div className="flex items-center gap-1.5">
           <span
             className={cn(
-              "truncate text-sm",
-              unread ? "font-semibold text-foreground" : "font-medium text-foreground",
+              "flex-1 truncate text-[13px] leading-snug",
+              unread
+                ? "font-semibold text-foreground"
+                : "font-medium text-foreground/90",
             )}
           >
             {contact.name}
@@ -85,51 +91,68 @@ function ConversationListItemImpl({
           <LocalTime
             iso={conversation.lastMessageAt}
             format="listTime"
-            className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground"
+            className={cn(
+              "shrink-0 text-[11px] tabular-nums",
+              unread ? "text-primary font-medium" : "text-muted-foreground",
+            )}
           />
         </div>
 
-        <div className="mt-0.5 flex items-center gap-2">
+        {/* Row 2: message preview + unread badge */}
+        <div className="flex items-center gap-1.5">
           <p
             className={cn(
-              "min-w-0 flex-1 truncate text-xs",
-              unread ? "text-foreground" : "text-muted-foreground",
+              "min-w-0 flex-1 truncate text-[12px] leading-snug",
+              unread ? "text-foreground/80" : "text-muted-foreground",
             )}
           >
             {conversation.lastMessagePreview}
           </p>
           {pending && !active ? (
             <Loader2
-              className="ml-1 size-3 shrink-0 animate-spin text-muted-foreground"
+              className="size-3 shrink-0 animate-spin text-muted-foreground"
               aria-label="Loading conversation"
             />
           ) : unread ? (
-            <span className="ml-1 flex size-4.5 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] font-semibold tabular-nums text-primary-foreground">
-              {conversation.unreadCount}
+            /* key changes only when badge transitions 0→N, triggering the
+               mount animation. Subsequent count increases don't re-mount. */
+            <span
+              key="badge-visible"
+              className="animate-badge-pop flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold tabular-nums text-primary-foreground"
+            >
+              {conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}
             </span>
           ) : null}
         </div>
 
-        <div className="mt-1.5 flex items-center gap-1.5">
+        {/* Row 3: status chip + assignment */}
+        <div className="flex items-center gap-1.5">
           {conversation.status === "pending" && (
-            <span className="inline-flex h-4 items-center rounded bg-amber-500/15 px-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+            <span className="inline-flex h-[18px] items-center rounded-sm bg-amber-500/12 px-1.5 text-[10px] font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
               pending
             </span>
           )}
           {conversation.status === "closed" && (
-            <span className="inline-flex h-4 items-center rounded bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-[18px] items-center rounded-sm bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
               closed
             </span>
           )}
           {assignedUser ? (
             <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-              <span className="inline-flex size-3.5 items-center justify-center rounded-full bg-secondary text-[8px] font-medium">
-                {initials(assignedUser.name)}
-              </span>
-              {assignedUser.name.split(" ")[0]}
+              <Avatar className="size-3.5">
+                <AvatarFallback
+                  seed={assignedUser.id}
+                  className="text-[7px] font-semibold"
+                >
+                  {initials(assignedUser.name)}
+                </AvatarFallback>
+              </Avatar>
+              <span className="truncate">{assignedUser.name.split(" ")[0]}</span>
             </span>
           ) : (
-            <span className="text-[11px] italic text-muted-foreground">unassigned</span>
+            <span className="text-[11px] italic text-muted-foreground/60">
+              unassigned
+            </span>
           )}
         </div>
       </div>
