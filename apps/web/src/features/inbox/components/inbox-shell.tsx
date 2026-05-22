@@ -805,6 +805,7 @@ function ThreadWorkspace({
         currentUser={currentUser}
         nextOlderCursor={thread.nextOlderCursor}
         stageCatalog={stageCatalog}
+        tags={tags}
         canManageStages={canManageStages}
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}

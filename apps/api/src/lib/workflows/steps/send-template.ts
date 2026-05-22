@@ -7,19 +7,17 @@ import {
   consumeConversationSendBudget,
 } from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 
-import { db } from "@/lib/db";
 import {
   type StepHandler,
   type StepResult,
   StepConfigError,
   advance,
   advanceWithError,
-  envelopeContact,
-  envelopeExtras,
   truncateBody,
 } from "./types";
+import { buildTokenContext } from "./token-context";
 import {
   type StepTarget,
   parseStepTarget,
@@ -90,33 +88,14 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       return advanceWithError(400, "could not resolve a conversation for the target");
     }
     const conversationId = resolved.conversationId;
-    // Token context resolves against the TARGET contact (custom phone) or the
-    // trigger contact (default). $var.sender.* still points at the original
-    // sender via envelopeExtras.triggerContact.
-    let contact: ContactLike;
-    if (!config.target || config.target.kind === "trigger_contact") {
-      const c = envelopeContact(envelope);
-      contact = {
-        name: c?.name ?? "",
-        phoneNumber: c?.phoneNumber ?? null,
-        email: c?.email ?? null,
-        location: null,
-        customFields: c?.customFields ?? {},
-      };
-    } else {
-      const row = await db.contact.findFirst({
-        where: { id: resolved.contactId, teamId: ctx.teamId },
-        select: { name: true, phoneNumber: true, email: true, location: true, customFields: true },
-      });
-      contact = {
-        name: row?.name ?? "",
-        phoneNumber: row?.phoneNumber ?? null,
-        email: row?.email ?? null,
-        location: row?.location ?? null,
-        customFields: (row?.customFields as Record<string, string> | null) ?? {},
-      };
-    }
-    const extras = envelopeExtras(envelope);
+    // Full contact (target) + trigger sender so every $var.contact.* /
+    // $var.sender.* token resolves (incl. stage_name / tag_names / …).
+    const { contact, extras } = await buildTokenContext(
+      envelope,
+      ctx,
+      ctx.teamId,
+      resolved.contactId,
+    );
     const variables = {
       body: config.variables.body.map((v) => resolveFieldTokens(v, contact, extras)),
       ...(config.variables.header

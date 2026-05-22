@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 
 import {
   type StepHandler,
@@ -10,8 +10,8 @@ import {
   advanceWithError,
   envelopeContact,
   envelopeConversation,
-  envelopeExtras,
 } from "./types";
+import { buildTokenContext } from "./token-context";
 
 /**
  * `add_comment` step. Drops an InternalNote on the conversation.
@@ -57,15 +57,15 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
     });
     if (!conversation) return advanceWithError(404, "conversation not found");
 
-    const c = envelopeContact(envelope);
-    const contact: ContactLike = {
-      name: c?.name ?? "",
-      phoneNumber: c?.phoneNumber ?? null,
-      email: c?.email ?? null,
-      location: null,
-      customFields: c?.customFields ?? {},
-    };
-    const body = resolveFieldTokens(config.body, contact, envelopeExtras(envelope));
+    // Full trigger contact + sender so all $var.contact.* / $var.sender.*
+    // tokens (incl. stage_name / tag_names / window_state) resolve.
+    const { contact, extras } = await buildTokenContext(
+      envelope,
+      ctx,
+      ctx.teamId,
+      envelopeContact(envelope)?.id,
+    );
+    const body = resolveFieldTokens(config.body, contact, extras);
 
     const note = await db.internalNote.create({
       data: {

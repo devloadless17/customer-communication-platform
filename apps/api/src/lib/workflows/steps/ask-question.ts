@@ -11,7 +11,7 @@ import {
   consumeConversationSendBudget,
 } from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import type { InteractiveOption } from "@ccp/shared/providers/types";
 
 import {
@@ -20,9 +20,9 @@ import {
   StepConfigError,
   advanceWithError,
   envelopeContact,
-  envelopeExtras,
   truncateBody,
 } from "./types";
+import { buildTokenContext } from "./token-context";
 
 /**
  * `ask_question` step. Sends a free-form question to the trigger contact,
@@ -365,16 +365,15 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       );
     }
 
-    // Resolve the contact row for $var token expansion. Same shape as the
-    // send_message handler's trigger-contact path.
-    const contact: ContactLike = {
-      name: c.name ?? "",
-      phoneNumber: c.phoneNumber ?? null,
-      email: c.email ?? null,
-      location: null,
-      customFields: c.customFields ?? {},
-    };
-    const body = resolveFieldTokens(config.question, contact, envelopeExtras(envelope));
+    // Full trigger contact + sender so every $var token (incl. stage_name /
+    // tag_names / window_state) resolves in the question copy.
+    const { contact, extras } = await buildTokenContext(
+      envelope,
+      ctx,
+      ctx.teamId,
+      c.id,
+    );
+    const body = resolveFieldTokens(config.question, contact, extras);
 
     try {
       // Per-conversation send ceiling — same loop backstop as send_message.

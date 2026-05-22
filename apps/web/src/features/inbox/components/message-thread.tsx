@@ -17,6 +17,7 @@ import type {
   InternalNote,
   Message,
   ReplySnapshot,
+  Tag,
   User,
 } from "@ccp/shared/types";
 import { useConversationEvents } from "@/features/inbox/hooks/use-conversation-events";
@@ -60,6 +61,7 @@ function MessageThreadImpl({
   currentUser,
   nextOlderCursor,
   stageCatalog,
+  tags,
   canManageStages,
   onMarkRead,
   onSnapshot,
@@ -71,6 +73,9 @@ function MessageThreadImpl({
   nextOlderCursor: string | null;
   /** Team-wide stage catalog — drives the header stepper. */
   stageCatalog: ContactStage[];
+  /** Team tag catalog — forwarded to ReplyBox so snippet
+   *  `$var.contact.tag_names` resolves (contact carries only tag ids). */
+  tags: Tag[];
   /** Whether the current user can edit the team's stage catalog. */
   canManageStages: boolean;
   /** Forwarded to useConversationEvents so the shell can patch its cached
@@ -957,6 +962,8 @@ function MessageThreadImpl({
             conversationId={conversation.id}
             currentUser={currentUser}
             contact={contact}
+            stageCatalog={stageCatalog}
+            tags={tags}
             lastInboundAt={lastInboundAt}
             replyTarget={replyTarget}
             onCancelReply={cancelReply}

@@ -1,4 +1,3 @@
-import { db } from "@/lib/db";
 import {
   SendTextValidationError,
   sendTextInternal,
@@ -8,7 +7,7 @@ import {
   consumeConversationSendBudget,
 } from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 
 import {
   type StepHandler,
@@ -16,8 +15,6 @@ import {
   StepConfigError,
   advance,
   advanceWithError,
-  envelopeContact,
-  envelopeExtras,
   truncateBody,
 } from "./types";
 import {
@@ -25,6 +22,7 @@ import {
   parseStepTarget,
   resolveStepTarget,
 } from "./target";
+import { buildTokenContext } from "./token-context";
 
 /**
  * `send_message` step. Sends a free-form text via the team's provider.
@@ -85,43 +83,18 @@ export const sendMessageStepHandler: StepHandler<SendMessageStepConfig> = {
       return advanceWithError(400, "could not resolve a conversation for the target");
     }
     const conversationId = resolved.conversationId;
-    // For the trigger-contact path we already have the contact snapshot.
-    // For the phone path we need to read the contact row so $var.contact.*
-    // tokens resolve against the TARGET (not the trigger contact).
-    let contact: ContactLike;
-    if (!config.target || config.target.kind === "trigger_contact") {
-      const c = envelopeContact(envelope);
-      contact = {
-        name: c?.name ?? "",
-        phoneNumber: c?.phoneNumber ?? null,
-        email: c?.email ?? null,
-        location: null,
-        customFields: c?.customFields ?? {},
-      };
-    } else {
-      const row = await db.contact.findFirst({
-        where: { id: resolved.contactId, teamId: ctx.teamId },
-        select: {
-          name: true,
-          phoneNumber: true,
-          email: true,
-          location: true,
-          customFields: true,
-        },
-      });
-      contact = {
-        name: row?.name ?? "",
-        phoneNumber: row?.phoneNumber ?? null,
-        email: row?.email ?? null,
-        location: row?.location ?? null,
-        customFields: (row?.customFields as Record<string, string> | null) ?? {},
-      };
-    }
-    // Pass envelope message + conversation through as `extras` so authors
-    // can drop `$var.message.body`, `$var.message.timestamp`, etc. inline.
-    // Falls back to empty string for tokens whose source isn't in this
-    // trigger's payload (e.g. `$var.message.*` outside message_received).
-    const body = resolveFieldTokens(config.body, contact, envelopeExtras(envelope));
+    // Load the resolution contact (the send target — custom phone or, by
+    // default, the trigger contact) AND the original trigger sender COMPLETE,
+    // so every $var.contact.* / $var.sender.* token resolves, including the
+    // derived stage_name / tag_names / window_state / last_inbound_at. Also
+    // carries $var.message.* / $var.previousStep.* via extras.
+    const { contact, extras } = await buildTokenContext(
+      envelope,
+      ctx,
+      ctx.teamId,
+      resolved.contactId,
+    );
+    const body = resolveFieldTokens(config.body, contact, extras);
 
     try {
       // Per-conversation send ceiling — the loop backstop for workflow auto-

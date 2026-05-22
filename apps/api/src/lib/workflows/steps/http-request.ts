@@ -1,4 +1,4 @@
-import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { safeFetch, SsrfBlockedError, readLimitedBody } from "@/lib/http/safe-fetch";
@@ -9,9 +9,9 @@ import {
   StepConfigError,
   advanceWithError,
   envelopeContact,
-  envelopeExtras,
   truncateBody,
 } from "./types";
+import { buildTokenContext } from "./token-context";
 
 /**
  * `http_request` step. Direct port of the legacy `webhook` action: POSTs
@@ -88,21 +88,16 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
     // the parseConfig above).
     const timeout = config.timeoutMs ?? 30_000;
 
-    const envC = envelopeContact(envelope);
-    const contact: ContactLike = envC
-      ? {
-          name: envC.name,
-          phoneNumber: envC.phoneNumber,
-          email: envC.email,
-          location: null,
-          customFields: envC.customFields,
-        }
-      : { name: "", phoneNumber: null, email: null, location: null, customFields: {} };
-
-    // Full token context so URL / token / header values can use the same
-    // namespaces the editor offers — `$var.sender.*`, `$var.message.*`,
-    // `$var.previousStep.*`, `$var.steps.*` — not just `$var.contact.*`.
-    const extras = envelopeExtras(envelope, ctx);
+    // Full token context (complete contact + sender) so URL / token / header
+    // values can use every namespace the editor offers — `$var.contact.*`
+    // incl. stage_name / tag_names, `$var.sender.*`, `$var.message.*`,
+    // `$var.previousStep.*`, `$var.steps.*`.
+    const { contact, extras } = await buildTokenContext(
+      envelope,
+      ctx,
+      ctx.teamId,
+      envelopeContact(envelope)?.id,
+    );
     const resolvedUrl = resolveFieldTokens(config.url, contact, extras);
     // bearerToken is envelope-encrypted at rest (workflows.service ->
     // encryptGraphStepSecrets). decryptSecret() is a no-op for plaintext

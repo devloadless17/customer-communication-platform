@@ -18,13 +18,16 @@ import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import type {
   Contact,
+  ContactStage,
   MediaKind,
   Message,
   ReplySnapshot,
   SnippetItem,
+  Tag,
   TemplateDto,
   User,
 } from "@ccp/shared/types";
+import type { ContactLike } from "@ccp/shared/field-tokens";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
@@ -100,6 +103,8 @@ export function ReplyBox({
   conversationId,
   currentUser,
   contact,
+  stageCatalog,
+  tags,
   lastInboundAt,
   replyTarget,
   onCancelReply,
@@ -117,6 +122,11 @@ export function ReplyBox({
    * `$var.contact.*` tokens when an agent inserts a snippet (`/<name>`).
    */
   contact: Contact;
+  /** Team stage + tag catalogs — used to resolve the derived
+   *  `$var.contact.stage_name` / `$var.contact.tag_names` tokens when an
+   *  agent inserts a snippet (the contact carries only ids). */
+  stageCatalog: ContactStage[];
+  tags: Tag[];
   /**
    * Most recent inbound timestamp for this contact. Drives the 24h window
    * status — when null or > 24h ago, free-form replies are blocked (Meta
@@ -319,9 +329,25 @@ export function ReplyBox({
       if (!slashRange) return;
       // Resolve `$var.contact.*` against the live conversation contact and
       // `$var.agent.*` against the agent inserting it — that's `currentUser`.
-      // Both namespaces are valid in snippets (configured by listAvailableTokens
-      // in the snippets editor); the runner here doesn't need to gate them.
-      const resolved = resolveFieldTokens(s.body, contact, currentUser);
+      // The contact carries only stageId / tagIds, so derive the display
+      // values (stage_name, tag_names) from the catalogs and fold in the
+      // window state + lastInboundAt — otherwise those tokens resolve empty.
+      const contactForTokens: ContactLike = {
+        name: contact.name,
+        phoneNumber: contact.phoneNumber,
+        email: contact.email ?? null,
+        location: contact.location ?? null,
+        customFields: contact.customFields ?? {},
+        lastInboundAt,
+        windowState: windowStatus.state,
+        stageName: contact.stageId
+          ? stageCatalog.find((s2) => s2.id === contact.stageId)?.name ?? null
+          : null,
+        tagNames: (contact.tagIds ?? [])
+          .map((id) => tags.find((t) => t.id === id)?.name)
+          .filter((n): n is string => typeof n === "string"),
+      };
+      const resolved = resolveFieldTokens(s.body, contactForTokens, currentUser);
       const before = value.slice(0, slashRange.start);
       const after = value.slice(slashRange.end);
       const next = before + resolved + after;

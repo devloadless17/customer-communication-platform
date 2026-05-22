@@ -611,6 +611,11 @@ export const SAMPLE_CONTACT: ContactLike = {
   email: "sara@example.com",
   location: "Beirut",
   customFields: {} as Prisma.JsonValue,
+  // Derived fields so previews exercise EVERY token, not just the scalar ones.
+  stageName: "Lead",
+  tagNames: ["VIP", "Ramadan buyer"],
+  windowState: "open",
+  lastInboundAt: new Date().toISOString(),
 };
 
 /**

@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import type { Contact } from "@ccp/shared/types";
-import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import {
@@ -12,13 +12,13 @@ import {
   StepConfigError,
   advance,
   advanceWithError,
-  envelopeExtras,
 } from "./types";
 import {
   type StepTarget,
   parseStepTarget,
   resolveStepTarget,
 } from "./target";
+import { buildTokenContext } from "./token-context";
 
 /**
  * `update_field` step. Sets a single custom field on the contact.
@@ -85,22 +85,17 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       return advanceWithError(404, "field_key_not_defined", `No ContactFieldDefinition with key "${config.fieldKey}"`);
     }
 
-    const contactLike: ContactLike = {
-      name: contact.name,
-      phoneNumber: contact.phoneNumber,
-      email: contact.email,
-      location: contact.location,
-      customFields: normalizeStringMap(contact.customFields),
-    };
-    // `contactLike` is the TARGET (may be a custom-phone contact, not the
-    // trigger sender). Pass extras so `$var.sender.*` / `$var.trigger.contact.*`
-    // still resolve to the original sender and `$var.message.*` /
-    // `$var.previousStep.*` work — e.g. "set B's field = the sender's phone".
-    const resolvedValue = resolveFieldTokens(
-      config.value,
-      contactLike,
-      envelopeExtras(envelope, ctx),
+    // Full token context: contactLike = the TARGET (custom-phone or trigger
+    // contact) loaded complete; extras.triggerContact = the original sender.
+    // So $var.contact.* (incl. stage_name / tag_names) AND $var.sender.* both
+    // resolve — e.g. "set B's field = the sender's phone".
+    const { contact: contactLike, extras } = await buildTokenContext(
+      envelope,
+      ctx,
+      ctx.teamId,
+      contactId,
     );
+    const resolvedValue = resolveFieldTokens(config.value, contactLike, extras);
 
     const currentFields = normalizeStringMap(contact.customFields);
     const previousValue = currentFields[config.fieldKey] ?? null;
