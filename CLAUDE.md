@@ -194,7 +194,7 @@ Bulk paths (`/api/contacts/bulk` tag-add/tag-remove today) publish per-contact `
 ### Dev-environment OOM (`tsx watch` chewing memory) 
 Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `tsx watch` + Next.js dev mode accumulate bundler/AST state across hot-reloads. Fix order:
 1. `rm -rf .next` (the dev cache bloats past 500MB after heavy days)
-2. Restart `npm run dev`
+2. Restart `pnpm dev`
 3. Re-bump heap to 6GB if even 4GB isn't enough during a particularly heavy session
 4. As a habit, restart dev once an hour during heavy work
 
@@ -278,12 +278,17 @@ Remaining steps for the actual deploy:
 
 1. **Dev smoke** (one-time before each deploy):
    ```bash
-   npm install
-   npm run typecheck && npm run api:typecheck
-   npm run dev       # Next.js on :3000
-   npm run api:dev   # NestJS on :4000
+   pnpm install      # NEVER `npm install` — workspace:* deps + pnpm-lock; npm errors out
+   pnpm typecheck    # turbo runs web + api typecheck together
+   pnpm web:dev      # Next.js on :3000  (terminal 1; the script symlinks apps/web/.env -> ../../.env)
+   pnpm api:dev      # NestJS on :4000   (terminal 2)
    ```
-   `.env` should set `NEXT_PUBLIC_API_URL=http://localhost:4000` so the browser Socket.io client points at NestJS.
+   This repo is **pnpm-only** (corepack-pinned `pnpm@10.33.3`). `pnpm dev` runs both
+   at once; the per-app scripts above are for separate-terminal logs. `.env` should set
+   `NEXT_PUBLIC_API_URL=http://localhost:4000` so the browser Socket.io client points at
+   NestJS. Run Prisma (`pnpm db:migrate`, `pnpm db:studio`) only from the repo root —
+   Prisma 7's `prisma.config.ts` loads `.env` relative to cwd. Full matrix:
+   [docs/local-setup.md](docs/local-setup.md).
 
 2. **Caddy routing**: see [deploy/Caddyfile.template](deploy/Caddyfile.template) — commit-controlled config so the rule ordering doesn't live only in this prose. The non-obvious lines:
    - `/api/auth/change-password` → NestJS (moved off Better Auth). Must come BEFORE the `/api/auth/*` → Next.js wildcard or change-password 404s.
