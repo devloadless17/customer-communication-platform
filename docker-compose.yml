@@ -146,6 +146,12 @@ services:
         # Socket.io target. Runtime env (below) can't help here — Next.js
         # inlines NEXT_PUBLIC_* at build time.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        # Same build-time-only constraint: next.config.ts's `/api/*` rewrite
+        # reads INTERNAL_API_URL, and Next.js bakes rewrites into the manifest
+        # at `next build`. The runtime env (below) is too late for the proxy
+        # target, so it must be a build arg too. Defaults to the api service
+        # hostname on the compose network.
+        INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:4000}
     restart: unless-stopped
     networks: [ccp_net]
     depends_on:

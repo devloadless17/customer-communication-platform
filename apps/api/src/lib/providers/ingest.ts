@@ -620,6 +620,9 @@ async function ingestInboundMessage(
         // ingesting (the `channel` arg to ingestInboundMessage).
         channel,
         senderUserId: null,
+        // Inbound: the sender IS the contact — surface their name for
+        // `$var.message.sender_name`.
+        senderName: contactSnapshot.name,
         body: evt.body,
         direction: "in",
         mediaKind: evt.media?.kind ?? null,
@@ -815,6 +818,9 @@ function toWorkflowMessage(m: {
   mediaCaption: string | null;
   timestamp: Date;
   senderUserId: string | null;
+  /** Display name of whoever sent it — contact name for inbound. Drives
+   *  `$var.message.sender_name`; empty when the call site doesn't supply it. */
+  senderName?: string | null;
 }): WorkflowMessageSnapshot {
   return {
     id: m.id,
@@ -827,6 +833,8 @@ function toWorkflowMessage(m: {
     mediaCaption: m.mediaCaption,
     timestamp: m.timestamp.toISOString(),
     senderUserId: m.senderUserId,
+    ...(m.senderName != null ? { senderName: m.senderName } : {}),
+    hasMedia: m.mediaKind != null,
   };
 }
 

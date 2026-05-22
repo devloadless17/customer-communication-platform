@@ -100,7 +100,13 @@ export function FieldTokenPicker({
           <ChevronDown className="size-3" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-55">
+      <DropdownMenuContent
+        align="end"
+        // Cap to the space available below the trigger (Radix sets the var)
+        // and scroll — the full token list is ~28 rows and otherwise runs off
+        // the bottom of the screen.
+        className="max-h-(--radix-dropdown-menu-content-available-height) min-w-55 overflow-y-auto scrollbar-thin"
+      >
         <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Contact
         </DropdownMenuLabel>

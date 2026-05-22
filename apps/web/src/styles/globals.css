@@ -155,11 +155,13 @@
   * {
     @apply border-border;
   }
+
   html {
     @apply h-full;
     scroll-behavior: smooth;
     -webkit-text-size-adjust: 100%;
   }
+
   body {
     @apply h-full bg-background text-foreground antialiased;
     font-feature-settings: "cv11", "ss01", "kern";
@@ -167,22 +169,26 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
   /* Accessible focus ring — visible on keyboard nav, invisible on click */
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
     border-radius: var(--radius-sm);
   }
+
   /* Override for elements that have their own ring (inputs, buttons) */
   [data-slot="input"]:focus-visible,
   [data-slot="select-trigger"]:focus-visible,
   [data-slot="textarea"]:focus-visible {
     outline: none;
   }
+
   ::selection {
     background: color-mix(in oklab, var(--primary) 25%, transparent);
     color: var(--foreground);
   }
+
   /* Thin scrollbars everywhere by default */
   * {
     scrollbar-width: thin;
@@ -195,10 +201,12 @@
     scrollbar-width: thin;
     scrollbar-color: color-mix(in oklab, var(--foreground) 15%, transparent) transparent;
   }
+
   .scrollbar-thin::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
+
   .scrollbar-thin::-webkit-scrollbar-thumb {
     background: color-mix(in oklab, var(--foreground) 15%, transparent);
     border-radius: 9999px;
@@ -206,12 +214,10 @@
 
   /* Skeleton shimmer — use as className on placeholder elements */
   .skeleton-shimmer {
-    background: linear-gradient(
-      90deg,
-      var(--muted) 0%,
-      color-mix(in oklab, var(--muted) 60%, var(--background)) 50%,
-      var(--muted) 100%
-    );
+    background: linear-gradient(90deg,
+        var(--muted) 0%,
+        color-mix(in oklab, var(--muted) 60%, var(--background)) 50%,
+        var(--muted) 100%);
     background-size: 200% 100%;
     animation: shimmer 1.5s ease-in-out infinite;
     border-radius: var(--radius-sm);
@@ -236,6 +242,7 @@
   .hover-lift {
     transition: transform 150ms ease, box-shadow 150ms ease;
   }
+
   .hover-lift:hover {
     transform: translateY(-1px);
     box-shadow: 0 4px 12px color-mix(in oklab, var(--foreground) 8%, transparent);
@@ -267,7 +274,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: 0 1px 3px color-mix(in oklab, var(--foreground) 5%, transparent),
-                0 1px 2px color-mix(in oklab, var(--foreground) 3%, transparent);
+      0 1px 2px color-mix(in oklab, var(--foreground) 3%, transparent);
   }
 
   /* Inset shadow for pressed/active state */
@@ -283,6 +290,7 @@
 
 /* Respect reduce-motion: disable all our custom animations */
 @media (prefers-reduced-motion: reduce) {
+
   .animate-badge-pop,
   .animate-message-in,
   .animate-slide-up,
@@ -292,6 +300,7 @@
     animation: none !important;
     transition: none !important;
   }
+
   html {
     scroll-behavior: auto;
   }
@@ -300,38 +309,83 @@
 /* ─── Keyframes ────────────────────────────────────────────────────────────── */
 
 @keyframes shimmer {
-  0%   { background-position: -200% 0; }
-  100% { background-position:  200% 0; }
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
 }
 
 /* Spring pop for badge appearance */
 @keyframes badge-pop {
-  0%   { transform: scale(0.4); opacity: 0; }
-  55%  { transform: scale(1.15); opacity: 1; }
-  75%  { transform: scale(0.95); }
-  100% { transform: scale(1); opacity: 1; }
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+
+  55% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+
+  75% {
+    transform: scale(0.95);
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 /* New message slide + fade in from below */
 @keyframes message-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Generic slide-up fade */
 @keyframes slide-up {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Simple fade in */
 @keyframes fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 /* Scale + fade in for overlays / menus */
 @keyframes scale-in {
-  from { opacity: 0; transform: scale(0.95); }
-  to   { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }

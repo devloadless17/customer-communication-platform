@@ -359,6 +359,14 @@ export function TokenHighlightTextarea({
           "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "resize-none wrap-break-word",
+          // Hide the native scrollbar (`.scrollbar-none` in globals.css). When
+          // it appears it steals ~15px from the textarea's text width, so the
+          // text wraps at a NARROWER column than the full-width overlay — the
+          // painted tokens then drift / fragment ("$$", orphaned leading
+          // letters). With no scrollbar both wrap at the same width; scrolling
+          // still works (wheel / keys) and the overlay mirrors it via the
+          // onScroll → translateY sync above.
+          "scrollbar-none",
           "text-transparent caret-foreground selection:bg-blue-500/30 selection:text-transparent",
           className,
         )}
