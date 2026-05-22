@@ -169,4 +169,14 @@
     background: color-mix(in oklab, var(--foreground) 15%, transparent);
     border-radius: 9999px;
   }
+  /* Fully hide the scrollbar (standard + webkit). Used by the token-highlight
+     textarea: a visible scrollbar steals width and makes its text wrap at a
+     different column than the full-width colored overlay, fragmenting the
+     painted tokens. Scrolling still works via wheel / keyboard. */
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
 }
