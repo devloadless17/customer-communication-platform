@@ -139,9 +139,24 @@ export function useTeamChannelEvents(
     }
   }, [channelId]);
 
-  // Mark read on mount (the user just opened the channel).
+  // Mark read on mount (the user just opened the channel) AND again on
+  // leave. The leave-side call closes the navigation-straggler race: when
+  // the user clicks away, `activeChannelId` flips FIRST, so a
+  // `team:channel:message` frame for THIS channel that lands in the gap
+  // before this hook unmounts is no longer `isActive` and bumps the sidebar
+  // dot true (use-team-channels-events.ts onMessage). `team:channel:read`
+  // is one-shot per markRead, so without a follow-up markRead that bump has
+  // nothing to clear it and the dot sticks until the channel is re-opened.
+  // Stamping the receipt as we leave guarantees everything shown up to that
+  // moment reads as read; only genuinely-newer messages (frame arriving
+  // after the leave stamp) stay unread, which is correct. The cleanup
+  // closes over the OLD channel's `markRead` (deps include channelId), so a
+  // B→C switch marks B read, not C.
   useEffect(() => {
     void markRead();
+    return () => {
+      void markRead();
+    };
   }, [markRead]);
 
   const inFlightOlder = useRef(false);

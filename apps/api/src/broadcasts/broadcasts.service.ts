@@ -276,7 +276,7 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
 
   async list(teamId: string) {
     const rows = await this.db.broadcast.findMany({
-      where: { teamId, deletedAt: null },
+      where: { teamId },
       orderBy: { createdAt: "desc" },
       take: 100,
       include: { createdBy: { select: { id: true, name: true } } },

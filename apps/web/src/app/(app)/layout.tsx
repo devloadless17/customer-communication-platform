@@ -45,7 +45,14 @@ export default async function AppShellLayout({
           and hard-reloads once to pull fresh chunk hashes. Without this, a
           deploy → soft nav → silent route failure leaves the agent stuck. */}
       <ChunkErrorReload />
-      <div className="relative flex min-h-svh w-full flex-col bg-background text-foreground md:flex-row">
+      {/* h-svh + overflow-hidden locks the shell to exactly one viewport so
+          the scrollbar lives on `main` (SectionShell's overflow-y-auto), NOT
+          the document. With the old min-h-svh, tall pages grew the document
+          and the h-svh AppRail/SubSidebar scrolled away, leaving a blank gap
+          below them. Inbox/team-chat already self-bound with their own h-svh
+          islands, so they're unaffected. Popovers/toasts portal to body, so
+          overflow-hidden here doesn't clip overlays. */}
+      <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
         <AppRail currentUser={user} team={{ id: team.id, name: team.name }} />
         <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
       </div>

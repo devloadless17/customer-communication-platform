@@ -471,6 +471,16 @@ export class ChannelsService {
           skipDuplicates: true,
         });
       }
+      // Sidebar summary — bump in the SAME transaction as the insert so
+      // `lastMessageAt` can never lag (or silently fail) behind a committed
+      // message. A fire-and-forget update here could drop on error, leaving
+      // a real unread message with NO sidebar dot (unreadForMe compares
+      // lastMessageAt vs the reader's lastReadAt). Mirrors uploadMedia's
+      // in-txn bump; a PK update is negligible on the delivery path.
+      await tx.teamChannel.update({
+        where: { id: channelId },
+        data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
+      });
       return msg;
     });
 
@@ -494,16 +504,6 @@ export class ChannelsService {
       threadReplyCount: 0,
       ...(input.clientTempId ? { clientTempId: input.clientTempId } : {}),
     });
-
-    // Sidebar preview — recipients see this in the channel-list "last
-    // message" line. Not on the critical path of message delivery, so we
-    // fire after the emit and don't await. Errors land in the logger.
-    this.db.teamChannel
-      .update({
-        where: { id: channelId },
-        data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
-      })
-      .catch((err) => this.logger.warn(`channel preview update failed: ${String(err)}`));
 
     return { messageId: created.id, message: dto };
   }
