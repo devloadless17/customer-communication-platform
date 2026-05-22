@@ -234,7 +234,7 @@ export class DevEmitController {
 
     const created = await this.db.internalNote.create({
       // Always attribute to the calling user — the request body has no say.
-      data: { conversationId, authorUserId: userId, body },
+      data: { teamId, conversationId, authorUserId: userId, body },
     });
 
     const note: InternalNote = {

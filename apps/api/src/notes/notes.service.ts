@@ -30,6 +30,7 @@ export class NotesService {
 
     const created = await this.db.internalNote.create({
       data: {
+        teamId,
         conversationId: input.conversationId,
         authorUserId,
         body: input.body,

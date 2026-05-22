@@ -270,6 +270,7 @@ model Team {
   outboundWebhooks        OutboundWebhook[]
   snippets                Snippet[]
   conversationEvents      ConversationEvent[]
+  internalNotes           InternalNote[]
   teamChannels            TeamChannel[]
   teamChannelMessages     TeamChannelMessage[]
   outboundEvents          OutboundEvent[]
@@ -1083,6 +1084,12 @@ model BroadcastRecipient {
 
 model InternalNote {
   id             String   @id @default(cuid())
+  // Tenant scope, for rule-#2 consistency with every other table (notably its
+  // sibling audit table ConversationEvent). A note's team always equals its
+  // conversation's team (conversations never change team), so this is a stable
+  // denorm — kept for direct team-scoped queries / future RLS, not for delete
+  // cascades (those already flow Team -> Conversation -> InternalNote).
+  teamId         String
   conversationId String
   // Nullable + SetNull — internal notes are critical audit trail. When the
   // author is removed, the note STAYS and the UI renders "Removed user".
@@ -1091,10 +1098,12 @@ model InternalNote {
   body           String
   timestamp      DateTime @default(now())
 
+  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   author       User?        @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, timestamp])
+  @@index([teamId])
 }
 
 // ---------------------------------------------------------------------------

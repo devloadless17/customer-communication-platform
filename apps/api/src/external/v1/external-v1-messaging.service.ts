@@ -990,7 +990,7 @@ export class ExternalV1MessagingService {
     const authorUserId: string = u.id;
 
     const note = await this.db.internalNote.create({
-      data: { conversationId, authorUserId, body: input.body },
+      data: { teamId, conversationId, authorUserId, body: input.body },
     });
 
     const notePayload = {

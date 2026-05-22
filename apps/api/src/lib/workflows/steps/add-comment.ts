@@ -69,6 +69,7 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
 
     const note = await db.internalNote.create({
       data: {
+        teamId: ctx.teamId,
         conversationId,
         authorUserId: null,
         body,
