@@ -54,3 +54,45 @@ implementation spec.)
 3. WhatsApp depth before multi-channel breadth; provider seam is ready but dormant.
 4. Channel discriminator is `Channel` (the medium) on the rows — NO "provider"/"vendor" column, NO `Inbox` table.
 5. Team-wide unread, NOT per-agent inbox read state.
+
+## Second schema review (later same day, 2026-05-22)
+A different reviewer did a deeper schema pass. Sharper than the first — its
+"don't touch" section correctly validated the locked decisions above. But almost
+all its *actionable* calls were wrong, and it **contradicted the first review on
+three tables the first one correctly told us to keep**.
+
+**Score: 1 minor-legitimate find out of ~9 claims.**
+- ✅ **`InternalNote.teamId` missing** — the one real item. It was the only
+  conversation-child without `teamId` while its sibling `ConversationEvent` had one
+  — a real deviation from rule #2. **Fixed** (branch `feat/internal-note-teamid`):
+  additive nullable→backfill→NOT NULL→FK→index migration + `teamId` set at all 4
+  create sites. (Reviewer's stated reason — "team deletion needs a join" — was off;
+  deletes already cascade `Team→Conversation→InternalNote`. The real value is
+  rule-#2 uniformity + future RLS.)
+- ❌ **Add telegram/instagram to the `Channel` enum "before it breaks":** locked
+  WhatsApp-first deferral; and "breaks" is false — enum values are additive
+  (`ALTER TYPE … ADD VALUE`), a non-destructive migration.
+- ❌ **`Broadcast.templateId` needs an FK:** it's a *documented snapshot*
+  (`template*` fields frozen at send; soft `templateId` for UI), same as
+  `audienceGroupId`/`createdById` — never cascade-delete audit history.
+- ❌ **Index `WorkflowRun.contactId` for once-per-contact:** self-contradictory —
+  once-per-contact is `WorkflowContactState` (unique index), which the same review
+  praised. No `WorkflowRun.contactId` query exists.
+- ❌ **Remove `Contact.version`:** it IS used — app-level optimistic-lock CAS in
+  workflow tag/update steps (`where: { …, version }`, `version: { increment: 1 }`).
+- ❌ **Remove `OutboundEvent`:** it's the transactional outbox for the internal
+  domain-event bus — a different layer from `OutboundWebhookDelivery` (external HTTP).
+- ❌ **Remove `OutboundSendAttempt` / add `messageId` FK:** it's the Meta-send
+  idempotency ledger; the `Message` row is created only *after* Meta returns a wamid,
+  so a `messageId` FK is impossible. It guards BullMQ retries from double-sending.
+- ❌ **Remove `ApiIdempotencyKey`:** the `/v1` API is public/partner-facing
+  (n8n etc.); idempotency is required.
+- ❌ **"Audience/Broadcast is confused":** misread a documented snapshot/audit design
+  as live reconciliation — recipients are materialized once into `BroadcastRecipient`;
+  `audienceTagIds`/`audienceGroupId` are audit metadata, not reconciled at send.
+
+**Tells (same pattern as review #1):** doesn't know locked decisions (Channel),
+misses app-level enforcement (`version` CAS), conflates distinct tables (the two
+outbox tables; the send-attempt ledger), and reads deliberate documented denorm as
+accidental redundancy. It told us to delete three things review #1 correctly kept
+(`version`, `OutboundEvent`, `ApiIdempotencyKey`).
