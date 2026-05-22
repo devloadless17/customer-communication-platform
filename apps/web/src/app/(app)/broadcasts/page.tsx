@@ -16,22 +16,13 @@ export default async function BroadcastsPage() {
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          {/* In-page tabs between Broadcasts and Groups so they read as
-              two views of the same area (saved audiences + past sends). */}
-          <Link
-            href="/broadcasts"
-            className="rounded-md bg-accent px-2.5 py-1.5 text-sm font-medium text-foreground"
-          >
-            Broadcasts
-          </Link>
-          <Link
-            href="/broadcasts/groups"
-            className="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-          >
-            Groups
-          </Link>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Broadcasts</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Send a pre-approved WhatsApp template to many contacts in one go.
+            Past broadcasts and their delivery status are listed below.
+          </p>
         </div>
         <Button asChild>
           <Link href="/broadcasts/new" className="gap-1.5">
@@ -39,14 +30,6 @@ export default async function BroadcastsPage() {
             New broadcast
           </Link>
         </Button>
-      </header>
-
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Broadcasts</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Send a pre-approved WhatsApp template to many contacts in one go.
-          Past broadcasts and their delivery status are listed below.
-        </p>
       </div>
 
       {rows.length === 0 ? (

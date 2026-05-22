@@ -1,15 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   Copy,
   History,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Plus,
+  Power,
   RefreshCw,
   RotateCw,
   Save,
@@ -21,6 +25,13 @@ import {
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Sheet } from "@/components/ui/sheet";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -121,20 +132,32 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Create banner / form */}
-      {!showCreate ? (
-        <Button
-          variant="outline"
-          onClick={() => {
-            setEditingId(null);
-            setShowCreate(true);
-          }}
-          className="self-start"
-        >
-          <Plus className="size-4" />
-          Create a webhook
-        </Button>
-      ) : (
+      {/* Section header */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium">Your webhooks</h3>
+          <p className="text-xs text-muted-foreground">
+            {webhooks.length === 0
+              ? "Send HMAC-signed events to your own endpoints."
+              : `${webhooks.length} endpoint${webhooks.length === 1 ? "" : "s"} receiving events.`}
+          </p>
+        </div>
+        {webhooks.length > 0 && !showCreate && !editingId && (
+          <Button
+            onClick={() => {
+              setEditingId(null);
+              setShowCreate(true);
+            }}
+            className="shrink-0"
+          >
+            <Plus className="size-4" />
+            New webhook
+          </Button>
+        )}
+      </div>
+
+      {/* Create form */}
+      {showCreate && (
         <WebhookForm
           eventGroups={eventGroups}
           onCancel={() => setShowCreate(false)}
@@ -157,123 +180,140 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
         />
       )}
 
-      {/* HMAC verification snippets — always shown so admins can wire up the
-          receiver's verifier without leaving the page or searching docs. */}
-      <SignatureVerificationGuide />
+      {/* Empty state OR the list */}
+      {webhooks.length === 0 && !showCreate ? (
+        <EmptyState
+          onCreate={() => {
+            setEditingId(null);
+            setShowCreate(true);
+          }}
+        />
+      ) : webhooks.length > 0 ? (
+        <MotionConfig reducedMotion="user">
+          <div className="overflow-hidden rounded-lg border border-border">
+            <AnimatePresence initial={false}>
+              {webhooks.map((w) =>
+                editingId === w.id ? (
+                  <motion.div
+                    key={w.id}
+                    layout
+                    className="border-b border-border p-3 last:border-b-0"
+                  >
+                    <WebhookForm
+                      eventGroups={eventGroups}
+                      initial={w}
+                      onCancel={() => setEditingId(null)}
+                      onUpdated={(updated) => {
+                        setWebhooks((prev) =>
+                          prev.map((p) => (p.id === updated.id ? updated : p)),
+                        );
+                        setEditingId(null);
+                        toast.success(`Updated "${updated.name}"`);
+                      }}
+                      submitting={submitting}
+                      setSubmitting={setSubmitting}
+                    />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key={w.id}
+                    layout
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="border-b border-border last:border-b-0"
+                  >
+                    <WebhookRow
+                      webhook={w}
+                      eventLabel={eventLabel}
+                      onViewDeliveries={() => {
+                        setDeliveriesFor(w);
+                        setDeliveriesOpen(true);
+                      }}
+                      onEdit={() => {
+                        setShowCreate(false);
+                        setEditingId(w.id);
+                      }}
+                      onDelete={async () => {
+                        const ok = await confirm({
+                          title: `Delete "${w.name}"?`,
+                          description:
+                            "Deliveries are dropped immediately. The delivery history for this webhook is removed too.",
+                          confirmLabel: "Delete",
+                          destructive: true,
+                        });
+                        if (!ok) return;
+                        const res = await fetch(`/api/team/outbound-webhooks/${w.id}`, {
+                          method: "DELETE",
+                        });
+                        if (!res.ok) {
+                          toast.error("Delete failed", { description: `HTTP ${res.status}` });
+                          return;
+                        }
+                        setWebhooks((prev) => prev.filter((p) => p.id !== w.id));
+                        toast.success(`Deleted "${w.name}"`);
+                      }}
+                      onRotate={async () => {
+                        const ok = await confirm({
+                          title: `Rotate secret for "${w.name}"?`,
+                          description:
+                            "Update your receiver's signature verifier to the new secret. In-flight deliveries pick up the new secret on their next attempt.",
+                          confirmLabel: "Rotate",
+                        });
+                        if (!ok) return;
+                        const res = await fetch(
+                          `/api/team/outbound-webhooks/${w.id}/rotate-secret`,
+                          { method: "POST" },
+                        );
+                        if (!res.ok) {
+                          toast.error("Rotate failed", { description: `HTTP ${res.status}` });
+                          return;
+                        }
+                        const json = (await res.json()) as { secret: string };
+                        setRevealed({ webhookId: w.id, secret: json.secret, flow: "rotated" });
+                        toast.success("Secret rotated");
+                      }}
+                      onTest={async () => {
+                        const res = await fetch(`/api/team/outbound-webhooks/${w.id}/test`, {
+                          method: "POST",
+                        });
+                        if (!res.ok) {
+                          toast.error("Test failed", { description: `HTTP ${res.status}` });
+                          return;
+                        }
+                        toast.success("Test delivery queued", {
+                          description:
+                            "Check your receiver — the synthetic test event should land shortly.",
+                        });
+                      }}
+                      onToggleEnabled={async () => {
+                        const res = await fetch(`/api/team/outbound-webhooks/${w.id}`, {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled: !w.enabled }),
+                        });
+                        if (!res.ok) {
+                          toast.error("Toggle failed", { description: `HTTP ${res.status}` });
+                          return;
+                        }
+                        const json = (await res.json()) as { webhook: Webhook };
+                        setWebhooks((prev) =>
+                          prev.map((p) => (p.id === w.id ? json.webhook : p)),
+                        );
+                      }}
+                    />
+                  </motion.div>
+                ),
+              )}
+            </AnimatePresence>
+          </div>
+        </MotionConfig>
+      ) : null}
 
-      {/* List */}
-      <div className="flex flex-col gap-2">
-        <div className="text-sm font-medium">Your webhooks</div>
-        {webhooks.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
-            No webhooks yet. Create one above to start receiving deliveries.
-          </div>
-        ) : (
-          <div className="flex flex-col divide-y divide-border rounded-md border border-border">
-            {webhooks.map((w) =>
-              editingId === w.id ? (
-                <div key={w.id} className="p-3">
-                  <WebhookForm
-                    eventGroups={eventGroups}
-                    initial={w}
-                    onCancel={() => setEditingId(null)}
-                    onUpdated={(updated) => {
-                      setWebhooks((prev) =>
-                        prev.map((p) => (p.id === updated.id ? updated : p)),
-                      );
-                      setEditingId(null);
-                      toast.success(`Updated "${updated.name}"`);
-                    }}
-                    submitting={submitting}
-                    setSubmitting={setSubmitting}
-                  />
-                </div>
-              ) : (
-              <WebhookRow
-                key={w.id}
-                webhook={w}
-                eventLabel={eventLabel}
-                onViewDeliveries={() => {
-                  setDeliveriesFor(w);
-                  setDeliveriesOpen(true);
-                }}
-                onEdit={() => {
-                  setShowCreate(false);
-                  setEditingId(w.id);
-                }}
-                onDelete={async () => {
-                  const ok = await confirm({
-                    title: `Delete "${w.name}"?`,
-                    description:
-                      "Deliveries are dropped immediately. The delivery history for this webhook is removed too.",
-                    confirmLabel: "Delete",
-                    destructive: true,
-                  });
-                  if (!ok) return;
-                  const res = await fetch(`/api/team/outbound-webhooks/${w.id}`, {
-                    method: "DELETE",
-                  });
-                  if (!res.ok) {
-                    toast.error("Delete failed", { description: `HTTP ${res.status}` });
-                    return;
-                  }
-                  setWebhooks((prev) => prev.filter((p) => p.id !== w.id));
-                  toast.success(`Deleted "${w.name}"`);
-                }}
-                onRotate={async () => {
-                  const ok = await confirm({
-                    title: `Rotate secret for "${w.name}"?`,
-                    description:
-                      "Update your receiver's signature verifier to the new secret. In-flight deliveries pick up the new secret on their next attempt.",
-                    confirmLabel: "Rotate",
-                  });
-                  if (!ok) return;
-                  const res = await fetch(
-                    `/api/team/outbound-webhooks/${w.id}/rotate-secret`,
-                    { method: "POST" },
-                  );
-                  if (!res.ok) {
-                    toast.error("Rotate failed", { description: `HTTP ${res.status}` });
-                    return;
-                  }
-                  const json = (await res.json()) as { secret: string };
-                  setRevealed({ webhookId: w.id, secret: json.secret, flow: "rotated" });
-                  toast.success("Secret rotated");
-                }}
-                onTest={async () => {
-                  const res = await fetch(`/api/team/outbound-webhooks/${w.id}/test`, {
-                    method: "POST",
-                  });
-                  if (!res.ok) {
-                    toast.error("Test failed", { description: `HTTP ${res.status}` });
-                    return;
-                  }
-                  toast.success("Test delivery queued", {
-                    description:
-                      "Check your receiver — the synthetic webhook.test event should land shortly.",
-                  });
-                }}
-                onToggleEnabled={async () => {
-                  const res = await fetch(`/api/team/outbound-webhooks/${w.id}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ enabled: !w.enabled }),
-                  });
-                  if (!res.ok) {
-                    toast.error("Toggle failed", { description: `HTTP ${res.status}` });
-                    return;
-                  }
-                  const json = (await res.json()) as { webhook: Webhook };
-                  setWebhooks((prev) =>
-                    prev.map((p) => (p.id === w.id ? json.webhook : p)),
-                  );
-                }}
-              />
-              ),
-            )}
-          </div>
-        )}
-      </div>
+      {/* HMAC verification reference — kept at the bottom; it's docs, not a
+          primary action, so it no longer sits between create and the list. */}
+      <SignatureVerificationGuide />
 
       {deliveriesFor && (
         <DeliveriesSheet
@@ -559,51 +599,82 @@ function WebhookRow({
   onToggleEnabled: () => void;
 }) {
   const host = safeHost(webhook.url);
-  // `disabledAt` is set ONLY by the circuit breaker; an admin's manual
-  // toggle leaves it null. That's a reliable signal for the badge — the
-  // pre-disabledAt fallback (`!enabled && consecutiveFailures > 0`) was a
-  // proxy that misfired when an admin disabled an already-erroring webhook.
+  // `disabledAt` is set ONLY by the circuit breaker; an admin's manual toggle
+  // leaves it null — so it cleanly distinguishes auto-disable from a manual one.
   const tripped = !webhook.enabled && webhook.disabledAt !== null;
+  const hasError = webhook.enabled && webhook.lastErrorAt != null;
+  const dotClass = tripped
+    ? "bg-destructive"
+    : !webhook.enabled
+      ? "bg-muted-foreground/40"
+      : hasError
+        ? "bg-amber-500"
+        : "bg-emerald-500";
+  const statusTitle = tripped
+    ? `Auto-disabled${webhook.disabledReason ? ` — ${webhook.disabledReason}` : ""}`
+    : !webhook.enabled
+      ? "Disabled"
+      : hasError
+        ? "Active · recent delivery error"
+        : "Active";
 
+  const MAX_CHIPS = 3;
+  const shownEvents = webhook.eventTypes.slice(0, MAX_CHIPS);
+  const extra = webhook.eventTypes.length - shownEvents.length;
+
+  // The whole row opens the deliveries drill-down (the common "what happened?"
+  // action). Edit / test / rotate / enable / delete live in the overflow menu
+  // so the row reads cleanly instead of carrying six buttons.
   return (
-    <div className="flex flex-col gap-2 px-3 py-3">
-      <div className="flex items-start gap-3">
-        <div
-          className={`flex size-7 shrink-0 items-center justify-center rounded-md ${
-            webhook.enabled
-              ? "bg-primary/10 text-primary"
-              : "bg-muted text-muted-foreground"
-          }`}
-        >
-          <Webhook className="size-3.5" />
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onViewDeliveries}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onViewDeliveries();
+        }
+      }}
+      title="View deliveries"
+      className="group flex cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-hidden"
+    >
+      {/* Status indicator */}
+      <span className="relative flex size-2.5 shrink-0" aria-label={statusTitle} title={statusTitle}>
+        <span className={`size-2.5 rounded-full ${dotClass}`} />
+        {webhook.enabled && !hasError && (
+          <span
+            className={`absolute inset-0 animate-ping rounded-full ${dotClass} opacity-60 motion-reduce:hidden`}
+          />
+        )}
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium">{webhook.name}</span>
+          {tripped ? (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-destructive">
+              <AlertTriangle className="size-3" /> auto-disabled
+            </span>
+          ) : !webhook.enabled ? (
+            <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              disabled
+            </span>
+          ) : null}
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="truncate font-medium">{webhook.name}</span>
-            {tripped && (
-              <span
-                className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] uppercase text-destructive"
-                title={webhook.disabledReason ?? undefined}
-              >
-                <AlertTriangle className="size-3" /> auto-disabled
-              </span>
-            )}
-            {!webhook.enabled && !tripped && (
-              <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
-                disabled
-              </span>
-            )}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            <code className="font-mono">{host}</code>
-          </div>
-          {/* The actual subscribed events, in plain language — so you can tell
-              at a glance what this webhook is for without opening edit. */}
-          <div className="mt-1.5 flex flex-wrap items-center gap-1">
-            {webhook.eventTypes.length === 0 ? (
-              <span className="text-[11px] text-muted-foreground">no events</span>
-            ) : (
-              webhook.eventTypes.map((t) => (
+
+        <code className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
+          {host}
+        </code>
+
+        {/* Subscribed events (first few + overflow count) — at-a-glance "what
+            is this for" without opening edit. */}
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {webhook.eventTypes.length === 0 ? (
+            <span className="text-[11px] text-muted-foreground">no events</span>
+          ) : (
+            <>
+              {shownEvents.map((t) => (
                 <span
                   key={t}
                   title={t}
@@ -611,72 +682,103 @@ function WebhookRow({
                 >
                   {eventLabel.get(t) ?? t}
                 </span>
-              ))
-            )}
-          </div>
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-            {webhook.lastDeliveredAt ? (
-              <span className="inline-flex items-center gap-1">
-                <CheckCircle2 className="size-3 text-emerald-600" />
-                last delivered{" "}
-                <LocalTime iso={webhook.lastDeliveredAt} format="localeString" />
-              </span>
-            ) : (
-              <span>never delivered</span>
-            )}
-            {webhook.lastErrorAt && (
-              <span className="inline-flex items-center gap-1 text-destructive">
-                <XCircle className="size-3" />
-                last error <LocalTime iso={webhook.lastErrorAt} format="localeString" />
-              </span>
-            )}
-          </div>
-          {webhook.lastErrorMessage && (
-            <div className="mt-1 truncate text-[11px] text-destructive">
-              {webhook.lastErrorMessage}
-            </div>
+              ))}
+              {extra > 0 && (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                  +{extra}
+                </span>
+              )}
+            </>
           )}
         </div>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={onViewDeliveries}
-            title="View deliveries"
-          >
-            <History className="size-3.5" />
-          </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={onEdit} title="Edit">
-            <Pencil className="size-3.5" />
-          </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={onTest} title="Send test delivery">
-            <Send className="size-3.5" />
-          </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={onRotate} title="Rotate secret">
-            <RotateCw className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={onToggleEnabled}
-            title={webhook.enabled ? "Disable" : "Enable"}
-          >
-            {webhook.enabled ? "Disable" : "Enable"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={onDelete}
-            title="Delete"
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+
+        <div className="mt-1 text-[11px] text-muted-foreground">
+          {hasError ? (
+            <span
+              className="inline-flex items-center gap-1 text-destructive"
+              title={webhook.lastErrorMessage ?? undefined}
+            >
+              <XCircle className="size-3" /> Last error{" "}
+              <LocalTime iso={webhook.lastErrorAt!} format="localeString" />
+            </span>
+          ) : webhook.lastDeliveredAt ? (
+            <span className="inline-flex items-center gap-1">
+              <CheckCircle2 className="size-3 text-emerald-600" /> Last delivered{" "}
+              <LocalTime iso={webhook.lastDeliveredAt} format="localeString" />
+            </span>
+          ) : (
+            <span>No deliveries yet</span>
+          )}
         </div>
       </div>
+
+      {/* Click-affordance hint + actions overflow */}
+      <ChevronRight className="size-4 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="shrink-0"
+            aria-label="Webhook actions"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <MoreHorizontal className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="w-44"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <DropdownMenuItem onSelect={onViewDeliveries}>
+            <History className="size-3.5" /> View deliveries
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onEdit}>
+            <Pencil className="size-3.5" /> Edit
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onTest}>
+            <Send className="size-3.5" /> Send test
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onRotate}>
+            <RotateCw className="size-3.5" /> Rotate secret
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onToggleEnabled}>
+            <Power className="size-3.5" /> {webhook.enabled ? "Disable" : "Enable"}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={onDelete}
+            className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+          >
+            <Trash2 className="size-3.5" /> Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+/** Polished empty state — first-run guidance + the primary CTA. */
+function EmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border bg-muted/20 px-6 py-12 text-center">
+      <div className="flex size-11 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <Webhook className="size-5" />
+      </div>
+      <div className="space-y-1">
+        <p className="text-sm font-medium">No webhooks yet</p>
+        <p className="mx-auto max-w-sm text-xs leading-relaxed text-muted-foreground">
+          Create a webhook to receive HMAC-signed POST deliveries whenever events
+          happen in this workspace — new messages, status changes, contact updates and more.
+        </p>
+      </div>
+      <Button onClick={onCreate} className="mt-1">
+        <Plus className="size-4" /> Create your first webhook
+      </Button>
     </div>
   );
 }

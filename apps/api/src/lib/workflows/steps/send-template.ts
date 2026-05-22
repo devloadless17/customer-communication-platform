@@ -9,6 +9,7 @@ import {
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import { type ContactLike, resolveFieldTokens } from "@ccp/shared/field-tokens";
 
+import { db } from "@/lib/db";
 import {
   type StepHandler,
   type StepResult,
@@ -16,10 +17,14 @@ import {
   advance,
   advanceWithError,
   envelopeContact,
-  envelopeConversation,
   envelopeExtras,
   truncateBody,
 } from "./types";
+import {
+  type StepTarget,
+  parseStepTarget,
+  resolveStepTarget,
+} from "./target";
 
 export interface SendTemplateStepConfig {
   templateId: string;
@@ -27,6 +32,10 @@ export interface SendTemplateStepConfig {
     body: string[];
     header?: string;
   };
+  /** Who to send to. Default = the trigger conversation's contact. A `phone`
+   *  target reaches ANY number (auto-creates the contact + conversation) —
+   *  templates are the cold-reachout path, so out-of-24h-window is fine. */
+  target?: StepTarget;
 }
 
 export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
@@ -54,26 +63,59 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       body.push(x);
     }
     const header = typeof v.header === "string" && v.header.length > 0 ? v.header : undefined;
+    const target = parseStepTarget(r.target);
     return {
       templateId: r.templateId,
       variables: { body, ...(header ? { header } : {}) },
+      ...(target ? { target } : {}),
     };
   },
   describeConfig(config) {
-    return `Send template ${config.templateId}`;
+    const head = `Send template ${config.templateId}`;
+    return config.target?.kind === "phone"
+      ? `${head} → ${config.target.phoneNumber}`
+      : head;
   },
   async run(envelope, config, ctx): Promise<StepResult> {
-    const conv = envelopeConversation(envelope);
-    if (!conv) return advanceWithError(400, "envelope missing conversation");
-    const conversationId = conv.id;
-    const c = envelopeContact(envelope);
-    const contact: ContactLike = {
-      name: c?.name ?? "",
-      phoneNumber: c?.phoneNumber ?? null,
-      email: c?.email ?? null,
-      location: null,
-      customFields: c?.customFields ?? {},
-    };
+    let resolved;
+    try {
+      resolved = await resolveStepTarget(config.target, envelope, ctx.teamId, {
+        createConversation: true,
+      });
+    } catch (err) {
+      if (err instanceof StepConfigError) return advanceWithError(400, err.message);
+      throw err;
+    }
+    if (!resolved.conversationId) {
+      return advanceWithError(400, "could not resolve a conversation for the target");
+    }
+    const conversationId = resolved.conversationId;
+    // Token context resolves against the TARGET contact (custom phone) or the
+    // trigger contact (default). $var.sender.* still points at the original
+    // sender via envelopeExtras.triggerContact.
+    let contact: ContactLike;
+    if (!config.target || config.target.kind === "trigger_contact") {
+      const c = envelopeContact(envelope);
+      contact = {
+        name: c?.name ?? "",
+        phoneNumber: c?.phoneNumber ?? null,
+        email: c?.email ?? null,
+        location: null,
+        customFields: c?.customFields ?? {},
+      };
+    } else {
+      const row = await db.contact.findFirst({
+        where: { id: resolved.contactId, teamId: ctx.teamId },
+        select: { name: true, phoneNumber: true, email: true, location: true, customFields: true },
+      });
+      contact = {
+        name: row?.name ?? "",
+        phoneNumber: row?.phoneNumber ?? null,
+        email: row?.email ?? null,
+        location: row?.location ?? null,
+        customFields: (row?.customFields as Record<string, string> | null) ?? {},
+      };
+    }
     const extras = envelopeExtras(envelope);
     const variables = {
       body: config.variables.body.map((v) => resolveFieldTokens(v, contact, extras)),

@@ -31,6 +31,9 @@ import type { ContactFieldDefinition } from "./types";
 const BUILTIN_CONTACT_KEYS = [
   "name",
   "phone",
+  // Back-compat alias for `phone` — older tokens / the data-inspector used the
+  // raw DB column name. Resolves identically so existing graphs don't break.
+  "phoneNumber",
   "email",
   "location",
   // PR 2.4 additions — derivable / populated by the snapshot builder when
@@ -432,6 +435,13 @@ function resolvePath(
     case "agent":
       return rest.length === 1 ? resolveAgent(rest[0]!, extras.agent ?? null) : "";
     case "message":
+      // message.contact.<field> / message.sender.<field> → the customer who
+      // SENT this message (the trigger contact). Lets authors treat the
+      // sender as part of the message; resolves identically to
+      // $var.contact / $var.sender. Falls back to the contact arg.
+      if ((rest[0] === "contact" || rest[0] === "sender") && rest.length === 2) {
+        return resolveContact(rest[1]!, extras.triggerContact ?? contact);
+      }
       return rest.length === 1
         ? resolveMessage(rest[0]!, extras.message ?? null)
         : "";
@@ -487,6 +497,7 @@ function resolveContact(key: string, contact: ContactLike): string {
       case "name":
         return contact.name ?? "";
       case "phone":
+      case "phoneNumber":
         return contact.phoneNumber ?? "";
       case "email":
         return contact.email ?? "";
@@ -666,9 +677,29 @@ export function findUnknownTokens(
       if (!knownLegacyKey(ns, segments[1]!)) out.push(tok);
       continue;
     }
+    // message.contact.<key> / message.sender.<key> — the sender-contact alias
+    // (resolves the same as contact.<key>).
+    if (
+      ns === "message" &&
+      (segments[1] === "contact" || segments[1] === "sender") &&
+      segments.length === 3
+    ) {
+      if (!contactKeys.has(segments[2]!)) out.push(tok);
+      continue;
+    }
     // trigger.<sub>.<key> — same validation as the bare sub-namespace.
     if (ns === "trigger" && segments.length === 3) {
       if (!knownLegacyKey(segments[1]!, segments[2]!)) out.push(tok);
+      continue;
+    }
+    // trigger.message.(contact|sender).<key> — the deep alias under trigger.
+    if (
+      ns === "trigger" &&
+      segments[1] === "message" &&
+      (segments[2] === "contact" || segments[2] === "sender") &&
+      segments.length === 4
+    ) {
+      if (!contactKeys.has(segments[3]!)) out.push(tok);
       continue;
     }
     // sender.<key> — accepts any key the contact OR agent namespace has.

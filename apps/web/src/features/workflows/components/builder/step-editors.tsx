@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
+import { PhoneNumberInput } from "@/features/contacts/components/phone-number-input";
 import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
 
 import { ConditionGroupEditor } from "./condition-group";
@@ -161,10 +162,15 @@ function TargetSelector({
   target,
   onChange,
   extraHint,
+  phoneMode = "window",
 }: {
   target: StepTarget | undefined;
   onChange: (next: StepTarget | undefined) => void;
   extraHint?: string;
+  /** "window" (default) — pick a contact inside the 24h window (send_message,
+   *  free-form sends fail outside it). "free" — type any number with the
+   *  +country picker (send_template; templates work cold/out-of-window). */
+  phoneMode?: "window" | "free";
 }) {
   const mode = target?.kind ?? "trigger_contact";
   const phone = target?.kind === "phone" ? target.phoneNumber : "";
@@ -198,20 +204,34 @@ function TargetSelector({
       </label>
       {mode === "phone" && (
         <div className="ml-6 flex flex-col gap-1">
-          <OpenWindowContactCombobox
-            value={phone ? { phoneNumber: phone } : null}
-            onChange={(next) =>
-              onChange(
-                next
-                  ? { kind: "phone", phoneNumber: next.phoneNumber }
-                  : { kind: "phone", phoneNumber: "" },
-              )
-            }
-          />
-          <span className="text-[10.5px] text-muted-foreground">
-            Pick from contacts who messaged you in the last 24h. Cold reachout
-            (outside the window) requires a Send Template step.
-          </span>
+          {phoneMode === "free" ? (
+            <>
+              <PhoneNumberInput
+                value={phone}
+                onChange={(e164) => onChange({ kind: "phone", phoneNumber: e164 })}
+              />
+              <span className="text-[10.5px] text-muted-foreground">
+                Any number — templates can reach contacts outside the 24h window.
+              </span>
+            </>
+          ) : (
+            <>
+              <OpenWindowContactCombobox
+                value={phone ? { phoneNumber: phone } : null}
+                onChange={(next) =>
+                  onChange(
+                    next
+                      ? { kind: "phone", phoneNumber: next.phoneNumber }
+                      : { kind: "phone", phoneNumber: "" },
+                  )
+                }
+              />
+              <span className="text-[10.5px] text-muted-foreground">
+                Pick from contacts who messaged you in the last 24h. Cold reachout
+                (outside the window) requires a Send Template step.
+              </span>
+            </>
+          )}
           {extraHint && (
             <span className="text-[10.5px] text-amber-600 dark:text-amber-400">
               {extraHint}
@@ -360,7 +380,7 @@ export function SendTemplateEditor({
   fields,
   trigger,
 }: {
-  config: { templateId?: string; variables?: { body?: string[]; header?: string } };
+  config: { templateId?: string; variables?: { body?: string[]; header?: string }; target?: StepTarget };
   onChange: (c: Record<string, unknown>) => void;
   templates: BuilderCatalogs["templates"];
   fields: BuilderCatalogs["fields"];
@@ -374,12 +394,12 @@ export function SendTemplateEditor({
   function pickTemplate(id: string) {
     const t = templates.find((x) => x.id === id);
     if (!t) {
-      onChange({ templateId: id, variables: { body: [] } });
+      onChange({ ...config, templateId: id, variables: { body: [] } });
       return;
     }
     const count = countPlaceholders(t.bodyText);
     const next = Array.from({ length: count }, (_, i) => bodyVars[i] ?? "");
-    onChange({ templateId: id, variables: { body: next } });
+    onChange({ ...config, templateId: id, variables: { body: next } });
   }
 
   function setVar(idx: number, val: string) {
@@ -434,6 +454,11 @@ export function SendTemplateEditor({
           </div>
         </Field>
       )}
+      <TargetSelector
+        target={config.target}
+        onChange={(target) => onChange({ ...config, target })}
+        phoneMode="free"
+      />
     </div>
   );
 }

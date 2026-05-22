@@ -15,22 +15,13 @@ export default async function AudienceGroupsPage() {
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:py-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          {/* In-page tabs between Broadcasts and Groups so they read as
-              two views of the same area (saved audiences + past sends). */}
-          <Link
-            href="/broadcasts"
-            className="rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-          >
-            Broadcasts
-          </Link>
-          <Link
-            href="/broadcasts/groups"
-            className="rounded-md bg-accent px-2.5 py-1.5 text-sm font-medium text-foreground"
-          >
-            Groups
-          </Link>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Audience groups</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Saved lists of contacts for repeat broadcasts. Mix tag-based
+            membership with hand-picked contacts.
+          </p>
         </div>
         <Button asChild>
           <Link href="/broadcasts/groups/new" className="gap-1.5">
@@ -38,14 +29,6 @@ export default async function AudienceGroupsPage() {
             New group
           </Link>
         </Button>
-      </header>
-
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Audience groups</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Saved lists of contacts for repeat broadcasts. Mix tag-based
-          membership with hand-picked contacts.
-        </p>
       </div>
 
       {groups.length === 0 ? (

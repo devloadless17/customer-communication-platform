@@ -95,7 +95,12 @@ function renderTokenized(
       <span
         key={`tok-${i++}`}
         className={cn(
-          "rounded-xs px-0.5",
+          // NO horizontal padding: the overlay must occupy the exact same
+          // width as the (transparent) textarea text, char-for-char. `px-*`
+          // here makes tokens wider than their underlying text, so the
+          // painted text drifts right of the caret and wraps at a different
+          // column — the "messy / doubled" look. Color + radius only.
+          "rounded-xs",
           isKnown
             ? "bg-blue-500/10 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
             : "bg-amber-500/10 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
@@ -139,8 +144,20 @@ function isTokenKnown(fullPath: string, knownKeys: Set<string>): boolean {
   ) {
     return knownKeys.has(`${ns}.${segments[1]!}`);
   }
-  if (ns === "trigger" && segments.length === 3) {
-    return knownKeys.has(`${segments[1]!}.${segments[2]!}`);
+  // message.contact.<field> / message.sender.<field> → the sender contact,
+  // resolves the same as $var.contact. Known iff the contact key is known.
+  if (
+    ns === "message" &&
+    (segments[1] === "contact" || segments[1] === "sender") &&
+    segments.length === 3
+  ) {
+    return knownKeys.has(`contact.${segments[2]!}`);
+  }
+  if (ns === "trigger" && segments.length >= 3) {
+    // trigger.<rest…> is known iff <rest…> is known in its own namespace —
+    // handles trigger.contact.x, trigger.message.body, AND the deeper
+    // trigger.message.contact.x alias.
+    return isTokenKnown(segments.slice(1).join("."), knownKeys);
   }
   if (ns === "sender" && segments.length === 2) {
     const k = segments[1]!;
@@ -255,6 +272,7 @@ export function TokenHighlightInput({
         ref={innerRef}
         type="text"
         value={value}
+        spellCheck={false}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
         className={cn(
           "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors",
@@ -325,6 +343,9 @@ export function TokenHighlightTextarea({
       <textarea
         ref={innerRef}
         value={value}
+        // Token text isn't prose — spellcheck just paints red squiggles under
+        // every `$var.*` token and makes the box look broken.
+        spellCheck={false}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
         className={cn(
           // `leading-relaxed` + `wrap-break-word` MUST match the overlay div

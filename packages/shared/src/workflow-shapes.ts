@@ -53,12 +53,15 @@ const leafBool = (description?: string): FieldShape => ({
 const CONTACT_SHAPE: FieldShape = {
   kind: "object",
   fields: {
-    id: leafString(),
+    // Keys MUST match the resolver vocabulary (BUILTIN_CONTACT_KEYS in
+    // field-tokens.ts): the inspector inserts `$var.<ns>.contact.<key>` and
+    // the runtime resolves the SAME key. Don't advertise raw DB column names
+    // (phoneNumber / id / stageId) the resolver can't resolve — that's how
+    // `$var.trigger.contact.phoneNumber` ended up always-empty.
     name: leafString(),
-    phoneNumber: leafString("E.164 digits"),
+    phone: leafString("E.164 phone"),
     email: leafString(),
     location: leafString(),
-    stageId: leafString(),
     stage_name: leafString("Lifecycle stage name"),
     tag_names: leafString("Comma-separated tag names"),
     window_state: leafString("open | closing-soon | closed | never"),
@@ -96,7 +99,8 @@ const CONVERSATION_SHAPE: FieldShape = {
 const AGENT_SHAPE: FieldShape = {
   kind: "object",
   fields: {
-    id: leafString(),
+    // Resolver only knows agent name + email (BUILTIN_AGENT_KEYS); `id`
+    // isn't resolvable, so don't advertise it.
     name: leafString(),
     email: leafString(),
   },

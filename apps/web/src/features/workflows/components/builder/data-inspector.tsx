@@ -100,6 +100,7 @@ export function DataInspector({
         path={["trigger"]}
         shape={triggerShape}
         onInsertToken={onInsertToken}
+        initiallyCollapsed
       />
 
       {previousStepNode && (
@@ -108,6 +109,7 @@ export function DataInspector({
           path={["previousStep"]}
           shape={STEP_OUTPUT_SHAPES[previousStepNode.type]}
           onInsertToken={onInsertToken}
+          initiallyCollapsed
         />
       )}
 
@@ -194,10 +196,11 @@ function CollapsibleGroup({
 }
 
 /**
- * Renders a single ShapeTree — a labeled root + flat list of clickable
- * leaves underneath. The flat-leaf view (instead of nested toggles) keeps
- * the inspector compact; deep paths still show their full dotted form
- * inline so authors can scan.
+ * One collapsible namespace (trigger / previousStep / output). Collapsed it's
+ * a single compact row ("trigger · 25 fields"); expanded, the leaves are
+ * grouped by their top segment (contact / message / conversation) under tiny
+ * sub-labels so a 25-field trigger reads as three short lists instead of one
+ * long flat dump. Each leaf is click-to-insert.
  */
 function ShapeTree({
   label,
@@ -217,51 +220,77 @@ function ShapeTree({
   initiallyCollapsed?: boolean;
 }) {
   const leaves = useMemo(() => flattenShape(shape), [shape]);
+  // Group by the first path segment when the shape is nested (trigger), else
+  // keep one flat group (step outputs are 1-deep: messageId, externalId…).
+  const groups = useMemo(() => {
+    const nested = leaves.some((l) => l.path.length >= 2);
+    if (!nested) return [{ name: null as string | null, leaves }];
+    const map = new Map<string, typeof leaves>();
+    for (const l of leaves) {
+      const g = l.path[0]!;
+      map.set(g, [...(map.get(g) ?? []), l]);
+    }
+    return [...map.entries()].map(([name, ls]) => ({ name, leaves: ls }));
+  }, [leaves]);
   const [open, setOpen] = useState(!initiallyCollapsed);
   return (
-    <div className="rounded-md border border-border bg-muted/20 px-2 py-1.5">
+    <div className="rounded-lg border border-border/70 bg-muted/20">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1 text-[11px] font-medium text-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-accent/40"
       >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        {open ? (
+          <ChevronDown className="size-3 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="size-3 text-muted-foreground" />
+        )}
         <span className="truncate">{label}</span>
-        <span className="ml-auto text-[10px] text-muted-foreground">
-          {leaves.length} field{leaves.length === 1 ? "" : "s"}
+        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/70">
+          {leaves.length}
         </span>
       </button>
       {open && (
-        <div className="mt-1.5 flex flex-col gap-0.5">
-          {leaves.map((leaf) => {
-            const fullPath = [...path, ...leaf.path];
-            const token = `$var.${fullPath.join(".")}`;
-            return (
-              <button
-                key={fullPath.join(".")}
-                type="button"
-                onClick={() => onInsertToken(token)}
-                disabled={readOnly}
-                className={cn(
-                  "group flex items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-[11px] transition-colors",
-                  readOnly
-                    ? "cursor-default"
-                    : "cursor-pointer hover:bg-accent/60",
-                )}
-                title={leaf.description ?? leaf.type}
-              >
-                <span className="truncate font-mono text-[10.5px]">
-                  {leaf.path.join(".")}
-                </span>
-                <span className="rounded bg-muted px-1 py-0 text-[9.5px] uppercase tracking-wider text-muted-foreground">
-                  {leaf.type}
-                </span>
-                {!readOnly && (
-                  <Copy className="ml-auto size-2.5 opacity-0 transition-opacity group-hover:opacity-60" />
-                )}
-              </button>
-            );
-          })}
+        <div className="flex flex-col gap-1.5 px-1.5 pb-1.5">
+          {groups.map((grp) => (
+            <div key={grp.name ?? "_flat"} className="flex flex-col">
+              {grp.name && (
+                <div className="px-1.5 pb-0.5 pt-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                  {grp.name}
+                </div>
+              )}
+              {grp.leaves.map((leaf) => {
+                const fullPath = [...path, ...leaf.path];
+                const token = `$var.${fullPath.join(".")}`;
+                // Drop the group prefix from the visible label when grouped —
+                // "id" reads cleaner than "contact.id" under a "CONTACT" header.
+                const display = grp.name
+                  ? leaf.path.slice(1).join(".")
+                  : leaf.path.join(".");
+                return (
+                  <button
+                    key={fullPath.join(".")}
+                    type="button"
+                    onClick={() => onInsertToken(token)}
+                    disabled={readOnly}
+                    className={cn(
+                      "group flex items-center gap-2 rounded px-1.5 py-1 text-left text-[11px] transition-colors",
+                      readOnly ? "cursor-default" : "cursor-pointer hover:bg-accent/60",
+                    )}
+                    title={readOnly ? leaf.description ?? leaf.type : `Insert ${token}`}
+                  >
+                    <span className="truncate font-mono text-[10.5px]">{display}</span>
+                    <span className="ml-auto shrink-0 text-[9px] lowercase text-muted-foreground/50">
+                      {leaf.type}
+                    </span>
+                    {!readOnly && (
+                      <Copy className="size-2.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-60" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>
