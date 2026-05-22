@@ -11,8 +11,19 @@ import type { NextConfig } from "next";
 // (mirrors the api's `node --env-file=../../.env`). Safe under Docker:
 // loadEnvConfig never overrides a value already in process.env, so
 // compose-injected vars win. Also restores NEXT_PUBLIC_* (e.g. the socket
-// client's NEXT_PUBLIC_API_URL) for host dev.
-loadEnvConfig(resolve(process.cwd(), "../.."));
+// client's NEXT_PUBLIC_API_URL) for host dev. Anchored on `__dirname` (always
+// apps/web — this file's dir), NOT `process.cwd()`, so it's cwd-independent.
+//
+// IMPORTANT — this only covers the MAIN process (config eval, `next build`
+// NEXT_PUBLIC_* inlining). Next 16 dev runs route handlers in a SEPARATE
+// render worker that does NOT re-run this file, so `loadEnvConfig` here never
+// reaches it. That worker gets env from Next's OWN native loader, which reads
+// `apps/web/.env` — so the `dev`/`start` scripts in package.json symlink
+// `apps/web/.env -> ../../.env` (gitignored) to feed it the root file. Without
+// that symlink the worker has no DATABASE_URL and every Prisma query fails with
+// `SASL: client password must be a string` (pg falls back to a passwordless
+// default). Both mechanisms point at the same physical root `.env`.
+loadEnvConfig(resolve(__dirname, "../.."));
 
 const isProd = process.env.NODE_ENV === "production";
 
