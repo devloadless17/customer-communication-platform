@@ -5,13 +5,15 @@ import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { subscribe, SubscriberPriority } from "@/lib/events/bus";
 import type {
   AssigneeInfo,
-  ChannelInfo,
   PublicContact,
   PublicEventType,
+  WireChannelBase,
 } from "@ccp/shared/outbound-webhooks/public-events";
 import {
   busEventTypesToSubscribe,
+  channelSourceFor,
   toPublicEnvelopes,
+  toWirePayload,
 } from "@ccp/shared/outbound-webhooks/public-events";
 
 import { DbService } from "../db/db.service";
@@ -61,7 +63,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
    * The cache itself stays grow-only across team additions — those rows
    * never go away. Wholesale eviction is correct on multi-tenant churn.
    */
-  private readonly channelCache = new Map<string, ChannelInfo>();
+  private readonly channelCache = new Map<string, WireChannelBase>();
 
   constructor(private readonly db: DbService) {}
 
@@ -128,27 +130,28 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     //   2. full contact + conversation (status, assignee) on message.sent so
     //      it matches message.received's context
     //   3. assignee + sender display names / emails wherever they're id-only
-    await this.enrichMediaUrls(envelopes);
+    await this.enrichMessages(envelopes);
     await this.enrichSentMessageContext(envelopes);
     await this.hydrateUsers(envelopes);
 
-    const channel = await this.resolveChannel(event.teamId);
+    const channelBase = await this.resolveChannel(event.teamId);
 
     for (const { type, envelope } of envelopes) {
       const matching = webhooks.filter((w) => w.eventTypes.includes(type));
       if (matching.length === 0) continue;
 
-      // Create delivery rows with pre-generated ids so the stamped event_id
-      // matches the row id exactly — partners can cross-reference webhook
-      // body event_id ↔ X-CCP-Delivery header ↔ delivery log row in one hop.
+      // Internal enriched envelope → flat wire shape (partner-compatible).
+      // Identical for every webhook subscribed to this type; dedup id rides
+      // on the X-CCP-Delivery header (= delivery row id), not the body.
+      const payload = toWirePayload(
+        type,
+        (envelope as { data: unknown }).data,
+        { channelBase },
+      );
+
       const created = await Promise.all(
         matching.map(async (w) => {
           const deliveryId = randomUUID();
-          const payload = {
-            ...envelope,
-            event_id: deliveryId,
-            channel,
-          };
           return this.db.outboundWebhookDelivery.create({
             data: {
               id: deliveryId,
@@ -175,38 +178,38 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
   }
 
   /**
-   * Fill `media.url` + `media.thumbnail_url` on message-bearing envelopes from
-   * the raw CDN columns. One batched lookup across all media messages in the
-   * event (≤2 in practice). Best-effort: a missing row or a not-yet-uploaded
-   * media leaves the url null, which the payload already documents.
+   * Enrich message-bearing envelopes from the DB in one batched lookup:
+   *   - `external_id` (the provider wamid → `channelMessageId` on the wire)
+   *   - `media.url` + `media.thumbnail_url` (public CDN links) on file messages
+   * One query across all messages in the event (≤2 in practice). Best-effort:
+   * a missing row leaves the documented nulls in place.
    */
-  private async enrichMediaUrls(
+  private async enrichMessages(
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
-    type MediaShape = {
-      url: string | null;
-      thumbnail_url: string | null;
-    };
-    type MsgData = { message?: { id?: string; media?: MediaShape | null } };
+    type MediaShape = { url: string | null; thumbnail_url: string | null };
+    type MsgShape = { id?: string; external_id?: string | null; media?: MediaShape | null };
+    type MsgData = { message?: MsgShape };
 
-    const mediaByMessageId = new Map<string, MediaShape>();
+    const messagesById = new Map<string, MsgShape>();
     for (const { envelope } of envelopes) {
-      const data = envelope.data as MsgData;
-      const id = data.message?.id;
-      const media = data.message?.media;
-      if (id && media) mediaByMessageId.set(id, media);
+      const msg = (envelope.data as MsgData).message;
+      if (msg?.id) messagesById.set(msg.id, msg);
     }
-    if (mediaByMessageId.size === 0) return;
+    if (messagesById.size === 0) return;
 
     const rows = await this.db.message.findMany({
-      where: { id: { in: [...mediaByMessageId.keys()] } },
-      select: { id: true, mediaUrl: true, mediaThumbnailUrl: true },
+      where: { id: { in: [...messagesById.keys()] } },
+      select: { id: true, externalId: true, mediaUrl: true, mediaThumbnailUrl: true },
     });
     for (const row of rows) {
-      const media = mediaByMessageId.get(row.id);
-      if (!media) continue;
-      media.url = row.mediaUrl ?? null;
-      media.thumbnail_url = row.mediaThumbnailUrl ?? null;
+      const msg = messagesById.get(row.id);
+      if (!msg) continue;
+      msg.external_id = row.externalId ?? null;
+      if (msg.media) {
+        msg.media.url = row.mediaUrl ?? null;
+        msg.media.thumbnail_url = row.mediaThumbnailUrl ?? null;
+      }
     }
   }
 
@@ -281,12 +284,24 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
   private async hydrateUsers(
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
-    type UserRef = { type?: string; id?: string | null; name?: string | null; email?: string | null };
+    type UserRef = {
+      type?: string;
+      id?: string | null;
+      name?: string | null;
+      email?: string | null;
+      role?: string | null;
+      created_at?: string | null;
+    };
     const refs: Array<{ ref: UserRef; withEmail: boolean }> = [];
     const collect = (ref: UserRef | null | undefined, withEmail: boolean) => {
       // Only `user`-typed refs map to a User row; `ai_agent` lives elsewhere
       // (future), `contact` / `api` / `workflow` have no name to hydrate.
-      if (!ref || !ref.id || ref.type !== "user" || ref.name != null) return;
+      if (!ref || !ref.id || ref.type !== "user") return;
+      // Senders need only a name (skip once set). Assignees need role +
+      // created_at for the wire `assignee` block, so collect them until
+      // `role` is filled — even when name was already set upstream (e.g.
+      // message.sent's assignee, hydrated name-only by enrichSentMessageContext).
+      if (withEmail ? ref.role !== undefined : ref.name != null) return;
       refs.push({ ref, withEmail });
     };
     for (const { envelope } of envelopes) {
@@ -306,14 +321,19 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     const ids = Array.from(new Set(refs.map((r) => r.ref.id as string)));
     const users = await this.db.user.findMany({
       where: { id: { in: ids } },
-      select: { id: true, name: true, email: true },
+      select: { id: true, name: true, email: true, role: true, createdAt: true },
     });
     const byId = new Map(users.map((u) => [u.id, u]));
     for (const { ref, withEmail } of refs) {
       const u = byId.get(ref.id as string);
       if (!u) continue;
       ref.name = u.name;
-      if (withEmail) ref.email = u.email;
+      if (withEmail) {
+        ref.email = u.email;
+        // Powers the wire `assignee` block (role + created_at).
+        ref.role = u.role;
+        ref.created_at = u.createdAt.toISOString();
+      }
     }
   }
 
@@ -323,24 +343,24 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
    * lookup on every event burns budget on a hot bus subscriber. On cache miss,
    * we hit the DB; on subsequent calls within the process, it's a Map read.
    */
-  private async resolveChannel(teamId: string): Promise<ChannelInfo | null> {
+  private async resolveChannel(teamId: string): Promise<WireChannelBase | null> {
     const cached = this.channelCache.get(teamId);
     if (cached) return cached;
 
+    // Single-channel today (whatsapp); resolves per-medium once a team runs
+    // more than one. `name` is the medium itself ("whatsapp" | "telegram" |
+    // "instagram"); `source` is the partner-style "<medium>_business" string.
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: "whatsapp" } },
-      select: { config: true },
+      select: { id: true, channel: true, createdAt: true },
     });
     if (!conn) return null;
-    const config = (conn.config ?? {}) as {
-      phoneNumberId?: string;
-      displayPhoneNumber?: string;
-    };
 
-    const channel: ChannelInfo = {
-      source: "whatsapp",
-      phone_number_id: config.phoneNumberId ?? null,
-      display_phone_number: config.displayPhoneNumber ?? null,
+    const channel: WireChannelBase = {
+      id: conn.id,
+      name: conn.channel,
+      source: channelSourceFor(conn.channel),
+      created_at: Math.floor(conn.createdAt.getTime() / 1000),
     };
     this.channelCache.set(teamId, channel);
     return channel;

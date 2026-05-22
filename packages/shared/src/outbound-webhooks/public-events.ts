@@ -97,6 +97,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         samplePayload: {
           message: {
             id: "cmpmsg_01",
+            external_id: "wamid.HBgLMTU1NTU1NTAxMDAVAgASGBI5RkE…",
             conversation_id: "cmpconv_01",
             contact_id: "cmpcnt_01",
             channel: "whatsapp",
@@ -142,7 +143,14 @@ export const PUBLIC_EVENT_GROUPS: Array<{
             status: "open",
             unread_count: 1,
             last_message_at: "2026-05-20T11:00:00.000Z",
-            assignee: null,
+            assignee: {
+              type: "user",
+              id: "cmpusr_01",
+              name: "Ali Hassan",
+              email: "ali@example.com",
+              role: "agent",
+              created_at: "2025-08-12T09:00:00.000Z",
+            },
           },
           is_new_conversation: false,
           reopened: false,
@@ -155,6 +163,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         samplePayload: {
           message: {
             id: "cmpmsg_02",
+            external_id: "wamid.HBgLMTU1NTU1NTAxMDAVAgARGBI2QkE…",
             conversation_id: "cmpconv_01",
             contact_id: "cmpcnt_01",
             channel: "whatsapp",
@@ -189,7 +198,14 @@ export const PUBLIC_EVENT_GROUPS: Array<{
             status: "open",
             unread_count: 0,
             last_message_at: "2026-05-20T11:00:05.000Z",
-            assignee: { type: "user", id: "cmpusr_01", name: "Ali", email: "ali@example.com" },
+            assignee: {
+              type: "user",
+              id: "cmpusr_01",
+              name: "Ali Hassan",
+              email: "ali@example.com",
+              role: "agent",
+              created_at: "2025-08-12T09:00:00.000Z",
+            },
           },
         },
       },
@@ -927,4 +943,286 @@ function contactFromSnapshot(e: MessageReceivedEvent): PublicContact {
  */
 function assigneeRef(userId: string): AssigneeInfo {
   return { type: "user", id: userId, name: null, email: null };
+}
+
+// ===========================================================================
+// WIRE SHAPE (what we actually POST)
+// ---------------------------------------------------------------------------
+// Flat, camelCase, epoch-timestamp envelope modelled on the partner's
+// existing inbox webhook so their n8n flows work with minimal rework:
+//   { event_type, assignee, message, channel, sender }  (+ event-specific
+//   blocks for non-message events). The internal `PublicEnvelope` above is
+//   the *input* to this transform — keeping the mapper + the subscriber's
+//   enrichment untouched. `toWirePayload` runs in the subscriber AFTER
+//   enrichment, reading the hydrated fields it left in place.
+//
+// Unavoidable deviations from the partner sample (DB-model facts, not bugs):
+//   - ids are strings (cuids), not integers — field NAMES match.
+//   - channelId/channel.id is the ChannelConnection cuid, not an integer.
+//   - channel.name is the MEDIUM ("whatsapp"|"telegram"|"instagram"); source
+//     keeps the partner's "<medium>_business" style.
+// ===========================================================================
+
+function toEpochMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+function toEpochSec(iso: string | null | undefined): number | null {
+  const ms = toEpochMs(iso);
+  return ms === null ? null : Math.floor(ms / 1000);
+}
+function splitName(name: string | null | undefined): { firstName: string | null; lastName: string | null } {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return { firstName: null, lastName: null };
+  const i = trimmed.indexOf(" ");
+  if (i === -1) return { firstName: trimmed, lastName: null };
+  return { firstName: trimmed.slice(0, i), lastName: trimmed.slice(i + 1) || null };
+}
+
+/** Base channel facts the subscriber resolves from the ChannelConnection row. */
+export interface WireChannelBase {
+  id: string | null;
+  /** The medium — "whatsapp" | "telegram" | "instagram". */
+  name: string;
+  /** Partner-style source string, e.g. "whatsapp_business". */
+  source: string;
+  created_at: number | null;
+}
+
+/** Map our `Channel` medium to the partner's `source` convention. */
+export function channelSourceFor(medium: string): string {
+  return medium === "whatsapp" ? "whatsapp_business" : medium;
+}
+
+/**
+ * The assignee block (the partner's top-level "team member assigned to this
+ * conversation"). The subscriber stamps `role` + `created_at` (ISO) onto the
+ * hydrated AssigneeInfo; this reads them back. null when unassigned.
+ */
+type AssigneeWithMeta = AssigneeInfo & { role?: string | null; created_at?: string | null };
+function wireAssignee(a: AssigneeWithMeta | null | undefined): Record<string, unknown> | null {
+  if (!a || !a.id) return null;
+  const { firstName, lastName } = splitName(a.name);
+  return {
+    id: a.id,
+    email: a.email ?? null,
+    firstName,
+    lastName,
+    role: a.role ?? null,
+    created_at: toEpochSec(a.created_at),
+  };
+}
+
+function wireChannel(
+  base: WireChannelBase | null,
+  contact: { phone_number?: string | null; name?: string | null } | null | undefined,
+): Record<string, unknown> | null {
+  if (!base) return null;
+  const waId = contact?.phone_number ? contact.phone_number.replace(/^\+/, "") : null;
+  const profileName = contact?.name ?? null;
+  const { firstName, lastName } = splitName(profileName);
+  // Mirror the partner's stringified `meta` blob (contact profile lives here)
+  // AND expose the same data as clean fields — both, per the integration's ask.
+  const meta =
+    waId || profileName
+      ? JSON.stringify({
+          meta: { profile: { name: profileName }, wa_id: waId, user_id: null, firstName, lastName },
+        })
+      : null;
+  return {
+    id: base.id,
+    name: base.name,
+    source: base.source,
+    meta,
+    waId,
+    profileName,
+    created_at: base.created_at,
+  };
+}
+
+function wireSender(s: SenderInfo | null | undefined): Record<string, unknown> {
+  const type = s?.type ?? "contact";
+  const id = s?.id ?? null;
+  return {
+    source: type,
+    userId: type === "user" ? id : null,
+    teamId: null,
+    workflowId: type === "workflow" ? id : null,
+    broadcastHistoryId: type === "broadcast" ? id : null,
+  };
+}
+
+function wireMessageBlock(
+  m: (PublicMessage & { external_id?: string | null }) | undefined,
+  traffic: "incoming" | "outgoing",
+  channelId: string | null,
+): Record<string, unknown> | null {
+  if (!m) return null;
+  return {
+    messageId: m.id,
+    channelMessageId: m.external_id ?? null,
+    contactId: m.contact_id,
+    channelId,
+    traffic,
+    timestamp: toEpochMs(m.timestamp),
+    message: { type: m.media ? m.media.kind : "text", text: m.body },
+    // Extra vs. the partner sample, ignored by text flows; carries file links.
+    media: m.media,
+  };
+}
+
+function wireContact(c: PublicContact | null | undefined): Record<string, unknown> | null {
+  if (!c) return null;
+  return {
+    id: c.id,
+    phoneNumber: c.phone_number,
+    name: c.name,
+    firstName: c.first_name,
+    lastName: c.last_name,
+    language: c.language,
+    countryCode: c.country_code,
+    avatarUrl: c.avatar_url,
+    email: c.email,
+    location: c.location,
+    stageId: c.stage_id,
+    tagIds: c.tag_ids,
+    customFields: c.custom_fields,
+    created_at: toEpochSec(c.created_at),
+  };
+}
+
+/**
+ * Transform an enriched internal `data` payload into the flat wire shape for
+ * one event type. Pure. `ctx.channelBase` is the team's resolved channel; the
+ * subscriber passes it (it can't be derived here).
+ */
+export function toWirePayload(
+  type: PublicEventType,
+  data: unknown,
+  ctx: { channelBase: WireChannelBase | null },
+): Record<string, unknown> {
+  const d = data as Record<string, any>;
+  const channelId = ctx.channelBase?.id ?? null;
+
+  switch (type) {
+    case "message.received":
+      return {
+        event_type: type,
+        // The customer who sent the message — first-class block (their full
+        // record: phoneNumber for replying, name, tags, stage, custom fields).
+        // The partner sample only carried this inside channel.meta; we keep
+        // that AND surface the proper contact here.
+        contact: wireContact(d.contact),
+        assignee: wireAssignee(d.conversation?.assignee),
+        message: wireMessageBlock(d.message, "incoming", channelId),
+        channel: wireChannel(ctx.channelBase, d.contact),
+        sender: wireSender(d.message?.sender),
+      };
+    case "message.sent":
+      return {
+        event_type: type,
+        // The customer the message was sent to (same conversation contact).
+        contact: wireContact(d.contact),
+        assignee: wireAssignee(d.conversation?.assignee),
+        message: wireMessageBlock(d.message, "outgoing", channelId),
+        channel: wireChannel(ctx.channelBase, d.contact),
+        sender: wireSender(d.message?.sender),
+      };
+    case "message.status_changed":
+      return {
+        event_type: type,
+        messageId: d.message_id,
+        contactId: d.contact_id,
+        conversationId: d.conversation_id,
+        status: d.status,
+        channel: wireChannel(ctx.channelBase, null),
+      };
+    case "conversation.assigned":
+      return {
+        event_type: type,
+        conversationId: d.conversation_id,
+        contactId: d.contact_id,
+        assignee: wireAssignee(d.assignee),
+        previousAssignee: wireAssignee(d.previous_assignee),
+        changedByUserId: d.changed_by_user_id ?? null,
+        changedByApiKeyId: d.changed_by_api_key_id ?? null,
+        channel: wireChannel(ctx.channelBase, null),
+      };
+    case "conversation.opened":
+    case "conversation.closed":
+    case "conversation.status_changed":
+      return {
+        event_type: type,
+        conversationId: d.conversation_id,
+        contactId: d.contact_id,
+        previousStatus: d.previous_status ?? null,
+        status: d.status,
+        changedByUserId: d.changed_by_user_id ?? null,
+        changedByApiKeyId: d.changed_by_api_key_id ?? null,
+        closedCategory: d.closed_category ?? null,
+        closedSummary: d.closed_summary ?? null,
+        channel: wireChannel(ctx.channelBase, null),
+      };
+    case "contact.created":
+      return {
+        event_type: type,
+        contact: wireContact(d.contact),
+        source: d.source ?? null,
+        createdByUserId: d.created_by_user_id ?? null,
+        createdByApiKeyId: d.created_by_api_key_id ?? null,
+      };
+    case "contact.updated":
+      return {
+        event_type: type,
+        contact: wireContact(d.contact),
+        fieldChanges: d.field_changes ?? null,
+        tagChanges: d.tag_changes ?? null,
+        previousStageId: d.previous_stage_id ?? null,
+        changedByUserId: d.changed_by_user_id ?? null,
+        changedByApiKeyId: d.changed_by_api_key_id ?? null,
+      };
+    case "contact.tag_changed":
+      return {
+        event_type: type,
+        contactId: d.contact_id,
+        before: d.before ?? null,
+        after: d.after ?? null,
+        added: d.added ?? [],
+        removed: d.removed ?? [],
+        changedByUserId: d.changed_by_user_id ?? null,
+        changedByApiKeyId: d.changed_by_api_key_id ?? null,
+      };
+    case "contact.lifecycle_changed":
+      return {
+        event_type: type,
+        contactId: d.contact_id,
+        before: d.before ?? null,
+        after: d.after ?? null,
+        changedByUserId: d.changed_by_user_id ?? null,
+        changedByApiKeyId: d.changed_by_api_key_id ?? null,
+      };
+    case "contact.deleted":
+      return {
+        event_type: type,
+        contactId: d.contact_id,
+        conversationIds: d.conversation_ids ?? [],
+        deletedByUserId: d.deleted_by_user_id ?? null,
+        deletedByApiKeyId: d.deleted_by_api_key_id ?? null,
+      };
+    case "note.created":
+      return {
+        event_type: type,
+        conversationId: d.note?.conversation_id,
+        note: {
+          id: d.note?.id,
+          conversationId: d.note?.conversation_id,
+          authorUserId: d.note?.author_user_id ?? null,
+          body: d.note?.body,
+          timestamp: toEpochMs(d.note?.timestamp),
+        },
+      };
+    default:
+      return { event_type: type, ...(d as Record<string, unknown>) };
+  }
 }

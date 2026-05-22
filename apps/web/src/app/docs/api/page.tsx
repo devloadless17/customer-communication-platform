@@ -1,9 +1,21 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
-import { PUBLIC_EVENT_GROUPS } from "@ccp/shared/outbound-webhooks/public-events";
+import {
+  PUBLIC_EVENT_GROUPS,
+  toWirePayload,
+  type WireChannelBase,
+} from "@ccp/shared/outbound-webhooks/public-events";
 
 import { CopyCurlButton } from "@/features/docs/components/copy-curl-button";
+
+/** Illustrative channel block for the docs samples (epoch = a fixed date). */
+const SAMPLE_CHANNEL: WireChannelBase = {
+  id: "cmpchan_01",
+  name: "whatsapp",
+  source: "whatsapp_business",
+  created_at: 1773145944,
+};
 
 export const metadata = { title: "API reference" };
 
@@ -330,10 +342,14 @@ function verify(rawBody, header, secret) {
                   <span className="text-xs text-muted-foreground">{e.description}</span>
                   <details className="mt-1 text-[11px]">
                     <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                      Sample <code>data</code> payload
+                      Sample payload
                     </summary>
                     <pre className="mt-1 overflow-x-auto rounded bg-muted/40 p-2 font-mono leading-relaxed">
-                      {JSON.stringify(e.samplePayload, null, 2)}
+                      {JSON.stringify(
+                        toWirePayload(e.type, e.samplePayload, { channelBase: SAMPLE_CHANNEL }),
+                        null,
+                        2,
+                      )}
                     </pre>
                   </details>
                 </div>

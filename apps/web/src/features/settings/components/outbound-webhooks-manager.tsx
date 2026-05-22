@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Copy,
+  History,
   Loader2,
+  Pencil,
   Plus,
+  RefreshCw,
   RotateCw,
+  Save,
   Send,
   Trash2,
   Webhook,
@@ -17,6 +22,7 @@ import {
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Sheet } from "@/components/ui/sheet";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -61,10 +67,26 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
   useEffect(() => {
     setWebhooks(initialWebhooks);
   }, [initialWebhooks]);
-  const [creating, setCreating] = useState(false);
+  // Single submit flag — only one form (create OR edit) is ever open at a time
+  // because opening one closes the other.
+  const [submitting, setSubmitting] = useState(false);
   const [revealed, setRevealed] = useState<RevealedSecret | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  // Webhook currently being edited inline (its row is swapped for the form).
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // Deliveries drill-down. `deliveriesFor` stays set during the sheet's exit
+  // animation; `deliveriesOpen` drives the slide.
+  const [deliveriesFor, setDeliveriesFor] = useState<Webhook | null>(null);
+  const [deliveriesOpen, setDeliveriesOpen] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
+
+  // type → human label, so rows can show what a webhook is subscribed to in
+  // plain language ("Message received") with the raw code as a hover title.
+  const eventLabel = useMemo(
+    () =>
+      new Map(eventGroups.flatMap((g) => g.events.map((e) => [e.type, e.label] as const))),
+    [eventGroups],
+  );
 
   // Listen for circuit-breaker trips. The worker publishes
   // `webhook:subscription_disabled` to the team room whenever auto-disable
@@ -103,24 +125,26 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
       {!showCreate ? (
         <Button
           variant="outline"
-          onClick={() => setShowCreate(true)}
+          onClick={() => {
+            setEditingId(null);
+            setShowCreate(true);
+          }}
           className="self-start"
         >
           <Plus className="size-4" />
           Create a webhook
         </Button>
       ) : (
-        <CreateForm
+        <WebhookForm
           eventGroups={eventGroups}
           onCancel={() => setShowCreate(false)}
           onCreated={(created, secret) => {
             setWebhooks((prev) => [created, ...prev]);
             setRevealed({ webhookId: created.id, secret, flow: "created" });
             setShowCreate(false);
-            setCreating(false);
           }}
-          submitting={creating}
-          setSubmitting={setCreating}
+          submitting={submitting}
+          setSubmitting={setSubmitting}
         />
       )}
 
@@ -146,10 +170,37 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
           </div>
         ) : (
           <div className="flex flex-col divide-y divide-border rounded-md border border-border">
-            {webhooks.map((w) => (
+            {webhooks.map((w) =>
+              editingId === w.id ? (
+                <div key={w.id} className="p-3">
+                  <WebhookForm
+                    eventGroups={eventGroups}
+                    initial={w}
+                    onCancel={() => setEditingId(null)}
+                    onUpdated={(updated) => {
+                      setWebhooks((prev) =>
+                        prev.map((p) => (p.id === updated.id ? updated : p)),
+                      );
+                      setEditingId(null);
+                      toast.success(`Updated "${updated.name}"`);
+                    }}
+                    submitting={submitting}
+                    setSubmitting={setSubmitting}
+                  />
+                </div>
+              ) : (
               <WebhookRow
                 key={w.id}
                 webhook={w}
+                eventLabel={eventLabel}
+                onViewDeliveries={() => {
+                  setDeliveriesFor(w);
+                  setDeliveriesOpen(true);
+                }}
+                onEdit={() => {
+                  setShowCreate(false);
+                  setEditingId(w.id);
+                }}
                 onDelete={async () => {
                   const ok = await confirm({
                     title: `Delete "${w.name}"?`,
@@ -218,10 +269,20 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                   );
                 }}
               />
-            ))}
+              ),
+            )}
           </div>
         )}
       </div>
+
+      {deliveriesFor && (
+        <DeliveriesSheet
+          webhook={deliveriesFor}
+          eventLabel={eventLabel}
+          open={deliveriesOpen}
+          onOpenChange={setDeliveriesOpen}
+        />
+      )}
 
       {confirmDialog}
     </div>
@@ -229,25 +290,33 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
 }
 
 // ---------------------------------------------------------------------------
-// Create form
+// Create / edit form — `initial` present = edit mode (PATCH, no secret reveal);
+// absent = create mode (POST, reveals the signing secret once via onCreated).
 // ---------------------------------------------------------------------------
 
-function CreateForm({
+function WebhookForm({
   eventGroups,
+  initial,
   onCancel,
   onCreated,
+  onUpdated,
   submitting,
   setSubmitting,
 }: {
   eventGroups: EventGroup[];
+  initial?: Webhook;
   onCancel: () => void;
-  onCreated: (webhook: Webhook, secret: string) => void;
+  onCreated?: (webhook: Webhook, secret: string) => void;
+  onUpdated?: (webhook: Webhook) => void;
   submitting: boolean;
   setSubmitting: (v: boolean) => void;
 }) {
-  const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const editing = initial != null;
+  const [name, setName] = useState(initial?.name ?? "");
+  const [url, setUrl] = useState(initial?.url ?? "");
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(initial?.eventTypes ?? []),
+  );
   const [error, setError] = useState<string | null>(null);
 
   function toggleEvent(type: string) {
@@ -268,14 +337,33 @@ function CreateForm({
 
     setSubmitting(true);
     try {
+      const body = JSON.stringify({
+        name: name.trim(),
+        url: url.trim(),
+        eventTypes: Array.from(selected),
+      });
+
+      if (editing) {
+        // Edit reuses the existing PATCH endpoint. The secret is never
+        // touched here (rotate is a separate action), so nothing is revealed.
+        const res = await fetch(`/api/team/outbound-webhooks/${initial.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        const json = (await res.json()) as { webhook?: Webhook; error?: string };
+        if (!res.ok || !json.webhook) {
+          setError(json.error ?? `error ${res.status}`);
+          return;
+        }
+        onUpdated?.(json.webhook);
+        return;
+      }
+
       const res = await fetch("/api/team/outbound-webhooks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          url: url.trim(),
-          eventTypes: Array.from(selected),
-        }),
+        body,
       });
       const json = (await res.json()) as {
         id?: string;
@@ -287,7 +375,7 @@ function CreateForm({
         setError(json.error ?? `error ${res.status}`);
         return;
       }
-      onCreated(
+      onCreated?.(
         {
           id: json.id,
           name: json.name ?? name.trim(),
@@ -382,10 +470,12 @@ function CreateForm({
         <Button type="submit" disabled={submitting}>
           {submitting ? (
             <Loader2 className="size-4 animate-spin" />
+          ) : editing ? (
+            <Save className="size-4" />
           ) : (
             <Plus className="size-4" />
           )}
-          Create webhook
+          {editing ? "Save changes" : "Create webhook"}
         </Button>
       </div>
     </form>
@@ -451,12 +541,18 @@ function SecretBanner({
 
 function WebhookRow({
   webhook,
+  eventLabel,
+  onViewDeliveries,
+  onEdit,
   onDelete,
   onRotate,
   onTest,
   onToggleEnabled,
 }: {
   webhook: Webhook;
+  eventLabel: Map<string, string>;
+  onViewDeliveries: () => void;
+  onEdit: () => void;
   onDelete: () => void;
   onRotate: () => void;
   onTest: () => void;
@@ -500,7 +596,23 @@ function WebhookRow({
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             <code className="font-mono">{host}</code>
-            <span className="ml-2">{webhook.eventTypes.length} event{webhook.eventTypes.length === 1 ? "" : "s"}</span>
+          </div>
+          {/* The actual subscribed events, in plain language — so you can tell
+              at a glance what this webhook is for without opening edit. */}
+          <div className="mt-1.5 flex flex-wrap items-center gap-1">
+            {webhook.eventTypes.length === 0 ? (
+              <span className="text-[11px] text-muted-foreground">no events</span>
+            ) : (
+              webhook.eventTypes.map((t) => (
+                <span
+                  key={t}
+                  title={t}
+                  className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
+                >
+                  {eventLabel.get(t) ?? t}
+                </span>
+              ))
+            )}
           </div>
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
             {webhook.lastDeliveredAt ? (
@@ -526,6 +638,18 @@ function WebhookRow({
           )}
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={onViewDeliveries}
+            title="View deliveries"
+          >
+            <History className="size-3.5" />
+          </Button>
+          <Button type="button" size="sm" variant="ghost" onClick={onEdit} title="Edit">
+            <Pencil className="size-3.5" />
+          </Button>
           <Button type="button" size="sm" variant="ghost" onClick={onTest} title="Send test delivery">
             <Send className="size-3.5" />
           </Button>
@@ -563,6 +687,273 @@ function safeHost(url: string): string {
   } catch {
     return url;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Deliveries drill-down — "what has this webhook actually sent?". Pulls the
+// recent delivery log (newest first, cursor-paginated), shows status + timing
+// per attempt, and expands to the exact JSON payload we POSTed plus the
+// receiver's response / error. Backed by GET /:id/deliveries.
+// ---------------------------------------------------------------------------
+
+interface Delivery {
+  id: string;
+  eventType: string;
+  attemptCount: number;
+  responseStatus: number | null;
+  responseBody: string | null;
+  payload: unknown;
+  deliveredAt: string | null;
+  failedAt: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+function deliveryState(d: Delivery): {
+  label: string;
+  tone: "ok" | "fail" | "pending";
+} {
+  if (d.deliveredAt) {
+    return {
+      label: d.responseStatus ? `delivered · ${d.responseStatus}` : "delivered",
+      tone: "ok",
+    };
+  }
+  if (d.failedAt || d.errorMessage || (d.responseStatus != null && d.responseStatus >= 400)) {
+    return {
+      label: d.responseStatus ? `failed · ${d.responseStatus}` : "failed",
+      tone: "fail",
+    };
+  }
+  // Enqueued but neither delivered nor failed yet (in-flight / retrying).
+  return { label: "pending", tone: "pending" };
+}
+
+function DeliveriesSheet({
+  webhook,
+  eventLabel,
+  open,
+  onOpenChange,
+}: {
+  webhook: Webhook;
+  eventLabel: Map<string, string>;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [items, setItems] = useState<Delivery[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const load = useCallback(
+    async (cursor?: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const qs = new URLSearchParams({ limit: "25" });
+        if (cursor) qs.set("cursor", cursor);
+        const res = await fetch(
+          `/api/team/outbound-webhooks/${webhook.id}/deliveries?${qs.toString()}`,
+        );
+        if (!res.ok) {
+          setError(`HTTP ${res.status}`);
+          return;
+        }
+        const json = (await res.json()) as {
+          items: Delivery[];
+          nextCursor: string | null;
+        };
+        // cursor present = "load older" → append; absent = fresh load → replace.
+        setItems((prev) => (cursor ? [...prev, ...json.items] : json.items));
+        setNextCursor(json.nextCursor);
+      } catch {
+        setError("Couldn't load deliveries");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [webhook.id],
+  );
+
+  // (Re)load from scratch each time the sheet opens.
+  useEffect(() => {
+    if (!open) return;
+    setItems([]);
+    setNextCursor(null);
+    setExpanded(null);
+    void load();
+  }, [open, load]);
+
+  return (
+    <Sheet
+      open={open}
+      onOpenChange={onOpenChange}
+      side="right"
+      contentClassName="w-full max-w-2xl"
+    >
+      <div className="flex h-full flex-col">
+        <div className="shrink-0 border-b border-border px-4 py-3 pr-12">
+          <div className="text-sm font-medium">Deliveries</div>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+            {webhook.name} · <code className="font-mono">{safeHost(webhook.url)}</code>
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void load()}
+              disabled={loading}
+            >
+              {loading ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Refresh
+            </Button>
+            <span className="text-[11px] text-muted-foreground">
+              newest first · 25 per page
+            </span>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {error && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {error}
+            </div>
+          )}
+          {!error && items.length === 0 && !loading && (
+            <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
+              No deliveries yet. Fire a test or wait for a subscribed event.
+            </div>
+          )}
+          {items.length > 0 && (
+            <div className="flex flex-col divide-y divide-border rounded-md border border-border">
+              {items.map((d) => (
+                <DeliveryRow
+                  key={d.id}
+                  delivery={d}
+                  eventLabel={eventLabel}
+                  open={expanded === d.id}
+                  onToggle={() => setExpanded((cur) => (cur === d.id ? null : d.id))}
+                />
+              ))}
+            </div>
+          )}
+          {nextCursor && (
+            <div className="mt-3 flex justify-center">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => void load(nextCursor)}
+                disabled={loading}
+              >
+                {loading && <Loader2 className="size-3.5 animate-spin" />}
+                Load older
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+function DeliveryRow({
+  delivery: d,
+  eventLabel,
+  open,
+  onToggle,
+}: {
+  delivery: Delivery;
+  eventLabel: Map<string, string>;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const state = deliveryState(d);
+  const toneClass =
+    state.tone === "ok"
+      ? "bg-emerald-500/10 text-emerald-600"
+      : state.tone === "fail"
+        ? "bg-destructive/10 text-destructive"
+        : "bg-muted text-muted-foreground";
+  const payloadJson = JSON.stringify(d.payload, null, 2);
+
+  function copyPayload() {
+    void navigator.clipboard.writeText(payloadJson).then(
+      () => toast.success("Payload copied"),
+      () => toast.error("Couldn't access clipboard"),
+    );
+  }
+
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex items-center gap-2 px-3 py-2 text-left hover:bg-accent/40"
+      >
+        <ChevronDown
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+            open ? "" : "-rotate-90"
+          }`}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-xs font-medium" title={d.eventType}>
+              {eventLabel.get(d.eventType) ?? d.eventType}
+            </span>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] ${toneClass}`}>
+              {state.label}
+            </span>
+            {d.attemptCount > 1 && (
+              <span className="text-[10px] text-muted-foreground">
+                {d.attemptCount} attempts
+              </span>
+            )}
+          </span>
+          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+            <LocalTime iso={d.createdAt} format="localeString" />
+          </span>
+        </span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2 border-t border-border bg-muted/10 px-3 py-2">
+          {d.errorMessage && (
+            <div className="text-[11px] text-destructive">{d.errorMessage}</div>
+          )}
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Payload sent
+              </span>
+              <Button type="button" size="sm" variant="ghost" onClick={copyPayload}>
+                <Copy className="size-3" />
+                Copy
+              </Button>
+            </div>
+            <pre className="max-h-64 overflow-auto rounded-md border border-border bg-background p-2 text-[10px] leading-relaxed">
+              <code>{payloadJson}</code>
+            </pre>
+          </div>
+          {d.responseBody && (
+            <div>
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                Response{d.responseStatus != null ? ` · ${d.responseStatus}` : ""}
+              </div>
+              <pre className="max-h-40 overflow-auto rounded-md border border-border bg-background p-2 text-[10px] leading-relaxed">
+                <code>{d.responseBody}</code>
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------

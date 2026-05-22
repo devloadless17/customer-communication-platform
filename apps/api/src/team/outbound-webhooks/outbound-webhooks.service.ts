@@ -5,6 +5,7 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { generateWebhookSecret } from "@/lib/outbound-webhooks/signing";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
+import { channelSourceFor } from "@ccp/shared/outbound-webhooks/public-events";
 
 import { DbService } from "../../db/db.service";
 import type {
@@ -165,6 +166,10 @@ export class OutboundWebhooksService {
       attemptCount: d.attemptCount,
       responseStatus: d.responseStatus,
       responseBody: d.responseBody,
+      // The exact JSON envelope we POSTed — lets an admin inspect "what was
+      // actually sent" when debugging a receiver. Small (one event envelope),
+      // admin-only route, so returning it inline beats a second round-trip.
+      payload: d.payload,
       deliveredAt: d.deliveredAt?.toISOString() ?? null,
       failedAt: d.failedAt?.toISOString() ?? null,
       errorMessage: d.errorMessage,
@@ -187,41 +192,57 @@ export class OutboundWebhooksService {
       select: { id: true, eventTypes: true },
     });
     if (!wh) throw new NotFoundException({ error: "webhook not found" });
-    const eventType = wh.eventTypes[0] ?? "webhook.test";
+    const eventType = wh.eventTypes[0] ?? "message.received";
 
-    // Stamp the channel block here too so the test payload matches the real
-    // production shape — receivers wiring their parser against the test event
-    // should not get a partial envelope.
+    // Build the channel block in the SAME flat wire shape as real deliveries
+    // (name = medium, source = "<medium>_business") so a receiver wiring its
+    // parser against the test event sees the production shape, not a partial one.
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: "whatsapp" } },
-      select: { config: true },
+      select: { id: true, channel: true, createdAt: true },
     });
-    const ccfg = (conn?.config ?? {}) as {
-      phoneNumberId?: string;
-      displayPhoneNumber?: string;
-    };
     const channel = conn
       ? {
-          source: "whatsapp" as const,
-          phone_number_id: ccfg.phoneNumberId ?? null,
-          display_phone_number: ccfg.displayPhoneNumber ?? null,
+          id: conn.id,
+          name: conn.channel,
+          source: channelSourceFor(conn.channel),
+          meta: null,
+          waId: null,
+          profileName: null,
+          created_at: Math.floor(conn.createdAt.getTime() / 1000),
         }
       : null;
 
-    // Pre-generate the delivery id so the stamped event_id matches the row id.
     const deliveryId = randomUUID();
     const created = await this.db.outboundWebhookDelivery.create({
       data: {
         id: deliveryId,
         webhookId: id,
         eventType,
+        // Flat wire shape (matches real deliveries) + a `test: true` marker so
+        // receivers can route/ignore synthetic events.
         payload: {
-          event_id: deliveryId,
-          event_type: "webhook.test",
-          occurred_at: new Date().toISOString(),
-          team_id: teamId,
+          event_type: eventType,
+          test: true,
+          assignee: null,
+          message: {
+            messageId: deliveryId,
+            channelMessageId: null,
+            contactId: null,
+            channelId: channel?.id ?? null,
+            traffic: "incoming",
+            timestamp: Date.now(),
+            message: { type: "text", text: "This is a test delivery from your CCP webhook." },
+            media: null,
+          },
           channel,
-          data: { message: "This is a test delivery from your CCP webhook." },
+          sender: {
+            source: "contact",
+            userId: null,
+            teamId: null,
+            workflowId: null,
+            broadcastHistoryId: null,
+          },
         },
       },
       select: { id: true },
