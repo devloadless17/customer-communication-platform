@@ -32,7 +32,7 @@ CREATE TYPE "TemplateStatus" AS ENUM ('approved', 'pending', 'rejected', 'paused
 CREATE TYPE "TemplateCategory" AS ENUM ('marketing', 'utility', 'authentication');
 
 -- CreateEnum
-CREATE TYPE "BroadcastStatus" AS ENUM ('queued', 'running', 'completed', 'failed', 'canceled');
+CREATE TYPE "BroadcastStatus" AS ENUM ('queued', 'running', 'completed', 'failed', 'canceled', 'paused');
 
 -- CreateEnum
 CREATE TYPE "BroadcastRecipientStatus" AS ENUM ('queued', 'sent', 'failed');
@@ -47,7 +47,7 @@ CREATE TYPE "ConversationEventKind" AS ENUM ('assigned', 'status_changed', 'tag_
 CREATE TYPE "WorkflowTriggerEvent" AS ENUM ('message_received', 'conversation_created', 'conversation_opened', 'conversation_closed', 'conversation_assigned', 'conversation_status_changed', 'contact_field_updated', 'contact_tag_updated', 'contact_lifecycle_updated', 'manual_trigger', 'incoming_webhook');
 
 -- CreateEnum
-CREATE TYPE "WorkflowStepType" AS ENUM ('send_message', 'send_template', 'add_comment', 'assign_to', 'set_status', 'open_conversation', 'close_conversation', 'add_tag', 'remove_tag', 'update_field', 'update_lifecycle', 'branch', 'wait', 'jump_to_step', 'http_request', 'trigger_workflow');
+CREATE TYPE "WorkflowStepType" AS ENUM ('send_message', 'send_template', 'add_comment', 'assign_to', 'set_status', 'open_conversation', 'close_conversation', 'add_tag', 'remove_tag', 'update_field', 'update_lifecycle', 'branch', 'wait', 'jump_to_step', 'noop', 'ask_question', 'http_request', 'trigger_workflow');
 
 -- CreateEnum
 CREATE TYPE "WorkflowRunStatus" AS ENUM ('queued', 'running', 'waiting', 'completed', 'failed', 'skipped');
@@ -58,15 +58,23 @@ CREATE TABLE "Team" (
     "name" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "plan" "Plan" NOT NULL DEFAULT 'starter',
-    "metaPhoneNumberId" TEXT,
-    "metaDisplayPhoneNumber" TEXT,
-    "metaWabaId" TEXT,
-    "metaAccessToken" TEXT,
-    "metaAppSecret" TEXT,
-    "metaVerifyToken" TEXT,
-    "metaAppId" TEXT,
+    "contactPanelBuiltins" JSONB NOT NULL DEFAULT '{}',
 
     CONSTRAINT "Team_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "ChannelConnection" (
+    "id" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
+    "provider" "ProviderName" NOT NULL,
+    "config" JSONB NOT NULL DEFAULT '{}',
+    "secrets" JSONB NOT NULL DEFAULT '{}',
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "ChannelConnection_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -156,7 +164,6 @@ CREATE TABLE "Contact" (
     "lastName" TEXT,
     "language" TEXT,
     "countryCode" TEXT,
-    "assignedUserId" TEXT,
     "avatarUrl" TEXT,
     "email" TEXT,
     "location" TEXT,
@@ -190,6 +197,7 @@ CREATE TABLE "ContactFieldDefinition" (
     "key" TEXT NOT NULL,
     "label" TEXT NOT NULL,
     "order" INTEGER NOT NULL DEFAULT 0,
+    "isVisible" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "ContactFieldDefinition_pkey" PRIMARY KEY ("id")
@@ -200,6 +208,7 @@ CREATE TABLE "Conversation" (
     "id" TEXT NOT NULL,
     "teamId" TEXT NOT NULL,
     "contactId" TEXT NOT NULL,
+    "provider" "ProviderName" NOT NULL DEFAULT 'meta_cloud',
     "assignedUserId" TEXT,
     "status" "ConversationStatus" NOT NULL DEFAULT 'pending',
     "unreadCount" INTEGER NOT NULL DEFAULT 0,
@@ -250,6 +259,21 @@ CREATE TABLE "Message" (
     "replyToMessageId" TEXT,
 
     CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "OutboundSendAttempt" (
+    "id" TEXT NOT NULL,
+    "jobId" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
+    "conversationId" TEXT NOT NULL,
+    "attemptStartedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "completedAt" TIMESTAMP(3),
+    "externalId" TEXT,
+    "failedAt" TIMESTAMP(3),
+    "failureReason" TEXT,
+
+    CONSTRAINT "OutboundSendAttempt_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -390,12 +414,28 @@ CREATE TABLE "WorkflowRun" (
     "waitUntil" TIMESTAMP(3),
     "jumpsUsed" INTEGER NOT NULL DEFAULT 0,
     "stepLog" JSONB NOT NULL DEFAULT '[]',
+    "pendingAnswer" JSONB,
+    "stepOutputs" JSONB NOT NULL DEFAULT '{}',
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "errorMessage" TEXT,
     "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "finishedAt" TIMESTAMP(3),
 
     CONSTRAINT "WorkflowRun_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "WorkflowAwaitingReply" (
+    "id" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
+    "contactId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "workflowId" TEXT NOT NULL,
+    "stepId" TEXT NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "WorkflowAwaitingReply_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -478,16 +518,6 @@ CREATE TABLE "OutboundWebhookDelivery" (
 );
 
 -- CreateTable
-CREATE TABLE "ConversationReadReceipt" (
-    "id" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "conversationId" TEXT NOT NULL,
-    "lastReadAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "ConversationReadReceipt_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
 CREATE TABLE "ConversationEvent" (
     "id" TEXT NOT NULL,
     "conversationId" TEXT NOT NULL,
@@ -516,6 +546,16 @@ CREATE TABLE "TeamChannel" (
     "lastMessagePreview" TEXT NOT NULL DEFAULT '',
 
     CONSTRAINT "TeamChannel_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "TeamChannelMember" (
+    "channelId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "addedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "addedById" TEXT,
+
+    CONSTRAINT "TeamChannelMember_pkey" PRIMARY KEY ("channelId","userId")
 );
 
 -- CreateTable
@@ -633,7 +673,7 @@ CREATE TABLE "_AudienceGroupContacts" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Team_metaPhoneNumberId_key" ON "Team"("metaPhoneNumberId");
+CREATE UNIQUE INDEX "ChannelConnection_teamId_provider_key" ON "ChannelConnection"("teamId", "provider");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
@@ -670,9 +710,6 @@ CREATE INDEX "Contact_teamId_source_idx" ON "Contact"("teamId", "source");
 
 -- CreateIndex
 CREATE INDEX "Contact_teamId_stageId_idx" ON "Contact"("teamId", "stageId");
-
--- CreateIndex
-CREATE INDEX "Contact_teamId_assignedUserId_idx" ON "Contact"("teamId", "assignedUserId");
 
 -- CreateIndex
 CREATE INDEX "Contact_teamId_lastInboundAt_idx" ON "Contact"("teamId", "lastInboundAt" DESC);
@@ -727,6 +764,15 @@ CREATE INDEX "Message_conversationId_timestamp_id_idx" ON "Message"("conversatio
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Message_teamId_provider_externalId_key" ON "Message"("teamId", "provider", "externalId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "OutboundSendAttempt_jobId_key" ON "OutboundSendAttempt"("jobId");
+
+-- CreateIndex
+CREATE INDEX "OutboundSendAttempt_attemptStartedAt_idx" ON "OutboundSendAttempt"("attemptStartedAt");
+
+-- CreateIndex
+CREATE INDEX "OutboundSendAttempt_teamId_completedAt_idx" ON "OutboundSendAttempt"("teamId", "completedAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Invite_tokenHash_key" ON "Invite"("tokenHash");
@@ -786,6 +832,15 @@ CREATE INDEX "WorkflowRun_teamId_startedAt_idx" ON "WorkflowRun"("teamId", "star
 CREATE INDEX "WorkflowRun_status_waitUntil_idx" ON "WorkflowRun"("status", "waitUntil");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "WorkflowAwaitingReply_runId_key" ON "WorkflowAwaitingReply"("runId");
+
+-- CreateIndex
+CREATE INDEX "WorkflowAwaitingReply_teamId_contactId_idx" ON "WorkflowAwaitingReply"("teamId", "contactId");
+
+-- CreateIndex
+CREATE INDEX "WorkflowAwaitingReply_expiresAt_idx" ON "WorkflowAwaitingReply"("expiresAt");
+
+-- CreateIndex
 CREATE INDEX "WorkflowContactState_teamId_idx" ON "WorkflowContactState"("teamId");
 
 -- CreateIndex
@@ -813,12 +868,6 @@ CREATE INDEX "OutboundWebhookDelivery_webhookId_createdAt_idx" ON "OutboundWebho
 CREATE INDEX "OutboundWebhookDelivery_createdAt_idx" ON "OutboundWebhookDelivery"("createdAt");
 
 -- CreateIndex
-CREATE INDEX "ConversationReadReceipt_conversationId_idx" ON "ConversationReadReceipt"("conversationId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "ConversationReadReceipt_userId_conversationId_key" ON "ConversationReadReceipt"("userId", "conversationId");
-
--- CreateIndex
 CREATE INDEX "ConversationEvent_conversationId_at_idx" ON "ConversationEvent"("conversationId", "at" DESC);
 
 -- CreateIndex
@@ -826,6 +875,9 @@ CREATE INDEX "TeamChannel_teamId_lastMessageAt_idx" ON "TeamChannel"("teamId", "
 
 -- CreateIndex
 CREATE UNIQUE INDEX "TeamChannel_teamId_name_key" ON "TeamChannel"("teamId", "name");
+
+-- CreateIndex
+CREATE INDEX "TeamChannelMember_userId_idx" ON "TeamChannelMember"("userId");
 
 -- CreateIndex
 CREATE INDEX "TeamChannelMessage_channelId_createdAt_id_idx" ON "TeamChannelMessage"("channelId", "createdAt" DESC, "id" DESC);
@@ -876,6 +928,9 @@ CREATE INDEX "_AudienceGroupTags_B_index" ON "_AudienceGroupTags"("B");
 CREATE INDEX "_AudienceGroupContacts_B_index" ON "_AudienceGroupContacts"("B");
 
 -- AddForeignKey
+ALTER TABLE "ChannelConnection" ADD CONSTRAINT "ChannelConnection_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "User" ADD CONSTRAINT "User_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -895,9 +950,6 @@ ALTER TABLE "Contact" ADD CONSTRAINT "Contact_teamId_fkey" FOREIGN KEY ("teamId"
 
 -- AddForeignKey
 ALTER TABLE "Contact" ADD CONSTRAINT "Contact_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "ContactStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Contact" ADD CONSTRAINT "Contact_assignedUserId_fkey" FOREIGN KEY ("assignedUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ContactStage" ADD CONSTRAINT "ContactStage_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -925,6 +977,9 @@ ALTER TABLE "Message" ADD CONSTRAINT "Message_conversationId_fkey" FOREIGN KEY (
 
 -- AddForeignKey
 ALTER TABLE "Message" ADD CONSTRAINT "Message_senderUserId_fkey" FOREIGN KEY ("senderUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "OutboundSendAttempt" ADD CONSTRAINT "OutboundSendAttempt_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Invite" ADD CONSTRAINT "Invite_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -972,6 +1027,18 @@ ALTER TABLE "WorkflowRun" ADD CONSTRAINT "WorkflowRun_workflowId_fkey" FOREIGN K
 ALTER TABLE "WorkflowRun" ADD CONSTRAINT "WorkflowRun_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_runId_fkey" FOREIGN KEY ("runId") REFERENCES "WorkflowRun"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "WorkflowContactState" ADD CONSTRAINT "WorkflowContactState_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -990,12 +1057,6 @@ ALTER TABLE "OutboundWebhook" ADD CONSTRAINT "OutboundWebhook_teamId_fkey" FOREI
 ALTER TABLE "OutboundWebhookDelivery" ADD CONSTRAINT "OutboundWebhookDelivery_webhookId_fkey" FOREIGN KEY ("webhookId") REFERENCES "OutboundWebhook"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ConversationReadReceipt" ADD CONSTRAINT "ConversationReadReceipt_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "ConversationReadReceipt" ADD CONSTRAINT "ConversationReadReceipt_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -1012,6 +1073,15 @@ ALTER TABLE "TeamChannel" ADD CONSTRAINT "TeamChannel_teamId_fkey" FOREIGN KEY (
 
 -- AddForeignKey
 ALTER TABLE "TeamChannel" ADD CONSTRAINT "TeamChannel_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "TeamChannelMember" ADD CONSTRAINT "TeamChannelMember_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "TeamChannelMember" ADD CONSTRAINT "TeamChannelMember_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "TeamChannelMember" ADD CONSTRAINT "TeamChannelMember_addedById_fkey" FOREIGN KEY ("addedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "TeamChannelMessage" ADD CONSTRAINT "TeamChannelMessage_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -1073,32 +1143,11 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fk
 -- AddForeignKey
 ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- ---------------------------------------------------------------------------
--- Partial / expression indexes (raw SQL because Prisma can't model them).
--- The schema comments reference these by their pre-consolidation migration
--- filenames; they live here now after the init consolidation.
--- ---------------------------------------------------------------------------
 
--- Contact.customFields JSONB containment lookups (settings/contact-fields
--- filters, /v1 contact search). Without this the planner seqscans Contact.
+-- CreateIndex
+-- Hand-written: a jsonb_path_ops GIN index on Contact.customFields for the
+-- contact custom-field search/filter path. Prisma's schema DSL can't model
+-- jsonb_path_ops (the raw("jsonb_path_ops") emitter appends a redundant ASC
+-- that breaks), so this lives here, NOT in schema.prisma. See the Contact
+-- model comment. Keep this on every squash/regeneration of the init.
 CREATE INDEX "Contact_customFields_gin_idx" ON "Contact" USING GIN ("customFields" jsonb_path_ops);
-
--- At-most-one default ContactStage per team. Cheap partial unique that the
--- app-code pre-check still wraps with a friendlier 4xx, but this is the
--- backstop preventing two concurrent admin clicks from leaving two defaults.
-CREATE UNIQUE INDEX "ContactStage_teamId_isDefault_key" ON "ContactStage"("teamId") WHERE "isDefault" = true;
-
--- Inbound-only Message lookups: "what was the contact's last inbound?"
--- (24h-window UI, lastInboundAt drift sweeper, getConversationWithRefs).
--- Skips outbound rows so the working set stays small on chatty conversations.
-CREATE INDEX "Message_conversationId_timestamp_inbound_idx" ON "Message"("conversationId", "timestamp" DESC) WHERE "direction" = 'in';
-
--- Channel feed keyset: WHERE channelId = ? AND threadRootId IS NULL
--- ORDER BY createdAt DESC, id DESC. Top-level messages only; thread replies
--- ride the full (threadRootId, createdAt) index above.
-CREATE INDEX "TeamChannelMessage_channel_toplevel_keyset_idx" ON "TeamChannelMessage"("channelId", "createdAt" DESC, "id" DESC) WHERE "threadRootId" IS NULL;
-
--- OutboundEvent drainer hot path: pending rows (publishedAt IS NULL AND
--- failedAt IS NULL) ORDER BY createdAt ASC. The drainer polls this set;
--- a partial keeps the index tiny (steady-state ≈ in-flight events only).
-CREATE INDEX "OutboundEvent_drainer_pending_idx" ON "OutboundEvent"("createdAt") WHERE "publishedAt" IS NULL AND "failedAt" IS NULL;
