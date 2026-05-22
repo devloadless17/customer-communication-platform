@@ -73,6 +73,16 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # too late for these.
 ARG NEXT_PUBLIC_API_URL=""
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Build-time injection of the server→api upstream too. next.config.ts's
+# `rewrites()` reads INTERNAL_API_URL, but Next.js evaluates rewrites at
+# `next build` and bakes the result into routes-manifest.json — it is NOT
+# re-read from the runtime env. Without this, the `/api/*` proxy rewrite
+# bakes the host-dev fallback (127.0.0.1:4000) and every browser /api call
+# inside the compose network hits the web container itself → ECONNREFUSED.
+# Default to the compose service hostname; prod is unaffected because Caddy
+# fronts /api/* before Next.js, so the rewrite is a no-op there.
+ARG INTERNAL_API_URL="http://api:4000"
+ENV INTERNAL_API_URL=$INTERNAL_API_URL
 COPY apps/web ./apps/web
 COPY packages ./packages
 COPY prisma ./prisma
