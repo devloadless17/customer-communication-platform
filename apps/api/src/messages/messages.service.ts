@@ -154,6 +154,54 @@ export class MessagesService {
   }
 
   /**
+   * A human agent sending a reply is unambiguous proof they've viewed the
+   * thread, so clear team-wide unread on send. This closes the gap where the
+   * client's mark-read-on-mount is skipped because its CACHED unread snapshot
+   * is stale-low — a client-side chat-switch into a thread whose LRU snapshot
+   * predates inbound that arrived since. The agent reads + replies, but the DB
+   * unread never zeroes, and a later authoritative frame (e.g. a broadcast
+   * republishing the row's true count) then surfaces the stuck-high badge as a
+   * sudden "1 -> 3" jump for a thread nobody-thinks-is-unread.
+   *
+   * Mirrors ConversationsService.markRead's CAS — zero only if unchanged since
+   * the read, so a concurrent inbound bump isn't clobbered — and reuses the
+   * already-wired `conversation.read` event (every client reducer: list badge,
+   * cached snapshot, live thread already handles it), so no client change is
+   * needed. Deliberately NOT placed in the shared send-*-internal helpers:
+   * workflow auto-replies and external-API sends must NOT mark a thread read
+   * (no human viewed it) — only these session-authenticated controller entry
+   * points do. Fire-and-forget with a self-contained try/catch: a mark-read
+   * failure must never fail or delay the actual send.
+   */
+  private markReadOnAgentSend(teamId: string, userId: string, conversationId: string): void {
+    void (async () => {
+      try {
+        const convo = await this.db.conversation.findFirst({
+          where: { id: conversationId, teamId },
+          select: { unreadCount: true },
+        });
+        if (!convo || convo.unreadCount <= 0) return;
+        const result = await this.db.conversation.updateMany({
+          where: { id: conversationId, teamId, unreadCount: convo.unreadCount },
+          data: { unreadCount: 0 },
+        });
+        if (result.count > 0) {
+          await this.bus.publish({
+            type: "conversation.read",
+            teamId,
+            conversationId,
+            readByUserId: userId,
+          });
+        }
+      } catch (err) {
+        this.logger.debug(
+          `markReadOnAgentSend failed for ${conversationId}: ${String(err)}`,
+        );
+      }
+    })();
+  }
+
+  /**
    * Free-form text send — public HTTP entry point.
    *
    * Two-phase contract introduced in S1 (audit follow-up):
@@ -180,6 +228,7 @@ export class MessagesService {
     userId: string,
     input: SendTextInput,
   ): Promise<{ ok: true; clientTempId?: string }> {
+    this.markReadOnAgentSend(teamId, userId, input.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -702,6 +751,7 @@ export class MessagesService {
     form: SendMediaFormInput,
     file: Express.Multer.File,
   ): Promise<{ messageId: string | null; warning?: string }> {
+    this.markReadOnAgentSend(teamId, userId, form.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -1724,6 +1774,7 @@ export class MessagesService {
     userId: string,
     input: SendTemplateInput,
   ): Promise<{ messageId: string }> {
+    this.markReadOnAgentSend(teamId, userId, input.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -1791,6 +1842,7 @@ export class MessagesService {
     userId: string,
     input: import("./messages.schemas").SendInteractiveInput,
   ): Promise<{ messageId: string }> {
+    this.markReadOnAgentSend(teamId, userId, input.conversationId);
     try {
       const result = await sendInteractiveInternal({
         teamId,
