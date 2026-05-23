@@ -153,6 +153,11 @@ function MessageThreadImpl({
       dispatchLocalSocketEvent("contact:updated", {
         teamId: contact.teamId,
         contact: { ...contact, stageId: next },
+        // Optimistic: the PATCH below hasn't committed yet. Tells the inbox
+        // list to splice optimistically but NOT re-fetch (a pre-commit read
+        // would re-add this row to its old stage-filter; the post-commit
+        // server frame converges). See use-team-events onContactUpdated.
+        optimistic: true,
       });
       // Sidebar stage badges are computed from a server-fetched `byStage`
       // map (useConversationCounts). The `contact:updated` event triggers
@@ -178,6 +183,7 @@ function MessageThreadImpl({
         dispatchLocalSocketEvent("contact:updated", {
           teamId: contact.teamId,
           contact: { ...contact, stageId: prev },
+          optimistic: true,
         });
         if (prev !== next && typeof window !== "undefined") {
           window.dispatchEvent(

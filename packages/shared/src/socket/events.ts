@@ -161,6 +161,15 @@ export interface ServerToClientEvents {
   "contact:updated": (payload: {
     teamId: string;
     contact: Contact;
+    /**
+     * Set ONLY by client-side optimistic dispatches (dispatchLocalSocketEvent),
+     * before the corresponding PATCH has committed. Server fan-out never sets
+     * it. Consumers that re-fetch from the server on this event (e.g. the inbox
+     * list's stage-filter re-sync) MUST skip that re-fetch when this is true —
+     * otherwise the read can beat the in-flight write and re-introduce a stale
+     * row. The post-commit server frame (optimistic absent) drives convergence.
+     */
+    optimistic?: boolean;
   }) => void;
 
   /**

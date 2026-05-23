@@ -449,19 +449,27 @@ export function useTeamEvents(
         // dropped event or out-of-order delivery can't drift the local
         // mirror — each frame replaces the value rather than adding to it.
         const isActive = activeIdRef.current === conversationId;
+        // Recency guard — only advance the preview / lastMessageAt / sort
+        // position / unread when this frame is STRICTLY newer than what the row
+        // already shows. The server sends the effective-newest summary, but
+        // Socket.io connection-state-recovery can REPLAY buffered frames on
+        // reconnect, and a late/out-of-order delivery can re-arrive after the
+        // row already absorbed that exact message. Must be `>` not `>=`: a
+        // replay of the SAME message carries `lastMessageAt === row.lastMessageAt`
+        // (the row was set from that very frame the first time), so `>=` would
+        // treat the replay as "new" — re-unshifting the row to the top AND
+        // re-applying the frame's stale ABSOLUTE unreadCount (e.g. 1) on top of
+        // a count the agent has since cleared to 0. That's the "unread reappears
+        // after I already read it / row jumps to top" bug. `>` makes a replay a
+        // no-op for position + unread; the count below stays at the row's value.
+        const advances = lastMessageAt > existing.conversation.lastMessageAt;
+        // The frame carries the ABSOLUTE team-wide unread count. Apply it only
+        // for a strictly-newer inbound frame the agent isn't viewing — gating on
+        // `advances` is what stops a replay from regressing a cleared count.
         const nextUnread =
-          message.direction === "in" && !isActive
+          message.direction === "in" && !isActive && advances
             ? unreadCount
             : existing.conversation.unreadCount;
-        // Recency guard — only advance the preview / lastMessageAt / sort
-        // position when this frame is at least as new as what the row already
-        // shows. The server now sends the effective-newest summary, but
-        // Socket.io connection-state-recovery can REPLAY buffered frames on
-        // reconnect, and an out-of-order replay must not regress the row to an
-        // older message (the same class of bug the inbound ingest guard fixes
-        // server-side). Counts/flags below still apply unconditionally —
-        // they're tallies, not a "latest" pointer.
-        const advances = lastMessageAt >= existing.conversation.lastMessageAt;
         const updated: ConversationWithRefs = {
           ...existing,
           conversation: {
@@ -661,6 +669,7 @@ export function useTeamEvents(
     // untouched (the map keeps stable references where it can).
     const onContactUpdated: Parameters<typeof socket.on<"contact:updated">>[1] = ({
       contact,
+      optimistic,
     }) => {
       setConversations((prev) => {
         const f = filterRef.current;
@@ -705,7 +714,14 @@ export function useTeamEvents(
         }
         return changed ? next : prev;
       });
-      scheduleFilterResync();
+      // Skip the server re-sync for OPTIMISTIC local dispatches: the PATCH that
+      // persists the change hasn't committed yet, so a re-fetch here can read
+      // the PRE-change state and re-add a row we just spliced out — leaving it
+      // stuck in (e.g.) a stage filter. resyncOnce merges-without-pruning, so
+      // that stale row then survives even the later post-commit re-sync. The
+      // optimistic splice in/out above is already correct; the post-commit
+      // SERVER frame (optimistic absent) drives convergence.
+      if (!optimistic) scheduleFilterResync();
     };
 
     // Coalesced bulk version. Server fires this from bulk-tag / bulk-stage /
