@@ -501,33 +501,42 @@ export class ConversationsService {
   async markRead(teamId: string, userId: string, conversationId: string): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
-      select: { id: true, unreadCount: true, lastMessageAt: true },
+      select: { id: true, unreadCount: true },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
-    // Always look up the latest inbound — a teammate may have local-marked
-    // without notifying Meta. Skip only when there's no inbound at all.
+    // Fast path: already read. The client now calls markRead on EVERY visible
+    // thread mount (not just when its cached snapshot claims unread>0) so the
+    // team-wide counter converges to server truth even when that snapshot was
+    // stale-low — see use-conversation-events. That makes the "already read"
+    // call the common case, so keep it to a single cheap read with NO Meta
+    // round-trip: the markRead that originally cleared the counter already sent
+    // the read receipt, and re-sending it on every open would spam Meta's API
+    // (and burn rate budget) for zero benefit.
+    if (conversation.unreadCount <= 0) return;
+
+    const result = await this.db.conversation.updateMany({
+      where: { id: conversationId, teamId, unreadCount: conversation.unreadCount },
+      data: { unreadCount: 0 },
+    });
+    if (result.count > 0) {
+      await this.bus.publish({
+        type: "conversation.read",
+        teamId,
+        conversationId,
+        readByUserId: userId,
+      });
+    }
+
+    // Meta read receipt (best-effort) — only when there was unread to clear.
+    // A CAS that lost (a concurrent inbound bumped the counter between the read
+    // and the update) still sends it: the agent IS looking, so mark the latest
+    // inbound read on Meta regardless of who won the counter race.
     const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },
       select: { externalId: true, channel: true },
     });
-
-    if (conversation.unreadCount > 0) {
-      const result = await this.db.conversation.updateMany({
-        where: { id: conversationId, teamId, unreadCount: conversation.unreadCount },
-        data: { unreadCount: 0 },
-      });
-      if (result.count > 0) {
-        await this.bus.publish({
-          type: "conversation.read",
-          teamId,
-          conversationId,
-          readByUserId: userId,
-        });
-      }
-    }
-
     if (latestInbound) {
       void this.markIncomingReadBestEffort(
         teamId,

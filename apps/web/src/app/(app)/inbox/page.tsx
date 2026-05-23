@@ -17,10 +17,13 @@ import { InboxShell } from "@/features/inbox/components/inbox-shell";
 /**
  * Single-page inbox workspace.
  *
- * Reads the active conversation from `?c=<id>` so chat switching can happen
- * entirely client-side via `history.pushState` — no segment unmount, no
- * server round-trip, no loading skeleton. Direct URL hits and hard refreshes
- * still SSR the picked thread (below) so the first paint isn't blank.
+ * `?c=<id>` is read ONLY to SSR a thread on a direct ENTRY (a shared link or
+ * the /inbox/[conversationId] redirect below) so the first paint isn't blank.
+ * In-app chat switching is client-state only — the shell does NOT write `?c=`
+ * to the URL (see the InboxShell header), so the steady-state URL is plain
+ * /inbox and a HARD refresh deliberately lands on the empty "pick a
+ * conversation" state (`initialThread` is null). A SOFT refresh keeps the
+ * thread via preserved client state.
  *
  * The /inbox/[conversationId] route still exists as a 307 redirect to keep
  * old links / bookmarks / external referrers working; everything inside the

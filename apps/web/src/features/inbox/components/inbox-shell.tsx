@@ -73,22 +73,28 @@ const FETCH_TIMEOUT_MS = 30_000;
  *
  * Owns the active conversation id as internal state so chat switching is a
  * client-only state swap — no Next.js navigation, no segment unmount, no
- * loading skeleton flash. The URL is kept in sync via `history.pushState` so
- * deep links, browser back/forward, and bookmark/share all still work.
+ * loading skeleton flash.
+ *
+ * Selection is CLIENT-STATE ONLY — we do NOT push `?c=<id>` into the URL on a
+ * chat switch. The URL stays at /inbox, so a HARD browser refresh lands on the
+ * clean "pick a conversation" empty state (SSR sees no `?c=` → null thread),
+ * while a SOFT refresh (`router.refresh()` from a mutation) preserves this
+ * client state and keeps you on the thread — no bounce. Deliberate UX choice
+ * (see [[project_nav_shell_ux_decisions_2026_05_23]]); the tradeoff is no
+ * per-thread shareable URL and no browser back/forward between threads. A
+ * direct /inbox?c=<id> link still opens that thread on first load (page.tsx
+ * SSRs it), so external/bookmarked deep-links keep working on ENTRY.
  *
  * Per-thread data flow:
- *   1. SSR seeds the cache with `initialThread` (when the inbound URL had
- *      ?c=<id>). First paint = full thread visible.
+ *   1. SSR seeds the cache with `initialThread` (only when the inbound URL had
+ *      ?c=<id>, e.g. a direct link). First paint = full thread visible.
  *   2. Clicking a chat in the list calls `openConversation(id)`:
  *        a. Internal state flips → the row's `active` style updates instantly.
- *        b. `history.pushState` updates the URL so refresh / share still work.
- *        c. Cache lookup. Hit → render the new thread immediately. Miss →
+ *        b. Cache lookup. Hit → render the new thread immediately. Miss →
  *           keep the previously-displayed thread on screen while a fetch
  *           lands in the background. If there's nothing to fall back to
  *           (first cold click), render a chat-shaped skeleton with the
  *           target contact's name pulled from the team-events list.
- *   3. Browser back/forward → `popstate` listener reads `?c=` from
- *      window.location and re-runs the same flow.
  *
  * Cache freshness for non-displayed threads: a shell-level socket listener
  * EVICTS the cached snapshot of any conversation that received a `message:new`
@@ -192,11 +198,15 @@ export function InboxShell({
   });
 
   // Render-time prop sync. The "did the SSR'd value actually change" guard
-  // is critical — our own openConversation() uses history.pushState which
-  // doesn't re-run page.tsx, so initialActiveConversationId stays stable
-  // across normal click navigation. Sync only fires when something else
-  // (router.replace from useConversationEvents on deletion, an external
-  // navigation back to /inbox with a new ?c=) changes the SSR'd value.
+  // is critical — openConversation() switches threads purely in client state
+  // (no navigation, no `?c=`), so page.tsx doesn't re-run and
+  // initialActiveConversationId stays stable across normal click navigation.
+  // On the steady-state /inbox URL it's null, so this sync is a no-op on a
+  // soft refresh (null === null) and the active thread is NOT reset — that's
+  // what keeps soft-refresh on the thread while a hard refresh shows empty.
+  // Sync only fires when something else (router.replace from
+  // useConversationEvents on deletion, an external navigation / direct link to
+  // /inbox with a new ?c=) actually changes the SSR'd value.
   const [lastSyncedInitialId, setLastSyncedInitialId] = useState(initialActiveConversationId);
   if (lastSyncedInitialId !== initialActiveConversationId) {
     setLastSyncedInitialId(initialActiveConversationId);
@@ -309,10 +319,11 @@ export function InboxShell({
       // displayedId alone — fetchThread will update it when the data lands.
       if (cached) setDisplayedId(conversationId);
 
-      if (typeof window !== "undefined") {
-        const url = `/inbox?c=${encodeURIComponent(conversationId)}`;
-        window.history.pushState(null, "", url);
-      }
+      // Intentionally NO `history.pushState("?c=<id>")` here — selection is
+      // client-state only so a hard refresh lands on the empty state (see the
+      // file header). The SSR sync block (initialActiveConversationId) is left
+      // untouched: on the normal /inbox flow it stays null, so a soft refresh
+      // never resets this selection.
 
       if (!cached) {
         void fetchThread(conversationId);
@@ -683,7 +694,9 @@ export function InboxShell({
     setPendingId(null);
     setErrorId(null);
     if (typeof window !== "undefined") {
-      window.history.pushState(null, "", "/inbox");
+      // replaceState (not push) — selection isn't URL-backed, so there's no
+      // ?c= to strip and we don't want a stray /inbox history entry.
+      window.history.replaceState(null, "", "/inbox");
     }
   }, []);
 

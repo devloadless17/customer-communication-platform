@@ -312,11 +312,13 @@ export function useConversationEvents(
   );
 
   // Mark-read coordination. The shell tells us via `onMarkRead` to patch
-  // the cached unreadCount=0 after the POST succeeds, so re-mounting the
-  // thread (chat-switch back) finds initialUnread=0 and skips the POST.
-  // Throttled via `useCoalescedAsync` — a burst of inbound messages fires
-  // one POST instead of N; same util backs the team-chat hook so the
-  // pattern stays consistent across both surfaces.
+  // the cached unreadCount=0 after the POST succeeds, so the list badge + LRU
+  // snapshot converge without waiting on the server's one-shot read frame.
+  // The mount effect below POSTs on every visible open regardless of the
+  // cached count (see its comment) — the server short-circuits the already-read
+  // case cheaply. Throttled via `useCoalescedAsync` — a burst of inbound
+  // messages (or rapid chat switching) fires one POST instead of N; same util
+  // backs the team-chat hook so the pattern stays consistent across surfaces.
   const onMarkReadRef = useRef(onMarkRead);
   onMarkReadRef.current = onMarkRead;
   const markRead = useCoalescedAsync(async () => {
@@ -328,26 +330,31 @@ export function useConversationEvents(
     }
   }, [conversationId]);
 
-  // Mark read when the thread becomes visible. The shell remounts this
-  // hook on every chat switch (via key=displayedId), and on remount we read
-  // initial.conversation.unreadCount from the cache — which the shell's
-  // onMarkRead callback has already patched to 0 if we marked the thread
-  // read earlier in this session. Net effect: at most one POST per
-  // (conversation × unread-cycle), even with rapid chat switching.
-  const initialUnread = initial.conversation.unreadCount;
+  // Mark read on mount when the agent is actually looking. The shell remounts
+  // this hook on every chat switch (via key=displayedId).
+  //
+  // We deliberately do NOT gate on the cached `initial.conversation.unreadCount`
+  // snapshot. On a client-side chat-switch that snapshot can be stale-LOW: it
+  // predates inbound that landed while the thread sat in the inbox LRU, so the
+  // DB counter is genuinely >0 while the snapshot reads 0. Trusting it skipped
+  // the POST and left the team-wide counter stuck-high until a later
+  // authoritative frame (e.g. a broadcast republishing the row's true count)
+  // surfaced it as a sudden badge jump. Always POST instead — the server
+  // markRead is a single cheap read when the counter is already 0 (and sends no
+  // redundant Meta read-receipt), and `markRead` is coalesced, so the over-call
+  // on an already-read thread is negligible. This makes convergence-on-open
+  // independent of the fragile reconnect/backfill timing that's supposed to
+  // catch the same case.
   useEffect(() => {
-    if (initialUnread <= 0) return;
-    // Only mark read when the agent is actually looking. If the thread mounts
-    // while the tab is hidden (e.g. cmd-click into a background tab), defer —
-    // onVisibility clears it on return, same rule as live inbounds. Without
-    // this, opening a thread into a background tab would clear team-wide unread
-    // for a thread nobody actually viewed.
+    // Still defer when hidden: a thread mounting into a background tab (cmd-click)
+    // must not clear team-wide unread for a message nobody viewed. onVisibility
+    // fires the deferred read on return, same rule as live inbounds.
     if (typeof document === "undefined" || document.visibilityState === "visible") {
       void markRead();
     } else {
       sawInboundWhileHiddenRef.current = true;
     }
-  }, [markRead, initialUnread]);
+  }, [markRead]);
 
   useEffect(() => {
     const socket = getClientSocket();
