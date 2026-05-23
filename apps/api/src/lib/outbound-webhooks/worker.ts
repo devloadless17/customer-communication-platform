@@ -483,52 +483,42 @@ async function recordFailure(
 }
 
 /**
- * Pull the originating API-key id out of a public-event envelope, if any.
+ * Pull the originating API-key id out of a delivered webhook payload, if any.
  *
- * Public envelope shape varies per event type. The two shapes that carry
- * an API-key sender today:
- *   - message.sent:     `data.message.sender.type === "api"` + `.sender.id`
- *   - message.received: never API-keyed (always a contact sender)
- *   - contact.*:        `data.changed_by.type === "api"` + `.changed_by.id`
- *   - note.created:     `data.note.author.type === "api"` (rare today)
- *   - conversation.*:   `data.changed_by.type === "api"` + `.changed_by.id`
+ * `delivery.payload` is the FLAT wire shape produced by `toWirePayload`
+ * (NOT the internal enveloped `PublicEnvelope`), so the api-key id lives on:
+ *   - message.sent:     `payload.sender.apiKeyId`  (wireSender, type "api")
+ *   - message.received: never api-keyed (contact sender → apiKeyId null)
+ *   - contact.*:        flat `payload.changedByApiKeyId` / `createdByApiKeyId`
+ *                       / `deletedByApiKeyId`
+ *   - conversation.*:   flat `payload.changedByApiKeyId`
+ *   - note.created:     no api-key origin on the wire today
  *
- * Returns null on any payload shape we don't recognize — the partner
- * just won't receive the loop-detection header, no harm done. JSON
- * structure check is defensive: a partner's bad webhook URL change
- * shouldn't tank deliveries with a TypeError on a missing nested field.
+ * Returns null on any shape we don't recognize — the partner just won't get
+ * the loop-detection header, no harm done. The structure checks are defensive:
+ * a malformed payload must not tank delivery with a TypeError.
+ *
+ * NOTE: this MUST stay in lockstep with `toWirePayload` / `wireSender` in
+ * packages/shared/src/outbound-webhooks/public-events.ts — the prior version
+ * read the old enveloped shape (`data.message.sender.{type,id}`) and so
+ * silently always returned null after the flat-wire migration.
  */
 function extractOriginApiKeyId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
-  const data = (payload as { data?: unknown }).data;
-  if (!data || typeof data !== "object") return null;
+  const p = payload as Record<string, unknown>;
 
-  const candidates: Array<{ type?: unknown; id?: unknown }> = [];
-  const d = data as Record<string, unknown>;
-  // message.* envelopes nest sender on the message
-  const msg = d.message;
-  if (msg && typeof msg === "object") {
-    const sender = (msg as { sender?: unknown }).sender;
-    if (sender && typeof sender === "object") {
-      candidates.push(sender as { type?: unknown; id?: unknown });
-    }
-  }
-  // contact.* / conversation.* envelopes nest the actor on changed_by
-  const changedBy = d.changed_by;
-  if (changedBy && typeof changedBy === "object") {
-    candidates.push(changedBy as { type?: unknown; id?: unknown });
-  }
-  // note.created envelope nests on note.author
-  const note = d.note;
-  if (note && typeof note === "object") {
-    const author = (note as { author?: unknown }).author;
-    if (author && typeof author === "object") {
-      candidates.push(author as { type?: unknown; id?: unknown });
-    }
+  // message.* — wireSender carries the api key id on `sender.apiKeyId`.
+  const sender = p.sender;
+  if (sender && typeof sender === "object") {
+    const id = (sender as { apiKeyId?: unknown }).apiKeyId;
+    if (typeof id === "string" && id) return id;
   }
 
-  for (const c of candidates) {
-    if (c.type === "api" && typeof c.id === "string" && c.id) return c.id;
+  // contact.* / conversation.* — flat top-level *ApiKeyId fields.
+  for (const key of ["changedByApiKeyId", "createdByApiKeyId", "deletedByApiKeyId"] as const) {
+    const v = p[key];
+    if (typeof v === "string" && v) return v;
   }
+
   return null;
 }

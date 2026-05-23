@@ -96,3 +96,32 @@ misses app-level enforcement (`version` CAS), conflates distinct tables (the two
 outbox tables; the send-attempt ledger), and reads deliberate documented denorm as
 accidental redundancy. It told us to delete three things review #1 correctly kept
 (`version`, `OutboundEvent`, `ApiIdempotencyKey`).
+
+## Third schema review (2026-05-23)
+A third reviewer — markedly more generous than #1/#2, explicitly retracted its
+earlier "cut to 12 tables" advice and rated the schema "top 10% of v1 SaaS." But
+its 5 "must do before live" items repeat the same pattern: each was already built,
+solved a cleaner way, or (in one case) would *introduce* a bug if applied. Every
+claim was verified against the live schema + app code before this verdict.
+
+**Score: 0 new actionable finds out of 9 points; 1 verification (password) + 1
+defensive doc-hardening done as a result.**
+
+| # | Claim ("must do" starred) | Verdict | Why (verified) |
+|---|---|---|---|
+| 1★ | Partial-unique `Contact.phoneNumber` (skip soft-deleted) | ❌ **Would break things** | Re-contact RESURRECTS, not re-creates: `ingest.ts` upserts on `teamId_phoneNumber` and clears `deletedAt`. The FULL unique is load-bearing for that `ON CONFLICT`; a partial index hides the tombstone → 2nd live row → fragmented history (violates one-conversation-per-contact). Guard-comment added on the `@@unique`. |
+| 2★ | Add `Conversation.serviceWindowExpiresAt` | ❌ Already solved, and a column would be *worse* | `computeWindowStatus(lastInboundAt, now)` (packages/shared/src/utils/window.ts) DERIVES `expiresAt = lastInboundAt + 24h` and is parameterized on `now` so the badge ticks down live each second with no refetch. The conversation list already selects `Contact.lastInboundAt` per row (conversations.ts:186) — free. A stored `serviceWindowExpiresAt` duplicates `lastInboundAt + 24h` AND can't tick. |
+| 3★ | Decide/document `ContactStage` deletion policy | ✅ Already done, as recommended | `stages.service.ts:remove` REFUSES delete of an in-use stage (`ConflictException` + count) and of the default-with-siblings. `SET NULL` is only the DB backstop. This is the reviewer's preferred RESTRICT option, already shipped. |
+| 4★ | Partial-unique `MessageTemplate.externalId` when non-null | 🟡 Optional, marginal | Sync upserts by natural key `(teamId, name, language)`, not externalId; Meta issues one id per name+language so a dup can't arise in practice. Harmless belt-and-suspenders; not done (needs migration, gated on Docker per schema-foundation plan). |
+| 5★ | Confirm `Account.password` is hashed | ✅ Verified | `better-auth.ts`: `passwordHash: bcrypt.hash(password, BCRYPT_COST)`. bcrypt + explicit cost, never plaintext. No P0. |
+| 6 | `Channel` enum has only `whatsapp` | Intentional + locked | The channel-vs-provider remodel landed 2026-05-22 (provider concept removed). `ALTER TYPE … ADD VALUE` is the cheap, additive path — the whole point of the dormant seam. |
+| 7 | `LoginAttempt` has no `teamId` | Intentional + already documented | Schema comment says attempts predate knowing the team → platform layer. (Minor correction: not the *only* such table — Session/Account/Verification are Better Auth platform tables too.) |
+| 8 | `threadRootId` cascade; add `Message.editedAt` | Cascade intentional; `editedAt` premature | Deleting a thread root drops the thread (no Slack-style tombstone) — documented choice. `editedAt` is dead schema until WhatsApp edit-webhook ingestion exists; add it *with* the handler. |
+| 9 | Don't GIN-index `WorkflowRun.graphSnapshot` | ✅ Already correct + documented | Looked up by run id only; comment already says so. No GIN. |
+
+**Tells (same pattern as #1/#2):** assumes a generic strategy (re-create on
+re-contact) without checking the code that chose the opposite (resurrection);
+re-proposes a policy already enforced one layer up (stage-delete RESTRICT); reads a
+single-source-of-truth denorm as a missing column. Net: the schema was *ahead* of
+where the reviewer assumed. Only durable risk remains over-tinkering — items 1–3
+left alone, 4 optional, 8's `editedAt` deferred to its feature.

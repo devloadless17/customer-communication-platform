@@ -257,6 +257,11 @@ export async function getConversationWithRefs(
         include: { replyTo: REPLY_TO_INCLUDE },
       },
       notes: { orderBy: { timestamp: "asc" } },
+      // Totals computed in the SAME round-trip via a relation aggregate —
+      // replaces two separate count() queries (one per message + note) that
+      // ran on every thread open (a hot path: chat-switch cache-miss + reconnect
+      // refetch). Same numbers, two fewer round-trips.
+      _count: { select: { messages: true, notes: true } },
     },
   });
   if (!row) return null;
@@ -274,10 +279,8 @@ export async function getConversationWithRefs(
   // `Contact.lastInboundAt` column maintained by the ingest path — the
   // previous Message scan with a join through Conversation seq-scanned
   // a heavy contact's entire history on every thread open.
-  const [messageCount, noteCount] = await Promise.all([
-    db.message.count({ where: { conversationId } }),
-    db.internalNote.count({ where: { conversationId } }),
-  ]);
+  const messageCount = row._count.messages;
+  const noteCount = row._count.notes;
   const lastInboundAtIso = row.contact.lastInboundAt
     ? row.contact.lastInboundAt.toISOString()
     : null;

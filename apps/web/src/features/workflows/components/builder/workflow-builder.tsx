@@ -45,13 +45,12 @@ import {
  *   - Palette is always visible (drag-and-click to add steps)
  *   - Drawer is contextual: opens when the user selects a node OR clicks
  *     the trigger card. Closes via X / Escape / clicking the canvas pane.
- *   - Top bar carries name + enabled toggle + Save/Publish/Test buttons.
+ *   - Top bar carries name + Draft↔Live toggle + Save/Test buttons.
  */
 
 interface InitialWorkflow {
   id: string;
   name: string;
-  enabled: boolean;
   published: boolean;
   trigger: Trigger;
   triggerConfig: Record<string, unknown>;
@@ -72,7 +71,6 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   const { confirm, confirmDialog } = useConfirm();
 
   const [name, setName] = useState(workflow?.name ?? "Untitled workflow");
-  const [enabled, setEnabled] = useState(workflow?.enabled ?? true);
   const [published, setPublished] = useState(workflow?.published ?? false);
   const [trigger, setTrigger] = useState<Trigger>(workflow?.trigger ?? "message_received");
   const [triggerConfig, setTriggerConfig] = useState<Record<string, unknown>>(
@@ -107,12 +105,11 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     }, 1500);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, enabled, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
+  }, [name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
 
   async function persist(opts: { silent?: boolean } = {}): Promise<boolean> {
     const body = {
       name,
-      enabled,
       trigger,
       triggerConfig,
       triggerConditions,
@@ -157,20 +154,25 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     });
   }
 
-  async function handlePublishToggle() {
+  // Single Draft ↔ Live control. `published` is the only gate — Live = the
+  // dispatcher runs it; Draft = it doesn't (still editable + test-runnable).
+  // Going Live saves the canvas then publishes; going Draft just unpublishes.
+  // The /publish endpoint runs the stricter publish-tier validation.
+  async function handleLiveToggle() {
     setTopErrors([]);
-    // Save first so the publish endpoint validates against the latest
-    // canvas. Skip when create mode — publish is only meaningful on a
-    // saved row.
+    // Publish is only meaningful on a saved row. Skip in create mode (the
+    // control is disabled there anyway).
     if (mode !== "edit" || !workflow) return;
-    const ok = await persist({ silent: true });
-    if (!ok) return;
-
-    const next = !published;
+    const goLive = !published;
+    if (goLive) {
+      // Save the latest canvas first so /publish validates what's on screen.
+      const ok = await persist({ silent: true });
+      if (!ok) return;
+    }
     const res = await fetch(`/api/team/workflows/${workflow.id}/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ publish: next }),
+      body: JSON.stringify({ publish: goLive }),
     });
     const json = (await res.json().catch(() => ({}))) as {
       error?: string;
@@ -182,7 +184,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       if (json.stepErrors) setStepErrors(json.stepErrors);
       return;
     }
-    setPublished(next);
+    setPublished(goLive);
     softRefresh();
   }
 
@@ -287,6 +289,8 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
 
   const selectedNode = graph.nodes.find((n) => n.id === selectedStepId) ?? null;
   const triggerMeta = TRIGGER_OPTIONS.find((t) => t.value === trigger);
+  // Live = the dispatcher runs it (published). Draft otherwise.
+  const isLive = published;
 
   return (
     <form className="flex h-svh flex-col" onSubmit={handleSave}>
@@ -301,29 +305,22 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
           />
           <button
             type="button"
-            onClick={() => setEnabled((v) => !v)}
+            onClick={handleLiveToggle}
+            disabled={mode !== "edit"}
+            title={
+              isLive
+                ? "Running on live triggers — click to switch back to a draft"
+                : "Draft (not running) — click to validate and go live"
+            }
             className={
-              "flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors " +
-              (enabled
+              "flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors disabled:opacity-50 " +
+              (isLive
                 ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                 : "border-border bg-muted text-muted-foreground")
             }
           >
             <Power className="size-3.5" />
-            {enabled ? "Enabled" : "Disabled"}
-          </button>
-          <button
-            type="button"
-            onClick={handlePublishToggle}
-            disabled={mode !== "edit"}
-            className={
-              "flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors disabled:opacity-50 " +
-              (published
-                ? "border-primary/60 bg-primary/10 text-primary"
-                : "border-border bg-muted text-muted-foreground")
-            }
-          >
-            {published ? "Published" : "Draft"}
+            {isLive ? "Live" : "Draft"}
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-2">

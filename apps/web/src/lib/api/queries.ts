@@ -450,7 +450,6 @@ export async function listOutboundWebhooks(): Promise<OutboundWebhookListItem[]>
 export interface WorkflowListItem {
   id: string;
   name: string;
-  enabled: boolean;
   published: boolean;
   trigger: string;
   stepCount: number;

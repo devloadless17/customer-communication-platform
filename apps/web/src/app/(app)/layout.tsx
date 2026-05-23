@@ -1,8 +1,15 @@
+import { cookies } from "next/headers";
+
 import { AppRail } from "@/components/layouts/app-rail";
 import { ChunkErrorReload } from "@/components/chunk-error-reload";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
+
+/** Rail collapse cookie — read server-side so SSR renders the persisted state
+ *  (no expand→collapse flash). Default COLLAPSED: only an explicit "false"
+ *  (the user expanded it) keeps it open. Written client-side in app-rail.tsx. */
+const RAIL_COLLAPSED_COOKIE = "app-rail-collapsed";
 
 /**
  * Shared authenticated shell. Wraps every section (inbox, team, contacts,
@@ -37,7 +44,12 @@ export default async function AppShellLayout({
   // serialized two RTTs on the gating layout for every authenticated page
   // render. Both are React.cached so child layouts re-calling them are
   // free cache hits.
-  const [{ user }, team] = await Promise.all([getSession(), getCurrentTeam()]);
+  const [{ user }, team, cookieStore] = await Promise.all([
+    getSession(),
+    getCurrentTeam(),
+    cookies(),
+  ]);
+  const railCollapsed = cookieStore.get(RAIL_COLLAPSED_COOKIE)?.value !== "false";
 
   return (
     <CatalogSyncBoundary>
@@ -53,7 +65,11 @@ export default async function AppShellLayout({
           islands, so they're unaffected. Popovers/toasts portal to body, so
           overflow-hidden here doesn't clip overlays. */}
       <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
-        <AppRail currentUser={user} team={{ id: team.id, name: team.name }} />
+        <AppRail
+          currentUser={user}
+          team={{ id: team.id, name: team.name }}
+          initialCollapsed={railCollapsed}
+        />
         <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
       </div>
     </CatalogSyncBoundary>

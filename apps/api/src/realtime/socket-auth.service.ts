@@ -29,8 +29,11 @@ export type SocketAuthResult =
   | { kind: "unavailable" };
 
 /**
- * Socket.io handshake authentication. Runs once per real connect (not once
- * per recovered reconnect — see `skipMiddlewares` in ws-adapter.ts).
+ * Socket.io handshake authentication. Runs on every real connect AND on every
+ * recovered reconnect — ws-adapter keeps `skipMiddlewares` at its default
+ * (false) so re-auth always runs (closes the deactivation-survival window).
+ * The reconnect-storm DB cost is absorbed by the 15s session cache below, not
+ * by skipping the handshake.
  *
  * Mirrors lib/socket/server.ts exactly:
  *   1. Forward the cookie header into Better Auth's getSession.

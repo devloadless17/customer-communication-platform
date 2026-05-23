@@ -10,8 +10,9 @@ import { SOCKET_PATH } from "@ccp/shared/socket/events";
  *
  * Notable choices:
  *   - `path` MUST match the client (`SOCKET_PATH = "/api/socket"`).
- *   - `connectionStateRecovery` replays missed events for up to 2 min so a
- *     tab-sleep or wifi blip doesn't leave the inbox stale.
+ *   - `connectionStateRecovery` replays missed events for up to 30s (see
+ *     maxDisconnectionDuration below) so a tab-sleep or wifi blip doesn't
+ *     leave the inbox stale.
  *   - `skipMiddlewares: false` (default): the auth handshake re-runs on
  *     every recovered reconnect. Earlier `true` lookalike caused two
  *     classes of bug — (1) a deactivated user with a closed laptop could

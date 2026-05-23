@@ -94,10 +94,11 @@ const MAX_RECIPIENTS_IN_PROCESS = 10_000;
 
 /**
  * Per-broadcast 429 streak tracking. Keyed by broadcast id; bumped on
- * each rate_limited send; reset on either a successful send or after
- * the pause fires. The map is bounded — entries are deleted when the
- * broadcast completes / fails (see clearBroadcast429State at the end of
- * each run). Worst case: an aborted process leaves stale entries; the
+ * each rate_limited send; the 30s window decays it, and it's reset after
+ * the pause fires and at run end. The map is bounded — both this and
+ * PAUSE_429 are deleted when the broadcast completes / fails (the
+ * `reset429Streak` + `PAUSE_429.delete` pair after the lane loop drains).
+ * Worst case: an aborted process leaves stale entries; the
  * orphan reconciler at boot doesn't touch this in-memory map, but it
  * grows-bounded with one entry per concurrent broadcast (at MAX_RECIPIENTS
  * = 10k and one running broadcast at a time, the map holds 1 entry).
@@ -118,6 +119,29 @@ function rate429Streak(broadcastId: string): number {
 }
 function reset429Streak(broadcastId: string): void {
   STREAK_429.delete(broadcastId);
+}
+
+/**
+ * Cross-lane 429 backoff. When one lane sees the streak cross the threshold it
+ * stamps a deadline here; EVERY lane checks it at the top of its loop and sleeps
+ * out the remainder before pulling the next recipient. Without this the pause
+ * only stopped the single lane that observed the streak while the other lanes
+ * kept sending into the rate limit (draining the number's quality rating).
+ */
+const PAUSE_429_MS = 60_000;
+const PAUSE_429: Map<string, number> = new Map();
+function pauseAllLanes(broadcastId: string, ms: number): void {
+  PAUSE_429.set(broadcastId, Date.now() + ms);
+}
+function lanePauseRemaining(broadcastId: string): number {
+  const until = PAUSE_429.get(broadcastId);
+  if (until === undefined) return 0;
+  const remaining = until - Date.now();
+  if (remaining <= 0) {
+    PAUSE_429.delete(broadcastId);
+    return 0;
+  }
+  return remaining;
 }
 
 interface BroadcastVariables {
@@ -388,6 +412,11 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         // Anything not yet pulled stays in `queued` for the next process's
         // boot reconciler to resume.
         if (shuttingDown) return;
+        // Honor a cross-lane 429 backoff set by any lane (see pauseAllLanes).
+        // Sleeping here, before pulling the next recipient, is what makes the
+        // pause global instead of single-lane.
+        const pauseMs = lanePauseRemaining(broadcast.id);
+        if (pauseMs > 0) await sleep(pauseMs);
         if (queue.length === 0) {
           await refill();
           if (queue.length === 0) return;
@@ -415,6 +444,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   if (pendingBumps.size > 0) {
     await Promise.allSettled(pendingBumps);
   }
+
+  // Drop the 429 state so neither Map grows across many broadcasts.
+  reset429Streak(broadcast.id);
+  PAUSE_429.delete(broadcast.id);
 
   // Flush any pending throttled progress emit + drop the throttle entry so
   // the Map doesn't grow unbounded across many broadcasts. Without this the
@@ -659,9 +692,12 @@ async function processOneRecipient(
           track429Hit(broadcast.id);
           if (rate429Streak(broadcast.id) >= 10) {
             console.warn(
-              `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing 60s`,
+              `[broadcast ${broadcast.id}] 10 consecutive 429s — pausing all lanes 60s`,
             );
-            await sleep(60_000);
+            // Signal the OTHER lanes to back off too (they check at their loop
+            // top), then wait it out here before this lane's own retry.
+            pauseAllLanes(broadcast.id, PAUSE_429_MS);
+            await sleep(PAUSE_429_MS);
             reset429Streak(broadcast.id);
           }
           await sleep(3_000 + Math.floor(Math.random() * 1_000));

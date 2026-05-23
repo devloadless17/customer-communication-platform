@@ -227,18 +227,6 @@ export async function getChannelById(
   return row ? mapChannel(row, row._count.members) : null;
 }
 
-/** Resolve a channel by URL slug (name). Returns null when not found. */
-export async function getChannelByName(
-  name: string,
-  teamId: string,
-): Promise<TeamChannelDto | null> {
-  const row = await db.teamChannel.findFirst({
-    where: { teamId, name },
-    include: { _count: { select: { members: true } } },
-  });
-  return row ? mapChannel(row, row._count.members) : null;
-}
-
 /** Default channel for a team — the one /team redirects to. */
 export async function getDefaultChannel(teamId: string): Promise<TeamChannelDto | null> {
   const row = await db.teamChannel.findFirst({
@@ -533,13 +521,6 @@ export async function searchChannelMessages(
       ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
       : null;
   return { items, nextCursor };
-}
-
-export async function getMessageById(
-  messageId: string,
-  teamId: string,
-): Promise<TeamChannelMessageDto | null> {
-  return loadMessageForEmit(messageId, teamId);
 }
 
 /**

@@ -475,8 +475,12 @@ export class ContactsService {
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
 
-    await this.db.contact.update({
-      where: { id: contactId },
+    // updateMany on (id, teamId) — the findFirst above already proves
+    // ownership, but keeping the tenant scope on the mutation itself means a
+    // future refactor that drops the gate isn't one line from a cross-tenant
+    // write (mirrors conversations.service.remove's defense-in-depth).
+    await this.db.contact.updateMany({
+      where: { id: contactId, teamId },
       data: { deletedAt: new Date() },
     });
 

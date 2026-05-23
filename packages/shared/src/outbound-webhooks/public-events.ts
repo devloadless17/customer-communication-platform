@@ -1050,6 +1050,13 @@ function wireSender(s: SenderInfo | null | undefined): Record<string, unknown> {
     teamId: null,
     workflowId: type === "workflow" ? id : null,
     broadcastHistoryId: type === "broadcast" ? id : null,
+    // The originating API key for `/v1` sends. Surfaced here (and read back by
+    // the delivery worker's loop-detection extractor) so a partner whose own
+    // key triggered this message can short-circuit the webhook → /v1 → webhook
+    // hot-potato via the `X-CCP-Origin-Key` header. null for every non-api
+    // sender. `SenderInfo.id` IS the apiKeyId when `type === "api"` (set in
+    // messageFromDomain).
+    apiKeyId: type === "api" ? id : null,
   };
 }
 

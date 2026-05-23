@@ -5,6 +5,7 @@ import { headers } from "next/headers";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TimezoneProvider } from "@/providers/tz-provider";
 import { AuthBroadcastListener } from "@/components/auth-broadcast-listener";
+import { NavProgress } from "@/components/nav-progress";
 import { ServiceWorkerKillSwitch } from "@/components/service-worker-killswitch";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -55,6 +56,10 @@ export default async function RootLayout({
             path → no hydration-mismatch warning on the nonce attribute). */}
         <ServiceWorkerKillSwitch />
         <AuthBroadcastListener />
+        {/* Top progress bar for client navigations. Replaces the per-section
+            loading.tsx skeleton-swap (removed) with a hold-current-page +
+            progress-bar feel — see components/nav-progress.tsx. */}
+        <NavProgress />
         <ThemeProvider
           attribute="class"
           defaultTheme="light"

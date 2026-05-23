@@ -78,16 +78,6 @@ export async function uploadAvatar(input: AvatarUploadInput): Promise<AvatarUplo
   return { key: res.data.key, url: res.data.ufsUrl, sizeBytes: res.data.size };
 }
 
-export async function deleteAvatarBlob(key: string): Promise<void> {
-  try {
-    await getUtApi().deleteFiles([key]);
-  } catch {
-    // Same swallow contract as the main blob delete — orphans are reconciled
-    // by the blob-orphan sweeper, the user-facing flow shouldn't fail because
-    // of an UploadThing 5xx during an avatar swap.
-  }
-}
-
 function extFromMime(mime: string): string {
   if (mime === "image/png") return "png";
   if (mime === "image/jpeg") return "jpg";

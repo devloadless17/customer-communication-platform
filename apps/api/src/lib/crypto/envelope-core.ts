@@ -20,7 +20,7 @@ function loadKey(): Buffer {
   if (!raw) {
     throw new Error(
       "ENCRYPTION_KEY is not set. Generate one with `openssl rand -base64 32` " +
-        "and add it to .env. See lib/env.ts.",
+        "and add it to .env. Boot-time env validation lives in @ccp/config (validateEnv).",
     );
   }
   const decoded = Buffer.from(raw, "base64");

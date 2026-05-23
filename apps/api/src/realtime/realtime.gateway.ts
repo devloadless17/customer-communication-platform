@@ -59,9 +59,14 @@ export class RealtimeGateway
     // failure delivers a typed `connect_error` to the client with a parseable
     // reason. The browser uses err.message to distinguish "session expired"
     // (route to /logout) from generic network blips (silent reconnect).
-    // ws-adapter's `connectionStateRecovery.skipMiddlewares: true` still
-    // bypasses this on brief reconnects, preserving the per-team-deploy
-    // economics — the DB hit is per real handshake, not per tick.
+    // ws-adapter keeps `connectionStateRecovery.skipMiddlewares` at its
+    // default (false), so this auth middleware RE-RUNS on every recovered
+    // reconnect — that's deliberate (it closes the deactivation-survival
+    // window; see ws-adapter.ts). The per-deploy reconnect-storm cost is
+    // absorbed by the 15s session cache in session.guard.ts, not by skipping
+    // re-auth. Do NOT set skipMiddlewares:true to "optimize" — it reintroduces
+    // the bug where a closed-laptop deactivated user reconnects within the
+    // recovery window and survives.
     // Handshake rate-limit by remote address. A deploy / WiFi flap
     // wakes 80 sockets at once; without a per-IP cap an authenticated
     // misbehaving page (or hostile client) can also fire unbounded
@@ -406,6 +411,12 @@ export class RealtimeGateway
     const userId = client.data.userId as string | undefined;
     const typingIn = client.data.typingIn as Set<string> | undefined;
     if (!userId || !typingIn) return;
+    // Membership gate — mirror the channel/thread typing handlers (a malicious
+    // client could otherwise inject a typing indicator + its userId into any
+    // conversation room it never joined, including another team's; conversation
+    // rooms aren't team-namespaced, so the join-time ownership check is the only
+    // gate). typing:stop is implicitly protected by the `typingIn.delete` gate.
+    if (!client.rooms.has(conversationRoom(body.conversationId))) return;
     const wasTyping = typingIn.has(body.conversationId);
     typingIn.add(body.conversationId);
     this.typing.addConv(body.conversationId, userId, client.id);

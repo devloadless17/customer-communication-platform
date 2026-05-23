@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "ln -sf ../../.env .env && NODE_OPTIONS='--max-old-space-size=3072' next dev --webpack",
+    "dev": "ln -sf ../../.env .env && NODE_OPTIONS='--max-old-space-size=3072' next dev --turbopack",
     "build": "next build",
     "start": "ln -sf ../../.env .env && NODE_OPTIONS='--max-old-space-size=4096' next start",
     "typecheck": "tsc --noEmit"

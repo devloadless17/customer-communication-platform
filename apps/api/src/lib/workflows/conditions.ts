@@ -187,23 +187,6 @@ export function validateConditions(
   return ["conditions must be an array or a { op, children } group"];
 }
 
-/**
- * Validate a condition group used as a `branch` step config. Branch steps
- * accept ANY field that the workflow's trigger payload could carry — we
- * can't tighten this since the step's evaluation happens at run time
- * against whatever the runner is holding. So we pass `null` for trigger
- * and allow every field.
- */
-export function validateBranchConditions(conditions: unknown): string[] {
-  // All fields allowed at branch evaluation time. Forgiving by design.
-  const allowed = new Set<ConditionField>(
-    Object.values(FIELDS_BY_TRIGGER).flat(),
-  );
-  if (Array.isArray(conditions)) return validateLeafArray(conditions, allowed, "conditions");
-  if (isGroupLike(conditions)) return validateGroup(conditions, allowed, "conditions");
-  return ["conditions must be an array or a { op, children } group"];
-}
-
 function validateLeafArray(
   rows: unknown[],
   allowed: ReadonlySet<ConditionField>,

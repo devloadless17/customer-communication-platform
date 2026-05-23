@@ -145,6 +145,10 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
         await runWorkflow({
           runId: job.data.runId,
           attempt: job.attemptsMade + 1,
+          // `inbound-${runId}-${tag}` jobs are early ask_question replies — the
+          // runner's stale-resume guard must let them through even before
+          // waitUntil. See enqueueWorkflowInboundResume + RunWorkflowInput.
+          isInboundResume: (job.id ?? "").startsWith("inbound-"),
         });
       } finally {
         releaseTeamSlot(run.teamId);

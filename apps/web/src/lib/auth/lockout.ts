@@ -40,16 +40,18 @@ export async function isLockedOut(email: string): Promise<boolean> {
 }
 
 /**
- * Record a failed login attempt. Atomic increment via upsert so concurrent
- * failures (same email, different sessions) don't race-double-count or
- * race-undercount. When the counter crosses the threshold, `lockedUntil`
- * is stamped to `now + LOCKOUT_DURATION_MS`.
+ * Record a failed login attempt. The counter bump is a TRUE atomic increment
+ * (`{ increment: 1 }`), NOT a read-then-write — concurrent failures for the
+ * same email (a parallel guessing burst) each count instead of collapsing N
+ * attempts into one increment, which would otherwise inflate the effective
+ * brute-force budget to ~batch-size guesses per increment. We read back the
+ * post-increment count and stamp `lockedUntil` once it crosses the threshold.
  */
 export async function recordFailure(email: string): Promise<void> {
   const now = new Date();
   const existing = await db.loginAttempt.findUnique({
     where: { email },
-    select: { failedCount: true, lockedUntil: true },
+    select: { lockedUntil: true },
   });
 
   // Past-lockout failure: treat as the start of a new spree rather than
@@ -63,23 +65,25 @@ export async function recordFailure(email: string): Promise<void> {
     return;
   }
 
-  const nextCount = (existing?.failedCount ?? 0) + 1;
-  const shouldLock = nextCount >= LOCKOUT_THRESHOLD;
-
-  await db.loginAttempt.upsert({
+  // Atomic increment — the DB does the add, so two concurrent failures both
+  // land (counter goes to N, not 1). create-path starts at 1.
+  const row = await db.loginAttempt.upsert({
     where: { email },
-    create: {
-      email,
-      failedCount: nextCount,
-      lockedUntil: shouldLock ? new Date(now.getTime() + LOCKOUT_DURATION_MS) : null,
-      lastFailedAt: now,
-    },
-    update: {
-      failedCount: nextCount,
-      lockedUntil: shouldLock ? new Date(now.getTime() + LOCKOUT_DURATION_MS) : null,
-      lastFailedAt: now,
-    },
+    create: { email, failedCount: 1, lastFailedAt: now },
+    update: { failedCount: { increment: 1 }, lastFailedAt: now },
+    select: { failedCount: true, lockedUntil: true },
   });
+
+  // Stamp the lock once the post-increment count crosses the threshold. The
+  // `!row.lockedUntil` guard makes this a one-shot per spree; once locked,
+  // signInWithCredentials short-circuits on isLockedOut() before reaching
+  // recordFailure again, so the lock window is fixed from the crossing attempt.
+  if (row.failedCount >= LOCKOUT_THRESHOLD && !row.lockedUntil) {
+    await db.loginAttempt.update({
+      where: { email },
+      data: { lockedUntil: new Date(now.getTime() + LOCKOUT_DURATION_MS) },
+    });
+  }
 }
 
 /**

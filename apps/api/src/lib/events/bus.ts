@@ -193,42 +193,51 @@ async function runSubscribers<K extends DomainEventType>(
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
 
-  // Realtime fanout fires SYNCHRONOUSLY before the awaited chain — so a
-  // slow downstream subscriber (workflow-dispatch, outbound-webhooks)
-  // cannot add latency to the socket emit that the inbox UI is waiting
-  // on. The realtime subscriber is itself a `void emit(...)` to Socket.io
-  // and never throws synchronously, so this is safe to fire-and-forget
-  // outside the try/catch sequence. Subsequent subscribers still need
-  // the ordering invariant (workflow-dispatch reads analytics' writes).
-  //
   // The list is kept sorted by `SubscriberPriority` on insert, so `list[0]`
-  // is always the REALTIME tier (priority 0) regardless of registration
-  // order — no name/registration-timing convention to break.
+  // is the lowest tier. When that's the REALTIME tier (0), fire it
+  // SYNCHRONOUSLY + fire-and-forget so a slow downstream subscriber
+  // (workflow-dispatch, outbound-webhooks) can't add latency to the socket
+  // emit the inbox UI is waiting on. The realtime subscriber is itself a
+  // `void emit(...)` to Socket.io and never throws synchronously, so firing
+  // it outside the awaited sequence is safe.
+  //
+  // CRITICAL: this only holds when `list[0]` actually IS the realtime tier.
+  // Events with a `null` fanout rule (`contact.tag_changed` /
+  // `contact.lifecycle_changed`) have NO realtime subscriber — their
+  // lowest-tier handler is a real awaited subscriber (outbound-webhooks).
+  // Firing THAT fire-and-forget would resolve `publish()` before the webhook
+  // delivery rows are written and would hide its errors from the outbox row.
+  // So when list[0] isn't REALTIME, fall through to the awaited loop at
+  // index 0 and treat it like any other subscriber.
+  let startIdx = 0;
   const first = list[0]!;
-  try {
-    const maybe = first.handler(event as DomainEventOf<DomainEventType>);
-    if (maybe && typeof (maybe as Promise<void>).then === "function") {
-      void (maybe as Promise<void>).catch((err) => {
-        console.error(
-          withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
-          err instanceof Error ? err.message : err,
-        );
-      });
+  if (first.priority === SubscriberPriority.REALTIME) {
+    startIdx = 1;
+    try {
+      const maybe = first.handler(event as DomainEventOf<DomainEventType>);
+      if (maybe && typeof (maybe as Promise<void>).then === "function") {
+        void (maybe as Promise<void>).catch((err) => {
+          console.error(
+            withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
+            err instanceof Error ? err.message : err,
+          );
+        });
+      }
+    } catch (err) {
+      console.error(
+        withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
+        err instanceof Error ? err.message : err,
+      );
     }
-  } catch (err) {
-    console.error(
-      withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
-      err instanceof Error ? err.message : err,
-    );
   }
 
-  // Remaining subscribers: sequential dispatch in priority order.
-  // workflow-dispatch reads post-mutation state that analytics writes;
-  // outbound-webhooks ships partner payloads carrying those same fields.
-  // Parallel dispatch made both races inevitable in proportion to
-  // subscriber latency. Each handler gets its own try/catch so a broken
-  // subscriber can't poison the chain.
-  for (let i = 1; i < list.length; i++) {
+  // Remaining subscribers (or ALL of them when there's no realtime tier):
+  // sequential dispatch in priority order. workflow-dispatch reads
+  // post-mutation state that analytics writes; outbound-webhooks ships
+  // partner payloads carrying those same fields. Parallel dispatch made both
+  // races inevitable in proportion to subscriber latency. Each handler gets
+  // its own try/catch so a broken subscriber can't poison the chain.
+  for (let i = startIdx; i < list.length; i++) {
     const record = list[i]!;
     try {
       await record.handler(event as DomainEventOf<DomainEventType>);

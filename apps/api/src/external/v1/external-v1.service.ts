@@ -425,6 +425,11 @@ export class ExternalV1Service {
       changedByApiKeyId: apiKeyId,
       kind: "created",
       workflowContact: workflowContactSnapshot(created),
+      // contact.created above already fans out the `contact:updated` socket
+      // frame; suppress the duplicate here so the client reducer runs once.
+      // Workflow + audit + outbound-webhook subscribers don't read this flag,
+      // so they still receive this event.
+      suppressSocketFanout: true,
     });
 
     return toExternalContact(created, tagIds);
@@ -528,6 +533,9 @@ export class ExternalV1Service {
       changedByApiKeyId: apiKeyId,
       kind: "created",
       workflowContact: workflowContactSnapshot(updated),
+      // contact.created above already fans out the `contact:updated` socket
+      // frame; suppress the duplicate here (non-socket subscribers still fire).
+      suppressSocketFanout: true,
     });
 
     return toExternalContact(updated, tagIds);

@@ -18,7 +18,7 @@ import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
-import { MEDIA_SIZE_CAPS, kindFromMime } from "@/lib/media-storage";
+import { MEDIA_SIZE_CAPS, META_DOCUMENT_MIME_ALLOWED, kindFromMime } from "@/lib/media-storage";
 import { transcodeToOggOpus } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
@@ -858,6 +858,18 @@ export class MessagesService {
           `WhatsApp doesn't accept ${mimeType || "this audio format"}. ` +
           "Supported: AAC, MP4 (m4a), MP3, AMR, OGG/Opus. " +
           "If this came from a voice recorder, try a different browser (Chrome 105+, Firefox, Safari).",
+      });
+    }
+    // Documents: kindFromMime is a catch-all (anything not image/video/audio
+    // lands here), so without an explicit allowlist arbitrary file types would
+    // be accepted + stored before Meta rejects them on send. Gate to Meta's
+    // supported document set.
+    if (kind === "document" && !META_DOCUMENT_MIME_ALLOWED.has(mimeType)) {
+      throw new BadRequestException({
+        error: "unsupported_file_type",
+        detail:
+          `WhatsApp doesn't support ${mimeType || "this file type"} as a document. ` +
+          "Supported: PDF, Word, Excel, PowerPoint, plain text, CSV.",
       });
     }
 

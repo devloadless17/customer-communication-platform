@@ -34,7 +34,6 @@ export default async function WorkflowPage({
       workflow={{
         id: wf.id as string,
         name: wf.name as string,
-        enabled: wf.enabled as boolean,
         published: wf.published as boolean,
         trigger: wf.trigger as WorkflowTriggerEvent,
         triggerConfig:

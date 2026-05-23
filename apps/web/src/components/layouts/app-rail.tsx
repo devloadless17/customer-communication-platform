@@ -77,22 +77,23 @@ export function AppRail({
   team,
   connected,
   onlineUserIds,
+  initialCollapsed,
 }: {
   currentUser: User;
   team: Team;
   connected?: boolean;
   onlineUserIds?: Set<string>;
+  /** Server-read cookie value so SSR renders the persisted state (no flash). */
+  initialCollapsed: boolean;
 }) {
   const pathname = usePathname() ?? "";
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
 
-  // Read from localStorage on first client render to avoid flash.
-  // SSR always starts expanded (false) which is the safe default.
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(STORAGE_KEY) === "true";
-  });
+  // Initial state comes from the server-read cookie (`initialCollapsed`), so
+  // SSR and the first client render agree — no expand→collapse flash on load.
+  // Toggling writes the cookie (below) so the next server render is correct.
+  const [collapsed, setCollapsed] = useState<boolean>(initialCollapsed);
 
   // Labels render conditionally: hide immediately on collapse, show after a
   // short delay on expand so the width animation has time to start first.
@@ -112,7 +113,9 @@ export function AppRail({
   function toggleCollapsed() {
     const next = !collapsed;
     setCollapsed(next);
-    localStorage.setItem(STORAGE_KEY, String(next));
+    // Persist as a cookie (not localStorage) so the SERVER layout can read it
+    // and SSR the correct state on the next load — that's what kills the flash.
+    document.cookie = `${STORAGE_KEY}=${String(next)}; path=/; max-age=31536000; samesite=lax`;
 
     if (labelTimerRef.current) clearTimeout(labelTimerRef.current);
 

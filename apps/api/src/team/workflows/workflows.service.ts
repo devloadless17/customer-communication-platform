@@ -77,7 +77,6 @@ export class WorkflowsService {
       select: {
         id: true,
         name: true,
-        enabled: true,
         published: true,
         trigger: true,
         graph: true,
@@ -102,7 +101,6 @@ export class WorkflowsService {
         return {
           id: r.id,
           name: r.name,
-          enabled: r.enabled,
           published: r.published,
           trigger: r.trigger,
           stepCount,
@@ -135,7 +133,6 @@ export class WorkflowsService {
         data: {
           teamId,
           name: parsed.name,
-          enabled: parsed.enabled,
           published: false,
           trigger: parsed.trigger,
           triggerConfig: encryptTriggerConfigSecret(parsed.triggerConfig),
@@ -178,7 +175,6 @@ export class WorkflowsService {
     const body = (raw ?? {}) as WorkflowBody;
     const merged: WorkflowBody = {
       name: body.name ?? existing.name,
-      enabled: body.enabled === undefined ? existing.enabled : body.enabled,
       trigger: body.trigger ?? existing.trigger,
       triggerConfig: body.triggerConfig ?? existing.triggerConfig,
       triggerConditions: body.triggerConditions ?? existing.triggerConditions,
@@ -230,7 +226,6 @@ export class WorkflowsService {
         where: { id },
         data: {
           name: parsed.name,
-          enabled: parsed.enabled,
           trigger: parsed.trigger,
           triggerConfig: encryptTriggerConfigSecret(parsed.triggerConfig),
           triggerConditions: parsed.triggerConditions as Prisma.InputJsonValue,
@@ -277,7 +272,6 @@ export class WorkflowsService {
       const validated = parseWorkflowBody(
         {
           name: existing.name,
-          enabled: existing.enabled,
           trigger: existing.trigger,
           triggerConfig: existing.triggerConfig,
           triggerConditions: existing.triggerConditions,
@@ -472,7 +466,7 @@ export class WorkflowsService {
   ): Promise<{ runId: string }> {
     const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
-      select: { id: true, trigger: true, enabled: true, published: true },
+      select: { id: true, trigger: true, published: true },
     });
     if (!wf) throw new NotFoundException({ error: "workflow not found" });
     if (wf.trigger !== "manual_trigger") {
@@ -480,9 +474,9 @@ export class WorkflowsService {
         error: "workflow trigger is not manual_trigger",
       });
     }
-    if (!wf.enabled || !wf.published) {
+    if (!wf.published) {
       throw new ConflictException({
-        error: "workflow is disabled or unpublished",
+        error: "workflow is not published",
       });
     }
 
@@ -519,8 +513,8 @@ export class WorkflowsService {
   /**
    * Synthetic test run. Bypasses trigger conditions + once-per-contact
    * dedupe (the admin is explicitly testing). Skips the dispatcher
-   * entirely so a draft workflow (enabled=true, published=false) can
-   * still be test-run from the canvas.
+   * entirely so a draft workflow (published=false) can still be test-run
+   * from the canvas.
    */
   async test(
     teamId: string,
@@ -529,14 +523,9 @@ export class WorkflowsService {
   ): Promise<{ runId: string; jobId: string | null }> {
     const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
-      select: { id: true, graph: true, trigger: true, enabled: true },
+      select: { id: true, graph: true, trigger: true },
     });
     if (!wf) throw new NotFoundException({ error: "not found" });
-    if (!wf.enabled) {
-      throw new ConflictException({
-        error: "workflow is disabled — enable it before testing",
-      });
-    }
 
     const contactId = input.contactId ?? null;
     const conversationId = input.conversationId ?? null;
@@ -650,7 +639,6 @@ export class WorkflowsService {
         graph: true,
         teamId: true,
         trigger: true,
-        enabled: true,
         published: true,
         triggerConfig: true,
       },
@@ -661,9 +649,9 @@ export class WorkflowsService {
         error: "workflow trigger is not incoming_webhook",
       });
     }
-    if (!wf.enabled || !wf.published) {
+    if (!wf.published) {
       throw new ConflictException({
-        error: "workflow is disabled or unpublished",
+        error: "workflow is not published",
       });
     }
 
@@ -928,7 +916,6 @@ export class WorkflowsService {
   private toDto(row: {
     id: string;
     name: string;
-    enabled: boolean;
     published: boolean;
     trigger: string;
     triggerConfig: Prisma.JsonValue;
@@ -941,7 +928,6 @@ export class WorkflowsService {
     return {
       id: row.id,
       name: row.name,
-      enabled: row.enabled,
       published: row.published,
       trigger: row.trigger,
       triggerConfig: row.triggerConfig,

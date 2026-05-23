@@ -12,7 +12,7 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  *   await dispatch(teamId, "message_received", { message, conversation, ... });
  *
  * Behavior per workflow on this team+trigger:
- *   1. Filter to enabled AND published
+ *   1. Filter to published (live) workflows
  *   2. Evaluate triggerConditions against the payload (fail-closed on garbage)
  *   3. If triggerOncePerContact: check WorkflowContactState (skip if fired)
  *   4. Create a WorkflowRun row with the snapshot payload + queued state
@@ -33,7 +33,7 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
     const workflows = await retry(
       () =>
         db.workflow.findMany({
-          where: { teamId, trigger: event, enabled: true, published: true },
+          where: { teamId, trigger: event, published: true },
           select: {
             id: true,
             graph: true,
@@ -222,7 +222,7 @@ async function retry<T>(
  *   - the `trigger_workflow` step              (workflow chaining)
  *
  * Bypasses the trigger-conditions filter — the caller has already decided
- * this workflow should fire — but still respects `enabled` + `published`.
+ * this workflow should fire — but still respects `published`.
  *
  * `enforceOncePerContact` defaults FALSE. The UI button + test fire are
  * explicit admin intent and should always run, even on a contact that has
@@ -252,14 +252,13 @@ export async function dispatchManualTrigger(args: {
     select: {
       id: true,
       graph: true,
-      enabled: true,
       published: true,
       triggerOncePerContact: true,
     },
   });
   if (!wf) throw new Error("workflow not found");
-  if (!wf.enabled || !wf.published) {
-    throw new Error("workflow is disabled or unpublished");
+  if (!wf.published) {
+    throw new Error("workflow is not published");
   }
 
   const [contact, conversation] = await Promise.all([

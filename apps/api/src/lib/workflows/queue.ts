@@ -151,11 +151,14 @@ export async function enqueueWorkflowResume(
  * same contact doesn't collide with the still-buffered previous resume.
  *
  * The timeout's `resume-${runId}-${waitSeq}` job stays in BullMQ's delayed
- * queue; when it eventually fires the runner reads pendingAnswer (now
- * cleared after the answered branch ran) and either re-enters the
- * ask_question step (if it's still the current step on a subsequent ask)
- * or no-ops if the run already advanced. Worker per-run locking keeps the
- * two from racing.
+ * queue; nothing cancels it when the contact replies. When it eventually
+ * fires, the runner's "stale / not-yet-due resume guard" (runner.ts) no-ops
+ * it if the run already advanced past the original wait (run is `waiting` at a
+ * LATER `waitUntil` with no `pendingAnswer`); if the run is genuinely back on
+ * an `ask_question` step it re-enters it. NOTE: BullMQ locks per-JOB, not
+ * per-run, so the inbound + timeout jobs for one run are NOT mutually
+ * exclusive by the lock alone — the runner-side guard is what prevents the
+ * dangling timeout job from waking the run early or racing the inbound resume.
  */
 export async function enqueueWorkflowInboundResume(
   runId: string,

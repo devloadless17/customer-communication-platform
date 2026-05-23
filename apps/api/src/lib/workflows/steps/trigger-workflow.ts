@@ -59,7 +59,7 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
   async run(envelope, config, ctx): Promise<StepResult> {
     const target = await db.workflow.findFirst({
       where: { id: config.workflowId, teamId: ctx.teamId },
-      select: { id: true, trigger: true, enabled: true, published: true },
+      select: { id: true, trigger: true, published: true },
     });
     if (!target) return advanceWithError(404, "target workflow not found");
     if (target.trigger !== "manual_trigger") {
@@ -69,8 +69,8 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
         `target workflow's trigger is ${target.trigger}; only manual_trigger workflows can be invoked from another workflow`,
       );
     }
-    if (!target.enabled || !target.published) {
-      return advanceWithError(409, "target_not_runnable", "target workflow is disabled or unpublished");
+    if (!target.published) {
+      return advanceWithError(409, "target_not_runnable", "target workflow is not published");
     }
 
     // Trace depth via the envelope payload. The dispatcher writes

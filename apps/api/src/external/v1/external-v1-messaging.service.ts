@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Prisma } from "@prisma/client";
 import {
   BadGatewayException,
@@ -104,6 +106,11 @@ export class ExternalV1MessagingService {
     teamId: string,
     apiKeyId: string,
     key: string,
+    /** SHA-256 of the canonical request — see requestFingerprint(). On a
+     *  completed-row replay we reject if it differs from the stored one
+     *  (same key, different payload), instead of silently returning the prior
+     *  response and dropping the new send. */
+    requestHash: string,
   ): Promise<{ kind: "claimed" } | { kind: "replay"; result: T }> {
     const claimPending = () =>
       this.db.apiIdempotencyKey.create({
@@ -111,6 +118,7 @@ export class ExternalV1MessagingService {
           teamId,
           apiKeyId,
           key,
+          requestHash,
           responseBody: { _pending: true } as Prisma.InputJsonValue,
           responseStatus: IDEMPOTENCY_PENDING_STATUS,
           expiresAt: new Date(Date.now() + IDEMPOTENCY_PENDING_TTL_MS),
@@ -129,7 +137,7 @@ export class ExternalV1MessagingService {
       // Another request already claimed this key. Read its state.
       const cached = await this.db.apiIdempotencyKey.findUnique({
         where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
-        select: { responseBody: true, responseStatus: true, expiresAt: true },
+        select: { responseBody: true, responseStatus: true, expiresAt: true, requestHash: true },
       });
       if (!cached) {
         // Vanished between P2002 and the read (sweeper / manual delete).
@@ -157,6 +165,18 @@ export class ExternalV1MessagingService {
         });
       }
       if (cached.expiresAt > new Date()) {
+        // Same key reused for a DIFFERENT request — reject (Stripe-style 422)
+        // rather than returning the prior response, which would silently drop
+        // the new send. Legacy rows have a null requestHash → skip the check
+        // and replay as before.
+        if (cached.requestHash && cached.requestHash !== requestHash) {
+          throw new UnprocessableEntityException({
+            error: "idempotency_key_reuse",
+            detail:
+              "This Idempotency-Key was already used with a different request payload. " +
+              "Use a fresh key per distinct request.",
+          });
+        }
         // Completed + still fresh — replay. Refund the API-key token: the
         // request did zero real work, so it shouldn't burn quota.
         refundApiKeyBucket(apiKeyId);
@@ -448,6 +468,11 @@ export class ExternalV1MessagingService {
         teamId,
         apiKeyId,
         idempotencyKey,
+        requestFingerprint("send_message", {
+          conversationId,
+          body: input.body,
+          replyToMessageId: input.replyToMessageId ?? null,
+        }),
       );
       if (claim.kind === "replay") return claim.result;
     }
@@ -881,6 +906,10 @@ export class ExternalV1MessagingService {
           teamId,
           apiKeyId,
           idempotencyKey,
+          requestFingerprint("send_template", {
+            contact: input.contact,
+            template: input.template,
+          }),
         );
         if (claim.kind === "replay") return claim.result;
       }
@@ -1010,4 +1039,17 @@ export class ExternalV1MessagingService {
 
     return { note: notePayload };
   }
+}
+
+/**
+ * Canonical request fingerprint for idempotency-key reuse detection. `payload`
+ * is the already-Zod-parsed input (stable key order for a given route), so a
+ * plain JSON.stringify is deterministic — two identical requests hash equal,
+ * two different payloads under the same key hash differently. The `route`
+ * prefix keeps a text send and a template send under the same key distinct.
+ */
+function requestFingerprint(route: string, payload: unknown): string {
+  return createHash("sha256")
+    .update(`${route}\n${JSON.stringify(payload)}`)
+    .digest("hex");
 }

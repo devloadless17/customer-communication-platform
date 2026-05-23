@@ -52,7 +52,7 @@ branching.
 | `workflows/` | The workflow engine: graph parser, DAG runner, step handlers, BullMQ queue + worker bootstrap, event-to-trigger dispatcher | `WorkflowWorkerService`, `WorkflowDispatcherService`, `WorkflowSubscribersService` |
 | `csv.ts` | papaparse wrapper for contact import/export | ContactsService |
 | `db.ts` | Lazy Proxy over `DbService`. See the file header — one pool per process, populated by `DbModule.onModuleInit` | every file here that touches Postgres |
-| `env.ts` | Boot-time required/optional env var validation | `main.ts` (or a future PreBootGuard) |
+| `@ccp/config` (package, not in `lib/`) | Boot-time required/optional env var validation (`validateEnv`) | `main.ts` (api), `instrumentation.ts` (web) |
 | `external-shapes.ts` | API-shape mappers for the public `/v1` API. Quarantined here so `/v1` response shapes can't accidentally drift with internal type changes | `ExternalV1Service` |
 | `media-storage.ts` | Helper bridge between MediaKind/MimeType and the blob-storage provider | messaging + ingest |
 | `rate-limit.ts` | In-process fixed-window rate limiter. MVP-scoped: counters live in this process's memory | guards that need request-rate ceilings |

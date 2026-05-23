@@ -539,7 +539,14 @@ model Contact {
   // (by tag) doesn't materialize here — it's resolved at send time.
   audienceGroups      AudienceGroup[]      @relation("AudienceGroupContacts")
 
-  // A phone number is unique within a team, but the same number can exist across tenants.
+  // A phone number is unique within a team, but the same number can exist across
+  // tenants. KEEP THIS A FULL unique — do NOT make it partial (`WHERE deletedAt
+  // IS NULL`). Ingest RESURRECTS a soft-deleted contact by upserting on this exact
+  // key and clearing `deletedAt` (lib/providers/ingest.ts). A partial index would
+  // hide the tombstone from `ON CONFLICT`, so re-contact would INSERT a 2nd live
+  // row and fragment the contact's preserved conversation history (violating "one
+  // conversation per contact, reopened on re-contact"). The soft-deleted row
+  // holding its phone slot IS the resurrection mechanism, not a bug to fix.
   @@unique([teamId, phoneNumber])
   // Compound identity for non-phone channels. Only enforced when both fields
   // are set — Postgres treats NULL as distinct in unique constraints, so
@@ -1118,7 +1125,7 @@ model InternalNote {
 //   - a graph of steps with edges, including branch / wait / jump control flow
 //
 // Dispatch path: a domain event calls `dispatch(teamId, event, payload)` in
-// lib/workflows/dispatcher.ts. The dispatcher loads enabled workflows for
+// lib/workflows/dispatcher.ts. The dispatcher loads published workflows for
 // this team+trigger, evaluates `triggerConditions`, optionally checks the
 // once-per-contact ledger (`WorkflowContactState`), and enqueues a BullMQ
 // job per match. The worker runs the DAG one step at a time, persisting
@@ -1134,11 +1141,12 @@ model Workflow {
   id                    String               @id @default(cuid())
   teamId                String
   name                  String
-  // `enabled` is the kill switch; `published` gates whether real triggers
-  // actually fire the workflow (vs. test-only). A workflow can be enabled
-  // but unpublished (still being edited) — the dispatcher requires BOTH to
-  // match production triggers.
-  enabled               Boolean              @default(true)
+  // `published` is the single live/draft gate: the dispatcher (and manual /
+  // webhook / trigger_workflow paths) run a workflow iff `published = true`.
+  // `false` = draft (still editable, test-runnable from the canvas, never
+  // fired by real triggers). The editor exposes one Draft↔Live control that
+  // flips this bit. (A separate `enabled` kill switch existed pre-2026-05-22;
+  // it was redundant once the UI collapsed to one control and was dropped.)
   published             Boolean              @default(false)
   trigger               WorkflowTriggerEvent
   // Trigger-specific config. Shape depends on trigger:
@@ -1173,8 +1181,8 @@ model Workflow {
   awaitingReplies WorkflowAwaitingReply[]
 
   @@unique([teamId, name])
-  // Hot path: dispatcher loads `WHERE teamId=? AND trigger=? AND enabled=true AND published=true`.
-  @@index([teamId, trigger, enabled, published])
+  // Hot path: dispatcher loads `WHERE teamId=? AND trigger=? AND published=true`.
+  @@index([teamId, trigger, published])
 }
 
 model WorkflowRun {
@@ -1201,7 +1209,7 @@ model WorkflowRun {
   // run is paused (wait / ask_question) can't corrupt the in-flight run
   // (orphaned currentStepId, wrong branch). Nullable only for runs created before
   // this column existed; the runner falls back to the live graph for those (see
-  // runner.ts). The enabled/published kill switch is still read live — only the
+  // runner.ts). The `published` live/draft gate is still read live — only the
   // graph is pinned.
   graphSnapshot Json?
 
@@ -1352,6 +1360,13 @@ model ApiIdempotencyKey {
   key            String
   responseBody   Json
   responseStatus Int
+  /// SHA-256 of the canonical request (route + sorted body) captured at claim
+  /// time. On a completed-row replay we compare this against the incoming
+  /// request: a mismatch means the same Idempotency-Key was reused for a
+  /// DIFFERENT payload, which we reject (Stripe-style) instead of returning the
+  /// prior response and silently dropping the new send. Nullable so legacy rows
+  /// (and any caller that pre-dates this) skip the check.
+  requestHash    String?
   createdAt      DateTime @default(now())
   expiresAt      DateTime
 

@@ -2,7 +2,6 @@ import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
 import {
-  getConversationWithRefs,
   getCurrentTeam,
   listConversations,
   listContactFieldsWithBuiltins,
@@ -19,8 +18,11 @@ import { InboxShell } from "@/features/inbox/components/inbox-shell";
  *
  * Reads the active conversation from `?c=<id>` so chat switching can happen
  * entirely client-side via `history.pushState` — no segment unmount, no
- * server round-trip, no loading skeleton. Direct URL hits and hard refreshes
- * still SSR the picked thread (below) so the first paint isn't blank.
+ * server round-trip, no loading skeleton. A full SERVER load (hard refresh /
+ * direct hit) deliberately lands on the empty "No conversation selected" state
+ * (we strip `?c=` and don't SSR the thread): it keeps refresh fast — skips the
+ * per-thread query — and sidesteps the SSR-paint-then-scroll-to-bottom blip.
+ * The agent re-opens a thread with one click (client-side, no reload).
  *
  * The /inbox/[conversationId] route still exists as a 307 redirect to keep
  * old links / bookmarks / external referrers working; everything inside the
@@ -32,6 +34,15 @@ export default async function InboxPage({
   searchParams: Promise<{ c?: string }>;
 }) {
   const { c: requestedConversationId } = await searchParams;
+
+  // Empty-on-refresh: a full server load always lands on "No conversation
+  // selected". Strip `?c=` and return BEFORE the data fetch so a hard refresh
+  // skips the per-thread query entirely (faster) and never SSR-paints a thread
+  // that then has to scroll to the bottom. Client-side chat switching uses
+  // pushState (no server hit), so this only affects refreshes / direct hits.
+  if (requestedConversationId) {
+    redirect("/inbox");
+  }
 
   // Fan everything out in one Promise.all — including the session lookup —
   // so the network/DB-bound queries are not serialized behind it. Each call
@@ -52,7 +63,6 @@ export default async function InboxPage({
     stages,
     contactFields,
     tags,
-    initialThread,
   ] = await Promise.all([
     getSession(),
     getCurrentTeam(),
@@ -62,26 +72,10 @@ export default async function InboxPage({
     listContactStages(),
     listContactFieldsWithBuiltins(),
     listTags(),
-    // Only SSR-fetch the picked thread when the URL carried `?c=<id>`. On the
-    // empty inbox state (no query param), this is null and the shell renders
-    // the "pick a conversation" placeholder.
-    requestedConversationId
-      ? getConversationWithRefs(requestedConversationId)
-      : Promise.resolve(null),
   ]);
-
-  // When the URL pointed at a conversation that doesn't exist (deleted, wrong
-  // team, typo'd id), strip the `?c=` from the URL with a server redirect.
-  // Without this, refreshing the bad URL would keep re-fetching null and the
-  // address bar would lie indefinitely.
-  if (requestedConversationId && !initialThread) {
-    redirect("/inbox");
-  }
 
   // `teamMembers` (all incl. deactivated) drives historical message
   // attribution so deactivated agents' past replies still show their name.
-
-  const initialActiveConversationId = initialThread ? requestedConversationId ?? null : null;
 
   return (
     <InboxShell
@@ -97,8 +91,8 @@ export default async function InboxPage({
       tags={tags}
       canManageStages={canManageStages(user.role)}
       canManageContactFields={canManageContactFields(user.role)}
-      initialActiveConversationId={initialActiveConversationId}
-      initialThread={initialThread}
+      initialActiveConversationId={null}
+      initialThread={null}
     />
   );
 }

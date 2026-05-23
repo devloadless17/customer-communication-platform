@@ -277,7 +277,3 @@ export function findNextStep(
   const unlabeled = outs.find((e) => !e.label);
   return (unlabeled ?? outs[0])?.to ?? null;
 }
-
-export function findNode(graph: WorkflowGraph, id: string): WorkflowNode | null {
-  return graph.nodes.find((n) => n.id === id) ?? null;
-}

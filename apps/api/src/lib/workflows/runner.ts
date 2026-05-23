@@ -27,9 +27,22 @@ import { StepConfigError, type StepResult } from "@/lib/workflows/steps/types";
 
 const MAX_STEPS_PER_RUN = 100;
 
+// Tolerance for the "resume isn't due yet" guard below — absorbs BullMQ
+// delayed-job jitter and small clock skew so an on-time resume is never
+// mistaken for a stale early fire.
+const RESUME_NOT_DUE_TOLERANCE_MS = 2_000;
+
 export interface RunWorkflowInput {
   runId: string;
   attempt: number;
+  /**
+   * True when this pickup came from an `inbound-${runId}-${tag}` resume job —
+   * i.e. the contact replied to an `ask_question`. Such resumes are ALWAYS due
+   * (the reply just landed) even when `waitUntil` is hours away, so the
+   * stale-resume guard must let them through. Defaults to false for the
+   * initial run, scheduled `resume-` jobs, and BullMQ retries.
+   */
+  isInboundResume?: boolean;
 }
 
 export interface RunWorkflowResult {
@@ -45,7 +58,6 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
         select: {
           id: true,
           teamId: true,
-          enabled: true,
           published: true,
           graph: true,
           trigger: true,
@@ -58,8 +70,8 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
     return { runId: input.runId, status: "skipped" };
   }
   const wf = run.workflow;
-  if (!wf || !wf.enabled || !wf.published) {
-    await markSkipped(run.id, "workflow disabled, unpublished, or deleted");
+  if (!wf || !wf.published) {
+    await markSkipped(run.id, "workflow unpublished or deleted");
     return { runId: run.id, status: "skipped" };
   }
 
@@ -71,6 +83,39 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
   if (!graph.startNodeId || graph.nodes.length === 0) {
     await markFailed(run.id, "workflow graph is empty");
     return { runId: run.id, status: "failed" };
+  }
+
+  // Stale / not-yet-due resume guard.
+  //
+  // A BullMQ resume job can fire for a wait the run already advanced past —
+  // the canonical case is the `ask_question` TIMEOUT job. When a contact
+  // replies early, the inbound resume advances the run, but NOTHING cancels
+  // the dangling timeout job (`resume-${runId}-${waitSeq}`). If that job later
+  // fires while the run is parked at a LATER wait, naively executing
+  // `currentStepId` would wake the run prematurely (running downstream steps
+  // ahead of their wait), and in the knife-edge reply≈timeout case it would
+  // run CONCURRENTLY with the inbound resume (BullMQ locks per-job, not
+  // per-run) — double side-effects.
+  //
+  // Guard: when the run is still `waiting`, its `waitUntil` hasn't arrived,
+  // and this isn't an early INBOUND reply, this pickup is a stale/early resume
+  // — leave the run parked and let the resume job for the CURRENT wait fire on
+  // time (the waiting-runs sweeper is the backstop for a genuinely early fire).
+  // Never blocks legitimate work: a fresh run (status≠"waiting"), a due resume
+  // (now≥waitUntil), an early inbound reply (`isInboundResume`), or a BullMQ
+  // retry of a thrown step (status left "running").
+  //
+  // Discriminate on the job KIND, not `pendingAnswer`: after an *answered*
+  // ask_question, `pendingAnswer` lingers on the run (nothing clears it until
+  // the next ask_question), so it can't distinguish a fresh inbound reply from
+  // a stale timeout job that fires while the run is parked at a later wait.
+  if (
+    run.status === "waiting" &&
+    run.waitUntil &&
+    !input.isInboundResume &&
+    Date.now() < run.waitUntil.getTime() - RESUME_NOT_DUE_TOLERANCE_MS
+  ) {
+    return { runId: run.id, status: "waiting" };
   }
 
   await db.workflowRun.update({

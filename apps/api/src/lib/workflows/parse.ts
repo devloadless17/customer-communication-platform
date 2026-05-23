@@ -39,7 +39,6 @@ export const VALID_TRIGGERS: ReadonlyArray<WorkflowTriggerEvent> = [
 
 export interface WorkflowBody {
   name?: unknown;
-  enabled?: unknown;
   published?: unknown;
   trigger?: unknown;
   triggerConfig?: unknown;
@@ -50,7 +49,6 @@ export interface WorkflowBody {
 
 export interface ParsedWorkflow {
   name: string;
-  enabled: boolean;
   published: boolean;
   trigger: WorkflowTriggerEvent;
   triggerConfig: Record<string, unknown>;
@@ -73,7 +71,6 @@ export function parseWorkflowBody(
   if (!name) errors.push("name: required");
   else if (name.length > 100) errors.push("name: too long (max 100)");
 
-  const enabled = body.enabled !== false;
   const published = body.published === true;
   const triggerOncePerContact = body.triggerOncePerContact === true;
 
@@ -119,7 +116,6 @@ export function parseWorkflowBody(
 
   return {
     name,
-    enabled,
     published,
     trigger,
     triggerConfig,
