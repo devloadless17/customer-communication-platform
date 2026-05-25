@@ -41,8 +41,18 @@ export async function findAndConsumeAwaitingReplies(
   tx: Prisma.TransactionClient,
   args: { teamId: string; contactId: string; answer: InboundAnswer },
 ): Promise<string[]> {
+  // Skip rows whose timeout already fired — those are the sweeper's to clean
+  // up. Without the filter, a stale awaiting row past `expiresAt` would
+  // steal the inbound answer that should have routed to a fresh ask_question
+  // (e.g., a different workflow restarted the same contact's question while
+  // the prior run was awaiting its timeout). The hourly sweeper is the
+  // primary cleanup; this filter is the read-side defense.
   const rows = await tx.workflowAwaitingReply.findMany({
-    where: { teamId: args.teamId, contactId: args.contactId },
+    where: {
+      teamId: args.teamId,
+      contactId: args.contactId,
+      expiresAt: { gt: new Date() },
+    },
     select: { id: true, runId: true },
   });
   if (rows.length === 0) return [];

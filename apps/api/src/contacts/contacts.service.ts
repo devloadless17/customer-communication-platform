@@ -743,8 +743,12 @@ export class ContactsService {
     type Mapping =
       | { kind: "phone" }
       | { kind: "name" }
+      | { kind: "firstName" }
+      | { kind: "lastName" }
       | { kind: "email" }
       | { kind: "location" }
+      | { kind: "language" }
+      | { kind: "country" }
       | { kind: "ignore" }
       | { kind: "field"; key: string };
 
@@ -753,9 +757,36 @@ export class ContactsService {
       if (h === "phone_number" || h === "phone" || h === "phone number") {
         return { kind: "phone" };
       }
-      if (h === "name" || h === "full name") return { kind: "name" };
-      if (h === "email" || h === "e-mail") return { kind: "email" };
+      if (h === "name" || h === "full name" || h === "full_name") {
+        return { kind: "name" };
+      }
+      if (
+        h === "first_name" ||
+        h === "firstname" ||
+        h === "first name" ||
+        h === "given_name" ||
+        h === "given name"
+      ) {
+        return { kind: "firstName" };
+      }
+      if (
+        h === "last_name" ||
+        h === "lastname" ||
+        h === "last name" ||
+        h === "surname" ||
+        h === "family_name" ||
+        h === "family name"
+      ) {
+        return { kind: "lastName" };
+      }
+      if (h === "email" || h === "e-mail" || h === "email_address") {
+        return { kind: "email" };
+      }
       if (h === "location" || h === "city") return { kind: "location" };
+      if (h === "language") return { kind: "language" };
+      if (h === "country" || h === "country_code" || h === "country code") {
+        return { kind: "country" };
+      }
       // `source` is intentionally ignored — imported rows are always 'manual'.
       // `id` from a round-trip export is meaningless on import.
       if (h === "source" || h === "id") return { kind: "ignore" };
@@ -782,8 +813,12 @@ export class ContactsService {
       rowNumber: number;
       phoneNumber: string;
       name: string;
+      firstName: string | null;
+      lastName: string | null;
       email: string | null;
       location: string | null;
+      language: string | null;
+      countryCode: string | null;
       customFields: Record<string, string>;
     }
     const pending: PendingRow[] = [];
@@ -793,8 +828,12 @@ export class ContactsService {
       const row = parsed.rows[i] ?? {};
       let phoneRaw: string | undefined;
       let name = "";
+      let firstName = "";
+      let lastName = "";
       let email = "";
       let location = "";
+      let language = "";
+      let country = "";
       const customFields: Record<string, string> = {};
 
       for (const [header, value] of Object.entries(row)) {
@@ -807,11 +846,23 @@ export class ContactsService {
           case "name":
             name = value.slice(0, MAX_TEXT);
             break;
+          case "firstName":
+            firstName = value.slice(0, MAX_TEXT);
+            break;
+          case "lastName":
+            lastName = value.slice(0, MAX_TEXT);
+            break;
           case "email":
             email = value.slice(0, MAX_TEXT);
             break;
           case "location":
             location = value.slice(0, MAX_TEXT);
+            break;
+          case "language":
+            language = value.slice(0, MAX_TEXT);
+            break;
+          case "country":
+            country = value.slice(0, MAX_TEXT);
             break;
           case "field":
             customFields[mapping.key] = value.slice(0, MAX_TEXT);
@@ -831,12 +882,34 @@ export class ContactsService {
         continue;
       }
 
+      // Synthesize the display `name` from first/last when the row has them
+      // but no explicit Name column. Mirrors the create-contact server behavior
+      // so a CSV of "first_name + last_name" only doesn't end up as the bare
+      // phone number for every contact.
+      let displayName = name.trim();
+      if (!displayName) {
+        const composed = `${firstName.trim()} ${lastName.trim()}`.trim();
+        if (composed) displayName = composed;
+      }
+
+      // Country must be a 2-letter ISO code. Anything else gets dropped
+      // silently — same shape as the Zod schema for the JSON API; the
+      // importer doesn't surface row-level validation for this one column
+      // because the phone-derived fallback will still produce a sane value.
+      const countryNormalized = country.trim().toUpperCase();
+      const countryValid =
+        countryNormalized.length === 2 && /^[A-Z]{2}$/.test(countryNormalized);
+
       pending.push({
         rowNumber,
         phoneNumber: phone,
-        name: name.trim() || phone,
+        name: displayName || phone,
+        firstName: firstName.trim() || null,
+        lastName: lastName.trim() || null,
         email: email.trim() || null,
         location: location.trim() || null,
+        language: language.trim() || null,
+        countryCode: countryValid ? countryNormalized : null,
         customFields,
       });
     }
@@ -860,8 +933,16 @@ export class ContactsService {
           teamId,
           phoneNumber: p.phoneNumber,
           name: p.name,
+          firstName: p.firstName ?? undefined,
+          lastName: p.lastName ?? undefined,
           email: p.email ?? undefined,
           location: p.location ?? undefined,
+          language: p.language ?? undefined,
+          // Falls back to `getCountryFromPhone(phone)` server-side when null;
+          // we only set when the CSV provided a valid ISO code so a bogus
+          // header value doesn't overwrite the libphonenumber-derived one.
+          countryCode:
+            p.countryCode ?? getCountryFromPhone(p.phoneNumber) ?? undefined,
           customFields: p.customFields,
           stageId: defaultStageId,
           source: "manual",
@@ -1022,8 +1103,12 @@ export class ContactsService {
         select: {
           phoneNumber: true,
           name: true,
+          firstName: true,
+          lastName: true,
           email: true,
           location: true,
+          language: true,
+          countryCode: true,
           source: true,
           customFields: true,
         },
@@ -1052,7 +1137,17 @@ export class ContactsService {
       }
     }
 
-    const baseColumns = ["phone_number", "name", "email", "location", "source"];
+    const baseColumns = [
+      "phone_number",
+      "name",
+      "first_name",
+      "last_name",
+      "email",
+      "location",
+      "language",
+      "country",
+      "source",
+    ];
     const teamColumns = fieldDefs.map((d) => d.label);
     const oneOffColumns = Array.from(oneOffKeys).sort();
     const columns = [...baseColumns, ...teamColumns, ...oneOffColumns];
@@ -1067,8 +1162,12 @@ export class ContactsService {
       const row: Record<string, string> = {
         phone_number: c.phoneNumber ?? "",
         name: c.name,
+        first_name: c.firstName ?? "",
+        last_name: c.lastName ?? "",
         email: c.email ?? "",
         location: c.location ?? "",
+        language: c.language ?? "",
+        country: c.countryCode ?? "",
         source: c.source,
       };
       for (const def of fieldDefs) {
@@ -1114,7 +1213,16 @@ export class ContactsService {
       orderBy: [{ order: "asc" }, { createdAt: "asc" }],
       select: { label: true },
     });
-    const baseColumns = ["phone_number", "name", "email", "location"];
+    const baseColumns = [
+      "phone_number",
+      "name",
+      "first_name",
+      "last_name",
+      "email",
+      "location",
+      "language",
+      "country",
+    ];
     const customColumns = fieldDefs.map((d) => d.label);
     const columns = [...baseColumns, ...customColumns];
     // Single header row terminated with CRLF — matches the Excel-friendly

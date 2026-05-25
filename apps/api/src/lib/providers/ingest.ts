@@ -1104,10 +1104,11 @@ export async function loadReplySnapshotByExternalId(
 }
 
 export async function loadReplySnapshotById(
+  teamId: string,
   id: string,
 ): Promise<ReplySnapshot | null> {
-  const row = await db.message.findUnique({
-    where: { id },
+  const row = await db.message.findFirst({
+    where: { id, teamId },
     select: REPLY_TO_INCLUDE.select,
   });
   return mapReplySnapshot(row);

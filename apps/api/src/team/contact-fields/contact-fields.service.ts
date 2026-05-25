@@ -22,13 +22,19 @@ const MAX_FIELDS_PER_TEAM = 50;
 
 /**
  * Default visibility for built-in contact-panel fields. Used when the team's
- * `contactPanelBuiltins` JSON is empty (every team starts that way). Preserves
- * the pre-feature behavior: email + location + firstContacted are rendered;
- * phone is rendered too but isn't toggleable so it's not in this map.
+ * `contactPanelBuiltins` JSON is empty (every team starts that way). Every
+ * built-in column on Contact except phone + name is in this map; all default
+ * to visible so a fresh team sees the full schema and the admin can hide.
+ * Phone and name aren't toggleable: phone is the WhatsApp identity and name
+ * is the panel heading.
  */
 const DEFAULT_BUILTINS: Required<ContactPanelBuiltins> = {
+  firstName: true,
+  lastName: true,
   email: true,
   location: true,
+  language: true,
+  country: true,
   firstContacted: true,
 };
 
@@ -36,8 +42,12 @@ function resolveBuiltins(raw: unknown): Required<ContactPanelBuiltins> {
   if (!raw || typeof raw !== "object") return DEFAULT_BUILTINS;
   const r = raw as Record<string, unknown>;
   return {
+    firstName: typeof r.firstName === "boolean" ? r.firstName : DEFAULT_BUILTINS.firstName,
+    lastName: typeof r.lastName === "boolean" ? r.lastName : DEFAULT_BUILTINS.lastName,
     email: typeof r.email === "boolean" ? r.email : DEFAULT_BUILTINS.email,
     location: typeof r.location === "boolean" ? r.location : DEFAULT_BUILTINS.location,
+    language: typeof r.language === "boolean" ? r.language : DEFAULT_BUILTINS.language,
+    country: typeof r.country === "boolean" ? r.country : DEFAULT_BUILTINS.country,
     firstContacted:
       typeof r.firstContacted === "boolean" ? r.firstContacted : DEFAULT_BUILTINS.firstContacted,
   };
@@ -74,8 +84,12 @@ export class ContactFieldsService {
     requireManage(role);
     const current = await this.getBuiltins(teamId);
     const next: Required<ContactPanelBuiltins> = {
+      firstName: patch.firstName ?? current.firstName,
+      lastName: patch.lastName ?? current.lastName,
       email: patch.email ?? current.email,
       location: patch.location ?? current.location,
+      language: patch.language ?? current.language,
+      country: patch.country ?? current.country,
       firstContacted: patch.firstContacted ?? current.firstContacted,
     };
     await this.db.team.update({

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Check, ChevronDown, Mail, Phone, MapPin, Clock, FileText, Loader2, UserRound } from "lucide-react";
+import { Check, ChevronDown, Mail, Phone, MapPin, Clock, FileText, Loader2, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -181,8 +181,12 @@ export function ContactPanel({
   // used to dedupe inbound webhooks, so it's read-only. Display straight from
   // `contact.phoneNumber`.
   const [name, setName] = useState(contact.name);
+  const [firstName, setFirstName] = useState(contact.firstName ?? "");
+  const [lastName, setLastName] = useState(contact.lastName ?? "");
   const [email, setEmail] = useState(contact.email ?? "");
   const [location, setLocation] = useState(contact.location ?? "");
+  const [language, setLanguage] = useState(contact.language ?? "");
+  const [country, setCountry] = useState(contact.countryCode ?? "");
   const [customFields, setCustomFields] = useState<Record<string, string>>(
     contact.customFields ?? {},
   );
@@ -209,8 +213,12 @@ export function ContactPanel({
   // panel would render the previous contact's edits against the new contact.
   useEffect(() => {
     setName(contact.name);
+    setFirstName(contact.firstName ?? "");
+    setLastName(contact.lastName ?? "");
     setEmail(contact.email ?? "");
     setLocation(contact.location ?? "");
+    setLanguage(contact.language ?? "");
+    setCountry(contact.countryCode ?? "");
     setCustomFields(contact.customFields ?? {});
     setTagIds(contact.tagIds ?? []);
     setAssigneeId(data.assignedUser?.id ?? null);
@@ -220,8 +228,12 @@ export function ContactPanel({
   }, [
     contact.id,
     contact.name,
+    contact.firstName,
+    contact.lastName,
     contact.email,
     contact.location,
+    contact.language,
+    contact.countryCode,
     contact.customFields,
     contact.tagIds,
     data.assignedUser?.id,
@@ -241,24 +253,36 @@ export function ContactPanel({
   //   - banner + park       (dirty fields the teammate's update would change)
   const serverSnapshotRef = useRef({
     name: contact.name,
+    firstName: contact.firstName ?? "",
+    lastName: contact.lastName ?? "",
     email: contact.email ?? "",
     location: contact.location ?? "",
+    language: contact.language ?? "",
+    country: contact.countryCode ?? "",
     customFields: contact.customFields ?? {},
     tagIds: contact.tagIds ?? [],
   });
   useEffect(() => {
     serverSnapshotRef.current = {
       name: contact.name,
+      firstName: contact.firstName ?? "",
+      lastName: contact.lastName ?? "",
       email: contact.email ?? "",
       location: contact.location ?? "",
+      language: contact.language ?? "",
+      country: contact.countryCode ?? "",
       customFields: contact.customFields ?? {},
       tagIds: contact.tagIds ?? [],
     };
   }, [
     contact.id,
     contact.name,
+    contact.firstName,
+    contact.lastName,
     contact.email,
     contact.location,
+    contact.language,
+    contact.countryCode,
     contact.customFields,
     contact.tagIds,
   ]);
@@ -269,8 +293,12 @@ export function ContactPanel({
   // values, our save will overwrite them which matches last-write-wins).
   const [pendingRemote, setPendingRemote] = useState<{
     name: string;
+    firstName: string;
+    lastName: string;
     email: string;
     location: string;
+    language: string;
+    country: string;
     customFields: Record<string, string>;
     tagIds: string[];
   } | null>(null);
@@ -293,24 +321,36 @@ export function ContactPanel({
       if (payload.contact.id !== contactId) return;
       const incoming = {
         name: payload.contact.name,
+        firstName: payload.contact.firstName ?? "",
+        lastName: payload.contact.lastName ?? "",
         email: payload.contact.email ?? "",
         location: payload.contact.location ?? "",
+        language: payload.contact.language ?? "",
+        country: payload.contact.countryCode ?? "",
         customFields: payload.contact.customFields ?? {},
         tagIds: payload.contact.tagIds ?? [],
       };
       const snapshot = serverSnapshotRef.current;
       const dirty =
         name !== snapshot.name ||
+        firstName !== snapshot.firstName ||
+        lastName !== snapshot.lastName ||
         email !== snapshot.email ||
         location !== snapshot.location ||
+        language !== snapshot.language ||
+        country !== snapshot.country ||
         !shallowJsonEqual(customFields, snapshot.customFields) ||
         !arraysEqual(tagIds, snapshot.tagIds);
       if (!dirty) {
         // Common path: live-collab. Apply silently + re-seed snapshot so the
         // panel stays in sync with the rest of the team without any banner.
         setName(incoming.name);
+        setFirstName(incoming.firstName);
+        setLastName(incoming.lastName);
         setEmail(incoming.email);
         setLocation(incoming.location);
+        setLanguage(incoming.language);
+        setCountry(incoming.country);
         setCustomFields(incoming.customFields);
         setTagIds(incoming.tagIds);
         serverSnapshotRef.current = incoming;
@@ -321,8 +361,12 @@ export function ContactPanel({
       // without spamming a banner.
       const wouldOverwrite =
         incoming.name !== name ||
+        incoming.firstName !== firstName ||
+        incoming.lastName !== lastName ||
         incoming.email !== email ||
         incoming.location !== location ||
+        incoming.language !== language ||
+        incoming.country !== country ||
         !shallowJsonEqual(incoming.customFields, customFields) ||
         !arraysEqual(incoming.tagIds, tagIds);
       if (!wouldOverwrite) {
@@ -352,8 +396,12 @@ export function ContactPanel({
       const snapshot = serverSnapshotRef.current;
       const dirty =
         name !== snapshot.name ||
+        firstName !== snapshot.firstName ||
+        lastName !== snapshot.lastName ||
         email !== snapshot.email ||
         location !== snapshot.location ||
+        language !== snapshot.language ||
+        country !== snapshot.country ||
         !shallowJsonEqual(customFields, snapshot.customFields) ||
         !arraysEqual(tagIds, snapshot.tagIds);
       if (dirty) return;
@@ -365,13 +413,29 @@ export function ContactPanel({
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
     };
-  }, [contact.id, name, email, location, customFields, tagIds, router]);
+  }, [
+    contact.id,
+    name,
+    firstName,
+    lastName,
+    email,
+    location,
+    language,
+    country,
+    customFields,
+    tagIds,
+    router,
+  ]);
 
   function acceptPendingRemote() {
     if (!pendingRemote) return;
     setName(pendingRemote.name);
+    setFirstName(pendingRemote.firstName);
+    setLastName(pendingRemote.lastName);
     setEmail(pendingRemote.email);
     setLocation(pendingRemote.location);
+    setLanguage(pendingRemote.language);
+    setCountry(pendingRemote.country);
     setCustomFields(pendingRemote.customFields);
     setTagIds(pendingRemote.tagIds);
     serverSnapshotRef.current = pendingRemote;
@@ -406,8 +470,12 @@ export function ContactPanel({
    */
   async function save(patch: {
     name?: string;
+    firstName?: string | null;
+    lastName?: string | null;
     email?: string | null;
     location?: string | null;
+    language?: string | null;
+    countryCode?: string | null;
     customFields?: Record<string, string | null>;
   }): Promise<boolean> {
     setError(null);
@@ -426,9 +494,17 @@ export function ContactPanel({
     const optimistic = {
       ...contact,
       name: patch.name ?? name,
+      firstName:
+        "firstName" in patch ? patch.firstName ?? null : firstName || null,
+      lastName:
+        "lastName" in patch ? patch.lastName ?? null : lastName || null,
       email: "email" in patch ? patch.email ?? undefined : email || undefined,
       location:
         "location" in patch ? patch.location ?? undefined : location || undefined,
+      language:
+        "language" in patch ? patch.language ?? null : language || null,
+      countryCode:
+        "countryCode" in patch ? patch.countryCode ?? null : country || null,
       customFields: nextCustomFields,
       tagIds,
     };
@@ -677,6 +753,44 @@ export function ContactPanel({
             mono
             value={formatPhone(contact.phoneNumber)}
           />
+          {builtins.firstName && (
+            <EditableField
+              icon={UserIcon}
+              label="First name"
+              value={firstName}
+              placeholder="—"
+              onSave={async (next) => {
+                const trimmed = next.trim();
+                if (trimmed === (firstName ?? "").trim()) return true;
+                const prev = firstName;
+                setFirstName(trimmed);
+                const ok = await save({
+                  firstName: trimmed === "" ? null : trimmed,
+                });
+                if (!ok) setFirstName(prev);
+                return ok;
+              }}
+            />
+          )}
+          {builtins.lastName && (
+            <EditableField
+              icon={UserIcon}
+              label="Last name"
+              value={lastName}
+              placeholder="—"
+              onSave={async (next) => {
+                const trimmed = next.trim();
+                if (trimmed === (lastName ?? "").trim()) return true;
+                const prev = lastName;
+                setLastName(trimmed);
+                const ok = await save({
+                  lastName: trimmed === "" ? null : trimmed,
+                });
+                if (!ok) setLastName(prev);
+                return ok;
+              }}
+            />
+          )}
           {builtins.email && (
             <EditableField
               icon={Mail}
@@ -707,6 +821,45 @@ export function ContactPanel({
                 setLocation(trimmed);
                 const ok = await save({ location: trimmed === "" ? null : trimmed });
                 if (!ok) setLocation(prev);
+                return ok;
+              }}
+            />
+          )}
+          {builtins.language && (
+            <EditableField
+              icon={Globe}
+              label="Language"
+              value={language}
+              placeholder="—"
+              onSave={async (next) => {
+                const trimmed = next.trim();
+                if (trimmed === (language ?? "").trim()) return true;
+                const prev = language;
+                setLanguage(trimmed);
+                const ok = await save({
+                  language: trimmed === "" ? null : trimmed,
+                });
+                if (!ok) setLanguage(prev);
+                return ok;
+              }}
+            />
+          )}
+          {builtins.country && (
+            <EditableField
+              icon={Flag}
+              label="Country"
+              value={country}
+              placeholder="—"
+              mono
+              onSave={async (next) => {
+                const trimmed = next.trim().toUpperCase();
+                if (trimmed === (country ?? "").trim().toUpperCase()) return true;
+                const prev = country;
+                setCountry(trimmed);
+                const ok = await save({
+                  countryCode: trimmed === "" ? null : trimmed,
+                });
+                if (!ok) setCountry(prev);
                 return ok;
               }}
             />

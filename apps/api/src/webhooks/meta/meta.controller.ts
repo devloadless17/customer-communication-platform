@@ -85,7 +85,18 @@ export class MetaWebhookController {
       res.status(403).type("text/plain").send("forbidden");
       return;
     }
-    if (mode === "subscribe" && token === config.verifyToken && challenge) {
+    // Timing-safe compare on the verify token + a length sanity cap on the
+    // echoed challenge. Meta's challenge values are short opaque strings (~32
+    // chars); refusing >255 chars stops a misrouted client from coaxing us
+    // into echoing arbitrary text.
+    if (
+      mode === "subscribe" &&
+      typeof token === "string" &&
+      typeof challenge === "string" &&
+      challenge.length > 0 &&
+      challenge.length <= 255 &&
+      timingSafeEqualString(token, config.verifyToken)
+    ) {
       res.status(200).type("text/plain").send(challenge);
       return;
     }
@@ -634,6 +645,19 @@ function verifySignature(
   const b = Buffer.from(header);
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/**
+ * Constant-time string compare. Used by the verify-token handshake so a
+ * remote prober can't time-difference the prefix of the expected token.
+ * Both inputs are coerced to fixed-length Buffers; the length-mismatch
+ * branch is a precondition of `timingSafeEqual` (which throws on unequal
+ * lengths) — comparing a zero-padded buffer instead would just hide the
+ * length leak without preventing it.
+ */
+function timingSafeEqualString(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 async function runWithConcurrency<T>(

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Mail, MapPin, MessageSquare, Phone, Send, Trash2 } from "lucide-react";
+import { Flag, Globe, Mail, MapPin, MessageSquare, Phone, Send, Trash2, User as UserIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +27,7 @@ import { formatPhone, initials } from "@ccp/shared/utils";
 import type {
   Contact,
   ContactFieldDefinition,
+  ContactPanelBuiltins,
   ContactStage,
   Tag,
 } from "@ccp/shared/types";
@@ -43,6 +44,7 @@ import type {
 export function ContactDetailDrawer({
   contact,
   fieldDefinitions,
+  builtins,
   tagCatalog,
   stageCatalog,
   canManageFields,
@@ -56,6 +58,9 @@ export function ContactDetailDrawer({
 }: {
   contact: Contact;
   fieldDefinitions: ContactFieldDefinition[];
+  /** Built-in field visibility — admin-controlled at /settings/contact-fields.
+   *  Phone + name always render; everything else honors this map. */
+  builtins: ContactPanelBuiltins;
   tagCatalog: Tag[];
   stageCatalog: ContactStage[];
   canManageFields: boolean;
@@ -71,8 +76,12 @@ export function ContactDetailDrawer({
   // Local mirrors so edits feel instant; re-seeded only when a different
   // contact is opened. The optimistic dispatch keeps the list in sync.
   const [name, setName] = useState(contact.name);
+  const [firstName, setFirstName] = useState(contact.firstName ?? "");
+  const [lastName, setLastName] = useState(contact.lastName ?? "");
   const [email, setEmail] = useState(contact.email ?? "");
   const [location, setLocation] = useState(contact.location ?? "");
+  const [language, setLanguage] = useState(contact.language ?? "");
+  const [country, setCountry] = useState(contact.countryCode ?? "");
   const [customFields, setCustomFields] = useState<Record<string, string>>(
     contact.customFields ?? {},
   );
@@ -85,8 +94,12 @@ export function ContactDetailDrawer({
 
   useEffect(() => {
     setName(contact.name);
+    setFirstName(contact.firstName ?? "");
+    setLastName(contact.lastName ?? "");
     setEmail(contact.email ?? "");
     setLocation(contact.location ?? "");
+    setLanguage(contact.language ?? "");
+    setCountry(contact.countryCode ?? "");
     setCustomFields(contact.customFields ?? {});
     setTagIds(contact.tagIds ?? []);
     setStageId(contact.stageId ?? null);
@@ -110,8 +123,12 @@ export function ContactDetailDrawer({
   /** Single save path. Optimistic local fan + PATCH; rollback on failure. */
   async function save(patch: {
     name?: string;
+    firstName?: string | null;
+    lastName?: string | null;
     email?: string | null;
     location?: string | null;
+    language?: string | null;
+    countryCode?: string | null;
     customFields?: Record<string, string | null>;
     stageId?: string | null;
   }): Promise<boolean> {
@@ -126,9 +143,17 @@ export function ContactDetailDrawer({
     const optimistic: Contact = {
       ...contact,
       name: patch.name ?? name,
+      firstName:
+        "firstName" in patch ? patch.firstName ?? null : firstName || null,
+      lastName:
+        "lastName" in patch ? patch.lastName ?? null : lastName || null,
       email: "email" in patch ? patch.email ?? undefined : email || undefined,
       location:
         "location" in patch ? patch.location ?? undefined : location || undefined,
+      language:
+        "language" in patch ? patch.language ?? null : language || null,
+      countryCode:
+        "countryCode" in patch ? patch.countryCode ?? null : country || null,
       customFields: nextCustomFields,
       tagIds,
       stageId: "stageId" in patch ? patch.stageId ?? null : stageId,
@@ -257,36 +282,117 @@ export function ContactDetailDrawer({
               <Phone className="size-4 shrink-0 text-muted-foreground" />
               <span className="font-mono">{formatPhone(contact.phoneNumber)}</span>
             </div>
-            <EditableField
-              icon={Mail}
-              label="Email"
-              value={email}
-              placeholder="—"
-              onSave={async (next) => {
-                const trimmed = next.trim();
-                if (trimmed === (email ?? "").trim()) return true;
-                const prev = email;
-                setEmail(trimmed);
-                const ok = await save({ email: trimmed === "" ? null : trimmed });
-                if (!ok) setEmail(prev);
-                return ok;
-              }}
-            />
-            <EditableField
-              icon={MapPin}
-              label="Location"
-              value={location}
-              placeholder="—"
-              onSave={async (next) => {
-                const trimmed = next.trim();
-                if (trimmed === (location ?? "").trim()) return true;
-                const prev = location;
-                setLocation(trimmed);
-                const ok = await save({ location: trimmed === "" ? null : trimmed });
-                if (!ok) setLocation(prev);
-                return ok;
-              }}
-            />
+            {builtins.firstName && (
+              <EditableField
+                icon={UserIcon}
+                label="First name"
+                value={firstName}
+                placeholder="—"
+                onSave={async (next) => {
+                  const trimmed = next.trim();
+                  if (trimmed === (firstName ?? "").trim()) return true;
+                  const prev = firstName;
+                  setFirstName(trimmed);
+                  const ok = await save({
+                    firstName: trimmed === "" ? null : trimmed,
+                  });
+                  if (!ok) setFirstName(prev);
+                  return ok;
+                }}
+              />
+            )}
+            {builtins.lastName && (
+              <EditableField
+                icon={UserIcon}
+                label="Last name"
+                value={lastName}
+                placeholder="—"
+                onSave={async (next) => {
+                  const trimmed = next.trim();
+                  if (trimmed === (lastName ?? "").trim()) return true;
+                  const prev = lastName;
+                  setLastName(trimmed);
+                  const ok = await save({
+                    lastName: trimmed === "" ? null : trimmed,
+                  });
+                  if (!ok) setLastName(prev);
+                  return ok;
+                }}
+              />
+            )}
+            {builtins.email && (
+              <EditableField
+                icon={Mail}
+                label="Email"
+                value={email}
+                placeholder="—"
+                onSave={async (next) => {
+                  const trimmed = next.trim();
+                  if (trimmed === (email ?? "").trim()) return true;
+                  const prev = email;
+                  setEmail(trimmed);
+                  const ok = await save({ email: trimmed === "" ? null : trimmed });
+                  if (!ok) setEmail(prev);
+                  return ok;
+                }}
+              />
+            )}
+            {builtins.location && (
+              <EditableField
+                icon={MapPin}
+                label="Location"
+                value={location}
+                placeholder="—"
+                onSave={async (next) => {
+                  const trimmed = next.trim();
+                  if (trimmed === (location ?? "").trim()) return true;
+                  const prev = location;
+                  setLocation(trimmed);
+                  const ok = await save({ location: trimmed === "" ? null : trimmed });
+                  if (!ok) setLocation(prev);
+                  return ok;
+                }}
+              />
+            )}
+            {builtins.language && (
+              <EditableField
+                icon={Globe}
+                label="Language"
+                value={language}
+                placeholder="—"
+                onSave={async (next) => {
+                  const trimmed = next.trim();
+                  if (trimmed === (language ?? "").trim()) return true;
+                  const prev = language;
+                  setLanguage(trimmed);
+                  const ok = await save({
+                    language: trimmed === "" ? null : trimmed,
+                  });
+                  if (!ok) setLanguage(prev);
+                  return ok;
+                }}
+              />
+            )}
+            {builtins.country && (
+              <EditableField
+                icon={Flag}
+                label="Country"
+                value={country}
+                placeholder="—"
+                mono
+                onSave={async (next) => {
+                  const trimmed = next.trim().toUpperCase();
+                  if (trimmed === (country ?? "").trim().toUpperCase()) return true;
+                  const prev = country;
+                  setCountry(trimmed);
+                  const ok = await save({
+                    countryCode: trimmed === "" ? null : trimmed,
+                  });
+                  if (!ok) setCountry(prev);
+                  return ok;
+                }}
+              />
+            )}
 
             {fieldDefinitions
               .filter((def) => def.isVisible)

@@ -478,7 +478,7 @@ export class MessagesService {
     // payload for the quote pill; failure here degrades to a quoteless
     // bubble, never blocks the send.
     const replySnapshotPromise = replyToMessageId
-      ? loadReplySnapshotById(replyToMessageId)
+      ? loadReplySnapshotById(teamId, replyToMessageId)
       : Promise.resolve(null);
 
     // BEFORE-Meta-call idempotency: try to insert an OutboundSendAttempt
@@ -1168,7 +1168,7 @@ export class MessagesService {
       : undefined;
 
     const replySnapshot = replyToMessageId
-      ? await loadReplySnapshotById(replyToMessageId).catch(() => null)
+      ? await loadReplySnapshotById(teamId, replyToMessageId).catch(() => null)
       : null;
 
     const message: Message = {

@@ -62,6 +62,11 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
       if (oncePerContactIds.length > 0) {
         const already = await db.workflowContactState.findMany({
           where: {
+            // teamId is redundant with workflowId here (workflowId is a global
+            // cuid and oncePerContactIds came from a teamId-scoped lookup),
+            // but adding it makes the team boundary explicit at the query and
+            // means the row's @@index([teamId]) can serve this filter too.
+            teamId,
             workflowId: { in: oncePerContactIds },
             contactId,
           },

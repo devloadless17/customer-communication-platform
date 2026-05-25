@@ -375,6 +375,7 @@ CREATE TABLE "BroadcastRecipient" (
 -- CreateTable
 CREATE TABLE "InternalNote" (
     "id" TEXT NOT NULL,
+    "teamId" TEXT NOT NULL,
     "conversationId" TEXT NOT NULL,
     "authorUserId" TEXT,
     "body" TEXT NOT NULL,
@@ -388,7 +389,6 @@ CREATE TABLE "Workflow" (
     "id" TEXT NOT NULL,
     "teamId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "enabled" BOOLEAN NOT NULL DEFAULT true,
     "published" BOOLEAN NOT NULL DEFAULT false,
     "trigger" "WorkflowTriggerEvent" NOT NULL,
     "triggerConfig" JSONB NOT NULL DEFAULT '{}',
@@ -411,6 +411,7 @@ CREATE TABLE "WorkflowRun" (
     "contactId" TEXT,
     "conversationId" TEXT,
     "eventPayload" JSONB NOT NULL,
+    "graphSnapshot" JSONB,
     "currentStepId" TEXT,
     "waitUntil" TIMESTAMP(3),
     "jumpsUsed" INTEGER NOT NULL DEFAULT 0,
@@ -474,6 +475,7 @@ CREATE TABLE "ApiIdempotencyKey" (
     "key" TEXT NOT NULL,
     "responseBody" JSONB NOT NULL,
     "responseStatus" INTEGER NOT NULL,
+    "requestHash" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "expiresAt" TIMESTAMP(3) NOT NULL,
 
@@ -821,7 +823,10 @@ CREATE UNIQUE INDEX "BroadcastRecipient_broadcastId_contactId_key" ON "Broadcast
 CREATE INDEX "InternalNote_conversationId_timestamp_idx" ON "InternalNote"("conversationId", "timestamp");
 
 -- CreateIndex
-CREATE INDEX "Workflow_teamId_trigger_enabled_published_idx" ON "Workflow"("teamId", "trigger", "enabled", "published");
+CREATE INDEX "InternalNote_teamId_idx" ON "InternalNote"("teamId");
+
+-- CreateIndex
+CREATE INDEX "Workflow_teamId_trigger_published_idx" ON "Workflow"("teamId", "trigger", "published");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Workflow_teamId_name_key" ON "Workflow"("teamId", "name");
@@ -1016,6 +1021,9 @@ ALTER TABLE "BroadcastRecipient" ADD CONSTRAINT "BroadcastRecipient_broadcastId_
 ALTER TABLE "BroadcastRecipient" ADD CONSTRAINT "BroadcastRecipient_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "InternalNote" ADD CONSTRAINT "InternalNote_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "InternalNote" ADD CONSTRAINT "InternalNote_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -1148,6 +1156,13 @@ ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fk
 ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 
--- CreateIndex
--- Hand-written jsonb_path_ops GIN (Prisma DSL can't model it). Keep on regen.
+-- ---------------------------------------------------------------------------
+-- Hand-written jsonb_path_ops GIN — the Prisma DSL can't emit this cleanly
+-- (`raw("jsonb_path_ops")` appends an invalid trailing `ASC`), so the index is
+-- maintained as raw SQL and intentionally NOT represented in schema.prisma.
+-- Consequence: every `prisma migrate dev` diff against an apply state that
+-- HAS this index will propose a spurious `DROP INDEX "Contact_customFields_gin_idx"`.
+-- Always strip that DROP from generated migrations — losing this index forces
+-- a full rebuild on the largest table.
+-- ---------------------------------------------------------------------------
 CREATE INDEX "Contact_customFields_gin_idx" ON "Contact" USING GIN ("customFields" jsonb_path_ops);

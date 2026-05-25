@@ -1,7 +1,7 @@
 import { getSession } from "@/lib/auth/current-user";
 import { canManageContactFields, canManageStages } from "@ccp/shared/auth/permissions";
 import {
-  listContactFieldDefinitions,
+  listContactFieldsWithBuiltins,
   listContactStages,
   listContacts,
   listTags,
@@ -27,14 +27,16 @@ export default async function ContactsPage({
   const params = await searchParams;
   const stageParam = typeof params.stage === "string" ? params.stage : undefined;
 
-  const [page, fieldDefinitions, tags, stages] = await Promise.all([
+  const [page, fieldsAndBuiltins, tags, stages] = await Promise.all([
     listContacts({
       stageId: stageParam === "none" ? "none" : stageParam || undefined,
     }),
-    listContactFieldDefinitions(),
+    listContactFieldsWithBuiltins(),
     listTags(),
     listContactStages(),
   ]);
+  const { definitions: fieldDefinitions, builtins: contactPanelBuiltins } =
+    fieldsAndBuiltins;
 
   const resolvedStageFilter: StageFilter =
     stageParam === "none"
@@ -54,6 +56,7 @@ export default async function ContactsPage({
       initialItems={page.items}
       initialNextCursor={page.nextCursor}
       fieldDefinitions={fieldDefinitions}
+      contactPanelBuiltins={contactPanelBuiltins}
       initialTags={tags}
       initialStages={stages}
       initialStageFilter={resolvedStageFilter}

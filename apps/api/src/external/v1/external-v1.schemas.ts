@@ -189,8 +189,11 @@ export const ExternalCreateContactSchema = z.object({
 });
 export type ExternalCreateContactInput = z.infer<typeof ExternalCreateContactSchema>;
 
-export const ExternalUpdateContactSchema = z
-  .object({
+// Default Zod `.strip()` — unknown keys silently dropped. The service layer
+// also destructures to a known allowlist (external-v1.service.ts:556-566),
+// so even if someone refactored to `data: input` directly, the schema would
+// still strip `teamId`/FK columns at the door. Don't add `.passthrough()`.
+export const ExternalUpdateContactSchema = z.object({
     name: z.string().trim().min(1).max(MAX_TEXT).optional(),
     firstName: z
       .union([z.string().trim().max(MAX_TEXT), z.null()])
@@ -216,8 +219,7 @@ export const ExternalUpdateContactSchema = z
       .optional(),
     customFields: CustomFieldsSchema.optional(),
     stageId: z.union([z.string().min(1), z.null()]).optional(),
-  })
-  .passthrough();
+  });
 export type ExternalUpdateContactInput = z.infer<typeof ExternalUpdateContactSchema>;
 
 // Same body as create but always succeeds (find-or-create on phoneNumber).

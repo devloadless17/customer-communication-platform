@@ -381,16 +381,22 @@ async function runBroadcast(broadcastId: string): Promise<void> {
 
   // Cooperative cancel — operators flip the broadcast row to `canceled`
   // via POST /api/broadcasts/:id/cancel; the lanes check this flag at the
-  // top of every iteration (cheap: one indexed `select` per recipient).
-  // Recipients already sent stay sent (Meta can't be unsent); the loop
-  // simply stops pulling more queued rows.
+  // top of every iteration. Recipients already sent stay sent (Meta can't
+  // be unsent); the loop simply stops pulling more queued rows.
   //
-  // The status check is co-located with the queue refill so a long-running
-  // broadcast picks up cancellation between pages rather than waiting until
-  // a lane idles.
+  // Cancel polling is rate-limited to CANCEL_POLL_MS (every ~2s) — the cancel
+  // signal lives in-memory and the DB read only refreshes the cache when the
+  // window expires. Without the cache, a 10k-recipient broadcast issued one
+  // SELECT per recipient × 5 lanes = ~10k extra DB round-trips that bought
+  // sub-200ms cancel responsiveness no operator needed.
+  const CANCEL_POLL_MS = 2_000;
   let canceled = false;
+  let lastCancelPollAt = 0;
   async function checkCanceled(): Promise<boolean> {
     if (canceled) return true;
+    const now = Date.now();
+    if (now - lastCancelPollAt < CANCEL_POLL_MS) return false;
+    lastCancelPollAt = now;
     const row = await db.broadcast.findUnique({
       where: { id: broadcastId_ },
       select: { status: true },

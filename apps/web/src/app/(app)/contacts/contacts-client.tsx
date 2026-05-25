@@ -44,6 +44,7 @@ import type {
   Contact,
   ContactFieldDefinition,
   ContactListItem,
+  ContactPanelBuiltins,
   ContactStage,
   Tag,
 } from "@ccp/shared/types";
@@ -101,6 +102,7 @@ export function ContactsClient({
   initialItems,
   initialNextCursor,
   fieldDefinitions: initialFieldDefinitions,
+  contactPanelBuiltins,
   initialTags,
   initialStages,
   initialStageFilter,
@@ -110,6 +112,9 @@ export function ContactsClient({
   initialItems: ContactListItem[];
   initialNextCursor: string | null;
   fieldDefinitions: ContactFieldDefinition[];
+  /** Admin-controlled visibility for the built-in contact rows. Forwarded to
+   *  the detail drawer so it honors the same hide toggles as the inbox panel. */
+  contactPanelBuiltins: ContactPanelBuiltins;
   initialTags: Tag[];
   initialStages: ContactStage[];
   initialStageFilter: StageFilter;
@@ -590,6 +595,7 @@ export function ContactsClient({
           <ContactDetailDrawer
             contact={row.contact}
             fieldDefinitions={fieldDefinitions}
+            builtins={contactPanelBuiltins}
             tagCatalog={tags}
             stageCatalog={stages}
             canManageFields={canManageFields}

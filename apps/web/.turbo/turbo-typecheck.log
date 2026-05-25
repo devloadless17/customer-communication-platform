@@ -2,3 +2,5 @@
 > @ccp/web@0.0.0 typecheck /home/aliubuntu/projects/loadless_projects/customer-communication-platform/apps/web
 > tsc --noEmit
 
+src/app/(app)/contacts/new-contact-dialog.tsx(107,35): error TS2339: Property 'trim' does not exist on type 'Country'.
+ ELIFECYCLE  Command failed with exit code 1.

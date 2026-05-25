@@ -119,15 +119,23 @@ export interface ContactFieldDefinition {
 
 /**
  * Built-in contact-panel field visibility. Per-team admin toggle for the
- * email / location / firstContacted rows in the inbox contact panel. Phone is
- * NOT in this map — it's the WhatsApp identity and always renders. Stored as
- * a JSON map on Team.contactPanelBuiltins; the server resolves missing keys
- * to the legacy "always visible" default so existing teams stay on parity
- * until an admin explicitly hides one.
+ * rows in the inbox contact panel + contact detail drawer. Phone is NOT in
+ * this map — it's the WhatsApp identity and always renders, as is `name`
+ * (rendered as the panel heading). Stored as a JSON map on
+ * Team.contactPanelBuiltins; the server resolves missing keys to the
+ * "available by default" default (true), so existing teams keep parity
+ * after the surface grows.
+ *
+ * `country` corresponds to the ISO 3166-1 alpha-2 `countryCode` column on
+ * Contact; the shorter key keeps the settings UI human-readable.
  */
 export interface ContactPanelBuiltins {
+  firstName: boolean;
+  lastName: boolean;
   email: boolean;
   location: boolean;
+  language: boolean;
+  country: boolean;
   firstContacted: boolean;
 }
 

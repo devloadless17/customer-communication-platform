@@ -55,6 +55,8 @@ export function NewContactDialog({
   onTeamWideFieldAdded: (def: ContactFieldDefinition) => void;
 }) {
   const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   // Phone is split into dial-code + local digits so the user doesn't have to
   // remember country prefixes. Default to Lebanon — the pilot customer's
   // market. The API still gets a single digits-only string at submit time.
@@ -62,6 +64,11 @@ export function NewContactDialog({
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [location, setLocation] = useState("");
+  const [language, setLanguage] = useState("");
+  // Free-text override for ISO 3166-1 alpha-2 country (e.g. "US", "LB"). Empty
+  // means "derive from phone server-side" — `countryIso` above is the picker
+  // for the dial code, not the contact's residency country.
+  const [country, setCountry] = useState("");
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
   // Per-contact one-off keys added via the "+ Add field" button. Tracked
   // separately from team-wide defs so we can render them with prettyfied
@@ -97,14 +104,19 @@ export function NewContactDialog({
     const fullNumber = `+${country.dial}${localDigits}`;
     setSubmitting(true);
     try {
+      const countryTrim = country.trim().toUpperCase();
       const res = await fetch("/api/contacts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           phoneNumber: fullNumber,
           name: name || undefined,
+          firstName: firstName.trim() || undefined,
+          lastName: lastName.trim() || undefined,
           email: email || undefined,
           location: location || undefined,
+          language: language.trim() || undefined,
+          countryCode: countryTrim || undefined,
           // Drop empty fields server-side anyway, but cleaner to send only
           // what was set.
           customFields: Object.fromEntries(
@@ -202,6 +214,22 @@ export function NewContactDialog({
               placeholder="Defaults to phone number"
             />
           </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="First name">
+              <Input
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                placeholder="—"
+              />
+            </Field>
+            <Field label="Last name">
+              <Input
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                placeholder="—"
+              />
+            </Field>
+          </div>
           <Field label="Email">
             <Input
               type="email"
@@ -217,6 +245,24 @@ export function NewContactDialog({
               placeholder="—"
             />
           </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Language">
+              <Input
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                placeholder="en, ar…"
+              />
+            </Field>
+            <Field label="Country">
+              <Input
+                value={country}
+                onChange={(e) => setCountry(e.target.value)}
+                placeholder="ISO (US, LB…)"
+                maxLength={2}
+                className="font-mono uppercase"
+              />
+            </Field>
+          </div>
 
           {(fieldDefinitions.length > 0 || perContactKeys.length > 0) && (
             <div className="border-t border-border pt-3">

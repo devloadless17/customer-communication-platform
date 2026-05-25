@@ -112,11 +112,13 @@ export type CreateContactInput = z.infer<typeof CreateContactSchema>;
 // "phoneNumber is not editable — it's the WhatsApp identity for this contact"
 // rather than a generic Zod issue.
 //
-// `.passthrough()` so unknown keys (forward-compat / future fields) don't
-// reject; only `phoneNumber` is hard-blocked.
+// Zod's default is `.strip()` — unknown keys are silently dropped. We rely on
+// this AND on the service-layer destructure (contacts.service.ts) to filter to
+// a known field allowlist before any Prisma `data:` spread. Don't use
+// `.passthrough()` here — it would let a future `data: input` call smuggle
+// arbitrary columns (`teamId`, FK fields) into the update.
 // ---------------------------------------------------------------------------
-export const UpdateContactSchema = z
-  .object({
+export const UpdateContactSchema = z.object({
     name: z.string().trim().min(1).max(MAX_TEXT).optional(),
     firstName: z
       .union([z.string().trim().max(MAX_TEXT), z.null()])
@@ -138,8 +140,7 @@ export const UpdateContactSchema = z
       .optional(),
     customFields: CustomFieldsPatchSchema.optional(),
     stageId: z.union([z.string().min(1), z.null()]).optional(),
-  })
-  .passthrough();
+  });
 export type UpdateContactInput = z.infer<typeof UpdateContactSchema>;
 
 // ---------------------------------------------------------------------------

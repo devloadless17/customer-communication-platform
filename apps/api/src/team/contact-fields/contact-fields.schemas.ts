@@ -3,15 +3,18 @@ import { z } from "zod";
 const MAX_LABEL = 60;
 
 /**
- * Built-in contact-panel fields that admins can show/hide. Phone is NOT in
- * this set — it's the WhatsApp identity and always renders. Other built-ins
- * (firstName / lastName / language / countryCode) aren't yet rendered, so
- * they're not on this list either. Adding them later is a non-breaking
- * extension — just append a key + extend the renderer.
+ * Built-in contact-panel fields that admins can show/hide. Phone + name are
+ * NOT in this set — phone is the WhatsApp identity, name is the heading;
+ * both always render. Every other built-in column on Contact is toggleable
+ * here, defaulting to visible on the server side.
  */
 export const ContactPanelBuiltinSchema = z.object({
+  firstName: z.boolean().optional(),
+  lastName: z.boolean().optional(),
   email: z.boolean().optional(),
   location: z.boolean().optional(),
+  language: z.boolean().optional(),
+  country: z.boolean().optional(),
   firstContacted: z.boolean().optional(),
 });
 export type ContactPanelBuiltins = z.infer<typeof ContactPanelBuiltinSchema>;

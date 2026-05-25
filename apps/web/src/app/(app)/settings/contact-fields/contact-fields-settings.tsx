@@ -326,11 +326,24 @@ export function ContactFieldsSettings({
         <header className="border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">Built-in fields</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Toggle which built-in fields show up on the contact panel. Phone is
-            always shown — it&apos;s the WhatsApp identity.
+            Toggle which built-in fields show up on the contact panel and the
+            contact details drawer. Phone and name are always shown — phone is
+            the WhatsApp identity, name is the heading.
           </p>
         </header>
         <ul className="divide-y divide-border">
+          <BuiltinRow
+            label="First name"
+            description="Contact's given name."
+            visible={builtins.firstName}
+            onToggle={() => void toggleBuiltin("firstName")}
+          />
+          <BuiltinRow
+            label="Last name"
+            description="Contact's family name."
+            visible={builtins.lastName}
+            onToggle={() => void toggleBuiltin("lastName")}
+          />
           <BuiltinRow
             label="Email"
             description="Contact's email address."
@@ -342,6 +355,18 @@ export function ContactFieldsSettings({
             description="Free-form location string (city, region, etc.)."
             visible={builtins.location}
             onToggle={() => void toggleBuiltin("location")}
+          />
+          <BuiltinRow
+            label="Language"
+            description="BCP-47 language tag (e.g. en, ar). Used for WhatsApp template selection."
+            visible={builtins.language}
+            onToggle={() => void toggleBuiltin("language")}
+          />
+          <BuiltinRow
+            label="Country"
+            description="ISO 3166-1 alpha-2 country code (e.g. US, LB). Derived from phone when blank."
+            visible={builtins.country}
+            onToggle={() => void toggleBuiltin("country")}
           />
           <BuiltinRow
             label="First contacted"
