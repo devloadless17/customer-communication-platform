@@ -94,18 +94,17 @@ export function NewContactDialog({
       setError("Phone number is required");
       return;
     }
-    const country = findCountry(countryIso);
-    if (!country) {
+    const dialCountry = findCountry(countryIso);
+    if (!dialCountry) {
       setError("Please pick a country");
       return;
     }
     // Concatenate dial code + local. Server normalises to digits-only and
     // validates the 8-15 digit length (lib/phone.ts).
-    const fullNumber = `+${country.dial}${localDigits}`;
+    const fullNumber = `+${dialCountry.dial}${localDigits}`;
     setSubmitting(true);
     try {
-      const countryTrim = country
-      // const countryTrim = country.trim().toUpperCase();
+      const countryTrim = country.trim().toUpperCase();
 
       const res = await fetch("/api/contacts", {
         method: "POST",
