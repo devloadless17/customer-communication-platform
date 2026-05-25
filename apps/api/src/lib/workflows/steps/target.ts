@@ -130,6 +130,9 @@ export async function resolveStepTarget(
     const created = await db.contact.create({
       data: {
         teamId,
+        // Workflow target with a phone number = WhatsApp by definition
+        // today. Stamped explicitly because identityChannel is NOT NULL.
+        identityChannel: "whatsapp",
         phoneNumber: phone,
         // Use the phone number as the placeholder name. The contact owner
         // can rename later via the contact panel. Better than "Unknown"

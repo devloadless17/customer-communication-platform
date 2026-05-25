@@ -135,6 +135,11 @@ export class ContactsService {
       created = await this.db.contact.create({
         data: {
           teamId,
+          // Manual contact-create from the UI is WhatsApp-only today (it
+          // takes a phone number). Stamp the channel explicitly so the row
+          // is self-describing; future channels would get their own create
+          // path that stamps their own channel.
+          identityChannel: "whatsapp",
           phoneNumber: phone,
           name,
           firstName: trimmedFirst,
@@ -931,6 +936,10 @@ export class ContactsService {
       const result = await this.db.contact.createMany({
         data: toCreate.map((p) => ({
           teamId,
+          // CSV import is WhatsApp-only (phone is the natural key for each
+          // row). Channel stamped explicitly so every imported contact is
+          // self-describing in cross-channel queries.
+          identityChannel: "whatsapp",
           phoneNumber: p.phoneNumber,
           name: p.name,
           firstName: p.firstName ?? undefined,

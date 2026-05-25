@@ -214,7 +214,13 @@ async function main() {
   for (const c of CONTACTS) {
     await db.contact.upsert({
       where: { id: c.id },
-      create: { id: c.id, teamId: TEAM.id, phoneNumber: c.phoneNumber, name: c.name },
+      create: {
+        id: c.id,
+        teamId: TEAM.id,
+        identityChannel: "whatsapp",
+        phoneNumber: c.phoneNumber,
+        name: c.name,
+      },
       update: { phoneNumber: c.phoneNumber, name: c.name },
     });
   }

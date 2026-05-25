@@ -452,11 +452,16 @@ model Contact {
   // explicitly. The compound unique below stays valid since Postgres treats
   // multiple NULLs as distinct.
   phoneNumber       String?
-  // Multi-channel identity. Used when phoneNumber isn't the natural key
-  // (Instagram scoped-user-id, Telegram chat-id). For WhatsApp these are
-  // null and phoneNumber is the identity. The compound unique below allows
-  // future Instagram/Telegram ingest to dedupe contacts by their native id.
-  identityChannel   Channel?
+  // Channel this contact lives on. NOT NULL: every contact-create path
+  // stamps it explicitly (WhatsApp ingest, manual create, CSV import, /v1,
+  // workflow target, seeds). Legacy NULL rows were backfilled to
+  // 'whatsapp' in migration 20260525135307; the column was then tightened
+  // to NOT NULL in 20260525_identity_channel_not_null. Channel filtering
+  // is now a clean `WHERE identityChannel = '<value>'` — no NULL handling.
+  identityChannel   Channel
+  // Native id on non-phone channels (Instagram scoped-user-id, Telegram
+  // chat-id). NULL for WhatsApp where phone IS the identity. Combined with
+  // `identityChannel` to form the compound unique below for non-phone dedup.
   externalContactId String?
   // Canonical display name. Derived from `firstName + lastName` when both
   // are populated; otherwise whatever the create path stored (inbound
@@ -539,15 +544,27 @@ model Contact {
   // (by tag) doesn't materialize here — it's resolved at send time.
   audienceGroups      AudienceGroup[]      @relation("AudienceGroupContacts")
 
-  // A phone number is unique within a team, but the same number can exist across
-  // tenants. KEEP THIS A FULL unique — do NOT make it partial (`WHERE deletedAt
-  // IS NULL`). Ingest RESURRECTS a soft-deleted contact by upserting on this exact
-  // key and clearing `deletedAt` (lib/providers/ingest.ts). A partial index would
-  // hide the tombstone from `ON CONFLICT`, so re-contact would INSERT a 2nd live
-  // row and fragment the contact's preserved conversation history (violating "one
-  // conversation per contact, reopened on re-contact"). The soft-deleted row
-  // holding its phone slot IS the resurrection mechanism, not a bug to fix.
-  @@unique([teamId, phoneNumber])
+  // Phone uniqueness is enforced by a PARTIAL unique index, not a full one —
+  // see `Contact_teamId_phoneNumber_whatsapp_key` (raw SQL in migration
+  // 20260525_partial_phone_unique, simplified in 20260525_identity_channel_not_null).
+  // It fires ONLY for WhatsApp (identityChannel = 'whatsapp'). Two Instagram
+  // accounts with the same phone (different `externalContactId`) legitimately
+  // coexist because the partial WHERE excludes them — their identity is
+  // `(identityChannel, externalContactId)`, not phone.
+  //
+  // The partial unique covers BOTH active AND soft-deleted rows for WhatsApp,
+  // so re-contact resurrection still works: the tombstoned row holds the
+  // WhatsApp phone slot, the lookup lands on it, ingest clears `deletedAt`.
+  // The schema-level `@@index` below is the lookup index; Prisma can't model
+  // partial uniques, so the constraint lives in raw SQL (same pattern as the
+  // customFields GIN index — drift-detected, strip the spurious DROP from
+  // any generated migration).
+  //
+  // Ingest path is findFirst+create/update (NOT upsert) because no Prisma
+  // unique key exists for `(teamId, phoneNumber)` after this change. The
+  // partial unique + Serializable wrapper (P2002 + P2034 retry) is the race
+  // backstop.
+  @@index([teamId, phoneNumber])
   // Compound identity for non-phone channels. Only enforced when both fields
   // are set — Postgres treats NULL as distinct in unique constraints, so
   // WhatsApp-only contacts (both nulls) coexist freely.

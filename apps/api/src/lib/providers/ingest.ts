@@ -353,14 +353,18 @@ async function ingestInboundMessage(
   // two simultaneous first-time inbounds from the same brand-new phone both
   // see `findFirst({ status: { not: "closed" } }) === null` and both
   // `conversation.create()` succeed — producing duplicate conversation rows
-  // for one contact. The contact upsert is already race-safe via the
-  // `teamId_phoneNumber` unique, but the conversation lookup-then-create
-  // pattern is the classic check-then-act race.
+  // for one contact. The contact race is backstopped by the partial unique
+  // `Contact_teamId_phoneNumber_whatsapp_key` (raw SQL — WhatsApp/null
+  // identityChannel only, so Instagram/Telegram can store the same phone
+  // across distinct accounts); the conversation lookup-then-create pattern
+  // is the classic check-then-act race that Serializable resolves.
   //
   // We use `Serializable` because the read of "is there an open conversation?"
   // must be conflict-protected against another tx's create. Postgres returns
-  // P2034 (serialization failure) on conflict; we retry once. Two retries is
-  // a sensible ceiling — by then the contention is real, not a fluke.
+  // P2034 (serialization failure) on conflict; we retry once. P2002 (unique
+  // violation from a parallel insert outracing predicate locking) is also
+  // retried by the wrapper for the same reason. Two retries is a sensible
+  // ceiling — by then the contention is real, not a fluke.
   const { contact, conversation, isNewContact, isNewConversation, reopened } = await runWithSerializableRetry(
     async (tx) => {
       // Pre-existence check — the signal "did this inbound just create a
@@ -373,43 +377,57 @@ async function ingestInboundMessage(
       // Serializable transaction — the isolation level would silently
       // become Read Committed and the duplicate-Conversation race the
       // wrapper exists to prevent would still bite.
-      const existingContact = await tx.contact.findUnique({
-        where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
+      //
+      // findFirst (not findUnique) because the WhatsApp phone unique moved
+      // to a partial index — no Prisma key to look up by. We still see both
+      // active AND soft-deleted rows so the revive path works, since the
+      // partial unique constrains across deletedAt too (the tombstone holds
+      // the slot; see schema comment on Contact phoneNumber).
+      const existingContact = await tx.contact.findFirst({
+        where: { teamId, phoneNumber: evt.contactPhone },
         select: { id: true },
       });
       const isNewContact = !existingContact;
 
       const { firstName, lastName } = splitContactName(evt.contactName ?? evt.contactPhone);
-      const contact = await tx.contact.upsert({
-        where: { teamId_phoneNumber: { teamId, phoneNumber: evt.contactPhone } },
-        create: {
-          teamId,
-          phoneNumber: evt.contactPhone,
-          name: evt.contactName ?? evt.contactPhone,
-          // Populate the new webhook-facing fields on create. Splitting the
-          // name + deriving the country code on first contact matches what
-          // the migration does for backfill — both paths converge on the
-          // same shape so webhook receivers don't see partial rows.
-          firstName,
-          lastName,
-          countryCode: getCountryFromPhone(evt.contactPhone),
-          stageId: defaultStageId,
-        },
-        update: {
-          // Revive a soft-deleted contact: they're messaging again, so they
-          // belong back in the directory. The soft-deleted row still holds
-          // this phone's unique slot (one contact = one phone), so the upsert
-          // lands on it — clearing the tombstone reconnects them to their
-          // preserved conversation history. No-op when already active.
-          //
-          // Everything else is intentionally untouched: do NOT touch the name
-          // OR the stage. The agent's manually entered name (or the
-          // first-contact profile name) stays put, and a contact who
-          // progressed past the default stage isn't pulled back to it just
-          // because they sent another message.
-          deletedAt: null,
-        },
-      });
+      let contact;
+      if (existingContact) {
+        // Revive a soft-deleted contact: they're messaging again, so they
+        // belong back in the directory. The soft-deleted row still holds
+        // this phone's unique slot (one contact = one phone), so the lookup
+        // lands on it — clearing the tombstone reconnects them to their
+        // preserved conversation history. No-op when already active.
+        //
+        // Everything else is intentionally untouched: do NOT touch the name
+        // OR the stage. The agent's manually entered name (or the
+        // first-contact profile name) stays put, and a contact who
+        // progressed past the default stage isn't pulled back to it just
+        // because they sent another message.
+        contact = await tx.contact.update({
+          where: { id: existingContact.id },
+          data: { deletedAt: null },
+        });
+      } else {
+        contact = await tx.contact.create({
+          data: {
+            teamId,
+            // Explicit channel stamp — every new contact carries its channel.
+            // Legacy WhatsApp rows that pre-date this were backfilled in
+            // migration 20260525_normalize_identity_channel.
+            identityChannel: channel,
+            phoneNumber: evt.contactPhone,
+            name: evt.contactName ?? evt.contactPhone,
+            // Populate the new webhook-facing fields on create. Splitting the
+            // name + deriving the country code on first contact matches what
+            // the migration does for backfill — both paths converge on the
+            // same shape so webhook receivers don't see partial rows.
+            firstName,
+            lastName,
+            countryCode: getCountryFromPhone(evt.contactPhone),
+            stageId: defaultStageId,
+          },
+        });
+      }
 
       // Strict invariant: one contact = one conversation, forever. If the
       // contact has any prior conversation (including closed), reuse it.
@@ -1116,12 +1134,14 @@ export async function loadReplySnapshotById(
 
 /**
  * Run `work` in a Serializable transaction, retrying once on Postgres
- * `40001` (serialization failure). Two concurrent webhook handlers ingesting
- * the first inbound from the same brand-new phone can race the
- * findFirst→create on `Conversation` — Serializable + a retry is the
- * cleanest fix without changing the schema (a partial unique on
- * `(teamId, contactId) WHERE status != 'closed'` would also work but
- * requires a migration).
+ * `40001` (serialization failure) OR `23505` (unique violation). Two
+ * concurrent webhook handlers ingesting the first inbound from the same
+ * brand-new phone can race the findFirst→create on both `Contact` (partial
+ * unique on phone) and `Conversation` (full unique on (teamId, contactId)).
+ * Serializable + a retry is the cleanest fix. In practice Postgres usually
+ * fires P2034 first via predicate locking, but the unique-index backstop
+ * can race ahead — we retry both signals so the loser's tx restarts cleanly
+ * and finds the row the winner committed.
  */
 async function runWithSerializableRetry<T>(
   work: (tx: Prisma.TransactionClient) => Promise<T>,
@@ -1130,9 +1150,10 @@ async function runWithSerializableRetry<T>(
     try {
       return await db.$transaction(work, { isolationLevel: "Serializable" });
     } catch (err) {
-      const isSerializationFailure =
-        err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034";
-      if (!isSerializationFailure || attempt === 1) throw err;
+      const isRaceRetryable =
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        (err.code === "P2034" || err.code === "P2002");
+      if (!isRaceRetryable || attempt === 1) throw err;
       // Brief jitter before retry to break the symmetric-conflict cycle.
       await new Promise((r) => setTimeout(r, 5 + Math.random() * 20));
     }

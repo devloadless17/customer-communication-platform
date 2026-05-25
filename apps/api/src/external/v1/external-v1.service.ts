@@ -324,6 +324,10 @@ export class ExternalV1Service {
       created = await this.db.contact.create({
         data: {
           teamId,
+          // External /v1 contact create is WhatsApp-only (input requires
+          // phone). Channel stamped explicitly — when a partner adds an IG
+          // /v1 endpoint later, it'd stamp 'instagram' from its own path.
+          identityChannel: "whatsapp",
           phoneNumber: phone,
           name,
           firstName: trimmedFirst,
@@ -790,8 +794,7 @@ export class ExternalV1Service {
           // Read-only DESCRIPTION of this contact's own (siloed, immutable)
           // channel — NOT a send-routing decision. Send paths route by
           // `Conversation.channel`; never derive a channel from the contact.
-          // Don't copy this `identityChannel ?? "whatsapp"` into a send site.
-          channel: c.identityChannel ?? "whatsapp",
+          channel: c.identityChannel,
           phoneNumber: c.phoneNumber,
           externalContactId: c.externalContactId,
         },

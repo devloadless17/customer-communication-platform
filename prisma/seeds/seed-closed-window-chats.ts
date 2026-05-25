@@ -150,6 +150,7 @@ async function main() {
       create: {
         id: contactId,
         teamId: team.id,
+        identityChannel: "whatsapp",
         phoneNumber: chat.phone,
         name: chat.name,
         source: "inbound",
