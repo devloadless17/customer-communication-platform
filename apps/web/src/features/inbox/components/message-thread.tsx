@@ -14,6 +14,7 @@ import { formatDaySeparator } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ContactStage,
+  ConversationActivityEvent,
   ConversationWithRefs,
   InternalNote,
   Message,
@@ -33,6 +34,7 @@ import { ErrorBoundary } from "@/components/error-boundary";
 
 import { MessageBubble } from "./message-bubble";
 import { InternalNote as InternalNoteCard } from "./internal-note";
+import { ActivityEntry } from "./activity-entry";
 import { ReplyBox } from "./reply-box";
 // Forward dialog + in-thread search — both rarely opened, so defer them
 // out of the critical thread bundle. SSR-disabled because they're
@@ -54,7 +56,14 @@ import { readError, unknownAuthor } from "./message-thread/utils";
 
 type TimelineEntry =
   | { kind: "message"; data: Message }
-  | { kind: "note"; data: InternalNote };
+  | { kind: "note"; data: InternalNote }
+  // Activity events carry their time on `at`; we surface a `timestamp` alias on
+  // the entry so the shared sort + day-separator logic (which reads
+  // `entry.data.timestamp`) treats all three kinds uniformly.
+  | {
+      kind: "activity";
+      data: ConversationActivityEvent & { timestamp: string };
+    };
 
 function MessageThreadImpl({
   data: initialData,
@@ -118,6 +127,7 @@ function MessageThreadImpl({
     replaceWithContext,
   } = useConversationEvents(initialData, nextOlderCursor, onMarkRead, onSnapshot);
   const { conversation, contact, assignedUser, messages, notes } = data;
+  const events = data.events ?? [];
   const { confirm, alert, confirmDialog } = useConfirm();
 
   const memberById = useMemo(() => {
@@ -678,15 +688,30 @@ function MessageThreadImpl({
   // "you just sent → you see it at the bottom" guarantee.
   const timeline = useMemo<TimelineEntry[]>(() => {
     const oldestMessageTs = messages[0]?.timestamp;
+    // Same visibility rule as notes: hide entries older than the oldest loaded
+    // message until their neighborhood scrolls in, so an activity pill doesn't
+    // orphan at the very top detached from its conversational context.
     const visibleNotes =
       hasMoreOlder && oldestMessageTs
         ? notes.filter((n) => n.timestamp >= oldestMessageTs)
         : notes;
+    const visibleEvents =
+      hasMoreOlder && oldestMessageTs
+        ? events.filter((e) => e.at >= oldestMessageTs)
+        : events;
     const isPending = (e: TimelineEntry) =>
       e.kind === "message" && e.data.pending === true;
     return [
       ...messages.map((m): TimelineEntry => ({ kind: "message", data: m })),
       ...visibleNotes.map((n): TimelineEntry => ({ kind: "note", data: n })),
+      // Alias `at` → `timestamp` so the sort + day-separator code (which reads
+      // entry.data.timestamp) treats activity entries like any other.
+      ...visibleEvents.map(
+        (e): TimelineEntry => ({
+          kind: "activity",
+          data: { ...e, timestamp: e.at },
+        }),
+      ),
     ].sort((a, b) => {
       const ap = isPending(a);
       const bp = isPending(b);
@@ -696,7 +721,7 @@ function MessageThreadImpl({
         new Date(b.data.timestamp).getTime()
       );
     });
-  }, [messages, notes, hasMoreOlder]);
+  }, [messages, notes, events, hasMoreOlder]);
 
   // Day-separator labels keyed by timeline index. Pre-computed alongside the
   // timeline so the per-entry render doesn't run formatDaySeparator twice per
@@ -915,7 +940,7 @@ function MessageThreadImpl({
                           searchOpen && entry.data.id === activeMatchId
                         }
                       />
-                    ) : (
+                    ) : entry.kind === "note" ? (
                       <InternalNoteCard
                         note={entry.data}
                         author={
@@ -925,6 +950,8 @@ function MessageThreadImpl({
                         }
                         onDelete={deleteNote}
                       />
+                    ) : (
+                      <ActivityEntry event={entry.data} />
                     )}
                   </ErrorBoundary>
                 </div>

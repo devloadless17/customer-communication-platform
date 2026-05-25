@@ -33,7 +33,7 @@ prior audit concluded, **over-tinkering** — see the "Do NOT touch" list at the
 
 | # | Severity | Area | One-liner | Status |
 |---|---|---|---|---|
-| F1 | **MEDIUM (feature gap)** | Channel accounts | Can't run 2 WhatsApp numbers on one team — `channelConnectionId` not on rows | Pre-scoped, build when a customer needs it |
+| F1 | ~~MEDIUM~~ **RETIRED (not a gap)** | Channel accounts | "Can't run 2 WhatsApp numbers per team" — but Team = 1 org = 1 number is the business model; the constraint enforces it. NOT a feature. (corrected 2026-05-25) | Won't build |
 | F2 | **MEDIUM** | /v1 idempotency | Non-send `/v1` mutations (assign/status/tag/contact) don't honor `Idempotency-Key` | Real gap, small fix |
 | F3 | **LOW** | Analytics denorm | Conversation analytics counters drift silently on exception (no reconciler) | Real, low impact |
 | F4 | **LOW** | Identity (future) | Inbound contact lookup keys on `phoneNumber` only — must switch to compound unique before channel #2 | Latent, only bites at multi-channel |
@@ -140,9 +140,18 @@ statuses would be complexity for no behavioral gain.
 
 ## Part 2 — Genuine findings (ranked)
 
-### F1 — MEDIUM (feature gap): Multiple WhatsApp accounts per team is not supported
+### F1 — RETIRED (NOT a gap, by design) — was: "Multiple WhatsApp accounts per team"
 
-**This is the owner's stated #1 future need, so it gets the most detail.**
+> **CORRECTION (2026-05-25):** The owner confirmed the tenancy model is
+> **multi-tenant SaaS where Team = one customer org = ONE WhatsApp number.**
+> Multiple WhatsApp numbers per team is therefore **NOT a feature gap — it's
+> explicitly outside the business model.** The `@@unique([teamId, channel])`
+> constraint below *enforces* that rule; it is correct, not a limitation. This
+> finding is **retired** — do not build channelConnectionId-on-rows / multi-number
+> routing. The analysis below is preserved only as a record of how the constraint
+> works. See memory `project_tenancy_model`.
+
+**(Historical — was originally framed as the owner's #1 future need.)**
 
 **Current state:**
 - `ChannelConnection` is keyed `@@unique([teamId, channel])`
@@ -398,8 +407,9 @@ Nothing here is required for pilot. In rough value order:
 2. **F4 prep** — leave a `TODO` at [ingest.ts:386] noting the lookup must switch to
    the compound key before channel #2 (so it's not forgotten —
    cf. [feedback_not_in_this_batch_means_forgotten]). 5 min.
-3. **F1 (multi-WhatsApp)** — only when a customer needs it. The migration is
-   pre-planned in [docs/plan-schema-foundation-2026-05-22.md].
+3. ~~**F1 (multi-WhatsApp)**~~ — **RETIRED (2026-05-25): not a gap.** Team = 1 org
+   = 1 WhatsApp number is the business model; the unique constraint enforces it.
+   Don't build it. See memory `project_tenancy_model`.
 4. **F3 / F5 / F6** — optional; defer until analytics/observability are user-facing.
 
 ---
@@ -407,3 +417,6 @@ Nothing here is required for pilot. In rough value order:
 *Reviewed by: deep multi-agent read-only audit, reconciled against the 2026-05-22
 certified audits. Verdict: re-certified production-grade for pilot. Highest-value
 finding = the pre-scoped multi-WhatsApp gap (F1). Highest *risk* = over-tinkering.*
+
+> **2026-05-25 follow-up:** F1 is RETIRED — multi-WhatsApp-per-team is outside the
+> business model (Team = 1 org = 1 number), not a gap. F2–F6 all fixed since.

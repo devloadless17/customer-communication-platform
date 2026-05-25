@@ -27,8 +27,10 @@ that slipped through:
 | N2 | **MEDIUM** | Retention | `ConversationEvent` (audit timeline) has **no retention sweeper** — only high-churn table that grows forever |
 | N3 | **LOW** | Soft-delete | Workflow steps + /v1 contact lookups don't filter `deletedAt` — narrow, self-healing window (revive-on-ingest), not the "critical" an agent flagged |
 
-Plus the **still-open F1** (multiple WhatsApp accounts) — unchanged, pre-scoped,
-deferred by design.
+~~Plus the still-open F1 (multiple WhatsApp accounts)~~ — **F1 RETIRED 2026-05-25:
+NOT a gap.** Team = one customer org = one WhatsApp number is the tenancy model;
+the `@@unique([teamId, channel])` constraint enforces it. Won't build. See memory
+`project_tenancy_model`.
 
 **Two agent "findings" were WRONG on verification and are dismissed** (see end).
 **Biggest risk remains over-tinkering** — N1/N2 are small, surgical fixes; N3 may
@@ -222,7 +224,8 @@ Everything here is optional; nothing blocks pilot. Value order:
    insurance against month-3 bloat. *Worth doing.*
 3. **upsertContact idempotency** — 10-min completeness fix on F2.
 4. **N3 / WorkflowContactState** — likely leave as-is (self-healing / intended).
-5. **F1 (multi-WhatsApp)** — still deferred; build on customer demand.
+5. ~~F1 (multi-WhatsApp)~~ — **RETIRED 2026-05-25: not a gap** (Team = 1 org = 1
+   number is the model). Don't build.
 
 ---
 

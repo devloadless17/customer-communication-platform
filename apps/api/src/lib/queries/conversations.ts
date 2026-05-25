@@ -9,6 +9,7 @@ import type {
 
 import {
   clampTake,
+  mapActivityEvent,
   mapContact,
   mapContactListItem,
   mapConversation,
@@ -27,6 +28,16 @@ import {
 /** Max page size, server-side cap so a hostile client can't ask for 100k rows. */
 export const CONVERSATIONS_PAGE = 25;
 export const MESSAGES_PAGE = 30;
+/**
+ * How many recent activity-log events the thread hydration carries. Generous
+ * (most threads have a handful of lifecycle changes), but bounded so a thread
+ * that gets re-assigned/re-tagged hundreds of times can't bloat the per-open
+ * payload. The thread's visibility filter hides any event older than the
+ * oldest loaded message anyway, so over-fetching beyond the message window is
+ * wasted — this cap keeps it sane. A full audit-history view (if ever needed)
+ * is a separate paginated endpoint, not this hot-path hydration.
+ */
+export const ACTIVITY_WINDOW = 100;
 
 /**
  * Page of conversations for a team, sorted by recency.
@@ -257,6 +268,21 @@ export async function getConversationWithRefs(
         include: { replyTo: REPLY_TO_INCLUDE },
       },
       notes: { orderBy: { timestamp: "asc" } },
+      // Inline activity log. Bounded to the most recent ACTIVITY_WINDOW events
+      // (desc here, reversed to asc below) so a churny thread can't bloat the
+      // hydration payload — the thread's note-style visibility filter then
+      // hides any that predate the oldest loaded message. `user` is joined for
+      // the actor name; `apiKey` for its label so external /v1 changes read as
+      // the integration name, not a blank actor. Rides the
+      // (conversationId, at DESC) index.
+      events: {
+        orderBy: { at: "desc" },
+        take: ACTIVITY_WINDOW,
+        include: {
+          user: { select: { name: true } },
+          apiKey: { select: { name: true } },
+        },
+      },
       // Totals computed in the SAME round-trip via a relation aggregate —
       // replaces two separate count() queries (one per message + note) that
       // ran on every thread open (a hot path: chat-switch cache-miss + reconnect
@@ -285,6 +311,8 @@ export async function getConversationWithRefs(
     ? row.contact.lastInboundAt.toISOString()
     : null;
 
+  const events = await mapActivityEventRows(row.events);
+
   return {
     data: {
       conversation: mapConversation(row),
@@ -295,12 +323,80 @@ export async function getConversationWithRefs(
       assignedUser: row.assignedUser ? mapUser(row.assignedUser) : null,
       messages: messagesAsc.map(mapMessage),
       notes: row.notes.map(mapNote),
+      events,
       lastInboundAt: lastInboundAtIso,
       messageCount,
       noteCount,
     },
     nextOlderCursor,
   };
+}
+
+// Shape of the joined ConversationEvent rows both event readers fetch.
+type ActivityEventRow = Parameters<typeof mapActivityEvent>[0];
+
+/**
+ * Map a DESC-ordered batch of joined ConversationEvent rows into chronological
+ * (oldest-first) DTOs, resolving assignee names for `assigned` events in ONE
+ * batched lookup (the audit row stores the assignee's id, not a name, and has
+ * no FK to join). Shared by the thread hydration and the events-only refetch
+ * so the resolution logic lives in one place. Deactivated/removed users still
+ * resolve (no deletedAt filter) so "assigned to <name>" survives a departure.
+ */
+async function mapActivityEventRows(
+  rowsDesc: ActivityEventRow[],
+): Promise<ConversationWithRefs["events"]> {
+  const assigneeIds = new Set<string>();
+  for (const e of rowsDesc) {
+    if (e.kind !== "assigned") continue;
+    const after = e.after as { assignedUserId?: unknown } | null;
+    if (after && typeof after.assignedUserId === "string") {
+      assigneeIds.add(after.assignedUserId);
+    }
+  }
+  const assigneeNameById = new Map<string, string>();
+  if (assigneeIds.size > 0) {
+    const users = await db.user.findMany({
+      where: { id: { in: [...assigneeIds] } },
+      select: { id: true, name: true },
+    });
+    for (const u of users) assigneeNameById.set(u.id, u.name);
+  }
+  // Reverse the desc fetch to chronological (oldest-first) so it merges into
+  // the timeline the same way messages/notes do.
+  return [...rowsDesc].reverse().map((e) => mapActivityEvent(e, assigneeNameById));
+}
+
+/**
+ * Events-only refetch for the displayed thread. The activity log is written
+ * server-side AFTER the realtime frame fans out (audit runs at a lower bus
+ * priority than realtime), so when the live thread receives a status/assign/
+ * contact/note frame, the authoritative event row exists but the client
+ * doesn't have it yet. This re-pulls the recent window so the new pill appears
+ * — fully attributed, no client-side actor guessing. Tenant-scoped; returns
+ * [] (not an error) for a non-owned id so a racing refetch after delete is a
+ * no-op. Same ACTIVITY_WINDOW bound as the hydration.
+ */
+export async function listConversationEvents(
+  teamId: string,
+  conversationId: string,
+): Promise<ConversationWithRefs["events"]> {
+  const owns = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    select: { id: true },
+  });
+  if (!owns) return [];
+
+  const rows = await db.conversationEvent.findMany({
+    where: { conversationId, teamId },
+    orderBy: { at: "desc" },
+    take: ACTIVITY_WINDOW,
+    include: {
+      user: { select: { name: true } },
+      apiKey: { select: { name: true } },
+    },
+  });
+  return mapActivityEventRows(rows);
 }
 
 /**

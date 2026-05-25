@@ -1,4 +1,5 @@
 import {
+  CalendarClock,
   CheckCircle2,
   CircleSlash,
   ClockArrowUp,
@@ -29,6 +30,15 @@ export function BroadcastStatusBadge({ status }: { status: string }) {
 
 function mapStatus(status: string) {
   switch (status) {
+    case "scheduled":
+      // Future send; a delayed job fires it at scheduledAt. Indigo to read as
+      // "planned / upcoming", distinct from the gray of queued (about to run).
+      return {
+        Icon: CalendarClock,
+        tone: "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300",
+        label: "Scheduled",
+        spin: false,
+      };
     case "queued":
       return {
         Icon: ClockArrowUp,

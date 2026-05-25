@@ -110,6 +110,10 @@ enum TemplateCategory {
 //               already `sent` stay `sent`; remaining `queued` rows get
 //               picked up where the old runner left off.
 enum BroadcastStatus {
+  // Created with a future scheduledAt. A delayed BullMQ job (jobId =
+  // broadcast id) flips it `scheduled` → `queued` and starts the runner at
+  // that time. Cancelable while scheduled (removes the delayed job).
+  scheduled
   queued
   running
   completed
@@ -588,6 +592,15 @@ model Contact {
   @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
   // pg_trgm GIN index for substring ILIKE search on contact name.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
+  // NOTE: a PARTIAL pg_trgm GIN index `Contact_phoneNumber_trgm_idx`
+  // (USING GIN ("phoneNumber" gin_trgm_ops) WHERE "phoneNumber" IS NOT NULL)
+  // is hand-written in migration 20260525234500. Phone search is a substring
+  // match (LIKE/ILIKE '%digits%') in all three call sites (contacts list,
+  // conversation list, global contact search); the btree `(teamId,
+  // phoneNumber)` above CAN'T serve a leading-wildcard match, so without the
+  // trgm index those scans were full seq-scans of Contact. It's NOT declared
+  // here because Prisma can't express the `WHERE phoneNumber IS NOT NULL`
+  // partial predicate — same hand-managed reason as the customFields GIN below.
   // NOTE: the JSONB GIN index `Contact_customFields_gin_idx` (USING GIN
   // ("customFields" jsonb_path_ops)) is hand-written in the init migration's
   // raw-SQL section. It's NOT declared here because Prisma's
@@ -1058,6 +1071,13 @@ model Broadcast {
   // destroyed when the agent who launched them is removed.
   createdById       String?
   status            BroadcastStatus @default(queued)
+  // Optional operator-given label for the list/audit ("Ramadan promo").
+  // Falls back to the template name in the UI when null.
+  name              String?
+  // Future send time. Null = send immediately (legacy behavior). When set +
+  // in the future, the broadcast is created `scheduled` and a delayed BullMQ
+  // job (jobId = broadcast id) fires it at this instant.
+  scheduledAt       DateTime?
   // Snapshot of the template at send time.
   templateId        String
   templateName      String
@@ -1099,6 +1119,8 @@ model Broadcast {
 
   @@index([teamId, createdAt(sort: Desc)])
   @@index([teamId, status])
+  // Calendar view + scheduler boot-reconcile scan upcoming scheduled sends.
+  @@index([teamId, scheduledAt])
 }
 
 model BroadcastRecipient {

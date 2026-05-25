@@ -6,6 +6,7 @@ export {
   CONVERSATIONS_PAGE,
   MESSAGES_PAGE,
   getConversationWithRefs,
+  listConversationEvents,
   listConversations,
   listNewerMessages,
   listOlderMessages,

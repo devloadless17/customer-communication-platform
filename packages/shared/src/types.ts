@@ -371,6 +371,50 @@ export interface InternalNote {
   timestamp: string;
 }
 
+// ---------------------------------------------------------------------------
+// Conversation activity log (audit timeline rendered inline in the thread).
+// Backed by the ConversationEvent table — recorded server-side by the audit
+// subscriber, READ here for display. Names (actor, stage, tag) are resolved at
+// write time on the server so historical entries survive renames/deletes.
+// ---------------------------------------------------------------------------
+
+export type ConversationEventKind =
+  | "assigned"
+  | "status_changed"
+  | "tag_added"
+  | "tag_removed"
+  | "stage_changed"
+  | "note_added"
+  | "note_deleted";
+
+/** Who triggered the change. `system` = no human + no API key (automation). */
+export type ActivityActorKind = "user" | "apiKey" | "system";
+
+/**
+ * One inline activity entry. `before`/`after` carry the per-kind payload the
+ * audit subscriber wrote (e.g. status_changed → before.status / after.status;
+ * stage_changed → before.stageName / after.stageName; assigned →
+ * before.assignedUserId / after.assignedUserId). The server pre-resolves
+ * `assignedToName` for `assigned` so the client doesn't need the team roster.
+ */
+export interface ConversationActivityEvent {
+  id: string;
+  conversationId: string;
+  kind: ConversationEventKind;
+  /** Display name of the actor; null when system/automation. */
+  actorName: string | null;
+  actorKind: ActivityActorKind;
+  /** Pre-resolved target-user name for `assigned` (the new assignee), null on
+   *  unassign. Other kinds leave it undefined. */
+  assignedToName?: string | null;
+  /** Raw per-kind payload as written by the audit subscriber. */
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  /** ISO timestamp — named `at` to match the message/note `timestamp` only at
+   *  the timeline-merge boundary (the merge maps it). */
+  at: string;
+}
+
 export interface Conversation {
   id: string;
   teamId: string;
@@ -399,6 +443,16 @@ export interface ConversationWithRefs {
   assignedUser: User | null;
   messages: Message[];
   notes: InternalNote[];
+  /**
+   * Inline activity log — assignment / status / stage / tag / note-delete
+   * events, newest-relevant window, oldest-first to match `messages`/`notes`.
+   * Merged into the thread timeline by `at`. Bounded server-side so a churny
+   * thread can't bloat the hydration payload; the full history (if ever
+   * needed) would be a separate paginated endpoint. Optional + defaults to
+   * `[]` so existing construction sites (list rows, ingest fanout) that don't
+   * populate it stay valid.
+   */
+  events?: ConversationActivityEvent[];
   /**
    * Latest inbound timestamp across ALL of this contact's conversations.
    * Used to drive the 24h customer-service window in the reply box. Null

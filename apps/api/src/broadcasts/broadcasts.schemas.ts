@@ -64,5 +64,20 @@ export const CreateBroadcastSchema = z.object({
   templateId: z.string().min(1),
   variables: BroadcastVariablesSchema.default({ body: [] }),
   audience: AudienceSchema,
+  // Optional operator label (falls back to template name in the UI).
+  name: z.string().trim().max(120).optional(),
+  // ISO datetime to send later. Omit / null = send now. A past/near-now value
+  // is treated as "now" by the service (clamped delay), so no strict future
+  // validation here — the UI prevents past picks, the server is tolerant.
+  scheduledAt: z.string().datetime().nullable().optional(),
 });
 export type CreateBroadcastInput = z.infer<typeof CreateBroadcastSchema>;
+
+/** Status filter for the list page rail. `all` = no filter. */
+export const BroadcastListQuerySchema = z.object({
+  status: z
+    .enum(["all", "scheduled", "queued", "running", "completed", "failed", "canceled", "paused"])
+    .optional(),
+  search: z.string().trim().max(120).optional(),
+});
+export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;

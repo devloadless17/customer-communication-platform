@@ -13,9 +13,11 @@ import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { zBody } from "../common/zod-validation.pipe";
+import { zBody, zQuery } from "../common/zod-validation.pipe";
 import {
+  BroadcastListQuerySchema,
   CreateBroadcastSchema,
+  type BroadcastListQuery,
   type CreateBroadcastInput,
 } from "./broadcasts.schemas";
 import { BroadcastsService } from "./broadcasts.service";
@@ -44,17 +46,20 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateBroadcastSchema)) body: CreateBroadcastInput,
   ) {
-    const { broadcastId, totalCount } = await this.broadcasts.create(
+    const { broadcastId, totalCount, scheduled } = await this.broadcasts.create(
       session.teamId,
       session.userId,
       body,
     );
-    return { ok: true, broadcastId, totalCount };
+    return { ok: true, broadcastId, totalCount, scheduled };
   }
 
   @Get()
-  async list(@CurrentSession() session: ApiSession) {
-    const broadcasts = await this.broadcasts.list(session.teamId);
+  async list(
+    @CurrentSession() session: ApiSession,
+    @Query(zQuery(BroadcastListQuerySchema)) query: BroadcastListQuery,
+  ) {
+    const broadcasts = await this.broadcasts.list(session.teamId, query);
     return { broadcasts };
   }
 
@@ -97,6 +102,17 @@ export class BroadcastsController {
   ) {
     await this.broadcasts.cancel(session.teamId, id);
     return { ok: true };
+  }
+
+  /** Re-queue + re-run only the FAILED recipients of a finished broadcast. */
+  @Post(":id/retry")
+  @RequireCapability("broadcasts:manage")
+  async retry(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const { requeued } = await this.broadcasts.retryFailed(session.teamId, id);
+    return { ok: true, requeued };
   }
 
   @Delete(":id")

@@ -1,7 +1,10 @@
 import { db } from "@/lib/db";
 import type {
+  ActivityActorKind,
   Contact,
   Conversation,
+  ConversationActivityEvent,
+  ConversationEventKind,
   ConversationStatus,
   InternalNote,
   MediaAttachment,
@@ -240,5 +243,65 @@ export function mapNote(n: PrismaNote): InternalNote {
     authorUserId: n.authorUserId,
     body: n.body,
     timestamp: n.timestamp.toISOString(),
+  };
+}
+
+// Activity-log mapper. The Prisma row joins `user`/`apiKey` for the actor
+// name; `before`/`after` are the JSONB payloads the audit subscriber wrote.
+// `assignedToName` (for the `assigned` kind) can't be joined off the audit row
+// — it stores the assignee's *id* in `after.assignedUserId` — so the caller
+// passes a pre-built id→name map (batched in getConversationWithRefs) rather
+// than this mapper doing an N+1 lookup.
+type PrismaActivityEventRow = {
+  id: string;
+  conversationId: string;
+  kind: ConversationEventKind;
+  before: unknown;
+  after: unknown;
+  at: Date;
+  userId: string | null;
+  apiKeyId: string | null;
+  user: { name: string } | null;
+  apiKey: { name: string } | null;
+};
+
+function asJsonObject(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
+}
+
+export function mapActivityEvent(
+  e: PrismaActivityEventRow,
+  assigneeNameById?: Map<string, string>,
+): ConversationActivityEvent {
+  // Actor precedence: human user > API key > system (automation / retention).
+  const actorKind: ActivityActorKind = e.user
+    ? "user"
+    : e.apiKey
+      ? "apiKey"
+      : "system";
+  const actorName = e.user?.name ?? e.apiKey?.name ?? null;
+
+  const after = asJsonObject(e.after);
+  let assignedToName: string | null | undefined;
+  if (e.kind === "assigned") {
+    const toId = after?.assignedUserId;
+    assignedToName =
+      typeof toId === "string"
+        ? assigneeNameById?.get(toId) ?? null
+        : null; // explicit null = unassigned
+  }
+
+  return {
+    id: e.id,
+    conversationId: e.conversationId,
+    kind: e.kind as ConversationEventKind,
+    actorName,
+    actorKind,
+    before: asJsonObject(e.before),
+    after,
+    at: e.at.toISOString(),
+    ...(assignedToName !== undefined ? { assignedToName } : {}),
   };
 }

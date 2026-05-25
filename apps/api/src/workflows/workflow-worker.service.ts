@@ -13,6 +13,11 @@ import {
   closeWorkflowQueue,
 } from "@/lib/workflows/queue";
 import {
+  startBroadcastScheduleWorker,
+  stopBroadcastScheduleWorker,
+} from "@/lib/broadcasts/schedule-worker";
+import { closeBroadcastScheduleQueue } from "@/lib/broadcasts/schedule-queue";
+import {
   startContactDriftSweeper,
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
@@ -97,6 +102,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private outboundSendAttemptRetentionStarted = false;
   private workflowRunRetentionStarted = false;
   private conversationEventRetentionStarted = false;
+  private broadcastScheduleWorkerStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -243,6 +249,15 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start conversation-event retention sweeper", err);
     }
+    try {
+      // Fires SCHEDULED broadcasts at their scheduledAt (delayed BullMQ job →
+      // CAS scheduled→queued → startBroadcast). Shares the inline-worker gate.
+      startBroadcastScheduleWorker();
+      this.broadcastScheduleWorkerStarted = true;
+      this.logger.log("Broadcast schedule worker started");
+    } catch (err) {
+      this.logger.error("Failed to start broadcast-schedule worker", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -331,12 +346,22 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(`stopWorkflowWorker threw: ${err instanceof Error ? err.message : err}`);
     }
-    // ALWAYS close the queue — both this process's worker AND any HTTP
-    // dispatcher path opens it via getWorkflowQueue.
+    try {
+      if (this.broadcastScheduleWorkerStarted) await stopBroadcastScheduleWorker();
+    } catch (err) {
+      this.logger.warn(`stopBroadcastScheduleWorker threw: ${err instanceof Error ? err.message : err}`);
+    }
+    // ALWAYS close the queues — both this process's worker AND any HTTP path
+    // (create/cancel) opens them via get*Queue.
     try {
       await closeWorkflowQueue();
     } catch (err) {
       this.logger.warn(`closeWorkflowQueue threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      await closeBroadcastScheduleQueue();
+    } catch (err) {
+      this.logger.warn(`closeBroadcastScheduleQueue threw: ${err instanceof Error ? err.message : err}`);
     }
   }
 }

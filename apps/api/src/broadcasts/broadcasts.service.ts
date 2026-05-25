@@ -15,12 +15,19 @@ import {
   signalShutdown,
   startBroadcast,
 } from "@/lib/broadcast-runner";
+import {
+  enqueueScheduledBroadcast,
+  removeScheduledBroadcast,
+} from "@/lib/broadcasts/schedule-queue";
 import { countTemplatePlaceholders } from "@/lib/providers/meta";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 
 import { DbService } from "../db/db.service";
-import type { CreateBroadcastInput } from "./broadcasts.schemas";
+import type {
+  BroadcastListQuery,
+  CreateBroadcastInput,
+} from "./broadcasts.schemas";
 
 @Injectable()
 export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
@@ -40,6 +47,30 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       await reconcileOrphanedBroadcasts();
     } catch (err) {
       this.logger.error("orphan reconciler failed on boot", err);
+    }
+    // Re-enqueue delayed jobs for any `scheduled` broadcasts. Covers the case
+    // where Redis lost the job (flush / non-persistent restart) while the row
+    // still says scheduled. Idempotent: enqueue uses jobId=bcast-<id>, so a
+    // surviving job isn't duplicated. A past scheduledAt → clamped to fire
+    // immediately (the worker's CAS still guards a canceled row).
+    try {
+      const scheduled = await this.db.broadcast.findMany({
+        where: { status: "scheduled" },
+        select: { id: true, scheduledAt: true },
+      });
+      for (const b of scheduled) {
+        const delay = (b.scheduledAt?.getTime() ?? Date.now()) - Date.now();
+        await enqueueScheduledBroadcast(b.id, delay).catch((err) =>
+          this.logger.warn(
+            `re-enqueue scheduled broadcast ${b.id} failed: ${err instanceof Error ? err.message : err}`,
+          ),
+        );
+      }
+      if (scheduled.length > 0) {
+        this.logger.log(`re-enqueued ${scheduled.length} scheduled broadcast(s) on boot`);
+      }
+    } catch (err) {
+      this.logger.error("scheduled-broadcast reconciler failed on boot", err);
     }
   }
 
@@ -102,8 +133,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     teamId: string,
     userId: string,
     input: CreateBroadcastInput,
-  ): Promise<{ broadcastId: string; totalCount: number }> {
+  ): Promise<{ broadcastId: string; totalCount: number; scheduled: boolean }> {
     const { templateId, audience, variables } = input;
+
+    // Resolve the schedule up front. A scheduledAt in the future → the
+    // broadcast is created `scheduled` and a delayed job fires it later; a
+    // null/past value → send now (legacy path).
+    const SCHEDULE_LEAD_MS = 30_000; // treat <30s-out as "now" — not worth a job
+    const scheduledAtDate = input.scheduledAt ? new Date(input.scheduledAt) : null;
+    const isFutureSchedule =
+      scheduledAtDate !== null &&
+      scheduledAtDate.getTime() - Date.now() > SCHEDULE_LEAD_MS;
+    const name = input.name && input.name.length > 0 ? input.name : null;
 
     const template = await this.db.messageTemplate.findFirst({
       where: { id: templateId, teamId },
@@ -250,7 +291,11 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       data: {
         teamId,
         createdById: userId,
-        status: "queued",
+        // Scheduled → the delayed job will flip it to queued + run at time.
+        // Otherwise queued → runs immediately below.
+        status: isFutureSchedule ? "scheduled" : "queued",
+        name,
+        scheduledAt: scheduledAtDate,
         templateId: template.id,
         templateName: template.name,
         templateLanguage: template.language,
@@ -267,16 +312,47 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       select: { id: true, totalCount: true },
     });
 
-    // Fire-and-forget; startBroadcast schedules via setImmediate so the
-    // response returns before any Meta sends happen.
-    startBroadcast(broadcast.id);
+    if (isFutureSchedule && scheduledAtDate) {
+      // Enqueue the delayed fire. If Redis is briefly down the enqueue throws;
+      // the row stays `scheduled` and the boot reconciler re-enqueues it.
+      try {
+        await enqueueScheduledBroadcast(
+          broadcast.id,
+          scheduledAtDate.getTime() - Date.now(),
+        );
+      } catch (err) {
+        this.logger.error(
+          `failed to enqueue scheduled broadcast ${broadcast.id} — reconciler will retry`,
+          err,
+        );
+      }
+    } else {
+      // Fire-and-forget; startBroadcast schedules via setImmediate so the
+      // response returns before any Meta sends happen.
+      startBroadcast(broadcast.id);
+    }
 
-    return { broadcastId: broadcast.id, totalCount: broadcast.totalCount };
+    return {
+      broadcastId: broadcast.id,
+      totalCount: broadcast.totalCount,
+      scheduled: isFutureSchedule,
+    };
   }
 
-  async list(teamId: string) {
+  async list(teamId: string, query?: BroadcastListQuery) {
+    const where: Prisma.BroadcastWhereInput = { teamId };
+    if (query?.status && query.status !== "all") {
+      where.status = query.status;
+    }
+    if (query?.search) {
+      // Search the operator name + the template name (the two human labels).
+      where.OR = [
+        { name: { contains: query.search, mode: "insensitive" } },
+        { templateName: { contains: query.search, mode: "insensitive" } },
+      ];
+    }
     const rows = await this.db.broadcast.findMany({
-      where: { teamId },
+      where,
       orderBy: { createdAt: "desc" },
       take: 100,
       include: { createdBy: { select: { id: true, name: true } } },
@@ -284,6 +360,8 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     return rows.map((b) => ({
       id: b.id,
       status: b.status,
+      name: b.name,
+      scheduledAt: b.scheduledAt?.toISOString() ?? null,
       templateName: b.templateName,
       templateLanguage: b.templateLanguage,
       audienceMode: b.audienceMode,
@@ -333,10 +411,14 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     return {
       id: row.id,
       status: row.status,
+      name: row.name,
+      scheduledAt: row.scheduledAt?.toISOString() ?? null,
       templateId: row.templateId,
       templateName: row.templateName,
       templateLanguage: row.templateLanguage,
       audienceMode: row.audienceMode,
+      audienceTagIds: row.audienceTagIds,
+      audienceGroupId: row.audienceGroupId,
       variables: row.variables,
       totalCount: row.totalCount,
       sentCount: row.sentCount,
@@ -428,14 +510,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       select: { id: true, status: true },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
-    if (row.status !== "queued" && row.status !== "running") {
+    if (
+      row.status !== "scheduled" &&
+      row.status !== "queued" &&
+      row.status !== "running"
+    ) {
       throw new ConflictException({
         error: "broadcast not cancelable",
-        detail: `Broadcast is already ${row.status}; cancel is only valid while queued or running.`,
+        detail: `Broadcast is already ${row.status}; cancel is only valid while scheduled, queued, or running.`,
       });
     }
     const updated = await this.db.broadcast.updateMany({
-      where: { id, status: { in: ["queued", "running"] } },
+      where: { id, status: { in: ["scheduled", "queued", "running"] } },
       data: { status: "canceled" },
     });
     if (updated.count === 0) {
@@ -443,6 +529,62 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // write — surface idempotently as success rather than a 409 race.
       return;
     }
+    // Was it a scheduled broadcast? Pull its pending delayed job so it can't
+    // fire later. The worker's CAS (scheduled→queued) already makes a late
+    // fire on a now-`canceled` row a no-op, so this is belt-and-suspenders
+    // that also keeps Redis tidy. Safe if the job already fired/is gone.
+    if (row.status === "scheduled") {
+      await removeScheduledBroadcast(id).catch((err) =>
+        this.logger.warn(
+          `removeScheduledBroadcast(${id}) failed: ${err instanceof Error ? err.message : err}`,
+        ),
+      );
+    }
+  }
+
+  /**
+   * Re-queue a finished broadcast's FAILED recipients and run it again. Only
+   * valid on a terminal broadcast (completed/failed/canceled) that actually
+   * has failures. Resets those recipient rows to `queued` + clears their
+   * error, flips the broadcast back to `queued`, and fires the runner — whose
+   * per-recipient CAS guarantees already-`sent` rows are never touched.
+   */
+  async retryFailed(teamId: string, id: string): Promise<{ requeued: number }> {
+    const row = await this.db.broadcast.findFirst({
+      where: { id, teamId },
+      select: { id: true, status: true, failedCount: true },
+    });
+    if (!row) throw new NotFoundException({ error: "not found" });
+    if (row.status === "running" || row.status === "queued" || row.status === "scheduled") {
+      throw new ConflictException({
+        error: "broadcast in progress",
+        detail: "Wait for the broadcast to finish before retrying failed recipients.",
+      });
+    }
+    const reset = await this.db.broadcastRecipient.updateMany({
+      where: { broadcastId: id, status: "failed" },
+      data: { status: "queued", errorMessage: null, sentAt: null, externalId: null },
+    });
+    if (reset.count === 0) {
+      throw new ConflictException({
+        error: "nothing to retry",
+        detail: "This broadcast has no failed recipients.",
+      });
+    }
+    // Recompute counters off the reset and re-open the broadcast. failedCount
+    // drops by the number we just re-queued; the runner re-increments as it
+    // re-processes. lastError cleared so the detail page banner goes away.
+    await this.db.broadcast.update({
+      where: { id },
+      data: {
+        status: "queued",
+        failedCount: { decrement: reset.count },
+        lastError: null,
+        completedAt: null,
+      },
+    });
+    startBroadcast(id);
+    return { requeued: reset.count };
   }
 
   /**

@@ -134,6 +134,15 @@ export class ConversationsController {
     });
   }
 
+  @Get(":id/events")
+  async events(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    const events = await this.conversations.listEvents(session.teamId, id);
+    return { events };
+  }
+
   @Get(":id/messages/context")
   async messageContext(
     @CurrentSession() session: ApiSession,

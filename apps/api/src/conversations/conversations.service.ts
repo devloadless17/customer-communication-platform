@@ -20,6 +20,7 @@ import {
   listConversations,
   listNewerMessages,
   listOlderMessages,
+  listConversationEvents,
   loadMessageContextWindow,
   searchAllMessages,
   searchAllNotes,
@@ -197,6 +198,12 @@ export class ConversationsService {
     opts: { query: string; take?: number; cursor?: string },
   ) {
     return searchConversationMessages(teamId, conversationId, opts);
+  }
+
+  /** Recent activity-log events for one thread — the events-only refetch the
+   *  live thread fires after an audit-implying frame lands. */
+  listEvents(teamId: string, conversationId: string) {
+    return listConversationEvents(teamId, conversationId);
   }
 
   // ---- Global (team-wide) search — the tabbed inbox search bar -----------

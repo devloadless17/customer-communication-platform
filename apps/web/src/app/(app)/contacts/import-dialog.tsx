@@ -127,15 +127,50 @@ export function ImportContactsDialog({
               column. Existing contacts are matched by phone number and left untouched —
               only new rows are added.
             </p>
+
+            {/* Format guidance — the phone format is the #1 import mistake. */}
+            <div className="rounded-md border border-border bg-muted/40 p-2.5 text-xs text-muted-foreground space-y-1.5">
+              <div>
+                <span className="font-medium text-foreground">Phone number:</span>{" "}
+                full international number <span className="font-medium">with the
+                country code</span>, e.g.{" "}
+                <code className="rounded bg-muted px-1">15551234567</code> for the US
+                or <code className="rounded bg-muted px-1">96170921116</code> for
+                Lebanon. The leading{" "}
+                <code className="rounded bg-muted px-1">+</code> is optional (both{" "}
+                <code className="rounded bg-muted px-1">+15551234567</code> and{" "}
+                <code className="rounded bg-muted px-1">15551234567</code> work);
+                spaces and dashes are fine too. A local number without the country
+                code won't reach anyone.
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Tags:</span>{" "}
+                one <code className="rounded bg-muted px-1">tags</code> column,
+                separate multiple with a semicolon —{" "}
+                <code className="rounded bg-muted px-1">VIP;Lead</code>. New tag names
+                are created automatically. Leave blank for none.
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Stage:</span>{" "}
+                one <code className="rounded bg-muted px-1">stage</code> column with
+                the stage name. Blank or an unknown name uses your default stage.
+              </div>
+              <div className="text-muted-foreground/70">
+                Tip: in Excel/Sheets, format the phone column as{" "}
+                <span className="font-medium">Text</span> so long numbers aren't
+                mangled into <code className="rounded bg-muted px-1">9.6E+10</code>.
+              </div>
+            </div>
+
             <button
               type="button"
               onClick={downloadTemplate}
               className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               <Download className="size-3.5" />
-              Download blank template
+              Download template
               <span className="text-[10px] text-muted-foreground/60">
-                (built-in + your custom fields)
+                (with an example row + your fields)
               </span>
             </button>
             <button
@@ -188,6 +223,8 @@ interface ImportResult {
   skippedExisting: number;
   errors: Array<{ row: number; reason: string }>;
   unknownColumns: string[];
+  /** Stage names in the CSV that didn't match a team stage → used default. */
+  unknownStages?: string[];
 }
 
 function ImportResultView({
@@ -229,6 +266,24 @@ function ImportResultView({
           <div className="mt-2 text-muted-foreground">
             Add them as team fields in a contact panel, then re-import to bring those
             values in.
+          </div>
+        </div>
+      )}
+
+      {result.unknownStages && result.unknownStages.length > 0 && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+          <div className="font-medium text-amber-700 dark:text-amber-400">
+            Unknown stage name{result.unknownStages.length === 1 ? "" : "s"} — used your
+            default stage instead:
+          </div>
+          <ul className="mt-1 list-disc pl-5 text-muted-foreground">
+            {result.unknownStages.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+          <div className="mt-2 text-muted-foreground">
+            Create the stage in Settings → Stages (or fix the spelling), then re-import
+            to place those contacts.
           </div>
         </div>
       )}

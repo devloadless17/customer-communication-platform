@@ -558,6 +558,10 @@ export function useConversationEvents(
               contact: fresh.contact,
               assignedUser: fresh.assignedUser,
               notes: fresh.notes,
+              // Authoritative refetch — adopt the server's activity log (it can
+              // carry changes that happened while we were offline, which the
+              // delta backfill can't).
+              events: fresh.events ?? [],
               messages,
               lastInboundAt: fresh.lastInboundAt,
               ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
@@ -813,6 +817,45 @@ export function useConversationEvents(
     socket.on("note:new", onNoteNew);
     socket.on("conversation:deleted", onConversationDeleted);
 
+    // Activity-log live refresh. The audit row for a status / assign / stage /
+    // tag / note-delete change is written server-side AFTER the realtime frame
+    // fans out (audit runs at a lower bus priority than realtime), so when one
+    // of those frames lands we re-pull the events-only window and merge it in.
+    // This keeps pills fully server-attributed (correct actor + id) with no
+    // client-side guessing. Debounced + coalesced so a burst (e.g. bulk
+    // tag-add fanning several contact:updated) makes one request, and a
+    // trailing self-cancelling guard drops a response that arrives after the
+    // user switched threads.
+    //
+    // Events that imply an audit row exists for THIS thread. (note:deleted is
+    // handled by its own reducer for the card removal AND triggers a refresh
+    // here for the "deleted a note" pill.)
+    const ACTIVITY_REFRESH_EVENTS = new Set([
+      "conversation:status",
+      "conversation:assigned",
+      "contact:updated",
+      "note:deleted",
+    ]);
+    let activityRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const refreshActivity = () => {
+      if (activityRefreshTimer !== null) clearTimeout(activityRefreshTimer);
+      activityRefreshTimer = setTimeout(() => {
+        activityRefreshTimer = null;
+        void fetchWithSessionGuard(`/api/conversations/${conversationId}/events`)
+          .then((r) => (r && r.ok ? (r.json() as Promise<{ events: ConversationWithRefs["events"] }>) : null))
+          .then((body) => {
+            if (!body) return;
+            // Drop a late response for a thread we've since left.
+            if (dataRef.current.conversation.id !== conversationId) return;
+            setData((prev) => ({ ...prev, events: body.events ?? [] }));
+          })
+          .catch(() => {
+            // Non-fatal: the next thread open / reconnect refetch carries the
+            // authoritative events anyway.
+          });
+      }, 350);
+    };
+
     // Iterated wiring — bind one direct-setData handler per reducer entry.
     // Skips events in COALESCED_LIVE_HOOK_EVENTS (declared in thread-reducers.ts
     // as the structural source of truth). Adding a non-coalesced entry to
@@ -833,17 +876,28 @@ export function useConversationEvents(
         // and break the React tree for the displayed thread. Isolate to
         // this event so the rest of the inbox keeps working.
         try {
+          const targetsThisThread =
+            (target ?? "conversation") === "all" ||
+            payload?.conversationId === conversationId;
           if ((target ?? "conversation") === "conversation") {
             if (payload?.conversationId !== conversationId) return;
           }
-           
+
           setData((prev) => (apply as any)(prev, payload));
+          // After applying the header/contact patch, pull the matching audit
+          // entry so the inline pill appears live. `contact:updated` (target
+          // "all") may be for a different thread's contact — refreshActivity's
+          // own response-guard + the server's thread-scoped query make a
+          // spurious refresh a cheap no-op, so we don't over-filter here.
+          if (targetsThisThread && ACTIVITY_REFRESH_EVENTS.has(event)) {
+            refreshActivity();
+          }
         } catch (err) {
-           
+
           console.error(`[use-conversation-events] reducer for "${event}" threw`, err);
         }
       };
-       
+
       socket.on(event as any, handler as any);
       return { event, handler };
     });
@@ -854,6 +908,10 @@ export function useConversationEvents(
       if (statusFlushRaf !== null) {
         cancelAnimationFrame(statusFlushRaf);
         statusFlushRaf = null;
+      }
+      if (activityRefreshTimer !== null) {
+        clearTimeout(activityRefreshTimer);
+        activityRefreshTimer = null;
       }
       pendingStatuses.clear();
       socket.emit("unsubscribe:conversation", { conversationId });

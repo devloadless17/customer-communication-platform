@@ -54,6 +54,9 @@ export interface ImportResult {
   /** Header columns that didn't match any known field — listed so the UI
    *  can prompt the user to add them as team fields. */
   unknownColumns: string[];
+  /** Stage NAMES in the CSV that didn't match any team stage — those rows
+   *  fell back to the default stage. Surfaced so the user can fix typos. */
+  unknownStages?: string[];
 }
 
 @Injectable()
@@ -754,6 +757,8 @@ export class ContactsService {
       | { kind: "location" }
       | { kind: "language" }
       | { kind: "country" }
+      | { kind: "tags" }
+      | { kind: "stage" }
       | { kind: "ignore" }
       | { kind: "field"; key: string };
 
@@ -792,6 +797,14 @@ export class ContactsService {
       if (h === "country" || h === "country_code" || h === "country code") {
         return { kind: "country" };
       }
+      // Tags: one column, semicolon-separated tag NAMES (e.g. "VIP;Lead").
+      // Unknown names are auto-created on import (same as the UI tag picker).
+      if (h === "tags" || h === "tag") return { kind: "tags" };
+      // Stage: one column, the stage NAME (e.g. "Stage 2"). Blank or unknown
+      // → team default stage. Stages are never auto-created (curated pipeline).
+      if (h === "stage" || h === "stage_name" || h === "stage name") {
+        return { kind: "stage" };
+      }
       // `source` is intentionally ignored — imported rows are always 'manual'.
       // `id` from a round-trip export is meaningless on import.
       if (h === "source" || h === "id") return { kind: "ignore" };
@@ -825,6 +838,11 @@ export class ContactsService {
       language: string | null;
       countryCode: string | null;
       customFields: Record<string, string>;
+      /** Tag NAMES from the CSV cell (de-duped, capped). Resolved to ids
+       *  (get-or-create) after the create batch. */
+      tagNames: string[];
+      /** Raw stage NAME from the CSV (empty = use default). */
+      stageName: string;
     }
     const pending: PendingRow[] = [];
 
@@ -839,6 +857,8 @@ export class ContactsService {
       let location = "";
       let language = "";
       let country = "";
+      let tagsRaw = "";
+      let stageRaw = "";
       const customFields: Record<string, string> = {};
 
       for (const [header, value] of Object.entries(row)) {
@@ -868,6 +888,12 @@ export class ContactsService {
             break;
           case "country":
             country = value.slice(0, MAX_TEXT);
+            break;
+          case "tags":
+            tagsRaw = value.slice(0, MAX_TEXT);
+            break;
+          case "stage":
+            stageRaw = value.slice(0, MAX_TEXT);
             break;
           case "field":
             customFields[mapping.key] = value.slice(0, MAX_TEXT);
@@ -905,6 +931,21 @@ export class ContactsService {
       const countryValid =
         countryNormalized.length === 2 && /^[A-Z]{2}$/.test(countryNormalized);
 
+      // Tags: split on ";", trim, drop blanks, de-dupe (case-insensitive on
+      // the key but keep first-seen casing for create), cap at 25/row so a
+      // pathological cell can't blow up the tag catalog.
+      const seenTagKeys = new Set<string>();
+      const tagNames: string[] = [];
+      for (const raw of tagsRaw.split(";")) {
+        const t = raw.trim().slice(0, MAX_TEXT);
+        if (!t) continue;
+        const key = t.toLowerCase();
+        if (seenTagKeys.has(key)) continue;
+        seenTagKeys.add(key);
+        tagNames.push(t);
+        if (tagNames.length >= 25) break;
+      }
+
       pending.push({
         rowNumber,
         phoneNumber: phone,
@@ -916,6 +957,8 @@ export class ContactsService {
         language: language.trim() || null,
         countryCode: countryValid ? countryNormalized : null,
         customFields,
+        tagNames,
+        stageName: stageRaw.trim(),
       });
     }
 
@@ -929,10 +972,44 @@ export class ContactsService {
     const skippedExisting = pending.length - toCreate.length;
 
     let created = 0;
+    const unknownStages = new Set<string>();
     if (toCreate.length > 0) {
-      // Default stage looked up once for the whole batch — every row lands
-      // in the same place, no per-row roundtrip needed.
+      // Default stage looked up once for the whole batch — rows with no (or an
+      // unknown) stage land here.
       const defaultStageId = await ensureDefaultStage(teamId);
+
+      // Resolve the DISTINCT stage names present in the CSV to ids in one
+      // query (stages are a small curated set). Case-insensitive match;
+      // unknown names fall back to default and are reported in the summary.
+      // Stages are NEVER auto-created — a typo shouldn't multiply the pipeline.
+      const stageNameKeys = new Set(
+        toCreate
+          .map((p) => p.stageName)
+          .filter((s) => s.length > 0)
+          .map((s) => s.toLowerCase()),
+      );
+      const stageIdByNameKey = new Map<string, string>();
+      if (stageNameKeys.size > 0) {
+        const stageRows = await this.db.contactStage.findMany({
+          where: { teamId },
+          select: { id: true, name: true },
+        });
+        for (const s of stageRows) {
+          stageIdByNameKey.set(s.name.toLowerCase(), s.id);
+        }
+      }
+      const resolveStage = (name: string): string => {
+        if (!name) return defaultStageId;
+        const hit = stageIdByNameKey.get(name.toLowerCase());
+        if (hit) return hit;
+        unknownStages.add(name);
+        return defaultStageId;
+      };
+
+      // createMany is fast but can't connect M2M tags, so do it in two steps:
+      // bulk-insert the rows, then bulk-link tags by reading the created ids
+      // back by phone. skipDuplicates guards the (teamId, phone) unique against
+      // a concurrent inbound that created the same contact mid-import.
       const result = await this.db.contact.createMany({
         data: toCreate.map((p) => ({
           teamId,
@@ -953,12 +1030,71 @@ export class ContactsService {
           countryCode:
             p.countryCode ?? getCountryFromPhone(p.phoneNumber) ?? undefined,
           customFields: p.customFields,
-          stageId: defaultStageId,
+          stageId: resolveStage(p.stageName),
           source: "manual",
         })),
         skipDuplicates: true,
       });
       created = result.count;
+
+      // ---- Tag links --------------------------------------------------------
+      // Only the rows that actually carry tags. Resolve every distinct name to
+      // an id via get-or-create (auto-create unknown tags, slate color — same
+      // as the UI), then one bulk INSERT into the implicit M2M join table.
+      const rowsWithTags = toCreate.filter((p) => p.tagNames.length > 0);
+      if (rowsWithTags.length > 0) {
+        const distinctTagNames = new Map<string, string>(); // key → first-seen name
+        for (const p of rowsWithTags) {
+          for (const t of p.tagNames) {
+            const k = t.toLowerCase();
+            if (!distinctTagNames.has(k)) distinctTagNames.set(k, t);
+          }
+        }
+        const tagIdByNameKey = await this.resolveTagIdsByName(
+          teamId,
+          [...distinctTagNames.values()],
+        );
+
+        // Map phone → created contact id (createMany returns no ids). Scope to
+        // the phones we just tried to create.
+        const createdRows = await this.db.contact.findMany({
+          where: {
+            teamId,
+            phoneNumber: { in: rowsWithTags.map((p) => p.phoneNumber) },
+          },
+          select: { id: true, phoneNumber: true },
+        });
+        const idByPhone = new Map(createdRows.map((r) => [r.phoneNumber, r.id]));
+
+        // Build the (contactId, tagId) pairs, de-duped.
+        const pairs: Array<{ contactId: string; tagId: string }> = [];
+        const seenPair = new Set<string>();
+        for (const p of rowsWithTags) {
+          const contactId = idByPhone.get(p.phoneNumber);
+          if (!contactId) continue; // lost to a concurrent create — skip
+          for (const t of p.tagNames) {
+            const tagId = tagIdByNameKey.get(t.toLowerCase());
+            if (!tagId) continue;
+            const pk = `${contactId}:${tagId}`;
+            if (seenPair.has(pk)) continue;
+            seenPair.add(pk);
+            pairs.push({ contactId, tagId });
+          }
+        }
+        if (pairs.length > 0) {
+          // Single bulk insert into the implicit join table, mirroring the
+          // bulk tag-add path. ON CONFLICT DO NOTHING so a re-import / racing
+          // link is a no-op. Prisma's implicit M2M table is "_ContactToTag"
+          // with A=Contact.id, B=Tag.id.
+          const contactIds = pairs.map((p) => p.contactId);
+          const tagIds = pairs.map((p) => p.tagId);
+          await this.db.$executeRaw`
+            INSERT INTO "_ContactToTag" ("A", "B")
+            SELECT * FROM UNNEST(${contactIds}::text[], ${tagIds}::text[])
+            ON CONFLICT DO NOTHING
+          `;
+        }
+      }
     }
 
     return {
@@ -967,7 +1103,61 @@ export class ContactsService {
       skippedExisting: skippedExisting + (toCreate.length - created),
       errors,
       unknownColumns,
+      ...(unknownStages.size > 0
+        ? { unknownStages: [...unknownStages].sort() }
+        : {}),
     };
+  }
+
+  /**
+   * Get-or-create tags by NAME for CSV import. Returns a map keyed by the
+   * LOWERCASED name → tag id. Existing tags are reused (case-insensitive on
+   * the unique (teamId, name)); missing ones are created with the default
+   * color, mirroring the UI tag picker's "create on the fly" behavior. One
+   * `catalog_changed` event after any creates so open clients refresh.
+   */
+  private async resolveTagIdsByName(
+    teamId: string,
+    names: string[],
+  ): Promise<Map<string, string>> {
+    const byKey = new Map<string, string>();
+    if (names.length === 0) return byKey;
+
+    const existing = await this.db.tag.findMany({
+      where: { teamId },
+      select: { id: true, name: true },
+    });
+    for (const t of existing) byKey.set(t.name.toLowerCase(), t.id);
+
+    const toCreate = names.filter((n) => !byKey.has(n.toLowerCase()));
+    let createdAny = false;
+    for (const name of toCreate) {
+      // Per-name create (not createMany) so a P2002 from a concurrent create
+      // of the same name is caught and the winner reused — keeps the import
+      // resilient to a teammate adding the same tag mid-run.
+      try {
+        const created = await this.db.tag.create({
+          data: { teamId, name, color: "slate" },
+          select: { id: true },
+        });
+        byKey.set(name.toLowerCase(), created.id);
+        createdAny = true;
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          const winner = await this.db.tag.findFirst({
+            where: { teamId, name },
+            select: { id: true },
+          });
+          if (winner) byKey.set(name.toLowerCase(), winner.id);
+        } else {
+          throw err;
+        }
+      }
+    }
+    if (createdAny) {
+      await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
+    }
+    return byKey;
   }
 
   // -------------------------------------------------------------------------
@@ -1105,7 +1295,7 @@ export class ContactsService {
     // teams; over that, the operator should filter the audience first or
     // we should ship a true streaming export.
     const EXPORT_HARD_CAP = 50_000;
-    const [contacts, fieldDefs] = await Promise.all([
+    const [contacts, fieldDefs, stages] = await Promise.all([
       this.db.contact.findMany({
         // Export is a directory dump — soft-deleted contacts stay out.
         where: { teamId, deletedAt: null },
@@ -1119,6 +1309,11 @@ export class ContactsService {
           language: true,
           countryCode: true,
           source: true,
+          stageId: true,
+          // Tag NAMES (not ids) so the CSV round-trips on import. The implicit
+          // M2M is small per contact; selecting names here avoids a second
+          // catalog join per row.
+          tags: { select: { name: true } },
           customFields: true,
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -1128,7 +1323,12 @@ export class ContactsService {
         where: { teamId },
         orderBy: [{ order: "asc" }, { createdAt: "asc" }],
       }),
+      this.db.contactStage.findMany({
+        where: { teamId },
+        select: { id: true, name: true },
+      }),
     ]);
+    const stageNameById = new Map(stages.map((s) => [s.id, s.name]));
 
     // Collect per-contact one-off keys we encounter. Render after team-wide
     // columns so the schema-defined fields stay in stable order.
@@ -1155,6 +1355,8 @@ export class ContactsService {
       "location",
       "language",
       "country",
+      "tags",
+      "stage",
       "source",
     ];
     const teamColumns = fieldDefs.map((d) => d.label);
@@ -1177,6 +1379,9 @@ export class ContactsService {
         location: c.location ?? "",
         language: c.language ?? "",
         country: c.countryCode ?? "",
+        // Semicolon-separated tag names — round-trips with the import parser.
+        tags: c.tags.map((t) => t.name).join(";"),
+        stage: (c.stageId && stageNameById.get(c.stageId)) || "",
         source: c.source,
       };
       for (const def of fieldDefs) {
@@ -1210,11 +1415,18 @@ export class ContactsService {
   }
 
   /**
-   * Blank import template — CSV with header row only. Built from the same
-   * recognized-headers list as the importer, plus any team-defined custom
-   * field labels, so a fresh download always reflects the current schema.
-   * No data rows: empty file == "fill me in" rather than risking the user
-   * importing the example as a real contact.
+   * Import template — header row + ONE clearly-fake example row that documents
+   * the expected formats inline (phone WITH country code, tags semicolon-
+   * separated, stage by name). Built from the same recognized headers as the
+   * importer plus the team's custom-field labels, so a fresh download always
+   * matches the current schema.
+   *
+   * Why an example row now (was header-only): the #1 import mistake is the
+   * phone format (missing country code, or a local number). A visible example
+   * is the clearest possible guidance. The example contact ("John Example",
+   * `15551234567`) is obvious filler the user overwrites; if imported as-is it
+   * creates one easily-deleted contact — a far smaller cost than a batch of
+   * unreachable local numbers. Same approach Respond.io / HubSpot templates use.
    */
   async importTemplateCsv(teamId: string): Promise<{ csv: string; filename: string }> {
     const fieldDefs = await this.db.contactFieldDefinition.findMany({
@@ -1231,14 +1443,34 @@ export class ContactsService {
       "location",
       "language",
       "country",
+      "tags",
+      "stage",
     ];
     const customColumns = fieldDefs.map((d) => d.label);
     const columns = [...baseColumns, ...customColumns];
-    // Single header row terminated with CRLF — matches the Excel-friendly
-    // default the export path uses.
-    const csv = columns
-      .map((c) => (/[",\n\r]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c))
-      .join(",") + "\r\n";
+
+    // One example row. phone_number is full international WITH country code and
+    // NO "+" (a "+" works too — the importer strips it — but showing it without
+    // is the safe Excel-friendly form). Tags are ";"-separated; stage is a name.
+    const example: Record<string, string> = {
+      phone_number: "15551234567",
+      name: "John Example",
+      first_name: "John",
+      last_name: "Example",
+      email: "john@example.com",
+      location: "New York",
+      language: "en",
+      country: "US",
+      tags: "VIP;Lead",
+      stage: "Stage 1",
+    };
+    const exampleRow = columns.map((c) => example[c] ?? "");
+
+    const esc = (c: string) =>
+      /[",\n\r]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c;
+    // CRLF line endings — Excel-friendly, matches the export path.
+    const csv =
+      columns.map(esc).join(",") + "\r\n" + exampleRow.map(esc).join(",") + "\r\n";
     return { csv, filename: "contacts-template.csv" };
   }
 }
