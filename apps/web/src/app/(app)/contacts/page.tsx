@@ -1,5 +1,4 @@
 import { getSession } from "@/lib/auth/current-user";
-import { canManageContactFields, canManageStages } from "@ccp/shared/auth/permissions";
 import {
   listContactFieldsWithBuiltins,
   listContactStages,
@@ -23,7 +22,7 @@ export default async function ContactsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const { user } = await getSession();
+  const { permissions } = await getSession();
   const params = await searchParams;
   const stageParam = typeof params.stage === "string" ? params.stage : undefined;
 
@@ -60,8 +59,9 @@ export default async function ContactsPage({
       initialTags={tags}
       initialStages={stages}
       initialStageFilter={resolvedStageFilter}
-      canManageFields={canManageContactFields(user.role)}
-      canManageStages={canManageStages(user.role)}
+      canManageFields={permissions["contactFields:manage"]}
+      canManageStages={permissions["stages:manage"]}
+      canDeleteContacts={permissions["contacts:delete"]}
     />
   );
 }

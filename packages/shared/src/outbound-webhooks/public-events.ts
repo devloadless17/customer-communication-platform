@@ -40,6 +40,7 @@ import type {
   MessageSentEvent,
   MessageStatusChangedEvent,
   NoteCreatedEvent,
+  NoteDeletedEvent,
 } from "../events/types";
 
 /**
@@ -65,6 +66,7 @@ export const PUBLIC_EVENT_TYPES = [
   "contact.lifecycle_changed",
   "contact.deleted",
   "note.created",
+  "note.deleted",
 ] as const;
 export type PublicEventType = (typeof PUBLIC_EVENT_TYPES)[number];
 
@@ -381,6 +383,16 @@ export const PUBLIC_EVENT_GROUPS: Array<{
             body: "Customer prefers SMS — leaving a note here.",
             timestamp: "2026-05-20T11:05:00.000Z",
           },
+        },
+      },
+      {
+        type: "note.deleted",
+        label: "On Comment deleted",
+        description: "An internal note was removed from a conversation.",
+        samplePayload: {
+          note_id: "cmpnote_01",
+          conversation_id: "cmpconv_01",
+          deleted_by_user_id: "cmpusr_01",
         },
       },
     ],
@@ -779,6 +791,21 @@ export function toPublicEnvelopes(
       });
       break;
     }
+    case "note.deleted": {
+      // Symmetric with note.created so a partner syncing internal notes can
+      // remove the row on their side. The note is gone, so only the ids +
+      // actor are carried (no body/timestamp to read back).
+      const e = event as NoteDeletedEvent;
+      out.push({
+        type: "note.deleted",
+        envelope: build(e.teamId, occurredAt, "note.deleted", {
+          note_id: e.noteId,
+          conversation_id: e.conversationId,
+          deleted_by_user_id: e.deletedByUserId,
+        }),
+      });
+      break;
+    }
     // All other DomainEvent types are intentionally internal — broadcast,
     // team-chat, catalog, message-send-failed, bulk coalescing, etc.
     default:
@@ -801,6 +828,7 @@ export function busEventTypesToSubscribe(): DomainEventType[] {
     "contact.lifecycle_changed",
     "contact.deleted",
     "note.created",
+    "note.deleted",
   ];
 }
 
@@ -1228,6 +1256,13 @@ export function toWirePayload(
           body: d.note?.body,
           timestamp: toEpochMs(d.note?.timestamp),
         },
+      };
+    case "note.deleted":
+      return {
+        event_type: type,
+        conversationId: d.conversation_id,
+        noteId: d.note_id,
+        deletedByUserId: d.deleted_by_user_id ?? null,
       };
     default:
       return { event_type: type, ...(d as Record<string, unknown>) };

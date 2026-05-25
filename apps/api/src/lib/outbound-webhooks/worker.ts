@@ -225,6 +225,10 @@ async function deliverOnce(
         "X-CCP-Delivery": delivery.id,
         "X-CCP-Signature": signature,
         ...(originApiKeyId ? { "X-CCP-Origin-Key": originApiKeyId } : {}),
+        // Correlation id of the request that caused this delivery, so a partner
+        // can echo it back / log it and we can join their failure to our
+        // originating request. Absent when the source event had no HTTP scope.
+        ...(delivery.correlationId ? { "X-CCP-Trace-Id": delivery.correlationId } : {}),
       },
       body,
       timeoutMs: DEFAULT_TIMEOUT_MS,

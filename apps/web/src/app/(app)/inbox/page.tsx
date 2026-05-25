@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
@@ -11,8 +12,13 @@ import {
   listTags,
   listTeamMembers,
 } from "@/lib/api/queries";
-import { canManageContactFields, canManageStages } from "@ccp/shared/auth/permissions";
 import { InboxShell } from "@/features/inbox/components/inbox-shell";
+
+/** Right contact-panel collapse cookie — read server-side so SSR renders the
+ *  persisted state (no expand→collapse flash, same approach as the left
+ *  AppRail). Default EXPANDED: only an explicit "true" (the user collapsed it)
+ *  collapses it to a rail. Written client-side in contact-panel.tsx. */
+const CONTACT_PANEL_COLLAPSED_COOKIE = "contact-panel-collapsed";
 
 /**
  * Single-page inbox workspace.
@@ -47,7 +53,7 @@ export default async function InboxPage({
   // Now we fetch once and derive `teammates` (active, for the sidebar) from
   // the same list `teamMembers` uses (all, for historical message attribution).
   const [
-    { user },
+    { user, permissions },
     team,
     conversationsPage,
     teamMembers,
@@ -56,6 +62,7 @@ export default async function InboxPage({
     contactFields,
     tags,
     initialThread,
+    cookieStore,
   ] = await Promise.all([
     getSession(),
     getCurrentTeam(),
@@ -71,7 +78,11 @@ export default async function InboxPage({
     requestedConversationId
       ? getConversationWithRefs(requestedConversationId)
       : Promise.resolve(null),
+    cookies(),
   ]);
+
+  const contactPanelCollapsed =
+    cookieStore.get(CONTACT_PANEL_COLLAPSED_COOKIE)?.value === "true";
 
   // When the URL pointed at a conversation that doesn't exist (deleted, wrong
   // team, typo'd id), strip the `?c=` from the URL with a server redirect.
@@ -98,10 +109,12 @@ export default async function InboxPage({
       fieldDefinitions={contactFields.definitions}
       contactPanelBuiltins={contactFields.builtins}
       tags={tags}
-      canManageStages={canManageStages(user.role)}
-      canManageContactFields={canManageContactFields(user.role)}
+      canManageStages={permissions["stages:manage"]}
+      canManageContactFields={permissions["contactFields:manage"]}
+      canDeleteConversations={permissions["conversations:delete"]}
       initialActiveConversationId={initialActiveConversationId}
       initialThread={initialThread}
+      initialContactPanelCollapsed={contactPanelCollapsed}
     />
   );
 }

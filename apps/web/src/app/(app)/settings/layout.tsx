@@ -12,10 +12,12 @@ export default async function SettingsLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { user } = await getSession();
+  const { user, permissions } = await getSession();
 
   return (
-    <SectionShell subSidebar={<SettingsSubSidebar role={user.role} />}>
+    <SectionShell
+      subSidebar={<SettingsSubSidebar role={user.role} permissions={permissions} />}
+    >
       <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 md:px-8 md:py-10">{children}</div>
     </SectionShell>
   );

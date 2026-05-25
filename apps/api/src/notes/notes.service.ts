@@ -92,6 +92,7 @@ export class NotesService {
       teamId,
       conversationId: note.conversationId,
       noteId: id,
+      deletedByUserId: requesterUserId,
     });
   }
 }

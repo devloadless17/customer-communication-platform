@@ -69,6 +69,8 @@ export interface MessageReceivedEvent {
   unreadCount: number;
   /** Recent thread context handed to workflow `message_received` trigger. */
   recentMessages: WorkflowMessageSnapshot[];
+  /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
+  silent?: boolean;
 }
 
 export interface MessageSentEvent {
@@ -104,6 +106,8 @@ export interface MessageSentEvent {
    * refetch — same shape used by the inbound-message path on first contact.
    */
   newConversation?: ConversationWithRefs;
+  /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
+  silent?: boolean;
 }
 
 export interface MessageStatusChangedEvent {
@@ -114,6 +118,8 @@ export interface MessageStatusChangedEvent {
   contactId: string;
   messageId: string;
   status: MessageStatus;
+  /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
+  silent?: boolean;
 }
 
 /**
@@ -164,11 +170,18 @@ export interface ConversationAssignedEvent {
   /** Contact attached to the conversation, for workflow snapshot. */
   contact: WorkflowContactSnapshot;
   /**
-   * When true, workflow-dispatch subscribers SKIP this event. Set by
-   * workflow step handlers so a step that runs inside workflow X doesn't
-   * cascade into workflow Y mid-run (loop avoidance). Socket fanout,
-   * audit, and analytics still run normally — those are user-visible
-   * effects, not chain-trigger semantics. See lib/workflows/steps/*.
+   * `silent` = "this mutation is internal/cascaded — skip downstream
+   * REACTIONS." Two subscribers honor it:
+   *   - workflow-dispatch: skips chain-triggering, so a step inside workflow
+   *     X can't cascade into workflow Y mid-run (loop avoidance).
+   *   - outbound-webhooks: skips delivery, so an API/workflow-driven change
+   *     doesn't echo a webhook back to the very system that caused it
+   *     (echo-loop avoidance).
+   * Socket fanout + audit + analytics ALWAYS run — those are user-visible
+   * truth, not reactions. Set by workflow step handlers (always) and by the
+   * external /v1 API when the request opts in (`silent: true`). The same
+   * `silent` flag on every webhook-able event below carries this meaning.
+   * See lib/workflows/steps/* and outbound-webhooks.subscriber.ts.
    */
   silent?: boolean;
 }
@@ -273,6 +286,8 @@ export interface ContactDeletedEvent {
   deletedByUserId: string | null;
   /** Set on /v1 external-API deletes for audit attribution. */
   deletedByApiKeyId?: string | null;
+  /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
+  silent?: boolean;
 }
 
 /**
@@ -296,6 +311,8 @@ export interface ContactCreatedEvent {
   createdByUserId: string | null;
   /** Set on /v1 create paths for audit attribution. */
   createdByApiKeyId?: string | null;
+  /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
+  silent?: boolean;
 }
 
 /**
@@ -318,12 +335,12 @@ export interface ContactTagChangedEvent {
   /** Set on /v1 mutations for audit attribution. */
   changedByApiKeyId?: string | null;
   /**
-   * Workflow steps set this to skip chain-trigger dispatch. Today the
-   * workflow-dispatch subscriber doesn't subscribe to this event, so the
-   * flag is dormant — but a future PR that wires the tag-changed trigger
-   * MUST honor this or step-driven tag changes will infinite-loop into
-   * themselves. Mirrors the pattern on `contact.updated`,
-   * `conversation.assigned`, etc.
+   * Skip downstream reactions — see ConversationAssignedEvent.silent.
+   * The outbound-webhook subscriber honors it TODAY (no echo back to the
+   * partner that just changed the tag via /v1). Workflow-dispatch does not
+   * yet subscribe to `contact.tag_changed`, so the workflow side is dormant
+   * until that trigger is wired — but the flag is set by the tag step now so
+   * that future trigger can't infinite-loop into itself.
    */
   silent?: boolean;
 }
@@ -343,12 +360,11 @@ export interface ContactLifecycleChangedEvent {
   /** Set on /v1 mutations for audit attribution. */
   changedByApiKeyId?: string | null;
   /**
-   * Workflow steps set this to skip chain-trigger dispatch. Today the
-   * workflow-dispatch subscriber doesn't subscribe to this event, so the
-   * flag is dormant — but a future PR that wires a lifecycle-changed trigger
-   * MUST honor this or the `update_lifecycle` step infinite-loops into
-   * itself. Mirrors the identical guard on `ContactTagChangedEvent.silent`;
-   * this was the one contact-mutation event missing it (audit 2026-05-22).
+   * Skip downstream reactions — see ConversationAssignedEvent.silent.
+   * Honored by the outbound-webhook subscriber TODAY; the workflow side is
+   * dormant until a lifecycle-changed trigger is wired (the `update_lifecycle`
+   * step sets it now so that future trigger can't loop into itself). Mirrors
+   * `ContactTagChangedEvent.silent`.
    */
   silent?: boolean;
 }
@@ -372,6 +388,10 @@ export interface NoteDeletedEvent {
   teamId: string;
   conversationId: string;
   noteId: string;
+  /** Who deleted the note. null for system/automation deletions. The audit
+   *  timeline attributes the row to this actor instead of falling back to
+   *  "Removed user" / unattributed. */
+  deletedByUserId: string | null;
 }
 
 /**

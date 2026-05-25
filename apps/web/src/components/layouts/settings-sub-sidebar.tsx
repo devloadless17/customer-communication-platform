@@ -6,17 +6,15 @@ import {
   ListChecks,
   MessageSquare,
   Plug,
+  ShieldCheck,
   Sparkles,
   Tag as TagIcon,
   UserCircle2,
   Users,
 } from "lucide-react";
 
-import {
-  canManageContactFields,
-  canManageStages,
-  canManageUsers,
-} from "@ccp/shared/auth/permissions";
+import { canManageUsers } from "@ccp/shared/auth/permissions";
+import type { Capability } from "@ccp/shared/auth/permissions";
 import type { Role } from "@ccp/shared/types";
 
 import {
@@ -32,11 +30,17 @@ import {
  * settings / Data settings). Items that don't have a page today are
  * intentionally omitted; admin-only links are gated per `role`.
  */
-export function SettingsSubSidebar({ role }: { role: Role }) {
+export function SettingsSubSidebar({
+  role,
+  permissions,
+}: {
+  role: Role;
+  permissions: Record<Capability, boolean>;
+}) {
   const pathname = usePathname() ?? "";
   const isAdmin = canManageUsers(role);
-  const canStages = canManageStages(role);
-  const canFields = canManageContactFields(role);
+  const canStages = permissions["stages:manage"];
+  const canFields = permissions["contactFields:manage"];
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(href + "/");
@@ -56,6 +60,14 @@ export function SettingsSubSidebar({ role }: { role: Role }) {
           leading={<Users className="size-4" />}
           active={isActive("/settings/team")}
         />
+        {isAdmin && (
+          <SubSidebarItem
+            href="/settings/permissions"
+            label="Role permissions"
+            leading={<ShieldCheck className="size-4" />}
+            active={isActive("/settings/permissions")}
+          />
+        )}
       </SubSidebarSection>
 
       {isAdmin && (

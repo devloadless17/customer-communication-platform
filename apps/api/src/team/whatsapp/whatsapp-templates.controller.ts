@@ -18,6 +18,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { diskStorage } from "multer";
 
+import { RequireCapability } from "../../auth/capability.guard";
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
@@ -38,9 +39,10 @@ import { WhatsappService } from "./whatsapp.service";
  *   DELETE /api/team/whatsapp/templates/:id            — remove (Meta first, then local)
  *   PATCH  /api/team/whatsapp/templates/:id            — update variableBindings only
  *
- * Routes intentionally NOT admin-gated — team-scoped session lookup is
- * sufficient (a contact on team A can never see team B's templates).
- * Tighten to admin-only later if/when roles harden.
+ * Read routes (list / sync from Meta) are open to any team member. Mutations
+ * (create / upload-media / update bindings / delete) require the
+ * `templates:manage` capability — admin-configurable per role (defaults to on
+ * for everyone, preserving prior open behavior until an admin restricts it).
  *
  * Route order: static paths (`create`, `upload-media`) MUST precede `:id`
  * — Express matches in registration order.
@@ -67,6 +69,7 @@ export class WhatsappTemplatesController {
    * we'd reimplement.
    */
   @Post("create")
+  @RequireCapability("templates:manage")
   async create(
     @CurrentSession() session: ApiSession,
     @Body() body: unknown,
@@ -85,6 +88,7 @@ export class WhatsappTemplatesController {
    * calling, then unlink in finally.
    */
   @Post("upload-media")
+  @RequireCapability("templates:manage")
   @UseInterceptors(
     FileInterceptor("file", {
       limits: { fileSize: 16 * 1024 * 1024 },
@@ -116,6 +120,7 @@ export class WhatsappTemplatesController {
   }
 
   @Delete(":id")
+  @RequireCapability("templates:manage")
   async remove(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
@@ -125,6 +130,7 @@ export class WhatsappTemplatesController {
   }
 
   @Patch(":id")
+  @RequireCapability("templates:manage")
   async updateBindings(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

@@ -32,6 +32,7 @@ export const loadActiveUser = cache(async (userId: string) => {
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
+      team: { select: { rolePermissions: true } },
     },
   });
   if (!user || user.deactivatedAt) return null;

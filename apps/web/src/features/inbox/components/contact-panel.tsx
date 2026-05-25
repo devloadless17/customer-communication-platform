@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Check, ChevronDown, Mail, Phone, MapPin, Clock, FileText, Loader2, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, Mail, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
@@ -80,6 +81,9 @@ interface PanelProps {
   tagCatalog: Tag[];
   /** Team roster used to render the assignee picker. */
   teamMembers: User[];
+  /** Server-read cookie so the panel SSRs in its persisted rail state (no
+   *  expand→collapse flash). Default false (expanded). */
+  initialCollapsed: boolean;
 }
 
 export function ContactPanel({
@@ -89,10 +93,46 @@ export function ContactPanel({
   canManageFields,
   tagCatalog,
   teamMembers,
+  initialCollapsed,
 }: PanelProps) {
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
   const softRefresh = useSoftRefresh();
+
+  // ------------------------------------------------------------------
+  // Collapse-to-rail. Mirrors the left AppRail: the full 320px panel
+  // collapses to a thin 48px rail showing only an expand button, and the
+  // state persists in a cookie so the inbox page (RSC) SSRs the right width
+  // on the next load with no flash. `transitionEnabled` skips the width
+  // animation on first mount so a restored-collapsed state doesn't animate
+  // open→closed on load.
+  // ------------------------------------------------------------------
+  // Seed from the server-read prop for an SSR-consistent first paint, then
+  // re-sync from the live cookie on mount. The prop is frozen at page load, so
+  // on a chat-switch remount (ThreadWorkspace is keyed by conversation id) it
+  // can be stale relative to a toggle made since — the cookie is the truth.
+  const [collapsed, setCollapsed] = useState<boolean>(initialCollapsed);
+  const [transitionEnabled, setTransitionEnabled] = useState(false);
+  useEffect(() => {
+    const fromCookie = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("contact-panel-collapsed="))
+      ?.slice("contact-panel-collapsed=".length);
+    if (fromCookie === "true" || fromCookie === "false") {
+      setCollapsed(fromCookie === "true");
+    }
+    const raf = requestAnimationFrame(() => setTransitionEnabled(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  function toggleCollapsed() {
+    const next = !collapsed;
+    setCollapsed(next);
+    // Cookie (not localStorage) so the server layout reads it and SSRs the
+    // correct width next load — that's what kills the flash. Default expanded,
+    // so only an explicit "true" persists the collapsed rail.
+    document.cookie = `contact-panel-collapsed=${String(next)}; path=/; max-age=31536000; samesite=lax`;
+  }
 
   // ------------------------------------------------------------------
   // Live stats. ContactPanel is a SIBLING of MessageThread (see
@@ -667,7 +707,57 @@ export function ContactPanel({
     .sort();
 
   return (
-    <aside className="hidden h-full w-[320px] shrink-0 flex-col border-l border-border bg-sidebar text-sidebar-foreground lg:flex">
+    <aside
+      className="hidden h-full shrink-0 flex-col overflow-hidden border-l border-border bg-sidebar text-sidebar-foreground lg:flex"
+      style={{
+        width: collapsed ? 48 : 320,
+        transition: transitionEnabled
+          ? "width 250ms cubic-bezier(0.4, 0, 0.2, 1)"
+          : "none",
+      }}
+    >
+      {collapsed && (
+        // Collapsed rail: a single expand button filling the thin rail.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              className="flex h-11 w-12 shrink-0 items-center justify-center border-b border-border text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+              aria-label="Expand contact panel"
+            >
+              <ChevronLeft className="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="left">Contact details</TooltipContent>
+        </Tooltip>
+      )}
+      {/* Expanded body. Fixed 320px inner width + shrink-0 so the dense content
+          never reflows/squashes while the aside animates its width — it stays
+          full-width and the shrinking aside (overflow-hidden) clips it from the
+          right, a clean slide-out. Unmounted when collapsed so it can't stack
+          under the rail button in the 48px column. */}
+      {!collapsed && (
+      <div className="flex h-full w-[320px] shrink-0 flex-col">
+      {/* Header bar with the collapse toggle, at the panel's right edge. */}
+      <div className="flex h-11 shrink-0 items-center justify-between border-b border-border pl-4 pr-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Details
+        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+              aria-label="Collapse contact panel"
+            >
+              <PanelRightClose className="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="left">Collapse panel</TooltipContent>
+        </Tooltip>
+      </div>
       {pendingRemote ? (
         <div className="flex items-start gap-2 border-b border-amber-300/40 bg-amber-50 px-4 py-2 text-[12px] text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
           <span className="mt-px inline-block size-1.5 shrink-0 rounded-full bg-amber-500" />
@@ -1033,6 +1123,8 @@ export function ContactPanel({
         </Section>
 
       </ScrollArea>
+      </div>
+      )}
     </aside>
   );
 }

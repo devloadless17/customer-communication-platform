@@ -120,6 +120,7 @@ export class SocketAuthService {
           email: true,
           avatarUrl: true,
           deactivatedAt: true,
+          team: { select: { rolePermissions: true } },
         },
       });
     } catch (err) {
@@ -138,6 +139,7 @@ export class SocketAuthService {
       name: dbUser.name,
       email: dbUser.email,
       avatarUrl: dbUser.avatarUrl ?? null,
+      rolePermissions: dbUser.team?.rolePermissions ?? {},
     });
     sessionCacheSetByCookie(cookieHeader, dbUser.id);
     return {

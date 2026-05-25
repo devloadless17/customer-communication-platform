@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   Param,
@@ -18,6 +19,9 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 
+import { resolvePermissions } from "@ccp/shared/auth/permissions";
+
+import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -91,6 +95,13 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(BulkContactsSchema)) body: BulkContactsInput,
   ) {
+    // Only the destructive `delete` action is gated by `contacts:delete`;
+    // tag-add / tag-remove stay open to any team member. A decorator can't see
+    // the body, so this lives here rather than on @RequireCapability.
+    if (body.action === "delete") {
+      const perms = resolvePermissions(session.role, session.rolePermissions);
+      if (!perms["contacts:delete"]) throw new ForbiddenException("forbidden");
+    }
     return this.contacts.bulk(session.teamId, session.userId, body);
   }
 
@@ -228,6 +239,7 @@ export class ContactsController {
   }
 
   @Delete(":id")
+  @RequireCapability("contacts:delete")
   async remove(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

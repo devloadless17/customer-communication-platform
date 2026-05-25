@@ -65,6 +65,7 @@ function MessageThreadImpl({
   tags,
   fieldDefinitions,
   canManageStages,
+  canDeleteConversations,
   onMarkRead,
   onSnapshot,
   onMobileBack,
@@ -83,6 +84,9 @@ function MessageThreadImpl({
   fieldDefinitions: ContactFieldDefinition[];
   /** Whether the current user can edit the team's stage catalog. */
   canManageStages: boolean;
+  /** Whether the current user can delete conversations (`conversations:delete`).
+   *  Forwarded to ThreadHeader → ConversationMenu to hide the delete action. */
+  canDeleteConversations: boolean;
   /** Forwarded to useConversationEvents so the shell can patch its cached
    *  unreadCount=0 after the mark-read POST resolves. Optional so tests and
    *  other mount points don't need to thread it. */
@@ -779,6 +783,7 @@ function MessageThreadImpl({
         currentStageId={stageId}
         onStageChange={persistStageId}
         canManageStages={canManageStages}
+        canDeleteConversations={canDeleteConversations}
         onMobileBack={onMobileBack}
       />
 

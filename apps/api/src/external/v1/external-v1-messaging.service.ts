@@ -20,7 +20,6 @@ import {
 } from "@/lib/external-shapes";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 
-import { refundApiKeyBucket } from "../../auth/api-key.guard";
 import {
   sendTemplateInternal,
   SendTemplateValidationError,
@@ -43,6 +42,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
+import { ApiIdempotencyService } from "./api-idempotency.service";
 import type {
   ExternalAssignInput,
   ExternalContactAssignInput,
@@ -54,14 +54,6 @@ import type {
   ListConversationsQueryInput,
   ListMessagesQueryInput,
 } from "./external-v1.schemas";
-
-// Idempotency claim sentinels — shared by every /v1 send path so the text and
-// template flows can't drift. `responseStatus: 0` marks a pending claim; a
-// crashed handler's pending row is GC'd after PENDING_TTL by the sweeper at
-// lib/sweepers/api-idempotency-cleanup. Completed rows live COMPLETED_TTL.
-const IDEMPOTENCY_PENDING_STATUS = 0;
-const IDEMPOTENCY_PENDING_TTL_MS = 5 * 60_000;
-const IDEMPOTENCY_COMPLETED_TTL_MS = 24 * 60 * 60_000;
 
 /**
  * Extracted from the original `external-v1.service.ts` to keep file sizes
@@ -80,153 +72,43 @@ export class ExternalV1MessagingService {
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
+    private readonly idem: ApiIdempotencyService,
   ) {}
 
   // ===========================================================================
-  // IDEMPOTENCY (shared by text + template /v1 send paths)
+  // IDEMPOTENCY (thin delegates to the shared ApiIdempotencyService)
   // ===========================================================================
+  //
+  // The actual claim/complete/release logic now lives in
+  // `ApiIdempotencyService` so the NON-send mutations (assign / status / tag /
+  // contact-update, in the sibling ExternalV1Service) reuse the exact same
+  // implementation. These thin wrappers keep the existing send-path call sites
+  // (sendMessage / sendTopLevelMessage below) unchanged.
 
-  /**
-   * CLAIM-then-execute idempotency on the (teamId, apiKeyId, key) unique index.
-   *
-   * Returns:
-   *   - { kind: "claimed" }      → caller OWNS a pending sentinel row and MUST
-   *                                resolve it (`completeIdempotency` on success,
-   *                                `releaseIdempotency` on failure) before
-   *                                returning. Proceed with the real work.
-   *   - { kind: "replay", result } → a prior identical request already
-   *                                completed; return it verbatim (zero side
-   *                                effects, API-key token refunded).
-   *
-   * Throws ConflictException(409) when a concurrent request with the same key
-   * is still in flight. Centralizing this is what closes the template
-   * double-send gap (audit 2026-05-22): previously only the text path had it.
-   */
-  private async claimIdempotency<T>(
+  private claimIdempotency<T>(
     teamId: string,
     apiKeyId: string,
     key: string,
-    /** SHA-256 of the canonical request — see requestFingerprint(). On a
-     *  completed-row replay we reject if it differs from the stored one
-     *  (same key, different payload), instead of silently returning the prior
-     *  response and dropping the new send. */
     requestHash: string,
   ): Promise<{ kind: "claimed" } | { kind: "replay"; result: T }> {
-    const claimPending = () =>
-      this.db.apiIdempotencyKey.create({
-        data: {
-          teamId,
-          apiKeyId,
-          key,
-          requestHash,
-          responseBody: { _pending: true } as Prisma.InputJsonValue,
-          responseStatus: IDEMPOTENCY_PENDING_STATUS,
-          expiresAt: new Date(Date.now() + IDEMPOTENCY_PENDING_TTL_MS),
-        },
-      });
-    try {
-      await claimPending();
-      return { kind: "claimed" };
-    } catch (err) {
-      if (
-        !(err instanceof Prisma.PrismaClientKnownRequestError) ||
-        err.code !== "P2002"
-      ) {
-        throw err;
-      }
-      // Another request already claimed this key. Read its state.
-      const cached = await this.db.apiIdempotencyKey.findUnique({
-        where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
-        select: { responseBody: true, responseStatus: true, expiresAt: true, requestHash: true },
-      });
-      if (!cached) {
-        // Vanished between P2002 and the read (sweeper / manual delete).
-        throw new ConflictException({
-          error: "idempotency_in_progress",
-          detail: "Concurrent retry race — try again in a moment.",
-        });
-      }
-      if (cached.responseStatus === IDEMPOTENCY_PENDING_STATUS) {
-        if (cached.expiresAt > new Date()) {
-          throw new ConflictException({
-            error: "idempotency_in_progress",
-            detail:
-              "A previous request with this Idempotency-Key is still in flight. " +
-              "Retry in a few seconds.",
-          });
-        }
-        // Stale pending past TTL — clear and tell the partner to re-claim.
-        await this.db.apiIdempotencyKey.deleteMany({
-          where: { teamId, apiKeyId, key },
-        });
-        throw new ConflictException({
-          error: "idempotency_in_progress",
-          detail: "Stale pending claim cleared — retry.",
-        });
-      }
-      if (cached.expiresAt > new Date()) {
-        // Same key reused for a DIFFERENT request — reject (Stripe-style 422)
-        // rather than returning the prior response, which would silently drop
-        // the new send. Legacy rows have a null requestHash → skip the check
-        // and replay as before.
-        if (cached.requestHash && cached.requestHash !== requestHash) {
-          throw new UnprocessableEntityException({
-            error: "idempotency_key_reuse",
-            detail:
-              "This Idempotency-Key was already used with a different request payload. " +
-              "Use a fresh key per distinct request.",
-          });
-        }
-        // Completed + still fresh — replay. Refund the API-key token: the
-        // request did zero real work, so it shouldn't burn quota.
-        refundApiKeyBucket(apiKeyId);
-        return { kind: "replay", result: cached.responseBody as unknown as T };
-      }
-      // Expired completed row — delete + re-claim, then proceed.
-      await this.db.apiIdempotencyKey.deleteMany({ where: { teamId, apiKeyId, key } });
-      await claimPending();
-      return { kind: "claimed" };
-    }
+    return this.idem.claim<T>(teamId, apiKeyId, key, requestHash);
   }
 
-  /** Flip a claimed pending row to the completed response (24h TTL). */
-  private async completeIdempotency<T>(
+  private completeIdempotency<T>(
     teamId: string,
     apiKeyId: string,
     key: string,
     result: T,
   ): Promise<void> {
-    try {
-      await this.db.apiIdempotencyKey.update({
-        where: { teamId_apiKeyId_key: { teamId, apiKeyId, key } },
-        data: {
-          responseBody: result as unknown as Prisma.InputJsonValue,
-          responseStatus: 200,
-          expiresAt: new Date(Date.now() + IDEMPOTENCY_COMPLETED_TTL_MS),
-        },
-      });
-    } catch (err) {
-      // Row should exist (we just claimed it). If the sweeper got aggressive,
-      // log + continue so the partner still gets their success response.
-      this.logger.warn(
-        `idempotency-key completion failed: ${err instanceof Error ? err.message : err}`,
-      );
-    }
+    return this.idem.complete<T>(teamId, apiKeyId, key, result);
   }
 
-  /** Release a claimed pending row on failure so a retry can re-claim fresh. */
-  private async releaseIdempotency(
+  private releaseIdempotency(
     teamId: string,
     apiKeyId: string,
     key: string,
   ): Promise<void> {
-    await this.db.apiIdempotencyKey
-      .deleteMany({
-        where: { teamId, apiKeyId, key, responseStatus: IDEMPOTENCY_PENDING_STATUS },
-      })
-      .catch(() => {
-        /* best-effort */
-      });
+    return this.idem.release(teamId, apiKeyId, key);
   }
 
   // ===========================================================================
@@ -269,7 +151,43 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     conversationId: string,
     input: ExternalAssignInput,
-  ) {
+    idempotencyKey?: string,
+  ): Promise<{ ok: true }> {
+    // Idempotency — a partner retry of the same assign (n8n re-firing on a
+    // timeout) must not re-publish conversation.assigned + re-trigger workflows
+    // / webhooks. CLAIM-then-execute via the shared service (F2 in
+    // docs/architecture-review-2026-05-25.md). A replay returns the prior
+    // { ok: true } with zero side effects.
+    if (idempotencyKey) {
+      const claim = await this.idem.claim<{ ok: true }>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+        this.idem.fingerprint("assign", {
+          conversationId,
+          assignedUserId: input.assignedUserId,
+        }),
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+    try {
+      const result = await this.assignInternal(teamId, apiKeyId, conversationId, input);
+      if (idempotencyKey) {
+        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      }
+      return result;
+    } catch (err) {
+      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      throw err;
+    }
+  }
+
+  private async assignInternal(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalAssignInput,
+  ): Promise<{ ok: true }> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       select: {
@@ -345,6 +263,11 @@ export class ExternalV1MessagingService {
         }
       : null;
 
+    // `silent: true` on the request → `silent` on BOTH the assign event and
+    // the cascaded status change, so a partner that (un)assigns via /v1 doesn't
+    // re-trigger a workflow on assignment OR echo a webhook back into itself.
+    const silent = input.silent === true;
+
     await this.bus.publish({
       type: "conversation.assigned",
       teamId,
@@ -355,6 +278,7 @@ export class ExternalV1MessagingService {
       changedByUserId: null,
       changedByApiKeyId: apiKeyId,
       contact: workflowContactSnapshot(conversation.contact),
+      silent,
     });
 
     if (statusChanged) {
@@ -367,8 +291,10 @@ export class ExternalV1MessagingService {
         changedByUserId: null,
         changedByApiKeyId: apiKeyId,
         contact: workflowContactSnapshot(conversation.contact),
+        silent,
       });
     }
+    return { ok: true };
   }
 
   async setStatus(
@@ -376,17 +302,56 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     conversationId: string,
     input: ExternalStatusInput,
-  ) {
+    idempotencyKey?: string,
+  ): Promise<{ ok: true }> {
+    // Idempotency — see assign(). A retry must not re-publish
+    // conversation.status_changed (+ the unassign-on-close cascade).
+    if (idempotencyKey) {
+      const claim = await this.idem.claim<{ ok: true }>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+        this.idem.fingerprint("set_status", { conversationId, status: input.status }),
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+    try {
+      const result = await this.setStatusInternal(teamId, apiKeyId, conversationId, input);
+      if (idempotencyKey) {
+        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      }
+      return result;
+    } catch (err) {
+      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      throw err;
+    }
+  }
+
+  private async setStatusInternal(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalStatusInput,
+  ): Promise<{ ok: true }> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
       include: { contact: { include: { tags: { select: { id: true } } } } },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
     const previousStatus = conversation.status;
+    const previousAssignedUserId = conversation.assignedUserId;
+
+    // Closing releases the owner — mirror ConversationsService.setStatus so a
+    // close via the external API leaves the thread in the same unassigned state
+    // as a close from the inbox UI (a closed thread has no work-in-progress).
+    const unassignOnClose =
+      input.status === "closed" && previousAssignedUserId !== null;
 
     await this.db.conversation.update({
       where: { id: conversationId },
-      data: { status: input.status },
+      data: unassignOnClose
+        ? { status: input.status, assignedUserId: null }
+        : { status: input.status },
     });
 
     await this.bus.publish({
@@ -398,7 +363,25 @@ export class ExternalV1MessagingService {
       changedByUserId: null,
       changedByApiKeyId: apiKeyId,
       contact: workflowContactSnapshot(conversation.contact),
+      // `silent: true` → skip workflow re-trigger + webhook echo. See assign().
+      silent: input.silent === true,
     });
+
+    if (unassignOnClose) {
+      await this.bus.publish({
+        type: "conversation.assigned",
+        teamId,
+        conversationId,
+        assignedUser: null,
+        previousAssignedUserId,
+        newAssignedUserId: null,
+        changedByUserId: null,
+        changedByApiKeyId: apiKeyId,
+        contact: workflowContactSnapshot(conversation.contact),
+        silent: input.silent === true,
+      });
+    }
+    return { ok: true };
   }
 
   // ===========================================================================
@@ -761,6 +744,7 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAssignInput,
+    idempotencyKey?: string,
   ) {
     const contactRow = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
@@ -774,7 +758,14 @@ export class ExternalV1MessagingService {
         detail: "this contact has no conversations yet — start one with POST /v1/messages first",
       });
     }
-    await this.assign(teamId, apiKeyId, conv.id, { assignedUserId: input.assignedUserId });
+    // Idempotency is enforced inside assign() on the resolved conversation id.
+    await this.assign(
+      teamId,
+      apiKeyId,
+      conv.id,
+      { assignedUserId: input.assignedUserId, silent: input.silent },
+      idempotencyKey,
+    );
     return { conversationId: conv.id };
   }
 
@@ -783,6 +774,7 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     contactId: string,
     input: ExternalContactStatusInput,
+    idempotencyKey?: string,
   ) {
     const contactRow = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
@@ -796,7 +788,14 @@ export class ExternalV1MessagingService {
         detail: "this contact has no conversations yet",
       });
     }
-    await this.setStatus(teamId, apiKeyId, conv.id, { status: input.status });
+    // Idempotency is enforced inside setStatus() on the resolved conversation id.
+    await this.setStatus(
+      teamId,
+      apiKeyId,
+      conv.id,
+      { status: input.status, silent: input.silent },
+      idempotencyKey,
+    );
     return { conversationId: conv.id };
   }
 

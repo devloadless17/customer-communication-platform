@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 
 import { loadActiveUser } from "@/lib/auth/active-user";
 import { getCurrentSession } from "@/lib/auth";
+import { resolvePermissions } from "@ccp/shared/auth/permissions";
+import type { Capability } from "@ccp/shared/auth/permissions";
 import type { User } from "@ccp/shared/types";
 
 /**
@@ -29,6 +31,13 @@ import type { User } from "@ccp/shared/types";
 export interface Session {
   user: User;
   teamId: string;
+  /**
+   * Effective per-capability map for this user's role, with the team admin's
+   * overrides already applied. Pass the relevant boolean down to client
+   * components to hide/disable gated actions. UI gating is UX only — the
+   * NestJS guards are the real enforcement.
+   */
+  permissions: Record<Capability, boolean>;
 }
 
 export const getSession = cache(async (): Promise<Session> => {
@@ -60,5 +69,6 @@ export const getSession = cache(async (): Promise<Session> => {
       isActive: true,
     },
     teamId: row.teamId,
+    permissions: resolvePermissions(row.role, row.team?.rolePermissions ?? {}),
   };
 });

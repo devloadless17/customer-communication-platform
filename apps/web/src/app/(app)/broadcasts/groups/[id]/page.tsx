@@ -1,5 +1,6 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
+import { getSession } from "@/lib/auth/current-user";
 import {
   getAudienceGroup,
   listContactFieldDefinitions,
@@ -19,6 +20,9 @@ export default async function EditGroupPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
+  const { permissions } = await getSession();
+  if (!permissions["audienceGroups:manage"]) redirect("/broadcasts/groups");
 
   const group = await getAudienceGroup(id);
   if (!group) notFound();

@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -23,6 +24,7 @@ import {
   MessageContextQuerySchema,
   SearchMessagesQuerySchema,
   SetConversationStatusSchema,
+  StartConversationSchema,
   type AssignConversationInput,
   type BulkDeleteConversationsInput,
   type ListConversationsQuery,
@@ -30,6 +32,7 @@ import {
   type MessageContextQuery,
   type SearchMessagesQuery,
   type SetConversationStatusInput,
+  type StartConversationInput,
 } from "./conversations.schemas";
 
 /**
@@ -75,7 +78,24 @@ export class ConversationsController {
     return this.conversations.counts(session.teamId, session.userId);
   }
 
+  /**
+   * Get-or-create the conversation for a contact and return its id so the
+   * client can open it in the inbox. The "re-chat after delete" entry point —
+   * a hard-deleted thread strands the Contact otherwise. Declared before the
+   * `:id` routes so `/start` isn't swallowed as an id. No capability gate:
+   * sending a message has none either, and this is the precursor to a send.
+   */
+  @Post("start")
+  @HttpCode(200)
+  async start(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(StartConversationSchema)) body: StartConversationInput,
+  ) {
+    return this.conversations.startConversation(session.teamId, session.userId, body);
+  }
+
   @Post("bulk")
+  @RequireCapability("conversations:delete")
   async bulkDelete(
     @CurrentSession() session: ApiSession,
     @Body(zBody(BulkDeleteConversationsSchema)) body: BulkDeleteConversationsInput,
@@ -128,6 +148,7 @@ export class ConversationsController {
   }
 
   @Delete(":id")
+  @RequireCapability("conversations:delete")
   async remove(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

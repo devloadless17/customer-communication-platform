@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { getSession } from "@/lib/auth/current-user";
 import {
   countAllContacts,
   getTeamWhatsappConfig,
@@ -27,6 +28,9 @@ export default async function NewBroadcastPage({
     groupId?: string | string[];
   }>;
 }) {
+  const { permissions } = await getSession();
+  if (!permissions["broadcasts:manage"]) redirect("/broadcasts");
+
   const sp = await searchParams;
   const preselectedContactIds = normalizeIds(sp.contactIds);
   const preselectedTagIds = normalizeIds(sp.tagIds);

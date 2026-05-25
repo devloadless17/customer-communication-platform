@@ -1,3 +1,4 @@
+import { getSession } from "@/lib/auth/current-user";
 import { listContactFieldDefinitions, listWhatsappTemplates } from "@/lib/api/queries";
 
 import { TemplatesView } from "./templates-view";
@@ -12,7 +13,8 @@ export const metadata = { title: "Templates" };
 export const dynamic = "force-dynamic";
 
 export default async function TemplatesPage() {
-  const [templatesResp, fieldDefinitions] = await Promise.all([
+  const [{ permissions }, templatesResp, fieldDefinitions] = await Promise.all([
+    getSession(),
     listWhatsappTemplates(),
     listContactFieldDefinitions(),
   ]);
@@ -24,6 +26,7 @@ export default async function TemplatesPage() {
       connected={templatesResp.connected}
       hasWabaId={templatesResp.hasWabaId}
       hasAppId={templatesResp.hasAppId}
+      canManage={permissions["templates:manage"]}
     />
   );
 }

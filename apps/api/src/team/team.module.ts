@@ -4,6 +4,7 @@ import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { AudienceGroupsModule } from "./audience-groups/audience-groups.module";
 import { ContactFieldsModule } from "./contact-fields/contact-fields.module";
 import { OutboundWebhooksAdminModule } from "./outbound-webhooks/outbound-webhooks.module";
+import { PermissionsModule } from "./permissions/permissions.module";
 import { SnippetsModule } from "./snippets/snippets.module";
 import { StagesModule } from "./stages/stages.module";
 import { TagsModule } from "./tags/tags.module";
@@ -32,6 +33,7 @@ import { WorkflowsModule as TeamWorkflowsModule } from "./workflows/workflows.mo
     OutboundWebhooksAdminModule,
     WhatsappModule,
     TeamWorkflowsModule,
+    PermissionsModule,
   ],
   controllers: [TeamRootController],
   providers: [TeamRootService],

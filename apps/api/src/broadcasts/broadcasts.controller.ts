@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
@@ -38,6 +39,7 @@ export class BroadcastsController {
   constructor(private readonly broadcasts: BroadcastsService) {}
 
   @Post()
+  @RequireCapability("broadcasts:manage")
   async create(
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateBroadcastSchema)) body: CreateBroadcastInput,
@@ -88,6 +90,7 @@ export class BroadcastsController {
   }
 
   @Post(":id/cancel")
+  @RequireCapability("broadcasts:manage")
   async cancel(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
@@ -97,6 +100,7 @@ export class BroadcastsController {
   }
 
   @Delete(":id")
+  @RequireCapability("broadcasts:manage")
   async remove(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

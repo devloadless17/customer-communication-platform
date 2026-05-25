@@ -117,8 +117,10 @@ export function InboxShell({
   tags,
   canManageStages: canManageStagesPerm,
   canManageContactFields,
+  canDeleteConversations,
   initialActiveConversationId,
   initialThread,
+  initialContactPanelCollapsed,
 }: {
   currentUser: User;
   team: Team;
@@ -132,8 +134,11 @@ export function InboxShell({
   tags: Tag[];
   canManageStages: boolean;
   canManageContactFields: boolean;
+  canDeleteConversations: boolean;
   initialActiveConversationId: string | null;
   initialThread: CachedThread | null;
+  /** Server-read cookie so the right panel SSRs in its persisted rail state. */
+  initialContactPanelCollapsed: boolean;
 }) {
   // Filter lives in the layout-level InboxFilterProvider so it's shared with
   // the sub-sidebar (which now renders in /inbox/layout.tsx and owns the
@@ -733,6 +738,7 @@ export function InboxShell({
               pendingConversationId={pendingId}
               onOpenConversation={openConversation}
               onPrefetchConversation={fetchThread}
+              canDeleteConversations={canDeleteConversations}
             />
           </div>
           {/* Mobile: main pane visible only when a thread is active.
@@ -756,7 +762,9 @@ export function InboxShell({
                 fieldDefinitions={fieldDefinitions}
                 contactPanelBuiltins={contactPanelBuiltins}
                 canManageContactFields={canManageContactFields}
+                canDeleteConversations={canDeleteConversations}
                 tags={tags}
+                initialContactPanelCollapsed={initialContactPanelCollapsed}
                 onMarkRead={handleMarkRead}
                 onThreadSnapshot={handleThreadSnapshot}
                 onMobileBack={onMobileBack}
@@ -789,7 +797,9 @@ function ThreadWorkspace({
   fieldDefinitions,
   contactPanelBuiltins,
   canManageContactFields,
+  canDeleteConversations,
   tags,
+  initialContactPanelCollapsed,
   onMarkRead,
   onThreadSnapshot,
   onMobileBack,
@@ -802,7 +812,9 @@ function ThreadWorkspace({
   fieldDefinitions: ContactFieldDefinition[];
   contactPanelBuiltins: ContactPanelBuiltins;
   canManageContactFields: boolean;
+  canDeleteConversations: boolean;
   tags: Tag[];
+  initialContactPanelCollapsed: boolean;
   onMarkRead: (conversationId: string) => void;
   onThreadSnapshot: (
     data: ConversationWithRefs,
@@ -821,6 +833,7 @@ function ThreadWorkspace({
         tags={tags}
         fieldDefinitions={fieldDefinitions}
         canManageStages={canManageStages}
+        canDeleteConversations={canDeleteConversations}
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}
@@ -832,6 +845,7 @@ function ThreadWorkspace({
         canManageFields={canManageContactFields}
         tagCatalog={tags}
         teamMembers={teamMembers}
+        initialCollapsed={initialContactPanelCollapsed}
       />
       {/* Previously this slot held an inline `<script>` that ran during
           HTML parse and slammed `[data-thread-scroll-root]`'s viewport to

@@ -28,6 +28,7 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import { runWithConcurrency } from "../../common/concurrency";
+import { ApiIdempotencyService } from "./api-idempotency.service";
 import { ExternalV1MessagingService } from "./external-v1-messaging.service";
 import type {
   ExternalAssignInput,
@@ -72,7 +73,42 @@ export class ExternalV1Service {
     private readonly db: DbService,
     private readonly bus: EventBus,
     private readonly messaging: ExternalV1MessagingService,
+    private readonly idem: ApiIdempotencyService,
   ) {}
+
+  /**
+   * Wrap a mutation thunk in CLAIM-then-execute idempotency. No-op (just runs
+   * `work`) when `idempotencyKey` is absent, so existing callers that don't pass
+   * a key are unchanged. A replay short-circuits the thunk entirely — zero side
+   * effects — and returns the prior response. Used by the contact tag mutations
+   * (F2 in docs/architecture-review-2026-05-25.md). The conversation mutations
+   * inline the same pattern in ExternalV1MessagingService.
+   */
+  private async withIdempotency<T>(
+    teamId: string,
+    apiKeyId: string,
+    idempotencyKey: string | undefined,
+    route: string,
+    fingerprintPayload: unknown,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (!idempotencyKey) return work();
+    const claim = await this.idem.claim<T>(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      this.idem.fingerprint(route, fingerprintPayload),
+    );
+    if (claim.kind === "replay") return claim.result;
+    try {
+      const result = await work();
+      await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      return result;
+    } catch (err) {
+      await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      throw err;
+    }
+  }
 
   // ===========================================================================
   // Delegations to ExternalV1MessagingService — pass-through, no behavior here.
@@ -91,8 +127,9 @@ export class ExternalV1Service {
     apiKeyId: string,
     conversationId: string,
     input: ExternalAssignInput,
+    idempotencyKey?: string,
   ) {
-    return this.messaging.assign(teamId, apiKeyId, conversationId, input);
+    return this.messaging.assign(teamId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
   setStatus(
@@ -100,8 +137,9 @@ export class ExternalV1Service {
     apiKeyId: string,
     conversationId: string,
     input: ExternalStatusInput,
+    idempotencyKey?: string,
   ) {
-    return this.messaging.setStatus(teamId, apiKeyId, conversationId, input);
+    return this.messaging.setStatus(teamId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
   listMessages(
@@ -137,8 +175,9 @@ export class ExternalV1Service {
     apiKeyId: string,
     contactId: string,
     input: ExternalContactAssignInput,
+    idempotencyKey?: string,
   ) {
-    return this.messaging.assignByContact(teamId, apiKeyId, contactId, input);
+    return this.messaging.assignByContact(teamId, apiKeyId, contactId, input, idempotencyKey);
   }
 
   setStatusByContact(
@@ -146,8 +185,9 @@ export class ExternalV1Service {
     apiKeyId: string,
     contactId: string,
     input: ExternalContactStatusInput,
+    idempotencyKey?: string,
   ) {
-    return this.messaging.setStatusByContact(teamId, apiKeyId, contactId, input);
+    return this.messaging.setStatusByContact(teamId, apiKeyId, contactId, input, idempotencyKey);
   }
 
   sendTopLevelMessage(
@@ -556,6 +596,37 @@ export class ExternalV1Service {
     apiKeyId: string,
     contactId: string,
     input: ExternalUpdateContactInput,
+    idempotencyKey?: string,
+  ): Promise<ExternalContact> {
+    // Idempotency — a partner retry must not re-publish contact.updated /
+    // lifecycle_changed and re-trigger workflows/webhooks. F2 in
+    // docs/architecture-review-2026-05-25.md.
+    if (idempotencyKey) {
+      const claim = await this.idem.claim<ExternalContact>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+        this.idem.fingerprint("update_contact", { contactId, input }),
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+    try {
+      const result = await this.updateContactInternal(teamId, apiKeyId, contactId, input);
+      if (idempotencyKey) {
+        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      }
+      return result;
+    } catch (err) {
+      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      throw err;
+    }
+  }
+
+  private async updateContactInternal(
+    teamId: string,
+    apiKeyId: string,
+    contactId: string,
+    input: ExternalUpdateContactInput,
   ): Promise<ExternalContact> {
     const {
       name,
@@ -670,6 +741,11 @@ export class ExternalV1Service {
       createdAt: updated.createdAt.toISOString(),
     };
 
+    // `silent: true` → skip reactions on every event this update fans out, so
+    // a partner that edits a contact via /v1 doesn't re-trigger a workflow
+    // (contact_field_updated / lifecycle) or echo a webhook back to itself.
+    const silent = input.silent === true;
+
     // Always publish `contact.updated` for the catch-all subscribers.
     await this.bus.publish({
       type: "contact.updated",
@@ -681,6 +757,7 @@ export class ExternalV1Service {
       changedByApiKeyId: apiKeyId,
       kind: "updated",
       workflowContact: workflowContactSnapshot(updated),
+      silent,
     });
 
     // Narrow events for n8n triggers — only fire when the relevant field
@@ -694,6 +771,7 @@ export class ExternalV1Service {
         after: { stageId: updated.stageId },
         changedByUserId: null,
         changedByApiKeyId: apiKeyId,
+        silent,
       });
     }
 
@@ -728,7 +806,9 @@ export class ExternalV1Service {
       const contact = await this.createContact(teamId, apiKeyId, input);
       return { contact, created: true };
     }
-    const contact = await this.updateContact(teamId, apiKeyId, existing.id, {
+    // Call the internal (un-wrapped) update — upsert's own idempotency is the
+    // caller's concern at the /v1/contacts/upsert route, not a nested claim.
+    const contact = await this.updateContactInternal(teamId, apiKeyId, existing.id, {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.email !== undefined ? { email: input.email } : {}),
       ...(input.location !== undefined ? { location: input.location } : {}),
@@ -806,7 +886,24 @@ export class ExternalV1Service {
   // CONTACTS — tag ops (single-contact + bulk)
   // ===========================================================================
 
-  async addContactTags(
+  addContactTags(
+    teamId: string,
+    apiKeyId: string,
+    contactId: string,
+    input: ExternalContactAddTagsInput,
+    idempotencyKey?: string,
+  ): Promise<ExternalContact> {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "add_contact_tags",
+      { contactId, tagIds: input.tagIds },
+      () => this.addContactTagsInternal(teamId, apiKeyId, contactId, input),
+    );
+  }
+
+  private async addContactTagsInternal(
     teamId: string,
     apiKeyId: string,
     contactId: string,
@@ -857,6 +954,7 @@ export class ExternalV1Service {
       contact.stageId,
       contact.tags.map((t) => t.id),
       { added: newIds, removed: [] },
+      input.silent === true,
     );
     return toExternalContact(updated, tagIds);
   }
@@ -867,11 +965,30 @@ export class ExternalV1Service {
    * removing N tags doesn't have to loop. Fires ONE `contact.tag_changed`
    * event carrying all `removed` ids.
    */
-  async removeContactTags(
+  removeContactTags(
     teamId: string,
     apiKeyId: string,
     contactId: string,
     tagIds: string[],
+    silent = false,
+    idempotencyKey?: string,
+  ): Promise<ExternalContact> {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "remove_contact_tags",
+      { contactId, tagIds },
+      () => this.removeContactTagsInternal(teamId, apiKeyId, contactId, tagIds, silent),
+    );
+  }
+
+  private async removeContactTagsInternal(
+    teamId: string,
+    apiKeyId: string,
+    contactId: string,
+    tagIds: string[],
+    silent = false,
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
       where: { id: contactId, teamId },
@@ -911,6 +1028,7 @@ export class ExternalV1Service {
       contact.stageId,
       contact.tags.map((t) => t.id),
       { added: [], removed: toRemove },
+      silent,
     );
     return toExternalContact(updated, newTagIds);
   }
@@ -1360,6 +1478,8 @@ export class ExternalV1Service {
     previousStageId: string | null,
     previousTagIds: string[],
     tagChanges: { added: string[]; removed: string[] },
+    /** `silent: true` on the request → skip workflow re-trigger + webhook echo. */
+    silent = false,
   ) {
     const tagIds = updated.tags.map((t) => t.id);
     const payload: DomainContact = {
@@ -1393,6 +1513,7 @@ export class ExternalV1Service {
       changedByUserId: null,
       changedByApiKeyId: apiKeyId,
       workflowContact: workflowContactSnapshot(updated),
+      silent,
     });
     // First-class event powering the "On Contact Tag updated" n8n trigger.
     // Only fire when tags actually changed — otherwise this gets emitted
@@ -1408,6 +1529,7 @@ export class ExternalV1Service {
         removed: tagChanges.removed,
         changedByUserId: null,
         changedByApiKeyId: apiKeyId,
+        silent,
       });
     }
   }

@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { getSession } from "@/lib/auth/current-user";
 import {
   getTeamWhatsappConfig,
   listContactFieldDefinitions,
@@ -13,6 +14,9 @@ export const metadata = { title: "New audience group" };
 export const dynamic = "force-dynamic";
 
 export default async function NewGroupPage() {
+  const { permissions } = await getSession();
+  if (!permissions["audienceGroups:manage"]) redirect("/broadcasts/groups");
+
   const [config, tags, fieldDefinitions, stages] = await Promise.all([
     getTeamWhatsappConfig(),
     listTags(),

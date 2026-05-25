@@ -252,6 +252,14 @@ model Team {
   // means adding the key and rendering — no schema bump.
   contactPanelBuiltins   Json    @default("{}")
 
+  // Per-role capability overrides, set by a team admin. Sparse JSON of the
+  // shape `{ manager?: { "<capability>": boolean }, agent?: {...} }`. Missing
+  // key = the default in packages/shared/src/auth/permissions.ts (which
+  // reproduces pre-feature behavior, so an un-configured team is unchanged).
+  // admin/superAdmin are never stored here — they're always-allowed and not
+  // editable, so the org owner can't be locked out of their own org.
+  rolePermissions        Json    @default("{}")
+
   users                   User[]
   contacts                Contact[]
   conversations           Conversation[]
@@ -1457,6 +1465,15 @@ model OutboundWebhookDelivery {
   deliveredAt    DateTime?
   failedAt       DateTime?
   errorMessage   String?
+  /// Request correlation id of the action that CAUSED this delivery (the HTTP
+  /// request / webhook whose mutation published the source event), captured
+  /// from the ALS scope at delivery-row creation. Echoed to the receiver as
+  /// `X-CCP-Trace-Id` and shown in the delivery-log UI so an operator can join
+  /// a partner-side failure back to the originating request in our logs.
+  /// Nullable: events published outside an HTTP request (sweepers, the boot
+  /// reconciler) have no correlation scope. F6 in
+  /// docs/architecture-review-2026-05-25.md.
+  correlationId  String?
   createdAt      DateTime @default(now())
 
   webhook OutboundWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)

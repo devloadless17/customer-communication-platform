@@ -10,6 +10,8 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import { resolvePermissions } from "@ccp/shared/auth/permissions";
+
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
@@ -32,14 +34,21 @@ import { ContactFieldsService } from "./contact-fields.service";
  *   PATCH  /api/team/contact-fields/:id      — admin / manager only
  *   DELETE /api/team/contact-fields/:id      — admin / manager only
  *
- * Write gate enforced in ContactFieldsService via canManageContactFields().
- * Key is derived from label and IMMUTABLE — renaming would orphan every
- * contact's customFields[key] data.
+ * Write gate is the admin-configurable `contactFields:manage` capability,
+ * resolved here and passed into the service as a boolean. Key is derived from
+ * label and IMMUTABLE — renaming would orphan every contact's
+ * customFields[key] data.
  */
 @Controller("api/team/contact-fields")
 @UseGuards(SessionGuard)
 export class ContactFieldsController {
   constructor(private readonly fields: ContactFieldsService) {}
+
+  private canManage(session: ApiSession): boolean {
+    return resolvePermissions(session.role, session.rolePermissions)[
+      "contactFields:manage"
+    ];
+  }
 
   @Get()
   async list(@CurrentSession() session: ApiSession) {
@@ -55,7 +64,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(ContactPanelBuiltinSchema)) body: ContactPanelBuiltins,
   ) {
-    const builtins = await this.fields.updateBuiltins(session.teamId, session.role, body);
+    const builtins = await this.fields.updateBuiltins(session.teamId, this.canManage(session), body);
     return { builtins };
   }
 
@@ -65,7 +74,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateContactFieldSchema)) body: CreateContactFieldInput,
   ) {
-    const definition = await this.fields.create(session.teamId, session.role, body);
+    const definition = await this.fields.create(session.teamId, this.canManage(session), body);
     return { definition };
   }
 
@@ -75,7 +84,7 @@ export class ContactFieldsController {
     @Param("id") id: string,
     @Body(zBody(UpdateContactFieldSchema)) body: UpdateContactFieldInput,
   ) {
-    const definition = await this.fields.update(session.teamId, session.role, id, body);
+    const definition = await this.fields.update(session.teamId, this.canManage(session), id, body);
     return { definition };
   }
 
@@ -84,7 +93,7 @@ export class ContactFieldsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    await this.fields.remove(session.teamId, session.role, id);
+    await this.fields.remove(session.teamId, this.canManage(session), id);
     return { ok: true };
   }
 }

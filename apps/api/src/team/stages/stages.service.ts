@@ -6,8 +6,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
-import { canManageStages } from "@ccp/shared/auth/permissions";
-import { TAG_COLORS, type ContactStage, type Role, type TagColor } from "@ccp/shared/types";
+import { TAG_COLORS, type ContactStage, type TagColor } from "@ccp/shared/types";
 
 import { invalidateDefaultStageCache } from "@/lib/queries/stages";
 
@@ -61,13 +60,13 @@ export class StagesService {
     return { countsByStageId, unassignedCount };
   }
 
-  /** Admin / manager / superAdmin only — gated by canManageStages. */
+  /** Gated by the caller's resolved `stages:manage` capability. */
   async create(
     teamId: string,
-    role: Role,
+    canManage: boolean,
     input: CreateStageInput,
   ): Promise<ContactStage> {
-    requireManage(role);
+    requireManage(canManage);
 
     // Single read to learn count + next position + whether a default exists.
     const existing = await this.db.contactStage.findMany({
@@ -105,11 +104,11 @@ export class StagesService {
 
   async update(
     teamId: string,
-    role: Role,
+    canManage: boolean,
     id: string,
     input: UpdateStageInput,
   ): Promise<ContactStage> {
-    requireManage(role);
+    requireManage(canManage);
 
     const existing = await this.db.contactStage.findFirst({
       where: { id, teamId },
@@ -151,8 +150,8 @@ export class StagesService {
     }
   }
 
-  async remove(teamId: string, role: Role, id: string): Promise<void> {
-    requireManage(role);
+  async remove(teamId: string, canManage: boolean, id: string): Promise<void> {
+    requireManage(canManage);
 
     const stage = await this.db.contactStage.findFirst({
       where: { id, teamId },
@@ -204,10 +203,10 @@ export class StagesService {
    */
   async reorder(
     teamId: string,
-    role: Role,
+    canManage: boolean,
     input: ReorderStagesInput,
   ): Promise<void> {
-    requireManage(role);
+    requireManage(canManage);
     const ids = input.orderedIds;
     if (ids.length === 0) return;
 
@@ -267,8 +266,8 @@ function pickNextPaletteColor(used: string[]): TagColor {
   return "slate";
 }
 
-function requireManage(role: Role): void {
-  if (!canManageStages(role)) throw new ForbiddenException({ error: "forbidden" });
+function requireManage(canManage: boolean): void {
+  if (!canManage) throw new ForbiddenException({ error: "forbidden" });
 }
 
 function throwIfUniqueViolation(err: unknown, detail: string): void {

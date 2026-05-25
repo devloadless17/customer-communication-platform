@@ -46,6 +46,7 @@ function ConversationListImpl({
   pendingConversationId,
   onOpenConversation,
   onPrefetchConversation,
+  canDeleteConversations,
 }: {
   conversations: ConversationWithRefs[];
   stages: ContactStage[];
@@ -73,6 +74,9 @@ function ConversationListImpl({
    *  to click. Idempotent and cheap — fires on hover/focus, no-ops if the
    *  row is already cached or in flight. */
   onPrefetchConversation: (conversationId: string) => void;
+  /** `conversations:delete` — gates the multi-select toolbar + bulk delete.
+   *  When false, the "Select multiple" affordance is hidden entirely. */
+  canDeleteConversations: boolean;
 }) {
   const { confirm, alert, confirmDialog } = useConfirm();
   // "selection mode": clicking a row toggles its checkbox instead of opening
@@ -284,20 +288,22 @@ function ConversationListImpl({
           </p>
         </div>
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setSelectionMode((v) => !v)}
-            title={selectionMode ? "Exit selection mode" : "Select multiple"}
-            className={cn(
-              "flex size-8 items-center justify-center rounded-md transition-colors",
-              selectionMode
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground",
-            )}
-            aria-label={selectionMode ? "Exit selection mode" : "Select multiple"}
-          >
-            <CheckSquare className="size-4" />
-          </button>
+          {canDeleteConversations && (
+            <button
+              type="button"
+              onClick={() => setSelectionMode((v) => !v)}
+              title={selectionMode ? "Exit selection mode" : "Select multiple"}
+              className={cn(
+                "flex size-8 items-center justify-center rounded-md transition-colors",
+                selectionMode
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
+              )}
+              aria-label={selectionMode ? "Exit selection mode" : "Select multiple"}
+            >
+              <CheckSquare className="size-4" />
+            </button>
+          )}
           {/* Sort & filter — not yet implemented. Removed until it does
               something; the current Filter chips below already cover most use
               cases (All / Mine / Unassigned). */}

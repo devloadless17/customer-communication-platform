@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { getSession } from "@/lib/auth/current-user";
 import { getTeamWhatsappConfig, listContactFieldDefinitions } from "@/lib/api/queries";
 
 import { TemplateForm } from "./template-form";
@@ -8,6 +9,9 @@ export const metadata = { title: "New template" };
 export const dynamic = "force-dynamic";
 
 export default async function NewTemplatePage() {
+  const { permissions } = await getSession();
+  if (!permissions["templates:manage"]) redirect("/templates");
+
   const [config, fieldDefinitions] = await Promise.all([
     getTeamWhatsappConfig(),
     listContactFieldDefinitions(),

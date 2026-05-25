@@ -8,8 +8,11 @@ import {
 
 // (BadRequestException already imported above — used by listMessages cursor guard.)
 
+import { Prisma } from "@prisma/client";
+
 import { blobStorage } from "@/lib/blob-storage";
 import { getProviderBinding } from "@/lib/providers";
+import { resolveContactChannel } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Channel } from "@ccp/shared/types";
 import {
@@ -30,6 +33,7 @@ import type {
   AssignConversationInput,
   BulkDeleteConversationsInput,
   SetConversationStatusInput,
+  StartConversationInput,
 } from "./conversations.schemas";
 
 @Injectable()
@@ -285,6 +289,7 @@ export class ConversationsService {
     actorUserId: string,
     conversationId: string,
     input: AssignConversationInput,
+    opts?: { silent?: boolean },
   ): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
@@ -376,6 +381,7 @@ export class ConversationsService {
         newAssignedUserId: assignedUserId,
         changedByUserId: actorUserId,
         contact: workflowContactSnapshot(conversation.contact),
+        silent: opts?.silent === true,
       });
     }
 
@@ -395,6 +401,9 @@ export class ConversationsService {
         newStatus: nextStatus,
         changedByUserId: actorUserId,
         contact: workflowContactSnapshot(conversation.contact),
+        // When the caller asked for a silent assign, the auto-flip it caused
+        // is part of the same internal action — suppress its reactions too.
+        silent: opts?.silent === true,
       });
     }
   }
@@ -402,12 +411,22 @@ export class ConversationsService {
   /**
    * Open / pending / closed. CAS on previous status to defeat concurrent
    * flips. Publishes `conversation.status_changed`.
+   *
+   * `opts.silent` lets an internal/code caller mark THIS status change as a
+   * cascaded/internal mutation — the published event carries `silent: true`,
+   * so the workflow-dispatch and outbound-webhook subscribers skip it (no
+   * "on status changed" workflow re-trigger, no webhook echo). Use it when
+   * your code flips status as a side-effect and a listening workflow would
+   * otherwise loop. Default false — the human-UI route never passes it, so
+   * agent clicks behave exactly as before. Socket UI + audit still fire.
+   * See ConversationAssignedEvent.silent.
    */
   async setStatus(
     teamId: string,
     actorUserId: string,
     conversationId: string,
     input: SetConversationStatusInput,
+    opts?: { silent?: boolean },
   ): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },
@@ -415,11 +434,24 @@ export class ConversationsService {
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
     const previousStatus = conversation.status;
+    const previousAssignedUserId = conversation.assignedUserId;
+
+    // Closing releases the owner: a closed thread has no work-in-progress, so
+    // it shouldn't sit on anyone's "Mine". Clears regardless of WHO it was
+    // assigned to (closing a teammate's thread frees it too) — when it reopens
+    // it lands back in triage unassigned, ready to be re-claimed. Only the
+    // close transition unassigns; reopening to open/pending does not touch the
+    // assignee. Done in the SAME update as the status flip so the row never
+    // exists in a closed-but-still-assigned state.
+    const unassignOnClose =
+      input.status === "closed" && previousAssignedUserId !== null;
 
     try {
       await this.db.conversation.update({
         where: { id: conversationId, teamId, status: previousStatus },
-        data: { status: input.status },
+        data: unassignOnClose
+          ? { status: input.status, assignedUserId: null }
+          : { status: input.status },
       });
     } catch (err) {
       if (isP2025(err)) {
@@ -436,7 +468,28 @@ export class ConversationsService {
       newStatus: input.status,
       changedByUserId: actorUserId,
       contact: workflowContactSnapshot(conversation.contact),
+      silent: opts?.silent === true,
     });
+
+    // Emitted AFTER status_changed: the unassign is a side-effect of the close,
+    // so consumers watching both see cause (closed) then effect (unassigned).
+    // Same actor/contact snapshot. NOT silent unless the close itself was —
+    // a manual close should fire on-unassigned workflows + webhooks like any
+    // other unassignment. Drives the same socket fanout + audit row + reducers
+    // as a manual unassign, so the UI clears the assignee with no extra wiring.
+    if (unassignOnClose) {
+      await this.bus.publish({
+        type: "conversation.assigned",
+        teamId,
+        conversationId,
+        assignedUser: null,
+        previousAssignedUserId,
+        newAssignedUserId: null,
+        changedByUserId: actorUserId,
+        contact: workflowContactSnapshot(conversation.contact),
+        silent: opts?.silent === true,
+      });
+    }
   }
 
   /**
@@ -445,6 +498,96 @@ export class ConversationsService {
    * deleted post-commit. Meta-side messages stay delivered (no Meta unsend
    * API). Contact row is preserved.
    */
+  /**
+   * Get-or-create the (single) conversation for a contact, returning its id so
+   * the caller can open it in the inbox. This is the "re-chat with a customer"
+   * entry point: a hard-deleted conversation leaves the Contact intact but with
+   * no thread, so without this there's no way back into a chat with them.
+   *
+   * Honors the one-conversation-per-contact invariant (@@unique[teamId,
+   * contactId]):
+   *   - existing OPEN/PENDING thread → returned as-is (created:false).
+   *   - existing CLOSED thread → reopened to pending via setStatus (so the
+   *     audit + analytics + workflow reopen side-effects fire), reopened:true.
+   *   - no thread → created `pending` with the channel stamped from the
+   *     contact's identity, created:true. P2002 (lost the race to a concurrent
+   *     inbound/forward) reuses the winner.
+   *
+   * A freshly-created thread is EMPTY (no message). It surfaces in the opening
+   * agent's inbox via the `?c=<id>` SSR path (the page renders it as the active
+   * thread). We deliberately do NOT publish a "conversation created" socket
+   * frame here: an empty, never-messaged thread doesn't need to appear in every
+   * teammate's list — it joins all lists the moment the first message flows
+   * (the send paths' `message.sent` carries `newConversation`). Note the 24h
+   * window is closed on a brand-new thread, so the reply box correctly offers
+   * templates only until the customer replies — Meta's rule, surfaced by the
+   * existing composer.
+   */
+  async startConversation(
+    teamId: string,
+    actorUserId: string,
+    input: StartConversationInput,
+  ): Promise<{ conversationId: string; created: boolean; reopened: boolean }> {
+    const contact = await this.db.contact.findFirst({
+      where: { id: input.contactId, teamId },
+      select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
+    });
+    if (!contact) throw new NotFoundException({ error: "contact not found" });
+
+    const existing = await this.db.conversation.findFirst({
+      where: { teamId, contactId: contact.id },
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true, status: true },
+    });
+
+    if (existing) {
+      if (existing.status === "closed") {
+        // Reopen through setStatus so the reopen is audited + fans out exactly
+        // like any other status change (and clears nothing it shouldn't).
+        await this.setStatus(teamId, actorUserId, existing.id, { status: "pending" });
+        return { conversationId: existing.id, created: false, reopened: true };
+      }
+      return { conversationId: existing.id, created: false, reopened: false };
+    }
+
+    // Stamp channel from the contact's identity — source of truth at creation
+    // (contacts are siloed + immutable-identity). A wrong default would
+    // propagate to every Message.channel on this thread. No reachable address
+    // → keep whatsapp; the first send surfaces the proper error.
+    let channel: Channel = "whatsapp";
+    try {
+      channel = resolveContactChannel(contact).channel;
+    } catch {
+      /* keep default */
+    }
+
+    try {
+      const created = await this.db.conversation.create({
+        data: {
+          teamId,
+          contactId: contact.id,
+          channel,
+          status: "pending",
+          lastMessagePreview: "",
+        },
+        select: { id: true },
+      });
+      return { conversationId: created.id, created: true, reopened: false };
+    } catch (err) {
+      // Lost the race for this contact's single conversation to a concurrent
+      // inbound/forward — reuse the winner (just created `pending`, no reopen).
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const winner = await this.db.conversation.findFirstOrThrow({
+          where: { teamId, contactId: contact.id },
+          orderBy: { lastMessageAt: "desc" },
+          select: { id: true },
+        });
+        return { conversationId: winner.id, created: false, reopened: false };
+      }
+      throw err;
+    }
+  }
+
   async remove(teamId: string, actorUserId: string, conversationId: string): Promise<void> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId },

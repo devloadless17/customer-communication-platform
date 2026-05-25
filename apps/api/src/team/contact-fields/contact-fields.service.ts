@@ -6,9 +6,8 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 
-import { canManageContactFields } from "@ccp/shared/auth/permissions";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
-import type { ContactFieldDefinition, Role } from "@ccp/shared/types";
+import type { ContactFieldDefinition } from "@ccp/shared/types";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -78,10 +77,10 @@ export class ContactFieldsService {
 
   async updateBuiltins(
     teamId: string,
-    role: Role,
+    canManage: boolean,
     patch: ContactPanelBuiltins,
   ): Promise<Required<ContactPanelBuiltins>> {
-    requireManage(role);
+    requireManage(canManage);
     const current = await this.getBuiltins(teamId);
     const next: Required<ContactPanelBuiltins> = {
       firstName: patch.firstName ?? current.firstName,
@@ -106,10 +105,10 @@ export class ContactFieldsService {
 
   async create(
     teamId: string,
-    role: Role,
+    canManage: boolean,
     input: CreateContactFieldInput,
   ): Promise<ContactFieldDefinition> {
-    requireManage(role);
+    requireManage(canManage);
 
     // Cap definitions so a runaway client can't bloat the panel + the JSONB
     // column on every contact (every key gets rendered + serialized).
@@ -169,11 +168,11 @@ export class ContactFieldsService {
 
   async update(
     teamId: string,
-    role: Role,
+    canManage: boolean,
     id: string,
     input: UpdateContactFieldInput,
   ): Promise<ContactFieldDefinition> {
-    requireManage(role);
+    requireManage(canManage);
 
     const existing = await this.db.contactFieldDefinition.findFirst({
       where: { id, teamId },
@@ -203,8 +202,8 @@ export class ContactFieldsService {
     return toDto(updated);
   }
 
-  async remove(teamId: string, role: Role, id: string): Promise<void> {
-    requireManage(role);
+  async remove(teamId: string, canManage: boolean, id: string): Promise<void> {
+    requireManage(canManage);
 
     const def = await this.db.contactFieldDefinition.findFirst({
       where: { id, teamId },
@@ -269,8 +268,8 @@ function slugifyKey(label: string): string {
     .slice(0, 60);
 }
 
-function requireManage(role: Role): void {
-  if (!canManageContactFields(role)) throw new ForbiddenException({ error: "forbidden" });
+function requireManage(canManage: boolean): void {
+  if (!canManage) throw new ForbiddenException({ error: "forbidden" });
 }
 
 function throwIfUniqueViolation(err: unknown, detail: string): void {

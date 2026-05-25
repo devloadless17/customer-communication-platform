@@ -17,6 +17,14 @@ import {
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
 import {
+  startConversationAnalyticsDriftSweeper,
+  stopConversationAnalyticsDriftSweeper,
+} from "@/lib/sweepers/conversation-analytics-drift";
+import {
+  startAuthTableCleanupSweeper,
+  stopAuthTableCleanupSweeper,
+} from "@/lib/sweepers/auth-table-cleanup";
+import {
   startInboundMediaSweeper,
   stopInboundMediaSweeper,
 } from "@/lib/sweepers/inbound-media";
@@ -76,6 +84,8 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private waitingSweeperStarted = false;
   private awaitingReplySweeperStarted = false;
   private contactDriftSweeperStarted = false;
+  private analyticsDriftSweeperStarted = false;
+  private authCleanupSweeperStarted = false;
   private webhookDeliveryCleanupStarted = false;
   private apiIdempotencyCleanupStarted = false;
   private blobOrphanSweeperStarted = false;
@@ -125,14 +135,34 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.error("Failed to start workflow-awaiting-reply sweeper", err);
     }
     try {
-      // Daily reconciler for the `Contact.lastInboundAt` denorm. Self-
-      // disables after a week of zero drift so a healthy system pays
-      // nothing for the scan.
+      // Daily reconciler for the `Contact.lastInboundAt` denorm — one
+      // set-based UPDATE, cheap enough to run forever.
       startContactDriftSweeper();
       this.contactDriftSweeperStarted = true;
       this.logger.log("Contact lastInboundAt drift sweeper started");
     } catch (err) {
       this.logger.error("Failed to start contact-drift sweeper", err);
+    }
+    try {
+      // Daily reconciler for the Conversation analytics MESSAGE COUNTERS
+      // (incoming/outgoing), which the fire-and-forget analytics helpers can
+      // drift on a swallowed error. Same set-based-UPDATE shape as the contact
+      // drift sweep. F3 in docs/architecture-review-2026-05-25.md.
+      startConversationAnalyticsDriftSweeper();
+      this.analyticsDriftSweeperStarted = true;
+      this.logger.log("Conversation analytics drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start analytics-drift sweeper", err);
+    }
+    try {
+      // Daily delete of EXPIRED Better Auth Session + Verification rows
+      // (Better Auth invalidates-on-read but never prunes). Active sessions
+      // are untouched. F5 in docs/architecture-review-2026-05-25.md.
+      startAuthTableCleanupSweeper();
+      this.authCleanupSweeperStarted = true;
+      this.logger.log("Auth-table cleanup sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start auth-table cleanup sweeper", err);
     }
     try {
       // Nightly TTL on OutboundWebhookDelivery rows (default 30d). Self-
@@ -240,6 +270,21 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(`stopContactDriftSweeper threw: ${err instanceof Error ? err.message : err}`);
     }
+    try {
+      if (this.analyticsDriftSweeperStarted) stopConversationAnalyticsDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopConversationAnalyticsDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      if (this.authCleanupSweeperStarted) stopAuthTableCleanupSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopAuthTableCleanupSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
     try {
       if (this.awaitingReplySweeperStarted) stopWorkflowAwaitingReplySweeper();
     } catch (err) {

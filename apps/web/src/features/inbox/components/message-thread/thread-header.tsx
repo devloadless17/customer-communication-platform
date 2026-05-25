@@ -78,6 +78,7 @@ export function ThreadHeader({
   currentStageId,
   onStageChange,
   canManageStages,
+  canDeleteConversations,
   onMobileBack,
 }: {
   teamId: string;
@@ -104,6 +105,9 @@ export function ThreadHeader({
   currentStageId: string | null;
   onStageChange: (stageId: string) => Promise<void>;
   canManageStages: boolean;
+  /** Whether the current user can delete this conversation. Hides the
+   *  delete action inside ConversationMenu when false. */
+  canDeleteConversations: boolean;
   /** Mobile back-to-list affordance. Only rendered when set + below md. */
   onMobileBack?: () => void;
 }) {
@@ -171,10 +175,12 @@ export function ThreadHeader({
           current={status}
           onAlert={onAlert}
         />
-        <ConversationMenu
-          conversationId={conversationId}
-          contactName={contactName}
-        />
+        {canDeleteConversations && (
+          <ConversationMenu
+            conversationId={conversationId}
+            contactName={contactName}
+          />
+        )}
       </div>
     </header>
   );

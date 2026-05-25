@@ -9,10 +9,6 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import {
-  canManageContactFields,
-  canManageStages,
-} from "@ccp/shared/auth/permissions";
 
 export const metadata = { title: "Team settings" };
 export const dynamic = "force-dynamic";
@@ -23,9 +19,9 @@ export const dynamic = "force-dynamic";
  * plumbing lives one level over at /settings/workspace.
  */
 export default async function TeamSettingsIndex() {
-  const { user } = await getSession();
-  const canStages = canManageStages(user.role);
-  const canFields = canManageContactFields(user.role);
+  const { permissions } = await getSession();
+  const canStages = permissions["stages:manage"];
+  const canFields = permissions["contactFields:manage"];
 
   const cards: Card[] = [
     {

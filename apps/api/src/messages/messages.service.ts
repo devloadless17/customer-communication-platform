@@ -47,6 +47,7 @@ import type {
   MediaAttachment,
   MediaKind,
   Message,
+  User,
 } from "@ccp/shared/types";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
@@ -202,6 +203,111 @@ export class MessagesService {
   }
 
   /**
+   * Claim-on-reply: when a human agent sends into an UNASSIGNED conversation,
+   * assign it to them. The agent is already chatting — making them click the
+   * assignee dropdown first is friction; replying IS the claim.
+   *
+   * Only fires when `assignedUserId IS NULL` — never steals a thread already
+   * owned by a teammate (that would silently reassign their work the moment
+   * anyone else replies). Mirrors `ConversationsService.assign`'s observable
+   * behaviour so the result is indistinguishable from a manual claim:
+   *   - publishes `conversation.assigned` (drives socket UI + audit timeline +
+   *     on-assigned workflows + outbound webhooks — NOT silent, per product
+   *     decision: a reply-claim is a real assignment)
+   *   - if the claim moves a pending/closed thread, also flips it to `open`
+   *     and publishes `conversation.status_changed`, exactly like assign().
+   *
+   * CAS on `assignedUserId: null` (+ pinned status) so a concurrent manual
+   * assign or a racing second reply can't double-assign — the loser's update
+   * matches zero rows and is a no-op. Deliberately NOT in the shared
+   * send-*-internal helpers: workflow auto-replies and external-API sends must
+   * NOT claim a thread (no human is replying). Fire-and-forget with a
+   * self-contained try/catch — an assign failure must never fail the send.
+   */
+  private autoAssignOnAgentSend(teamId: string, userId: string, conversationId: string): void {
+    void (async () => {
+      try {
+        const convo = await this.db.conversation.findFirst({
+          where: { id: conversationId, teamId },
+          select: {
+            assignedUserId: true,
+            status: true,
+            contact: { include: { tags: { select: { id: true } } } },
+          },
+        });
+        // Already owned (by anyone, including this agent) → nothing to claim.
+        if (!convo || convo.assignedUserId !== null) return;
+
+        // Same pending/closed → open flip assign() applies on a claim, so a
+        // reply-claim leaves the thread in the identical state as the manual
+        // path. (Open stays open.)
+        const previousStatus = convo.status;
+        const nextStatus = previousStatus !== "open" ? "open" : previousStatus;
+        const statusChanged = nextStatus !== previousStatus;
+
+        const result = await this.db.conversation.updateMany({
+          where: { id: conversationId, teamId, assignedUserId: null, status: previousStatus },
+          data: statusChanged
+            ? { assignedUserId: userId, status: nextStatus }
+            : { assignedUserId: userId },
+        });
+        if (result.count === 0) return; // lost the CAS race — someone else claimed/closed first
+
+        const assignee = await this.db.user.findFirst({
+          where: { id: userId, teamId },
+          select: {
+            id: true,
+            teamId: true,
+            role: true,
+            name: true,
+            email: true,
+            avatarUrl: true,
+            deactivatedAt: true,
+          },
+        });
+        const assignedUser: User | null = assignee
+          ? {
+              id: assignee.id,
+              teamId: assignee.teamId,
+              role: assignee.role,
+              name: assignee.name,
+              email: assignee.email,
+              avatarUrl: assignee.avatarUrl ?? undefined,
+              isActive: assignee.deactivatedAt === null,
+            }
+          : null;
+
+        await this.bus.publish({
+          type: "conversation.assigned",
+          teamId,
+          conversationId,
+          assignedUser,
+          previousAssignedUserId: null,
+          newAssignedUserId: userId,
+          changedByUserId: userId,
+          contact: workflowContactSnapshot(convo.contact),
+        });
+
+        if (statusChanged) {
+          await this.bus.publish({
+            type: "conversation.status_changed",
+            teamId,
+            conversationId,
+            previousStatus,
+            newStatus: nextStatus,
+            changedByUserId: userId,
+            contact: workflowContactSnapshot(convo.contact),
+          });
+        }
+      } catch (err) {
+        this.logger.debug(
+          `autoAssignOnAgentSend failed for ${conversationId}: ${String(err)}`,
+        );
+      }
+    })();
+  }
+
+  /**
    * Free-form text send — public HTTP entry point.
    *
    * Two-phase contract introduced in S1 (audit follow-up):
@@ -229,6 +335,7 @@ export class MessagesService {
     input: SendTextInput,
   ): Promise<{ ok: true; clientTempId?: string }> {
     this.markReadOnAgentSend(teamId, userId, input.conversationId);
+    this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -752,6 +859,7 @@ export class MessagesService {
     file: Express.Multer.File,
   ): Promise<{ messageId: string | null; warning?: string }> {
     this.markReadOnAgentSend(teamId, userId, form.conversationId);
+    this.autoAssignOnAgentSend(teamId, userId, form.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -1775,6 +1883,7 @@ export class MessagesService {
     input: SendTemplateInput,
   ): Promise<{ messageId: string }> {
     this.markReadOnAgentSend(teamId, userId, input.conversationId);
+    this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -1843,6 +1952,7 @@ export class MessagesService {
     input: import("./messages.schemas").SendInteractiveInput,
   ): Promise<{ messageId: string }> {
     this.markReadOnAgentSend(teamId, userId, input.conversationId);
+    this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
     try {
       const result = await sendInteractiveInternal({
         teamId,

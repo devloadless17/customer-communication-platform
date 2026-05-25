@@ -68,9 +68,20 @@ async function main() {
   // Default #general channel. The schema documents this as auto-created at
   // team setup, and /team redirects to it on first login; without this row
   // the team-chat surface lands on the "No channels yet" dead-end.
-  await db.teamChannel.upsert({
+  const channel = await db.teamChannel.upsert({
     where: { teamId_name: { teamId: team.id, name: "general" } },
     create: { teamId: team.id, name: "general", isDefault: true, createdById: user.id },
+    update: {},
+  });
+
+  // Auto-add the superadmin to #general. The schema documents the default
+  // channel as "implicitly including every team member" — but that invariant
+  // is enforced at INSERT time (registration + invite-accept). The seed has
+  // to mirror that or /team/[channelId] loops via the channels-list-membership
+  // check in team-chat-workspace.tsx. (Mirrors register.controller.ts:79.)
+  await db.teamChannelMember.upsert({
+    where: { channelId_userId: { channelId: channel.id, userId: user.id } },
+    create: { channelId: channel.id, userId: user.id, addedById: user.id },
     update: {},
   });
 

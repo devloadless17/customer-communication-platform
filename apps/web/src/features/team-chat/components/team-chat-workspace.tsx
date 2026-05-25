@@ -285,10 +285,22 @@ export function TeamChatWorkspace({
   // bounce to /team — which redirects to the default channel. Runs as a
   // post-commit effect so React doesn't warn about setState/router calls
   // during render.
+  //
+  // GUARD: only treat "channel missing from my list" as a deletion when the
+  // list is NON-EMPTY. An EMPTY list means "I'm not a member of anything" —
+  // e.g. a user whose default-channel membership row was never created (the
+  // superadmin-seed gap, fixed in migration
+  // 20260525145612_backfill_default_channel_membership). Without this guard,
+  // such a user loops: /team → redirect to /team/<general> → workspace sees
+  // channels=[] so channelExists=false → router.replace("/team") → repeat.
+  // That presented in production as an "infinite page refresh." A real
+  // deletion always leaves the user with ≥1 other channel (or zero, in which
+  // case /team's own "No channels yet" empty-state is the correct landing —
+  // not a loop back through here).
   const channelExists = channels.some((c) => c.id === initialChannel.id);
   useEffect(() => {
-    if (!channelExists) router.replace("/team");
-  }, [channelExists, router]);
+    if (channels.length > 0 && !channelExists) router.replace("/team");
+  }, [channels.length, channelExists, router]);
 
   return (
     // The channel-list sidebar lives in /team/layout.tsx (SectionShell slot)

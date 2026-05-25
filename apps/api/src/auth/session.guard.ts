@@ -32,6 +32,11 @@ export interface ApiSession {
   /** Same row the guard already loaded — exposing it lets handlers build
    *  message DTOs inline without a follow-up user lookup. */
   avatarUrl: string | null;
+  /** The team's raw `rolePermissions` JSON (admin-configured per-role
+   *  capability overrides). Carried on the session so CapabilityGuard +
+   *  handler-level checks resolve permissions with ZERO extra DB read; the
+   *  15s session cache bounds staleness after an admin edits the matrix. */
+  rolePermissions: unknown;
 }
 
 declare module "express-serve-static-core" {
@@ -277,6 +282,7 @@ export async function resolveSession(
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
+      team: { select: { rolePermissions: true } },
     },
   });
   if (!user || user.deactivatedAt) return null;
@@ -289,6 +295,7 @@ export async function resolveSession(
     name: user.name,
     email: user.email,
     avatarUrl: user.avatarUrl ?? null,
+    rolePermissions: user.team?.rolePermissions ?? {},
   };
   cacheSet(user.id, session);
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {

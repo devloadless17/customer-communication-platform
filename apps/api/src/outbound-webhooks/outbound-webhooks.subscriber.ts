@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import type { Channel as ChannelMedium } from "@prisma/client";
 
 import { subscribe, SubscriberPriority } from "@/lib/events/bus";
 import type {
@@ -17,6 +18,7 @@ import {
 } from "@ccp/shared/outbound-webhooks/public-events";
 
 import { DbService } from "../db/db.service";
+import { getCorrelationId } from "../common/correlation";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
 import {
   EXTERNAL_CONVERSATION_INCLUDE,
@@ -105,7 +107,24 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     );
   }
 
-  private async handle(event: { teamId: string; type: string }) {
+  private async handle(event: { teamId: string; type: string; silent?: boolean }) {
+    // `silent` = internal/cascaded mutation — skip downstream reactions. The
+    // workflow-dispatch subscriber already skips chain-triggering on this flag;
+    // we mirror that for webhook delivery so an API/workflow-driven change
+    // doesn't echo a webhook back to the system that caused it (echo-loop
+    // avoidance). Socket fanout + audit + analytics still ran upstream — those
+    // are user-visible truth, not reactions. See ConversationAssignedEvent.silent.
+    if (event.silent) return;
+
+    // Capture the correlation id of the request that CAUSED this event NOW —
+    // we're still synchronous within the publish() call chain, so the ALS scope
+    // of the originating HTTP request is intact. The BullMQ delivery worker runs
+    // later, outside that scope, so it can't read this itself. Persisted on the
+    // delivery row + echoed as X-CCP-Trace-Id. Undefined for events published
+    // outside an HTTP request (sweepers, boot reconciler). F6 in
+    // docs/architecture-review-2026-05-25.md.
+    const correlationId = getCorrelationId() ?? null;
+
     const envelopes = toPublicEnvelopes(event as Parameters<typeof toPublicEnvelopes>[0]);
     if (envelopes.length === 0) return;
 
@@ -134,7 +153,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
     await this.enrichSentMessageContext(envelopes);
     await this.hydrateUsers(envelopes);
 
-    const channelBase = await this.resolveChannel(event.teamId);
+    // Channel is derived from the event itself (message/contact/conversation),
+    // so a Telegram/Instagram event stamps its own connection — not WhatsApp.
+    const channelBase = await this.resolveChannel(
+      event.teamId,
+      deriveEventChannel(event as unknown as Record<string, unknown>),
+    );
 
     for (const { type, envelope } of envelopes) {
       const matching = webhooks.filter((w) => w.eventTypes.includes(type));
@@ -143,11 +167,13 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
       // Internal enriched envelope → flat wire shape (partner-compatible).
       // Identical for every webhook subscribed to this type; dedup id rides
       // on the X-CCP-Delivery header (= delivery row id), not the body.
-      const payload = toWirePayload(
-        type,
-        (envelope as { data: unknown }).data,
-        { channelBase },
-      );
+      // `team_id` is stamped here (not inside toWirePayload's per-type cases)
+      // so a multi-tenant partner pointing one URL at several teams can route
+      // by team from the body — the flat shape otherwise omits it.
+      const payload = {
+        team_id: event.teamId,
+        ...toWirePayload(type, (envelope as { data: unknown }).data, { channelBase }),
+      };
 
       const created = await Promise.all(
         matching.map(async (w) => {
@@ -157,6 +183,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
               id: deliveryId,
               webhookId: w.id,
               eventType: type,
+              correlationId,
               payload: payload as unknown as Parameters<
                 typeof this.db.outboundWebhookDelivery.create
               >[0]["data"]["payload"],
@@ -338,33 +365,71 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
   }
 
   /**
-   * Resolve the team's Meta config into a public ChannelInfo. Cached per-team
-   * for the process lifetime — Meta phone numbers rarely change, and a fresh
-   * lookup on every event burns budget on a hot bus subscriber. On cache miss,
-   * we hit the DB; on subsequent calls within the process, it's a Map read.
+   * Resolve a team's ChannelConnection into a public ChannelInfo, keyed by the
+   * EVENT's channel (not hardcoded). The channel medium is derived per-event
+   * from the data already in the payload (`deriveEventChannel`), so a Telegram
+   * message's webhook stamps the Telegram connection, not WhatsApp's. Cached
+   * per `(teamId, channel)` for the process lifetime — connections rarely
+   * change; cache is invalidated wholesale on `team.catalog_changed`.
+   *
+   * `channel = null` (the event carried no derivable channel — e.g. a future
+   * channel-less event) falls back to the team's first active connection so
+   * the channel block degrades to "the team's primary channel" rather than
+   * disappearing. Today that's WhatsApp; it's no longer assumed.
    */
-  private async resolveChannel(teamId: string): Promise<WireChannelBase | null> {
-    const cached = this.channelCache.get(teamId);
+  private async resolveChannel(
+    teamId: string,
+    channel: ChannelMedium | null,
+  ): Promise<WireChannelBase | null> {
+    const key = `${teamId}:${channel ?? "_primary"}`;
+    const cached = this.channelCache.get(key);
     if (cached) return cached;
 
-    // Single-channel today (whatsapp); resolves per-medium once a team runs
-    // more than one. `name` is the medium itself ("whatsapp" | "telegram" |
-    // "instagram"); `source` is the partner-style "<medium>_business" string.
-    const conn = await this.db.channelConnection.findUnique({
-      where: { teamId_channel: { teamId, channel: "whatsapp" } },
-      select: { id: true, channel: true, createdAt: true },
-    });
+    const conn = channel
+      ? await this.db.channelConnection.findUnique({
+          where: { teamId_channel: { teamId, channel } },
+          select: { id: true, channel: true, createdAt: true },
+        })
+      : await this.db.channelConnection.findFirst({
+          where: { teamId, isActive: true },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, channel: true, createdAt: true },
+        });
     if (!conn) return null;
 
-    const channel: WireChannelBase = {
+    const base: WireChannelBase = {
       id: conn.id,
+      // `name` is the medium itself ("whatsapp" | "telegram" | "instagram");
+      // `source` is the partner-style "<medium>_business" string.
       name: conn.channel,
       source: channelSourceFor(conn.channel),
       created_at: Math.floor(conn.createdAt.getTime() / 1000),
     };
-    this.channelCache.set(teamId, channel);
-    return channel;
+    this.channelCache.set(key, base);
+    return base;
   }
+}
+
+/**
+ * Derive the channel medium an event belongs to from data already on the
+ * payload — no DB read. Every webhook-relevant event carries the channel
+ * either directly on its message (`Message.channel`), on a workflow snapshot
+ * (`WorkflowMessageSnapshot.channel` / `WorkflowConversationSnapshot.channel`),
+ * or on the contact (`identityChannel`, NOT NULL post-2026-05-25, and equal to
+ * the conversation's channel because contacts are siloed per channel). Returns
+ * null only for events that genuinely carry no channel reference (the resolver
+ * then falls back to the team's primary connection).
+ */
+function deriveEventChannel(event: Record<string, unknown>): ChannelMedium | null {
+  const message = event.message as { channel?: ChannelMedium } | undefined;
+  if (message?.channel) return message.channel;
+  const workflowMessage = event.workflowMessage as { channel?: ChannelMedium } | undefined;
+  if (workflowMessage?.channel) return workflowMessage.channel;
+  const conversation = event.conversation as { channel?: ChannelMedium } | undefined;
+  if (conversation?.channel) return conversation.channel;
+  const contact = event.contact as { identityChannel?: ChannelMedium | null } | undefined;
+  if (contact?.identityChannel) return contact.identityChannel;
+  return null;
 }
 
 /**

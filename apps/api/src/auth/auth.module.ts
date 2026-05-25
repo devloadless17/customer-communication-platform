@@ -1,6 +1,7 @@
 import { Global, Module } from "@nestjs/common";
 
 import { ApiKeyGuard } from "./api-key.guard";
+import { CapabilityGuard } from "./capability.guard";
 import { ChangePasswordController } from "./change-password.controller";
 import { InternalSessionController } from "./internal-session.controller";
 import { RoleGuard } from "./role.guard";
@@ -28,6 +29,7 @@ import { SessionInvalidationService } from "./session-invalidation.service";
     SessionGuard,
     ApiKeyGuard,
     RoleGuard,
+    CapabilityGuard,
     ScopeGuard,
     SessionInvalidationService,
   ],
@@ -35,6 +37,7 @@ import { SessionInvalidationService } from "./session-invalidation.service";
     SessionGuard,
     ApiKeyGuard,
     RoleGuard,
+    CapabilityGuard,
     ScopeGuard,
     SessionInvalidationService,
   ],

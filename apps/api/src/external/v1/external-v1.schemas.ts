@@ -9,6 +9,22 @@ const MAX_TEXT = 500;
 const MAX_BULK_IDS = 500;
 const MAX_FIELDS = 50;
 
+/**
+ * Opt-in "don't trigger reactions" flag, shared by the mutating /v1 endpoints
+ * (assign / status / contact-update / tag ops). When `true` the published
+ * domain event carries `silent: true`, which both the workflow-dispatch and
+ * outbound-webhook subscribers honor — so a partner changing a tag (or
+ * (un)assigning) via the API doesn't re-trigger a workflow or echo a webhook
+ * back to itself and loop. Defaults `false`: existing integrations are
+ * unaffected; you opt out of reactions per request only when you'd loop.
+ * Socket UI updates + audit timeline still happen.
+ *
+ * Named `silent` to match the wire all the way down: request `silent` →
+ * event `silent` → subscriber `if (e.silent) return`. Same word everywhere.
+ * See ConversationAssignedEvent.silent in @ccp/shared/events/types.
+ */
+const SilentFlag = z.boolean().optional();
+
 // ===========================================================================
 // EXISTING (do not break — partners depend on these shapes)
 // ===========================================================================
@@ -96,21 +112,25 @@ export type ExternalTopLevelSendMessageInput = z.infer<typeof ExternalTopLevelSe
  */
 export const ExternalContactAssignSchema = z.object({
   assignedUserId: z.string().min(1).nullable(),
+  silent: SilentFlag,
 });
 export type ExternalContactAssignInput = z.infer<typeof ExternalContactAssignSchema>;
 
 export const ExternalContactStatusSchema = z.object({
   status: z.enum(["open", "pending", "closed"]),
+  silent: SilentFlag,
 });
 export type ExternalContactStatusInput = z.infer<typeof ExternalContactStatusSchema>;
 
 export const ExternalAssignSchema = z.object({
   assignedUserId: z.string().min(1).nullable(),
+  silent: SilentFlag,
 });
 export type ExternalAssignInput = z.infer<typeof ExternalAssignSchema>;
 
 export const ExternalStatusSchema = z.object({
   status: z.enum(["open", "pending", "closed"]),
+  silent: SilentFlag,
 });
 export type ExternalStatusInput = z.infer<typeof ExternalStatusSchema>;
 
@@ -219,6 +239,7 @@ export const ExternalUpdateContactSchema = z.object({
       .optional(),
     customFields: CustomFieldsSchema.optional(),
     stageId: z.union([z.string().min(1), z.null()]).optional(),
+    silent: SilentFlag,
   });
 export type ExternalUpdateContactInput = z.infer<typeof ExternalUpdateContactSchema>;
 
@@ -232,6 +253,7 @@ export type ExternalUpsertContactInput = z.infer<typeof ExternalUpsertContactSch
 
 export const ExternalContactAddTagsSchema = z.object({
   tagIds: z.array(z.string().min(1)).min(1).max(50),
+  silent: SilentFlag,
 });
 export type ExternalContactAddTagsInput = z.infer<typeof ExternalContactAddTagsSchema>;
 
@@ -243,6 +265,7 @@ export type ExternalContactAddTagsInput = z.infer<typeof ExternalContactAddTagsS
  */
 export const ExternalContactRemoveTagsSchema = z.object({
   tagIds: z.array(z.string().min(1)).min(1).max(50),
+  silent: SilentFlag,
 });
 export type ExternalContactRemoveTagsInput = z.infer<typeof ExternalContactRemoveTagsSchema>;
 

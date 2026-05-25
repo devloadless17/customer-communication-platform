@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import type { Role } from "../types";
 
 /**
@@ -30,7 +32,7 @@ export function canManageUsers(role: Role): boolean {
  * PATCH route, not here).
  */
 export function canManageContactFields(role: Role): boolean {
-  return role === "superAdmin" || role === "admin" || role === "manager";
+  return DEFAULT_CAPABILITIES[role]["contactFields:manage"];
 }
 
 /**
@@ -40,7 +42,7 @@ export function canManageContactFields(role: Role): boolean {
  * stages is open to anyone signed in (handled at the contact PATCH route).
  */
 export function canManageStages(role: Role): boolean {
-  return role === "superAdmin" || role === "admin" || role === "manager";
+  return DEFAULT_CAPABILITIES[role]["stages:manage"];
 }
 
 /** Only superAdmins can grant or revoke the superAdmin role. */
@@ -85,3 +87,164 @@ export function roleLabel(role: Role): string {
 }
 
 export const ALL_ROLES: Role[] = ["superAdmin", "admin", "manager", "agent"];
+
+/* ------------------------------------------------------------------------- *
+ * Admin-configurable per-role capabilities
+ *
+ * A team admin can override, per role, which of these capabilities its
+ * managers/agents have. Overrides live on `Team.rolePermissions` (sparse
+ * JSON); `resolvePermissions(role, teamConfig)` overlays them on top of the
+ * defaults below. admin/superAdmin are always allowed everything — the org
+ * owner can't be locked out — so only `manager` and `agent` are editable.
+ *
+ * Wire-format stability: these capability strings are persisted in the DB
+ * and round-trip through the settings API. Add new ones, don't rename.
+ * ------------------------------------------------------------------------- */
+
+export type Capability =
+  | "conversations:delete"
+  | "contacts:delete"
+  | "broadcasts:manage"
+  | "templates:manage"
+  | "audienceGroups:manage"
+  | "stages:manage"
+  | "contactFields:manage";
+
+export const ALL_CAPABILITIES: Capability[] = [
+  "conversations:delete",
+  "contacts:delete",
+  "broadcasts:manage",
+  "templates:manage",
+  "audienceGroups:manage",
+  "stages:manage",
+  "contactFields:manage",
+];
+
+/** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
+export const EDITABLE_ROLES = ["manager", "agent"] as const;
+export type EditableRole = (typeof EDITABLE_ROLES)[number];
+
+/** Human labels for the settings grid. */
+export const CAPABILITY_LABELS: Record<Capability, string> = {
+  "conversations:delete": "Delete conversations",
+  "contacts:delete": "Delete contacts",
+  "broadcasts:manage": "Create & manage broadcasts",
+  "templates:manage": "Create & manage templates",
+  "audienceGroups:manage": "Manage audience groups",
+  "stages:manage": "Manage lifecycle stages",
+  "contactFields:manage": "Manage contact fields",
+};
+
+/**
+ * Default capability matrix — reproduces pre-feature behavior EXACTLY so an
+ * un-configured team (`rolePermissions = {}`) is unchanged on deploy:
+ *  - admin/superAdmin: everything (and not editable; the resolver forces this).
+ *  - manager: everything — stages/fields matched the old `canManageStages/
+ *    canManageContactFields`; delete/broadcast/template/groups were ungated
+ *    (open to all), so `true` preserves that.
+ *  - agent: delete/broadcast/template/groups true (ungated before); stages +
+ *    contactFields false (agents never had those manage powers).
+ */
+export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
+  superAdmin: allCapabilities(true),
+  admin: allCapabilities(true),
+  manager: allCapabilities(true),
+  agent: {
+    "conversations:delete": true,
+    "contacts:delete": true,
+    "broadcasts:manage": true,
+    "templates:manage": true,
+    "audienceGroups:manage": true,
+    "stages:manage": false,
+    "contactFields:manage": false,
+  },
+};
+
+function allCapabilities(value: boolean): Record<Capability, boolean> {
+  return ALL_CAPABILITIES.reduce(
+    (acc, cap) => {
+      acc[cap] = value;
+      return acc;
+    },
+    {} as Record<Capability, boolean>,
+  );
+}
+
+/** Persisted shape of `Team.rolePermissions` after validation. */
+export type RolePermissionsConfig = Partial<
+  Record<EditableRole, Partial<Record<Capability, boolean>>>
+>;
+
+/**
+ * Resolve the effective capability map for a role given a team's stored
+ * overrides. Pure — same inputs always yield the same output, so it's safe to
+ * call on both server (guards) and client (UI gating).
+ *
+ * - admin/superAdmin → all true, ignoring `teamConfig` (can't lock out the
+ *   org owner).
+ * - manager/agent → defaults overlaid with any keys present in
+ *   `teamConfig[role]`. Sparse: a missing key keeps the default.
+ *
+ * `teamConfig` is typed `unknown` because it arrives as raw Prisma JSON; we
+ * validate-by-shape inline rather than trusting the caller.
+ */
+export function resolvePermissions(
+  role: Role,
+  teamConfig: unknown,
+): Record<Capability, boolean> {
+  if (role === "superAdmin" || role === "admin") {
+    return allCapabilities(true);
+  }
+
+  const resolved = { ...DEFAULT_CAPABILITIES[role] };
+  const overrides = readRoleOverrides(teamConfig, role);
+  for (const cap of ALL_CAPABILITIES) {
+    const value = overrides[cap];
+    if (typeof value === "boolean") resolved[cap] = value;
+  }
+  return resolved;
+}
+
+/** Convenience: does the resolved map grant `cap`? */
+export function hasCapability(
+  perms: Record<Capability, boolean>,
+  cap: Capability,
+): boolean {
+  return perms[cap] === true;
+}
+
+/** Pull a single role's override sub-map out of raw JSON, defensively. */
+function readRoleOverrides(
+  teamConfig: unknown,
+  role: EditableRole,
+): Partial<Record<Capability, boolean>> {
+  if (!teamConfig || typeof teamConfig !== "object") return {};
+  const sub = (teamConfig as Record<string, unknown>)[role];
+  if (!sub || typeof sub !== "object") return {};
+  return sub as Partial<Record<Capability, boolean>>;
+}
+
+/**
+ * Zod schema for the PATCH body / stored value. Only editable roles, only
+ * known capabilities, only booleans. `admin`/`superAdmin` keys are rejected so
+ * a malformed write can't claim to lock out the owner. `.strict()` rejects
+ * unknown role keys.
+ */
+const zCapabilityMap = z
+  .object(
+    ALL_CAPABILITIES.reduce(
+      (acc, cap) => {
+        acc[cap] = z.boolean().optional();
+        return acc;
+      },
+      {} as Record<Capability, z.ZodOptional<z.ZodBoolean>>,
+    ),
+  )
+  .strict();
+
+export const zRolePermissions = z
+  .object({
+    manager: zCapabilityMap.optional(),
+    agent: zCapabilityMap.optional(),
+  })
+  .strict();

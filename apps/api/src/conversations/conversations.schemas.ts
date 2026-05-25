@@ -67,3 +67,8 @@ export const BulkDeleteConversationsSchema = z.object({
   conversationIds: z.array(z.string().min(1)).min(1).max(500),
 });
 export type BulkDeleteConversationsInput = z.infer<typeof BulkDeleteConversationsSchema>;
+
+export const StartConversationSchema = z.object({
+  contactId: z.string().min(1),
+});
+export type StartConversationInput = z.infer<typeof StartConversationSchema>;

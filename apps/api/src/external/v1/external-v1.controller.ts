@@ -198,6 +198,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body() rawBody: Record<string, unknown>,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     if (rawBody && Object.prototype.hasOwnProperty.call(rawBody, "phoneNumber")) {
       throw new BadRequestException({
@@ -217,6 +218,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       parsed.data,
+      idempotencyKey?.trim() || undefined,
     );
     return { contact };
   }
@@ -248,8 +250,15 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalContactAddTagsSchema)) body: ExternalContactAddTagsInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    const contact = await this.api.addContactTags(auth.teamId, auth.apiKeyId, id, body);
+    const contact = await this.api.addContactTags(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      idempotencyKey?.trim() || undefined,
+    );
     return { contact };
   }
 
@@ -276,12 +285,15 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalContactRemoveTagsSchema)) body: ExternalContactRemoveTagsInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     const contact = await this.api.removeContactTags(
       auth.teamId,
       auth.apiKeyId,
       id,
       body.tagIds,
+      body.silent === true,
+      idempotencyKey?.trim() || undefined,
     );
     return { contact };
   }
@@ -409,8 +421,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalAssignSchema)) body: ExternalAssignInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    await this.api.assign(auth.teamId, auth.apiKeyId, id, body);
+    await this.api.assign(auth.teamId, auth.apiKeyId, id, body, idempotencyKey?.trim() || undefined);
     return { ok: true };
   }
 
@@ -420,8 +433,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalStatusSchema)) body: ExternalStatusInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body);
+    await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, idempotencyKey?.trim() || undefined);
     return { ok: true };
   }
 
@@ -437,8 +451,15 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalContactAssignSchema)) body: ExternalContactAssignInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    return this.api.assignByContact(auth.teamId, auth.apiKeyId, id, body);
+    return this.api.assignByContact(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      idempotencyKey?.trim() || undefined,
+    );
   }
 
   @Post("contacts/:id/status")
@@ -447,8 +468,15 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalContactStatusSchema)) body: ExternalContactStatusInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    return this.api.setStatusByContact(auth.teamId, auth.apiKeyId, id, body);
+    return this.api.setStatusByContact(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      idempotencyKey?.trim() || undefined,
+    );
   }
 
   // ---- Messages -----------------------------------------------------

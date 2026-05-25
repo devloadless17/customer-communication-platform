@@ -1,0 +1,87 @@
+import { Body, Controller, Get, Patch, UseGuards } from "@nestjs/common";
+
+import {
+  ALL_CAPABILITIES,
+  resolvePermissions,
+  zRolePermissions,
+  type RolePermissionsConfig,
+} from "@ccp/shared/auth/permissions";
+
+import { RequireRole } from "../../auth/role.guard";
+import { CurrentSession } from "../../auth/current-session.decorator";
+import { invalidateSessionCache } from "../../auth/session.guard";
+import { SessionGuard } from "../../auth/session.guard";
+import type { ApiSession } from "../../auth/session.guard";
+import { zBody } from "../../common/zod-validation.pipe";
+import { DbService } from "../../db/db.service";
+
+/**
+ * Admin-configurable per-role capability matrix.
+ *
+ *   GET   /api/team/permissions   — any signed-in member; returns the EFFECTIVE
+ *                                   grid (defaults overlaid with the team's
+ *                                   stored overrides) so the UI can render the
+ *                                   true state, and so a restricted member can
+ *                                   see what they're allowed to do.
+ *   PATCH /api/team/permissions   — admin only; persists overrides for the
+ *                                   editable roles (manager / agent).
+ *
+ * admin/superAdmin are never stored and always resolve to all-true — the org
+ * owner can't lock themselves out.
+ */
+@Controller("api/team/permissions")
+@UseGuards(SessionGuard)
+export class PermissionsController {
+  constructor(private readonly db: DbService) {}
+
+  @Get()
+  async get(@CurrentSession() session: ApiSession) {
+    const config = await this.load(session.teamId);
+    return {
+      capabilities: ALL_CAPABILITIES,
+      // Effective resolved map per editable role (defaults + overrides).
+      permissions: {
+        manager: resolvePermissions("manager", config),
+        agent: resolvePermissions("agent", config),
+      },
+    };
+  }
+
+  @RequireRole("admin")
+  @Patch()
+  async update(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(zRolePermissions)) body: RolePermissionsConfig,
+  ) {
+    await this.db.team.update({
+      where: { id: session.teamId },
+      data: { rolePermissions: body },
+    });
+
+    // Bust the per-user session cache for the whole team so the new matrix
+    // lands immediately instead of waiting out the 15s TTL. A team has tens of
+    // users, not thousands, so this loop is cheap. (Mirrors the deactivation
+    // invalidation pattern in session.guard.ts.)
+    const members = await this.db.user.findMany({
+      where: { teamId: session.teamId },
+      select: { id: true },
+    });
+    for (const m of members) invalidateSessionCache(m.id);
+
+    return {
+      ok: true,
+      permissions: {
+        manager: resolvePermissions("manager", body),
+        agent: resolvePermissions("agent", body),
+      },
+    };
+  }
+
+  private async load(teamId: string): Promise<RolePermissionsConfig> {
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { rolePermissions: true },
+    });
+    return (team?.rolePermissions ?? {}) as RolePermissionsConfig;
+  }
+}

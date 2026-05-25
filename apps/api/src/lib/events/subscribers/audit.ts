@@ -104,10 +104,9 @@ export function registerAuditSubscribers(): void {
     await recordConversationEvent({
       conversationId: e.conversationId,
       teamId: e.teamId,
-      // note.deleted carries no deletedByUserId today — the bus event only
-      // ships ids. Leave userId null so the timeline reads "Note deleted"
-      // attributed to the team, not falsely attributed to the author.
-      userId: null,
+      // Attributed to whoever deleted the note (author or an admin). null only
+      // for system/automation deletions, which the timeline renders as "System".
+      userId: e.deletedByUserId,
       kind: "note_deleted",
       before: { noteId: e.noteId },
     });

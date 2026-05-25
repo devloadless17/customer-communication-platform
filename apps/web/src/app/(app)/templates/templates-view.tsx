@@ -45,11 +45,15 @@ export function TemplatesView({
   fieldDefinitions,
   connected,
   hasWabaId,
+  canManage,
 }: {
   initialTemplates: TemplateDto[];
   fieldDefinitions: ContactFieldDefinition[];
   connected: boolean;
   hasWabaId: boolean;
+  /** `templates:manage` — gates create / refresh-from-Meta / edit bindings /
+   *  delete. Reads stay open. */
+  canManage: boolean;
   hasAppId: boolean;
 }) {
   const { confirm, confirmDialog } = useConfirm();
@@ -219,12 +223,14 @@ export function TemplatesView({
             {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
             Refresh from Meta
           </Button>
-          <Button asChild disabled={!connected || !hasWabaId}>
-            <Link href="/templates/new" className="gap-1.5">
-              <Plus className="size-4" />
-              New template
-            </Link>
-          </Button>
+          {canManage && (
+            <Button asChild disabled={!connected || !hasWabaId}>
+              <Link href="/templates/new" className="gap-1.5">
+                <Plus className="size-4" />
+                New template
+              </Link>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -236,7 +242,7 @@ export function TemplatesView({
       )}
 
       {templates.length === 0 ? (
-        <EmptyState canCreate={connected && hasWabaId} />
+        <EmptyState canCreate={connected && hasWabaId && canManage} />
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
           No templates match the current filters.
@@ -259,6 +265,7 @@ export function TemplatesView({
         fieldDefinitions={fieldDefinitions}
         deleting={deleting}
         deleteError={deleteError}
+        canManage={canManage}
         onClose={() => setSelectedId(null)}
         onDelete={() => selected && askDelete(selected)}
         onBindingsSaved={onBindingsSaved}
@@ -438,6 +445,7 @@ function DetailDrawer({
   fieldDefinitions,
   deleting,
   deleteError,
+  canManage,
   onClose,
   onDelete,
   onBindingsSaved,
@@ -447,6 +455,7 @@ function DetailDrawer({
   fieldDefinitions: ContactFieldDefinition[];
   deleting: boolean;
   deleteError: string | null;
+  canManage: boolean;
   onClose: () => void;
   onDelete: () => void;
   onBindingsSaved: (id: string, bindings: VariableBindings) => void;
@@ -526,19 +535,25 @@ function DetailDrawer({
                     is empty.
                   </p>
                   <div className="mt-3">
-                    <VariableBindingsEditor
-                      templateId={template.id}
-                      components={
-                        Array.isArray(template.components)
-                          ? (template.components as TemplateComponent[])
-                          : []
-                      }
-                      initialBindings={parseVariableBindings(
-                        template.variableBindings as never,
-                      )}
-                      fieldDefinitions={fieldDefinitions}
-                      onSaved={(bindings) => onBindingsSaved(template.id, bindings)}
-                    />
+                    {canManage ? (
+                      <VariableBindingsEditor
+                        templateId={template.id}
+                        components={
+                          Array.isArray(template.components)
+                            ? (template.components as TemplateComponent[])
+                            : []
+                        }
+                        initialBindings={parseVariableBindings(
+                          template.variableBindings as never,
+                        )}
+                        fieldDefinitions={fieldDefinitions}
+                        onSaved={(bindings) => onBindingsSaved(template.id, bindings)}
+                      />
+                    ) : (
+                      <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+                        You don&apos;t have permission to edit template bindings.
+                      </p>
+                    )}
                   </div>
                 </section>
 
@@ -584,21 +599,23 @@ function DetailDrawer({
                     <RefreshCw className="size-3.5" />
                     Reload
                   </Button>
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="sm"
-                    onClick={onDelete}
-                    disabled={deleting}
-                    className="gap-1.5"
-                  >
-                    {deleting ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="size-3.5" />
-                    )}
-                    Delete
-                  </Button>
+                  {canManage && (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={onDelete}
+                      disabled={deleting}
+                      className="gap-1.5"
+                    >
+                      {deleting ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-3.5" />
+                      )}
+                      Delete
+                    </Button>
+                  )}
                 </div>
               </div>
             </footer>

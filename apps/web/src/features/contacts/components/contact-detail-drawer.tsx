@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Flag, Globe, Mail, MapPin, MessageSquare, Phone, Send, Trash2, User as UserIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Flag, Globe, Loader2, Mail, MapPin, MessageSquare, Phone, Send, Trash2, User as UserIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +54,7 @@ export function ContactDetailDrawer({
   lastInboundAt,
   onClose,
   onDelete,
+  canDelete,
   onTagCreated,
   onTeamWideFieldAdded,
 }: {
@@ -70,6 +72,8 @@ export function ContactDetailDrawer({
   onClose: () => void;
   /** Parent owns the confirm + DELETE + list removal + drawer close. */
   onDelete: () => void;
+  /** Hide the delete button when the role lacks `contacts:delete`. */
+  canDelete: boolean;
   onTagCreated: (tag: Tag) => void;
   onTeamWideFieldAdded: (def: ContactFieldDefinition) => void;
 }) {
@@ -90,7 +94,40 @@ export function ContactDetailDrawer({
   const [tags, setTags] = useState<Tag[]>(tagCatalog);
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
   const tagBoxRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
+
+  // Re-chat with a contact that has no thread (e.g. its conversation was
+  // deleted). Get-or-create on the server, then open it in the inbox. When a
+  // thread already exists this same endpoint just returns it — but the footer
+  // only renders this button when there isn't one, so this is the create path.
+  async function startChat() {
+    if (starting) return;
+    setStarting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/conversations/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ contactId: contact.id }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(body.error ?? "Couldn't start chat");
+        setStarting(false);
+        return;
+      }
+      const { conversationId } = (await res.json()) as { conversationId: string };
+      // Navigate into the inbox thread. Don't reset `starting` — we're leaving
+      // this page, and clearing it would flash the button back to its idle
+      // label mid-transition.
+      router.push(`/inbox?c=${encodeURIComponent(conversationId)}`);
+    } catch {
+      setError("Couldn't start chat");
+      setStarting(false);
+    }
+  }
 
   useEffect(() => {
     setName(contact.name);
@@ -517,8 +554,17 @@ export function ContactDetailDrawer({
           </Section>
         </div>
 
-        {/* Footer actions */}
-        <div className="flex items-center gap-2 border-t border-border px-4 py-3">
+        {/* Footer actions. A start-chat failure surfaces just above the
+            buttons (the body-level `error` block is far up the scroll). */}
+        <div className="border-t border-border">
+          {error && !activeConversationId && (
+            <div className="px-4 pt-2">
+              <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+                {error}
+              </div>
+            </div>
+          )}
+          <div className="flex items-center gap-2 px-4 py-3">
           {activeConversationId ? (
             <Button asChild size="sm" className="flex-1 gap-1.5">
               <Link href={`/inbox/${activeConversationId}`}>
@@ -527,22 +573,43 @@ export function ContactDetailDrawer({
               </Link>
             </Button>
           ) : (
-            <Button asChild variant="outline" size="sm" className="flex-1 gap-1.5">
-              <Link href={`/broadcasts/new?contactIds=${contact.id}`}>
-                <Send className="size-3.5" />
-                Send template
-              </Link>
+            <>
+              {/* No thread (new contact, or its conversation was deleted) —
+                  recreate + open it. "Send template" stays as the secondary
+                  cold-outbound path. */}
+              <Button
+                size="sm"
+                className="flex-1 gap-1.5"
+                onClick={() => void startChat()}
+                disabled={starting}
+              >
+                {starting ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <MessageSquare className="size-3.5" />
+                )}
+                Start chat
+              </Button>
+              <Button asChild variant="outline" size="sm" className="gap-1.5">
+                <Link href={`/broadcasts/new?contactIds=${contact.id}`}>
+                  <Send className="size-3.5" />
+                  Template
+                </Link>
+              </Button>
+            </>
+          )}
+          {canDelete && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              onClick={onDelete}
+            >
+              <Trash2 className="size-3.5" />
+              Delete
             </Button>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={onDelete}
-          >
-            <Trash2 className="size-3.5" />
-            Delete
-          </Button>
+          </div>
         </div>
       </div>
     </Sheet>

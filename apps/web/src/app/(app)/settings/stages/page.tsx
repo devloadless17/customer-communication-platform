@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
-import { canManageStages } from "@ccp/shared/auth/permissions";
 import { getStageContactCounts, listContactStages } from "@/lib/api/queries";
 
 import { StagesSettings } from "./stages-settings";
@@ -19,8 +18,8 @@ export const dynamic = "force-dynamic";
  * confused. Redirect to /settings/account when gated.
  */
 export default async function StagesSettingsPage() {
-  const { user } = await getSession();
-  if (!canManageStages(user.role)) {
+  const { permissions } = await getSession();
+  if (!permissions["stages:manage"]) {
     redirect("/settings/account");
   }
 

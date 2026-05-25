@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { getSession } from "@/lib/auth/current-user";
 import { listAudienceGroups, listTags } from "@/lib/api/queries";
 
 import { GroupRow } from "./group-row";
@@ -10,7 +11,12 @@ export const metadata = { title: "Audience groups" };
 export const dynamic = "force-dynamic";
 
 export default async function AudienceGroupsPage() {
-  const [groups, tags] = await Promise.all([listAudienceGroups(), listTags()]);
+  const [{ permissions }, groups, tags] = await Promise.all([
+    getSession(),
+    listAudienceGroups(),
+    listTags(),
+  ]);
+  const canManage = permissions["audienceGroups:manage"];
   const tagById = new Map(tags.map((t) => [t.id, t] as const));
 
   return (
@@ -23,16 +29,18 @@ export default async function AudienceGroupsPage() {
             membership with hand-picked contacts.
           </p>
         </div>
-        <Button asChild>
-          <Link href="/broadcasts/groups/new" className="gap-1.5">
-            <Plus className="size-4" />
-            New group
-          </Link>
-        </Button>
+        {canManage && (
+          <Button asChild>
+            <Link href="/broadcasts/groups/new" className="gap-1.5">
+              <Plus className="size-4" />
+              New group
+            </Link>
+          </Button>
+        )}
       </div>
 
       {groups.length === 0 ? (
-        <EmptyState />
+        <EmptyState canManage={canManage} />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="w-full min-w-160 text-sm">
@@ -64,7 +72,7 @@ export default async function AudienceGroupsPage() {
   );
 }
 
-function EmptyState() {
+function EmptyState({ canManage }: { canManage: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-card px-6 py-16 text-center">
       <div className="inline-flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
@@ -75,9 +83,11 @@ function EmptyState() {
         Save a named audience now — pick contacts manually, by tag, or both —
         and reuse it in any future broadcast without re-selecting.
       </p>
-      <Button asChild className="mt-2">
-        <Link href="/broadcasts/groups/new">Create your first group</Link>
-      </Button>
+      {canManage && (
+        <Button asChild className="mt-2">
+          <Link href="/broadcasts/groups/new">Create your first group</Link>
+        </Button>
+      )}
     </div>
   );
 }

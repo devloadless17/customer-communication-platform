@@ -103,6 +103,28 @@ export class ApiKeyGuard implements CanActivate {
       );
     }
 
+    // Loop guard. `X-CCP-Origin-Key` is OUR header — the outbound-webhook
+    // worker stamps it on every delivery with the apiKeyId that triggered the
+    // event (worker.ts). If a partner blindly relays our webhook back to /v1
+    // using the SAME key, the header arrives matching THIS request's key,
+    // which means the request was triggered by an event this very key caused:
+    // a hot-potato loop (partner → POST /v1 → message.sent → webhook →
+    // partner → POST again …). Refuse it server-side instead of trusting the
+    // partner to check the header. The consumed rate-limit token is left
+    // spent on purpose — natural backpressure on a runaway loop. A legitimate
+    // caller never sends our internal origin header.
+    const originKey = req.headers["x-ccp-origin-key"];
+    if (typeof originKey === "string" && originKey === row.id) {
+      throw new HttpException(
+        {
+          error: "loop_detected",
+          detail:
+            "X-CCP-Origin-Key matches the calling API key — strip CCP webhook headers before relaying a delivery back to the API.",
+        },
+        409,
+      );
+    }
+
     req.apiKey = { teamId: row.teamId, apiKeyId: row.id, scopes: row.scopes };
 
     // Stamp lastUsedAt async — failing this should NOT fail the request.

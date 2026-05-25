@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import { RequireCapability } from "../../auth/capability.guard";
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
@@ -42,6 +43,7 @@ export class AudienceGroupsController {
   }
 
   @Post()
+  @RequireCapability("audienceGroups:manage")
   async create(
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateAudienceGroupSchema)) body: CreateAudienceGroupInput,
@@ -51,6 +53,7 @@ export class AudienceGroupsController {
   }
 
   @Patch(":id")
+  @RequireCapability("audienceGroups:manage")
   async update(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
@@ -61,6 +64,7 @@ export class AudienceGroupsController {
   }
 
   @Delete(":id")
+  @RequireCapability("audienceGroups:manage")
   async remove(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

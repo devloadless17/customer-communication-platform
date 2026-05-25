@@ -108,6 +108,7 @@ export function ContactsClient({
   initialStageFilter,
   canManageFields,
   canManageStages,
+  canDeleteContacts,
 }: {
   initialItems: ContactListItem[];
   initialNextCursor: string | null;
@@ -120,6 +121,7 @@ export function ContactsClient({
   initialStageFilter: StageFilter;
   canManageFields: boolean;
   canManageStages: boolean;
+  canDeleteContacts: boolean;
 }) {
   const router = useRouter();
   const softRefresh = useSoftRefresh();
@@ -586,6 +588,7 @@ export function ContactsClient({
           setItems((prev) => prev.filter((row) => !ids.includes(row.contact.id)));
           setSelectedIds(new Set());
         }}
+        canDelete={canDeleteContacts}
       />
 
       {detailId && (() => {
@@ -604,6 +607,7 @@ export function ContactsClient({
             lastInboundAt={row.lastInboundAt}
             onClose={() => setDetailId(null)}
             onDelete={() => void deleteOne(detailId)}
+            canDelete={canDeleteContacts}
             onTagCreated={(t) => {
               setTags((prev) =>
                 prev.some((x) => x.id === t.id)
@@ -880,6 +884,7 @@ function BulkActionBar({
   onTagBulk,
   onTagCreatedAndApply,
   onDelete,
+  canDelete,
 }: {
   selectedCount: number;
   tags: Tag[];
@@ -890,6 +895,7 @@ function BulkActionBar({
    *  Parent persists it to the team catalog + applies to the bulk selection. */
   onTagCreatedAndApply: (tag: Tag) => void | Promise<void>;
   onDelete: () => void | Promise<void>;
+  canDelete: boolean;
 }) {
   // Local UI state for the tag popovers. Kept inside the bar so the parent
   // doesn't have to track which popover is open.
@@ -941,15 +947,17 @@ function BulkActionBar({
           Remove tag
         </Button>
 
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
-          onClick={onDelete}
-        >
-          <Trash2 className="size-3.5" />
-          Delete
-        </Button>
+        {canDelete && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={onDelete}
+          >
+            <Trash2 className="size-3.5" />
+            Delete
+          </Button>
+        )}
 
         <button
           type="button"
