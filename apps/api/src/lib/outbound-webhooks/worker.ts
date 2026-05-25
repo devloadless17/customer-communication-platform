@@ -4,7 +4,7 @@
 // init/destroy so worker.close() can drain the in-flight HTTP request
 // before the process exits.
 
-import { Worker, type Job } from "bullmq";
+import { DelayedError, Worker, type Job } from "bullmq";
 import type IORedis from "ioredis";
 
 import {
@@ -55,6 +55,48 @@ function concurrency(): number {
   return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 10;
 }
 
+/**
+ * Per-team in-process concurrency cap — same model as the workflow worker
+ * (lib/workflows/worker.ts). One team whose partner endpoint is slow or
+ * hanging at the request timeout would otherwise pin every global delivery
+ * slot and starve every other team's deliveries. With this gate, a team at
+ * cap has its extra jobs deferred (moveToDelayed + DelayedError) so the
+ * BullMQ slot frees immediately for other teams.
+ *
+ * Tunable via WEBHOOK_PER_TEAM_CONCURRENCY (default 4 — a little looser than
+ * workflows' 2 because deliveries are independent single-fetch jobs, not
+ * multi-step runs). Across-PROCESS fairness needs Redis-backed counters
+ * (deferred — single-process pilot). Inside one process this is exact.
+ */
+function perTeamConcurrency(): number {
+  const raw = Number.parseInt(process.env.WEBHOOK_PER_TEAM_CONCURRENCY ?? "4", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 4;
+}
+
+/** Delay before re-picking up a deferred (team-at-cap) delivery. */
+const TEAM_BUSY_DEFER_MS = 250;
+
+const teamSlots = new Map<string, { active: number }>();
+
+function tryAcquireTeamSlot(teamId: string): boolean {
+  const cap = perTeamConcurrency();
+  let entry = teamSlots.get(teamId);
+  if (!entry) {
+    entry = { active: 0 };
+    teamSlots.set(teamId, entry);
+  }
+  if (entry.active >= cap) return false;
+  entry.active += 1;
+  return true;
+}
+
+function releaseTeamSlot(teamId: string): void {
+  const entry = teamSlots.get(teamId);
+  if (!entry) return;
+  entry.active = Math.max(0, entry.active - 1);
+  if (entry.active === 0) teamSlots.delete(teamId);
+}
+
 export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
   if (state.worker) return state.worker;
   state.shuttingDown = false;
@@ -66,12 +108,38 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
 
   const worker = new Worker<WebhookDeliverJobData>(
     WEBHOOK_DELIVER_QUEUE_NAME,
-    async (job: Job<WebhookDeliverJobData>) => {
-      // attemptsMade is 0 on first run; deliverOnce wants 1-indexed.
-      // job.opts.attempts comes from the queue default (currently 4).
-      const attempt = job.attemptsMade + 1;
-      const maxAttempts = job.opts.attempts ?? 1;
-      await deliverOnce(job.data.deliveryId, attempt, maxAttempts);
+    async (job: Job<WebhookDeliverJobData>, token?: string) => {
+      // Per-team concurrency gate. Resolve the owning team from the delivery
+      // row (single indexed read; the job payload only carries deliveryId).
+      const owner = await db.outboundWebhookDelivery.findUnique({
+        where: { id: job.data.deliveryId },
+        select: { webhook: { select: { teamId: true } } },
+      });
+      if (!owner) {
+        // Row deleted between enqueue and pickup (webhook revoked). deliverOnce
+        // handles this too, but bail early so we don't claim a team slot for a
+        // no-op.
+        return;
+      }
+      const teamId = owner.webhook.teamId;
+      if (!tryAcquireTeamSlot(teamId)) {
+        // Team at cap — defer this delivery and free the BullMQ slot for other
+        // teams' work. moveToDelayed + DelayedError doesn't count against
+        // `attempts`.
+        if (token) {
+          await job.moveToDelayed(Date.now() + TEAM_BUSY_DEFER_MS, token);
+        }
+        throw new DelayedError();
+      }
+      try {
+        // attemptsMade is 0 on first run; deliverOnce wants 1-indexed.
+        // job.opts.attempts comes from the queue default (currently 4).
+        const attempt = job.attemptsMade + 1;
+        const maxAttempts = job.opts.attempts ?? 1;
+        await deliverOnce(job.data.deliveryId, attempt, maxAttempts);
+      } finally {
+        releaseTeamSlot(teamId);
+      }
     },
     {
       connection,

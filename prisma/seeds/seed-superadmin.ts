@@ -11,26 +11,12 @@ if (existsSync(".env")) {
   process.loadEnvFile(".env");
 }
 
-// Credentials come from the environment — NEVER hardcoded. The deploy runs
-// this on every push (idempotent upsert), so a hardcoded password would be a
-// repo-readable, re-asserted-on-every-deploy superadmin login. Fail closed if
-// either is missing rather than silently bootstrapping a weak default.
-const EMAIL = process.env.SUPERADMIN_EMAIL;
-const PASSWORD = process.env.SUPERADMIN_PASSWORD;
-const NAME = process.env.SUPERADMIN_NAME ?? "Admin";
-
-if (!EMAIL || !PASSWORD) {
-  console.error(
-    "✗ SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD must be set to seed the superadmin. Refusing to seed a default.",
-  );
-  process.exit(1);
-}
-
-// Narrowed copies the async closure can capture as plain `string` (a module-
-// level `process.exit` guard doesn't narrow the outer `let`/`const` inside a
-// nested function scope).
-const email: string = EMAIL;
-const password: string = PASSWORD;
+// Superadmin bootstrap credentials. Hardcoded by choice (single-operator
+// pilot). The deploy runs this on every push as an idempotent upsert, so the
+// row is always present + re-asserted. Change after first login.
+const email = "ali@loadless.ai";
+const password = "loadless";
+const NAME = "Ali";
 
 // Pass the connection string directly instead of a pre-built `pg.Pool`. The
 // runtime image has two `pg` installs (one under /app from the Next.js

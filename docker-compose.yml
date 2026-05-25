@@ -196,14 +196,6 @@ services:
       # this endpoint requires the same secret. Must match the value
       # on the api service. validateEnv requires this in prod.
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
-      # Superadmin bootstrap credentials. Only read by the one-off
-      # `db:seed:superadmin` script (run via `docker exec` on this container
-      # during deploy) — NOT by the running app. The seed fails closed if
-      # absent, so an empty default here just means "no superadmin seed on a
-      # bare local `compose up`" (local dev sets them in .env).
-      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-}
-      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
-      SUPERADMIN_NAME: ${SUPERADMIN_NAME:-}
       # Post-Phase-5: Next.js owns auth pages + RSC reads only. The NestJS
       # api container owns everything else (REST, Socket.io, webhooks, the
       # workflow worker, audit/analytics/dispatch). No env-toggle here for

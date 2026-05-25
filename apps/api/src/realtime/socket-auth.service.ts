@@ -35,7 +35,7 @@ export type SocketAuthResult =
  * The reconnect-storm DB cost is absorbed by the 15s session cache below, not
  * by skipping the handshake.
  *
- * Mirrors lib/socket/server.ts exactly:
+ * Handshake steps:
  *   1. Forward the cookie header into Better Auth's getSession.
  *   2. Reject if no valid session.
  *   3. Re-check the user's `deactivatedAt` — Better Auth's in-cookie cache

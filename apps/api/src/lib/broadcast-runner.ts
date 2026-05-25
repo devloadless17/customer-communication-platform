@@ -68,10 +68,10 @@ import type { Message } from "@ccp/shared/types";
  * Fire-and-forget: callers POST to `/api/broadcasts` which kicks this off via
  * `setImmediate` so the HTTP response returns immediately with the new id.
  *
- * Tradeoff: this runs in-process on the Next.js server. server.ts has a boot
- * reconciler that flips orphaned `running` rows to `failed` so a restart
- * mid-broadcast doesn't leave them dangling — but in-flight Meta sends from
- * the dead process are not retried (we don't know if they landed).
+ * Tradeoff: this runs in-process in the NestJS api. A boot reconciler flips
+ * orphaned `running` rows to `failed` so a restart mid-broadcast doesn't
+ * leave them dangling — but in-flight Meta sends from the dead process are
+ * not retried (we don't know if they landed).
  *
  * Rate: SEND_CONCURRENCY workers, each leaving a 200ms gap between its
  * own sends → ~25 msg/sec aggregate, well under Meta's 80 msg/sec hard cap.
@@ -168,6 +168,54 @@ interface BroadcastVariables {
 let shuttingDown = false;
 const inFlightRuns = new Map<string, Promise<void>>();
 
+/**
+ * Per-team concurrent-broadcast cap — the broadcast-runner's analogue of the
+ * workflow worker's per-team gate (lib/workflows/worker.ts). Each running
+ * broadcast spins up its OWN pool of SEND_CONCURRENCY lanes, so without a
+ * ceiling one team firing several broadcasts at once (API + scheduled-send
+ * worker + boot resume can all kick off concurrently) would multiply lanes,
+ * blow past Meta's per-number rate budget, and let one team's burst crowd out
+ * every other team's sends. With the gate, a team already at cap leaves the
+ * extra broadcast in `queued` — the scheduled-broadcast worker + the
+ * deferred-retry below re-pick it once a slot frees, so nothing is dropped.
+ *
+ * Tunable via BROADCAST_PER_TEAM_CONCURRENCY (default 2). Single-process only;
+ * cross-process fairness would need Redis counters (deferred — pilot is one
+ * process). Keyed by teamId; the entry is dropped when the team goes idle so
+ * the Map stays bounded.
+ */
+function perTeamBroadcastConcurrency(): number {
+  const raw = Number.parseInt(
+    process.env.BROADCAST_PER_TEAM_CONCURRENCY ?? "2",
+    10,
+  );
+  return Number.isFinite(raw) && raw > 0 && raw <= 50 ? raw : 2;
+}
+
+/** Delay before a team-at-cap broadcast retries its slot claim. */
+const BROADCAST_TEAM_BUSY_DEFER_MS = 5_000;
+
+const broadcastTeamSlots = new Map<string, { active: number }>();
+
+function tryAcquireBroadcastTeamSlot(teamId: string): boolean {
+  const cap = perTeamBroadcastConcurrency();
+  let entry = broadcastTeamSlots.get(teamId);
+  if (!entry) {
+    entry = { active: 0 };
+    broadcastTeamSlots.set(teamId, entry);
+  }
+  if (entry.active >= cap) return false;
+  entry.active += 1;
+  return true;
+}
+
+function releaseBroadcastTeamSlot(teamId: string): void {
+  const entry = broadcastTeamSlots.get(teamId);
+  if (!entry) return;
+  entry.active = Math.max(0, entry.active - 1);
+  if (entry.active === 0) broadcastTeamSlots.delete(teamId);
+}
+
 export function signalShutdown(): void {
   shuttingDown = true;
 }
@@ -200,6 +248,39 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     );
     return;
   }
+
+  // Already running in this process (e.g. a duplicate kick from API + the
+  // scheduled worker) — don't double-claim a team slot or spawn a second
+  // lane pool. The CAS claim in runBroadcast also guards this, but bailing
+  // here avoids the wasted teamId lookup + slot churn.
+  if (inFlightRuns.has(broadcastId)) return;
+
+  // Per-team concurrency gate. Resolve the owning team cheaply (PK lookup,
+  // teamId only) so we can cap concurrent broadcasts per team.
+  const owner = await db.broadcast.findUnique({
+    where: { id: broadcastId },
+    select: { teamId: true, status: true },
+  });
+  if (!owner) {
+    console.warn(`[broadcast ${broadcastId}] not found at start`);
+    return;
+  }
+  // Only `queued` rows are runnable; anything else is already claimed /
+  // terminal and runBroadcast would bail anyway.
+  if (owner.status !== "queued") return;
+
+  if (!tryAcquireBroadcastTeamSlot(owner.teamId)) {
+    // Team at its concurrent-broadcast cap. Leave the row `queued` and
+    // re-attempt shortly — the slot frees when one of the team's running
+    // broadcasts finishes. (The scheduled-broadcast worker is a second
+    // safety net for `queued` rows.) unref so this timer can't hold the
+    // process open during shutdown.
+    setTimeout(() => {
+      if (!shuttingDown) void startBroadcast(broadcastId);
+    }, BROADCAST_TEAM_BUSY_DEFER_MS).unref();
+    return;
+  }
+
   // Fire-and-forget — the caller doesn't await this; we explicitly catch so
   // the unhandled rejection doesn't crash the server.
   const run = runBroadcast(broadcastId)
@@ -208,6 +289,7 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
     })
     .finally(() => {
       inFlightRuns.delete(broadcastId);
+      releaseBroadcastTeamSlot(owner.teamId);
     });
   inFlightRuns.set(broadcastId, run);
 }

@@ -1,5 +1,5 @@
-// Note: no `server-only` import — boots from both server.ts (web) and
-// worker.ts (worker process), outside Next's bundler context.
+// Note: no `server-only` import — loaded by the NestJS api process via
+// @swc-node/register, outside the Next bundler context.
 
 /**
  * Workflow dispatch subscriber.

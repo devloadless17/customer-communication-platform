@@ -1,8 +1,9 @@
 // Shared BullMQ wiring for the workflow runs queue.
 //
-// Lives outside the next bundler context the same way lib/socket-server.ts
-// does — server.ts imports it on boot for the worker, API routes import it
-// for `enqueue()`. globalThis singleton survives tsx-watch HMR.
+// Loaded by the NestJS api process via @swc-node/register, outside the Next
+// bundler context: the in-process worker imports it on boot, controllers/
+// services import it for `enqueue()`. globalThis singleton survives the
+// dev-watch reload.
 
 import { Queue, type ConnectionOptions } from "bullmq";
 import IORedis from "ioredis";

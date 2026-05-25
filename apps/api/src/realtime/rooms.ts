@@ -1,7 +1,6 @@
 /**
- * Socket.io room name conventions. Mirrors lib/socket/server.ts exactly so
- * subscribers / emitters can be migrated in either direction without a
- * rename.
+ * Socket.io room name conventions. The single source of truth for room names
+ * shared by the gateway, the fanout rules, and every emitter.
  */
 export const teamRoom = (teamId: string) => `team:${teamId}`;
 export const conversationRoom = (conversationId: string) => `conv:${conversationId}`;

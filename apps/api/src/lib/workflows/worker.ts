@@ -1,5 +1,5 @@
-// Note: no `server-only` import — server.ts loads this on boot, outside the
-// Next bundler context. Same convention as lib/socket/server.ts.
+// Note: no `server-only` import — the NestJS api process loads this on boot
+// via @swc-node/register, outside the Next bundler context.
 
 import { DelayedError, Worker, type Job } from "bullmq";
 import type IORedis from "ioredis";
@@ -31,8 +31,8 @@ if (WORKFLOW_LOCK_DURATION_MS <= MAX_STEP_TIMEOUT_MS + WORKFLOW_LOCK_MARGIN_MS) 
 }
 
 /**
- * BullMQ worker for the workflow queue. Lives in the same Node process as
- * the custom server today (server.ts); splitting into a dedicated `worker`
+ * BullMQ worker for the workflow queue. Runs in-process inside the NestJS api
+ * (RUN_WORKER_INLINE=1, the default); splitting into a dedicated `worker`
  * docker service is a one-line copy of the bootstrap call into a separate
  * entrypoint — the queue is shared via Redis.
  */

@@ -1,6 +1,6 @@
-// Note: no `server-only` import — boots from both server.ts (web) and
-// worker.ts (worker process), outside Next's bundler context. Same convention
-// as lib/socket/server.ts and lib/workflows/queue.ts.
+// Note: no `server-only` import — this is loaded by the NestJS api process
+// via @swc-node/register, outside the Next bundler context. Same convention
+// as lib/workflows/queue.ts.
 
 import type {
   DomainEventOf,
