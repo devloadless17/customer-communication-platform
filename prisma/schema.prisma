@@ -148,6 +148,7 @@ enum ConversationEventKind {
   status_changed
   tag_added
   tag_removed
+  stage_changed
   note_added
   note_deleted
 }
@@ -1498,6 +1499,10 @@ model OutboundWebhookDelivery {
 //                      `after`  = { status: ConversationStatus }
 //   tag_added        — `after`  = { tagId: string, tagName: string }
 //   tag_removed      — `before` = { tagId: string, tagName: string }
+//   stage_changed    — `before` = { stageId: string | null, stageName: string | null }
+//                      `after`  = { stageId: string | null, stageName: string | null }
+//   note_added       — `after`  = { noteId: string, excerpt: string }
+//   note_deleted     — `before` = { noteId: string }
 //
 // `userId` is the agent who performed the action. Nullable + SetNull so
 // removing an agent doesn't take their audit trail with them (the UI

@@ -13,7 +13,14 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 
 import { Button } from "@/components/ui/button";
-import type { TemplateDto } from "@ccp/shared/types";
+import type {
+  Contact,
+  ContactFieldDefinition,
+  ContactStage,
+  Tag,
+  TemplateDto,
+  User,
+} from "@ccp/shared/types";
 
 import { TemplateFillView } from "./template-picker/fill-view";
 import { TemplateListView } from "./template-picker/list-view";
@@ -44,6 +51,15 @@ interface PickerProps {
   syncing: boolean;
   /** True when WABA id isn't configured — picker shows a setup nudge. */
   wabaMissing: boolean;
+  /** Conversation's contact — drives token resolution + the resolved preview. */
+  contact: Contact;
+  currentUser: User;
+  stageCatalog: ContactStage[];
+  tags: Tag[];
+  fieldDefinitions: ContactFieldDefinition[];
+  /** Most-recent inbound timestamp — drives the `$var.contact.last_inbound_at`
+   *  / window-state derived tokens (mirrors the snippet picker's resolver). */
+  lastInboundAt: string | null;
   onClose: () => void;
   onRefresh: () => void;
   onSend: (args: {
@@ -93,6 +109,12 @@ function PickerPanel(props: PickerProps) {
     error,
     syncing,
     wabaMissing,
+    contact,
+    currentUser,
+    stageCatalog,
+    tags,
+    fieldDefinitions,
+    lastInboundAt,
     onClose,
     onRefresh,
     onSend,
@@ -198,6 +220,12 @@ function PickerPanel(props: PickerProps) {
           template={selected}
           sending={sending}
           sendError={sendError}
+          contact={contact}
+          currentUser={currentUser}
+          stageCatalog={stageCatalog}
+          tags={tags}
+          fieldDefinitions={fieldDefinitions}
+          lastInboundAt={lastInboundAt}
           onSubmit={async (variables) => {
             setSendError(null);
             setSending(true);

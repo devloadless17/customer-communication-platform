@@ -819,6 +819,7 @@ function ThreadWorkspace({
         nextOlderCursor={thread.nextOlderCursor}
         stageCatalog={stageCatalog}
         tags={tags}
+        fieldDefinitions={fieldDefinitions}
         canManageStages={canManageStages}
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}

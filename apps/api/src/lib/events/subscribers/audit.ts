@@ -21,8 +21,27 @@
 
 import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
 
+import { db } from "@/lib/db";
 import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { recordConversationEvent } from "@/lib/inbox/events";
+
+/**
+ * Resolve the conversation for a contact. Contact↔Conversation is 1:1
+ * (DB-enforced via `@@unique([teamId, contactId])`), so the result is at most
+ * one row. Returns null when the contact was created without a conversation
+ * yet (manual create / CSV import that never messaged in) — those mutations
+ * have no in-conversation surface to attach an audit row to, so we skip.
+ */
+async function resolveConversationIdForContact(
+  teamId: string,
+  contactId: string,
+): Promise<string | null> {
+  const conv = await db.conversation.findFirst({
+    where: { teamId, contactId },
+    select: { id: true },
+  });
+  return conv?.id ?? null;
+}
 
 export function registerAuditSubscribers(): void {
   // All audit handlers run at the AUDIT tier (after realtime, before
@@ -92,5 +111,83 @@ export function registerAuditSubscribers(): void {
       kind: "note_deleted",
       before: { noteId: e.noteId },
     });
+  });
+
+  // Stage changed (Contact-level lifecycle, surfaced in the in-conversation
+  // audit because Contact↔Conversation is 1:1). Stage NAMES are resolved at
+  // write time so the timeline reads "Lead → Customer" without a future join
+  // into ContactStage rows that may have been renamed/deleted by then.
+  subscribe("contact.lifecycle_changed", async (e) => {
+    if (e.before.stageId === e.after.stageId) return;
+    const conversationId = await resolveConversationIdForContact(
+      e.teamId,
+      e.contactId,
+    );
+    if (!conversationId) return;
+    const stageIds = [e.before.stageId, e.after.stageId].filter(
+      (id): id is string => Boolean(id),
+    );
+    const stages = stageIds.length
+      ? await db.contactStage.findMany({
+          where: { teamId: e.teamId, id: { in: stageIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const nameById = new Map(stages.map((s) => [s.id, s.name] as const));
+    await recordConversationEvent({
+      conversationId,
+      teamId: e.teamId,
+      userId: e.changedByUserId,
+      apiKeyId: e.changedByApiKeyId ?? null,
+      kind: "stage_changed",
+      before: {
+        stageId: e.before.stageId,
+        stageName: e.before.stageId ? nameById.get(e.before.stageId) ?? null : null,
+      },
+      after: {
+        stageId: e.after.stageId,
+        stageName: e.after.stageId ? nameById.get(e.after.stageId) ?? null : null,
+      },
+    });
+  });
+
+  // Tag added / removed (Contact-level, surfaced in the in-conversation
+  // audit via the 1:1). One audit row per tag change so the timeline can
+  // render "Added VIP", "Removed Ramadan buyers" as discrete lines instead
+  // of an opaque diff. Tag NAMES are resolved at write time so a future
+  // rename doesn't garble historical entries.
+  subscribe("contact.tag_changed", async (e) => {
+    if (e.added.length === 0 && e.removed.length === 0) return;
+    const conversationId = await resolveConversationIdForContact(
+      e.teamId,
+      e.contactId,
+    );
+    if (!conversationId) return;
+    const allTagIds = [...e.added, ...e.removed];
+    const tags = await db.tag.findMany({
+      where: { teamId: e.teamId, id: { in: allTagIds } },
+      select: { id: true, name: true },
+    });
+    const nameById = new Map(tags.map((t) => [t.id, t.name] as const));
+    for (const tagId of e.added) {
+      await recordConversationEvent({
+        conversationId,
+        teamId: e.teamId,
+        userId: e.changedByUserId,
+        apiKeyId: e.changedByApiKeyId ?? null,
+        kind: "tag_added",
+        after: { tagId, tagName: nameById.get(tagId) ?? null },
+      });
+    }
+    for (const tagId of e.removed) {
+      await recordConversationEvent({
+        conversationId,
+        teamId: e.teamId,
+        userId: e.changedByUserId,
+        apiKeyId: e.changedByApiKeyId ?? null,
+        kind: "tag_removed",
+        before: { tagId, tagName: nameById.get(tagId) ?? null },
+      });
+    }
   });
 }

@@ -18,6 +18,7 @@ import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import type {
   Contact,
+  ContactFieldDefinition,
   ContactStage,
   MediaKind,
   Message,
@@ -105,6 +106,7 @@ export function ReplyBox({
   contact,
   stageCatalog,
   tags,
+  fieldDefinitions,
   lastInboundAt,
   replyTarget,
   onCancelReply,
@@ -127,6 +129,9 @@ export function ReplyBox({
    *  agent inserts a snippet (the contact carries only ids). */
   stageCatalog: ContactStage[];
   tags: Tag[];
+  /** Team custom-field schema — forwarded to TemplatePicker so the per-
+   *  variable field-token dropdown lists known custom keys. */
+  fieldDefinitions: ContactFieldDefinition[];
   /**
    * Most recent inbound timestamp for this contact. Drives the 24h window
    * status — when null or > 24h ago, free-form replies are blocked (Meta
@@ -1177,6 +1182,12 @@ export function ReplyBox({
         error={templatesError}
         syncing={templatesSyncing}
         wabaMissing={wabaMissing}
+        contact={contact}
+        currentUser={currentUser}
+        stageCatalog={stageCatalog}
+        tags={tags}
+        fieldDefinitions={fieldDefinitions}
+        lastInboundAt={lastInboundAt}
         onClose={() => setPickerOpen(false)}
         onRefresh={syncTemplates}
         onSend={sendTemplate}

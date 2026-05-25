@@ -175,7 +175,7 @@ export function CountryCodePicker({
       {open && (
         <div
           role="listbox"
-          className="absolute left-0 top-full z-50 mt-1 flex max-h-[300px] w-[260px] flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
+          className="absolute left-0 top-full z-50 mt-1 flex max-h-75 w-65 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
         >
           <div className="border-b border-border px-2.5 py-2">
             <div className="relative">

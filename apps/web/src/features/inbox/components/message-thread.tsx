@@ -12,6 +12,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
 import { formatDaySeparator } from "@ccp/shared/utils";
 import type {
+  ContactFieldDefinition,
   ContactStage,
   ConversationWithRefs,
   InternalNote,
@@ -62,6 +63,7 @@ function MessageThreadImpl({
   nextOlderCursor,
   stageCatalog,
   tags,
+  fieldDefinitions,
   canManageStages,
   onMarkRead,
   onSnapshot,
@@ -76,6 +78,9 @@ function MessageThreadImpl({
   /** Team tag catalog — forwarded to ReplyBox so snippet
    *  `$var.contact.tag_names` resolves (contact carries only tag ids). */
   tags: Tag[];
+  /** Team custom-field schema — forwarded to ReplyBox so the template
+   *  fill view can offer the `$var.contact.<custom_key>` picker. */
+  fieldDefinitions: ContactFieldDefinition[];
   /** Whether the current user can edit the team's stage catalog. */
   canManageStages: boolean;
   /** Forwarded to useConversationEvents so the shell can patch its cached
@@ -970,6 +975,7 @@ function MessageThreadImpl({
             contact={contact}
             stageCatalog={stageCatalog}
             tags={tags}
+            fieldDefinitions={fieldDefinitions}
             lastInboundAt={lastInboundAt}
             replyTarget={replyTarget}
             onCancelReply={cancelReply}

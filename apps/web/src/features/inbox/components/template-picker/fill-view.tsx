@@ -1,12 +1,24 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, Loader2, Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
-import type { TemplateDto } from "@ccp/shared/types";
+import type {
+  Contact,
+  ContactFieldDefinition,
+  ContactStage,
+  Tag,
+  TemplateDto,
+  User,
+} from "@ccp/shared/types";
+import {
+  resolveFieldTokens,
+  type ContactLike,
+} from "@ccp/shared/field-tokens";
+import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
+import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
 
 import {
   countPlaceholders,
@@ -19,11 +31,29 @@ export function TemplateFillView({
   template,
   sending,
   sendError,
+  contact,
+  currentUser,
+  stageCatalog,
+  tags,
+  fieldDefinitions,
+  lastInboundAt,
   onSubmit,
 }: {
   template: TemplateDto;
   sending: boolean;
   sendError: string | null;
+  /** Conversation contact — token target + preview source. */
+  contact: Contact;
+  /** The agent sending — drives `$var.agent.*` tokens. */
+  currentUser: User;
+  /** Stage catalog — resolves `$var.contact.stage_name` (contact carries only stageId). */
+  stageCatalog: ContactStage[];
+  /** Tag catalog — resolves `$var.contact.tag_names`. */
+  tags: Tag[];
+  /** Team custom-field schema — drives the picker dropdown. */
+  fieldDefinitions: ContactFieldDefinition[];
+  /** Last inbound timestamp — folded into ContactLike for window-state tokens. */
+  lastInboundAt: string | null;
   onSubmit: (vars: { body: string[]; header?: string }) => Promise<void>;
 }) {
   // The DTO carries `components: unknown[]` to keep the boundary loose;
@@ -58,9 +88,44 @@ export function TemplateFillView({
     firstEmptyRef.current?.focus();
   }, [template.id]);
 
+  // ContactLike for token resolution — mirrors the snippet picker's shape in
+  // ReplyBox so `$var.contact.stage_name` / `$var.contact.tag_names` resolve
+  // off the catalogs (the contact row carries only ids).
+  const contactForTokens = useMemo<ContactLike>(
+    () => ({
+      name: contact.name,
+      phoneNumber: contact.phoneNumber,
+      email: contact.email ?? null,
+      location: contact.location ?? null,
+      customFields: contact.customFields ?? {},
+      lastInboundAt,
+      stageName: contact.stageId
+        ? stageCatalog.find((s) => s.id === contact.stageId)?.name ?? null
+        : null,
+      tagNames: (contact.tagIds ?? [])
+        .map((id) => tags.find((t) => t.id === id)?.name)
+        .filter((n): n is string => typeof n === "string"),
+    }),
+    [contact, stageCatalog, tags, lastInboundAt],
+  );
+
+  // Resolve a single field's text against the conversation's contact. Empty
+  // input passes through as empty — the form's "all filled" gate uses the
+  // RESOLVED value so an unfilled token (e.g. blank email) blocks send.
+  const resolve = useCallback(
+    (raw: string) => resolveFieldTokens(raw, contactForTokens, currentUser),
+    [contactForTokens, currentUser],
+  );
+
+  const resolvedBodyVars = useMemo(
+    () => bodyVars.map(resolve),
+    [bodyVars, resolve],
+  );
+  const resolvedHeaderVar = useMemo(() => resolve(headerVar), [headerVar, resolve]);
+
   const allFilled =
-    bodyVars.every((v) => v.trim().length > 0) &&
-    (headerVarCount === 0 || headerVar.trim().length > 0);
+    resolvedBodyVars.every((v) => v.trim().length > 0) &&
+    (headerVarCount === 0 || resolvedHeaderVar.trim().length > 0);
 
   return (
     <form
@@ -68,9 +133,13 @@ export function TemplateFillView({
       onSubmit={(e) => {
         e.preventDefault();
         if (!allFilled || sending) return;
+        // Resolve tokens BEFORE handing to the parent — the server's template
+        // send path doesn't run a token resolver (broadcasts + workflows do,
+        // but per-conversation template send doesn't), so the on-the-wire
+        // variables must already be literal strings.
         void onSubmit({
-          body: bodyVars,
-          ...(headerVarCount > 0 ? { header: headerVar } : {}),
+          body: resolvedBodyVars,
+          ...(headerVarCount > 0 ? { header: resolvedHeaderVar } : {}),
         });
       }}
     >
@@ -85,9 +154,11 @@ export function TemplateFillView({
               <VarField
                 label="Header {{1}}"
                 value={headerVar}
+                resolved={resolvedHeaderVar}
                 onChange={setHeaderVar}
                 placeholder={extractExample(headerComp?.example?.header_text, 0)}
                 inputRef={headerVar.length === 0 ? firstEmptyRef : undefined}
+                fieldDefinitions={fieldDefinitions}
               />
             )}
             {bodyVars.map((v, i) => (
@@ -95,6 +166,7 @@ export function TemplateFillView({
                 key={i}
                 label={`Body {{${i + 1}}}`}
                 value={v}
+                resolved={resolvedBodyVars[i] ?? ""}
                 onChange={(next) => {
                   setBodyVars((cur) => {
                     const copy = cur.slice();
@@ -108,6 +180,7 @@ export function TemplateFillView({
                     ? firstEmptyRef
                     : undefined
                 }
+                fieldDefinitions={fieldDefinitions}
               />
             ))}
           </div>
@@ -117,7 +190,8 @@ export function TemplateFillView({
           </div>
         )}
 
-        {/* Preview */}
+        {/* Preview — uses RESOLVED values so the agent sees exactly what the
+            customer will receive (not the raw `$var.contact.name` tokens). */}
         <div className="mt-5">
           <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             <span>Preview</span>
@@ -125,9 +199,9 @@ export function TemplateFillView({
           </div>
           <PreviewBubble
             headerComp={headerComp}
-            headerValue={headerVar}
+            headerValue={resolvedHeaderVar}
             bodyText={template.bodyText}
-            bodyVars={bodyVars}
+            bodyVars={resolvedBodyVars}
             footerComp={footerComp}
             buttonsComp={buttonsComp}
           />
@@ -167,28 +241,78 @@ export function TemplateFillView({
 function VarField({
   label,
   value,
+  resolved,
   onChange,
   placeholder,
   inputRef,
+  fieldDefinitions,
 }: {
   label: string;
+  /** Raw input, may contain `$var.contact.*` tokens. */
   value: string;
+  /** Token-resolved value for this contact — used to hint "Will send as: …"
+   *  when a token is present, mirroring the broadcast form's pattern. */
+  resolved: string;
   onChange: (next: string) => void;
   placeholder?: string;
   inputRef?: React.Ref<HTMLInputElement>;
+  fieldDefinitions: ContactFieldDefinition[];
 }) {
+  const localRef = useRef<HTMLInputElement>(null);
+  const ref = (inputRef ?? localRef) as React.RefObject<HTMLInputElement>;
+
+  // Splice the token at the current cursor (same pattern as the broadcast
+  // form's VarField). Falls back to append when the field isn't focused.
+  const insertToken = useCallback(
+    (token: string) => {
+      const el = ref.current;
+      if (!el || el.selectionStart === null) {
+        onChange(value + token);
+        return;
+      }
+      const start = el.selectionStart;
+      const end = el.selectionEnd ?? start;
+      onChange(value.slice(0, start) + token + value.slice(end));
+      requestAnimationFrame(() => {
+        el.focus();
+        const pos = start + token.length;
+        el.setSelectionRange(pos, pos);
+      });
+    },
+    [value, onChange, ref],
+  );
+
+  const hasToken = /\$var\.(contact|agent)\./.test(value);
+
   return (
     <label className="flex flex-col gap-1">
       <span className="font-mono text-[11px] font-medium text-foreground">
         {label}
       </span>
-      <Input
-        ref={inputRef}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder ? `e.g. ${placeholder}` : "Type a value…"}
-        className="h-9 text-sm"
-      />
+      <div className="flex items-center gap-1.5">
+        <TokenHighlightInput
+          ref={ref}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder ? `e.g. ${placeholder}` : "Type a value or insert $var.contact.name"}
+          fieldDefinitions={fieldDefinitions}
+          className="h-9 text-sm"
+        />
+        <FieldTokenPicker
+          fieldDefinitions={fieldDefinitions}
+          onInsert={insertToken}
+          includeAgent
+          hint="Tokens are replaced with this contact's data when you send."
+        />
+      </div>
+      {hasToken && (
+        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+          <span className="font-medium">Will send:</span>
+          <span className="truncate font-mono text-foreground">
+            {resolved || <span className="text-muted-foreground italic">(empty)</span>}
+          </span>
+        </div>
+      )}
     </label>
   );
 }
