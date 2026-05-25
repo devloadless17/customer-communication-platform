@@ -43,6 +43,17 @@ export const SearchMessagesQuerySchema = z.object({
 });
 export type SearchMessagesQuery = z.infer<typeof SearchMessagesQuerySchema>;
 
+// Global (team-wide) inbox search — the tabbed search bar. `scope` selects
+// which entity to search; the response shape differs per scope (the client
+// knows the shape from the tab it requested).
+export const GlobalSearchQuerySchema = z.object({
+  scope: z.enum(["contacts", "messages", "notes"]),
+  q: z.string().max(200).optional(),
+  cursor: z.string().min(1).optional(),
+  take: takeQuery,
+});
+export type GlobalSearchQuery = z.infer<typeof GlobalSearchQuerySchema>;
+
 // `messageId` is required so it stays at the type level — the controller
 // can read query.messageId without re-narrowing.
 export const MessageContextQuerySchema = z.object({

@@ -21,10 +21,15 @@ import {
   listNewerMessages,
   listOlderMessages,
   loadMessageContextWindow,
+  searchAllMessages,
+  searchAllNotes,
+  searchContacts,
   searchConversationMessages,
 } from "@/lib/queries";
-import type { User } from "@ccp/shared/types";
-import { workflowContactSnapshot } from "@/lib/workflows/events";
+import {
+  assignConversation,
+  setConversationStatus,
+} from "@/lib/conversations/mutations";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
@@ -194,6 +199,29 @@ export class ConversationsService {
     return searchConversationMessages(teamId, conversationId, opts);
   }
 
+  // ---- Global (team-wide) search — the tabbed inbox search bar -----------
+
+  globalSearchContacts(
+    teamId: string,
+    opts: { query: string; take?: number; cursor?: string },
+  ) {
+    return searchContacts(teamId, opts);
+  }
+
+  globalSearchMessages(
+    teamId: string,
+    opts: { query: string; take?: number; cursor?: string },
+  ) {
+    return searchAllMessages(teamId, opts);
+  }
+
+  globalSearchNotes(
+    teamId: string,
+    opts: { query: string; take?: number; cursor?: string },
+  ) {
+    return searchAllNotes(teamId, opts);
+  }
+
   // ---- Bulk -----------------------------------------------------------
 
   /**
@@ -291,119 +319,28 @@ export class ConversationsService {
     input: AssignConversationInput,
     opts?: { silent?: boolean },
   ): Promise<void> {
-    const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      select: {
-        id: true,
-        assignedUserId: true,
-        status: true,
-        contact: { include: { tags: { select: { id: true } } } },
-      },
+    // Business rule (status-flip, CAS, event publishing) lives in the shared
+    // lib helper so the workflow `assign_to` step and the /v1 API run the
+    // EXACT same logic — see lib/conversations/mutations.ts. This method only
+    // maps the typed outcome to the HTTP error surface.
+    const result = await assignConversation({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
+      teamId,
+      conversationId,
+      targetUserId: input.assignedUserId,
+      changedByUserId: actorUserId,
+      silent: opts?.silent === true,
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-
-    const previousAssignedUserId = conversation.assignedUserId;
-    const previousStatus = conversation.status;
-    const { assignedUserId } = input;
-
-    if (assignedUserId !== null) {
-      // Reject deactivated assignees — a soft-deleted agent shouldn't be
-      // assigned new work even if their User row still exists for history.
-      const member = await this.db.user.findFirst({
-        where: { id: assignedUserId, teamId, deactivatedAt: null },
-        select: { id: true },
-      });
-      if (!member) throw new BadRequestException({ error: "user not in team" });
-    }
-
-    // Derive the next status from the assignment transition. Two narrow
-    // rules — anything not listed keeps status untouched.
-    //   - Assigning to someone while pending/closed → open (claim moves it
-    //     out of the triage column or reopens it).
-    //   - Unassigning while open → pending (back to triage).
-    let nextStatus: typeof previousStatus = previousStatus;
-    if (assignedUserId !== null && previousStatus !== "open") {
-      nextStatus = "open";
-    } else if (assignedUserId === null && previousStatus === "open") {
-      nextStatus = "pending";
-    }
-    const statusChanged = nextStatus !== previousStatus;
-
-    let updated;
-    try {
-      updated = await this.db.conversation.update({
-        // CAS includes status when we're changing it, so a teammate's
-        // racing setStatus call can't get clobbered silently — they get
-        // 409 and retry. When status isn't changing we still pin it in
-        // the where so a concurrent close (e.g. teammate closes while we
-        // assign) isn't dropped by writing back `data.status: <stale>`.
-        where: {
-          id: conversationId,
-          teamId,
-          assignedUserId: previousAssignedUserId,
-          status: previousStatus,
-        },
-        data: statusChanged
-          ? { assignedUserId, status: nextStatus }
-          : { assignedUserId },
-        include: { assignedUser: true },
-      });
-    } catch (err) {
-      if (isP2025(err)) {
-        throw new ConflictException({ error: "conversation was reassigned by someone else" });
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        throw new NotFoundException({ error: "conversation not found" });
       }
-      throw err;
-    }
-
-    const assignedUser: User | null = updated.assignedUser
-      ? {
-          id: updated.assignedUser.id,
-          teamId: updated.assignedUser.teamId,
-          role: updated.assignedUser.role,
-          name: updated.assignedUser.name,
-          email: updated.assignedUser.email,
-          avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
-          isActive: updated.assignedUser.deactivatedAt === null,
-        }
-      : null;
-
-    // Only when the assignee actually changed — re-picking the SAME user to
-    // claim an assigned-but-pending chat (→ open) must not re-trigger
-    // on-assignment workflows / audit rows; only the status_changed side-
-    // effect below should fire.
-    if (assignedUserId !== previousAssignedUserId) {
-      await this.bus.publish({
-        type: "conversation.assigned",
-        teamId,
-        conversationId,
-        assignedUser,
-        previousAssignedUserId,
-        newAssignedUserId: assignedUserId,
-        changedByUserId: actorUserId,
-        contact: workflowContactSnapshot(conversation.contact),
-        silent: opts?.silent === true,
-      });
-    }
-
-    if (statusChanged) {
-      // Fired AFTER conversation.assigned so a consumer that watches both
-      // (audit / analytics / workflow-dispatch) sees the cause-then-effect
-      // order. Same actor, same contact snapshot — the status change was
-      // a side-effect of the assign, not an independent event, but it IS
-      // a real status change and downstream handlers should treat it as
-      // such (workflows on reopen/pending fire, badge counts re-evaluate,
-      // status-history audit row gets written).
-      await this.bus.publish({
-        type: "conversation.status_changed",
-        teamId,
-        conversationId,
-        previousStatus,
-        newStatus: nextStatus,
-        changedByUserId: actorUserId,
-        contact: workflowContactSnapshot(conversation.contact),
-        // When the caller asked for a silent assign, the auto-flip it caused
-        // is part of the same internal action — suppress its reactions too.
-        silent: opts?.silent === true,
+      if (result.reason === "invalid_user") {
+        throw new BadRequestException({ error: "user not in team" });
+      }
+      throw new ConflictException({
+        error: "conversation was reassigned by someone else",
       });
     }
   }
@@ -428,66 +365,24 @@ export class ConversationsService {
     input: SetConversationStatusInput,
     opts?: { silent?: boolean },
   ): Promise<void> {
-    const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      include: { contact: { include: { tags: { select: { id: true } } } } },
-    });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-    const previousStatus = conversation.status;
-    const previousAssignedUserId = conversation.assignedUserId;
-
-    // Closing releases the owner: a closed thread has no work-in-progress, so
-    // it shouldn't sit on anyone's "Mine". Clears regardless of WHO it was
-    // assigned to (closing a teammate's thread frees it too) — when it reopens
-    // it lands back in triage unassigned, ready to be re-claimed. Only the
-    // close transition unassigns; reopening to open/pending does not touch the
-    // assignee. Done in the SAME update as the status flip so the row never
-    // exists in a closed-but-still-assigned state.
-    const unassignOnClose =
-      input.status === "closed" && previousAssignedUserId !== null;
-
-    try {
-      await this.db.conversation.update({
-        where: { id: conversationId, teamId, status: previousStatus },
-        data: unassignOnClose
-          ? { status: input.status, assignedUserId: null }
-          : { status: input.status },
-      });
-    } catch (err) {
-      if (isP2025(err)) {
-        throw new ConflictException({ error: "conversation status changed by someone else" });
-      }
-      throw err;
-    }
-
-    await this.bus.publish({
-      type: "conversation.status_changed",
+    // Unassign-on-close + CAS + event publishing live in the shared lib helper
+    // so the workflow `close_conversation` step and /v1 run identically — see
+    // lib/conversations/mutations.ts. This method maps the outcome to HTTP.
+    const result = await setConversationStatus({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
       teamId,
       conversationId,
-      previousStatus,
-      newStatus: input.status,
+      status: input.status,
       changedByUserId: actorUserId,
-      contact: workflowContactSnapshot(conversation.contact),
       silent: opts?.silent === true,
     });
-
-    // Emitted AFTER status_changed: the unassign is a side-effect of the close,
-    // so consumers watching both see cause (closed) then effect (unassigned).
-    // Same actor/contact snapshot. NOT silent unless the close itself was —
-    // a manual close should fire on-unassigned workflows + webhooks like any
-    // other unassignment. Drives the same socket fanout + audit row + reducers
-    // as a manual unassign, so the UI clears the assignee with no extra wiring.
-    if (unassignOnClose) {
-      await this.bus.publish({
-        type: "conversation.assigned",
-        teamId,
-        conversationId,
-        assignedUser: null,
-        previousAssignedUserId,
-        newAssignedUserId: null,
-        changedByUserId: actorUserId,
-        contact: workflowContactSnapshot(conversation.contact),
-        silent: opts?.silent === true,
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        throw new NotFoundException({ error: "conversation not found" });
+      }
+      throw new ConflictException({
+        error: "conversation status changed by someone else",
       });
     }
   }
@@ -743,13 +638,4 @@ export class ConversationsService {
       this.logger.warn(`markIncomingRead failed: ${err instanceof Error ? err.message : err}`);
     }
   }
-}
-
-function isP2025(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code?: string }).code === "P2025"
-  );
 }

@@ -24,16 +24,18 @@ import { readError } from "./utils";
  * Keep these in sync — divergence would show as a one-frame UI flash
  * (client predicts X, server returns Y, client snaps to Y).
  *
- *   - Assign to user + status≠open   → status becomes open (claim from
- *     pending = move out of triage; claim from closed = reopen)
- *   - Unassign       + status=open    → status becomes pending
+ * Assignment NEVER sets "open" — only the assignee chatting does (claim-on-
+ * reply). So:
+ *   - Assign to user + status=closed → pending (reopen into triage, assigned)
+ *   - Assign to user + status=pending → unchanged (stays pending)
+ *   - Unassign       + status=open    → pending (back to triage)
  *   - everything else                 → status unchanged
  */
 function predictNextStatus(
   current: ConversationStatus,
   nextAssignedUserId: string | null,
 ): ConversationStatus {
-  if (nextAssignedUserId !== null && current !== "open") return "open";
+  if (nextAssignedUserId !== null && current === "closed") return "pending";
   if (nextAssignedUserId === null && current === "open") return "pending";
   return current;
 }

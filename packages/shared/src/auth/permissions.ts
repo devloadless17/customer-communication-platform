@@ -108,7 +108,9 @@ export type Capability =
   | "templates:manage"
   | "audienceGroups:manage"
   | "stages:manage"
-  | "contactFields:manage";
+  | "contactFields:manage"
+  | "tags:manage"
+  | "snippets:manage";
 
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
@@ -118,6 +120,8 @@ export const ALL_CAPABILITIES: Capability[] = [
   "audienceGroups:manage",
   "stages:manage",
   "contactFields:manage",
+  "tags:manage",
+  "snippets:manage",
 ];
 
 /** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
@@ -133,6 +137,8 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "audienceGroups:manage": "Manage audience groups",
   "stages:manage": "Manage lifecycle stages",
   "contactFields:manage": "Manage contact fields",
+  "tags:manage": "Create & manage tags",
+  "snippets:manage": "Create & manage snippets",
 };
 
 /**
@@ -157,6 +163,12 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     "audienceGroups:manage": true,
     "stages:manage": false,
     "contactFields:manage": false,
+    // tags + snippets were UNGATED before this capability existed (any agent
+    // could create/edit/delete them), so default `true` to preserve today's
+    // behavior exactly. An admin can flip them off in settings to lock down
+    // team-wide tag/snippet management — the whole point of adding the gate.
+    "tags:manage": true,
+    "snippets:manage": true,
   },
 };
 

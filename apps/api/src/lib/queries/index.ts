@@ -46,4 +46,10 @@ export {
 } from "./search";
 export type { MessageSearchHit, MessageSearchPage } from "./search";
 
+export {
+  searchAllMessages,
+  searchAllNotes,
+  searchContacts,
+} from "./global-search";
+
 export { ensureDefaultStage, listContactStages } from "./stages";

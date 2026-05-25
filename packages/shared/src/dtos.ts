@@ -90,6 +90,74 @@ export interface MessageSearchPage {
 }
 
 // ---------------------------------------------------------------------------
+// Global inbox search (the tabbed search bar over the conversation list).
+// Three scopes — contacts / messages / notes — each ILIKE-matched team-wide
+// (NOT scoped to one conversation, unlike MessageSearchHit above). Every hit
+// carries enough context to render a row AND to open the right conversation:
+// `conversationId` is what the inbox opens, plus a `messageId` on message/note
+// hits so the thread can jump straight to the match.
+// ---------------------------------------------------------------------------
+
+export type InboxSearchScope = "contacts" | "messages" | "notes";
+
+/** A contact match — opens that contact's conversation (one-per-contact). */
+export interface ContactSearchHit {
+  contactId: string;
+  /** Null when the contact has never had a conversation (manually added,
+   *  never messaged). The UI renders these as "start a chat" rather than
+   *  "open thread". */
+  conversationId: string | null;
+  name: string;
+  phoneNumber: string | null;
+  avatarUrl?: string;
+  /** Which field actually matched, so the row can show the matched value
+   *  (e.g. an email hit shows the email, not just the name). */
+  matchedField: "name" | "phone" | "email";
+  /** The value of the matched field, for the snippet line. */
+  matchedValue: string;
+}
+
+/** A message match anywhere in the team — opens its conversation + jumps. */
+export interface GlobalMessageHit {
+  messageId: string;
+  conversationId: string;
+  /** Contact name on the conversation, for the row header. */
+  contactName: string;
+  contactAvatarUrl?: string;
+  /** Body or caption — whichever matched (caption preferred when it's the
+   *  one that contains the query). Already trimmed for display. */
+  snippet: string;
+  direction: MessageDirection;
+  timestamp: string;
+  mediaKind?: MediaKind;
+}
+
+/** An internal-note match — opens the conversation it's attached to. */
+export interface NoteSearchHit {
+  noteId: string;
+  conversationId: string;
+  contactName: string;
+  contactAvatarUrl?: string;
+  /** The note author's name, null when the author was removed. */
+  authorName: string | null;
+  snippet: string;
+  timestamp: string;
+}
+
+export interface ContactSearchPage {
+  items: ContactSearchHit[];
+  nextCursor: string | null;
+}
+export interface GlobalMessageSearchPage {
+  items: GlobalMessageHit[];
+  nextCursor: string | null;
+}
+export interface NoteSearchPage {
+  items: NoteSearchHit[];
+  nextCursor: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Contacts list — request-side options. Response shape is `CursorPage<ContactListItem>`
 // from ./types (already there).
 // ---------------------------------------------------------------------------

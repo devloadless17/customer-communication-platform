@@ -69,6 +69,7 @@ function MessageThreadImpl({
   onMarkRead,
   onSnapshot,
   onMobileBack,
+  jumpToMessageId,
 }: {
   data: ConversationWithRefs;
   teamMembers: User[];
@@ -98,6 +99,13 @@ function MessageThreadImpl({
   /** Below md the inbox single-panes between conversation list and thread.
    *  When set, ThreadHeader renders a back-arrow that returns to the list. */
   onMobileBack?: () => void;
+  /** One-shot deep-link target from the GLOBAL inbox search: when an agent
+   *  clicks a "Messages" hit in another conversation, the shell opens this
+   *  thread and passes the matched message id here. The thread loads a
+   *  context window around it (if outside the slice) and scrolls to it,
+   *  reusing the same machinery the in-thread search uses. Null/undefined on
+   *  every normal open. */
+  jumpToMessageId?: string | null;
 }) {
   const {
     data,
@@ -436,6 +444,12 @@ function MessageThreadImpl({
     [matches],
   );
 
+  // The id the thread should center on: an in-thread search match the user is
+  // navigating takes priority; otherwise the one-shot deep-link target from
+  // the global inbox search. Both flow through the SAME context-window load +
+  // scroll effect below. Cleared to null when neither is present.
+  const jumpTargetId = activeMatchId ?? jumpToMessageId ?? null;
+
   // Forward-ref to useChatScroll's `markBenignTailUpdate`. The hook is
   // declared later (it needs `lastEntryKey` which is computed below), but
   // the active-match effect needs to flag the slice swap as benign before
@@ -554,26 +568,26 @@ function MessageThreadImpl({
   // match on the next render).
   const handledMatchIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!activeMatchId) {
+    if (!jumpTargetId) {
       handledMatchIdRef.current = null;
       return;
     }
-    if (handledMatchIdRef.current === activeMatchId) return;
+    if (handledMatchIdRef.current === jumpTargetId) return;
 
-    if (messagesById.has(activeMatchId)) {
-      handledMatchIdRef.current = activeMatchId;
-      return scrollMatchIntoView(activeMatchId);
+    if (messagesById.has(jumpTargetId)) {
+      handledMatchIdRef.current = jumpTargetId;
+      return scrollMatchIntoView(jumpTargetId);
     }
 
     // Slow path: load a context window centered on the match and remember
     // to scroll once it renders.
-    handledMatchIdRef.current = activeMatchId;
+    handledMatchIdRef.current = jumpTargetId;
     let cancelled = false;
     setSearchError(null);
     void (async () => {
       try {
         const res = await fetch(
-          `/api/conversations/${conversation.id}/messages/context?messageId=${encodeURIComponent(activeMatchId)}`,
+          `/api/conversations/${conversation.id}/messages/context?messageId=${encodeURIComponent(jumpTargetId)}`,
         );
         if (cancelled) return;
         if (!res.ok) {
@@ -594,7 +608,7 @@ function MessageThreadImpl({
           messages: ctx.messages,
           nextOlderCursor: ctx.nextOlderCursor,
         });
-        setPendingJumpId(activeMatchId);
+        setPendingJumpId(jumpTargetId);
       } catch {
         if (!cancelled) setSearchError("Network error");
       }
@@ -602,7 +616,7 @@ function MessageThreadImpl({
     return () => {
       cancelled = true;
     };
-  }, [activeMatchId, messagesById, conversation.id, replaceWithContext, scrollMatchIntoView]);
+  }, [jumpTargetId, messagesById, conversation.id, replaceWithContext, scrollMatchIntoView]);
 
   // Once the context window has rendered, scroll to the message we were
   // waiting on. Routed through the shared helper so the same settle window

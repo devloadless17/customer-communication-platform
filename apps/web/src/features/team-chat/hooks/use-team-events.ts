@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { onOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
-import type { ConversationWithRefs, CursorPage } from "@ccp/shared/types";
+import type { Contact, ConversationWithRefs, CursorPage } from "@ccp/shared/types";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 
 export interface TeamEventsState {
@@ -117,6 +117,18 @@ export function useTeamEvents(
   // Same pattern inbox-shell.tsx uses for activeIdRef / displayedIdRef.
   const activeThreadRef = useRef(activeThread);
   activeThreadRef.current = activeThread;
+
+  // Last-known contact overlay, keyed by contactId. Updated on EVERY
+  // `contact:updated` frame (optimistic + server). Read during a resync to
+  // correct a STALE HTTP page's embedded contact — even for a row that was
+  // optimistically spliced OUT of the list (so it's no longer in the live
+  // `conversations` state to reconcile against). Without this, a stale resync
+  // page that still lists a just-moved contact under its OLD stage re-adds the
+  // row to the wrong stage filter — the "changed stage fast 2-3 times, header
+  // right but sidebar wrong" bug. Server frames are in-order + version-CAS'd,
+  // so the latest write here reflects the latest commit. Grow-only within a
+  // session; one small entry per contact the agent touches — negligible.
+  const latestContactRef = useRef<Map<string, Contact>>(new Map());
 
   // Re-seed when the server hands us a MEANINGFULLY different initial list.
   // Gating on raw array identity blew away every realtime update on any
@@ -265,10 +277,62 @@ export function useTeamEvents(
         const r = await fetchWithSessionGuard(url);
         if (!r.ok) return false;
         const page = (await r.json()) as CursorPage<ConversationWithRefs>;
+
+        // Self-heal the overlay: once the fetched page AGREES with the overlay
+        // on a contact's stage, the server has caught up and the overlay entry
+        // is redundant — drop it. This bounds overlay staleness to the rapid-
+        // change window: if we DIDN'T clear it, a later legitimate change we
+        // missed (e.g. a teammate's move while this tab was backgrounded) would
+        // be silently reverted by an outdated overlay entry. Disagreement means
+        // the page is still stale mid-burst, so the entry is KEPT and keeps
+        // correcting. Drop also when the page omits the contact entirely yet
+        // its rows are all accounted for — handled by the next clean resync.
+        {
+          const overlay = latestContactRef.current;
+          if (overlay.size > 0) {
+            const pageStageByContact = new Map(
+              page.items.map((c) => [c.contact.id, c.contact.stageId ?? null]),
+            );
+            for (const [contactId, c] of overlay) {
+              const pageStage = pageStageByContact.get(contactId);
+              if (pageStage !== undefined && pageStage === (c.stageId ?? null)) {
+                overlay.delete(contactId);
+              }
+            }
+          }
+        }
+
         setConversations((prev) => {
           const freshIds = new Set(page.items.map((c) => c.conversation.id));
-          const tail = prev.filter((c) => !freshIds.has(c.conversation.id));
-          return [...page.items, ...tail];
+          const overlay = latestContactRef.current;
+
+          // The HTTP resync can be STALE — it may have started before a
+          // stage/assign/status change committed server-side, so its rows can
+          // carry the OLD contact stage. Socket `contact:updated` frames, by
+          // contrast, arrive IN ORDER and the server's version-CAS means the
+          // last one we saw reflects the last commit — so `latestContactRef`
+          // is authoritative for a contact's stage over any page copy.
+          //
+          // Overlay every page row's embedded contact with the latest-known
+          // one (keyed by contactId, so it corrects even a row the page lists
+          // under the wrong stage), THEN prune the whole merged list by the
+          // SAME `rowMatchesFilter` the splice branches use. This kills the
+          // "changed stage fast 2-3 times → header right, sidebar still shows
+          // the old stage" bug: a stale page can no longer resurrect or retain
+          // a row that the latest contact data says doesn't match the filter.
+          const reconciledPage = page.items.map((row) => {
+            const latest = overlay.get(row.contact.id);
+            return latest ? { ...row, contact: latest } : row;
+          });
+          // Tail = local rows the page didn't return (newer realtime arrivals
+          // mid-fetch). Overlay their contact too, then prune below.
+          const tail = prev
+            .filter((c) => !freshIds.has(c.conversation.id))
+            .map((c) => {
+              const latest = overlay.get(c.contact.id);
+              return latest ? { ...c, contact: latest } : c;
+            });
+          return [...reconciledPage, ...tail].filter(rowMatchesFilter);
         });
         return true;
       } catch {
@@ -671,6 +735,10 @@ export function useTeamEvents(
       contact,
       optimistic,
     }) => {
+      // Record the latest-known contact so a later (possibly stale) resync can
+      // correct its page rows even for a contact whose row we just spliced OUT.
+      // In-order socket frames mean the last write wins = latest commit.
+      latestContactRef.current.set(contact.id, contact);
       setConversations((prev) => {
         const f = filterRef.current;
         const isStageFilter = f?.kind === "stage";

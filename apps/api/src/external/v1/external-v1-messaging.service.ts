@@ -35,10 +35,13 @@ import {
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
-import type { Message, Channel, User } from "@ccp/shared/types";
+import type { Message, Channel } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
-import { workflowContactSnapshot } from "@/lib/workflows/events";
+import {
+  assignConversation,
+  setConversationStatus,
+} from "@/lib/conversations/mutations";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -188,110 +191,33 @@ export class ExternalV1MessagingService {
     conversationId: string,
     input: ExternalAssignInput,
   ): Promise<{ ok: true }> {
-    const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      select: {
-        id: true,
-        assignedUserId: true,
-        status: true,
-        contact: { include: { tags: { select: { id: true } } } },
-      },
-    });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-
-    const previousAssignedUserId = conversation.assignedUserId;
-    const previousStatus = conversation.status;
-
-    if (input.assignedUserId !== null) {
-      // Mirror the UI route's guard (conversations.service.ts:assign): refuse
-      // to assign to a deactivated agent. Without `deactivatedAt: null`, a
-      // partner integration could strand a thread with a soft-deleted owner
-      // who'll never see it in any queue.
-      const member = await this.db.user.findFirst({
-        where: { id: input.assignedUserId, teamId, deactivatedAt: null },
-        select: { id: true },
-      });
-      if (!member) throw new BadRequestException({ error: "user not in team" });
-    }
-
-    // Mirror conversations.service.ts:assign — assignment carries an
-    // ownership signal so the status auto-flips on the two transitions
-    // worth automating. Kept identical between routes so a UI click + a
-    // partner /v1 POST produce the same end state.
-    let nextStatus: typeof previousStatus = previousStatus;
-    if (input.assignedUserId !== null && previousStatus === "closed") {
-      nextStatus = "open";
-    } else if (input.assignedUserId === null && previousStatus === "open") {
-      nextStatus = "pending";
-    }
-    const statusChanged = nextStatus !== previousStatus;
-
-    // CAS on previous assignee + status. Mirrors the UI route so a concurrent
-    // UI click and /v1 call converge on the same race-loser-409 behavior,
-    // instead of the /v1 update silently clobbering a fresh UI assignment
-    // (or a fresh manual close in the brief window before our write lands).
-    let updated;
-    try {
-      updated = await this.db.conversation.update({
-        where: {
-          id: conversationId,
-          teamId,
-          assignedUserId: previousAssignedUserId,
-          status: previousStatus,
-        },
-        data: statusChanged
-          ? { assignedUserId: input.assignedUserId, status: nextStatus }
-          : { assignedUserId: input.assignedUserId },
-        include: { assignedUser: true },
-      });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        throw new ConflictException({ error: "conversation was reassigned by someone else" });
-      }
-      throw err;
-    }
-
-    const assignedUser: User | null = updated.assignedUser
-      ? {
-          id: updated.assignedUser.id,
-          teamId: updated.assignedUser.teamId,
-          role: updated.assignedUser.role,
-          name: updated.assignedUser.name,
-          email: updated.assignedUser.email,
-          avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
-          isActive: updated.assignedUser.deactivatedAt === null,
-        }
-      : null;
-
-    // `silent: true` on the request → `silent` on BOTH the assign event and
-    // the cascaded status change, so a partner that (un)assigns via /v1 doesn't
-    // re-trigger a workflow on assignment OR echo a webhook back into itself.
-    const silent = input.silent === true;
-
-    await this.bus.publish({
-      type: "conversation.assigned",
+    // Shared business rule (member validation, CAS on assignee+status,
+    // status-flip on assign-to-closed → pending, gated event publishing) lives
+    // in lib/conversations/mutations.ts so a partner /v1 POST, a UI click, and
+    // a workflow step all produce the IDENTICAL end state. Previously this
+    // route flipped assign-to-closed → "open" (a drift); it now matches the
+    // others (→ pending; assignment never sets "open" — only chatting does).
+    // `changedByApiKeyId` threads partner attribution; `silent` skips workflow
+    // re-trigger + webhook echo.
+    const result = await assignConversation({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
       teamId,
       conversationId,
-      assignedUser,
-      previousAssignedUserId,
-      newAssignedUserId: input.assignedUserId,
+      targetUserId: input.assignedUserId,
       changedByUserId: null,
       changedByApiKeyId: apiKeyId,
-      contact: workflowContactSnapshot(conversation.contact),
-      silent,
+      silent: input.silent === true,
     });
-
-    if (statusChanged) {
-      await this.bus.publish({
-        type: "conversation.status_changed",
-        teamId,
-        conversationId,
-        previousStatus,
-        newStatus: nextStatus,
-        changedByUserId: null,
-        changedByApiKeyId: apiKeyId,
-        contact: workflowContactSnapshot(conversation.contact),
-        silent,
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        throw new NotFoundException({ error: "conversation not found" });
+      }
+      if (result.reason === "invalid_user") {
+        throw new BadRequestException({ error: "user not in team" });
+      }
+      throw new ConflictException({
+        error: "conversation was reassigned by someone else",
       });
     }
     return { ok: true };
@@ -333,52 +259,27 @@ export class ExternalV1MessagingService {
     conversationId: string,
     input: ExternalStatusInput,
   ): Promise<{ ok: true }> {
-    const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      include: { contact: { include: { tags: { select: { id: true } } } } },
-    });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-    const previousStatus = conversation.status;
-    const previousAssignedUserId = conversation.assignedUserId;
-
-    // Closing releases the owner — mirror ConversationsService.setStatus so a
-    // close via the external API leaves the thread in the same unassigned state
-    // as a close from the inbox UI (a closed thread has no work-in-progress).
-    const unassignOnClose =
-      input.status === "closed" && previousAssignedUserId !== null;
-
-    await this.db.conversation.update({
-      where: { id: conversationId },
-      data: unassignOnClose
-        ? { status: input.status, assignedUserId: null }
-        : { status: input.status },
-    });
-
-    await this.bus.publish({
-      type: "conversation.status_changed",
+    // Shared business rule (CAS, unassign-on-close, event publishing) lives in
+    // lib/conversations/mutations.ts so a /v1 close matches the inbox UI + the
+    // workflow close step exactly. (Also tightens the update with a status CAS
+    // + teamId guard the old hand-rolled version lacked.) `changedByApiKeyId`
+    // threads partner attribution; `silent` skips workflow re-trigger + echo.
+    const result = await setConversationStatus({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
       teamId,
       conversationId,
-      previousStatus,
-      newStatus: input.status,
+      status: input.status,
       changedByUserId: null,
       changedByApiKeyId: apiKeyId,
-      contact: workflowContactSnapshot(conversation.contact),
-      // `silent: true` → skip workflow re-trigger + webhook echo. See assign().
       silent: input.silent === true,
     });
-
-    if (unassignOnClose) {
-      await this.bus.publish({
-        type: "conversation.assigned",
-        teamId,
-        conversationId,
-        assignedUser: null,
-        previousAssignedUserId,
-        newAssignedUserId: null,
-        changedByUserId: null,
-        changedByApiKeyId: apiKeyId,
-        contact: workflowContactSnapshot(conversation.contact),
-        silent: input.silent === true,
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        throw new NotFoundException({ error: "conversation not found" });
+      }
+      throw new ConflictException({
+        error: "conversation status changed by someone else",
       });
     }
     return { ok: true };

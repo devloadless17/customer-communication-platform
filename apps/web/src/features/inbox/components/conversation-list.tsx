@@ -2,7 +2,6 @@
 
 import {
   memo,
-  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -23,6 +22,7 @@ import type {
   ConversationWithRefs,
 } from "@ccp/shared/types";
 import { ConversationListItem } from "./conversation-list-item";
+import { InboxSearchPanel, type SearchResultTarget } from "./inbox-search-panel";
 import type { Filter, PresetFilterId } from "./inbox-controls";
 
 const PRESET_LABELS: Record<PresetFilterId, string> = {
@@ -38,13 +38,14 @@ function ConversationListImpl({
   filter,
   search,
   onSearchChange,
-  searching = false,
   hasMore,
   loadingMore,
   onLoadMore,
   activeConversationId,
   pendingConversationId,
   onOpenConversation,
+  onOpenSearchResult,
+  onStartContactChat,
   onPrefetchConversation,
   canDeleteConversations,
 }: {
@@ -53,10 +54,6 @@ function ConversationListImpl({
   filter: Filter;
   search: string;
   onSearchChange: (s: string) => void;
-  /** True while a debounced server search is in flight. Drives the spinner
-   *  in the search box; the listed rows are still the previous results until
-   *  the new ones arrive. */
-  searching?: boolean;
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
@@ -70,6 +67,13 @@ function ConversationListImpl({
   /** Open a conversation in the workspace. The shell handles cache + URL
    *  sync — this list just dispatches. */
   onOpenConversation: (conversationId: string) => void;
+  /** Open a conversation from a search hit, optionally jumping to a message.
+   *  Distinct from onOpenConversation because message hits carry a target
+   *  the thread must scroll to. */
+  onOpenSearchResult: (target: SearchResultTarget) => void;
+  /** Start a fresh chat with a contact that has no conversation yet (a
+   *  contact-tab hit on a never-messaged contact). */
+  onStartContactChat: (contactId: string) => void;
   /** Warm the workspace cache for a conversation the agent is likely about
    *  to click. Idempotent and cheap — fires on hover/focus, no-ops if the
    *  row is already cached or in flight. */
@@ -151,24 +155,13 @@ function ConversationListImpl({
     }
   }
 
-  // Defer the client-side filter so a fast typist's keystrokes paint the
-  // input immediately while the (virtualized) list re-filters at lower
-  // priority — same pattern as the team channel-list search.
-  const deferredSearch = useDeferredValue(search);
-  const visible = useMemo(() => {
-    const q = deferredSearch.trim().toLowerCase();
-    if (!q) return conversations;
-    // Preset / stage filtering is server-side now (useTeamEvents drives a
-    // filter-aware fetch). Only the search box stays client-side because
-    // it's keystroke-debounced UX, not a true server query — flipping it
-    // server-side would force a fetch per keystroke. Search runs over the
-    // already-filtered slice the server returned.
-    return conversations.filter(({ conversation: c, contact }) => {
-      const haystack =
-        `${contact.name} ${contact.phoneNumber} ${c.lastMessagePreview}`.toLowerCase();
-      return haystack.includes(q);
-    });
-  }, [conversations, deferredSearch]);
+  // A non-empty query swaps the live conversation list for the global tabbed
+  // search panel (InboxSearchPanel). The live list is no longer client-side
+  // filtered — search is a true server query across the WHOLE team now, not a
+  // filter over the loaded slice (which could only ever find loaded rows).
+  const searchActive = search.trim().length > 0;
+  // The live list always renders the full server slice; no client filter.
+  const visible = conversations;
 
   const headerTitle = useMemo(() => {
     if (filter.kind === "preset") {
@@ -314,21 +307,34 @@ function ConversationListImpl({
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search name, phone, or message…"
+            placeholder="Search contacts, messages, comments…"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
             className="h-9 pl-8 pr-8"
           />
-          {searching && (
-            <Loader2
-              className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground"
-              aria-label="Searching"
-            />
+          {search.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onSearchChange("")}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <X className="size-3.5" />
+            </button>
           )}
         </div>
       </div>
 
-      <ScrollArea ref={scrollRootRef} className="flex-1">
+      {searchActive ? (
+        // Global tabbed search (Contacts / Messages / Comments) — replaces the
+        // live conversation list while a query is present.
+        <InboxSearchPanel
+          query={search}
+          onOpenResult={onOpenSearchResult}
+          onStartContactChat={onStartContactChat}
+        />
+      ) : (
+        <ScrollArea ref={scrollRootRef} className="flex-1">
         {visible.length === 0 ? (
           <div className="px-3 py-12 text-center text-xs text-muted-foreground">
             No conversations match.
@@ -428,7 +434,8 @@ function ConversationListImpl({
             )}
           </div>
         )}
-      </ScrollArea>
+        </ScrollArea>
+      )}
 
       <AnimatePresence>
         {selectionMode && selectedIds.size > 0 && (

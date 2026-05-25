@@ -82,8 +82,21 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // SCOPED TO THE CONVERSATION ROOM, not the team room (realtime audit
+  // 2026-05-25, R1). Status ticks (sent → delivered → read) are consumed by
+  // exactly ONE client surface — the live thread hook for the conversation the
+  // agent is VIEWING (use-conversation-events `onMessageStatus`), which already
+  // discards any frame whose conversationId != the displayed thread. The inbox
+  // LIST does not consume `message:status` at all. So a team-wide blast made
+  // every agent receive + parse a frame they immediately throw away. Each
+  // outbound message gets 3 status webhooks (sent/delivered/read); a
+  // 1k-recipient broadcast = ~3k frames × every connected tab — the last
+  // remaining team-room storm vector after `broadcast.recipient_message_sent`
+  // was scoped (see below). Emitting to the conversation room delivers the tick
+  // ONLY to agents subscribed to that thread (the common-case empty room is a
+  // no-op), with zero behavior change for the viewer.
   "message.status_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:status", {
+    emitter.emitToConversation(e.conversationId, "message:status", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,
@@ -268,8 +281,17 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // SCOPED TO THE CONVERSATION ROOM, like its sibling above (realtime audit
+  // 2026-05-25, R1). A broadcast can reopen many closed recipients; team-wide
+  // `conversation:status` here would fire once PER reopened recipient, each
+  // hitting every agent's list `onStatus` (array find + splice + filter-resync)
+  // — the same storm `broadcast.recipient_message_sent` was scoped to avoid.
+  // We accept the SAME documented tradeoff: an agent watching the "Closed"
+  // filter won't see a broadcast-reopened row leave it live; it reconciles on
+  // the next filter-resync / navigation. A human viewing THAT thread (in its
+  // room) still gets the live flip.
   "broadcast.conversation_reopened": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "conversation:status", {
+    emitter.emitToConversation(e.conversationId, "conversation:status", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       status: "pending",

@@ -182,8 +182,14 @@ export class ExternalV1Controller {
   async upsertContact(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalUpsertContactSchema)) body: ExternalUpsertContactInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    return this.api.upsertContact(auth.teamId, auth.apiKeyId, body);
+    return this.api.upsertContact(
+      auth.teamId,
+      auth.apiKeyId,
+      body,
+      idempotencyKey?.trim() || undefined,
+    );
   }
 
   /**

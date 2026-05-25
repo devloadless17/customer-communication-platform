@@ -41,6 +41,8 @@ export function SettingsSubSidebar({
   const isAdmin = canManageUsers(role);
   const canStages = permissions["stages:manage"];
   const canFields = permissions["contactFields:manage"];
+  const canSnippets = permissions["snippets:manage"];
+  const canTags = permissions["tags:manage"];
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(href + "/");
@@ -96,18 +98,22 @@ export function SettingsSubSidebar({
             active={isActive("/settings/stages")}
           />
         )}
-        <SubSidebarItem
-          href="/settings/snippets"
-          label="Snippets"
-          leading={<Sparkles className="size-4" />}
-          active={isActive("/settings/snippets")}
-        />
-        <SubSidebarItem
-          href="/settings/tags"
-          label="Tags"
-          leading={<TagIcon className="size-4" />}
-          active={isActive("/settings/tags")}
-        />
+        {canSnippets && (
+          <SubSidebarItem
+            href="/settings/snippets"
+            label="Snippets"
+            leading={<Sparkles className="size-4" />}
+            active={isActive("/settings/snippets")}
+          />
+        )}
+        {canTags && (
+          <SubSidebarItem
+            href="/settings/tags"
+            label="Tags"
+            leading={<TagIcon className="size-4" />}
+            active={isActive("/settings/tags")}
+          />
+        )}
         {canFields && (
           <SubSidebarItem
             href="/settings/contact-fields"

@@ -173,6 +173,8 @@ export function ThreadHeader({
           teamId={teamId}
           conversationId={conversationId}
           current={status}
+          assignedUserId={assignedUserId}
+          teamMembers={teamMembers}
           onAlert={onAlert}
         />
         {canDeleteConversations && (

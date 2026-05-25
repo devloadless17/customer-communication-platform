@@ -1,0 +1,51 @@
+import { Controller, Get, Query, UseGuards } from "@nestjs/common";
+
+import { CurrentSession } from "../auth/current-session.decorator";
+import { SessionGuard } from "../auth/session.guard";
+import type { ApiSession } from "../auth/session.guard";
+import { zQuery } from "../common/zod-validation.pipe";
+import { ConversationsService } from "./conversations.service";
+import {
+  GlobalSearchQuerySchema,
+  type GlobalSearchQuery,
+} from "./conversations.schemas";
+
+/**
+ * GLOBAL inbox search — backs the tabbed search bar over the conversation
+ * list. One endpoint, `scope`-dispatched; the response shape differs per
+ * scope and the client requests exactly the tab it's rendering:
+ *
+ *   GET /api/inbox/search?scope=contacts&q=… → ContactSearchPage
+ *   GET /api/inbox/search?scope=messages&q=… → GlobalMessageSearchPage
+ *   GET /api/inbox/search?scope=notes&q=…    → NoteSearchPage
+ *
+ * All three are team-scoped (session.teamId), read-only, and ungated beyond
+ * SessionGuard — same access level as the conversation list itself (any
+ * member can search the inbox they can already see). Empty/blank `q`
+ * short-circuits to an empty page so the client can fire on every keystroke
+ * without a special-case.
+ */
+@Controller("api/inbox/search")
+@UseGuards(SessionGuard)
+export class InboxSearchController {
+  constructor(private readonly conversations: ConversationsService) {}
+
+  @Get()
+  async search(
+    @CurrentSession() session: ApiSession,
+    @Query(zQuery(GlobalSearchQuerySchema)) query: GlobalSearchQuery,
+  ) {
+    const q = (query.q ?? "").trim();
+    if (q.length === 0) return { items: [], nextCursor: null };
+
+    const opts = { query: q, take: query.take, cursor: query.cursor };
+    switch (query.scope) {
+      case "contacts":
+        return this.conversations.globalSearchContacts(session.teamId, opts);
+      case "messages":
+        return this.conversations.globalSearchMessages(session.teamId, opts);
+      case "notes":
+        return this.conversations.globalSearchNotes(session.teamId, opts);
+    }
+  }
+}

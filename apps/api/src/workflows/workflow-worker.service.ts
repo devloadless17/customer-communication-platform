@@ -60,6 +60,10 @@ import {
   startWorkflowRunRetentionSweeper,
   stopWorkflowRunRetentionSweeper,
 } from "@/lib/sweepers/workflow-run-retention";
+import {
+  startConversationEventRetentionSweeper,
+  stopConversationEventRetentionSweeper,
+} from "@/lib/sweepers/conversation-event-retention";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -92,6 +96,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private outboundEventRetentionStarted = false;
   private outboundSendAttemptRetentionStarted = false;
   private workflowRunRetentionStarted = false;
+  private conversationEventRetentionStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -227,9 +232,28 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start workflow-run retention sweeper", err);
     }
+    try {
+      // Daily retention on ConversationEvent (audit timeline) — the one
+      // high-churn table that previously had no sweep. 90-day cutoff (tunable
+      // via CONVERSATION_EVENT_RETENTION_DAYS). N2 in
+      // docs/architecture-review-2026-05-25-pass2.md.
+      startConversationEventRetentionSweeper();
+      this.conversationEventRetentionStarted = true;
+      this.logger.log("Conversation event retention sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start conversation-event retention sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.conversationEventRetentionStarted)
+        stopConversationEventRetentionSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopConversationEventRetentionSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     try {
       if (this.workflowRunRetentionStarted) stopWorkflowRunRetentionSweeper();
     } catch (err) {

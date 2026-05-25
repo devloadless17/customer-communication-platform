@@ -1,8 +1,8 @@
-import { Prisma, type ConversationStatus } from "@prisma/client";
+import { type ConversationStatus } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { workflowContactSnapshot } from "@/lib/workflows/events";
+import { setConversationStatus } from "@/lib/conversations/mutations";
 
 import {
   type StepHandler,
@@ -37,49 +37,43 @@ export async function runSetStatus(
   if (!conv) return advanceWithError(400, "envelope missing conversation");
   const conversationId = conv.id;
 
-  const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, teamId: ctx.teamId },
-    include: { contact: { include: { tags: { select: { id: true } } } } },
+  // Shared business rule (CAS, idempotency, unassign-on-close, event
+  // publishing — incl. closedCategory/closedSummary carried to the analytics
+  // subscriber) lives in lib/conversations/mutations.ts so a workflow close
+  // stays in lockstep with the inbox UI + /v1. `changedByUserId: null` =
+  // system; `silent: true` so workflow-dispatch doesn't chain-trigger another
+  // workflow mid-run (socket + audit + analytics still fire). Note: unlike the
+  // old hand-rolled version, a `close_conversation` step now correctly
+  // UNASSIGNS the closed thread (matching the UI close behavior).
+  const result = await setConversationStatus({
+    db,
+    publish,
+    teamId: ctx.teamId,
+    conversationId,
+    status,
+    changedByUserId: null,
+    silent: true,
+    ...(extras.closedCategory !== undefined ? { closedCategory: extras.closedCategory } : {}),
+    ...(extras.closedSummary !== undefined ? { closedSummary: extras.closedSummary } : {}),
   });
-  if (!conversation) return advanceWithError(404, "conversation not found");
-  const previousStatus = conversation.status as ConversationStatus;
-  if (previousStatus === status && !extras.closedCategory && !extras.closedSummary) {
+
+  if (!result.ok) {
+    if (result.reason === "not_found") {
+      return advanceWithError(404, "conversation not found");
+    }
+    return advanceWithError(409, "conversation status changed by someone else");
+  }
+
+  if (!result.changed) {
     return advance({ skipped: "already_in_target_status" });
   }
 
-  // Only flip the status here. The analytics subscriber writes closedAt /
-  // closedByUserId / closedCategory / closedSummary (and wipes them on
-  // reopen) using the closed metadata carried on the event payload.
-  try {
-    await db.conversation.update({
-      where: { id: conversationId, teamId: ctx.teamId, status: previousStatus },
-      data: { status },
-    });
-  } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-      return advanceWithError(409, "conversation status changed by someone else");
-    }
-    throw err;
-  }
-
-  // `silent: true` — step-driven status change. Without this, workflow-
-  // dispatch would re-fire `conversation_status_changed`/`_opened`/`_closed`
-  // and trigger a downstream workflow inside the current run. Socket fanout,
-  // audit, and analytics still run (those are user-visible effects).
-  await publish({
-    type: "conversation.status_changed",
-    teamId: ctx.teamId,
+  return advance({
     conversationId,
-    previousStatus,
+    previousStatus: result.previousStatus,
     newStatus: status,
-    changedByUserId: null,
-    contact: workflowContactSnapshot(conversation.contact),
-    ...(extras.closedCategory !== undefined ? { closedCategory: extras.closedCategory } : {}),
-    ...(extras.closedSummary !== undefined ? { closedSummary: extras.closedSummary } : {}),
-    silent: true,
+    ...(result.unassigned ? { unassigned: true } : {}),
   });
-
-  return advance({ conversationId, previousStatus, newStatus: status });
 }
 
 export const setStatusStepHandler: StepHandler<SetStatusStepConfig> = {

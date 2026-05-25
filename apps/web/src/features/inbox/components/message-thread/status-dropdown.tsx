@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@ccp/shared/utils";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
-import type { ConversationStatus } from "@ccp/shared/types";
+import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
 
@@ -20,11 +20,18 @@ export function StatusDropdown({
   teamId,
   conversationId,
   current,
+  assignedUserId,
+  teamMembers,
   onAlert,
 }: {
   teamId: string;
   conversationId: string;
   current: ConversationStatus;
+  /** Current assignee — needed to optimistically clear it when closing, since
+   *  the server unassigns on close (mirror of conversations.service setStatus). */
+  assignedUserId: string | null;
+  /** Roster, to reconstruct the prior assignee for rollback on a failed close. */
+  teamMembers: User[];
   onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
@@ -42,14 +49,30 @@ export function StatusDropdown({
   const setStatus = async (status: ConversationStatus) => {
     if (status === current || pending) return;
     setPending(true);
-    // Optimistic: fan the same socket frame the server will broadcast so
-    // sidebar status badges, the row, and the right-rail mirror flip
-    // instantly instead of waiting on PATCH → bus → socket round-trip.
+    // Closing UNASSIGNS server-side (conversations.service setStatus). Mirror
+    // that optimistically so the assignee chip clears in the SAME frame as the
+    // status pill — without this the chip lags until the server's
+    // `conversation:assigned` round-trips back, which is the visible "takes
+    // time to become unassigned" delay. Only when there's actually an assignee.
+    const willUnassign = status === "closed" && assignedUserId !== null;
+    const prevUser = willUnassign
+      ? teamMembers.find((u) => u.id === assignedUserId) ?? null
+      : null;
+    // Optimistic: fan the same socket frames the server will broadcast so
+    // sidebar status badges, the row, the right-rail mirror, and the assignee
+    // chip flip instantly instead of waiting on PATCH → bus → socket round-trip.
     dispatchLocalSocketEvent("conversation:status", {
       teamId,
       conversationId,
       status,
     });
+    if (willUnassign) {
+      dispatchLocalSocketEvent("conversation:assigned", {
+        teamId,
+        conversationId,
+        assignedUser: null,
+      });
+    }
     try {
       const res = await fetch(`/api/conversations/${conversationId}/status`, {
         method: "POST",
@@ -57,12 +80,19 @@ export function StatusDropdown({
         body: JSON.stringify({ status }),
       });
       if (!res.ok) {
-        // Roll back so the chip reflects truth.
+        // Roll back BOTH frames so the pill + chip reflect truth.
         dispatchLocalSocketEvent("conversation:status", {
           teamId,
           conversationId,
           status: current,
         });
+        if (willUnassign) {
+          dispatchLocalSocketEvent("conversation:assigned", {
+            teamId,
+            conversationId,
+            assignedUser: prevUser,
+          });
+        }
         await onAlert("Couldn't change status", await readError(res));
       }
     } catch (err) {
@@ -71,6 +101,13 @@ export function StatusDropdown({
         conversationId,
         status: current,
       });
+      if (willUnassign) {
+        dispatchLocalSocketEvent("conversation:assigned", {
+          teamId,
+          conversationId,
+          assignedUser: prevUser,
+        });
+      }
       await onAlert(
         "Couldn't change status",
         err instanceof Error ? err.message : "Network error",

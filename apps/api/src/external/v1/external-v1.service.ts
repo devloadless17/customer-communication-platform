@@ -781,8 +781,29 @@ export class ExternalV1Service {
   /**
    * Create-or-update by phone — atomic find-then-create-or-update. Returns
    * `created: true` for new rows, `created: false` for updates.
+   *
+   * Optionally idempotent: a retry with the same Idempotency-Key replays the
+   * prior `{ contact, created }` without re-firing contact.created (the one
+   * double-fire risk, on a soft-deleted-then-revived row). Completes the F2
+   * coverage — every /v1 mutation now honors the header.
    */
-  async upsertContact(
+  upsertContact(
+    teamId: string,
+    apiKeyId: string,
+    input: ExternalUpsertContactInput,
+    idempotencyKey?: string,
+  ): Promise<{ contact: ExternalContact; created: boolean }> {
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      "upsert_contact",
+      { input },
+      () => this.upsertContactInternal(teamId, apiKeyId, input),
+    );
+  }
+
+  private async upsertContactInternal(
     teamId: string,
     apiKeyId: string,
     input: ExternalUpsertContactInput,

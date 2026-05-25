@@ -22,7 +22,6 @@ import type {
 } from "@ccp/shared/types";
 import { useTeamEvents } from "@/features/team-chat/hooks/use-team-events";
 import { useConnectionStatus } from "@/hooks/use-connection-status";
-import { useConversationSearch } from "@/features/inbox/hooks/use-conversation-search";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
 import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
@@ -166,6 +165,15 @@ export function InboxShell({
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [errorId, setErrorId] = useState<string | null>(null);
   const [cacheTick, setCacheTick] = useState(0);
+  // One-shot deep-link target from a global-search "Messages" hit. Set when
+  // the agent opens a message result; forwarded to MessageThread, which jumps
+  // to it. Cleared as soon as the target conversation is the displayed one so
+  // a later normal open doesn't re-jump. `{conversationId}` qualifies the id
+  // so a stale target can't fire against the wrong thread.
+  const [jumpTarget, setJumpTarget] = useState<{
+    conversationId: string;
+    messageId: string;
+  } | null>(null);
 
   // Refs for stable callback identity — see T1.5/T2.6/T2.7 in the plan.
   // openConversation and the popstate listener used to read these via
@@ -315,6 +323,11 @@ export function InboxShell({
     (conversationId: string) => {
       if (conversationId === activeIdRef.current) return;
 
+      // Any plain open clears a pending search-jump so a stale message target
+      // can't re-fire on a later normal click. onOpenSearchResult re-sets it
+      // immediately AFTER calling this when the open is a message hit.
+      setJumpTarget(null);
+
       const cached = cache.has(conversationId);
       setActiveId(conversationId);
       setPendingId(cached ? null : conversationId);
@@ -335,6 +348,52 @@ export function InboxShell({
       }
     },
     [cache, fetchThread],
+  );
+
+  // ---------------------------------------------------------------
+  // Global-search result handlers.
+  // ---------------------------------------------------------------
+  // onOpenSearchResult — open the hit's conversation, optionally jumping to a
+  // specific message. Unlike openConversation it does NOT early-return when
+  // the conversation is already active: a message hit in the open thread still
+  // needs to set the jump target so the thread scrolls to that message.
+  const onOpenSearchResult = useCallback(
+    (target: { conversationId: string; messageId?: string }) => {
+      // Order matters: openConversation clears any prior jump target, so set
+      // ours AFTER it. Both setState calls batch into one render, and the
+      // last write to jumpTarget wins — this one.
+      openConversation(target.conversationId);
+      setJumpTarget(
+        target.messageId
+          ? { conversationId: target.conversationId, messageId: target.messageId }
+          : null,
+      );
+    },
+    [openConversation],
+  );
+
+  // onStartContactChat — a contact-tab hit with no conversation yet. Mirrors
+  // the contact-drawer "Start chat" flow: get-or-create the conversation, then
+  // open it. (POST /api/conversations/start re-chats a hard-deleted thread or
+  // creates a fresh one; see project_start_conversation_endpoint.)
+  const onStartContactChat = useCallback(
+    async (contactId: string) => {
+      try {
+        const res = await fetch("/api/conversations/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contactId }),
+        });
+        if (!res.ok) return;
+        const { conversationId } = (await res.json()) as {
+          conversationId: string;
+        };
+        if (conversationId) openConversation(conversationId);
+      } catch {
+        // Non-fatal: the agent can retry; the contact directory still works.
+      }
+    },
+    [openConversation],
   );
 
   // popstate listener — handles browser back/forward AND the rare case where
@@ -624,15 +683,14 @@ export function InboxShell({
     [cache],
   );
 
-  // Search keeps its own server-fed list when active.
-  const searchState = useConversationSearch(search);
-
-  const conversationList = searchState.active ? searchState.results : live.conversations;
-  const hasMore = searchState.active
-    ? searchState.nextCursor !== null
-    : live.hasMore;
-  const loadingMore = searchState.active ? searchState.loadingMore : live.loadingMore;
-  const loadMore = searchState.active ? searchState.loadMore : live.loadMore;
+  // The live conversation list is ALWAYS what the column renders. Search no
+  // longer swaps the list out — the tabbed global search (InboxSearchPanel,
+  // inside ConversationList) overlays it while a query is present. So the
+  // list's pagination/load-more is purely the live list's now.
+  const conversationList = live.conversations;
+  const hasMore = live.hasMore;
+  const loadingMore = live.loadingMore;
+  const loadMore = live.loadMore;
 
   // useConnectionStatus is mounted for its side effect only; ConnectionBanner
   // reads the same hook to surface disconnect state.
@@ -730,13 +788,14 @@ export function InboxShell({
               filter={filter}
               search={search}
               onSearchChange={setSearch}
-              searching={searchState.active && searchState.loading}
               hasMore={hasMore}
               loadingMore={loadingMore}
               onLoadMore={loadMore}
               activeConversationId={activeId}
               pendingConversationId={pendingId}
               onOpenConversation={openConversation}
+              onOpenSearchResult={onOpenSearchResult}
+              onStartContactChat={onStartContactChat}
               onPrefetchConversation={fetchThread}
               canDeleteConversations={canDeleteConversations}
             />
@@ -768,6 +827,11 @@ export function InboxShell({
                 onMarkRead={handleMarkRead}
                 onThreadSnapshot={handleThreadSnapshot}
                 onMobileBack={onMobileBack}
+                jumpToMessageId={
+                  jumpTarget?.conversationId === displayedId
+                    ? jumpTarget.messageId
+                    : null
+                }
               />
             ) : activeId && skeletonContact ? (
               <ChatSkeleton contact={skeletonContact} onMobileBack={onMobileBack} />
@@ -803,6 +867,7 @@ function ThreadWorkspace({
   onMarkRead,
   onThreadSnapshot,
   onMobileBack,
+  jumpToMessageId,
 }: {
   thread: CachedThread;
   teamMembers: User[];
@@ -821,6 +886,9 @@ function ThreadWorkspace({
     nextOlderCursor: string | null,
   ) => void;
   onMobileBack: () => void;
+  /** Deep-link target from a global-search "Messages" hit; forwarded to
+   *  MessageThread to scroll to that message. Null on a normal open. */
+  jumpToMessageId: string | null;
 }) {
   return (
     <>
@@ -837,6 +905,7 @@ function ThreadWorkspace({
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}
+        jumpToMessageId={jumpToMessageId}
       />
       <ContactPanel
         data={thread.data}

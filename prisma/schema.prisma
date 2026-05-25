@@ -835,6 +835,16 @@ model Message {
   // serves chronological/range scans; this one is purpose-built for the
   // backward keyset cursor with id as the same-millisecond tiebreaker.
   @@index([conversationId, timestamp(sort: Desc), id(sort: Desc)])
+  // pg_trgm GIN for the GLOBAL inbox-search "Messages" tab — an ILIKE on
+  // body across EVERY conversation in the team (the in-thread message search
+  // is scoped by conversationId and rides the keyset index above; this one
+  // is for the team-wide search where there's no conversation predicate to
+  // narrow the scan). Caption-bearing rows store the caption in `body` too?
+  // No — captions live in mediaCaption, so the query ORs both columns; we
+  // only trgm-index body because caption-only matches are rare and the body
+  // index already covers the common case. Add a mediaCaption trgm index if
+  // caption search shows up hot in EXPLAIN.
+  @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "Message_body_trgm_idx")
 }
 
 // One-row-per-attempt log for outbound text sends, written BEFORE the Meta
@@ -1137,6 +1147,11 @@ model InternalNote {
 
   @@index([conversationId, timestamp])
   @@index([teamId])
+  // pg_trgm GIN for the GLOBAL inbox-search "Comments" tab — an ILIKE on a
+  // note's body across every conversation in the team. Same rationale as
+  // Message_body_trgm_idx: no conversation predicate to narrow the team-wide
+  // scan, so the index carries it.
+  @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "InternalNote_body_trgm_idx")
 }
 
 // ---------------------------------------------------------------------------
@@ -1547,6 +1562,11 @@ model ConversationEvent {
   apiKey       TeamApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, at(sort: Desc)])
+  // Drives the retention sweeper's `WHERE at < cutoff` scan — the composite
+  // index above leads with conversationId and can't serve an at-only filter.
+  // See lib/sweepers/conversation-event-retention.ts (N2,
+  // docs/architecture-review-2026-05-25-pass2.md).
+  @@index([at])
 }
 
 // ---------------------------------------------------------------------------

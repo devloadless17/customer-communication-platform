@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 
+import { RequireCapability } from "../../auth/capability.guard";
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
@@ -22,15 +23,18 @@ import {
 import { TagsService } from "./tags.service";
 
 /**
- * Team-wide tag catalog. Any signed-in user can list + create; mutations of
- * an existing tag are also allowed for any agent (admin gate is per-team,
- * not per-catalog-row).
+ * Team-wide tag catalog. Any signed-in user can LIST; creating / renaming /
+ * deleting a tag is gated by the admin-configurable `tags:manage` capability
+ * (default true for manager + agent, so today's behavior is unchanged until an
+ * admin locks it down). Tags are team-wide shared catalog like stages + contact
+ * fields — a rename/delete affects everyone's inbox, so it belongs behind the
+ * same capability tier.
  *
  * Route shape (relative to api root):
- *   GET    /api/team/tags
- *   POST   /api/team/tags
- *   PATCH  /api/team/tags/:id
- *   DELETE /api/team/tags/:id
+ *   GET    /api/team/tags                — anyone signed in
+ *   POST   /api/team/tags                — tags:manage
+ *   PATCH  /api/team/tags/:id            — tags:manage
+ *   DELETE /api/team/tags/:id            — tags:manage
  */
 @Controller("api/team/tags")
 @UseGuards(SessionGuard)
@@ -52,6 +56,7 @@ export class TagsController {
   }
 
   @Post()
+  @RequireCapability("tags:manage")
   async create(
     @CurrentSession() session: ApiSession,
     @Body(zBody(CreateTagSchema)) body: CreateTagInput,
@@ -61,6 +66,7 @@ export class TagsController {
   }
 
   @Patch(":id")
+  @RequireCapability("tags:manage")
   async update(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
@@ -71,6 +77,7 @@ export class TagsController {
   }
 
   @Delete(":id")
+  @RequireCapability("tags:manage")
   async remove(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,

@@ -1,9 +1,6 @@
-import { Prisma } from "@prisma/client";
-
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import type { User } from "@ccp/shared/types";
-import { workflowContactSnapshot } from "@/lib/workflows/events";
+import { assignConversation } from "@/lib/conversations/mutations";
 
 import {
   type StepHandler,
@@ -63,84 +60,44 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
     const conversationId = conv.id;
     const targetUserId = config.mode === "user" ? config.userId : null;
 
-    const conversation = await db.conversation.findFirst({
-      where: { id: conversationId, teamId: ctx.teamId },
-      select: {
-        id: true,
-        assignedUserId: true,
-        contact: { include: { tags: { select: { id: true } } } },
-      },
-    });
-    if (!conversation) return advanceWithError(404, "conversation not found");
-
-    if (targetUserId !== null) {
-      const member = await db.user.findFirst({
-        // Refuse to assign to a deactivated user — they're no longer
-        // routing tickets and the resulting conversation would sit
-        // stranded with no human owner. Surfacing this as a 400 lets the
-        // operator see the failure on the runs page; the workflow advances
-        // past the step so any downstream branch still runs.
-        where: { id: targetUserId, teamId: ctx.teamId, deactivatedAt: null },
-        select: { id: true },
-      });
-      if (!member) {
-        return advanceWithError(400, "configured user not in team or deactivated");
-      }
-    }
-
-    if (conversation.assignedUserId === targetUserId) {
-      return advance({ skipped: "already_assigned_to_target" });
-    }
-
-    let updated;
-    try {
-      updated = await db.conversation.update({
-        where: {
-          id: conversationId,
-          teamId: ctx.teamId,
-          assignedUserId: conversation.assignedUserId,
-        },
-        data: { assignedUserId: targetUserId },
-        include: { assignedUser: true },
-      });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return advanceWithError(409, "conversation reassigned by someone else");
-      }
-      throw err;
-    }
-
-    const assignedUser: User | null = updated.assignedUser
-      ? {
-          id: updated.assignedUser.id,
-          teamId: updated.assignedUser.teamId,
-          role: updated.assignedUser.role,
-          name: updated.assignedUser.name,
-          email: updated.assignedUser.email,
-          avatarUrl: updated.assignedUser.avatarUrl ?? undefined,
-          isActive: updated.assignedUser.deactivatedAt === null,
-        }
-      : null;
-
-    // `silent: true` — step-driven assignment. Without this, workflow-
-    // dispatch would fire `conversation_assigned` and the next workflow
-    // could re-assign → loop. Audit + socket-fanout + analytics still run.
-    await publish({
-      type: "conversation.assigned",
+    // Shared business rule (member validation, CAS, status-flip on
+    // assign-to-closed → pending, event publishing) lives in
+    // lib/conversations/mutations.ts so this step stays in lockstep with the
+    // inbox UI + /v1 API and can't drift. `changedByUserId: null` = system
+    // actor; `silent: true` so workflow-dispatch doesn't chain-trigger another
+    // workflow mid-run (audit + socket + analytics still fire). Note: unlike
+    // the old hand-rolled version, an assign onto a CLOSED conversation now
+    // correctly reopens it to pending (matching the UI).
+    const result = await assignConversation({
+      db,
+      publish,
       teamId: ctx.teamId,
       conversationId,
-      assignedUser,
-      previousAssignedUserId: conversation.assignedUserId,
-      newAssignedUserId: targetUserId,
+      targetUserId,
       changedByUserId: null,
-      contact: workflowContactSnapshot(conversation.contact),
       silent: true,
     });
+
+    if (!result.ok) {
+      switch (result.reason) {
+        case "not_found":
+          return advanceWithError(404, "conversation not found");
+        case "invalid_user":
+          return advanceWithError(400, "configured user not in team or deactivated");
+        case "conflict":
+          return advanceWithError(409, "conversation reassigned by someone else");
+      }
+    }
+
+    if (!result.changed) {
+      return advance({ skipped: "already_assigned_to_target" });
+    }
 
     return advance({
       conversationId,
       assignedUserId: targetUserId,
-      previousAssignedUserId: conversation.assignedUserId,
+      previousAssignedUserId: result.previousAssignedUserId,
+      ...(result.statusChanged ? { statusChangedTo: result.newStatus } : {}),
     });
   },
 };
