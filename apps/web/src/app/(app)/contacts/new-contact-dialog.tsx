@@ -104,7 +104,9 @@ export function NewContactDialog({
     const fullNumber = `+${country.dial}${localDigits}`;
     setSubmitting(true);
     try {
-      const countryTrim = country.trim().toUpperCase();
+      const countryTrim = country
+      // const countryTrim = country.trim().toUpperCase();
+
       const res = await fetch("/api/contacts", {
         method: "POST",
         headers: { "content-type": "application/json" },
