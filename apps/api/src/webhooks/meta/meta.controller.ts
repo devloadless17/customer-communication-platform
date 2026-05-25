@@ -18,6 +18,7 @@ import {
 import { Prisma } from "@prisma/client";
 import type { Request, Response } from "express";
 
+import { runWithConcurrency } from "@/common/concurrency";
 import { blobStorage } from "@/lib/blob-storage";
 import { publish } from "@/lib/events/bus";
 import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
@@ -658,22 +659,4 @@ function verifySignature(
 function timingSafeEqualString(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-async function runWithConcurrency<T>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T) => Promise<void>,
-): Promise<void> {
-  if (items.length === 0) return;
-  const queue = [...items];
-  const lanes = Math.min(concurrency, queue.length);
-  const runners = Array.from({ length: lanes }, async () => {
-    while (queue.length > 0) {
-      const next = queue.shift();
-      if (next === undefined) return;
-      await worker(next);
-    }
-  });
-  await Promise.all(runners);
 }

@@ -11,9 +11,26 @@ if (existsSync(".env")) {
   process.loadEnvFile(".env");
 }
 
-const EMAIL = "ali@loadless.ai";
-const PASSWORD = "loadless";
-const NAME = "Ali";
+// Credentials come from the environment — NEVER hardcoded. The deploy runs
+// this on every push (idempotent upsert), so a hardcoded password would be a
+// repo-readable, re-asserted-on-every-deploy superadmin login. Fail closed if
+// either is missing rather than silently bootstrapping a weak default.
+const EMAIL = process.env.SUPERADMIN_EMAIL;
+const PASSWORD = process.env.SUPERADMIN_PASSWORD;
+const NAME = process.env.SUPERADMIN_NAME ?? "Admin";
+
+if (!EMAIL || !PASSWORD) {
+  console.error(
+    "✗ SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD must be set to seed the superadmin. Refusing to seed a default.",
+  );
+  process.exit(1);
+}
+
+// Narrowed copies the async closure can capture as plain `string` (a module-
+// level `process.exit` guard doesn't narrow the outer `let`/`const` inside a
+// nested function scope).
+const email: string = EMAIL;
+const password: string = PASSWORD;
 
 // Pass the connection string directly instead of a pre-built `pg.Pool`. The
 // runtime image has two `pg` installs (one under /app from the Next.js
@@ -33,15 +50,15 @@ async function main() {
     update: {},
   });
 
-  const passwordHash = await bcrypt.hash(PASSWORD, 10);
+  const passwordHash = await bcrypt.hash(password, 10);
 
   const user = await db.user.upsert({
-    where: { email: EMAIL },
+    where: { email: email },
     create: {
       teamId: team.id,
       role: "superAdmin",
       name: NAME,
-      email: EMAIL,
+      email,
     },
     update: {
       role: "superAdmin",
@@ -55,11 +72,11 @@ async function main() {
   // a freshly-seeded DB — the old per-migration backfill is gone after the
   // init-migration squash.
   await db.account.upsert({
-    where: { providerId_accountId: { providerId: "credential", accountId: EMAIL } },
+    where: { providerId_accountId: { providerId: "credential", accountId: email } },
     create: {
       userId: user.id,
       providerId: "credential",
-      accountId: EMAIL,
+      accountId: email,
       password: passwordHash,
     },
     update: { password: passwordHash, userId: user.id },
@@ -109,7 +126,8 @@ async function main() {
     });
   }
 
-  console.log(`✓ superAdmin ready: ${user.email} / ${PASSWORD}`);
+  // Never log the password — this runs in CI/deploy output.
+  console.log(`✓ superAdmin ready: ${user.email}`);
 }
 
 main()

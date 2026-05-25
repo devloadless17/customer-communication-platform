@@ -1,13 +1,11 @@
 import Link from "next/link";
 import { Megaphone, Plus } from "lucide-react";
 
-import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/current-user";
 import { listBroadcasts } from "@/lib/api/queries";
 
-import { BroadcastStatusBadge } from "./broadcast-status-badge";
-import { BroadcastDeleteButton } from "./broadcast-delete-button";
+import { BroadcastsBrowser } from "./broadcasts-browser";
 
 export const metadata = { title: "Broadcasts" };
 export const dynamic = "force-dynamic";
@@ -26,7 +24,8 @@ export default async function BroadcastsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Broadcasts</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Send a pre-approved WhatsApp template to many contacts in one go.
-            Past broadcasts and their delivery status are listed below.
+            Filter by status, search, or switch to the calendar to see scheduled
+            sends.
           </p>
         </div>
         {canManage && (
@@ -42,67 +41,7 @@ export default async function BroadcastsPage() {
       {rows.length === 0 ? (
         <EmptyState canManage={canManage} />
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-border bg-card">
-          <table className="w-full min-w-180 text-sm">
-            <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
-                <th className="px-4 py-2.5 text-left font-medium">Template</th>
-                <th className="px-4 py-2.5 text-left font-medium">Audience</th>
-                <th className="px-4 py-2.5 text-left font-medium">Status</th>
-                <th className="px-4 py-2.5 text-left font-medium">Progress</th>
-                <th className="px-4 py-2.5 text-left font-medium">Created</th>
-                <th className="px-4 py-2.5 text-right font-medium" aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((b) => (
-                <tr
-                  key={b.id}
-                  className="border-b border-border last:border-b-0 hover:bg-accent/30"
-                >
-                  <td className="px-4 py-3">
-                    <Link
-                      href={`/broadcasts/${b.id}`}
-                      className="font-medium text-foreground hover:text-primary"
-                    >
-                      {b.templateName}
-                    </Link>
-                    <div className="text-[11px] text-muted-foreground">
-                      {b.templateLanguage} · by {b.createdByName}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-muted-foreground">
-                    {b.audienceMode === "all"
-                      ? `All (${b.totalCount})`
-                      : `${b.totalCount} selected`}
-                  </td>
-                  <td className="px-4 py-3">
-                    <BroadcastStatusBadge status={b.status} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <ProgressBar
-                      sent={b.sentCount}
-                      failed={b.failedCount}
-                      total={b.totalCount}
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-[12px] text-muted-foreground">
-                    <LocalTime iso={b.createdAt} format="listTime" />
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {canManage && (
-                      <BroadcastDeleteButton
-                        broadcastId={b.id}
-                        templateName={b.templateName}
-                        status={b.status}
-                      />
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <BroadcastsBrowser initial={rows} canManage={canManage} />
       )}
     </div>
   );
@@ -124,35 +63,6 @@ function EmptyState({ canManage }: { canManage: boolean }) {
           <Link href="/broadcasts/new">Create your first broadcast</Link>
         </Button>
       )}
-    </div>
-  );
-}
-
-function ProgressBar({
-  sent,
-  failed,
-  total,
-}: {
-  sent: number;
-  failed: number;
-  total: number;
-}) {
-  if (total === 0) {
-    return <span className="text-[12px] text-muted-foreground">—</span>;
-  }
-  const sentPct = Math.round((sent / total) * 100);
-  const failedPct = Math.round((failed / total) * 100);
-  return (
-    <div className="flex items-center gap-2">
-      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
-        <div className="flex h-full">
-          <div className="h-full bg-emerald-500" style={{ width: `${sentPct}%` }} />
-          <div className="h-full bg-destructive" style={{ width: `${failedPct}%` }} />
-        </div>
-      </div>
-      <div className="tabular-nums text-[12px] text-muted-foreground">
-        {sent + failed}/{total}
-      </div>
     </div>
   );
 }

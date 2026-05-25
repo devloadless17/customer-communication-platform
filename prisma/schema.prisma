@@ -633,8 +633,9 @@ model ContactStage {
   // available slot at create time; reorder is a bulk PATCH.
   position  Int      @default(0)
   // Exactly one row per team should carry isDefault = true. The partial
-  // unique index `ContactStage_teamId_isDefault_key` (raw SQL in the init
-  // migration) is the backstop; the app-code pre-check in
+  // unique index `ContactStage_teamId_isDefault_key` (raw SQL — partial
+  // indexes can't be expressed in the Prisma DSL, see migration
+  // 20260526120000) is the DB-level backstop; the app-code pre-check in
   // /api/team/stages POST + PATCH still runs as a friendlier 4xx.
   isDefault Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -1896,7 +1897,8 @@ model OutboundEvent {
 
   // Drainer hot-path is served by the partial index
   // `OutboundEvent_drainer_pending_idx` (WHERE publishedAt IS NULL AND
-  // failedAt IS NULL) added in the init migration's raw-SQL section.
+  // failedAt IS NULL, raw SQL — partial indexes aren't expressible in the
+  // Prisma DSL, see migration 20260526120000).
   // No team-id-keyed index here on purpose: the drainer never filters by
   // teamId, and that index was a non-trivial write tax on every publish.
 }

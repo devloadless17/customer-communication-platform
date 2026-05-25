@@ -2,11 +2,8 @@ import { Injectable } from "@nestjs/common";
 
 /**
  * Per-target typing tracker. The "target" is either a conversation id (for
- * customer threads) or a team-chat channel id. Same shape, two separate
- * maps so a key collision is structurally impossible.
- *
- * Migrated from the in-file maps in
- * [lib/socket/server.ts](../../../../../lib/socket/server.ts).
+ * customer threads) or a team-chat channel id. Two separate maps so a key
+ * collision is structurally impossible.
  */
 @Injectable()
 export class TypingService {

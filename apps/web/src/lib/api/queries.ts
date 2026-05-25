@@ -352,6 +352,8 @@ export async function listWhatsappTemplates(): Promise<{
 export interface BroadcastListItem {
   id: string;
   status: string;
+  name: string | null;
+  scheduledAt: string | null;
   templateName: string;
   templateLanguage: string;
   audienceMode: string;
@@ -367,6 +369,8 @@ export interface BroadcastListItem {
 
 export interface BroadcastDetail extends BroadcastListItem {
   templateId: string;
+  audienceTagIds: string[];
+  audienceGroupId: string | null;
   variables: unknown;
   lastError: string | null;
   recipients: Array<{
@@ -382,8 +386,17 @@ export interface BroadcastDetail extends BroadcastListItem {
   }>;
 }
 
-export async function listBroadcasts(): Promise<BroadcastListItem[]> {
-  const { broadcasts } = await api<{ broadcasts: BroadcastListItem[] }>("/api/broadcasts");
+export async function listBroadcasts(opts?: {
+  status?: string;
+  search?: string;
+}): Promise<BroadcastListItem[]> {
+  const params = new URLSearchParams();
+  if (opts?.status && opts.status !== "all") params.set("status", opts.status);
+  if (opts?.search) params.set("search", opts.search);
+  const qs = params.toString();
+  const { broadcasts } = await api<{ broadcasts: BroadcastListItem[] }>(
+    `/api/broadcasts${qs ? `?${qs}` : ""}`,
+  );
   return broadcasts;
 }
 

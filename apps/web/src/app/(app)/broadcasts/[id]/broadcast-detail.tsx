@@ -4,9 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
+  CalendarClock,
   CheckCircle2,
   Clock,
   ExternalLink,
+  Loader2,
+  RotateCcw,
   XCircle,
 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -37,6 +40,8 @@ import { BroadcastStatusBadge } from "../broadcast-status-badge";
 export interface BroadcastDetailDto {
   id: string;
   status: string;
+  name: string | null;
+  scheduledAt: string | null;
   templateId: string;
   templateName: string;
   templateLanguage: string;
@@ -74,6 +79,29 @@ const POLL_INTERVAL_MS = 2000;
 
 export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   const [data, setData] = useState(initial);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+
+  // Re-queue + re-run only the failed recipients. Server flips the broadcast
+  // back to `running`; the socket `broadcast:status` echo refreshes the page.
+  async function retryFailed() {
+    if (retrying) return;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const res = await fetch(`/api/broadcasts/${data.id}/retry`, { method: "POST" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        setRetryError(body.detail ?? body.error ?? "Couldn't retry");
+        return;
+      }
+      await refreshRef.current();
+    } catch {
+      setRetryError("Network error");
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   // Shared refresher so both the socket listeners and the poll go through
   // the same code path. Inside a ref so the socket effect can call it
@@ -205,10 +233,39 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {data.templateName}
-          </h1>
-          <BroadcastStatusBadge status={data.status} />
+          <div className="min-w-0">
+            <h1 className="truncate text-2xl font-semibold tracking-tight">
+              {data.name || data.templateName}
+            </h1>
+            {data.name && (
+              <div className="mt-0.5 truncate text-[12px] text-muted-foreground">
+                Template: {data.templateName}
+              </div>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Retry only makes sense on a finished broadcast that has
+                failures. Hidden while scheduled/queued/running. */}
+            {data.failedCount > 0 &&
+              (data.status === "completed" ||
+                data.status === "failed" ||
+                data.status === "canceled") && (
+                <button
+                  type="button"
+                  onClick={() => void retryFailed()}
+                  disabled={retrying}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-60"
+                >
+                  {retrying ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="size-3.5" />
+                  )}
+                  Retry {data.failedCount} failed
+                </button>
+              )}
+            <BroadcastStatusBadge status={data.status} />
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted-foreground">
           <span>Language: {data.templateLanguage}</span>
@@ -216,6 +273,15 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           <span>By {data.createdByName}</span>
           <span>·</span>
           <LocalTime iso={data.createdAt} format="listTime" />
+          {data.status === "scheduled" && data.scheduledAt && (
+            <>
+              <span>·</span>
+              <span className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400">
+                <CalendarClock className="size-3.5" />
+                Sends <LocalTime iso={data.scheduledAt} format="listTime" />
+              </span>
+            </>
+          )}
           {data.completedAt && (
             <>
               <span>·</span>
@@ -223,6 +289,11 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             </>
           )}
         </div>
+        {retryError && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs text-destructive">
+            {retryError}
+          </div>
+        )}
       </header>
 
       {data.lastError && (

@@ -97,6 +97,8 @@ jobs:
           INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          SUPERADMIN_EMAIL: ${{ secrets.SUPERADMIN_EMAIL }}
+          SUPERADMIN_PASSWORD: ${{ secrets.SUPERADMIN_PASSWORD }}
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
@@ -109,6 +111,7 @@ jobs:
           set -euo pipefail
           missing=()
           for v in ENCRYPTION_KEY BETTER_AUTH_SECRET INTERNAL_BUS_SECRET POSTGRES_PASSWORD UPLOADTHING_TOKEN \
+                   SUPERADMIN_EMAIL SUPERADMIN_PASSWORD \
                    APP_DOMAIN ADMIN_EMAIL HEALTHCHECK_URL DOCKER_USERNAME DOCKER_PASSWORD \
                    VPS_HOST VPS_USER VPS_SSH_KEY; do
             [ -z "${!v:-}" ] && missing+=("$v")
@@ -508,13 +511,15 @@ jobs:
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
           INTERNAL_BUS_SECRET: ${{ secrets.INTERNAL_BUS_SECRET }}
           UPLOADTHING_TOKEN: ${{ secrets.UPLOADTHING_TOKEN }}
+          SUPERADMIN_EMAIL: ${{ secrets.SUPERADMIN_EMAIL }}
+          SUPERADMIN_PASSWORD: ${{ secrets.SUPERADMIN_PASSWORD }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,UPLOADTHING_TOKEN,DOCKER_USERNAME,DOCKER_PASSWORD
+          envs: APP_DOMAIN,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,BETTER_AUTH_SECRET,ENCRYPTION_KEY,INTERNAL_BUS_SECRET,UPLOADTHING_TOKEN,SUPERADMIN_EMAIL,SUPERADMIN_PASSWORD,DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
             set -euo pipefail
             rm -rf /tmp/ccp-deploy
@@ -544,6 +549,11 @@ jobs:
             # validateEnv refuses to boot prod without it.
             INTERNAL_BUS_SECRET=${INTERNAL_BUS_SECRET}
             UPLOADTHING_TOKEN=${UPLOADTHING_TOKEN}
+            # Superadmin bootstrap credentials, read by seed-superadmin.ts on
+            # every deploy (idempotent upsert). The seed FAILS CLOSED if these
+            # are absent — no hardcoded default.
+            SUPERADMIN_EMAIL=${SUPERADMIN_EMAIL}
+            SUPERADMIN_PASSWORD=${SUPERADMIN_PASSWORD}
             META_GRAPH_VERSION=v25.0
             # NEXT_PUBLIC_API_URL intentionally empty — Caddy fronts both
             # processes on a single origin so the browser falls back to
@@ -617,7 +627,10 @@ jobs:
       # bootstraps the row, subsequent deploys are no-ops. The previous
       # "manual SSH and remember" flow failed once already (auto-memory:
       # "Superadmin seed is manual"); automating closes that footgun.
-      # Reads SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD from the VPS .env.
+      # Credentials come from SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD, set as
+      # GH secrets, written into /opt/ccp/.env above and surfaced to this
+      # container via the compose `environment:` block. The seed FAILS CLOSED
+      # if they're missing — there is no hardcoded default.
       - name: Bootstrap superadmin (idempotent)
         if: success()
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3

@@ -127,7 +127,33 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
 export async function stopWebhookDeliverWorker(): Promise<void> {
   state.shuttingDown = true;
   if (!state.worker) return;
-  await state.worker.close();
+  // Hard cap on `worker.close()` — same posture as the workflow + send workers
+  // (workflows/worker.ts, messages/send-worker.service.ts). onModuleDestroy
+  // hooks run SEQUENTIALLY across modules, so each worker's drain is additive
+  // toward systemd's TimeoutStopSec=120s; an uncapped close here (e.g. a
+  // partner endpoint hanging at the socket timeout) could push the total past
+  // 120s and force a SIGKILL mid-drain, which re-runs the in-flight job after
+  // restart (duplicate webhook POST). BullMQ's lockDuration is 90s, so past
+  // 85s the lock is already lost and another worker can pick it up cleanly.
+  const closeTimeoutMs = 85_000;
+  await Promise.race([
+    state.worker.close(),
+    new Promise<void>((_resolve, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `[webhooks] worker.close() exceeded ${closeTimeoutMs}ms — abandoning drain so process can exit before SIGKILL`,
+            ),
+          ),
+        closeTimeoutMs,
+      ).unref(),
+    ),
+  ]).catch((err) => {
+    // Log but don't re-throw — let the rest of shutdown (connection close)
+    // still run.
+    console.error(err instanceof Error ? err.message : err);
+  });
   // Close the worker's dedicated blocking connection (BullMQ doesn't, since we
   // handed it the instance). disconnect() is synchronous + can't hang.
   state.connection?.disconnect();

@@ -93,5 +93,3 @@ export function describeStep(type: WorkflowStepType, config: unknown): string {
     return type;
   }
 }
-
-export const ALL_STEP_TYPES: readonly WorkflowStepType[] = Object.keys(REGISTRY) as WorkflowStepType[];

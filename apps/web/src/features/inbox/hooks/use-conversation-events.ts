@@ -885,11 +885,30 @@ export function useConversationEvents(
 
           setData((prev) => (apply as any)(prev, payload));
           // After applying the header/contact patch, pull the matching audit
-          // entry so the inline pill appears live. `contact:updated` (target
-          // "all") may be for a different thread's contact — refreshActivity's
-          // own response-guard + the server's thread-scoped query make a
-          // spurious refresh a cheap no-op, so we don't over-filter here.
-          if (targetsThisThread && ACTIVITY_REFRESH_EVENTS.has(event)) {
+          // entry so the inline pill appears live — but only when the change
+          // is actually for THIS thread AND it's the authoritative
+          // (non-optimistic) frame:
+          //   - `contact:updated` is target:"all" and carries no
+          //     conversationId, so `targetsThisThread` is always true for it.
+          //     Narrow to this thread's contact id; otherwise every team-wide
+          //     contact edit fires a GET on every agent's open thread.
+          //   - Optimistic dispatches land BEFORE the PATCH commits + the
+          //     audit row is written, so a refresh then returns a stale window
+          //     with no new pill. The authoritative server frame fires a
+          //     second refresh that finds the row — so we skip the optimistic
+          //     one entirely (same guard the list hook uses for resync).
+          const isOptimistic =
+            (payload as { optimistic?: boolean }).optimistic === true;
+          const refreshTargetsThisThread =
+            event === "contact:updated"
+              ? (payload as { contact?: { id?: string } }).contact?.id ===
+                dataRef.current.contact.id
+              : targetsThisThread;
+          if (
+            refreshTargetsThisThread &&
+            !isOptimistic &&
+            ACTIVITY_REFRESH_EVENTS.has(event)
+          ) {
             refreshActivity();
           }
         } catch (err) {

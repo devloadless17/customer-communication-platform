@@ -6,9 +6,7 @@ import { Injectable } from "@nestjs/common";
  * `wentOffline` signal only when the last socket for that user closed —
  * callers use it to decide whether to broadcast a presence:update.
  *
- * Lives in the NestJS process. Migrated 1:1 from
- * [lib/socket/server.ts](../../../../../lib/socket/server.ts)'s in-file
- * presence map; same shape, same semantics.
+ * Lives in the NestJS api process, alongside the Socket.io gateway.
  */
 @Injectable()
 export class PresenceService {

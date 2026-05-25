@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   AlertTriangle,
   ArrowLeft,
+  CalendarClock,
   Check,
   ChevronRight,
   FileText,
@@ -59,6 +60,9 @@ export function NewBroadcastForm({
   preselectedContactIds,
   preselectedTagIds,
   preselectedGroupId,
+  cloneTemplateId = null,
+  cloneBodyVars = null,
+  cloneHeaderVar = null,
 }: {
   totalContactCount: number;
   initialContactLabels: ContactLabel[];
@@ -70,6 +74,10 @@ export function NewBroadcastForm({
   preselectedContactIds: string[];
   preselectedTagIds: string[];
   preselectedGroupId: string | null;
+  /** Clone prefill (from `?from=<id>`) — select this template + fill vars. */
+  cloneTemplateId?: string | null;
+  cloneBodyVars?: string[] | null;
+  cloneHeaderVar?: string | null;
 }) {
   const router = useRouter();
 
@@ -114,6 +122,13 @@ export function NewBroadcastForm({
   const [headerVar, setHeaderVar] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Optional operator label + scheduling. `scheduleMode` toggles between
+  // immediate send and a future datetime; `scheduledLocal` is the raw value
+  // from a <input type="datetime-local"> (local wall-clock, no tz) which we
+  // convert to an ISO string on submit.
+  const [name, setName] = useState("");
+  const [scheduleMode, setScheduleMode] = useState<"now" | "later">("now");
+  const [scheduledLocal, setScheduledLocal] = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
 
   // Live custom-audience recipient count. The shared AudienceBuilder owns the
@@ -191,6 +206,23 @@ export function NewBroadcastForm({
     void loadTemplates();
   }, [loadTemplates]);
 
+  // Clone prefill (?from=<id>): once templates load, select the source's
+  // template. The var-reset effect below then fills bodyVars/headerVar from the
+  // clone values on its first run for that template (guarded by cloneAppliedRef
+  // so a later manual template switch resets to binding tokens as usual).
+  const cloneAppliedRef = useRef(false);
+  useEffect(() => {
+    if (cloneAppliedRef.current) return;
+    if (!cloneTemplateId || templates.length === 0) return;
+    if (templates.some((t) => t.id === cloneTemplateId)) {
+      setSelectedTemplateId(cloneTemplateId);
+    } else {
+      // Template no longer exists / not approved — give up on clone, normal form.
+      cloneAppliedRef.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates, cloneTemplateId]);
+
   // -------------------------------------------------------------------------
   // Derived state
   // -------------------------------------------------------------------------
@@ -223,6 +255,21 @@ export function NewBroadcastForm({
     if (!selectedTemplate) {
       setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
       setHeaderVar("");
+      return;
+    }
+    // Clone: on the FIRST reset for the cloned template, use the source's saved
+    // values instead of binding tokens. One-shot — a later manual switch falls
+    // through to the normal binding-token prefill.
+    if (
+      !cloneAppliedRef.current &&
+      cloneTemplateId &&
+      selectedTemplateId === cloneTemplateId
+    ) {
+      cloneAppliedRef.current = true;
+      setBodyVars(
+        Array.from({ length: bodyVarCount }, (_, i) => cloneBodyVars?.[i] ?? ""),
+      );
+      setHeaderVar(headerVarCount > 0 ? cloneHeaderVar ?? "" : "");
       return;
     }
     const bindings = parseVariableBindings(selectedTemplate.variableBindings as never);
@@ -294,6 +341,28 @@ export function NewBroadcastForm({
   // -------------------------------------------------------------------------
   async function submit() {
     if (!readyToSend || !selectedTemplate) return;
+
+    // Resolve scheduling. datetime-local has no timezone — `new Date(local)`
+    // interprets it in the browser's local zone, which is what the user means
+    // ("send at 3pm" = 3pm where they are). Guard against a past time.
+    let scheduledAtIso: string | null = null;
+    if (scheduleMode === "later") {
+      if (!scheduledLocal) {
+        setSendError("Pick a date and time, or switch to Send now.");
+        return;
+      }
+      const when = new Date(scheduledLocal);
+      if (Number.isNaN(when.getTime())) {
+        setSendError("That date/time isn't valid.");
+        return;
+      }
+      if (when.getTime() <= Date.now()) {
+        setSendError("Scheduled time must be in the future.");
+        return;
+      }
+      scheduledAtIso = when.toISOString();
+    }
+
     setSendError(null);
     setSending(true);
     try {
@@ -302,6 +371,8 @@ export function NewBroadcastForm({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           templateId: selectedTemplate.id,
+          ...(name.trim() ? { name: name.trim() } : {}),
+          ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
           variables: {
             body: bodyVars,
             ...(headerVarCount > 0 ? { header: headerVar } : {}),
@@ -470,6 +541,68 @@ export function NewBroadcastForm({
         </StepCard>
       )}
 
+      {/* Details & schedule — optional name + send-now / schedule-later. */}
+      <div className="rounded-xl border border-border bg-card p-4">
+        <h2 className="text-sm font-semibold">Details &amp; schedule</h2>
+        <div className="mt-3 flex flex-col gap-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-muted-foreground">
+              Broadcast name <span className="font-normal">(optional)</span>
+            </span>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value.slice(0, 120))}
+              placeholder={selectedTemplate?.name ?? "e.g. Ramadan promo"}
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
+            />
+            <span className="text-[11px] text-muted-foreground/70">
+              Shown in the broadcasts list. Falls back to the template name if blank.
+            </span>
+          </label>
+
+          <div className="flex flex-col gap-2">
+            <span className="text-xs font-medium text-muted-foreground">When to send</span>
+            {/* Segmented Send now / Schedule toggle. */}
+            <div className="inline-flex w-fit rounded-lg border border-border bg-muted/40 p-0.5 text-sm">
+              <button
+                type="button"
+                onClick={() => setScheduleMode("now")}
+                className={cn(
+                  "rounded-md px-3 py-1 font-medium transition-colors",
+                  scheduleMode === "now"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                Send now
+              </button>
+              <button
+                type="button"
+                onClick={() => setScheduleMode("later")}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition-colors",
+                  scheduleMode === "later"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <CalendarClock className="size-3.5" />
+                Schedule
+              </button>
+            </div>
+            {scheduleMode === "later" && (
+              <input
+                type="datetime-local"
+                value={scheduledLocal}
+                onChange={(e) => setScheduledLocal(e.target.value)}
+                className="w-fit rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="sticky bottom-0 -mx-6 mt-2 border-t border-border bg-background/95 px-6 py-3 backdrop-blur">
         {sendError && (
           <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -510,10 +643,18 @@ export function NewBroadcastForm({
           >
             {sending ? (
               <Loader2 className="size-4 animate-spin" />
+            ) : scheduleMode === "later" ? (
+              <CalendarClock className="size-4" />
             ) : (
               <Send className="size-4" />
             )}
-            {sending ? "Sending…" : "Send broadcast"}
+            {sending
+              ? scheduleMode === "later"
+                ? "Scheduling…"
+                : "Sending…"
+              : scheduleMode === "later"
+                ? "Schedule broadcast"
+                : "Send broadcast"}
           </Button>
         </div>
       </div>

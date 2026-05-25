@@ -168,10 +168,6 @@ interface BroadcastVariables {
 let shuttingDown = false;
 const inFlightRuns = new Map<string, Promise<void>>();
 
-export function isShuttingDown(): boolean {
-  return shuttingDown;
-}
-
 export function signalShutdown(): void {
   shuttingDown = true;
 }
