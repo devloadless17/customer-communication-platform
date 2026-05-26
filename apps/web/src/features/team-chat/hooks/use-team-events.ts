@@ -113,8 +113,16 @@ export function useTeamEvents(
    */
   activeThread: ConversationWithRefs | null = null,
 ): TeamEventsState {
-  const [conversations, setConversations] =
-    useState<ConversationWithRefs[]>(initialConversations);
+  // SSR ships the team-wide unfiltered feed (the sub-sidebar's first-paint
+  // preset counts depend on having closed rows in the seed too). The LIST
+  // surface, though, has an active client-side filter ("All open" by
+  // default) which excludes closed — so prune the seed through the same
+  // predicate the filter-change effect uses, applied on first paint. Lazy
+  // initializer keeps it synchronous: zero flicker, no closed row ever
+  // renders under "All open" on a hard refresh.
+  const [conversations, setConversations] = useState<ConversationWithRefs[]>(
+    () => initialConversations.filter((row) => rowMatchesFilterFor(filter, currentUserId, row)),
+  );
   const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -164,15 +172,21 @@ export function useTeamEvents(
   // a fresh server render produces a new array reference even when the
   // underlying data is unchanged. Compare by team + the set of conversation
   // ids instead: only re-seed when the team switches or the served list
-  // actually changes.
+  // actually changes. The seed is pruned through the active filter on the
+  // way in for the same "no closed under All open on refresh" reason the
+  // initial useState lazy initializer above guards against.
   const lastSeedKeyRef = useRef<string>("");
   useEffect(() => {
     const key = `${teamId}|${initialConversations.map((c) => c.conversation.id).join(",")}|${initialNextCursor ?? ""}`;
     if (key === lastSeedKeyRef.current) return;
     lastSeedKeyRef.current = key;
-    setConversations(initialConversations);
+    setConversations(
+      initialConversations.filter((row) =>
+        rowMatchesFilterFor(filterRef.current, currentUserId, row),
+      ),
+    );
     setNextCursor(initialNextCursor);
-  }, [teamId, initialConversations, initialNextCursor]);
+  }, [teamId, initialConversations, initialNextCursor, currentUserId]);
 
   // Optimistic LIST bump for the sender's OWN send. Every send site (reply
   // box text/media/voice, template, interactive) fires this so the row jumps

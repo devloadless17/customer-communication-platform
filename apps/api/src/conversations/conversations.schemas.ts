@@ -83,3 +83,21 @@ export const StartConversationSchema = z.object({
   contactId: z.string().min(1),
 });
 export type StartConversationInput = z.infer<typeof StartConversationSchema>;
+
+/**
+ * Attachments tab in the contact panel. Keyset-paginated (newest first) by
+ * the message's compound `(timestamp DESC, id DESC)` order so cursor
+ * semantics match the thread itself. `kind` narrows by media category — the
+ * gallery's chip filter passes it through. Without `kind`, every media
+ * message on the thread is included.
+ */
+export const ListAttachmentsQuerySchema = z.object({
+  // Last `id` from the previous page — fetch attachments strictly OLDER
+  // than this row. Absent on the first page.
+  cursor: z.string().min(1).optional(),
+  take: takeQuery,
+  // Maps to the shared `MediaKind` union. The gallery UI groups stickers
+  // under "image" (both render as a thumbnail tile).
+  kind: z.enum(["image", "video", "audio", "document"]).optional(),
+});
+export type ListAttachmentsQuery = z.infer<typeof ListAttachmentsQuerySchema>;

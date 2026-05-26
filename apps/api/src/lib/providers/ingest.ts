@@ -424,8 +424,6 @@ async function ingestInboundMessage(
           data: {
             teamId,
             // Explicit channel stamp — every new contact carries its channel.
-            // Legacy WhatsApp rows that pre-date this were backfilled in
-            // migration 20260525_normalize_identity_channel.
             identityChannel: channel,
             phoneNumber: evt.contactPhone,
             name: evt.contactName ?? evt.contactPhone,

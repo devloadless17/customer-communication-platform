@@ -1,23 +1,41 @@
+import { cookies } from "next/headers";
+
 import { getSession } from "@/lib/auth/current-user";
 import { listContactFieldDefinitions, listWhatsappTemplates } from "@/lib/api/queries";
 
-import { TemplatesView } from "./templates-view";
+import {
+  TEMPLATES_SEARCH_COOKIE,
+  TEMPLATES_STATUS_COOKIE,
+  TemplatesView,
+  parseTemplatesStatus,
+} from "./templates-view";
 
 /**
  * Templates index. Server component so the initial paint already has the
  * team's cached templates and the contact field schema (needed by the binding
  * editor inside the drawer). All further mutations go through API routes.
+ *
+ * The status filter + search query persist across hard refreshes via cookies
+ * (templates-status, templates-search) read SSR-side and forwarded to the
+ * view as initial state — first paint already shows the user's last view.
  */
 
 export const metadata = { title: "Templates" };
 export const dynamic = "force-dynamic";
 
 export default async function TemplatesPage() {
-  const [{ permissions }, templatesResp, fieldDefinitions] = await Promise.all([
-    getSession(),
-    listWhatsappTemplates(),
-    listContactFieldDefinitions(),
-  ]);
+  const [{ permissions }, templatesResp, fieldDefinitions, cookieStore] =
+    await Promise.all([
+      getSession(),
+      listWhatsappTemplates(),
+      listContactFieldDefinitions(),
+      cookies(),
+    ]);
+
+  const initialStatusFilter = parseTemplatesStatus(
+    cookieStore.get(TEMPLATES_STATUS_COOKIE)?.value,
+  );
+  const initialQuery = cookieStore.get(TEMPLATES_SEARCH_COOKIE)?.value ?? "";
 
   return (
     <TemplatesView
@@ -27,6 +45,8 @@ export default async function TemplatesPage() {
       hasWabaId={templatesResp.hasWabaId}
       hasAppId={templatesResp.hasAppId}
       canManage={permissions["templates:manage"]}
+      initialStatusFilter={initialStatusFilter}
+      initialQuery={initialQuery}
     />
   );
 }

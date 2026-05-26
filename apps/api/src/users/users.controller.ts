@@ -18,14 +18,17 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { diskStorage } from "multer";
 
+import { RequireCapability } from "../auth/capability.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import {
+  UpdateMyAvailabilitySchema,
   UpdateMyProfileSchema,
   UpdateUserSchema,
+  type UpdateMyAvailabilityInput,
   type UpdateMyProfileInput,
   type UpdateUserInput,
 } from "./users.schemas";
@@ -62,6 +65,28 @@ export class UsersController {
     @Body(zBody(UpdateMyProfileSchema)) body: UpdateMyProfileInput,
   ) {
     const user = await this.users.updateMyProfile(
+      session.teamId,
+      session.userId,
+      body,
+    );
+    return { user };
+  }
+
+  /**
+   * Self-availability — "busy / away / appear offline" toggle + optional note.
+   * Gated by `availability:manage` so an admin can lock it down for teams that
+   * don't want agents self-marking away mid-shift (default on for every role).
+   * The route is dedicated, not folded into PATCH /me, because the capability
+   * check is its own concern (a user might be allowed to edit their name but
+   * not their availability, or vice versa).
+   */
+  @RequireCapability("availability:manage")
+  @Patch("me/availability")
+  async updateAvailability(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(UpdateMyAvailabilitySchema)) body: UpdateMyAvailabilityInput,
+  ) {
+    const user = await this.users.updateMyAvailability(
       session.teamId,
       session.userId,
       body,

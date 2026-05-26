@@ -15,6 +15,10 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn, initials } from "@ccp/shared/utils";
+import {
+  AVAILABILITY_DOT_CLASSES,
+  AVAILABILITY_LABELS,
+} from "@ccp/shared/presence";
 import type { ContactStage, ConversationWithRefs, User } from "@ccp/shared/types";
 import type {
   Filter,
@@ -48,6 +52,7 @@ export function InboxSubSidebar({
   stages,
   teammates,
   onlineUserIds,
+  availabilityByUserId,
   filter,
   onFilterChange,
 }: {
@@ -58,6 +63,11 @@ export function InboxSubSidebar({
   teammates?: User[];
   /** When provided, teammate avatars get a green/grey dot. */
   onlineUserIds?: Set<string>;
+  /** Sparse per-user availability badge. Absent entry = "available, no note". */
+  availabilityByUserId?: Record<
+    string,
+    { status: import("@ccp/shared/types").UserAvailabilityStatus; message?: string | null }
+  >;
   filter: Filter;
   onFilterChange: (f: Filter) => void;
 }) {
@@ -262,10 +272,31 @@ export function InboxSubSidebar({
                 // Otherwise the row is identical for every page.
                 const hasPresence = onlineUserIds !== undefined;
                 const online = hasPresence ? onlineUserIds.has(u.id) : false;
+                // Availability badge — sparse map, absence = "available + no
+                // note" (the dot just reflects online/offline). When the user
+                // has set busy/away the dot color comes from the shared
+                // catalog; an offline-marked teammate falls into the
+                // "not online" branch because the server filtered them out of
+                // onlineUserIds, so the offline color naturally applies.
+                const availability = availabilityByUserId?.[u.id];
+                const dotClass = online
+                  ? (availability
+                      ? AVAILABILITY_DOT_CLASSES[availability.status]
+                      : AVAILABILITY_DOT_CLASSES.available)
+                  : AVAILABILITY_DOT_CLASSES.offline;
+                const dotLabel = !hasPresence
+                  ? ""
+                  : online
+                    ? (availability
+                        ? AVAILABILITY_LABELS[availability.status]
+                        : "Online")
+                    : "Offline";
+                const note = availability?.message ?? null;
                 return (
                   <div
                     key={u.id}
                     className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] text-muted-foreground"
+                    title={note ? `${dotLabel} — ${note}` : dotLabel}
                   >
                     <div className="relative">
                       <Avatar className="size-5">
@@ -277,9 +308,9 @@ export function InboxSubSidebar({
                         <span
                           className={cn(
                             "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar transition-colors",
-                            online ? "bg-emerald-500" : "bg-muted-foreground/40",
+                            dotClass,
                           )}
-                          aria-label={online ? "Online" : "Offline"}
+                          aria-label={dotLabel}
                         />
                       )}
                     </div>

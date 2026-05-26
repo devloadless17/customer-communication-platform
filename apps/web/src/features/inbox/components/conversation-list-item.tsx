@@ -128,12 +128,12 @@ function ConversationListItemImpl({
         {/* Row 3: status chip + assignment */}
         <div className="flex items-center gap-1.5">
           {conversation.status === "pending" && (
-            <span className="inline-flex h-[18px] items-center rounded-sm bg-amber-500/12 px-1.5 text-[10px] font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+            <span className="inline-flex h-4.5 items-center rounded-sm bg-amber-500/12 px-1.5 text-[10px] font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
               pending
             </span>
           )}
           {conversation.status === "closed" && (
-            <span className="inline-flex h-[18px] items-center rounded-sm bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-4.5 items-center rounded-sm bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
               closed
             </span>
           )}

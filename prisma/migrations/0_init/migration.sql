@@ -1,1168 +1,1222 @@
--- CreateSchema
-CREATE SCHEMA IF NOT EXISTS "public";
+-- ---------------------------------------------------------------------------
+-- Single-init migration. Replaces the prior init + the
+-- 20260526160000_add_user_availability migration on 2026-05-26 (squash #2).
+--
+-- Produced by:
+--   1. apply the previous migration chain to a clean Postgres 16
+--   2. pg_dump --schema-only that DB
+--   3. sanitize away pg_dump preamble + _prisma_migrations table
+--   4. prepend the pg_trgm extension (the only one we need; plpgsql is auto)
+--   5. append the two partial indexes schema.prisma documents but that
+--      were lost in the previous (2026-05-26) squash
+--
+-- Every raw SQL nuance is preserved verbatim below:
+--   - `Contact_customFields_gin_idx`              GIN with jsonb_path_ops
+--   - `Contact_teamId_phoneNumber_whatsapp_key`   partial unique (WHERE channel)
+--   - `Contact_phoneNumber_trgm_idx`              GIN trgm WHERE phoneNumber NOT NULL
+--   - `Contact_name_trgm_idx`                     GIN trgm
+--   - `Conversation_lastMessagePreview_trgm_idx`  GIN trgm
+--   - `Message_body_trgm_idx` / `InternalNote_body_trgm_idx` /
+--     `TeamChannelMessage_body_trgm_idx`          GIN trgm
+--   - `ContactStage_teamId_isDefault_key`         partial unique (WHERE isDefault)
+--   - `OutboundEvent_drainer_pending_idx`         partial (WHERE publishedAt NULL AND failedAt NULL)
+--   - `Message_conversationId_timestamp_inbound_idx`  partial (WHERE direction='in')
+--   - `TeamChannelMessage_channel_toplevel_keyset_idx`  partial (WHERE threadRootId IS NULL)
+--
+-- Do NOT regenerate this file from `prisma migrate dev` after edits to
+-- schema.prisma; the auto-emitted DDL strips the jsonb_path_ops index and
+-- both partial indexes above. Any future schema change goes in a NEW
+-- timestamped migration alongside this one.
+-- ---------------------------------------------------------------------------
 
--- CreateExtension
+-- pg_trgm powers every GIN trigram search index below. plpgsql ships
+-- enabled by default in stock Postgres so we don't restate it here.
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
--- CreateExtension
-CREATE EXTENSION IF NOT EXISTS "plpgsql";
 
--- CreateEnum
-CREATE TYPE "Role" AS ENUM ('superAdmin', 'admin', 'manager', 'agent');
-
--- CreateEnum
-CREATE TYPE "Plan" AS ENUM ('free', 'starter', 'advanced', 'enterprise');
-
--- CreateEnum
-CREATE TYPE "ConversationStatus" AS ENUM ('open', 'pending', 'closed');
-
--- CreateEnum
-CREATE TYPE "MessageDirection" AS ENUM ('in', 'out');
-
--- CreateEnum
-CREATE TYPE "MessageStatus" AS ENUM ('sent', 'delivered', 'read', 'failed');
-
--- CreateEnum
-CREATE TYPE "Channel" AS ENUM ('whatsapp');
-
--- CreateEnum
-CREATE TYPE "TemplateStatus" AS ENUM ('approved', 'pending', 'rejected', 'paused', 'disabled');
-
--- CreateEnum
-CREATE TYPE "TemplateCategory" AS ENUM ('marketing', 'utility', 'authentication');
-
--- CreateEnum
-CREATE TYPE "BroadcastStatus" AS ENUM ('queued', 'running', 'completed', 'failed', 'canceled', 'paused');
-
--- CreateEnum
-CREATE TYPE "BroadcastRecipientStatus" AS ENUM ('queued', 'sent', 'failed');
-
--- CreateEnum
-CREATE TYPE "ContactSource" AS ENUM ('inbound', 'manual');
-
--- CreateEnum
-CREATE TYPE "ConversationEventKind" AS ENUM ('assigned', 'status_changed', 'tag_added', 'tag_removed', 'note_added', 'note_deleted');
-
--- CreateEnum
-CREATE TYPE "WorkflowTriggerEvent" AS ENUM ('message_received', 'conversation_created', 'conversation_opened', 'conversation_closed', 'conversation_assigned', 'conversation_status_changed', 'contact_field_updated', 'contact_tag_updated', 'contact_lifecycle_updated', 'manual_trigger', 'incoming_webhook');
-
--- CreateEnum
-CREATE TYPE "WorkflowStepType" AS ENUM ('send_message', 'send_template', 'add_comment', 'assign_to', 'set_status', 'open_conversation', 'close_conversation', 'add_tag', 'remove_tag', 'update_field', 'update_lifecycle', 'branch', 'wait', 'jump_to_step', 'noop', 'ask_question', 'http_request', 'trigger_workflow');
-
--- CreateEnum
-CREATE TYPE "WorkflowRunStatus" AS ENUM ('queued', 'running', 'waiting', 'completed', 'failed', 'skipped');
-
--- CreateTable
-CREATE TABLE "Team" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "plan" "Plan" NOT NULL DEFAULT 'starter',
-    "contactPanelBuiltins" JSONB NOT NULL DEFAULT '{}',
-
-    CONSTRAINT "Team_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."BroadcastRecipientStatus" AS ENUM (
+    'queued',
+    'sent',
+    'failed'
 );
 
--- CreateTable
-CREATE TABLE "ChannelConnection" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "channel" "Channel" NOT NULL,
-    "config" JSONB NOT NULL DEFAULT '{}',
-    "secrets" JSONB NOT NULL DEFAULT '{}',
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "ChannelConnection_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."BroadcastStatus" AS ENUM (
+    'queued',
+    'running',
+    'completed',
+    'failed',
+    'canceled',
+    'paused',
+    'scheduled'
 );
 
--- CreateTable
-CREATE TABLE "User" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "role" "Role" NOT NULL DEFAULT 'agent',
-    "name" TEXT NOT NULL,
-    "email" TEXT NOT NULL,
-    "emailVerified" BOOLEAN NOT NULL DEFAULT true,
-    "avatarUrl" TEXT,
-    "deactivatedAt" TIMESTAMP(3),
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."Channel" AS ENUM (
+    'whatsapp'
 );
 
--- CreateTable
-CREATE TABLE "Session" (
-    "id" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "token" TEXT NOT NULL,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
-    "ipAddress" TEXT,
-    "userAgent" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Session_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."ContactSource" AS ENUM (
+    'inbound',
+    'manual'
 );
 
--- CreateTable
-CREATE TABLE "Account" (
-    "id" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "accountId" TEXT NOT NULL,
-    "providerId" TEXT NOT NULL,
-    "accessToken" TEXT,
-    "refreshToken" TEXT,
-    "idToken" TEXT,
-    "accessTokenExpiresAt" TIMESTAMP(3),
-    "refreshTokenExpiresAt" TIMESTAMP(3),
-    "scope" TEXT,
-    "password" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Account_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."ConversationEventKind" AS ENUM (
+    'assigned',
+    'status_changed',
+    'tag_added',
+    'tag_removed',
+    'note_added',
+    'note_deleted',
+    'stage_changed'
 );
 
--- CreateTable
-CREATE TABLE "Verification" (
-    "id" TEXT NOT NULL,
-    "identifier" TEXT NOT NULL,
-    "value" TEXT NOT NULL,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Verification_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."ConversationStatus" AS ENUM (
+    'open',
+    'pending',
+    'closed'
 );
 
--- CreateTable
-CREATE TABLE "Snippet" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "label" TEXT NOT NULL,
-    "body" TEXT NOT NULL,
-    "createdById" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Snippet_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."MessageDirection" AS ENUM (
+    'in',
+    'out'
 );
 
--- CreateTable
-CREATE TABLE "Contact" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "phoneNumber" TEXT,
-    "identityChannel" "Channel",
-    "externalContactId" TEXT,
-    "name" TEXT NOT NULL,
-    "firstName" TEXT,
-    "lastName" TEXT,
-    "language" TEXT,
-    "countryCode" TEXT,
-    "avatarUrl" TEXT,
-    "email" TEXT,
-    "location" TEXT,
-    "customFields" JSONB NOT NULL DEFAULT '{}',
-    "stageId" TEXT,
-    "source" "ContactSource" NOT NULL DEFAULT 'inbound',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "lastInboundAt" TIMESTAMP(3),
-    "version" INTEGER NOT NULL DEFAULT 0,
-    "deletedAt" TIMESTAMP(3),
-
-    CONSTRAINT "Contact_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."MessageStatus" AS ENUM (
+    'sent',
+    'delivered',
+    'read',
+    'failed'
 );
 
--- CreateTable
-CREATE TABLE "ContactStage" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "color" TEXT NOT NULL DEFAULT 'slate',
-    "position" INTEGER NOT NULL DEFAULT 0,
-    "isDefault" BOOLEAN NOT NULL DEFAULT false,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "ContactStage_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."Plan" AS ENUM (
+    'free',
+    'starter',
+    'advanced',
+    'enterprise'
 );
 
--- CreateTable
-CREATE TABLE "ContactFieldDefinition" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "key" TEXT NOT NULL,
-    "label" TEXT NOT NULL,
-    "order" INTEGER NOT NULL DEFAULT 0,
-    "isVisible" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "ContactFieldDefinition_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."Role" AS ENUM (
+    'superAdmin',
+    'admin',
+    'manager',
+    'agent'
 );
 
--- CreateTable
-CREATE TABLE "Conversation" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "contactId" TEXT NOT NULL,
-    "channel" "Channel" NOT NULL DEFAULT 'whatsapp',
-    "assignedUserId" TEXT,
-    "status" "ConversationStatus" NOT NULL DEFAULT 'pending',
-    "unreadCount" INTEGER NOT NULL DEFAULT 0,
-    "lastMessageAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "lastMessagePreview" TEXT NOT NULL DEFAULT '',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "firstAssignedAt" TIMESTAMP(3),
-    "firstAssignedUserId" TEXT,
-    "lastAssignedAt" TIMESTAMP(3),
-    "firstResponseAt" TIMESTAMP(3),
-    "firstResponseByUserId" TEXT,
-    "closedAt" TIMESTAMP(3),
-    "closedByUserId" TEXT,
-    "closedCategory" TEXT,
-    "closedSummary" TEXT,
-    "assignmentsCount" INTEGER NOT NULL DEFAULT 0,
-    "incomingMessagesCount" INTEGER NOT NULL DEFAULT 0,
-    "outgoingMessagesCount" INTEGER NOT NULL DEFAULT 0,
-    "responsesCount" INTEGER NOT NULL DEFAULT 0,
-
-    CONSTRAINT "Conversation_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."TemplateCategory" AS ENUM (
+    'marketing',
+    'utility',
+    'authentication'
 );
 
--- CreateTable
-CREATE TABLE "Message" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "conversationId" TEXT NOT NULL,
-    "externalId" TEXT NOT NULL,
-    "senderUserId" TEXT,
-    "body" TEXT NOT NULL,
-    "direction" "MessageDirection" NOT NULL,
-    "channel" "Channel" NOT NULL,
-    "status" "MessageStatus" NOT NULL DEFAULT 'sent',
-    "rawPayload" JSONB NOT NULL,
-    "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "mediaKind" TEXT,
-    "mediaKey" TEXT,
-    "mediaUrl" TEXT,
-    "mediaMimeType" TEXT,
-    "mediaCaption" TEXT,
-    "mediaFilename" TEXT,
-    "mediaSizeBytes" INTEGER,
-    "mediaDurationMs" INTEGER,
-    "mediaThumbnailKey" TEXT,
-    "mediaThumbnailUrl" TEXT,
-    "replyToMessageId" TEXT,
-
-    CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."TemplateStatus" AS ENUM (
+    'approved',
+    'pending',
+    'rejected',
+    'paused',
+    'disabled'
 );
 
--- CreateTable
-CREATE TABLE "OutboundSendAttempt" (
-    "id" TEXT NOT NULL,
-    "jobId" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "conversationId" TEXT NOT NULL,
-    "attemptStartedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "completedAt" TIMESTAMP(3),
-    "externalId" TEXT,
-    "failedAt" TIMESTAMP(3),
-    "failureReason" TEXT,
-
-    CONSTRAINT "OutboundSendAttempt_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."WorkflowRunStatus" AS ENUM (
+    'queued',
+    'running',
+    'waiting',
+    'completed',
+    'failed',
+    'skipped'
 );
 
--- CreateTable
-CREATE TABLE "Invite" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "email" TEXT NOT NULL,
-    "role" "Role" NOT NULL DEFAULT 'agent',
-    "tokenHash" TEXT NOT NULL,
-    "createdById" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
-    "acceptedAt" TIMESTAMP(3),
-
-    CONSTRAINT "Invite_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."WorkflowStepType" AS ENUM (
+    'send_message',
+    'send_template',
+    'add_comment',
+    'assign_to',
+    'set_status',
+    'open_conversation',
+    'close_conversation',
+    'add_tag',
+    'remove_tag',
+    'update_field',
+    'update_lifecycle',
+    'branch',
+    'wait',
+    'jump_to_step',
+    'noop',
+    'ask_question',
+    'http_request',
+    'trigger_workflow'
 );
 
--- CreateTable
-CREATE TABLE "MessageTemplate" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "externalId" TEXT,
-    "name" TEXT NOT NULL,
-    "language" TEXT NOT NULL,
-    "category" "TemplateCategory" NOT NULL,
-    "status" "TemplateStatus" NOT NULL,
-    "bodyText" TEXT NOT NULL DEFAULT '',
-    "components" JSONB NOT NULL,
-    "variableBindings" JSONB NOT NULL DEFAULT '{}',
-    "syncedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "MessageTemplate_pkey" PRIMARY KEY ("id")
+CREATE TYPE public."WorkflowTriggerEvent" AS ENUM (
+    'message_received',
+    'conversation_created',
+    'conversation_opened',
+    'conversation_closed',
+    'conversation_assigned',
+    'conversation_status_changed',
+    'contact_field_updated',
+    'contact_tag_updated',
+    'contact_lifecycle_updated',
+    'manual_trigger',
+    'incoming_webhook'
 );
 
--- CreateTable
-CREATE TABLE "Tag" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "color" TEXT NOT NULL DEFAULT 'slate',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "Tag_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Account" (
+    id text NOT NULL,
+    "userId" text NOT NULL,
+    "accountId" text NOT NULL,
+    "providerId" text NOT NULL,
+    "accessToken" text,
+    "refreshToken" text,
+    "idToken" text,
+    "accessTokenExpiresAt" timestamp(3) without time zone,
+    "refreshTokenExpiresAt" timestamp(3) without time zone,
+    scope text,
+    password text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "AudienceGroup" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "description" TEXT,
-    "createdById" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "AudienceGroup_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."ApiIdempotencyKey" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "apiKeyId" text NOT NULL,
+    key text NOT NULL,
+    "responseBody" jsonb NOT NULL,
+    "responseStatus" integer NOT NULL,
+    "requestHash" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "expiresAt" timestamp(3) without time zone NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "Broadcast" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "createdById" TEXT,
-    "status" "BroadcastStatus" NOT NULL DEFAULT 'queued',
-    "templateId" TEXT NOT NULL,
-    "templateName" TEXT NOT NULL,
-    "templateLanguage" TEXT NOT NULL,
-    "variables" JSONB NOT NULL,
-    "audienceMode" TEXT NOT NULL,
-    "audienceTagIds" TEXT[] DEFAULT ARRAY[]::TEXT[],
-    "audienceGroupId" TEXT,
-    "audienceGroupName" TEXT,
-    "totalCount" INTEGER NOT NULL DEFAULT 0,
-    "sentCount" INTEGER NOT NULL DEFAULT 0,
-    "failedCount" INTEGER NOT NULL DEFAULT 0,
-    "lastError" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "startedAt" TIMESTAMP(3),
-    "completedAt" TIMESTAMP(3),
-
-    CONSTRAINT "Broadcast_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."AudienceGroup" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    description text,
+    "createdById" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "BroadcastRecipient" (
-    "id" TEXT NOT NULL,
-    "broadcastId" TEXT NOT NULL,
-    "contactId" TEXT NOT NULL,
-    "conversationId" TEXT,
-    "status" "BroadcastRecipientStatus" NOT NULL DEFAULT 'queued',
-    "externalId" TEXT,
-    "errorMessage" TEXT,
-    "sentAt" TIMESTAMP(3),
-
-    CONSTRAINT "BroadcastRecipient_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Broadcast" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "createdById" text,
+    status public."BroadcastStatus" DEFAULT 'queued'::public."BroadcastStatus" NOT NULL,
+    "templateId" text NOT NULL,
+    "templateName" text NOT NULL,
+    "templateLanguage" text NOT NULL,
+    variables jsonb NOT NULL,
+    "audienceMode" text NOT NULL,
+    "audienceTagIds" text[] DEFAULT ARRAY[]::text[],
+    "audienceGroupId" text,
+    "audienceGroupName" text,
+    "totalCount" integer DEFAULT 0 NOT NULL,
+    "sentCount" integer DEFAULT 0 NOT NULL,
+    "failedCount" integer DEFAULT 0 NOT NULL,
+    "lastError" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "startedAt" timestamp(3) without time zone,
+    "completedAt" timestamp(3) without time zone,
+    name text,
+    "scheduledAt" timestamp(3) without time zone
 );
 
--- CreateTable
-CREATE TABLE "InternalNote" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "conversationId" TEXT NOT NULL,
-    "authorUserId" TEXT,
-    "body" TEXT NOT NULL,
-    "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "InternalNote_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."BroadcastRecipient" (
+    id text NOT NULL,
+    "broadcastId" text NOT NULL,
+    "contactId" text NOT NULL,
+    "conversationId" text,
+    status public."BroadcastRecipientStatus" DEFAULT 'queued'::public."BroadcastRecipientStatus" NOT NULL,
+    "externalId" text,
+    "errorMessage" text,
+    "sentAt" timestamp(3) without time zone
 );
 
--- CreateTable
-CREATE TABLE "Workflow" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "published" BOOLEAN NOT NULL DEFAULT false,
-    "trigger" "WorkflowTriggerEvent" NOT NULL,
-    "triggerConfig" JSONB NOT NULL DEFAULT '{}',
-    "triggerConditions" JSONB NOT NULL DEFAULT '{"op":"AND","children":[]}',
-    "triggerOncePerContact" BOOLEAN NOT NULL DEFAULT false,
-    "graph" JSONB NOT NULL DEFAULT '{"startNodeId":"","nodes":[],"edges":[]}',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Workflow_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."ChannelConnection" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    channel public."Channel" NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    secrets jsonb DEFAULT '{}'::jsonb NOT NULL,
+    "isActive" boolean DEFAULT true NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "WorkflowRun" (
-    "id" TEXT NOT NULL,
-    "workflowId" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "status" "WorkflowRunStatus" NOT NULL DEFAULT 'queued',
-    "trigger" "WorkflowTriggerEvent" NOT NULL,
-    "contactId" TEXT,
-    "conversationId" TEXT,
-    "eventPayload" JSONB NOT NULL,
-    "graphSnapshot" JSONB,
-    "currentStepId" TEXT,
-    "waitUntil" TIMESTAMP(3),
-    "jumpsUsed" INTEGER NOT NULL DEFAULT 0,
-    "stepLog" JSONB NOT NULL DEFAULT '[]',
-    "pendingAnswer" JSONB,
-    "stepOutputs" JSONB NOT NULL DEFAULT '{}',
-    "attempts" INTEGER NOT NULL DEFAULT 0,
-    "errorMessage" TEXT,
-    "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "finishedAt" TIMESTAMP(3),
-
-    CONSTRAINT "WorkflowRun_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Contact" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "phoneNumber" text,
+    "identityChannel" public."Channel" NOT NULL,
+    "externalContactId" text,
+    name text NOT NULL,
+    "firstName" text,
+    "lastName" text,
+    language text,
+    "countryCode" text,
+    "avatarUrl" text,
+    email text,
+    location text,
+    "customFields" jsonb DEFAULT '{}'::jsonb NOT NULL,
+    "stageId" text,
+    source public."ContactSource" DEFAULT 'inbound'::public."ContactSource" NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "lastInboundAt" timestamp(3) without time zone,
+    version integer DEFAULT 0 NOT NULL,
+    "deletedAt" timestamp(3) without time zone
 );
 
--- CreateTable
-CREATE TABLE "WorkflowAwaitingReply" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "contactId" TEXT NOT NULL,
-    "runId" TEXT NOT NULL,
-    "workflowId" TEXT NOT NULL,
-    "stepId" TEXT NOT NULL,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "WorkflowAwaitingReply_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."ContactFieldDefinition" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    key text NOT NULL,
+    label text NOT NULL,
+    "order" integer DEFAULT 0 NOT NULL,
+    "isVisible" boolean DEFAULT true NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "WorkflowContactState" (
-    "id" TEXT NOT NULL,
-    "workflowId" TEXT NOT NULL,
-    "contactId" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "firedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "WorkflowContactState_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."ContactStage" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    color text DEFAULT 'slate'::text NOT NULL,
+    "position" integer DEFAULT 0 NOT NULL,
+    "isDefault" boolean DEFAULT false NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "TeamApiKey" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "tokenHash" TEXT NOT NULL,
-    "tokenPrefix" TEXT NOT NULL,
-    "createdById" TEXT NOT NULL,
-    "lastUsedAt" TIMESTAMP(3),
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "revokedAt" TIMESTAMP(3),
-    "scopes" TEXT[] DEFAULT ARRAY['*']::TEXT[],
-
-    CONSTRAINT "TeamApiKey_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Conversation" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "contactId" text NOT NULL,
+    channel public."Channel" DEFAULT 'whatsapp'::public."Channel" NOT NULL,
+    "assignedUserId" text,
+    status public."ConversationStatus" DEFAULT 'pending'::public."ConversationStatus" NOT NULL,
+    "unreadCount" integer DEFAULT 0 NOT NULL,
+    "lastMessageAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "lastMessagePreview" text DEFAULT ''::text NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "firstAssignedAt" timestamp(3) without time zone,
+    "firstAssignedUserId" text,
+    "lastAssignedAt" timestamp(3) without time zone,
+    "firstResponseAt" timestamp(3) without time zone,
+    "firstResponseByUserId" text,
+    "closedAt" timestamp(3) without time zone,
+    "closedByUserId" text,
+    "closedCategory" text,
+    "closedSummary" text,
+    "assignmentsCount" integer DEFAULT 0 NOT NULL,
+    "incomingMessagesCount" integer DEFAULT 0 NOT NULL,
+    "outgoingMessagesCount" integer DEFAULT 0 NOT NULL,
+    "responsesCount" integer DEFAULT 0 NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "ApiIdempotencyKey" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "apiKeyId" TEXT NOT NULL,
-    "key" TEXT NOT NULL,
-    "responseBody" JSONB NOT NULL,
-    "responseStatus" INTEGER NOT NULL,
-    "requestHash" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "ApiIdempotencyKey_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."ConversationEvent" (
+    id text NOT NULL,
+    "conversationId" text NOT NULL,
+    "teamId" text NOT NULL,
+    "userId" text,
+    "apiKeyId" text,
+    kind public."ConversationEventKind" NOT NULL,
+    before jsonb,
+    after jsonb,
+    at timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "OutboundWebhook" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "url" TEXT NOT NULL,
-    "secret" TEXT NOT NULL,
-    "eventTypes" TEXT[],
-    "enabled" BOOLEAN NOT NULL DEFAULT true,
-    "createdById" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "lastDeliveredAt" TIMESTAMP(3),
-    "lastErrorAt" TIMESTAMP(3),
-    "lastErrorMessage" TEXT,
-    "consecutiveFailures" INTEGER NOT NULL DEFAULT 0,
-    "disabledAt" TIMESTAMP(3),
-    "disabledReason" TEXT,
-
-    CONSTRAINT "OutboundWebhook_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."InternalNote" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "conversationId" text NOT NULL,
+    "authorUserId" text,
+    body text NOT NULL,
+    "timestamp" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "OutboundWebhookDelivery" (
-    "id" TEXT NOT NULL,
-    "webhookId" TEXT NOT NULL,
-    "eventType" TEXT NOT NULL,
-    "payload" JSONB NOT NULL,
-    "responseStatus" INTEGER,
-    "responseBody" TEXT,
-    "attemptCount" INTEGER NOT NULL DEFAULT 0,
-    "deliveredAt" TIMESTAMP(3),
-    "failedAt" TIMESTAMP(3),
-    "errorMessage" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "OutboundWebhookDelivery_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Invite" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    email text NOT NULL,
+    role public."Role" DEFAULT 'agent'::public."Role" NOT NULL,
+    "tokenHash" text NOT NULL,
+    "createdById" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "expiresAt" timestamp(3) without time zone NOT NULL,
+    "acceptedAt" timestamp(3) without time zone
 );
 
--- CreateTable
-CREATE TABLE "ConversationEvent" (
-    "id" TEXT NOT NULL,
-    "conversationId" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "userId" TEXT,
-    "apiKeyId" TEXT,
-    "kind" "ConversationEventKind" NOT NULL,
-    "before" JSONB,
-    "after" JSONB,
-    "at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "ConversationEvent_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."LoginAttempt" (
+    email text NOT NULL,
+    "failedCount" integer DEFAULT 0 NOT NULL,
+    "lockedUntil" timestamp(3) without time zone,
+    "lastFailedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "TeamChannel" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "description" TEXT,
-    "isDefault" BOOLEAN NOT NULL DEFAULT false,
-    "createdById" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-    "lastMessageAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "lastMessagePreview" TEXT NOT NULL DEFAULT '',
-
-    CONSTRAINT "TeamChannel_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Message" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "conversationId" text NOT NULL,
+    "externalId" text NOT NULL,
+    "senderUserId" text,
+    body text NOT NULL,
+    direction public."MessageDirection" NOT NULL,
+    channel public."Channel" NOT NULL,
+    status public."MessageStatus" DEFAULT 'sent'::public."MessageStatus" NOT NULL,
+    "rawPayload" jsonb NOT NULL,
+    "timestamp" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "mediaKind" text,
+    "mediaKey" text,
+    "mediaUrl" text,
+    "mediaMimeType" text,
+    "mediaCaption" text,
+    "mediaFilename" text,
+    "mediaSizeBytes" integer,
+    "mediaDurationMs" integer,
+    "mediaThumbnailKey" text,
+    "mediaThumbnailUrl" text,
+    "replyToMessageId" text
 );
 
--- CreateTable
-CREATE TABLE "TeamChannelMember" (
-    "channelId" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "addedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "addedById" TEXT,
-
-    CONSTRAINT "TeamChannelMember_pkey" PRIMARY KEY ("channelId","userId")
+CREATE TABLE public."MessageTemplate" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "externalId" text,
+    name text NOT NULL,
+    language text NOT NULL,
+    category public."TemplateCategory" NOT NULL,
+    status public."TemplateStatus" NOT NULL,
+    "bodyText" text DEFAULT ''::text NOT NULL,
+    components jsonb NOT NULL,
+    "variableBindings" jsonb DEFAULT '{}'::jsonb NOT NULL,
+    "syncedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "TeamChannelMessage" (
-    "id" TEXT NOT NULL,
-    "channelId" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "authorUserId" TEXT,
-    "body" TEXT NOT NULL,
-    "mediaKind" TEXT,
-    "mediaKey" TEXT,
-    "mediaUrl" TEXT,
-    "mediaMimeType" TEXT,
-    "mediaCaption" TEXT,
-    "mediaFilename" TEXT,
-    "mediaSizeBytes" INTEGER,
-    "mediaDurationMs" INTEGER,
-    "editedAt" TIMESTAMP(3),
-    "threadRootId" TEXT,
-    "threadReplyCount" INTEGER NOT NULL DEFAULT 0,
-    "threadLastReplyAt" TIMESTAMP(3),
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "TeamChannelMessage_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."OutboundEvent" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    type text NOT NULL,
+    payload jsonb NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "publishedAt" timestamp(3) without time zone,
+    "failedAt" timestamp(3) without time zone,
+    "lastError" text,
+    attempts integer DEFAULT 0 NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "TeamChannelMention" (
-    "id" TEXT NOT NULL,
-    "messageId" TEXT NOT NULL,
-    "mentionedUserId" TEXT NOT NULL,
-
-    CONSTRAINT "TeamChannelMention_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."OutboundSendAttempt" (
+    id text NOT NULL,
+    "jobId" text NOT NULL,
+    "teamId" text NOT NULL,
+    "conversationId" text NOT NULL,
+    "attemptStartedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "completedAt" timestamp(3) without time zone,
+    "externalId" text,
+    "failedAt" timestamp(3) without time zone,
+    "failureReason" text
 );
 
--- CreateTable
-CREATE TABLE "TeamChannelReaction" (
-    "id" TEXT NOT NULL,
-    "messageId" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "emoji" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "TeamChannelReaction_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."OutboundWebhook" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    url text NOT NULL,
+    secret text NOT NULL,
+    "eventTypes" text[],
+    enabled boolean DEFAULT true NOT NULL,
+    "createdById" text NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "lastDeliveredAt" timestamp(3) without time zone,
+    "lastErrorAt" timestamp(3) without time zone,
+    "lastErrorMessage" text,
+    "consecutiveFailures" integer DEFAULT 0 NOT NULL,
+    "disabledAt" timestamp(3) without time zone,
+    "disabledReason" text
 );
 
--- CreateTable
-CREATE TABLE "TeamChannelPin" (
-    "id" TEXT NOT NULL,
-    "channelId" TEXT NOT NULL,
-    "messageId" TEXT NOT NULL,
-    "pinnedById" TEXT,
-    "pinnedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "TeamChannelPin_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."OutboundWebhookDelivery" (
+    id text NOT NULL,
+    "webhookId" text NOT NULL,
+    "eventType" text NOT NULL,
+    payload jsonb NOT NULL,
+    "responseStatus" integer,
+    "responseBody" text,
+    "attemptCount" integer DEFAULT 0 NOT NULL,
+    "deliveredAt" timestamp(3) without time zone,
+    "failedAt" timestamp(3) without time zone,
+    "errorMessage" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "correlationId" text
 );
 
--- CreateTable
-CREATE TABLE "TeamChannelReadReceipt" (
-    "id" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "channelId" TEXT NOT NULL,
-    "lastReadAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "TeamChannelReadReceipt_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Session" (
+    id text NOT NULL,
+    "userId" text NOT NULL,
+    token text NOT NULL,
+    "expiresAt" timestamp(3) without time zone NOT NULL,
+    "ipAddress" text,
+    "userAgent" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "LoginAttempt" (
-    "email" TEXT NOT NULL,
-    "failedCount" INTEGER NOT NULL DEFAULT 0,
-    "lockedUntil" TIMESTAMP(3),
-    "lastFailedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "LoginAttempt_pkey" PRIMARY KEY ("email")
+CREATE TABLE public."Snippet" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    label text NOT NULL,
+    body text NOT NULL,
+    "createdById" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "OutboundEvent" (
-    "id" TEXT NOT NULL,
-    "teamId" TEXT NOT NULL,
-    "type" TEXT NOT NULL,
-    "payload" JSONB NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "publishedAt" TIMESTAMP(3),
-    "failedAt" TIMESTAMP(3),
-    "lastError" TEXT,
-    "attempts" INTEGER NOT NULL DEFAULT 0,
-
-    CONSTRAINT "OutboundEvent_pkey" PRIMARY KEY ("id")
+CREATE TABLE public."Tag" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    color text DEFAULT 'slate'::text NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "_ContactToTag" (
-    "A" TEXT NOT NULL,
-    "B" TEXT NOT NULL,
-
-    CONSTRAINT "_ContactToTag_AB_pkey" PRIMARY KEY ("A","B")
+CREATE TABLE public."Team" (
+    id text NOT NULL,
+    name text NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    plan public."Plan" DEFAULT 'starter'::public."Plan" NOT NULL,
+    "contactPanelBuiltins" jsonb DEFAULT '{}'::jsonb NOT NULL,
+    "rolePermissions" jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
--- CreateTable
-CREATE TABLE "_AudienceGroupTags" (
-    "A" TEXT NOT NULL,
-    "B" TEXT NOT NULL,
-
-    CONSTRAINT "_AudienceGroupTags_AB_pkey" PRIMARY KEY ("A","B")
+CREATE TABLE public."TeamApiKey" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    "tokenHash" text NOT NULL,
+    "tokenPrefix" text NOT NULL,
+    "createdById" text NOT NULL,
+    "lastUsedAt" timestamp(3) without time zone,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "revokedAt" timestamp(3) without time zone,
+    scopes text[] DEFAULT ARRAY['*'::text]
 );
 
--- CreateTable
-CREATE TABLE "_AudienceGroupContacts" (
-    "A" TEXT NOT NULL,
-    "B" TEXT NOT NULL,
-
-    CONSTRAINT "_AudienceGroupContacts_AB_pkey" PRIMARY KEY ("A","B")
+CREATE TABLE public."TeamChannel" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    description text,
+    "isDefault" boolean DEFAULT false NOT NULL,
+    "createdById" text,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL,
+    "lastMessageAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "lastMessagePreview" text DEFAULT ''::text NOT NULL
 );
 
--- CreateIndex
-CREATE UNIQUE INDEX "ChannelConnection_teamId_channel_key" ON "ChannelConnection"("teamId", "channel");
+CREATE TABLE public."TeamChannelMember" (
+    "channelId" text NOT NULL,
+    "userId" text NOT NULL,
+    "addedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "addedById" text
+);
+
+CREATE TABLE public."TeamChannelMention" (
+    id text NOT NULL,
+    "messageId" text NOT NULL,
+    "mentionedUserId" text NOT NULL
+);
+
+CREATE TABLE public."TeamChannelMessage" (
+    id text NOT NULL,
+    "channelId" text NOT NULL,
+    "teamId" text NOT NULL,
+    "authorUserId" text,
+    body text NOT NULL,
+    "mediaKind" text,
+    "mediaKey" text,
+    "mediaUrl" text,
+    "mediaMimeType" text,
+    "mediaCaption" text,
+    "mediaFilename" text,
+    "mediaSizeBytes" integer,
+    "mediaDurationMs" integer,
+    "editedAt" timestamp(3) without time zone,
+    "threadRootId" text,
+    "threadReplyCount" integer DEFAULT 0 NOT NULL,
+    "threadLastReplyAt" timestamp(3) without time zone,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE public."TeamChannelPin" (
+    id text NOT NULL,
+    "channelId" text NOT NULL,
+    "messageId" text NOT NULL,
+    "pinnedById" text,
+    "pinnedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE public."TeamChannelReaction" (
+    id text NOT NULL,
+    "messageId" text NOT NULL,
+    "userId" text NOT NULL,
+    emoji text NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE public."TeamChannelReadReceipt" (
+    id text NOT NULL,
+    "userId" text NOT NULL,
+    "channelId" text NOT NULL,
+    "lastReadAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE public."User" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    role public."Role" DEFAULT 'agent'::public."Role" NOT NULL,
+    name text NOT NULL,
+    email text NOT NULL,
+    "emailVerified" boolean DEFAULT true NOT NULL,
+    "avatarUrl" text,
+    "deactivatedAt" timestamp(3) without time zone,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL,
+    "availabilityStatus" text DEFAULT 'available'::text,
+    "availabilityMessage" text
+);
+
+CREATE TABLE public."Verification" (
+    id text NOT NULL,
+    identifier text NOT NULL,
+    value text NOT NULL,
+    "expiresAt" timestamp(3) without time zone NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
+);
+
+CREATE TABLE public."Workflow" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    name text NOT NULL,
+    published boolean DEFAULT false NOT NULL,
+    trigger public."WorkflowTriggerEvent" NOT NULL,
+    "triggerConfig" jsonb DEFAULT '{}'::jsonb NOT NULL,
+    "triggerConditions" jsonb DEFAULT '{"op": "AND", "children": []}'::jsonb NOT NULL,
+    "triggerOncePerContact" boolean DEFAULT false NOT NULL,
+    graph jsonb DEFAULT '{"edges": [], "nodes": [], "startNodeId": ""}'::jsonb NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updatedAt" timestamp(3) without time zone NOT NULL
+);
+
+CREATE TABLE public."WorkflowAwaitingReply" (
+    id text NOT NULL,
+    "teamId" text NOT NULL,
+    "contactId" text NOT NULL,
+    "runId" text NOT NULL,
+    "workflowId" text NOT NULL,
+    "stepId" text NOT NULL,
+    "expiresAt" timestamp(3) without time zone NOT NULL,
+    "createdAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE public."WorkflowContactState" (
+    id text NOT NULL,
+    "workflowId" text NOT NULL,
+    "contactId" text NOT NULL,
+    "teamId" text NOT NULL,
+    "firedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE public."WorkflowRun" (
+    id text NOT NULL,
+    "workflowId" text NOT NULL,
+    "teamId" text NOT NULL,
+    status public."WorkflowRunStatus" DEFAULT 'queued'::public."WorkflowRunStatus" NOT NULL,
+    trigger public."WorkflowTriggerEvent" NOT NULL,
+    "contactId" text,
+    "conversationId" text,
+    "eventPayload" jsonb NOT NULL,
+    "graphSnapshot" jsonb,
+    "currentStepId" text,
+    "waitUntil" timestamp(3) without time zone,
+    "jumpsUsed" integer DEFAULT 0 NOT NULL,
+    "stepLog" jsonb DEFAULT '[]'::jsonb NOT NULL,
+    "pendingAnswer" jsonb,
+    "stepOutputs" jsonb DEFAULT '{}'::jsonb NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    "errorMessage" text,
+    "startedAt" timestamp(3) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "finishedAt" timestamp(3) without time zone
+);
 
--- CreateIndex
-CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+CREATE TABLE public."_AudienceGroupContacts" (
+    "A" text NOT NULL,
+    "B" text NOT NULL
+);
 
--- CreateIndex
-CREATE INDEX "User_teamId_idx" ON "User"("teamId");
+CREATE TABLE public."_AudienceGroupTags" (
+    "A" text NOT NULL,
+    "B" text NOT NULL
+);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Session_token_key" ON "Session"("token");
+CREATE TABLE public."_ContactToTag" (
+    "A" text NOT NULL,
+    "B" text NOT NULL
+);
 
--- CreateIndex
-CREATE INDEX "Session_userId_idx" ON "Session"("userId");
+ALTER TABLE ONLY public."Account"
+    ADD CONSTRAINT "Account_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Account_userId_idx" ON "Account"("userId");
+ALTER TABLE ONLY public."ApiIdempotencyKey"
+    ADD CONSTRAINT "ApiIdempotencyKey_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Account_providerId_accountId_key" ON "Account"("providerId", "accountId");
+ALTER TABLE ONLY public."AudienceGroup"
+    ADD CONSTRAINT "AudienceGroup_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Verification_identifier_idx" ON "Verification"("identifier");
+ALTER TABLE ONLY public."BroadcastRecipient"
+    ADD CONSTRAINT "BroadcastRecipient_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Snippet_teamId_label_idx" ON "Snippet"("teamId", "label");
+ALTER TABLE ONLY public."Broadcast"
+    ADD CONSTRAINT "Broadcast_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Snippet_teamId_name_key" ON "Snippet"("teamId", "name");
+ALTER TABLE ONLY public."ChannelConnection"
+    ADD CONSTRAINT "ChannelConnection_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Contact_teamId_idx" ON "Contact"("teamId");
+ALTER TABLE ONLY public."ContactFieldDefinition"
+    ADD CONSTRAINT "ContactFieldDefinition_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Contact_teamId_source_idx" ON "Contact"("teamId", "source");
+ALTER TABLE ONLY public."ContactStage"
+    ADD CONSTRAINT "ContactStage_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Contact_teamId_stageId_idx" ON "Contact"("teamId", "stageId");
+ALTER TABLE ONLY public."Contact"
+    ADD CONSTRAINT "Contact_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Contact_teamId_deletedAt_idx" ON "Contact"("teamId", "deletedAt");
+ALTER TABLE ONLY public."ConversationEvent"
+    ADD CONSTRAINT "ConversationEvent_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Contact_teamId_lastInboundAt_idx" ON "Contact"("teamId", "lastInboundAt" DESC);
+ALTER TABLE ONLY public."Conversation"
+    ADD CONSTRAINT "Conversation_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Contact_name_trgm_idx" ON "Contact" USING GIN ("name" gin_trgm_ops);
+ALTER TABLE ONLY public."InternalNote"
+    ADD CONSTRAINT "InternalNote_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Contact_teamId_phoneNumber_key" ON "Contact"("teamId", "phoneNumber");
+ALTER TABLE ONLY public."Invite"
+    ADD CONSTRAINT "Invite_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Contact_teamId_identityChannel_externalContactId_key" ON "Contact"("teamId", "identityChannel", "externalContactId");
+ALTER TABLE ONLY public."LoginAttempt"
+    ADD CONSTRAINT "LoginAttempt_pkey" PRIMARY KEY (email);
 
--- CreateIndex
-CREATE INDEX "ContactStage_teamId_position_idx" ON "ContactStage"("teamId", "position");
+ALTER TABLE ONLY public."MessageTemplate"
+    ADD CONSTRAINT "MessageTemplate_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "ContactStage_teamId_name_key" ON "ContactStage"("teamId", "name");
+ALTER TABLE ONLY public."Message"
+    ADD CONSTRAINT "Message_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "ContactFieldDefinition_teamId_order_idx" ON "ContactFieldDefinition"("teamId", "order");
+ALTER TABLE ONLY public."OutboundEvent"
+    ADD CONSTRAINT "OutboundEvent_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "ContactFieldDefinition_teamId_key_key" ON "ContactFieldDefinition"("teamId", "key");
+ALTER TABLE ONLY public."OutboundSendAttempt"
+    ADD CONSTRAINT "OutboundSendAttempt_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Conversation_teamId_status_lastMessageAt_idx" ON "Conversation"("teamId", "status", "lastMessageAt" DESC);
+ALTER TABLE ONLY public."OutboundWebhookDelivery"
+    ADD CONSTRAINT "OutboundWebhookDelivery_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Conversation_teamId_assignedUserId_idx" ON "Conversation"("teamId", "assignedUserId");
+ALTER TABLE ONLY public."OutboundWebhook"
+    ADD CONSTRAINT "OutboundWebhook_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Conversation_teamId_lastMessageAt_id_idx" ON "Conversation"("teamId", "lastMessageAt" DESC, "id" DESC);
+ALTER TABLE ONLY public."Session"
+    ADD CONSTRAINT "Session_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Conversation_lastMessagePreview_trgm_idx" ON "Conversation" USING GIN ("lastMessagePreview" gin_trgm_ops);
+ALTER TABLE ONLY public."Snippet"
+    ADD CONSTRAINT "Snippet_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Conversation_teamId_contactId_key" ON "Conversation"("teamId", "contactId");
+ALTER TABLE ONLY public."Tag"
+    ADD CONSTRAINT "Tag_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Message_conversationId_timestamp_idx" ON "Message"("conversationId", "timestamp");
+ALTER TABLE ONLY public."TeamApiKey"
+    ADD CONSTRAINT "TeamApiKey_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Message_teamId_idx" ON "Message"("teamId");
+ALTER TABLE ONLY public."TeamChannelMember"
+    ADD CONSTRAINT "TeamChannelMember_pkey" PRIMARY KEY ("channelId", "userId");
 
--- CreateIndex
-CREATE INDEX "Message_replyToMessageId_idx" ON "Message"("replyToMessageId");
+ALTER TABLE ONLY public."TeamChannelMention"
+    ADD CONSTRAINT "TeamChannelMention_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Message_conversationId_timestamp_id_idx" ON "Message"("conversationId", "timestamp" DESC, "id" DESC);
+ALTER TABLE ONLY public."TeamChannelMessage"
+    ADD CONSTRAINT "TeamChannelMessage_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Message_teamId_channel_externalId_key" ON "Message"("teamId", "channel", "externalId");
+ALTER TABLE ONLY public."TeamChannelPin"
+    ADD CONSTRAINT "TeamChannelPin_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "OutboundSendAttempt_jobId_key" ON "OutboundSendAttempt"("jobId");
+ALTER TABLE ONLY public."TeamChannelReaction"
+    ADD CONSTRAINT "TeamChannelReaction_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "OutboundSendAttempt_attemptStartedAt_idx" ON "OutboundSendAttempt"("attemptStartedAt");
+ALTER TABLE ONLY public."TeamChannelReadReceipt"
+    ADD CONSTRAINT "TeamChannelReadReceipt_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "OutboundSendAttempt_teamId_completedAt_idx" ON "OutboundSendAttempt"("teamId", "completedAt");
+ALTER TABLE ONLY public."TeamChannel"
+    ADD CONSTRAINT "TeamChannel_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Invite_tokenHash_key" ON "Invite"("tokenHash");
+ALTER TABLE ONLY public."Team"
+    ADD CONSTRAINT "Team_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Invite_teamId_email_idx" ON "Invite"("teamId", "email");
+ALTER TABLE ONLY public."User"
+    ADD CONSTRAINT "User_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "MessageTemplate_teamId_status_idx" ON "MessageTemplate"("teamId", "status");
+ALTER TABLE ONLY public."Verification"
+    ADD CONSTRAINT "Verification_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "MessageTemplate_teamId_name_language_key" ON "MessageTemplate"("teamId", "name", "language");
+ALTER TABLE ONLY public."WorkflowAwaitingReply"
+    ADD CONSTRAINT "WorkflowAwaitingReply_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "Tag_teamId_idx" ON "Tag"("teamId");
+ALTER TABLE ONLY public."WorkflowContactState"
+    ADD CONSTRAINT "WorkflowContactState_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Tag_teamId_name_key" ON "Tag"("teamId", "name");
+ALTER TABLE ONLY public."WorkflowRun"
+    ADD CONSTRAINT "WorkflowRun_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE INDEX "AudienceGroup_teamId_idx" ON "AudienceGroup"("teamId");
+ALTER TABLE ONLY public."Workflow"
+    ADD CONSTRAINT "Workflow_pkey" PRIMARY KEY (id);
 
--- CreateIndex
-CREATE UNIQUE INDEX "AudienceGroup_teamId_name_key" ON "AudienceGroup"("teamId", "name");
+ALTER TABLE ONLY public."_AudienceGroupContacts"
+    ADD CONSTRAINT "_AudienceGroupContacts_AB_pkey" PRIMARY KEY ("A", "B");
 
--- CreateIndex
-CREATE INDEX "Broadcast_teamId_createdAt_idx" ON "Broadcast"("teamId", "createdAt" DESC);
+ALTER TABLE ONLY public."_AudienceGroupTags"
+    ADD CONSTRAINT "_AudienceGroupTags_AB_pkey" PRIMARY KEY ("A", "B");
 
--- CreateIndex
-CREATE INDEX "Broadcast_teamId_status_idx" ON "Broadcast"("teamId", "status");
+ALTER TABLE ONLY public."_ContactToTag"
+    ADD CONSTRAINT "_ContactToTag_AB_pkey" PRIMARY KEY ("A", "B");
 
--- CreateIndex
-CREATE INDEX "BroadcastRecipient_broadcastId_status_idx" ON "BroadcastRecipient"("broadcastId", "status");
+CREATE UNIQUE INDEX "Account_providerId_accountId_key" ON public."Account" USING btree ("providerId", "accountId");
 
--- CreateIndex
-CREATE INDEX "BroadcastRecipient_contactId_idx" ON "BroadcastRecipient"("contactId");
+CREATE INDEX "Account_userId_idx" ON public."Account" USING btree ("userId");
 
--- CreateIndex
-CREATE UNIQUE INDEX "BroadcastRecipient_broadcastId_contactId_key" ON "BroadcastRecipient"("broadcastId", "contactId");
+CREATE INDEX "ApiIdempotencyKey_expiresAt_idx" ON public."ApiIdempotencyKey" USING btree ("expiresAt");
 
--- CreateIndex
-CREATE INDEX "InternalNote_conversationId_timestamp_idx" ON "InternalNote"("conversationId", "timestamp");
+CREATE UNIQUE INDEX "ApiIdempotencyKey_teamId_apiKeyId_key_key" ON public."ApiIdempotencyKey" USING btree ("teamId", "apiKeyId", key);
 
--- CreateIndex
-CREATE INDEX "InternalNote_teamId_idx" ON "InternalNote"("teamId");
+CREATE INDEX "AudienceGroup_teamId_idx" ON public."AudienceGroup" USING btree ("teamId");
 
--- CreateIndex
-CREATE INDEX "Workflow_teamId_trigger_published_idx" ON "Workflow"("teamId", "trigger", "published");
+CREATE UNIQUE INDEX "AudienceGroup_teamId_name_key" ON public."AudienceGroup" USING btree ("teamId", name);
 
--- CreateIndex
-CREATE UNIQUE INDEX "Workflow_teamId_name_key" ON "Workflow"("teamId", "name");
+CREATE UNIQUE INDEX "BroadcastRecipient_broadcastId_contactId_key" ON public."BroadcastRecipient" USING btree ("broadcastId", "contactId");
 
--- CreateIndex
-CREATE INDEX "WorkflowRun_workflowId_startedAt_idx" ON "WorkflowRun"("workflowId", "startedAt" DESC);
+CREATE INDEX "BroadcastRecipient_broadcastId_status_idx" ON public."BroadcastRecipient" USING btree ("broadcastId", status);
 
--- CreateIndex
-CREATE INDEX "WorkflowRun_teamId_startedAt_idx" ON "WorkflowRun"("teamId", "startedAt" DESC);
+CREATE INDEX "BroadcastRecipient_contactId_idx" ON public."BroadcastRecipient" USING btree ("contactId");
 
--- CreateIndex
-CREATE INDEX "WorkflowRun_status_waitUntil_idx" ON "WorkflowRun"("status", "waitUntil");
+CREATE INDEX "Broadcast_teamId_createdAt_idx" ON public."Broadcast" USING btree ("teamId", "createdAt" DESC);
 
--- CreateIndex
-CREATE UNIQUE INDEX "WorkflowAwaitingReply_runId_key" ON "WorkflowAwaitingReply"("runId");
+CREATE INDEX "Broadcast_teamId_scheduledAt_idx" ON public."Broadcast" USING btree ("teamId", "scheduledAt");
 
--- CreateIndex
-CREATE INDEX "WorkflowAwaitingReply_teamId_contactId_idx" ON "WorkflowAwaitingReply"("teamId", "contactId");
+CREATE INDEX "Broadcast_teamId_status_idx" ON public."Broadcast" USING btree ("teamId", status);
 
--- CreateIndex
-CREATE INDEX "WorkflowAwaitingReply_expiresAt_idx" ON "WorkflowAwaitingReply"("expiresAt");
+CREATE UNIQUE INDEX "ChannelConnection_teamId_channel_key" ON public."ChannelConnection" USING btree ("teamId", channel);
 
--- CreateIndex
-CREATE INDEX "WorkflowContactState_teamId_idx" ON "WorkflowContactState"("teamId");
+CREATE UNIQUE INDEX "ContactFieldDefinition_teamId_key_key" ON public."ContactFieldDefinition" USING btree ("teamId", key);
 
--- CreateIndex
-CREATE UNIQUE INDEX "WorkflowContactState_workflowId_contactId_key" ON "WorkflowContactState"("workflowId", "contactId");
+CREATE INDEX "ContactFieldDefinition_teamId_order_idx" ON public."ContactFieldDefinition" USING btree ("teamId", "order");
 
--- CreateIndex
-CREATE UNIQUE INDEX "TeamApiKey_tokenHash_key" ON "TeamApiKey"("tokenHash");
+CREATE UNIQUE INDEX "ContactStage_teamId_isDefault_key" ON public."ContactStage" USING btree ("teamId") WHERE ("isDefault" = true);
 
--- CreateIndex
-CREATE INDEX "TeamApiKey_teamId_revokedAt_idx" ON "TeamApiKey"("teamId", "revokedAt");
+CREATE UNIQUE INDEX "ContactStage_teamId_name_key" ON public."ContactStage" USING btree ("teamId", name);
 
--- CreateIndex
-CREATE INDEX "ApiIdempotencyKey_expiresAt_idx" ON "ApiIdempotencyKey"("expiresAt");
+CREATE INDEX "ContactStage_teamId_position_idx" ON public."ContactStage" USING btree ("teamId", "position");
 
--- CreateIndex
-CREATE UNIQUE INDEX "ApiIdempotencyKey_teamId_apiKeyId_key_key" ON "ApiIdempotencyKey"("teamId", "apiKeyId", "key");
+CREATE INDEX "Contact_customFields_gin_idx" ON public."Contact" USING gin ("customFields" jsonb_path_ops);
 
--- CreateIndex
-CREATE INDEX "OutboundWebhook_teamId_enabled_idx" ON "OutboundWebhook"("teamId", "enabled");
+CREATE INDEX "Contact_name_trgm_idx" ON public."Contact" USING gin (name public.gin_trgm_ops);
 
--- CreateIndex
-CREATE INDEX "OutboundWebhookDelivery_webhookId_createdAt_idx" ON "OutboundWebhookDelivery"("webhookId", "createdAt" DESC);
+CREATE INDEX "Contact_phoneNumber_trgm_idx" ON public."Contact" USING gin ("phoneNumber" public.gin_trgm_ops) WHERE ("phoneNumber" IS NOT NULL);
 
--- CreateIndex
-CREATE INDEX "OutboundWebhookDelivery_createdAt_idx" ON "OutboundWebhookDelivery"("createdAt");
+CREATE INDEX "Contact_teamId_deletedAt_idx" ON public."Contact" USING btree ("teamId", "deletedAt");
 
--- CreateIndex
-CREATE INDEX "ConversationEvent_conversationId_at_idx" ON "ConversationEvent"("conversationId", "at" DESC);
+CREATE UNIQUE INDEX "Contact_teamId_identityChannel_externalContactId_key" ON public."Contact" USING btree ("teamId", "identityChannel", "externalContactId");
 
--- CreateIndex
-CREATE INDEX "TeamChannel_teamId_lastMessageAt_idx" ON "TeamChannel"("teamId", "lastMessageAt" DESC);
+CREATE INDEX "Contact_teamId_idx" ON public."Contact" USING btree ("teamId");
 
--- CreateIndex
-CREATE UNIQUE INDEX "TeamChannel_teamId_name_key" ON "TeamChannel"("teamId", "name");
+CREATE INDEX "Contact_teamId_lastInboundAt_idx" ON public."Contact" USING btree ("teamId", "lastInboundAt" DESC);
 
--- CreateIndex
-CREATE INDEX "TeamChannelMember_userId_idx" ON "TeamChannelMember"("userId");
+CREATE INDEX "Contact_teamId_phoneNumber_idx" ON public."Contact" USING btree ("teamId", "phoneNumber");
 
--- CreateIndex
-CREATE INDEX "TeamChannelMessage_channelId_createdAt_id_idx" ON "TeamChannelMessage"("channelId", "createdAt" DESC, "id" DESC);
+CREATE UNIQUE INDEX "Contact_teamId_phoneNumber_whatsapp_key" ON public."Contact" USING btree ("teamId", "phoneNumber") WHERE (("phoneNumber" IS NOT NULL) AND ("identityChannel" = 'whatsapp'::public."Channel"));
 
--- CreateIndex
-CREATE INDEX "TeamChannelMessage_threadRootId_createdAt_idx" ON "TeamChannelMessage"("threadRootId", "createdAt");
+CREATE INDEX "Contact_teamId_source_idx" ON public."Contact" USING btree ("teamId", source);
 
--- CreateIndex
-CREATE INDEX "TeamChannelMessage_teamId_idx" ON "TeamChannelMessage"("teamId");
+CREATE INDEX "Contact_teamId_stageId_idx" ON public."Contact" USING btree ("teamId", "stageId");
 
--- CreateIndex
-CREATE INDEX "TeamChannelMessage_body_trgm_idx" ON "TeamChannelMessage" USING GIN ("body" gin_trgm_ops);
+CREATE INDEX "ConversationEvent_at_idx" ON public."ConversationEvent" USING btree (at);
 
--- CreateIndex
-CREATE INDEX "TeamChannelMention_mentionedUserId_idx" ON "TeamChannelMention"("mentionedUserId");
+CREATE INDEX "ConversationEvent_conversationId_at_idx" ON public."ConversationEvent" USING btree ("conversationId", at DESC);
 
--- CreateIndex
-CREATE UNIQUE INDEX "TeamChannelMention_messageId_mentionedUserId_key" ON "TeamChannelMention"("messageId", "mentionedUserId");
+CREATE INDEX "Conversation_lastMessagePreview_trgm_idx" ON public."Conversation" USING gin ("lastMessagePreview" public.gin_trgm_ops);
 
--- CreateIndex
-CREATE INDEX "TeamChannelReaction_messageId_idx" ON "TeamChannelReaction"("messageId");
+CREATE INDEX "Conversation_teamId_assignedUserId_idx" ON public."Conversation" USING btree ("teamId", "assignedUserId");
 
--- CreateIndex
-CREATE UNIQUE INDEX "TeamChannelReaction_messageId_userId_emoji_key" ON "TeamChannelReaction"("messageId", "userId", "emoji");
+CREATE UNIQUE INDEX "Conversation_teamId_contactId_key" ON public."Conversation" USING btree ("teamId", "contactId");
 
--- CreateIndex
-CREATE UNIQUE INDEX "TeamChannelPin_messageId_key" ON "TeamChannelPin"("messageId");
+CREATE INDEX "Conversation_teamId_lastMessageAt_id_idx" ON public."Conversation" USING btree ("teamId", "lastMessageAt" DESC, id DESC);
 
--- CreateIndex
-CREATE INDEX "TeamChannelPin_channelId_pinnedAt_idx" ON "TeamChannelPin"("channelId", "pinnedAt" DESC);
+CREATE INDEX "Conversation_teamId_status_lastMessageAt_idx" ON public."Conversation" USING btree ("teamId", status, "lastMessageAt" DESC);
 
--- CreateIndex
-CREATE INDEX "TeamChannelReadReceipt_channelId_idx" ON "TeamChannelReadReceipt"("channelId");
+CREATE INDEX "InternalNote_body_trgm_idx" ON public."InternalNote" USING gin (body public.gin_trgm_ops);
 
--- CreateIndex
-CREATE UNIQUE INDEX "TeamChannelReadReceipt_userId_channelId_key" ON "TeamChannelReadReceipt"("userId", "channelId");
+CREATE INDEX "InternalNote_conversationId_timestamp_idx" ON public."InternalNote" USING btree ("conversationId", "timestamp");
 
--- CreateIndex
-CREATE INDEX "LoginAttempt_lockedUntil_idx" ON "LoginAttempt"("lockedUntil");
+CREATE INDEX "InternalNote_teamId_idx" ON public."InternalNote" USING btree ("teamId");
 
--- CreateIndex
-CREATE INDEX "_ContactToTag_B_index" ON "_ContactToTag"("B");
+CREATE INDEX "Invite_teamId_email_idx" ON public."Invite" USING btree ("teamId", email);
 
--- CreateIndex
-CREATE INDEX "_AudienceGroupTags_B_index" ON "_AudienceGroupTags"("B");
+CREATE UNIQUE INDEX "Invite_tokenHash_key" ON public."Invite" USING btree ("tokenHash");
 
--- CreateIndex
-CREATE INDEX "_AudienceGroupContacts_B_index" ON "_AudienceGroupContacts"("B");
+CREATE INDEX "LoginAttempt_lockedUntil_idx" ON public."LoginAttempt" USING btree ("lockedUntil");
 
--- AddForeignKey
-ALTER TABLE "ChannelConnection" ADD CONSTRAINT "ChannelConnection_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "MessageTemplate_teamId_name_language_key" ON public."MessageTemplate" USING btree ("teamId", name, language);
 
--- AddForeignKey
-ALTER TABLE "User" ADD CONSTRAINT "User_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "MessageTemplate_teamId_status_idx" ON public."MessageTemplate" USING btree ("teamId", status);
 
--- AddForeignKey
-ALTER TABLE "Session" ADD CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "Message_body_trgm_idx" ON public."Message" USING gin (body public.gin_trgm_ops);
 
--- AddForeignKey
-ALTER TABLE "Account" ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "Message_conversationId_timestamp_id_idx" ON public."Message" USING btree ("conversationId", "timestamp" DESC, id DESC);
 
--- AddForeignKey
-ALTER TABLE "Snippet" ADD CONSTRAINT "Snippet_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "Message_conversationId_timestamp_idx" ON public."Message" USING btree ("conversationId", "timestamp");
 
--- AddForeignKey
-ALTER TABLE "Snippet" ADD CONSTRAINT "Snippet_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "Message_replyToMessageId_idx" ON public."Message" USING btree ("replyToMessageId");
 
--- AddForeignKey
-ALTER TABLE "Contact" ADD CONSTRAINT "Contact_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "Message_teamId_channel_externalId_key" ON public."Message" USING btree ("teamId", channel, "externalId");
 
--- AddForeignKey
-ALTER TABLE "Contact" ADD CONSTRAINT "Contact_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "ContactStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "Message_teamId_idx" ON public."Message" USING btree ("teamId");
 
--- AddForeignKey
-ALTER TABLE "ContactStage" ADD CONSTRAINT "ContactStage_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "OutboundEvent_drainer_pending_idx" ON public."OutboundEvent" USING btree ("createdAt") WHERE (("publishedAt" IS NULL) AND ("failedAt" IS NULL));
 
--- AddForeignKey
-ALTER TABLE "ContactFieldDefinition" ADD CONSTRAINT "ContactFieldDefinition_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "OutboundSendAttempt_attemptStartedAt_idx" ON public."OutboundSendAttempt" USING btree ("attemptStartedAt");
 
--- AddForeignKey
-ALTER TABLE "Conversation" ADD CONSTRAINT "Conversation_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "OutboundSendAttempt_jobId_key" ON public."OutboundSendAttempt" USING btree ("jobId");
 
--- AddForeignKey
-ALTER TABLE "Conversation" ADD CONSTRAINT "Conversation_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "OutboundSendAttempt_teamId_completedAt_idx" ON public."OutboundSendAttempt" USING btree ("teamId", "completedAt");
 
--- AddForeignKey
-ALTER TABLE "Conversation" ADD CONSTRAINT "Conversation_assignedUserId_fkey" FOREIGN KEY ("assignedUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "OutboundWebhookDelivery_createdAt_idx" ON public."OutboundWebhookDelivery" USING btree ("createdAt");
 
--- AddForeignKey
-ALTER TABLE "Message" ADD CONSTRAINT "Message_replyToMessageId_fkey" FOREIGN KEY ("replyToMessageId") REFERENCES "Message"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "OutboundWebhookDelivery_webhookId_createdAt_idx" ON public."OutboundWebhookDelivery" USING btree ("webhookId", "createdAt" DESC);
 
--- AddForeignKey
-ALTER TABLE "Message" ADD CONSTRAINT "Message_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "OutboundWebhook_teamId_enabled_idx" ON public."OutboundWebhook" USING btree ("teamId", enabled);
 
--- AddForeignKey
-ALTER TABLE "Message" ADD CONSTRAINT "Message_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "Session_token_key" ON public."Session" USING btree (token);
 
--- AddForeignKey
-ALTER TABLE "Message" ADD CONSTRAINT "Message_senderUserId_fkey" FOREIGN KEY ("senderUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "Session_userId_idx" ON public."Session" USING btree ("userId");
 
--- AddForeignKey
-ALTER TABLE "OutboundSendAttempt" ADD CONSTRAINT "OutboundSendAttempt_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "Snippet_teamId_label_idx" ON public."Snippet" USING btree ("teamId", label);
 
--- AddForeignKey
-ALTER TABLE "Invite" ADD CONSTRAINT "Invite_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "Snippet_teamId_name_key" ON public."Snippet" USING btree ("teamId", name);
 
--- AddForeignKey
-ALTER TABLE "Invite" ADD CONSTRAINT "Invite_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "Tag_teamId_idx" ON public."Tag" USING btree ("teamId");
 
--- AddForeignKey
-ALTER TABLE "MessageTemplate" ADD CONSTRAINT "MessageTemplate_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "Tag_teamId_name_key" ON public."Tag" USING btree ("teamId", name);
 
--- AddForeignKey
-ALTER TABLE "Tag" ADD CONSTRAINT "Tag_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamApiKey_teamId_revokedAt_idx" ON public."TeamApiKey" USING btree ("teamId", "revokedAt");
 
--- AddForeignKey
-ALTER TABLE "AudienceGroup" ADD CONSTRAINT "AudienceGroup_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "TeamApiKey_tokenHash_key" ON public."TeamApiKey" USING btree ("tokenHash");
 
--- AddForeignKey
-ALTER TABLE "AudienceGroup" ADD CONSTRAINT "AudienceGroup_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelMember_userId_idx" ON public."TeamChannelMember" USING btree ("userId");
 
--- AddForeignKey
-ALTER TABLE "Broadcast" ADD CONSTRAINT "Broadcast_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelMention_mentionedUserId_idx" ON public."TeamChannelMention" USING btree ("mentionedUserId");
 
--- AddForeignKey
-ALTER TABLE "Broadcast" ADD CONSTRAINT "Broadcast_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "TeamChannelMention_messageId_mentionedUserId_key" ON public."TeamChannelMention" USING btree ("messageId", "mentionedUserId");
 
--- AddForeignKey
-ALTER TABLE "BroadcastRecipient" ADD CONSTRAINT "BroadcastRecipient_broadcastId_fkey" FOREIGN KEY ("broadcastId") REFERENCES "Broadcast"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelMessage_body_trgm_idx" ON public."TeamChannelMessage" USING gin (body public.gin_trgm_ops);
 
--- AddForeignKey
-ALTER TABLE "BroadcastRecipient" ADD CONSTRAINT "BroadcastRecipient_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelMessage_channelId_createdAt_id_idx" ON public."TeamChannelMessage" USING btree ("channelId", "createdAt" DESC, id DESC);
 
--- AddForeignKey
-ALTER TABLE "InternalNote" ADD CONSTRAINT "InternalNote_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelMessage_teamId_idx" ON public."TeamChannelMessage" USING btree ("teamId");
 
--- AddForeignKey
-ALTER TABLE "InternalNote" ADD CONSTRAINT "InternalNote_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelMessage_threadRootId_createdAt_idx" ON public."TeamChannelMessage" USING btree ("threadRootId", "createdAt");
 
--- AddForeignKey
-ALTER TABLE "InternalNote" ADD CONSTRAINT "InternalNote_authorUserId_fkey" FOREIGN KEY ("authorUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelPin_channelId_pinnedAt_idx" ON public."TeamChannelPin" USING btree ("channelId", "pinnedAt" DESC);
 
--- AddForeignKey
-ALTER TABLE "Workflow" ADD CONSTRAINT "Workflow_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "TeamChannelPin_messageId_key" ON public."TeamChannelPin" USING btree ("messageId");
 
--- AddForeignKey
-ALTER TABLE "WorkflowRun" ADD CONSTRAINT "WorkflowRun_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelReaction_messageId_idx" ON public."TeamChannelReaction" USING btree ("messageId");
 
--- AddForeignKey
-ALTER TABLE "WorkflowRun" ADD CONSTRAINT "WorkflowRun_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "TeamChannelReaction_messageId_userId_emoji_key" ON public."TeamChannelReaction" USING btree ("messageId", "userId", emoji);
 
--- AddForeignKey
-ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannelReadReceipt_channelId_idx" ON public."TeamChannelReadReceipt" USING btree ("channelId");
 
--- AddForeignKey
-ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "TeamChannelReadReceipt_userId_channelId_key" ON public."TeamChannelReadReceipt" USING btree ("userId", "channelId");
 
--- AddForeignKey
-ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_runId_fkey" FOREIGN KEY ("runId") REFERENCES "WorkflowRun"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "TeamChannel_teamId_lastMessageAt_idx" ON public."TeamChannel" USING btree ("teamId", "lastMessageAt" DESC);
 
--- AddForeignKey
-ALTER TABLE "WorkflowAwaitingReply" ADD CONSTRAINT "WorkflowAwaitingReply_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "TeamChannel_teamId_name_key" ON public."TeamChannel" USING btree ("teamId", name);
 
--- AddForeignKey
-ALTER TABLE "WorkflowContactState" ADD CONSTRAINT "WorkflowContactState_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "User_email_key" ON public."User" USING btree (email);
 
--- AddForeignKey
-ALTER TABLE "WorkflowContactState" ADD CONSTRAINT "WorkflowContactState_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "User_teamId_idx" ON public."User" USING btree ("teamId");
 
--- AddForeignKey
-ALTER TABLE "TeamApiKey" ADD CONSTRAINT "TeamApiKey_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "Verification_identifier_idx" ON public."Verification" USING btree (identifier);
 
--- AddForeignKey
-ALTER TABLE "ApiIdempotencyKey" ADD CONSTRAINT "ApiIdempotencyKey_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES "TeamApiKey"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "WorkflowAwaitingReply_expiresAt_idx" ON public."WorkflowAwaitingReply" USING btree ("expiresAt");
 
--- AddForeignKey
-ALTER TABLE "OutboundWebhook" ADD CONSTRAINT "OutboundWebhook_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "WorkflowAwaitingReply_runId_key" ON public."WorkflowAwaitingReply" USING btree ("runId");
 
--- AddForeignKey
-ALTER TABLE "OutboundWebhookDelivery" ADD CONSTRAINT "OutboundWebhookDelivery_webhookId_fkey" FOREIGN KEY ("webhookId") REFERENCES "OutboundWebhook"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "WorkflowAwaitingReply_teamId_contactId_idx" ON public."WorkflowAwaitingReply" USING btree ("teamId", "contactId");
 
--- AddForeignKey
-ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "WorkflowContactState_teamId_idx" ON public."WorkflowContactState" USING btree ("teamId");
 
--- AddForeignKey
-ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "WorkflowContactState_workflowId_contactId_key" ON public."WorkflowContactState" USING btree ("workflowId", "contactId");
 
--- AddForeignKey
-ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "WorkflowRun_status_waitUntil_idx" ON public."WorkflowRun" USING btree (status, "waitUntil");
 
--- AddForeignKey
-ALTER TABLE "ConversationEvent" ADD CONSTRAINT "ConversationEvent_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES "TeamApiKey"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "WorkflowRun_teamId_startedAt_idx" ON public."WorkflowRun" USING btree ("teamId", "startedAt" DESC);
 
--- AddForeignKey
-ALTER TABLE "TeamChannel" ADD CONSTRAINT "TeamChannel_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "WorkflowRun_workflowId_startedAt_idx" ON public."WorkflowRun" USING btree ("workflowId", "startedAt" DESC);
 
--- AddForeignKey
-ALTER TABLE "TeamChannel" ADD CONSTRAINT "TeamChannel_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE UNIQUE INDEX "Workflow_teamId_name_key" ON public."Workflow" USING btree ("teamId", name);
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMember" ADD CONSTRAINT "TeamChannelMember_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "Workflow_teamId_trigger_published_idx" ON public."Workflow" USING btree ("teamId", trigger, published);
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMember" ADD CONSTRAINT "TeamChannelMember_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "_AudienceGroupContacts_B_index" ON public."_AudienceGroupContacts" USING btree ("B");
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMember" ADD CONSTRAINT "TeamChannelMember_addedById_fkey" FOREIGN KEY ("addedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+CREATE INDEX "_AudienceGroupTags_B_index" ON public."_AudienceGroupTags" USING btree ("B");
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMessage" ADD CONSTRAINT "TeamChannelMessage_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "_ContactToTag_B_index" ON public."_ContactToTag" USING btree ("B");
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMessage" ADD CONSTRAINT "TeamChannelMessage_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Account"
+    ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMessage" ADD CONSTRAINT "TeamChannelMessage_authorUserId_fkey" FOREIGN KEY ("authorUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ApiIdempotencyKey"
+    ADD CONSTRAINT "ApiIdempotencyKey_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES public."TeamApiKey"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMessage" ADD CONSTRAINT "TeamChannelMessage_threadRootId_fkey" FOREIGN KEY ("threadRootId") REFERENCES "TeamChannelMessage"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."AudienceGroup"
+    ADD CONSTRAINT "AudienceGroup_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMention" ADD CONSTRAINT "TeamChannelMention_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES "TeamChannelMessage"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."AudienceGroup"
+    ADD CONSTRAINT "AudienceGroup_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelMention" ADD CONSTRAINT "TeamChannelMention_mentionedUserId_fkey" FOREIGN KEY ("mentionedUserId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."BroadcastRecipient"
+    ADD CONSTRAINT "BroadcastRecipient_broadcastId_fkey" FOREIGN KEY ("broadcastId") REFERENCES public."Broadcast"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelReaction" ADD CONSTRAINT "TeamChannelReaction_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES "TeamChannelMessage"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."BroadcastRecipient"
+    ADD CONSTRAINT "BroadcastRecipient_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES public."Contact"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelReaction" ADD CONSTRAINT "TeamChannelReaction_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Broadcast"
+    ADD CONSTRAINT "Broadcast_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelPin" ADD CONSTRAINT "TeamChannelPin_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Broadcast"
+    ADD CONSTRAINT "Broadcast_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelPin" ADD CONSTRAINT "TeamChannelPin_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES "TeamChannelMessage"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ChannelConnection"
+    ADD CONSTRAINT "ChannelConnection_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelPin" ADD CONSTRAINT "TeamChannelPin_pinnedById_fkey" FOREIGN KEY ("pinnedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ContactFieldDefinition"
+    ADD CONSTRAINT "ContactFieldDefinition_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelReadReceipt" ADD CONSTRAINT "TeamChannelReadReceipt_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ContactStage"
+    ADD CONSTRAINT "ContactStage_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "TeamChannelReadReceipt" ADD CONSTRAINT "TeamChannelReadReceipt_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES "TeamChannel"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Contact"
+    ADD CONSTRAINT "Contact_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES public."ContactStage"(id) ON UPDATE CASCADE ON DELETE SET NULL;
 
--- AddForeignKey
-ALTER TABLE "OutboundEvent" ADD CONSTRAINT "OutboundEvent_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES "Team"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Contact"
+    ADD CONSTRAINT "Contact_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "_ContactToTag" ADD CONSTRAINT "_ContactToTag_A_fkey" FOREIGN KEY ("A") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ConversationEvent"
+    ADD CONSTRAINT "ConversationEvent_apiKeyId_fkey" FOREIGN KEY ("apiKeyId") REFERENCES public."TeamApiKey"(id) ON UPDATE CASCADE ON DELETE SET NULL;
 
--- AddForeignKey
-ALTER TABLE "_ContactToTag" ADD CONSTRAINT "_ContactToTag_B_fkey" FOREIGN KEY ("B") REFERENCES "Tag"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ConversationEvent"
+    ADD CONSTRAINT "ConversationEvent_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES public."Conversation"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "_AudienceGroupTags" ADD CONSTRAINT "_AudienceGroupTags_A_fkey" FOREIGN KEY ("A") REFERENCES "AudienceGroup"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ConversationEvent"
+    ADD CONSTRAINT "ConversationEvent_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
--- AddForeignKey
-ALTER TABLE "_AudienceGroupTags" ADD CONSTRAINT "_AudienceGroupTags_B_fkey" FOREIGN KEY ("B") REFERENCES "Tag"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."ConversationEvent"
+    ADD CONSTRAINT "ConversationEvent_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
 
--- AddForeignKey
-ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_A_fkey" FOREIGN KEY ("A") REFERENCES "AudienceGroup"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Conversation"
+    ADD CONSTRAINT "Conversation_assignedUserId_fkey" FOREIGN KEY ("assignedUserId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
 
--- AddForeignKey
-ALTER TABLE "_AudienceGroupContacts" ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES "Contact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ONLY public."Conversation"
+    ADD CONSTRAINT "Conversation_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES public."Contact"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Conversation"
+    ADD CONSTRAINT "Conversation_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."InternalNote"
+    ADD CONSTRAINT "InternalNote_authorUserId_fkey" FOREIGN KEY ("authorUserId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."InternalNote"
+    ADD CONSTRAINT "InternalNote_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES public."Conversation"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."InternalNote"
+    ADD CONSTRAINT "InternalNote_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Invite"
+    ADD CONSTRAINT "Invite_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."Invite"
+    ADD CONSTRAINT "Invite_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."MessageTemplate"
+    ADD CONSTRAINT "MessageTemplate_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Message"
+    ADD CONSTRAINT "Message_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES public."Conversation"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Message"
+    ADD CONSTRAINT "Message_replyToMessageId_fkey" FOREIGN KEY ("replyToMessageId") REFERENCES public."Message"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."Message"
+    ADD CONSTRAINT "Message_senderUserId_fkey" FOREIGN KEY ("senderUserId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."Message"
+    ADD CONSTRAINT "Message_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."OutboundEvent"
+    ADD CONSTRAINT "OutboundEvent_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."OutboundSendAttempt"
+    ADD CONSTRAINT "OutboundSendAttempt_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."OutboundWebhookDelivery"
+    ADD CONSTRAINT "OutboundWebhookDelivery_webhookId_fkey" FOREIGN KEY ("webhookId") REFERENCES public."OutboundWebhook"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."OutboundWebhook"
+    ADD CONSTRAINT "OutboundWebhook_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Session"
+    ADD CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Snippet"
+    ADD CONSTRAINT "Snippet_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."Snippet"
+    ADD CONSTRAINT "Snippet_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Tag"
+    ADD CONSTRAINT "Tag_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamApiKey"
+    ADD CONSTRAINT "TeamApiKey_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMember"
+    ADD CONSTRAINT "TeamChannelMember_addedById_fkey" FOREIGN KEY ("addedById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."TeamChannelMember"
+    ADD CONSTRAINT "TeamChannelMember_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES public."TeamChannel"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMember"
+    ADD CONSTRAINT "TeamChannelMember_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMention"
+    ADD CONSTRAINT "TeamChannelMention_mentionedUserId_fkey" FOREIGN KEY ("mentionedUserId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMention"
+    ADD CONSTRAINT "TeamChannelMention_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES public."TeamChannelMessage"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMessage"
+    ADD CONSTRAINT "TeamChannelMessage_authorUserId_fkey" FOREIGN KEY ("authorUserId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."TeamChannelMessage"
+    ADD CONSTRAINT "TeamChannelMessage_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES public."TeamChannel"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMessage"
+    ADD CONSTRAINT "TeamChannelMessage_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelMessage"
+    ADD CONSTRAINT "TeamChannelMessage_threadRootId_fkey" FOREIGN KEY ("threadRootId") REFERENCES public."TeamChannelMessage"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelPin"
+    ADD CONSTRAINT "TeamChannelPin_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES public."TeamChannel"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelPin"
+    ADD CONSTRAINT "TeamChannelPin_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES public."TeamChannelMessage"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelPin"
+    ADD CONSTRAINT "TeamChannelPin_pinnedById_fkey" FOREIGN KEY ("pinnedById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."TeamChannelReaction"
+    ADD CONSTRAINT "TeamChannelReaction_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES public."TeamChannelMessage"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelReaction"
+    ADD CONSTRAINT "TeamChannelReaction_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelReadReceipt"
+    ADD CONSTRAINT "TeamChannelReadReceipt_channelId_fkey" FOREIGN KEY ("channelId") REFERENCES public."TeamChannel"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannelReadReceipt"
+    ADD CONSTRAINT "TeamChannelReadReceipt_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."TeamChannel"
+    ADD CONSTRAINT "TeamChannel_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES public."User"(id) ON UPDATE CASCADE ON DELETE SET NULL;
+
+ALTER TABLE ONLY public."TeamChannel"
+    ADD CONSTRAINT "TeamChannel_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."User"
+    ADD CONSTRAINT "User_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowAwaitingReply"
+    ADD CONSTRAINT "WorkflowAwaitingReply_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES public."Contact"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowAwaitingReply"
+    ADD CONSTRAINT "WorkflowAwaitingReply_runId_fkey" FOREIGN KEY ("runId") REFERENCES public."WorkflowRun"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowAwaitingReply"
+    ADD CONSTRAINT "WorkflowAwaitingReply_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowAwaitingReply"
+    ADD CONSTRAINT "WorkflowAwaitingReply_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES public."Workflow"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowContactState"
+    ADD CONSTRAINT "WorkflowContactState_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowContactState"
+    ADD CONSTRAINT "WorkflowContactState_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES public."Workflow"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowRun"
+    ADD CONSTRAINT "WorkflowRun_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."WorkflowRun"
+    ADD CONSTRAINT "WorkflowRun_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES public."Workflow"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."Workflow"
+    ADD CONSTRAINT "Workflow_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public."Team"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."_AudienceGroupContacts"
+    ADD CONSTRAINT "_AudienceGroupContacts_A_fkey" FOREIGN KEY ("A") REFERENCES public."AudienceGroup"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."_AudienceGroupContacts"
+    ADD CONSTRAINT "_AudienceGroupContacts_B_fkey" FOREIGN KEY ("B") REFERENCES public."Contact"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."_AudienceGroupTags"
+    ADD CONSTRAINT "_AudienceGroupTags_A_fkey" FOREIGN KEY ("A") REFERENCES public."AudienceGroup"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."_AudienceGroupTags"
+    ADD CONSTRAINT "_AudienceGroupTags_B_fkey" FOREIGN KEY ("B") REFERENCES public."Tag"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."_ContactToTag"
+    ADD CONSTRAINT "_ContactToTag_A_fkey" FOREIGN KEY ("A") REFERENCES public."Contact"(id) ON UPDATE CASCADE ON DELETE CASCADE;
+
+ALTER TABLE ONLY public."_ContactToTag"
+    ADD CONSTRAINT "_ContactToTag_B_fkey" FOREIGN KEY ("B") REFERENCES public."Tag"(id) ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 -- ---------------------------------------------------------------------------
--- Hand-written jsonb_path_ops GIN — the Prisma DSL can't emit this cleanly
--- (`raw("jsonb_path_ops")` appends an invalid trailing `ASC`), so the index is
--- maintained as raw SQL and intentionally NOT represented in schema.prisma.
--- Consequence: every `prisma migrate dev` diff against an apply state that
--- HAS this index will propose a spurious `DROP INDEX "Contact_customFields_gin_idx"`.
--- Always strip that DROP from generated migrations — losing this index forces
--- a full rebuild on the largest table.
+-- Partial indexes — referenced by schema.prisma but lost in the prior squash.
+-- Re-added in squash #2.
 -- ---------------------------------------------------------------------------
-CREATE INDEX "Contact_customFields_gin_idx" ON "Contact" USING GIN ("customFields" jsonb_path_ops);
+
+-- Powers "what was the contact's last inbound?" lookups (24h-window UI +
+-- lastInboundAt drift sweeper) without scanning outbound rows. Prisma DSL
+-- can't express `WHERE direction = 'in'`.
+CREATE INDEX "Message_conversationId_timestamp_inbound_idx"
+  ON public."Message" USING btree ("conversationId", "timestamp" DESC)
+  WHERE (direction = 'in'::public."MessageDirection");
+
+-- Team-chat channel feed keyset: WHERE channelId = ? AND threadRootId IS NULL
+-- ORDER BY createdAt DESC, id DESC. Prisma DSL can't express the partial
+-- predicate; the unfiltered (channelId, createdAt DESC, id DESC) index that
+-- @@index emits covers thread-reply scans but isn't selective enough for the
+-- top-level feed in busy channels.
+CREATE INDEX "TeamChannelMessage_channel_toplevel_keyset_idx"
+  ON public."TeamChannelMessage" USING btree ("channelId", "createdAt" DESC, id DESC)
+  WHERE ("threadRootId" IS NULL);

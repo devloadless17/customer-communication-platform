@@ -19,8 +19,10 @@ import {
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Sheet } from "@/components/ui/sheet";
+import { AvailabilityPicker } from "@/components/layouts/availability-picker";
 import { MobileSubSidebarProvider } from "@/components/layouts/sub-sidebar";
 import { useSignOutOverlay } from "@/components/auth/signout-overlay";
+import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
@@ -89,6 +91,7 @@ function sectionTitle(pathname: string): string {
 export function MobileShellChrome({
   currentUser,
   team,
+  canManageAvailability,
   subSidebar,
   /** Override the auto-derived section title (rare). */
   title,
@@ -97,6 +100,10 @@ export function MobileShellChrome({
 }: {
   currentUser: User;
   team: Team;
+  /** Resolved `availability:manage` capability. Drives whether the
+   *  AvailabilityPicker in the drawer footer is interactive or read-only.
+   *  The server endpoint @RequireCapability is the real enforcement. */
+  canManageAvailability: boolean;
   subSidebar?: ReactNode;
   title?: string;
   rightSlot?: ReactNode;
@@ -106,6 +113,8 @@ export function MobileShellChrome({
   // Same signout overlay used by the desktop AppRail — masks the blank
   // window between the /logout hard nav and /login painting.
   const { trigger: signOut, overlay: signOutOverlay } = useSignOutOverlay();
+  // Live org name — patches in place on `team:renamed`.
+  const teamName = useLiveTeamName(team.name);
 
   // Close the drawer when the route changes — without this, navigating
   // via a drawer link leaves it open over the new page.
@@ -164,11 +173,11 @@ export function MobileShellChrome({
           <div className="flex items-center gap-3 border-b border-border px-4 py-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
               <span className="text-sm font-semibold">
-                {team.name.charAt(0).toUpperCase()}
+                {teamName.charAt(0).toUpperCase()}
               </span>
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{team.name}</div>
+              <div className="truncate text-sm font-medium">{teamName}</div>
               <div className="truncate text-[11px] text-muted-foreground">
                 {currentUser.name} · {roleLabel(currentUser.role)}
               </div>
@@ -208,7 +217,18 @@ export function MobileShellChrome({
                 <div className="truncate">{currentUser.email}</div>
               </div>
             </div>
-            <div className="mt-1 flex flex-col gap-0.5">
+            {/* Availability picker — same component the desktop AppRail uses.
+                Without it, mobile agents had no way to mark themselves
+                busy/away/offline at all. Read-only when the user lacks
+                `availability:manage`; the server endpoint @RequireCapability
+                is the real gate. */}
+            <div className="mt-1 border-t border-border pt-1">
+              <AvailabilityPicker
+                currentUser={currentUser}
+                disabled={!canManageAvailability}
+              />
+            </div>
+            <div className="mt-1 flex flex-col gap-0.5 border-t border-border pt-1">
               <Link
                 href="/settings/account"
                 className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getClientSocket } from "@/lib/socket-client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -29,9 +30,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSignOutOverlay } from "@/components/auth/signout-overlay";
+import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { roleLabel } from "@ccp/shared/auth/permissions";
+import {
+  AVAILABILITY_DOT_CLASSES,
+  AVAILABILITY_LABELS,
+  resolveAvailabilityStatus,
+} from "@ccp/shared/presence";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
+import { AvailabilityPicker } from "./availability-picker";
 
 const STORAGE_KEY = "app-rail-collapsed";
 
@@ -77,18 +85,51 @@ export function AppRail({
   team,
   connected,
   onlineUserIds,
+  canManageAvailability,
   initialCollapsed,
 }: {
   currentUser: User;
   team: Team;
   connected?: boolean;
   onlineUserIds?: Set<string>;
+  /** Resolved `availability:manage` capability. When false the picker is
+   *  shown read-only so the user still sees their status but can't change it. */
+  canManageAvailability: boolean;
   /** Server-read cookie value so SSR renders the persisted state (no flash). */
   initialCollapsed: boolean;
 }) {
   const pathname = usePathname() ?? "";
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
+  // Live mirror of THIS user's availability. Seeded from the session payload
+  // (so the first paint reflects the persisted status), then updated by the
+  // picker's local dispatch + cross-tab/device server frames. Drives the dot
+  // color on the avatar so a "busy/away" pick shows immediately in the same
+  // frame as the menu state.
+  const [liveAvailability, setLiveAvailability] = useState(() => ({
+    status: resolveAvailabilityStatus(currentUser.availabilityStatus),
+    message: currentUser.availabilityMessage ?? null,
+  }));
+  useEffect(() => {
+    const socket = getClientSocket();
+    const handler: Parameters<
+      typeof socket.on<"user:availability:updated">
+    >[1] = (payload) => {
+      if (payload.userId !== currentUser.id) return;
+      setLiveAvailability((prev) => ({
+        status: payload.status,
+        message:
+          payload.message === undefined ? prev.message : payload.message,
+      }));
+    };
+    socket.on("user:availability:updated", handler);
+    return () => {
+      socket.off("user:availability:updated", handler);
+    };
+  }, [currentUser.id]);
+  // Live org name — patches in place on `team:renamed` (this tab's
+  // optimistic dispatch or another admin's rename) without a router refresh.
+  const teamName = useLiveTeamName(team.name);
 
   // Initial state comes from the server-read cookie (`initialCollapsed`), so
   // SSR and the first client render agree — no expand→collapse flash on load.
@@ -167,10 +208,10 @@ export function AppRail({
                   ? "size-9 justify-center"
                   : "h-9 w-full gap-2.5 px-2.5",
               )}
-              aria-label={team.name}
+              aria-label={teamName}
             >
               <span className="shrink-0 text-sm font-bold leading-none">
-                {team.name.charAt(0).toUpperCase()}
+                {teamName.charAt(0).toUpperCase()}
               </span>
               <span
                 className="truncate text-sm font-semibold whitespace-nowrap"
@@ -181,7 +222,7 @@ export function AppRail({
                   overflow: "hidden",
                 }}
               >
-                {team.name}
+                {teamName}
               </span>
               {connected !== undefined && (
                 <span
@@ -194,7 +235,7 @@ export function AppRail({
               )}
             </Link>
           </TooltipTrigger>
-          {collapsed && <TooltipContent side="right">{team.name}</TooltipContent>}
+          {collapsed && <TooltipContent side="right">{teamName}</TooltipContent>}
         </Tooltip>
       </div>
 
@@ -254,7 +295,11 @@ export function AppRail({
         </Tooltip>
 
         {/* User menu */}
-        <UserMenu currentUser={currentUser} collapsed={collapsed}>
+        <UserMenu
+          currentUser={currentUser}
+          collapsed={collapsed}
+          canManageAvailability={canManageAvailability}
+        >
           <button
             type="button"
             className={cn(
@@ -273,9 +318,19 @@ export function AppRail({
                 <span
                   className={cn(
                     "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar transition-colors",
-                    isOnline ? "bg-emerald-500" : "bg-muted-foreground/40",
+                    // Offline overrides everything: a user who picked "Appear
+                    // offline" must look identical to one with no socket. Then
+                    // the availability badge color when online; fallback to
+                    // emerald (available) otherwise.
+                    isOnline
+                      ? AVAILABILITY_DOT_CLASSES[liveAvailability.status]
+                      : AVAILABILITY_DOT_CLASSES.offline,
                   )}
-                  aria-label={isOnline ? "Online" : "Offline"}
+                  aria-label={
+                    isOnline
+                      ? AVAILABILITY_LABELS[liveAvailability.status]
+                      : "Offline"
+                  }
                 />
               )}
             </div>
@@ -370,10 +425,12 @@ function RailLink({
 function UserMenu({
   currentUser,
   collapsed,
+  canManageAvailability,
   children,
 }: {
   currentUser: User;
   collapsed: boolean;
+  canManageAvailability: boolean;
   children: React.ReactNode;
 }) {
   const { trigger: signOut, overlay } = useSignOutOverlay();
@@ -384,7 +441,7 @@ function UserMenu({
         <DropdownMenuContent
           align="end"
           side={collapsed ? "right" : "top"}
-          className="min-w-52"
+          className="min-w-64"
         >
           <DropdownMenuLabel>
             <div className="flex flex-col">
@@ -397,6 +454,16 @@ function UserMenu({
               </span>
             </div>
           </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {/* Availability picker (busy/away/appear-offline + optional note).
+              Read-only when the user lacks `availability:manage` — the dot
+              still shows the persisted status so they can see it, they just
+              can't change it. The server endpoint @RequireCapability is the
+              real enforcement; this disabled-state is UX. */}
+          <AvailabilityPicker
+            currentUser={currentUser}
+            disabled={!canManageAvailability}
+          />
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild>
             <Link href="/settings/workspace">

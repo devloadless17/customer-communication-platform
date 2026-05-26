@@ -19,6 +19,7 @@ import { ConversationsService } from "./conversations.service";
 import {
   AssignConversationSchema,
   BulkDeleteConversationsSchema,
+  ListAttachmentsQuerySchema,
   ListConversationsQuerySchema,
   ListMessagesQuerySchema,
   MessageContextQuerySchema,
@@ -27,6 +28,7 @@ import {
   StartConversationSchema,
   type AssignConversationInput,
   type BulkDeleteConversationsInput,
+  type ListAttachmentsQuery,
   type ListConversationsQuery,
   type ListMessagesQuery,
   type MessageContextQuery,
@@ -153,6 +155,25 @@ export class ConversationsController {
       messageId: query.messageId,
       before: query.before,
       after: query.after,
+    });
+  }
+
+  /**
+   * Media gallery for the contact panel's "Files" tab. Keyset-paginated;
+   * the optional `kind` chip narrows to a category. Items share the same
+   * `Message` shape returned by `:id/messages`, so the lightbox + jump-to-
+   * message machinery downstream takes them without remapping.
+   */
+  @Get(":id/attachments")
+  async attachments(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Query(zQuery(ListAttachmentsQuerySchema)) query: ListAttachmentsQuery,
+  ) {
+    return this.conversations.listAttachments(session.teamId, id, {
+      cursor: query.cursor,
+      take: query.take,
+      kind: query.kind,
     });
   }
 

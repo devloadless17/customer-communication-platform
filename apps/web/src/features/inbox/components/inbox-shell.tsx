@@ -22,6 +22,7 @@ import type {
 } from "@ccp/shared/types";
 import { useTeamEvents } from "@/features/team-chat/hooks/use-team-events";
 import { useConnectionStatus } from "@/hooks/use-connection-status";
+import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
 import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
@@ -383,6 +384,19 @@ export function InboxShell({
       );
     },
     [openConversation],
+  );
+
+  // Jump to a message within the currently-displayed thread — used by the
+  // contact panel's Files tab ("Jump" on an attachment row or "Go to
+  // message" in the lightbox). Just re-uses jumpTarget; the thread's render
+  // path already handles the scroll + flash.
+  const goToMessageInActiveThread = useCallback(
+    (messageId: string) => {
+      const convId = displayedIdRef.current;
+      if (!convId) return;
+      setJumpTarget({ conversationId: convId, messageId });
+    },
+    [],
   );
 
   // onStartContactChat — a contact-tab hit with no conversation yet. Mirrors
@@ -749,10 +763,11 @@ export function InboxShell({
     );
   }, [live.conversations]);
 
+  const liveTeamName = useLiveTeamName(team.name);
   useEffect(() => {
-    const base = "Inbox · " + team.name;
+    const base = "Inbox · " + liveTeamName;
     document.title = totalUnread > 0 ? `(${totalUnread}) ${base}` : base;
-  }, [totalUnread, team.name]);
+  }, [totalUnread, liveTeamName]);
 
   const retryActive = useCallback(() => {
     if (!activeIdRef.current) return;
@@ -840,6 +855,7 @@ export function InboxShell({
                 onMarkRead={handleMarkRead}
                 onThreadSnapshot={handleThreadSnapshot}
                 onMobileBack={onMobileBack}
+                onGoToMessage={goToMessageInActiveThread}
                 jumpToMessageId={
                   jumpTarget?.conversationId === displayedId
                     ? jumpTarget.messageId
@@ -880,6 +896,7 @@ function ThreadWorkspace({
   onMarkRead,
   onThreadSnapshot,
   onMobileBack,
+  onGoToMessage,
   jumpToMessageId,
 }: {
   thread: CachedThread;
@@ -899,6 +916,10 @@ function ThreadWorkspace({
     nextOlderCursor: string | null,
   ) => void;
   onMobileBack: () => void;
+  /** Jump the displayed thread to a specific message id — wired to the
+   *  contact-panel's Files tab so an attachment thumbnail / lightbox row
+   *  can scroll-and-flash the source bubble. */
+  onGoToMessage: (messageId: string) => void;
   /** Deep-link target from a global-search "Messages" hit; forwarded to
    *  MessageThread to scroll to that message. Null on a normal open. */
   jumpToMessageId: string | null;
@@ -929,6 +950,7 @@ function ThreadWorkspace({
         teamMembers={teamMembers}
         currentUserName={currentUser.name}
         initialCollapsed={initialContactPanelCollapsed}
+        onGoToMessage={onGoToMessage}
       />
       {/* The SSR parse-time bottom-snap is NOT here anymore — it can't be, this
           is a Client Component (React 19 warns about <script> in one, and it'd

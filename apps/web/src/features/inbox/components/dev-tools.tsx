@@ -72,7 +72,7 @@ export function DevTools({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.15, ease: "easeOut" }}
-            className="fixed bottom-16 right-4 z-50 w-[340px] overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-xl"
+            className="fixed bottom-16 right-4 z-50 w-85 overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-xl"
           >
             <header className="flex items-center gap-2 border-b border-border px-3 py-2">
               <Wrench className="size-3.5 text-muted-foreground" />

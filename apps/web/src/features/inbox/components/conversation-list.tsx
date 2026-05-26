@@ -95,6 +95,17 @@ function ConversationListImpl({
     setSelectedIds(new Set());
   }, [selectionMode]);
 
+  // Clear selection when the filter changes — otherwise checkboxes look
+  // unchecked (the rows aren't in the new view) but selectedIds still
+  // carries the prior ids, and a bulk-delete would target invisible chats.
+  // The reducer key is the filter's discriminated shape; stage filter id
+  // and preset id both feed the comparison.
+  const filterKey =
+    filter.kind === "preset" ? `p:${filter.id}` : `s:${filter.stageId}`;
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [filterKey]);
+
   // Hover-prefetch debounce. Without this, scrolling through 20 rows fires
   // 20 fetches in ~200ms — those evict useful entries from the LRU before
   // the agent has a chance to click anything. 150ms is long enough to weed

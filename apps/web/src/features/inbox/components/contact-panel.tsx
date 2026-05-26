@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Check, ChevronDown, ChevronLeft, Mail, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -35,6 +35,11 @@ import {
   optimisticTagRemoved,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
+import {
+  AVAILABILITY_DOT_CLASSES,
+  AVAILABILITY_LABELS,
+} from "@ccp/shared/presence";
+import { usePresence } from "@/hooks/use-presence";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
@@ -45,6 +50,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 
+import { AttachmentGallery } from "./attachments/attachment-gallery";
 import { EditableField } from "./contact-panel/editable-field";
 import { EditableHeading } from "./contact-panel/editable-heading";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
@@ -94,6 +100,11 @@ interface PanelProps {
   /** Server-read cookie so the panel SSRs in its persisted rail state (no
    *  expand→collapse flash). Default false (expanded). */
   initialCollapsed: boolean;
+  /** Jump the thread to a specific message (id) — used by the Files tab so
+   *  clicking "Jump" on an attachment scrolls + flashes the source bubble.
+   *  Reuses the same `jumpTarget` state inbox-shell already drives for
+   *  global search results. */
+  onGoToMessage: (messageId: string) => void;
 }
 
 export function ContactPanel({
@@ -105,6 +116,7 @@ export function ContactPanel({
   teamMembers,
   currentUserName,
   initialCollapsed,
+  onGoToMessage,
 }: PanelProps) {
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
@@ -124,6 +136,11 @@ export function ContactPanel({
   // can be stale relative to a toggle made since — the cookie is the truth.
   const [collapsed, setCollapsed] = useState<boolean>(initialCollapsed);
   const [transitionEnabled, setTransitionEnabled] = useState(false);
+  // Two-tab view inside the expanded panel: the existing details surface
+  // vs the per-conversation media gallery. State is local — switching chats
+  // remounts the panel via the key={conversationId} on ThreadWorkspace, so
+  // each chat starts on Details.
+  const [view, setView] = useState<"details" | "files">("details");
   useEffect(() => {
     const fromCookie = document.cookie
       .split("; ")
@@ -836,7 +853,36 @@ export function ContactPanel({
           <TooltipContent side="left">Collapse panel</TooltipContent>
         </Tooltip>
       </div>
-      {pendingRemote ? (
+      {/* View tabs (Details / Files). Sits between the header strip and the
+          panel body. Tiny segmented control to match the panel's density. */}
+      <div className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setView("details")}
+          className={cn(
+            "flex-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
+            view === "details"
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+          )}
+        >
+          Details
+        </button>
+        <button
+          type="button"
+          onClick={() => setView("files")}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
+            view === "files"
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+          )}
+        >
+          <Paperclip className="size-3.5" />
+          Files
+        </button>
+      </div>
+      {pendingRemote && view === "details" ? (
         <div className="flex items-start gap-2 border-b border-amber-300/40 bg-amber-50 px-4 py-2 text-[12px] text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
           <span className="mt-px inline-block size-1.5 shrink-0 rounded-full bg-amber-500" />
           <div className="min-w-0 flex-1">
@@ -864,6 +910,14 @@ export function ContactPanel({
           </div>
         </div>
       ) : null}
+      {view === "files" ? (
+        <ScrollArea className="flex-1">
+          <AttachmentGallery
+            conversationId={conversation.id}
+            onGoToMessage={onGoToMessage}
+          />
+        </ScrollArea>
+      ) : (
       <ScrollArea className="flex-1">
         <div className="flex flex-col items-center px-5 pt-6 pb-4">
           <Avatar className="size-16">
@@ -1136,6 +1190,7 @@ export function ContactPanel({
 
         <Section title="Assignee">
           <AssigneePicker
+            teamId={conversation.teamId}
             currentId={assigneeId}
             teamMembers={teamMembers}
             pending={assigneePending}
@@ -1201,6 +1256,7 @@ export function ContactPanel({
         </Section>
 
       </ScrollArea>
+      )}
       </div>
       )}
     </aside>
@@ -1215,17 +1271,24 @@ export function ContactPanel({
  * socket echo.
  */
 function AssigneePicker({
+  teamId,
   currentId,
   teamMembers,
   pending,
   onChange,
 }: {
+  teamId: string;
   currentId: string | null;
   teamMembers: User[];
   pending: boolean;
   onChange: (next: string | null) => void;
 }) {
   const current = currentId ? teamMembers.find((u) => u.id === currentId) ?? null : null;
+  // Subscribe to the team's online + availability state inline. usePresence is
+  // cheap (shared socket; two listeners) and only this picker reads the
+  // result, so threading availabilityByUserId through ContactPanel for one
+  // dropdown isn't worth the prop-drilling.
+  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, "");
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1265,19 +1328,49 @@ function AssigneePicker({
             Unassigned
           </span>
         </DropdownMenuItem>
-        {teamMembers.map((u) => (
-          <DropdownMenuItem key={u.id} onSelect={() => onChange(u.id)}>
-            {currentId === u.id ? (
-              <Check className="size-3.5" />
-            ) : (
-              <Avatar className="size-5">
-                {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
-              </Avatar>
-            )}
-            <span className="truncate">{u.name}</span>
-          </DropdownMenuItem>
-        ))}
+        {teamMembers.map((u) => {
+          const online = onlineUserIds.has(u.id);
+          const availability = availabilityByUserId[u.id];
+          const dotClass = online
+            ? (availability
+                ? AVAILABILITY_DOT_CLASSES[availability.status]
+                : AVAILABILITY_DOT_CLASSES.available)
+            : AVAILABILITY_DOT_CLASSES.offline;
+          const cue = !online
+            ? "Offline"
+            : availability && availability.status !== "available"
+              ? AVAILABILITY_LABELS[availability.status]
+              : null;
+          return (
+            <DropdownMenuItem
+              key={u.id}
+              onSelect={() => onChange(u.id)}
+              title={availability?.message ?? undefined}
+            >
+              {currentId === u.id ? (
+                <Check className="size-3.5" />
+              ) : (
+                <div className="relative">
+                  <Avatar className="size-5">
+                    {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
+                    <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
+                  </Avatar>
+                  <span
+                    className={cn(
+                      "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
+                      dotClass,
+                    )}
+                    aria-hidden
+                  />
+                </div>
+              )}
+              <span className="flex-1 truncate">{u.name}</span>
+              {cue && (
+                <span className="shrink-0 text-[10px] text-muted-foreground">{cue}</span>
+              )}
+            </DropdownMenuItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

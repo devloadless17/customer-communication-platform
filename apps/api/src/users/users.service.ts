@@ -6,7 +6,7 @@ import {
 } from "@nestjs/common";
 
 import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
-import type { Role, User } from "@ccp/shared/types";
+import type { Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
 
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { EventBus } from "../events/event-bus.module";
@@ -15,7 +15,11 @@ import {
   AvatarUploadError,
   uploadAvatar,
 } from "../lib/blob-storage/avatar";
-import type { UpdateMyProfileInput, UpdateUserInput } from "./users.schemas";
+import type {
+  UpdateMyAvailabilityInput,
+  UpdateMyProfileInput,
+  UpdateUserInput,
+} from "./users.schemas";
 
 /**
  * Multer-style upload payload for the avatar route. Re-declared here so the
@@ -73,6 +77,8 @@ export class UsersService {
         avatarUrl: true,
         createdAt: true,
         deactivatedAt: true,
+        availabilityStatus: true,
+        availabilityMessage: true,
       },
     });
     // Bust the session cache so the next request from this user sees the
@@ -87,16 +93,63 @@ export class UsersService {
       ...(data.avatarUrl !== undefined ? { avatarUrl: data.avatarUrl } : {}),
     });
 
-    return {
-      id: updated.id,
-      teamId: updated.teamId,
-      role: updated.role as Role,
-      name: updated.name,
-      email: updated.email,
-      ...(updated.avatarUrl ? { avatarUrl: updated.avatarUrl } : {}),
-      createdAt: updated.createdAt.toISOString(),
-      isActive: updated.deactivatedAt === null,
-    };
+    return mapAvailabilityRow(updated);
+  }
+
+  /**
+   * Self-edit availability. Mirrors updateMyProfile's shape:
+   *   - Only mutates the fields actually sent (`status` → only status,
+   *     `message: null` clears, `message: "x"` sets, omitted = unchanged).
+   *   - Refuses an empty body via the Zod refine in users.schemas.ts.
+   *   - Publishes a dedicated `user.availability_changed` domain event so the
+   *     fanout subscriber can update teammates without piggybacking on
+   *     `user.profile_updated` (heavier subscribers don't need to run).
+   *   - Returns the full User row so the client can swap its local mirror
+   *     in one round-trip.
+   *
+   * Capability `availability:manage` is enforced at the controller via the
+   * `@RequireCapability` decorator — not here, so the service stays
+   * orchestration-agnostic.
+   */
+  async updateMyAvailability(
+    teamId: string,
+    userId: string,
+    input: UpdateMyAvailabilityInput,
+  ): Promise<User> {
+    const data: { availabilityStatus?: string; availabilityMessage?: string | null } = {};
+    if (typeof input.status === "string") data.availabilityStatus = input.status;
+    if (input.message !== undefined) data.availabilityMessage = input.message;
+
+    const updated = await this.db.user.update({
+      where: { id: userId },
+      data,
+      select: {
+        id: true,
+        teamId: true,
+        role: true,
+        name: true,
+        email: true,
+        avatarUrl: true,
+        createdAt: true,
+        deactivatedAt: true,
+        availabilityStatus: true,
+        availabilityMessage: true,
+      },
+    });
+    // Availability lives on the User row that `loadActiveUser` reads, so the
+    // next request from this user needs to see the new status without a 15s
+    // session-cache wait — matches the profile-update pattern.
+    this.sessionInvalidator.bustCache(userId);
+
+    await this.bus.publish({
+      type: "user.availability_changed",
+      teamId,
+      userId,
+      status: (updated.availabilityStatus ?? "available") as UserAvailabilityStatus,
+      ...(input.message !== undefined ? { message: input.message } : {}),
+    });
+
+    return mapAvailabilityRow(updated);
   }
 
   /**
@@ -146,16 +199,7 @@ export class UsersService {
       where: { teamId },
       orderBy: { name: "asc" },
     });
-    return rows.map((u) => ({
-      id: u.id,
-      teamId: u.teamId,
-      role: u.role as Role,
-      name: u.name,
-      email: u.email,
-      ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
-      createdAt: u.createdAt.toISOString(),
-      isActive: u.deactivatedAt === null,
-    }));
+    return rows.map((u) => mapAvailabilityRow(u));
   }
 
   /**
@@ -317,4 +361,40 @@ export class UsersService {
     this.sessionInvalidator.revoke(targetId, "deletion");
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });
   }
+}
+
+/**
+ * Map a Prisma User row (with the availability columns selected) to the
+ * shared `User` wire type. Used by every mutation / list path so the user
+ * payload carries availability uniformly. Mirrors `mapUser` in
+ * apps/api/src/lib/queries/_shared.ts; kept here because that file's
+ * `mapUser` reads from a narrow PrismaUser without the new columns, and
+ * widening it would ripple through many call sites that don't need them.
+ */
+function mapAvailabilityRow(u: {
+  id: string;
+  teamId: string;
+  role: string;
+  name: string;
+  email: string;
+  avatarUrl: string | null;
+  createdAt: Date;
+  deactivatedAt: Date | null;
+  availabilityStatus: string | null;
+  availabilityMessage: string | null;
+}): User {
+  return {
+    id: u.id,
+    teamId: u.teamId,
+    role: u.role as Role,
+    name: u.name,
+    email: u.email,
+    ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
+    createdAt: u.createdAt.toISOString(),
+    isActive: u.deactivatedAt === null,
+    ...(u.availabilityStatus
+      ? { availabilityStatus: u.availabilityStatus as UserAvailabilityStatus }
+      : {}),
+    ...(u.availabilityMessage ? { availabilityMessage: u.availabilityMessage } : {}),
+  };
 }

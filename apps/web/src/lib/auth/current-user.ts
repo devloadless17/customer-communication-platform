@@ -7,7 +7,7 @@ import { loadActiveUser } from "@/lib/auth/active-user";
 import { getCurrentSession } from "@/lib/auth";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Capability } from "@ccp/shared/auth/permissions";
-import type { User } from "@ccp/shared/types";
+import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
 
 /**
  * Server-component helper. Resolves the current authenticated user, or
@@ -67,6 +67,14 @@ export const getSession = cache(async (): Promise<Session> => {
       // that reaches here is active. Spelled out so the type lines up with
       // `User`.
       isActive: true,
+      ...(row.availabilityStatus
+        ? {
+            availabilityStatus: row.availabilityStatus as UserAvailabilityStatus,
+          }
+        : {}),
+      ...(row.availabilityMessage
+        ? { availabilityMessage: row.availabilityMessage }
+        : {}),
     },
     teamId: row.teamId,
     permissions: resolvePermissions(row.role, row.team?.rolePermissions ?? {}),

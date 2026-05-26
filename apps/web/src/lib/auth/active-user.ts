@@ -32,6 +32,8 @@ export const loadActiveUser = cache(async (userId: string) => {
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
+      availabilityStatus: true,
+      availabilityMessage: true,
       team: { select: { rolePermissions: true } },
     },
   });

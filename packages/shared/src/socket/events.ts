@@ -18,6 +18,7 @@ import type {
   Message,
   MessageStatus,
   User,
+  UserAvailabilityStatus,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -241,6 +242,46 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * One teammate's availability changed (available / busy / away / offline).
+   *
+   * Sent to the team room on every status flip; also seeded to a single
+   * socket on connect as part of the initial snapshot so a freshly-loaded
+   * tab sees teammates' current state without waiting for a change.
+   *
+   * Orthogonal to `presence:update`:
+   *   - `presence:update` is the set of users with ≥1 open socket.
+   *   - `user:availability:updated` is the per-user status badge.
+   * A user can be online + busy (online dot + busy badge), online + offline
+   * (the user picked "Appear offline" — socket is up, presence excludes
+   * them anyway so the online dot goes off), or offline + anything (socket
+   * gone — status irrelevant). Treat them as independent.
+   *
+   * `message: null` clears a previously-set note; `undefined` means
+   * "unchanged" — clients merge by user id, replacing the prior entry.
+   */
+  "user:availability:updated": (payload: {
+    teamId: string;
+    userId: string;
+    status: UserAvailabilityStatus;
+    message?: string | null;
+  }) => void;
+
+  /**
+   * Bulk seed of every teammate's current availability. Sent to a single
+   * socket on connect (and on `presence:request`) so the freshly-loaded tab
+   * paints right immediately. Single-user changes go via
+   * `user:availability:updated`; this event is read once on join and never
+   * re-applied incrementally.
+   */
+  "user:availability:snapshot": (payload: {
+    teamId: string;
+    byUserId: Record<string, {
+      status: UserAvailabilityStatus;
+      message?: string | null;
+    }>;
+  }) => void;
+
+  /**
    * Snapshot of who's currently typing in a specific conversation. The
    * server broadcasts this to the conversation room on every change; clients
    * filter their own userId out of the list when rendering.
@@ -356,6 +397,18 @@ export interface ServerToClientEvents {
       // Team chat channels. Fires on channel create / rename / delete so
       // every agent's sidebar refreshes without a page reload.
       | "team-channels";
+  }) => void;
+
+  /**
+   * Team (organization) display name was changed by an admin. Sidebar
+   * chrome + settings header listen and patch the rendered name in place —
+   * no router.refresh(), no flash. Scoped to the `team:<id>` room so only
+   * members of that team see it.
+   */
+  "team:renamed": (payload: {
+    teamId: string;
+    name: string;
+    renamedByUserId: string;
   }) => void;
 
   /**

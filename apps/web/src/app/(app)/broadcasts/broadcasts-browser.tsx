@@ -28,7 +28,7 @@ import { BroadcastDeleteButton } from "./broadcast-delete-button";
  * Plain React + a debounced fetch — no React Query, matching the app's stack.
  */
 
-type StatusFilter =
+export type BroadcastStatusFilter =
   | "all"
   | "scheduled"
   | "queued"
@@ -36,7 +36,35 @@ type StatusFilter =
   | "completed"
   | "failed";
 
-const FILTERS: { id: StatusFilter; label: string; dot: string }[] = [
+export type BroadcastView = "table" | "calendar";
+
+const VALID_STATUSES: ReadonlySet<BroadcastStatusFilter> = new Set([
+  "all",
+  "scheduled",
+  "queued",
+  "running",
+  "completed",
+  "failed",
+]);
+
+export const BROADCASTS_STATUS_COOKIE = "broadcasts-status";
+export const BROADCASTS_SEARCH_COOKIE = "broadcasts-search";
+export const BROADCASTS_VIEW_COOKIE = "broadcasts-view";
+
+/** Parse the persisted status cookie. Defaults to "all" on missing / invalid. */
+export function parseBroadcastStatus(raw: string | undefined): BroadcastStatusFilter {
+  if (raw && VALID_STATUSES.has(raw as BroadcastStatusFilter)) {
+    return raw as BroadcastStatusFilter;
+  }
+  return "all";
+}
+
+/** Parse the persisted view cookie. Defaults to "table". */
+export function parseBroadcastView(raw: string | undefined): BroadcastView {
+  return raw === "calendar" ? "calendar" : "table";
+}
+
+const FILTERS: { id: BroadcastStatusFilter; label: string; dot: string }[] = [
   { id: "all", label: "All", dot: "bg-sky-500" },
   { id: "scheduled", label: "Scheduled", dot: "bg-indigo-500" },
   { id: "queued", label: "Queued", dot: "bg-muted-foreground" },
@@ -45,21 +73,59 @@ const FILTERS: { id: StatusFilter; label: string; dot: string }[] = [
   { id: "failed", label: "Failed", dot: "bg-destructive" },
 ];
 
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+
+function writeCookie(name: string, value: string) {
+  // `encodeURIComponent` on values so a search with `;` or `=` doesn't break
+  // the cookie header. The cookies are reserved for THIS surface; no
+  // collision with the inbox's cookies (different names).
+  const v = encodeURIComponent(value);
+  document.cookie = `${name}=${v}; path=/; max-age=${COOKIE_MAX_AGE}; samesite=lax`;
+}
+
 export function BroadcastsBrowser({
   initial,
   canManage,
+  initialFilter = "all",
+  initialSearch = "",
+  initialView = "table",
 }: {
   initial: BroadcastListItem[];
   canManage: boolean;
+  /** SSR-seeded from the `broadcasts-status` cookie. The seed `initial` was
+   *  fetched for this exact filter so the first paint is correct. */
+  initialFilter?: BroadcastStatusFilter;
+  /** SSR-seeded from the `broadcasts-search` cookie. Same as above —
+   *  `initial` was fetched matching this string. */
+  initialSearch?: string;
+  /** SSR-seeded from the `broadcasts-view` cookie. View is purely visual
+   *  (table vs calendar render of the same rows), so no refetch tied to it. */
+  initialView?: BroadcastView;
 }) {
   const [rows, setRows] = useState<BroadcastListItem[]>(initial);
-  const [filter, setFilter] = useState<StatusFilter>("all");
-  const [search, setSearch] = useState("");
-  const [view, setView] = useState<"table" | "calendar">("table");
+  const [filter, setFilterState] = useState<BroadcastStatusFilter>(initialFilter);
+  const [search, setSearchState] = useState(initialSearch);
+  const [view, setViewState] = useState<BroadcastView>(initialView);
   const [loading, setLoading] = useState(false);
 
+  // Cookie-writing wrappers. Keep the state + cookie in lockstep; SSR reads
+  // the cookie on the next request so a hard refresh restores the same view.
+  const setFilter = (next: BroadcastStatusFilter) => {
+    setFilterState(next);
+    writeCookie(BROADCASTS_STATUS_COOKIE, next);
+  };
+  const setSearch = (next: string) => {
+    setSearchState(next);
+    writeCookie(BROADCASTS_SEARCH_COOKIE, next);
+  };
+  const setView = (next: BroadcastView) => {
+    setViewState(next);
+    writeCookie(BROADCASTS_VIEW_COOKIE, next);
+  };
+
   // Debounced server refetch on filter/search change. Skip the very first run
-  // (SSR data is already current for filter=all + empty search).
+  // (SSR `initial` was fetched matching the persisted filter + search, so
+  // they're already current).
   const firstRef = useRef(true);
   useEffect(() => {
     if (firstRef.current) {

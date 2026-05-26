@@ -110,7 +110,8 @@ export type Capability =
   | "stages:manage"
   | "contactFields:manage"
   | "tags:manage"
-  | "snippets:manage";
+  | "snippets:manage"
+  | "availability:manage";
 
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
@@ -122,6 +123,7 @@ export const ALL_CAPABILITIES: Capability[] = [
   "contactFields:manage",
   "tags:manage",
   "snippets:manage",
+  "availability:manage",
 ];
 
 /** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
@@ -139,6 +141,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "contactFields:manage": "Manage contact fields",
   "tags:manage": "Create & manage tags",
   "snippets:manage": "Create & manage snippets",
+  "availability:manage": "Set own availability (busy / away / offline)",
 };
 
 /**
@@ -169,6 +172,10 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // team-wide tag/snippet management — the whole point of adding the gate.
     "tags:manage": true,
     "snippets:manage": true,
+    // Agents can manage THEIR OWN availability by default. An admin can flip
+    // this off for teams that want fixed online presence (e.g. a call center
+    // where agents shouldn't self-mark "away" mid-shift).
+    "availability:manage": true,
   },
 };
 

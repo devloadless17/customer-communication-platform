@@ -1,6 +1,13 @@
+import { cookies } from "next/headers";
+
 import { SectionShell } from "@/components/layouts/section-shell";
 import { InboxSubSidebarLive } from "@/components/layouts/inbox-sub-sidebar-live";
-import { InboxFilterProvider } from "@/features/inbox/contexts/inbox-filter-context";
+import {
+  INBOX_FILTER_COOKIE,
+  InboxFilterProvider,
+  parseInboxFilter,
+} from "@/features/inbox/contexts/inbox-filter-context";
+import type { Filter } from "@/features/inbox/components/inbox-controls";
 import { getSession } from "@/lib/auth/current-user";
 import {
   listContactStages,
@@ -31,20 +38,41 @@ export default async function InboxLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const [{ user }, stages, teamMembers, conversationsPage] = await Promise.all([
-    getSession(),
-    listContactStages(),
-    listTeamMembers(),
-    listConversations(),
-  ]);
+  const [{ user }, stages, teamMembers, conversationsPage, cookieStore] =
+    await Promise.all([
+      getSession(),
+      listContactStages(),
+      listTeamMembers(),
+      listConversations(),
+      cookies(),
+    ]);
 
   // Active members only for the sidebar roster — deactivated users still ride
   // along in `teamMembers` for historical message attribution in the thread,
   // but shouldn't show as teammates here.
   const teammates = teamMembers.filter((u) => u.isActive);
 
+  // Restore the agent's last-used filter (preset OR stage) so a hard refresh
+  // doesn't snap them back to "All open". Persisted as a cookie by the
+  // provider's setFilter — the SSR-seeded value drives the very first paint
+  // so the sub-sidebar + conversation list render the correct view from
+  // frame zero (no flash from "All open" → restored filter).
+  //
+  // Defensive validation: drop a stage id that no longer maps to a live
+  // stage (stage deleted on another tab / device). Falls back to default.
+  const persistedFilter = parseInboxFilter(cookieStore.get(INBOX_FILTER_COOKIE)?.value);
+  let initialFilter: Filter | undefined;
+  if (persistedFilter) {
+    if (persistedFilter.kind === "stage") {
+      const stageExists = stages.some((s) => s.id === persistedFilter.stageId);
+      if (stageExists) initialFilter = persistedFilter;
+    } else {
+      initialFilter = persistedFilter;
+    }
+  }
+
   return (
-    <InboxFilterProvider>
+    <InboxFilterProvider initialFilter={initialFilter}>
       <SectionShell
         mainClassName="min-w-0 overflow-hidden"
         subSidebar={

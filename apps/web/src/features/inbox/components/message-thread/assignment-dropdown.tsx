@@ -14,12 +14,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn, initials } from "@ccp/shared/utils";
+import {
+  AVAILABILITY_DOT_CLASSES,
+  AVAILABILITY_LABELS,
+} from "@ccp/shared/presence";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import {
   optimisticAssignment,
   optimisticStatusChange,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
+import { usePresence } from "@/hooks/use-presence";
 import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
@@ -70,6 +75,11 @@ export function AssignmentDropdown({
   onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
+  // Live online + availability for the team so the dropdown rows can show a
+  // small "Away/Busy/Offline" cue. The hook is cheap (shared socket + one
+  // listener per signal); subscribing it directly here avoids threading
+  // availabilityByUserId through ThreadHeader → MessageThread for one menu.
+  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, "");
 
   const assign = async (assignedUserId: string | null) => {
     if (pending) return;
@@ -201,19 +211,55 @@ export function AssignmentDropdown({
             Unassigned
           </span>
         </DropdownMenuItem>
-        {teamMembers.map((u) => (
-          <DropdownMenuItem key={u.id} onSelect={() => void assign(u.id)}>
-            {currentId === u.id ? (
-              <Check className="size-3.5" />
-            ) : (
-              <Avatar className="size-5">
-                {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
-              </Avatar>
-            )}
-            <span>{u.name}</span>
-          </DropdownMenuItem>
-        ))}
+        {teamMembers.map((u) => {
+          // Status dot rule mirrors the sidebar: offline color wins when the
+          // user has no socket OR picked "Appear offline" (server filtered);
+          // otherwise the availability badge color, defaulting to emerald.
+          const online = onlineUserIds.has(u.id);
+          const availability = availabilityByUserId[u.id];
+          const dotClass = online
+            ? (availability
+                ? AVAILABILITY_DOT_CLASSES[availability.status]
+                : AVAILABILITY_DOT_CLASSES.available)
+            : AVAILABILITY_DOT_CLASSES.offline;
+          // Cue text — render only when the user has set busy/away or is
+          // offline, so the row reads "Sara" for the common "Available" case
+          // (no noise) but "Maria · Busy" / "Omar · Offline" when relevant.
+          const cue = !online
+            ? "Offline"
+            : availability && availability.status !== "available"
+              ? AVAILABILITY_LABELS[availability.status]
+              : null;
+          return (
+            <DropdownMenuItem
+              key={u.id}
+              onSelect={() => void assign(u.id)}
+              title={availability?.message ?? undefined}
+            >
+              {currentId === u.id ? (
+                <Check className="size-3.5" />
+              ) : (
+                <div className="relative">
+                  <Avatar className="size-5">
+                    {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
+                    <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
+                  </Avatar>
+                  <span
+                    className={cn(
+                      "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
+                      dotClass,
+                    )}
+                    aria-hidden
+                  />
+                </div>
+              )}
+              <span className="flex-1">{u.name}</span>
+              {cue && (
+                <span className="text-[10px] text-muted-foreground">{cue}</span>
+              )}
+            </DropdownMenuItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

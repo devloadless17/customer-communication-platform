@@ -206,6 +206,13 @@ export interface ListConversationsOpts {
 // round-trip per render. React.cache keys on the arguments, so the no-arg
 // calls both sides make dedupe to a single fetch; callers passing distinct
 // `opts` objects are unaffected (fresh fetch, as before).
+//
+// Deliberately UNFILTERED: the sub-sidebar's first-paint fallback derives the
+// `closed` preset count from this seed (presetCounts in inbox-sub-sidebar),
+// so the SSR slice has to include closed rows for the count to be right
+// before `useConversationCounts` lands. The conversation LIST consumer
+// (`useTeamEvents`) prunes the seed against the active client-side filter on
+// mount so closed rows don't leak into "All open".
 export const listConversations = cache(async (
   opts: ListConversationsOpts = {},
 ): Promise<CursorPage<ConversationWithRefs>> => {

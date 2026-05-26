@@ -239,11 +239,9 @@ model Team {
   // is not wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
   plan      Plan     @default(starter)
 
-  // Per-team channel credentials moved OFF this model into `ChannelConnection`
-  // (one row per channel, keyed by (teamId, channel)) so adding a channel is
-  // a new row, not a new column-set. CLAUDE.md rule #6. The old `meta*` columns
-  // were dropped in migration 20260521..._drop_team_meta_columns; the encrypted
-  // secrets relocated verbatim into `ChannelConnection.secrets`.
+  // Per-team channel credentials live in `ChannelConnection`, one row per
+  // channel keyed by (teamId, channel). Adding a channel = insert a row, not
+  // add a column-set. CLAUDE.md rule #6.
 
   // Contact panel built-in field visibility. JSON map of built-in field key →
   // boolean. Missing key = visible (preserves backwards compat: existing teams
@@ -327,6 +325,17 @@ model User {
   avatarUrl     String?
   // Soft-disable: keeps FK history intact (authored messages, assignments).
   deactivatedAt DateTime?
+  // User-controlled availability. "available" is the implicit default for the
+  // UI when null (kept nullable so the migration doesn't have to backfill
+  // every existing row). "offline" hides the user from teammates' online dots
+  // even while their socket is connected — they still receive events for when
+  // they come back, but they appear away. Plain string column rather than a
+  // Prisma enum so adding a new state (e.g. "in_a_meeting") is a non-migration
+  // change; the Zod schema at the API boundary is the validation gate.
+  availabilityStatus  String?  @default("available")
+  // Optional free-form note teammates see ("Back at 3pm", "On a call").
+  // Bounded to 100 chars at the API; column is short for sane payloads.
+  availabilityMessage String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -467,10 +476,8 @@ model Contact {
   phoneNumber       String?
   // Channel this contact lives on. NOT NULL: every contact-create path
   // stamps it explicitly (WhatsApp ingest, manual create, CSV import, /v1,
-  // workflow target, seeds). Legacy NULL rows were backfilled to
-  // 'whatsapp' in migration 20260525135307; the column was then tightened
-  // to NOT NULL in 20260525_identity_channel_not_null. Channel filtering
-  // is now a clean `WHERE identityChannel = '<value>'` — no NULL handling.
+  // workflow target, seeds). Channel filtering is a clean
+  // `WHERE identityChannel = '<value>'` — no NULL handling.
   identityChannel   Channel
   // Native id on non-phone channels (Instagram scoped-user-id, Telegram
   // chat-id). NULL for WhatsApp where phone IS the identity. Combined with
@@ -558,9 +565,9 @@ model Contact {
   audienceGroups      AudienceGroup[]      @relation("AudienceGroupContacts")
 
   // Phone uniqueness is enforced by a PARTIAL unique index, not a full one —
-  // see `Contact_teamId_phoneNumber_whatsapp_key` (raw SQL in migration
-  // 20260525_partial_phone_unique, simplified in 20260525_identity_channel_not_null).
-  // It fires ONLY for WhatsApp (identityChannel = 'whatsapp'). Two Instagram
+  // see `Contact_teamId_phoneNumber_whatsapp_key` (raw SQL in the init
+  // migration). It fires ONLY for WhatsApp (identityChannel = 'whatsapp').
+  // Two Instagram
   // accounts with the same phone (different `externalContactId`) legitimately
   // coexist because the partial WHERE excludes them — their identity is
   // `(identityChannel, externalContactId)`, not phone.
@@ -594,7 +601,7 @@ model Contact {
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
   // NOTE: a PARTIAL pg_trgm GIN index `Contact_phoneNumber_trgm_idx`
   // (USING GIN ("phoneNumber" gin_trgm_ops) WHERE "phoneNumber" IS NOT NULL)
-  // is hand-written in migration 20260525234500. Phone search is a substring
+  // is hand-written in the init migration. Phone search is a substring
   // match (LIKE/ILIKE '%digits%') in all three call sites (contacts list,
   // conversation list, global contact search); the btree `(teamId,
   // phoneNumber)` above CAN'T serve a leading-wildcard match, so without the
@@ -1898,7 +1905,7 @@ model OutboundEvent {
   // Drainer hot-path is served by the partial index
   // `OutboundEvent_drainer_pending_idx` (WHERE publishedAt IS NULL AND
   // failedAt IS NULL, raw SQL — partial indexes aren't expressible in the
-  // Prisma DSL, see migration 20260526120000).
+  // Prisma DSL, see the init migration).
   // No team-id-keyed index here on purpose: the drainer never filters by
   // teamId, and that index was a non-trivial write tax on every publish.
 }

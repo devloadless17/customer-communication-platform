@@ -24,3 +24,20 @@ export const UpdateMyProfileSchema = z
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no changes" });
 export type UpdateMyProfileInput = z.infer<typeof UpdateMyProfileSchema>;
+
+/**
+ * Self-edit schema for `PATCH /api/users/me/availability`. Status enum mirrors
+ * the shared `UserAvailabilityStatus` type. Message is bounded short — it's
+ * read inline in the teammate sidebar, not a long bio. `null` clears it.
+ *
+ * This is its own endpoint (not folded into PATCH /me) because it's a much
+ * higher-frequency change with a separate capability gate; mixing the
+ * permission check at the route level keeps the profile route simple.
+ */
+export const UpdateMyAvailabilitySchema = z
+  .object({
+    status: z.enum(["available", "busy", "away", "offline"]).optional(),
+    message: z.union([z.string().trim().max(100), z.null()]).optional(),
+  })
+  .refine((b) => Object.keys(b).length > 0, { message: "no changes" });
+export type UpdateMyAvailabilityInput = z.infer<typeof UpdateMyAvailabilitySchema>;

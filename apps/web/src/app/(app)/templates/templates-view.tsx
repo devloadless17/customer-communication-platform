@@ -40,12 +40,38 @@ import { cn } from "@ccp/shared/utils";
 
 type StatusFilter = "all" | "approved" | "pending" | "rejected" | "paused" | "disabled";
 
+const VALID_STATUS_FILTERS: ReadonlySet<StatusFilter> = new Set([
+  "all",
+  "approved",
+  "pending",
+  "rejected",
+  "paused",
+  "disabled",
+]);
+
+export const TEMPLATES_STATUS_COOKIE = "templates-status";
+export const TEMPLATES_SEARCH_COOKIE = "templates-search";
+
+/** Parse the persisted status filter; defaults to "all" on missing/invalid. */
+export function parseTemplatesStatus(raw: string | undefined): StatusFilter {
+  return raw && VALID_STATUS_FILTERS.has(raw as StatusFilter)
+    ? (raw as StatusFilter)
+    : "all";
+}
+
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+function writeTemplatesCookie(name: string, value: string) {
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${COOKIE_MAX_AGE}; samesite=lax`;
+}
+
 export function TemplatesView({
   initialTemplates,
   fieldDefinitions,
   connected,
   hasWabaId,
   canManage,
+  initialQuery = "",
+  initialStatusFilter = "all",
 }: {
   initialTemplates: TemplateDto[];
   fieldDefinitions: ContactFieldDefinition[];
@@ -55,6 +81,10 @@ export function TemplatesView({
    *  delete. Reads stay open. */
   canManage: boolean;
   hasAppId: boolean;
+  /** SSR-seeded from `templates-search` cookie. */
+  initialQuery?: string;
+  /** SSR-seeded from `templates-status` cookie. */
+  initialStatusFilter?: StatusFilter;
 }) {
   const { confirm, confirmDialog } = useConfirm();
   const [templates, setTemplates] = useState<TemplateDto[]>(initialTemplates);
@@ -66,11 +96,23 @@ export function TemplatesView({
   }, [initialTemplates]);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [query, setQueryState] = useState(initialQuery);
+  const [statusFilter, setStatusFilterState] =
+    useState<StatusFilter>(initialStatusFilter);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Wrappers that mirror state → cookie. SSR reads on next refresh so
+  // hard reload keeps the user on the same status filter + search.
+  const setQuery = (next: string) => {
+    setQueryState(next);
+    writeTemplatesCookie(TEMPLATES_SEARCH_COOKIE, next);
+  };
+  const setStatusFilter = (next: StatusFilter) => {
+    setStatusFilterState(next);
+    writeTemplatesCookie(TEMPLATES_STATUS_COOKIE, next);
+  };
 
   const selected = useMemo(
     () => templates.find((t) => t.id === selectedId) ?? null,

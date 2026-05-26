@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
+import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
+  Check,
   Copy,
   Loader2,
   Mail,
@@ -20,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
-import { closeClientSocket } from "@/lib/socket-client";
+import { closeClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
 import {
   assignableRoles,
@@ -81,6 +83,10 @@ export function TeamSettings({
   // Sharing `pending` made clicking "Delete organization" look like nothing
   // happened while quietly disabling every other button on the page.
   const [deletingOrg, setDeletingOrg] = useState(false);
+  // Live team name — listens to `team:renamed` so the input + delete dialog
+  // + danger-zone copy stay in sync with what this tab just dispatched OR
+  // with another admin's rename on a different tab/device.
+  const liveTeamName = useLiveTeamName(teamName);
   const { confirm, confirmDialog } = useConfirm();
 
   const refresh = softRefresh;
@@ -176,11 +182,55 @@ export function TeamSettings({
     });
   }
 
+  async function renameOrg(nextName: string): Promise<boolean> {
+    setError(null);
+    const trimmed = nextName.trim();
+    if (trimmed.length === 0 || trimmed.length > 200) {
+      setError("Organization name must be 1–200 characters.");
+      return false;
+    }
+    if (trimmed === liveTeamName) return true; // no-op save — no toast, no churn
+
+    // Optimistic local dispatch FIRST so this tab's sidebar / header patches
+    // instantly. The server-side fanout drives every OTHER tab + agent. The
+    // input itself updates from `liveTeamName` via the local-event listener
+    // wired in team-name-live-sync.tsx, so we don't need to setLiveTeamName
+    // separately — the dispatched frame routes through the same listener.
+    dispatchLocalSocketEvent("team:renamed", {
+      teamId: "", // listener doesn't filter by id (only one team per session)
+      name: trimmed,
+      renamedByUserId: currentUserId,
+    });
+
+    const res = await fetch("/api/team", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: trimmed }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      setError(data.error ?? "Failed to rename organization");
+      // Roll the optimistic patch back to the server-truth name.
+      dispatchLocalSocketEvent("team:renamed", {
+        teamId: "",
+        name: liveTeamName,
+        renamedByUserId: currentUserId,
+      });
+      return false;
+    }
+    toast.success("Organization renamed");
+    // Soft-refresh so the RSC layout (sidebar shell) re-fetches and the prop
+    // matches the live state next render — purely belt-and-suspenders since
+    // the live listener already patched every consumer.
+    refresh();
+    return true;
+  }
+
   async function deleteOrg() {
     if (deletingOrg) return;
     setError(null);
     const ok = await confirm({
-      title: `Delete ${teamName}?`,
+      title: `Delete ${liveTeamName}?`,
       description:
         "This permanently removes the organization and EVERYTHING in it — contacts, conversations, messages, broadcasts, automations, every teammate's account. The WhatsApp connection is dropped. This cannot be undone. You will be signed out immediately.",
       confirmLabel: "Delete organization",
@@ -229,6 +279,8 @@ export function TeamSettings({
           {error}
         </div>
       )}
+
+      {canManage && <OrgNameCard currentName={liveTeamName} onRename={renameOrg} />}
 
       {canManage && (
         <InviteCard
@@ -291,7 +343,7 @@ export function TeamSettings({
 
       {canDeleteOrg && (
         <DangerZone
-          teamName={teamName}
+          teamName={liveTeamName}
           pending={deletingOrg}
           onDeleteOrg={() => {
             void deleteOrg();
@@ -300,7 +352,7 @@ export function TeamSettings({
       )}
 
       {confirmDialog}
-      {deletingOrg && <DeletingOrgOverlay teamName={teamName} />}
+      {deletingOrg && <DeletingOrgOverlay teamName={liveTeamName} />}
     </div>
   );
 }
@@ -476,6 +528,65 @@ function DangerZone({
         </Button>
       </div>
     </div>
+  );
+}
+
+function OrgNameCard({
+  currentName,
+  onRename,
+}: {
+  currentName: string;
+  onRename: (next: string) => Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState(currentName);
+  const [saving, setSaving] = useState(false);
+  // Keep the draft in sync if the live name changes elsewhere (another tab
+  // saved, another admin renamed). Only resets while the user isn't actively
+  // editing — i.e. draft equals the previous live value.
+  useEffect(() => {
+    setDraft((prev) => (prev === currentName ? prev : currentName));
+    // intentional: we want the prev-vs-new comparison driven by currentName
+    // changes only, not by the user's typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentName]);
+
+  const trimmed = draft.trim();
+  const isDirty = trimmed !== currentName && trimmed.length > 0;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!isDirty || saving) return;
+    setSaving(true);
+    const ok = await onRename(trimmed);
+    setSaving(false);
+    if (!ok) setDraft(currentName); // server rejected — snap back
+  }
+
+  return (
+    <form onSubmit={submit} className="rounded-xl border border-border bg-card p-5">
+      <div className="mb-4 flex items-center gap-2">
+        <ShieldAlert className="size-4 text-primary" />
+        <div className="text-sm font-medium">Organization name</div>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_140px]">
+        <Input
+          name="name"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          maxLength={200}
+          placeholder="Organization name"
+          aria-label="Organization name"
+          required
+        />
+        <Button type="submit" disabled={!isDirty || saving}>
+          {saving ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+          Save
+        </Button>
+      </div>
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Shown in the sidebar and at the top of every page. Changes appear live for every teammate.
+      </p>
+    </form>
   );
 }
 

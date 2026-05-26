@@ -54,6 +54,14 @@ export class RealtimeGateway
 
   afterInit(server: TypedIO): void {
     this.emitter.bind(server);
+    // Wire the visibly-online snapshot used by the `user.availability_changed`
+    // fanout. Single shared source of truth: connected userIds intersected
+    // with "not marked offline" — same rule as `buildVisibleOnlineSnapshot`
+    // below (the connect path uses the helper directly; fanout uses this
+    // indirection so the emitter doesn't take a circular dep on the gateway).
+    this.emitter.bindPresenceSnapshotter((teamId) =>
+      this.buildVisibleOnlineSnapshot(teamId),
+    );
 
     // Handshake auth runs in middleware (not handleConnection) so an auth
     // failure delivers a typed `connect_error` to the client with a parseable
@@ -166,12 +174,25 @@ export class RealtimeGateway
       identity.userId,
       client.id,
     );
+    // Visibly-online snapshot — connected users intersected with "not marked
+    // offline" so an agent who picked "Appear offline" doesn't show up on
+    // teammates' green dots even though their socket is connected. The async
+    // DB read happens at most once per connect (rare); after that the gateway
+    // handles user.availability_changed via the fanout's emitPresenceSnapshot
+    // path, not on every emit.
+    const onlineUserIds = await this.buildVisibleOnlineSnapshot(identity.teamId);
     // Snapshot to THIS socket immediately so the user's own dot lights up
     // without waiting for the next presence change.
     client.emit("presence:update", {
       teamId: identity.teamId,
-      onlineUserIds: this.presence.snapshot(identity.teamId),
+      onlineUserIds,
     });
+    // Seed availability for every teammate in one frame so the freshly-loaded
+    // tab paints right immediately, without waiting for a teammate to change
+    // status. Reuses the same DB read that built the presence snapshot
+    // shape-wise — kept as separate frames so consumers can subscribe to
+    // either independently (presence and availability are orthogonal).
+    void this.emitAvailabilitySnapshot(identity.teamId, client);
     // Broadcast a fresh snapshot to the rest of the team ONLY when this
     // connect transitioned the user from 0→1 sockets. Without the gate
     // every additional tab / Caddy bounce reconnect spammed a team-wide
@@ -179,9 +200,64 @@ export class RealtimeGateway
     if (cameOnline) {
       this.server.to(teamRoom(identity.teamId)).emit("presence:update", {
         teamId: identity.teamId,
-        onlineUserIds: this.presence.snapshot(identity.teamId),
+        onlineUserIds,
       });
     }
+  }
+
+  /**
+   * Compute the team's visibly-online userIds: presence (≥1 socket) intersected
+   * with `availabilityStatus !== "offline"`. One DB read on a small set
+   * (already-connected users only) — fine for a single-VPS pilot; on a hot
+   * path we'd cache it, but presence snapshots are rare events (connect /
+   * status flip), not per-message.
+   */
+  private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
+    const connected = this.presence.snapshot(teamId);
+    if (connected.length === 0) return [];
+    const rows = await this.db.user.findMany({
+      where: { teamId, id: { in: connected } },
+      select: { id: true, availabilityStatus: true },
+    });
+    const offline = new Set(
+      rows.filter((r) => r.availabilityStatus === "offline").map((r) => r.id),
+    );
+    return connected.filter((id) => !offline.has(id));
+  }
+
+  /**
+   * Emit a one-frame availability snapshot to a single socket on connect.
+   * Reads every teammate's stored status (not just currently-connected — an
+   * "Appear offline" user must still surface their status to teammates who
+   * connect later). Tightly bounded query (one team only).
+   */
+  private async emitAvailabilitySnapshot(
+    teamId: string,
+    client: Socket,
+  ): Promise<void> {
+    const rows = await this.db.user.findMany({
+      where: { teamId, deactivatedAt: null },
+      select: { id: true, availabilityStatus: true, availabilityMessage: true },
+    });
+    const byUserId: Record<
+      string,
+      { status: "available" | "busy" | "away" | "offline"; message?: string | null }
+    > = {};
+    for (const r of rows) {
+      const status = (r.availabilityStatus ?? "available") as
+        | "available"
+        | "busy"
+        | "away"
+        | "offline";
+      // Drop "available + no note" entries to keep the payload lean: the
+      // client treats a missing entry as "available, no note" anyway.
+      if (status === "available" && !r.availabilityMessage) continue;
+      byUserId[r.id] = {
+        status,
+        ...(r.availabilityMessage !== null ? { message: r.availabilityMessage } : {}),
+      };
+    }
+    client.emit("user:availability:snapshot", { teamId, byUserId });
   }
 
   handleDisconnect(client: Socket): void {
@@ -259,9 +335,14 @@ export class RealtimeGateway
 
     const wentOffline = this.presence.remove(teamId, userId, client.id);
     if (wentOffline) {
-      this.server.to(teamRoom(teamId)).emit("presence:update", {
-        teamId,
-        onlineUserIds: this.presence.snapshot(teamId),
+      // Async fire-and-forget — the DB read inside the snapshot helper isn't
+      // worth blocking teardown on. A late frame on disconnect lands at most
+      // a handful of ms behind, which is invisible to the team.
+      void this.buildVisibleOnlineSnapshot(teamId).then((onlineUserIds) => {
+        this.server.to(teamRoom(teamId)).emit("presence:update", {
+          teamId,
+          onlineUserIds,
+        });
       });
     }
   }
@@ -274,13 +355,15 @@ export class RealtimeGateway
   // reconnect after a long offline (>2 min connectionStateRecovery window)
   // refreshes state without a page reload.
   @SubscribeMessage("presence:request")
-  onPresenceRequest(@ConnectedSocket() client: Socket): void {
+  async onPresenceRequest(@ConnectedSocket() client: Socket): Promise<void> {
     const teamId = client.data.teamId as string | undefined;
     if (!teamId) return;
-    client.emit("presence:update", {
-      teamId,
-      onlineUserIds: this.presence.snapshot(teamId),
-    });
+    const onlineUserIds = await this.buildVisibleOnlineSnapshot(teamId);
+    client.emit("presence:update", { teamId, onlineUserIds });
+    // Also reseed the availability snapshot — the hook re-fires presence:
+    // request on every `connect`, and a reconnect after a long offline can
+    // have missed availability changes that a delta can't carry.
+    await this.emitAvailabilitySnapshot(teamId, client);
   }
 
   // ---- conversation rooms -------------------------------------------------

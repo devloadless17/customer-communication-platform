@@ -1,10 +1,11 @@
-import { Injectable, InternalServerErrorException, Logger } from "@nestjs/common";
+import { Injectable, InternalServerErrorException, Logger, NotFoundException } from "@nestjs/common";
 
 import { blobStorage } from "@/lib/blob-storage";
 import { invalidateProviderConfig } from "@/lib/providers/config";
 
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { DbService } from "../db/db.service";
+import { EventBus } from "../events/event-bus.module";
 
 /**
  * Whole-team destroy. Cascades through every team-scoped table (users,
@@ -26,7 +27,38 @@ export class TeamRootService {
   constructor(
     private readonly db: DbService,
     private readonly sessionInvalidator: SessionInvalidationService,
+    private readonly bus: EventBus,
   ) {}
+
+  /**
+   * Rename the team. Idempotent on the input — a no-op when the trimmed
+   * name matches the current row (returns the existing name without a write
+   * or a publish, so a "save" of unchanged text doesn't churn every open
+   * sidebar). Throws NotFound if the team is gone (race with delete).
+   */
+  async rename(teamId: string, name: string, actorUserId: string): Promise<{ name: string }> {
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { name: true },
+    });
+    if (!team) throw new NotFoundException({ error: "team not found" });
+    if (team.name === name) return { name };
+
+    const updated = await this.db.team.update({
+      where: { id: teamId },
+      data: { name },
+      select: { name: true },
+    });
+
+    await this.bus.publish({
+      type: "team.renamed",
+      teamId,
+      name: updated.name,
+      renamedByUserId: actorUserId,
+    });
+
+    return { name: updated.name };
+  }
 
   async destroy(teamId: string, label: string): Promise<void> {
     // Snapshot blob keys + member ids BEFORE the cascade nukes the rows.

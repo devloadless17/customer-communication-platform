@@ -507,3 +507,88 @@ export async function listNewerMessages(
     },
   };
 }
+
+export const ATTACHMENTS_PAGE = 40;
+
+/**
+ * Maps the gallery's filter chip to the Prisma `mediaKind` predicate. The
+ * `MediaKind` shared union is image / video / audio / document / sticker,
+ * so the chip groups them as:
+ *   - `image`    matches image OR sticker (both render as a thumbnail)
+ *   - `audio` / `video` / `document` map 1:1
+ */
+function mediaKindFilter(kind: string | undefined): Prisma.MessageWhereInput | null {
+  if (!kind) return null;
+  switch (kind) {
+    case "image":
+      return { mediaKind: { in: ["image", "sticker"] } };
+    case "audio":
+      return { mediaKind: "audio" };
+    case "video":
+      return { mediaKind: "video" };
+    case "document":
+      return { mediaKind: "document" };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Per-conversation attachments list (the "Files" tab in the contact panel).
+ * Returns media-bearing messages newest-first, in the same shape as
+ * `listOlderMessages` so the gallery can call into the existing
+ * jump-to-message machinery without remapping.
+ *
+ * Excludes inbound rows whose binary is still downloading
+ * (mediaUrl IS NULL) — they'd render an empty thumbnail. They'll appear on
+ * the next page load once `completePendingMedia` fills them in.
+ */
+export async function listConversationAttachments(
+  teamId: string,
+  conversationId: string,
+  opts: { cursor?: string; take?: number; kind?: string },
+): Promise<CursorPage<Message>> {
+  const take = clampTake(opts.take, ATTACHMENTS_PAGE);
+
+  // Tenant gate — silent empty page so we don't leak which conversation IDs
+  // exist in other teams (same posture as listOlderMessages).
+  const owns = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    select: { id: true },
+  });
+  if (!owns) return { items: [], nextCursor: null };
+
+  const cursor = opts.cursor ? parseMessageCursor(opts.cursor) : null;
+  const kindClause = mediaKindFilter(opts.kind);
+
+  const rows = await db.message.findMany({
+    omit: { rawPayload: true },
+    include: { replyTo: REPLY_TO_INCLUDE },
+    where: {
+      conversationId,
+      mediaKind: { not: null },
+      mediaUrl: { not: null },
+      ...(kindClause ?? {}),
+      ...(cursor
+        ? {
+            OR: [
+              { timestamp: { lt: cursor.timestamp } },
+              { timestamp: cursor.timestamp, id: { lt: cursor.id } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: take + 1,
+  });
+
+  const hasMore = rows.length > take;
+  const items = hasMore ? rows.slice(0, take) : rows;
+  const oldest = items[items.length - 1];
+  const nextCursor =
+    hasMore && oldest
+      ? encodeMessageCursor({ timestamp: oldest.timestamp, id: oldest.id })
+      : null;
+
+  return { items: items.map(mapMessage), nextCursor };
+}

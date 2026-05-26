@@ -76,4 +76,31 @@ export class RealtimeEmitter {
     io.to(channelRoom(channelId)).emit(event, ...args);
   }
 
+  /**
+   * Bound by the gateway at startup. Builds a fresh online-userIds snapshot
+   * for a team, filtered for visible-online (users who picked "Appear
+   * offline" are excluded even if their socket is connected). Lives on the
+   * emitter so fanout rules can re-emit presence after a status change
+   * without taking a circular dep on PresenceService / UsersService.
+   */
+  private presenceSnapshotter: ((teamId: string) => Promise<string[]>) | null = null;
+  bindPresenceSnapshotter(fn: (teamId: string) => Promise<string[]>): void {
+    this.presenceSnapshotter = fn;
+  }
+
+  /** Re-emit `presence:update` to the team room with a fresh visibly-online
+   *  set. Used by `user.availability_changed` fanout so toggling "appear
+   *  offline" updates teammates' green dots in the same frame as the badge. */
+  async emitPresenceSnapshot(teamId: string): Promise<void> {
+    const io = this.server;
+    const snapshot = this.presenceSnapshotter;
+    if (!io || !snapshot) {
+      this.logger.warn(
+        "emitPresenceSnapshot dropped — IO or snapshotter not ready yet",
+      );
+      return;
+    }
+    const onlineUserIds = await snapshot(teamId);
+    io.to(teamRoom(teamId)).emit("presence:update", { teamId, onlineUserIds });
+  }
 }

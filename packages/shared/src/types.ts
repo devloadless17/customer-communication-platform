@@ -20,6 +20,21 @@ export interface Team {
   name: string;
 }
 
+/**
+ * User-controlled availability/presence.
+ *
+ *   available — default; shown as the regular online dot.
+ *   busy      — yellow dot; receives events but signals "in a meeting / on a call".
+ *   away      — grey dot; signals "stepped away, will be back".
+ *   offline   — appears offline to teammates even while connected (still
+ *               receives events so coming back is instant). NOT a hard
+ *               disconnect — the socket stays up.
+ *
+ * `null`/undefined on the wire is equivalent to "available" (we don't force
+ * existing rows through a backfill on migration).
+ */
+export type UserAvailabilityStatus = "available" | "busy" | "away" | "offline";
+
 export interface User {
   id: string;
   teamId: string;
@@ -36,6 +51,10 @@ export interface User {
    * boolean — not the date — to keep the client payload lean.
    */
   isActive: boolean;
+  /** User-set availability. Absent = treat as "available". */
+  availabilityStatus?: UserAvailabilityStatus;
+  /** Optional free-form note teammates see alongside the status. */
+  availabilityMessage?: string;
 }
 
 /** How this contact got into the DB. See ContactSource enum on the schema. */

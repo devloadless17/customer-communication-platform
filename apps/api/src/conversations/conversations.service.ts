@@ -17,6 +17,7 @@ import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import type { Channel } from "@ccp/shared/types";
 import {
   getConversationWithRefs,
+  listConversationAttachments,
   listConversations,
   listNewerMessages,
   listOlderMessages,
@@ -204,6 +205,15 @@ export class ConversationsService {
    *  live thread fires after an audit-implying frame lands. */
   listEvents(teamId: string, conversationId: string) {
     return listConversationEvents(teamId, conversationId);
+  }
+
+  /** "Files" tab in the contact panel — keyset-paginated, kind-filtered. */
+  listAttachments(
+    teamId: string,
+    conversationId: string,
+    opts: { cursor?: string; take?: number; kind?: string },
+  ) {
+    return listConversationAttachments(teamId, conversationId, opts);
   }
 
   // ---- Global (team-wide) search — the tabbed inbox search bar -----------

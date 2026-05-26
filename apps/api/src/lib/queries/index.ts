@@ -3,9 +3,11 @@
 // preserved so import sites don't churn.
 
 export {
+  ATTACHMENTS_PAGE,
   CONVERSATIONS_PAGE,
   MESSAGES_PAGE,
   getConversationWithRefs,
+  listConversationAttachments,
   listConversationEvents,
   listConversations,
   listNewerMessages,

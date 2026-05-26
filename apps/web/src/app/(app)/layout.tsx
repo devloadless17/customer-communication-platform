@@ -44,7 +44,7 @@ export default async function AppShellLayout({
   // serialized two RTTs on the gating layout for every authenticated page
   // render. Both are React.cached so child layouts re-calling them are
   // free cache hits.
-  const [{ user }, team, cookieStore] = await Promise.all([
+  const [{ user, permissions }, team, cookieStore] = await Promise.all([
     getSession(),
     getCurrentTeam(),
     cookies(),
@@ -68,6 +68,7 @@ export default async function AppShellLayout({
         <AppRail
           currentUser={user}
           team={{ id: team.id, name: team.name }}
+          canManageAvailability={permissions["availability:manage"]}
           initialCollapsed={railCollapsed}
         />
         <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>

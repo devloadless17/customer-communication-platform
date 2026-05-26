@@ -388,6 +388,29 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  "user.availability_changed": (e, emitter) => {
+    // Per-user badge update — teammates' sidebar dots + user-menu reflect the
+    // new status in the same frame.
+    emitter.emitToTeam(e.teamId, "user:availability:updated", {
+      teamId: e.teamId,
+      userId: e.userId,
+      status: e.status as
+        | "available"
+        | "busy"
+        | "away"
+        | "offline",
+      ...(e.message !== undefined ? { message: e.message } : {}),
+    });
+    // "Appear offline" (or coming OUT of it) shifts the visibly-online set, so
+    // re-emit a fresh presence snapshot to the team. Cheaper than tracking the
+    // prior status — the snapshot read is one in-memory map walk and a
+    // presence:update is small. Other status changes don't move the set, so
+    // skip the extra emit there.
+    if (e.status === "offline" || e.status === "available") {
+      emitter.emitPresenceSnapshot(e.teamId);
+    }
+  },
+
   "user.profile_updated": (e, emitter) => {
     emitter.emitToTeam(e.teamId, "user:profile:updated", {
       teamId: e.teamId,
@@ -408,6 +431,16 @@ export const FANOUT_RULES: FanoutRuleMap = {
     emitter.emitToTeam(e.teamId, "team:catalog:changed", {
       teamId: e.teamId,
       scope: e.scope,
+    });
+  },
+
+  // Org name was changed by an admin. Sidebar chrome + settings header
+  // listen and patch the displayed name in place — no router.refresh().
+  "team.renamed": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "team:renamed", {
+      teamId: e.teamId,
+      name: e.name,
+      renamedByUserId: e.renamedByUserId,
     });
   },
 

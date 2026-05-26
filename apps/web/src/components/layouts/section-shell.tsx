@@ -31,13 +31,17 @@ export async function SectionShell({
   // layout, so these are free cache hits — but parallelize anyway in case
   // SectionShell is ever rendered before the parent layout's awaits resolve
   // (e.g. nested suspense boundary).
-  const [{ user }, team] = await Promise.all([getSession(), getCurrentTeam()]);
+  const [{ user, permissions }, team] = await Promise.all([
+    getSession(),
+    getCurrentTeam(),
+  ]);
 
   return (
     <>
       <MobileShellChrome
         currentUser={user}
         team={{ id: team.id, name: team.name }}
+        canManageAvailability={permissions["availability:manage"]}
         subSidebar={subSidebar}
       />
       {subSidebar}

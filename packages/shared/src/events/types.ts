@@ -625,6 +625,27 @@ export interface UserProfileUpdatedEvent {
 }
 
 /**
+ * A user changed their own availability (available / busy / away / offline).
+ *
+ * Split from `user.profile_updated` on purpose: availability is a higher-
+ * frequency, lower-cost change (toggling busy/away as you move through your
+ * day) — keeping it on a dedicated event keeps profile-update subscribers
+ * (which may do heavier work) from running on every status flip. The
+ * fanout subscriber emits a `user:availability:updated` socket frame to the
+ * team room; "appear offline" also re-emits `presence:update` so the
+ * online-dot list updates in the same frame.
+ */
+export interface UserAvailabilityChangedEvent {
+  teamId: string;
+  userId: string;
+  /** Plain string here so the domain-event type doesn't pull the
+   *  UserAvailabilityStatus union from the wider types module. */
+  status: string;
+  /** Optional free-form note; null when cleared, undefined when unchanged. */
+  message?: string | null;
+}
+
+/**
  * An outbound-webhook subscription was auto-disabled by the circuit breaker
  * after N consecutive failures. Carries the webhook id + a short human-
  * readable reason so the settings UI can toast the team in real time
@@ -682,6 +703,17 @@ export interface TeamCatalogChangedEvent {
     | "team-channels";
 }
 
+/**
+ * Team display name changed. Drives sidebar chrome + settings header live —
+ * every open tab of every agent sees the new name without a refresh. Same
+ * shape as the `team:renamed` socket frame in `socket/events.ts`.
+ */
+export interface TeamRenamedEvent {
+  teamId: string;
+  name: string;
+  renamedByUserId: string;
+}
+
 // ---------------------------------------------------------------------------
 // Event map — discriminated union by `type`. Use `DomainEventOf<K>` to grab
 // the strongly-typed envelope for a single type.
@@ -717,7 +749,9 @@ export interface DomainEventMap {
   "team_channel.read": TeamChannelReadEvent;
   "team_channel.members_changed": TeamChannelMembersChangedEvent;
   "user.profile_updated": UserProfileUpdatedEvent;
+  "user.availability_changed": UserAvailabilityChangedEvent;
   "team.catalog_changed": TeamCatalogChangedEvent;
+  "team.renamed": TeamRenamedEvent;
   "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
   "webhook.subscription_recovered": WebhookSubscriptionRecoveredEvent;
 }
