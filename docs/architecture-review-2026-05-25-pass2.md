@@ -1,4 +1,4 @@
-# Architecture Re-Audit (Pass 2) — 2026-05-25
+# Architecture Re-Audit (Pass 2) — 2026-05-25 test
 
 **Scope:** Full from-scratch 13-area re-audit, independent of the earlier
 [architecture-review-2026-05-25.md](architecture-review-2026-05-25.md). Run AFTER
