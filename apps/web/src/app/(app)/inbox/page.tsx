@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
@@ -13,6 +13,7 @@ import {
   listTeamMembers,
 } from "@/lib/api/queries";
 import { InboxShell } from "@/features/inbox/components/inbox-shell";
+import { SsrThreadBottomSnap } from "@/features/inbox/components/ssr-thread-bottom-snap";
 
 /** Right contact-panel collapse cookie — read server-side so SSR renders the
  *  persisted state (no expand→collapse flash, same approach as the left
@@ -23,13 +24,15 @@ const CONTACT_PANEL_COLLAPSED_COOKIE = "contact-panel-collapsed";
 /**
  * Single-page inbox workspace.
  *
- * `?c=<id>` is read ONLY to SSR a thread on a direct ENTRY (a shared link or
- * the /inbox/[conversationId] redirect below) so the first paint isn't blank.
- * In-app chat switching is client-state only — the shell does NOT write `?c=`
- * to the URL (see the InboxShell header), so the steady-state URL is plain
- * /inbox and a HARD refresh deliberately lands on the empty "pick a
- * conversation" state (`initialThread` is null). A SOFT refresh keeps the
- * thread via preserved client state.
+ * `?c=<id>` is read to SSR a thread so the first paint isn't blank. The shell
+ * mirrors the open conversation into the URL via `history.replaceState` on
+ * every chat switch (see the InboxShell header), so the steady-state URL is
+ * /inbox?c=<id> and a HARD refresh re-SSRs that thread — the agent stays on the
+ * conversation (scrolled to bottom via useChatScroll on mount) instead of
+ * bouncing to the empty "pick a conversation" state. A SOFT refresh re-runs
+ * with the same `?c=` and the shell's SSR sync no-ops, so it stays put too.
+ * Entering /inbox with no `?c=` (fresh nav, post-deletion redirect) still
+ * renders the empty state (`initialThread` is null).
  *
  * The /inbox/[conversationId] route still exists as a 307 redirect to keep
  * old links / bookmarks / external referrers working; everything inside the
@@ -97,24 +100,46 @@ export default async function InboxPage({
 
   const initialActiveConversationId = initialThread ? requestedConversationId ?? null : null;
 
+  // The bottom-snap <script> is a PARSE-TIME hack for a real document load
+  // (hard refresh / deep link): it runs as the browser parses the HTML, before
+  // first paint, to land the SSR'd thread at the bottom. On a client RSC
+  // navigation/refresh (`router.refresh()` after a mutation — now common since
+  // selection is mirrored as `?c=<id>`) there's no fresh document parse: React
+  // re-renders this server component on the CLIENT, where a <script> is never
+  // executed and React 19 warns ("Encountered a <script> tag while rendering").
+  // The DOM already exists and useChatScroll already owns the viewport there,
+  // so the snap is pointless anyway. Gate it to genuine document requests — an
+  // RSC fetch carries the `RSC: 1` header; a full page load does not.
+  const isRscRequest = (await headers()).get("rsc") === "1";
+
   return (
-    <InboxShell
-      currentUser={user}
-      team={team}
-      teamMembers={teamMembers}
-      conversations={conversationsPage.items}
-      nextConversationCursor={conversationsPage.nextCursor}
-      snippets={snippets}
-      stages={stages}
-      fieldDefinitions={contactFields.definitions}
-      contactPanelBuiltins={contactFields.builtins}
-      tags={tags}
-      canManageStages={permissions["stages:manage"]}
-      canManageContactFields={permissions["contactFields:manage"]}
-      canDeleteConversations={permissions["conversations:delete"]}
-      initialActiveConversationId={initialActiveConversationId}
-      initialThread={initialThread}
-      initialContactPanelCollapsed={contactPanelCollapsed}
-    />
+    <>
+      <InboxShell
+        currentUser={user}
+        team={team}
+        teamMembers={teamMembers}
+        conversations={conversationsPage.items}
+        nextConversationCursor={conversationsPage.nextCursor}
+        snippets={snippets}
+        stages={stages}
+        fieldDefinitions={contactFields.definitions}
+        contactPanelBuiltins={contactFields.builtins}
+        tags={tags}
+        canManageStages={permissions["stages:manage"]}
+        canManageContactFields={permissions["contactFields:manage"]}
+        canDeleteConversations={permissions["conversations:delete"]}
+        initialActiveConversationId={initialActiveConversationId}
+        initialThread={initialThread}
+        initialContactPanelCollapsed={contactPanelCollapsed}
+      />
+      {/* SSR-only: when a thread was SSR'd on a real DOCUMENT load (hard refresh
+          / deep link), snap its viewport to the bottom during HTML parse so the
+          first paint shows the latest message — no top-then-scroll jump.
+          Rendered AFTER the shell so the viewport DOM exists when the inline
+          script runs. Skipped on an RSC navigation/refresh (no document parse →
+          script wouldn't run + React warns). Server component; never hydrated.
+          See the component for the full rationale. */}
+      {initialThread && !isRscRequest ? <SsrThreadBottomSnap /> : null}
+    </>
   );
 }

@@ -74,15 +74,19 @@ const FETCH_TIMEOUT_MS = 30_000;
  * client-only state swap — no Next.js navigation, no segment unmount, no
  * loading skeleton flash.
  *
- * Selection is CLIENT-STATE ONLY — we do NOT push `?c=<id>` into the URL on a
- * chat switch. The URL stays at /inbox, so a HARD browser refresh lands on the
- * clean "pick a conversation" empty state (SSR sees no `?c=` → null thread),
- * while a SOFT refresh (`router.refresh()` from a mutation) preserves this
- * client state and keeps you on the thread — no bounce. Deliberate UX choice
- * (see [[project_nav_shell_ux_decisions_2026_05_23]]); the tradeoff is no
- * per-thread shareable URL and no browser back/forward between threads. A
- * direct /inbox?c=<id> link still opens that thread on first load (page.tsx
- * SSRs it), so external/bookmarked deep-links keep working on ENTRY.
+ * Selection lives in client state AND is mirrored into the URL as `?c=<id>`
+ * via `history.replaceState` on every open (see openConversation). The chat
+ * swap itself is still pure client state — no Next.js navigation, no segment
+ * unmount, no skeleton flash — the URL write is a passive side-channel so a
+ * HARD browser refresh re-SSRs the open thread (page.tsx reads `?c=`) and the
+ * agent STAYS on the conversation instead of bouncing to the empty state. The
+ * thread paints scrolled to the bottom on that refresh because useChatScroll
+ * snaps to bottom on mount (see message-thread.tsx). A SOFT refresh
+ * (`router.refresh()` from a mutation) re-runs page.tsx with the same `?c=`, so
+ * initialActiveConversationId matches and the SSR sync block is a no-op — no
+ * bounce either way. replaceState (not pushState) is deliberate: Back does NOT
+ * walk through every chat clicked; one Back press leaves the inbox. A direct
+ * /inbox?c=<id> link / bookmark still opens that thread on first load.
  *
  * Per-thread data flow:
  *   1. SSR seeds the cache with `initialThread` (only when the inbound URL had
@@ -337,11 +341,20 @@ export function InboxShell({
       // displayedId alone — fetchThread will update it when the data lands.
       if (cached) setDisplayedId(conversationId);
 
-      // Intentionally NO `history.pushState("?c=<id>")` here — selection is
-      // client-state only so a hard refresh lands on the empty state (see the
-      // file header). The SSR sync block (initialActiveConversationId) is left
-      // untouched: on the normal /inbox flow it stays null, so a soft refresh
-      // never resets this selection.
+      // Mirror the selection into the URL with replaceState so a HARD refresh
+      // re-SSRs this thread (page.tsx reads `?c=<id>`) and the agent stays on
+      // the conversation instead of bouncing to the empty state. replaceState
+      // (not pushState) keeps Back from walking through every chat clicked —
+      // one Back press still leaves the inbox. The SSR sync block is unaffected
+      // on a soft refresh: router.refresh() re-runs page.tsx with this same
+      // `?c=`, so initialActiveConversationId matches and the sync is a no-op.
+      if (typeof window !== "undefined") {
+        window.history.replaceState(
+          null,
+          "",
+          `/inbox?c=${encodeURIComponent(conversationId)}`,
+        );
+      }
 
       if (!cached) {
         void fetchThread(conversationId);
@@ -757,8 +770,8 @@ export function InboxShell({
     setPendingId(null);
     setErrorId(null);
     if (typeof window !== "undefined") {
-      // replaceState (not push) — selection isn't URL-backed, so there's no
-      // ?c= to strip and we don't want a stray /inbox history entry.
+      // Strip the `?c=` we wrote on open so a refresh from the mobile list view
+      // stays on the list. replaceState (not push) keeps it off the back stack.
       window.history.replaceState(null, "", "/inbox");
     }
   }, []);
@@ -914,24 +927,19 @@ function ThreadWorkspace({
         canManageFields={canManageContactFields}
         tagCatalog={tags}
         teamMembers={teamMembers}
+        currentUserName={currentUser.name}
         initialCollapsed={initialContactPanelCollapsed}
       />
-      {/* Previously this slot held an inline `<script>` that ran during
-          HTML parse and slammed `[data-thread-scroll-root]`'s viewport to
-          scrollHeight, so the very first paint already showed the bottom
-          of the thread. React 19's dev mode now warns about ANY `<script>`
-          rendered inside a Client Component (which inbox-shell is) because
-          they only fire on the SSR pass — never on client re-renders. The
-          effect was already redundant with useChatScroll's first
-          useLayoutEffect (keyed on conversationId, runs synchronously
-          BEFORE browser paint on both first mount and chat-switch) — see
-          `apps/web/src/features/inbox/hooks/use-chat-scroll.ts:158-169`.
-          The visible difference is at most a few ms of post-hydration
-          layout time on the very first SSR render; thereafter it's
-          indistinguishable. If a regression appears, the right re-fix is
-          to render an equivalent script from a SERVER component (the
-          inbox page) as a sibling AFTER InboxShell — not to bring back the
-          client-component `<script>` and silence the warning. */}
+      {/* The SSR parse-time bottom-snap is NOT here anymore — it can't be, this
+          is a Client Component (React 19 warns about <script> in one, and it'd
+          only fire on the SSR pass). It now lives as a SERVER component,
+          `SsrThreadBottomSnap`, rendered by inbox/page.tsx as a sibling AFTER
+          InboxShell. That was the right re-fix: useChatScroll's first
+          useLayoutEffect snaps to bottom too, but only AFTER hydration — on a
+          cold hard-refresh that's hundreds of ms (seconds in dev) late, so the
+          user saw the oldest message then a visible jump down (confirmed ~1.7s
+          via Playwright). The server script runs during HTML parse, pre-paint,
+          and hands off to the hook via the `data-chat-scroll-ready` marker. */}
     </>
   );
 }

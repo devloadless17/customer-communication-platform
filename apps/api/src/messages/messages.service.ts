@@ -19,7 +19,7 @@ import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
 import { MEDIA_SIZE_CAPS, META_DOCUMENT_MIME_ALLOWED, kindFromMime } from "@/lib/media-storage";
-import { transcodeToOggOpus } from "@/lib/media/audio-transcode";
+import { transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
 import {
   consumeConversationSendBudget,
   ConversationSendRateLimitedError,
@@ -1071,6 +1071,19 @@ export class MessagesService {
         );
       }
     }
+    // VERIFY-IN-PROD breadcrumb (2026-05-26 iOS voice-note fix): make the exact
+    // path obvious in journald so a test send is diagnosable at a glance.
+    // mono/voip ogg + voice:true is the iOS-playable profile but a past session
+    // saw Meta #131053 reject mono/voip on upload — if THAT regresses, the
+    // `audio uploadMedia failed` log below carries Meta's raw error; if it
+    // uploads but won't deliver, meta.ts logs the status-webhook errors[].
+    if (kind === "audio") {
+      const willSendAsVoice =
+        VOICE_IOS_PROFILE && isRecording && mimeType === "audio/ogg";
+      this.logger.log(
+        `audio send: recording=${isRecording} mime=${mimeType} iosProfile=${VOICE_IOS_PROFILE} voiceNote=${willSendAsVoice}`,
+      );
+    }
 
     const toPhone = channel.to;
     const toName = conversation.contact.name;
@@ -1164,11 +1177,23 @@ export class MessagesService {
           caption: caption || undefined,
           filename: kind === "document" ? filename : undefined,
           ...(replyToExternalId ? { replyToExternalId } : {}),
-          // Recordings are sent as a normal audio clip — we don't set
-          // `voice: true`. The transcode above (mp4 → clean ogg/opus) is what
-          // makes them deliver on every browser. `voice: true` (waveform
-          // voice-note rendering) is left off for now; it can be revisited on
-          // top of the clean ogg if the waveform UI is wanted.
+          // VOICE NOTE flag — GATED behind WHATSAPP_VOICE_IOS_PROFILE (off by
+          // default). When on, genuine ogg recordings send as a WhatsApp voice
+          // note, which (with the mono/voip transcode profile) is what iOS
+          // needs to PLAY them — a plain clip plays on Android/Mac but iOS shows
+          // "This audio is no longer available" (2026-05-26 bug). Off by
+          // default because a past session saw voice:true give intermittent
+          // delivery (3/5) and Meta reject mono/voip uploads (#131053); UNTESTED
+          // since the metadata-strip fix. See VOICE_IOS_PROFILE doc in
+          // audio-transcode.ts for the test+promote plan.
+          //
+          // Guard: ONLY flag voice when the bytes are actually audio/ogg —
+          // voice:true on audio/mp4 is itself a Meta reject, so a failed
+          // transcode falls back to a plain clip, never a guaranteed failure.
+          voice:
+            VOICE_IOS_PROFILE && isRecording && mimeType === "audio/ogg"
+              ? true
+              : undefined,
         },
         sendConfig,
       );

@@ -3,7 +3,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Loader2, X } from "lucide-react";
-import { useRouter } from "next/navigation";
 
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
@@ -22,6 +21,10 @@ import type {
   Tag,
   User,
 } from "@ccp/shared/types";
+import {
+  optimisticStageChange,
+  rollbackOptimisticActivity,
+} from "@/features/inbox/lib/optimistic-activity";
 import { useConversationEvents } from "@/features/inbox/hooks/use-conversation-events";
 import { useConversationViewers } from "@/features/inbox/hooks/use-conversation-viewers";
 import { useTyping } from "@/features/inbox/hooks/use-typing";
@@ -151,7 +154,6 @@ function MessageThreadImpl({
   // The 24h window is driven by the server-provided lastInboundAt — it's
   // contact-level and may predate the loaded message slice.
   const { lastInboundAt } = data;
-  const router = useRouter();
   const softRefresh = useSoftRefresh();
 
   // -------------------------------------------------------------------------
@@ -199,6 +201,20 @@ function MessageThreadImpl({
           }),
         );
       }
+      // Optimistic timeline pill for the stage move — only when it actually
+      // changed (matches when the server writes the audit row). Names resolved
+      // from the in-hand stage catalog so the pill reads identically to the
+      // server row the trailing GET reconciles in.
+      let stageActivityId: string | null = null;
+      if (prev !== next) {
+        stageActivityId = optimisticStageChange({
+          teamId: contact.teamId,
+          conversationId: conversation.id,
+          actorName: currentUser.name,
+          fromStageName: stageCatalog.find((s) => s.id === prev)?.name ?? null,
+          toStageName: stageCatalog.find((s) => s.id === next)?.name ?? null,
+        });
+      }
       const res = await fetch(`/api/contacts/${contact.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -212,6 +228,9 @@ function MessageThreadImpl({
           contact: { ...contact, stageId: prev },
           optimistic: true,
         });
+        if (stageActivityId) {
+          rollbackOptimisticActivity(contact.teamId, conversation.id, stageActivityId);
+        }
         if (prev !== next && typeof window !== "undefined") {
           window.dispatchEvent(
             new CustomEvent("ccp:contact-stage-delta", {
@@ -225,11 +244,23 @@ function MessageThreadImpl({
         );
         return;
       }
-      // Pull the fresh contact row through the server component so the
-      // right rail / contacts list also see the new stage on next navigation.
-      softRefresh();
+      // No router.refresh() here. The optimistic `contact:updated` dispatch +
+      // the byStage delta event already flip every live surface (header chip,
+      // sidebar counts, right rail, LRU cache) instantly, and the server frame
+      // converges them. A refresh would re-SSR the whole inbox page — and now
+      // that selection is mirrored as `?c=<id>` in the URL, that re-fetches the
+      // FULL open thread (getConversationWithRefs), which reads as "the whole
+      // page reloaded" on every stage change. Other RSC surfaces (contacts
+      // list) pick up the canonical row on their next navigation.
     },
-    [alert, contact, router, softRefresh, stageId],
+    [
+      alert,
+      contact,
+      conversation.id,
+      currentUser.name,
+      stageCatalog,
+      stageId,
+    ],
   );
 
   // -------------------------------------------------------------------------
@@ -815,6 +846,7 @@ function MessageThreadImpl({
         assignedUserName={assignedUser?.name ?? null}
         assignedUserAvatarUrl={assignedUser?.avatarUrl ?? null}
         teamMembers={teamMembers}
+        currentUserName={currentUser.name}
         otherViewers={otherViewers}
         onAlert={alert}
         onOpenSearch={openSearch}

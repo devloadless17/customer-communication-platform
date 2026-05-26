@@ -25,11 +25,11 @@
     "db:seed:long": "tsx prisma/seeds/seed-long-thread.ts",
     "db:seed:closed": "tsx prisma/seeds/seed-closed-window-chats.ts",
     "db:studio": "prisma studio",
-    "prod:local": "docker compose up --build",
-    "prod:local:detached": "docker compose up -d --build",
-    "prod:local:logs": "docker compose logs -f app",
-    "prod:local:down": "docker compose down",
-    "prod:local:nuke": "docker compose down -v",
+    "prod:local": "docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env.local-docker --profile local up --build",
+    "prod:local:detached": "docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env.local-docker --profile local up -d --build",
+    "prod:local:logs": "docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env.local-docker --profile local logs -f caddy app api",
+    "prod:local:down": "docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env.local-docker --profile local down",
+    "prod:local:nuke": "docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env.local-docker --profile local down -v",
     "postinstall": "prisma generate"
   },
   "dependencies": {

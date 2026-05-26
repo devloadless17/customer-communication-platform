@@ -28,6 +28,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
+import {
+  optimisticAssignment,
+  optimisticStatusChange,
+  optimisticTagAdded,
+  optimisticTagRemoved,
+  rollbackOptimisticActivity,
+} from "@/features/inbox/lib/optimistic-activity";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
@@ -81,6 +88,9 @@ interface PanelProps {
   tagCatalog: Tag[];
   /** Team roster used to render the assignee picker. */
   teamMembers: User[];
+  /** Current agent's display name — actor on optimistic activity pills
+   *  (stage / tag changes made from this panel). */
+  currentUserName: string;
   /** Server-read cookie so the panel SSRs in its persisted rail state (no
    *  expand→collapse flash). Default false (expanded). */
   initialCollapsed: boolean;
@@ -93,6 +103,7 @@ export function ContactPanel({
   canManageFields,
   tagCatalog,
   teamMembers,
+  currentUserName,
   initialCollapsed,
 }: PanelProps) {
   const { contact, conversation, messages, notes } = data;
@@ -611,13 +622,32 @@ export function ContactPanel({
       conversationId: conversation.id,
       assignedUser: nextUser,
     });
+    const assignActivityId = optimisticAssignment({
+      teamId: conversation.teamId,
+      conversationId: conversation.id,
+      actorName: currentUserName,
+      assignedToName: nextUser?.name ?? null,
+    });
+    let statusActivityId: string | null = null;
     if (statusWillChange) {
       dispatchLocalSocketEvent("conversation:status", {
         teamId: conversation.teamId,
         conversationId: conversation.id,
         status: predictedNextStatus,
       });
+      statusActivityId = optimisticStatusChange({
+        teamId: conversation.teamId,
+        conversationId: conversation.id,
+        actorName: currentUserName,
+        status: predictedNextStatus,
+      });
     }
+    const rollbackActivity = () => {
+      rollbackOptimisticActivity(conversation.teamId, conversation.id, assignActivityId);
+      if (statusActivityId) {
+        rollbackOptimisticActivity(conversation.teamId, conversation.id, statusActivityId);
+      }
+    };
     try {
       const res = await fetch(`/api/conversations/${conversation.id}/assign`, {
         method: "POST",
@@ -640,9 +670,13 @@ export function ContactPanel({
             status: liveStatus,
           });
         }
+        rollbackActivity();
         return;
       }
-      startSaving(() => router.refresh());
+      // No router.refresh(): the optimistic conversation:assigned (+ status)
+      // dispatches already flip every live surface, and the server frame
+      // converges. A refresh would re-SSR the whole inbox page (now heavy —
+      // `?c=<id>` in the URL makes it re-fetch the full open thread).
     } catch (err) {
       setAssigneeError(err instanceof Error ? err.message : "Network error");
       setAssigneeId(prevId);
@@ -658,6 +692,7 @@ export function ContactPanel({
           status: liveStatus,
         });
       }
+      rollbackActivity();
     } finally {
       setAssigneePending(false);
     }
@@ -675,6 +710,43 @@ export function ContactPanel({
       teamId: contact.teamId,
       contact: { ...contact, tagIds: nextIds },
     });
+    // Optimistic timeline pills — one per added/removed tag, mirroring the
+    // per-tag audit rows the server writes. Names resolved from the in-hand
+    // catalog so each pill reads identically to the row the trailing GET
+    // reconciles in.
+    const tagActivityIds: string[] = [];
+    const conversationId = conversation.id;
+    {
+      const prevSet = new Set(prevIds);
+      const nextSet = new Set(nextIds);
+      const nameOf = (id: string) => tags.find((t) => t.id === id)?.name ?? null;
+      for (const id of nextIds) {
+        if (prevSet.has(id)) continue;
+        const name = nameOf(id);
+        if (name == null) continue;
+        tagActivityIds.push(
+          optimisticTagAdded({
+            teamId: contact.teamId,
+            conversationId,
+            actorName: currentUserName,
+            tagName: name,
+          }),
+        );
+      }
+      for (const id of prevIds) {
+        if (nextSet.has(id)) continue;
+        const name = nameOf(id);
+        if (name == null) continue;
+        tagActivityIds.push(
+          optimisticTagRemoved({
+            teamId: contact.teamId,
+            conversationId,
+            actorName: currentUserName,
+            tagName: name,
+          }),
+        );
+      }
+    }
     const res = await fetch(`/api/contacts/${contact.id}/tags`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -687,9 +759,15 @@ export function ContactPanel({
         teamId: contact.teamId,
         contact: { ...contact, tagIds: prevIds },
       });
+      for (const id of tagActivityIds) {
+        rollbackOptimisticActivity(contact.teamId, conversationId, id);
+      }
       return;
     }
-    startSaving(() => router.refresh());
+    // No router.refresh(): the optimistic contact:updated dispatch already
+    // reflects the new tag set on every live surface, and the server frame
+    // converges. A refresh would re-SSR the whole inbox page (now heavy —
+    // `?c=<id>` in the URL makes it re-fetch the full open thread).
   }
 
   // Resolve ids to full tag objects in catalog (alphabetical) order. Ids

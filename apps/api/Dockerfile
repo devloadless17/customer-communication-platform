@@ -83,15 +83,18 @@ EXPOSE 4000
 HEALTHCHECK --start-interval=500ms --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:4000/health >/dev/null || exit 1
 # Direct node invocation — no pnpm/sh wrapper. Three reasons:
-#  1) Node runs as PID 1, so SIGTERM from systemd/docker reaches the
-#     manual shutdown handler in src/main.ts (server.close → app.close)
-#     immediately. The previous
+#  1) Node runs as PID 1, so SIGTERM from `docker compose down`/`stop`
+#     reaches the manual shutdown handler in src/main.ts (server.close →
+#     app.close) immediately. The previous
 #     `pnpm --filter @ccp/api start` chain (pnpm → sh → node, because
 #     the `start` script uses inline `VAR=value` prefix syntax) made
 #     signal forwarding shell-implementation-dependent. BullMQ's
 #     graceful drain (lib/workflows/worker.ts:lockDuration=90s) only
-#     works if SIGTERM lands on Node within the systemd TimeoutStopSec
-#     window — irreversible Meta sends double-fire otherwise.
+#     works if SIGTERM lands on Node within the drain budget — which is
+#     now compose's `stop_grace_period: 100s` on the api service (the
+#     `ccp` systemd unit + its TimeoutStopSec=120 were removed; compose
+#     drives the stack directly). Irreversible Meta sends double-fire if
+#     the process is SIGKILL'd mid-job before that budget elapses.
 #  2) Faster boot — drops two process spawns (~50-100ms each on this VPS).
 #  3) Reads pnpm-workspace symlinks at /app/apps/api/node_modules to find
 #     @swc-node/register (declared as a direct dep of @ccp/api). WORKDIR

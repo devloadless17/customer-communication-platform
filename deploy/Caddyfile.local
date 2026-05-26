@@ -1,0 +1,103 @@
+# Caddy reverse proxy — LOCAL same-origin variant (full docker stack on one
+# host machine, NO TLS, NO domain).
+#
+# Purpose: run the production-shaped docker stack (app + api + postgres + redis)
+# locally with the SAME single-origin topology prod uses, so the browser talks
+# to one origin (http://localhost:8080) and uses RELATIVE URLs through this
+# proxy — exactly like prod behind the real Caddy. This sidesteps the
+# local-docker login bug where the prod CSP's `upgrade-insecure-requests`
+# force-upgraded a baked cross-origin `http://localhost:4000` api URL to https
+# with no TLS terminator present. With same-origin relative URLs there is no
+# cross-origin http target to upgrade.
+#
+# This is NOT deployed anywhere. Prod uses deploy/Caddyfile.template (rendered
+# with a real domain + ACME). Keep the ROUTE ORDERING here identical to that
+# template — the first-match-wins rules are load-bearing and must not drift.
+#
+# Run it via the `local` compose profile:
+#   docker compose --env-file .env.local-docker --profile local up -d --build
+# then open http://localhost:8080
+#
+# Upstreams are the compose SERVICE names (app / api), not 127.0.0.1, because
+# Caddy runs inside the compose network here (prod's Caddy is on the host and
+# proxies to loopback-published ports).
+
+{
+	# No ACME: this site is plain HTTP on a port, so Caddy never tries to
+	# provision a certificate. Disabling admin keeps the local container lean.
+	admin off
+	auto_https off
+}
+
+# Plain HTTP on :8080 — the single local origin. No domain block, no TLS.
+:8080 {
+	encode zstd gzip
+
+	# Security headers mirror prod EXCEPT HSTS, which is omitted on purpose:
+	# Strict-Transport-Security on a plain-http localhost origin would tell
+	# the browser to force-https every future visit to localhost — poisoning
+	# OTHER localhost apps. Everything else matches deploy/Caddyfile.template.
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+
+	# -------------------------------------------------------------------------
+	# Routing — order matters, identical to deploy/Caddyfile.template.
+	# -------------------------------------------------------------------------
+
+	# (1) /api/auth/change-password → api (NestJS). MUST precede /api/auth/*.
+	handle /api/auth/change-password* {
+		reverse_proxy api:4000
+	}
+
+	# (2) /api/auth/* → web (Next.js / Better Auth catch-all).
+	handle /api/auth/* {
+		reverse_proxy app:3000
+	}
+
+	# (3) /api/health → web (Next.js legacy probe URL).
+	handle /api/health {
+		reverse_proxy app:3000
+	}
+
+	# (4) /api/webhooks/meta/* → web (Next.js raw-bytes proxy to api).
+	handle /api/webhooks/meta/* {
+		reverse_proxy app:3000
+	}
+
+	# (4b) /api/internal/* → web (cache-revalidate bridge). MUST precede the
+	#      /api/* wildcard below.
+	handle /api/internal/* {
+		reverse_proxy app:3000
+	}
+
+	# (5) /api/*, /webhooks/* → api (NestJS). Socket.io rides /api/socket/*,
+	#     covered by /api/* — no separate matcher needed. Long timeouts for
+	#     the WebSocket + SSE connections.
+	@apiBackend {
+		path /api/* /webhooks/*
+	}
+	handle @apiBackend {
+		reverse_proxy api:4000 {
+			transport http {
+				read_timeout 5m
+				write_timeout 5m
+				dial_timeout 2s
+			}
+		}
+	}
+
+	# (6) Default — everything else (`/`, `/_next/*`, pages, assets) → web.
+	handle {
+		reverse_proxy app:3000
+	}
+}

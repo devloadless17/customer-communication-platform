@@ -39,6 +39,42 @@ export function MediaBlock({
   }
 }
 
+/**
+ * Sticker image with the same shimmer→fade as ImageBlock, in the fixed 128px
+ * slot the bubble reserves. Lives here (not inline in message-bubble) so the
+ * load-state + fade logic is shared with the other media. Stickers are
+ * transparent PNGs, so the slot is left chrome-less (no bg) — only the shimmer
+ * shows through until decode.
+ */
+export function StickerImage({ url }: { url: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const ref = useRef<HTMLImageElement>(null);
+  useEffect(() => {
+    const img = ref.current;
+    if (!img || !img.complete) return;
+    if (img.naturalWidth > 0) setLoaded(true);
+  }, [url]);
+  return (
+    <div className="relative size-32 overflow-hidden rounded-md">
+      {/* Calm static placeholder (not pulsing) — same flicker reasoning as
+          ImageBlock. */}
+      {!loaded && <div className="absolute inset-0 rounded-md bg-muted" />}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        ref={ref}
+        src={url}
+        alt="sticker"
+        decoding="async"
+        onLoad={() => setLoaded(true)}
+        className={cn(
+          "absolute inset-0 size-full object-contain transition-opacity duration-150",
+          loaded ? "opacity-100" : "opacity-0",
+        )}
+      />
+    </div>
+  );
+}
+
 function PendingMediaBlock({ kind, isOut }: { kind: MediaKind; isOut: boolean }) {
   // Image/video share the same 4:3 slot as the final bubble — render a clean
   // shimmer at the exact same dimensions so the swap is a pure visual
@@ -99,6 +135,13 @@ function pendingPresentation(kind: "audio" | "document" | "sticker"): {
 function ImageBlock({ media }: { media: MediaAttachment }) {
   const [open, setOpen] = useState(false);
   const [errored, setErrored] = useState(false);
+  // `loaded` drives the fade-in + shimmer. Without it the slot is a bare dark
+  // box (bg-black/80) until the <img> decodes, then the photo POPS in — on a
+  // hard refresh with several cached images you catch frames of dark boxes
+  // turning into images, which reads as flicker. With it: a shimmer fills the
+  // (fixed-height) slot, then the image cross-fades in once decoded. No layout
+  // shift — the box was always 4:3; only the CONTENT transitions smoothly.
+  const [loaded, setLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
   // The bubble's box stays at a fixed 4:3 slot for the lifetime of the
@@ -136,7 +179,11 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
     if (!img || errored) return;
     if (!img.complete) return;
     if (img.naturalWidth > 0) {
+      // Already decoded (cached / SSR'd before hydration): reveal immediately
+      // with no fade so a refresh shows the image instantly, not a fade-from-
+      // shimmer that would itself read as a flash. decode() is idempotent.
       void img.decode?.().catch(() => {});
+      setLoaded(true);
     } else {
       setErrored(true);
     }
@@ -166,23 +213,45 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
             <span className="text-[11px]">Image unavailable</span>
           </div>
         ) : (
-          /* eslint-disable-next-line @next/next/no-img-element */
-          <img
-            ref={imgRef}
-            src={media.url}
-            alt={media.caption ?? "image"}
-            onError={() => setErrored(true)}
-            // Lazy + async-decode prevents the cold-load thundering herd on a
-            // thread with many images. Without these, every image requests
-            // `/api/media/<id>` in parallel on mount → N simultaneous auth →
-            // redirect → CDN fetches → UploadThing rate-caps the burst with
-            // ERR_CONNECTION_RESET and the tab hangs. With lazy, only images
-            // near the viewport load; async decoding keeps the main thread
-            // free during paint.
-            loading="lazy"
-            decoding="async"
-            className="absolute inset-0 block h-full w-full object-contain hover:opacity-95"
-          />
+          <>
+            {/* CALM static placeholder (NOT animate-pulse) fills the fixed slot
+                until the photo decodes. A PULSING shimmer was the visible
+                "flicker": with loading="lazy" a cached image isn't `complete`
+                at mount, so the instant-reveal effect can't fire and every
+                image sat in a ~1s opacity-pulsing box before fading in — that
+                pulse reads as flicker (measured via Playwright). A static fill
+                + a quick fade is invisible when the image is fast and calm when
+                it's slow. Hidden once loaded so it can't bleed through a
+                transparent PNG's edges. */}
+            {!loaded && (
+              <div className="absolute inset-0 bg-muted" />
+            )}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              ref={imgRef}
+              src={media.url}
+              alt={media.caption ?? "image"}
+              onLoad={() => setLoaded(true)}
+              onError={() => setErrored(true)}
+              // async-decode keeps the main thread free during paint. We do NOT
+              // set loading="lazy": it kept cached images from being `complete`
+              // at mount, defeating the instant-reveal path and forcing every
+              // image through the placeholder→fade window (the flicker). The
+              // thundering-herd risk lazy guarded against is bounded anyway —
+              // the thread loads a paged slice (~30 msgs), not the full history,
+              // so at most a handful of images request at once; async decode +
+              // the 302/CDN cache absorb that.
+              decoding="async"
+              // Fast cross-fade. Cached/SSR'd images get `loaded` set
+              // synchronously in the mount effect (img already `complete`), so
+              // they paint at opacity-100 with NO visible fade — instant on
+              // refresh. Only genuinely-loading images animate in.
+              className={cn(
+                "absolute inset-0 block h-full w-full object-contain transition-opacity duration-150 hover:opacity-95",
+                loaded ? "opacity-100" : "opacity-0",
+              )}
+            />
+          </>
         )}
       </button>
       {open && <Lightbox url={media.url} onClose={() => setOpen(false)} />}

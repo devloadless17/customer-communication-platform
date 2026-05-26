@@ -12,6 +12,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@ccp/shared/utils";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import {
+  optimisticAssignment,
+  optimisticStatusChange,
+  rollbackOptimisticActivity,
+} from "@/features/inbox/lib/optimistic-activity";
 import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
@@ -22,6 +27,7 @@ export function StatusDropdown({
   current,
   assignedUserId,
   teamMembers,
+  currentUserName,
   onAlert,
 }: {
   teamId: string;
@@ -32,6 +38,8 @@ export function StatusDropdown({
   assignedUserId: string | null;
   /** Roster, to reconstruct the prior assignee for rollback on a failed close. */
   teamMembers: User[];
+  /** Actor name for the optimistic activity pill (the agent making the change). */
+  currentUserName: string;
   onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
@@ -66,13 +74,35 @@ export function StatusDropdown({
       conversationId,
       status,
     });
+    // Synthesize the matching timeline pill so it lands in the same frame as
+    // the status badge, not a GET behind it. Reconciled by the authoritative
+    // events fetch; rolled back below on a failed write.
+    const statusActivityId = optimisticStatusChange({
+      teamId,
+      conversationId,
+      actorName: currentUserName,
+      status,
+    });
+    let unassignActivityId: string | null = null;
     if (willUnassign) {
       dispatchLocalSocketEvent("conversation:assigned", {
         teamId,
         conversationId,
         assignedUser: null,
       });
+      unassignActivityId = optimisticAssignment({
+        teamId,
+        conversationId,
+        actorName: currentUserName,
+        assignedToName: null,
+      });
     }
+    const rollbackActivity = () => {
+      rollbackOptimisticActivity(teamId, conversationId, statusActivityId);
+      if (unassignActivityId) {
+        rollbackOptimisticActivity(teamId, conversationId, unassignActivityId);
+      }
+    };
     try {
       const res = await fetch(`/api/conversations/${conversationId}/status`, {
         method: "POST",
@@ -93,6 +123,7 @@ export function StatusDropdown({
             assignedUser: prevUser,
           });
         }
+        rollbackActivity();
         await onAlert("Couldn't change status", await readError(res));
       }
     } catch (err) {
@@ -108,6 +139,7 @@ export function StatusDropdown({
           assignedUser: prevUser,
         });
       }
+      rollbackActivity();
       await onAlert(
         "Couldn't change status",
         err instanceof Error ? err.message : "Network error",

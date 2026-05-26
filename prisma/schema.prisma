@@ -240,7 +240,7 @@ model Team {
   plan      Plan     @default(starter)
 
   // Per-team channel credentials moved OFF this model into `ChannelConnection`
-  // (one row per provider, keyed by (teamId, provider)) so adding a channel is
+  // (one row per channel, keyed by (teamId, channel)) so adding a channel is
   // a new row, not a new column-set. CLAUDE.md rule #6. The old `meta*` columns
   // were dropped in migration 20260521..._drop_team_meta_columns; the encrypted
   // secrets relocated verbatim into `ChannelConnection.secrets`.
@@ -685,8 +685,8 @@ model Conversation {
   // ownership belongs to the thread). A conversation is bound to ONE channel
   // for its lifetime. Needed even with zero messages (a thread created on
   // first outbound), to route sends and list/filter threads. Stamped at
-  // creation: inbound = the ingesting provider; outbound-initiated threads
-  // default to the team's WhatsApp channel. `Message.provider` always equals
+  // creation: inbound = the ingesting channel; outbound-initiated threads
+  // default to the team's WhatsApp channel. `Message.channel` always equals
   // this but exists for a different reason (the dedup key — see its comment);
   // the equality is a consistency invariant, not duplicated data.
   channel            Channel            @default(whatsapp)
@@ -764,12 +764,12 @@ model Message {
   id             String           @id @default(cuid())
   teamId         String
   conversationId String
-  // Provider-assigned id. Dedupe via the compound unique below — bare
-  // `@unique` would collide across providers because Meta's WhatsApp wamid
-  // and Instagram message-id share the same opaque-string shape and could
-  // theoretically clash (Telegram numeric ids definitely will against
-  // something). Compound on (teamId, provider, externalId) keeps each
-  // channel's id space isolated.
+  // Provider-assigned id (Meta wamid for WhatsApp). Dedupe via the compound
+  // unique below — bare `@unique` would collide across channels because
+  // Meta's WhatsApp wamid and Instagram message-id share the same opaque-
+  // string shape and could theoretically clash (Telegram numeric ids
+  // definitely will against something). Compound on (teamId, channel,
+  // externalId) keeps each channel's id space isolated.
   externalId     String
   // null on inbound — only outbound has an authoring agent.
   senderUserId   String?
@@ -777,15 +777,15 @@ model Message {
   // the caption (or empty) so search keeps matching across both kinds.
   body           String
   direction      MessageDirection
-  // Half of the dedup key `@@unique([teamId, provider, externalId])` below —
-  // that's its job, NOT to classify the channel. It is enforced at INSERT,
-  // before any conversation link exists (dedupe runs first in ingest), and a
-  // DB unique index can't span a JOIN, so provider must live on this row.
-  // Channel OWNERSHIP is `Conversation.provider`; this always equals it
-  // (a thread is single-channel) — a consistency invariant, not redundancy.
-  // Don't "simplify" by dropping either: lose this and dedup breaks once a
-  // 2nd channel exists; lose Conversation.provider and empty threads (no
-  // messages yet) have no channel.
+  // Half of the dedup key `@@unique([teamId, channel, externalId])` below —
+  // that's its job, NOT to classify the channel for routing. It is enforced
+  // at INSERT, before any conversation link exists (dedupe runs first in
+  // ingest), and a DB unique index can't span a JOIN, so channel must live
+  // on this row. Channel OWNERSHIP is `Conversation.channel`; this always
+  // equals it (a thread is single-channel) — a consistency invariant, not
+  // redundancy. Don't "simplify" by dropping either: lose this and dedup
+  // breaks once a 2nd channel exists; lose Conversation.channel and empty
+  // threads (no messages yet) have no channel.
   channel        Channel
   status         MessageStatus    @default(sent)
   // Original webhook payload kept verbatim for debugging.
@@ -869,7 +869,7 @@ model Message {
 // without completing. Meta has no native idempotency key on POST /messages,
 // so a process death between Meta receiving the request and the worker
 // recording the response → BullMQ retry → Meta sends the message AGAIN.
-// The DB-level unique on `(teamId, provider, externalId)` dedupes the
+// The DB-level unique on `(teamId, channel, externalId)` dedupes the
 // resulting Message row, but the customer was already charged twice and
 // saw two messages on WhatsApp.
 //

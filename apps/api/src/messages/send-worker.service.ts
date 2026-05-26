@@ -134,8 +134,10 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     // Mirror the workflow worker's graceful-stop posture: await in-flight,
-    // then release the Redis lock cleanly. systemd TimeoutStopSec=120 in
-    // deploy/ccp.service is sized to cover lockDuration + this drain.
+    // then release the Redis lock cleanly. The api service's compose
+    // stop_grace_period (100s in docker-compose.yml) is the drain budget
+    // and is sized to cover lockDuration + this drain. (Formerly systemd's
+    // TimeoutStopSec=120; the ccp unit was removed 2026-05-26.)
     //
     // Hard cap on the await so a single send stuck mid-Meta-fetch can't keep
     // the close hanging until SIGKILL. Past 85s the BullMQ lock has expired

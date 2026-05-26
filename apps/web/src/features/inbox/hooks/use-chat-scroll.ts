@@ -170,6 +170,10 @@ export function useChatScroll({
     settleStopRef.current?.();
     setUnreadBelow(0);
     stickyRef.current = true;
+    // Tell the SSR parse-time bottom-snap script (see SsrThreadBottomSnap) that
+    // the client hook has taken over scroll, so it stops its rAF correction
+    // loop. Harmless on chat-switch (no SSR script there) and on the client.
+    viewportRef.current?.setAttribute("data-chat-scroll-ready", "1");
     snapToBottom();
     requestAnimationFrame(() => {
       if (stickyRef.current) snapToBottom();

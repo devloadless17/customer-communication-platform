@@ -1,0 +1,25 @@
+# Local same-origin override — used ONLY by the `prod:local*` scripts together
+# with the base docker-compose.yml and the `local` profile:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml \
+#     --env-file .env.local-docker --profile local up -d --build
+#
+# Why this exists: in the same-origin model the browser only ever talks to
+# Caddy on :8080, and Caddy reaches app/api over the INTERNAL docker network
+# (app:3000, api:4000). Publishing app/api on host 3000/4000 is therefore
+# pointless here AND collides with a `pnpm dev` that already owns those host
+# ports — the "ports are not available: 127.0.0.1:4000" error. Dropping the
+# host publishes lets the full docker stack and `pnpm dev` coexist (the whole
+# point of fronting on :8080).
+#
+# The `!reset []` tag (compose v2.24+) CLEARS the base list instead of merging
+# into it — a plain `ports: []` is ignored because compose merges sequence
+# fields like `ports` by concatenation, not replacement. With `!reset` the
+# base file's loopback publishes are dropped for these two services in local
+# mode; postgres/redis keep theirs (host tooling — Prisma CLI, redis-cli —
+# still wants 5433/6380).
+services:
+  app:
+    ports: !reset []
+  api:
+    ports: !reset []

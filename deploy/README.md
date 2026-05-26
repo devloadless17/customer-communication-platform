@@ -9,9 +9,15 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
 2. `deploy` job — runs only on push to `main` (or manual `workflow_dispatch`). Needs typecheck to pass.
    - retags the current `:latest` as `:previous` on Docker Hub (manifest-only copy, free)
    - builds the new image and pushes it as `:latest`
-   - SSHes to the VPS and writes/refreshes 4 config files
-   - `docker compose pull && systemctl restart ccp && systemctl reload caddy`
+   - SSHes to the VPS and writes/refreshes the config files
+   - `docker compose pull && docker compose up -d --remove-orphans && docker image prune -f && systemctl reload caddy`
    - polls `/api/health` end-to-end
+
+> **No systemd.** The stack is driven directly by `docker compose` (there is
+> no `ccp` systemd unit any more — the deploy auto-removes a legacy one if it
+> finds it). Nothing auto-starts: a `docker compose down` / `docker stop`
+> stays down, and a VPS reboot does NOT bring the stack back. Start it with
+> `docker compose up -d` (see "Starting / stopping the stack" below).
 
 ## Topology
 
@@ -39,18 +45,19 @@ Caddy splits traffic by path between the two app containers — see
 
 ## What lives on the VPS
 
-Four files, split between the `deploy` user's app dir and system locations.
+Three files, split between the `deploy` user's app dir and system locations.
 
 ```
 /opt/ccp/docker-compose.yml   ← owned by deploy, shipped from ./docker-compose.yml
 /opt/ccp/.env                 ← owned by deploy (mode 600), rendered from GitHub Secrets
 /etc/caddy/Caddyfile          ← owned by root, rendered from deploy/Caddyfile.template
-/etc/systemd/system/ccp.service  ← owned by root, copied from deploy/ccp.service
 ```
 
-The systemd unit runs as `User=deploy` so its `docker compose` calls share
-the deploy user's `docker login` credentials. The two `/etc/...` files are
-written by the workflow via `sudo`.
+There is no systemd unit: the deploy job runs `docker compose up -d` as the
+`deploy` user directly (its own `docker login` credentials). The one
+`/etc/...` file (Caddyfile) is written via `sudo`. Caddy itself still runs as
+a host service (`systemctl reload caddy`) — only the *app* stack moved off
+systemd.
 
 State that survives across deploys (Docker volumes):
 
@@ -248,12 +255,60 @@ Emergency manual deploy if GHA is down:
 
 ```bash
 ssh deploy@central.loadless.site
+cd /opt/ccp
 docker login -u <docker-username>             # interactive password prompt
-docker compose -f /opt/ccp/docker-compose.yml --env-file /opt/ccp/.env pull app
-sudo systemctl restart ccp
+docker compose --env-file .env pull
+docker compose --env-file .env up -d --remove-orphans
+docker image prune -f                          # reclaim the dangling layers the pull orphaned
 sudo systemctl reload caddy
-sudo journalctl -u ccp -f
+docker compose --env-file .env logs -f         # tail logs (replaces `journalctl -u ccp -f`)
 ```
+
+---
+
+# Starting / stopping the stack
+
+No systemd, no auto-start. You drive the stack directly with `docker compose`
+from `/opt/ccp` (all commands as the `deploy` user). **Nothing comes back on
+its own** — not after `down`, not after a `docker stop`, not after a VPS
+reboot. That's intentional.
+
+```bash
+cd /opt/ccp
+
+# Start everything (or bring it back after a reboot / down)
+docker compose --env-file .env up -d
+
+# Stop everything — STAYS stopped. No bounce-back.
+docker compose --env-file .env stop          # stop containers, keep them
+docker compose --env-file .env down          # stop AND remove containers (keeps volumes)
+
+# Stop / remove a single service
+docker compose --env-file .env stop api
+docker compose --env-file .env rm -sf api
+
+# Status + logs
+docker compose --env-file .env ps
+docker compose --env-file .env logs -f api
+```
+
+> **Why a manual `docker stop` used to bounce back:** the old `ccp` systemd
+> unit ran `docker compose up` with `Restart=always`, so the moment you
+> stopped a container the unit's `up` recreated it. Both that unit and the
+> compose `restart:` policy are gone now (`restart: "no"` on every prod
+> service). The deploy auto-removes the legacy unit if it's still installed.
+
+> **Reclaiming disk:** each deploy already runs `docker image prune -f`, which
+> removes the dangling (untagged) layers a fresh `:latest` pull orphans — the
+> main cause of disk creep. To clean up by hand at any time:
+> ```bash
+> docker image prune -f          # dangling images only (safe; keeps :latest-* + :previous-*)
+> docker container prune -f      # exited/stopped containers
+> docker system df               # see what's actually using disk
+> ```
+> Do NOT run `docker image prune -a` (removes ALL unused images, including
+> `:previous-*` which the auto-rollback needs) or `docker system prune -a`
+> on the VPS unless you're deliberately wiping the rollback target.
 
 ---
 
@@ -304,19 +359,24 @@ either way — fix forward at the schema layer.
 
 ## Fast rollback (~30s) — `:previous` swap
 
-Every deploy retags the prior `:latest` as `:previous` on Docker Hub
-(manifest-only copy, no layer transfer, no extra storage). To roll back
-one step: promote `:previous` back to `:latest`, then pull + restart.
+Every deploy retags the prior `:latest-{web,api}` as `:previous-{web,api}`
+on Docker Hub (manifest-only copy, no layer transfer, no extra storage). To
+roll back one step: promote `:previous-*` back to `:latest-*`, then pull +
+recreate. (The deploy workflow's auto-rollback does this for you when a
+post-deploy health check fails — this is the manual equivalent.)
 
 From your dev machine (one-shot):
 
 ```bash
 REPO=<docker-username>/customer-communication-platform
-docker buildx imagetools create --tag $REPO:latest $REPO:previous
+for v in web api; do
+  docker buildx imagetools create --tag $REPO:latest-$v $REPO:previous-$v
+done
 
 ssh deploy@central.loadless.site '
-  docker compose -f /opt/ccp/docker-compose.yml --env-file /opt/ccp/.env pull app
-  sudo systemctl restart ccp
+  cd /opt/ccp
+  docker compose --env-file .env pull
+  docker compose --env-file .env up -d --remove-orphans
 '
 ```
 
@@ -346,6 +406,10 @@ plus this sudoers entry equals immediate full root. The SSH key is your
 real protection, but defense-in-depth is cheap. Replace the open entry
 with the exact-binary allowlist the workflow needs:
 
+The app stack runs as the `deploy` user via `docker compose` (no `sudo`),
+so the only `sudo` the deploy needs now is for Caddy config + the one-time
+legacy `ccp` unit removal.
+
 ```bash
 # On the VPS, as root
 cat > /etc/sudoers.d/deploy <<'EOF'
@@ -353,29 +417,82 @@ cat > /etc/sudoers.d/deploy <<'EOF'
 # See .github/workflows/deploy.yml for the exact invocations.
 deploy ALL=(root) NOPASSWD: \
   /usr/bin/mv /tmp/ccp-deploy/Caddyfile /etc/caddy/Caddyfile, \
-  /usr/bin/mv /tmp/ccp-deploy/ccp.service /etc/systemd/system/ccp.service, \
   /usr/bin/mkdir -p /var/log/caddy, \
   /usr/bin/chown -R caddy\:caddy /var/log/caddy, \
   /usr/bin/caddy validate --config /etc/caddy/Caddyfile, \
+  /bin/systemctl reload-or-restart caddy, \
+  /bin/systemctl disable --now ccp.service, \
   /bin/systemctl daemon-reload, \
-  /bin/systemctl enable --now ccp, \
-  /bin/systemctl restart ccp, \
-  /bin/systemctl reload-or-restart caddy
+  /bin/rm -f /etc/systemd/system/ccp.service
 EOF
 chmod 440 /etc/sudoers.d/deploy
 visudo -c   # syntax check — refuses to commit if invalid
 ```
 
-If you ever add or remove a `sudo` call in `deploy.yml`, update this file
-in lockstep — the deploy will fail with `a password is required` until
-the allowlist matches.
+The `ccp.service` disable / rm / daemon-reload lines are only exercised once
+(the first deploy after this change, which removes the legacy systemd unit);
+they're harmless no-ops afterward but safe to keep. If you ever add or remove
+a `sudo` call in `deploy.yml`, update this file in lockstep — the deploy will
+fail with `a password is required` until the allowlist matches.
+
+# Backups
+
+Nightly `pg_dump` of the Postgres volume to `/opt/ccp/backups/`, 14-day
+retention. Script lives at `scripts/pg-backup.sh` in this repo and is shipped
+to the VPS alongside the other deploy files.
+
+**One-time setup on the VPS** (as the `deploy` user):
+
+```bash
+# Cron line — runs every night at 03:17 UTC (off the top of the hour to avoid
+# bunching with everyone else's 3:00 jobs). Stdout/stderr → syslog via logger,
+# so failures surface in `journalctl -t ccp-backup`.
+( crontab -l 2>/dev/null; echo '17 3 * * * cd /opt/ccp && ./pg-backup.sh 2>&1 | logger -t ccp-backup' ) | crontab -
+```
+
+**Restore** (the only step that matters — practice it once before you need it):
+
+```bash
+# Pick the dump file you want.
+ls /opt/ccp/backups/
+
+# Stop the app so nothing writes during restore, but keep postgres up.
+docker compose stop web api
+
+# Restore into the running postgres. --clean --if-exists in the dump means
+# the file already DROPs existing objects, so this is a full overwrite.
+gunzip -c /opt/ccp/backups/ccp-20260526T031700Z.sql.gz \
+  | docker compose exec -T postgres psql -U app -d ccp
+
+# Bring the app back.
+docker compose start api web
+```
+
+**Offsite copy** (recommended; the on-VPS backups don't survive a disk
+failure). Two simple options:
+
+- `rclone copy /opt/ccp/backups remote:bucket/ccp-backups --max-age 24h` after
+  the cron job. Add an `&&` to the cron line.
+- For S3/R2/Backblaze: `aws s3 sync /opt/ccp/backups s3://bucket/ccp-backups
+  --delete` (requires `aws` CLI on the VPS and an IAM key in `/opt/ccp/.env`).
+
+Either path: the dump is plain SQL and gzip-compressed; encrypt at rest with
+the bucket's KMS / SSE setting, or pipe through `gpg -c` before upload if the
+target bucket isn't encrypted.
 
 # Things to set up later (with trigger conditions)
 
 - **Uptime monitoring** — UptimeRobot or BetterStack on `/api/health`.
   Hostinger sends an email when the VPS reboots; not enough on its own.
+  **Extra-important now that nothing auto-starts:** a VPS reboot leaves the
+  app DOWN until you SSH in and run `docker compose up -d` (see "Starting /
+  stopping the stack"). If you want auto-start-on-boot back without the old
+  manual-stop-bounces-back behavior, the clean way is `restart: unless-stopped`
+  in `docker-compose.yml` (Docker's own restart policy honors a manual
+  `docker stop`) — NOT a systemd `docker compose up` wrapper. It's currently
+  `restart: "no"` by deliberate choice (fully manual).
 - **Docker Hub image scanning** — Hub's built-in scan, or Trivy in CI before push.
-- **Centralized log aggregation** — `journalctl -u ccp` is fine for one
+- **Centralized log aggregation** — `docker compose logs` is fine for one
   VPS; Loki / CloudWatch / Better Stack become worth it when you can't
   ssh in fast enough to read logs during an incident.
 - **Caddy proxy-layer rate limit** — requires `xcaddy build --with

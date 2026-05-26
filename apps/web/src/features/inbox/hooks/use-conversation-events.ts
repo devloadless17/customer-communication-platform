@@ -12,7 +12,13 @@ import {
   COALESCED_LIVE_HOOK_EVENTS,
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
-import type { ConversationWithRefs, CursorPage, Message } from "@ccp/shared/types";
+import { isOptimisticActivityId } from "@/features/inbox/lib/optimistic-activity";
+import type {
+  ConversationActivityEvent,
+  ConversationWithRefs,
+  CursorPage,
+  Message,
+} from "@ccp/shared/types";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 
 /**
@@ -99,6 +105,54 @@ function reconcileOptimisticAgainst(
   return existing.filter(
     (m) => !(m.pending && m.direction === "out" && m.body && confirmed.has(m.body)),
   );
+}
+
+/**
+ * How long an optimistic activity stub may survive an authoritative refetch
+ * before it's force-dropped. The trailing `refreshActivity` GET (~350ms after
+ * the change) almost always already carries the real audit row, so this only
+ * matters as a clock-skew safety net: if the client clock is far AHEAD of the
+ * server, a stub's `at` could stay greater than its own persisted row's `at`
+ * and linger as a duplicate. Bounding the stub's lifetime guarantees it can't
+ * outlive a couple of reconcile cycles regardless of skew. Comfortably longer
+ * than the audit write + GET round-trip; short enough that a stray duplicate
+ * self-heals within a blink.
+ */
+const OPTIMISTIC_ACTIVITY_TTL_MS = 5_000;
+
+/**
+ * Fold an authoritative server activity-log window over the current events,
+ * preserving any optimistic stub the server hasn't caught up to yet.
+ *
+ * The leading-edge `refreshActivity` GET can fire BEFORE the audit row is
+ * written (audit runs at a lower bus priority than the realtime frame), so a
+ * naive "replace events with the server response" would wipe the optimistic
+ * pill the agent just saw appear, only for the trailing GET to re-add it — a
+ * visible flicker. Instead: take the server rows as truth, then re-append any
+ * optimistic stub that is BOTH newer than the newest server row (not yet
+ * persisted/returned) AND younger than the TTL. The first condition drops the
+ * stub the instant its real row lands; the second is the clock-skew backstop so
+ * a stub can never linger as a permanent duplicate.
+ */
+function mergeAuthoritativeEvents(
+  prev: ConversationWithRefs["events"],
+  server: ConversationWithRefs["events"],
+): ConversationActivityEvent[] {
+  const serverEvents = server ?? [];
+  const stubs = (prev ?? []).filter((e) => isOptimisticActivityId(e.id));
+  if (stubs.length === 0) return serverEvents;
+  // Newest server row's time — anything optimistic after it is unconfirmed.
+  let newestServerAt = "";
+  for (const e of serverEvents) {
+    if (e.at > newestServerAt) newestServerAt = e.at;
+  }
+  const cutoff = Date.now() - OPTIMISTIC_ACTIVITY_TTL_MS;
+  const unconfirmed = stubs.filter(
+    (s) => s.at > newestServerAt && new Date(s.at).getTime() >= cutoff,
+  );
+  return unconfirmed.length === 0
+    ? serverEvents
+    : [...serverEvents, ...unconfirmed];
 }
 
 export interface ConversationEventsState {
@@ -560,8 +614,9 @@ export function useConversationEvents(
               notes: fresh.notes,
               // Authoritative refetch — adopt the server's activity log (it can
               // carry changes that happened while we were offline, which the
-              // delta backfill can't).
-              events: fresh.events ?? [],
+              // delta backfill can't). Keep any not-yet-persisted optimistic
+              // stub so an in-flight local change isn't wiped mid-flight.
+              events: mergeAuthoritativeEvents(prev.events, fresh.events),
               messages,
               lastInboundAt: fresh.lastInboundAt,
               ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
@@ -775,6 +830,28 @@ export function useConversationEvents(
       });
     };
 
+    // Optimistic activity pill (client-only; see socket events.ts +
+    // optimistic-activity.ts). The agent who changed status / assignment /
+    // stage / tag fans a synthetic ConversationActivityEvent so the timeline
+    // pill appears in the SAME frame as the header, not a GET behind it.
+    // `event` present → append (dedupe by id); `removeId` → splice (rollback on
+    // a failed PATCH). The trailing authoritative `refreshActivity` GET replaces
+    // the whole `events` array with server rows, transparently reconciling the
+    // stub away (its `optimistic-…` id never matches a server row).
+    const onActivity: Parameters<typeof socket.on<"conversation:activity">>[1] = (payload) => {
+      if (payload.conversationId !== conversationId) return;
+      setData((prev) => {
+        const events = prev.events ?? [];
+        if (payload.removeId) {
+          const next = events.filter((e) => e.id !== payload.removeId);
+          return next.length === events.length ? prev : { ...prev, events: next };
+        }
+        if (!payload.event) return prev;
+        if (events.some((e) => e.id === payload.event!.id)) return prev;
+        return { ...prev, events: [...events, payload.event] };
+      });
+    };
+
     // The conversation we're viewing was deleted (by us, by a teammate, or as
     // a side-effect of a contact delete). Bounce back to the inbox before the
     // server-rendered detail page errors out on a missing row. router.replace
@@ -815,6 +892,7 @@ export function useConversationEvents(
     socket.on("message:status", onMessageStatus);
     socket.on("message:failed", onMessageFailed);
     socket.on("note:new", onNoteNew);
+    socket.on("conversation:activity", onActivity);
     socket.on("conversation:deleted", onConversationDeleted);
 
     // Activity-log live refresh. The audit row for a status / assign / stage /
@@ -836,23 +914,53 @@ export function useConversationEvents(
       "contact:updated",
       "note:deleted",
     ]);
+    const runActivityFetch = () => {
+      void fetchWithSessionGuard(`/api/conversations/${conversationId}/events`)
+        .then((r) => (r && r.ok ? (r.json() as Promise<{ events: ConversationWithRefs["events"] }>) : null))
+        .then((body) => {
+          if (!body) return;
+          // Drop a late response for a thread we've since left.
+          if (dataRef.current.conversation.id !== conversationId) return;
+          setData((prev) => ({
+            ...prev,
+            events: mergeAuthoritativeEvents(prev.events, body.events),
+          }));
+        })
+        .catch(() => {
+          // Non-fatal: the next thread open / reconnect refetch carries the
+          // authoritative events anyway.
+        });
+    };
+
+    // Leading-edge + trailing coalesce. The pill for a SINGLE change (one
+    // status / assign / note-delete — the dominant case) used to wait a full
+    // 350ms trailing debounce before the GET even fired, so the pill lagged the
+    // rest of the realtime patch by a third of a second. Fire the GET
+    // IMMEDIATELY on the first frame instead, then suppress refires for the
+    // debounce window and run ONE trailing fetch if more frames landed during
+    // it. The trailing pass still matters because (a) bursts like a bulk
+    // tag-add fan several contact:updated frames and (b) the audit row is
+    // written AFTER the realtime frame (lower bus priority), so a leading fetch
+    // can race ahead of its own row — the trailing fetch backstops that. The
+    // leading fetch on its own also self-corrects on the next change or the
+    // reconnect/open refetch, so a one-off race just means the pill lands a beat
+    // later, never wrong.
     let activityRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let activitySawTrailing = false;
     const refreshActivity = () => {
-      if (activityRefreshTimer !== null) clearTimeout(activityRefreshTimer);
+      if (activityRefreshTimer !== null) {
+        // Inside the window — a leading fetch already fired; remember to do one
+        // trailing pass so burst/late-audit rows get picked up.
+        activitySawTrailing = true;
+        return;
+      }
+      runActivityFetch();
       activityRefreshTimer = setTimeout(() => {
         activityRefreshTimer = null;
-        void fetchWithSessionGuard(`/api/conversations/${conversationId}/events`)
-          .then((r) => (r && r.ok ? (r.json() as Promise<{ events: ConversationWithRefs["events"] }>) : null))
-          .then((body) => {
-            if (!body) return;
-            // Drop a late response for a thread we've since left.
-            if (dataRef.current.conversation.id !== conversationId) return;
-            setData((prev) => ({ ...prev, events: body.events ?? [] }));
-          })
-          .catch(() => {
-            // Non-fatal: the next thread open / reconnect refetch carries the
-            // authoritative events anyway.
-          });
+        if (activitySawTrailing) {
+          activitySawTrailing = false;
+          runActivityFetch();
+        }
       }, 350);
     };
 
@@ -939,6 +1047,7 @@ export function useConversationEvents(
       socket.off("message:status", onMessageStatus);
       socket.off("message:failed", onMessageFailed);
       socket.off("note:new", onNoteNew);
+      socket.off("conversation:activity", onActivity);
       socket.off("conversation:deleted", onConversationDeleted);
       for (const { event, handler } of reducerHandlers) {
          

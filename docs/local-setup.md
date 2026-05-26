@@ -71,17 +71,36 @@ route manifest. In Docker/prod they MUST be passed as **build args** (compose al
 does). Setting them only at runtime does nothing for the browser/proxy — that's the
 "infinity-refreshing / ECONNREFUSED" class of bug.
 
-| | **Dev (host)** | **Docker (`pnpm prod:local`)** | **Prod (VPS)** |
+| | **Dev (host)** | **Docker local (`pnpm prod:local`)** | **Prod (VPS)** |
 |---|---|---|---|
-| Run | `pnpm dev` (web+api on host; DB/Redis in Docker) | `docker compose up --build` | systemd + Caddy front |
+| Run | `pnpm dev` (web+api on host; DB/Redis in Docker) | `docker compose --env-file .env.local-docker --profile local up --build` (Caddy on `:8080` fronts everything) | systemd + Caddy front |
+| Origin | `http://localhost:3000` (web) + `:4000` (api), two ports | **one origin** `http://localhost:8080` (Caddy) | one origin `https://<host>` (Caddy) |
 | DB / Redis | `localhost:5433` / `localhost:6380` | `postgres:5432` / `redis:6379` | same (compose net) |
-| Browser → api | same-origin `:3000`; `/api/*` → `127.0.0.1:4000` via next.config rewrite; socket → `NEXT_PUBLIC_API_URL` (`http://localhost:4000`) | via baked build args | Caddy routes `/api/*`,`/socket.io/*` → api; `NEXT_PUBLIC_API_URL` = public origin |
+| Browser → api | absolute `NEXT_PUBLIC_API_URL` = `http://localhost:4000` (dev allows plain http) | **`NEXT_PUBLIC_API_URL` EMPTY → relative same-origin URLs through Caddy** | empty → relative; Caddy routes `/api/*`,`/socket.io/*` → api |
 | RSC → api (`INTERNAL_API_URL`) | `http://127.0.0.1:4000` (next.config fallback) | `http://api:4000` (build arg + runtime) | `http://api:4000` |
 | api → web (`WEB_INTERNAL_URL`) | `http://app:3000` default † | `http://app:3000` | `http://app:3000` |
-| `BETTER_AUTH_URL` | `http://localhost:3000` | from env | `https://<public host>` — must match exactly |
+| `BETTER_AUTH_URL` | `http://localhost:3000` | `http://localhost:8080` (the Caddy origin) | `https://<public host>` — must match exactly |
 
 † Doesn't resolve on the host, but harmless in dev (RSC isn't cached). If revalidate
 fetch-errors clutter dev logs, add `WEB_INTERNAL_URL=http://localhost:3000` to `.env`.
+
+### Why `pnpm prod:local` is same-origin (the login-bug fix)
+
+A bare `docker compose up` with the dev `.env` set `NEXT_PUBLIC_API_URL=http://localhost:4000`,
+which Next **bakes into the browser bundle**. But the prod image runs `NODE_ENV=production`,
+whose CSP includes `upgrade-insecure-requests` — the browser then force-upgrades that baked
+`http://localhost:4000` to **https**, which nothing serves locally (no TLS), so every
+browser→api call (and the Socket.io handshake) fails → "server error" right after login.
+`pnpm dev` dodges it (dev CSP has no upgrade directive); prod dodges it (empty
+`NEXT_PUBLIC_API_URL` + real HTTPS via Caddy). Local Docker was the only mode that hit it.
+
+The fix mirrors prod: a local Caddy ([deploy/Caddyfile.local](../deploy/Caddyfile.local),
+profile-gated `caddy` service) fronts app+api on **one origin** (`http://localhost:8080`), and
+`.env.local-docker` sets `NEXT_PUBLIC_API_URL=` empty + `BETTER_AUTH_URL=http://localhost:8080`.
+Same-origin relative URLs have no cross-origin http target to upgrade. `--build` is REQUIRED
+when switching to this mode (the empty `NEXT_PUBLIC_API_URL` is a build arg). The `caddy`
+service only starts with `--profile local`, so a plain `docker compose up -d` still won't run
+it (and on the VPS, Caddy is a host service, never in compose).
 
 ## Command cheat-sheet
 
@@ -91,6 +110,7 @@ Dev (both)     pnpm dev                  (web :3000 + api :4000)
 Dev (split)    pnpm web:dev / pnpm api:dev   (separate-terminal logs; web:dev makes the .env symlink)
 Typecheck      pnpm typecheck            (turbo: web + api; add --force after a schema/prisma change)
 DB             pnpm db:migrate | db:studio | db:reset   (repo ROOT only)
-Local prod     pnpm prod:local           (full Docker stack, mirrors VPS)
+Local prod     pnpm prod:local           (full Docker stack, same-origin via Caddy on http://localhost:8080)
+Local prod bg  pnpm prod:local:detached  (same, detached)  | :down  | :logs | :nuke (down -v)
 After upgrade  clear caches (trap #3) then pnpm install
 ```

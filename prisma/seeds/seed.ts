@@ -183,9 +183,19 @@ async function main() {
   });
 
   console.log(`→ ${USERS.length} users (default password: "${DEV_PASSWORD}")`);
+  // Upsert users keyed on EMAIL, not the synthetic id. The superadmin seed
+  // (prisma/seeds/seed-superadmin.ts, run on every deploy) already creates
+  // ali@loadless.ai under a generated cuid — keying on `id: "u_me"` here would
+  // hit the create branch and violate the User.email unique constraint. Keying
+  // on email makes this seed ADOPT the existing row instead of colliding. Side
+  // effect: adopted/new users keep their real (cuid) id rather than the
+  // synthetic "u_*", so we record actual ids in `userIdByKey` and remap every
+  // downstream reference (assignedUserId / senderUserId / authorUserId) through
+  // it. New users (sara/omar/lina) still get created — just with a cuid.
+  const userIdByKey: Record<string, string> = {};
   for (const u of USERS) {
-    await db.user.upsert({
-      where: { id: u.id },
+    const row = await db.user.upsert({
+      where: { email: u.email },
       create: {
         id: u.id, teamId: TEAM.id, role: u.role, name: u.name, email: u.email,
       },
@@ -195,20 +205,32 @@ async function main() {
         deactivatedAt: null,
       },
     });
+    userIdByKey[u.id] = row.id;
     // Better Auth verifies signin against Account.password (providerId
     // "credential", accountId = email). Re-upserted every reseed so dev never
-    // gets locked out from a hash that no longer matches the policy.
+    // gets locked out from a hash that no longer matches the policy. Points at
+    // the ACTUAL user id (row.id), which may differ from the synthetic u.id.
     await db.account.upsert({
       where: { providerId_accountId: { providerId: "credential", accountId: u.email } },
       create: {
-        userId: u.id,
+        userId: row.id,
         providerId: "credential",
         accountId: u.email,
         password: DEV_PASSWORD_HASH,
       },
-      update: { password: DEV_PASSWORD_HASH, userId: u.id },
+      update: { password: DEV_PASSWORD_HASH, userId: row.id },
     });
   }
+  // Resolve a synthetic seed user id ("u_me") to the real DB id. Returns null
+  // for a null input (unassigned conversations) and throws on an unknown key
+  // (a typo in the CONVERSATIONS fixtures should fail loudly, not silently
+  // SetNull the attribution).
+  const resolveUserId = (key: string | null): string | null => {
+    if (key === null) return null;
+    const id = userIdByKey[key];
+    if (!id) throw new Error(`seed: unknown user key "${key}" in CONVERSATIONS`);
+    return id;
+  };
 
   console.log(`→ ${CONTACTS.length} contacts`);
   for (const c of CONTACTS) {
@@ -233,12 +255,12 @@ async function main() {
       where: { id: c.id },
       create: {
         id: c.id, teamId: TEAM.id, contactId: c.contactId,
-        assignedUserId: c.assignedUserId, status: c.status,
+        assignedUserId: resolveUserId(c.assignedUserId), status: c.status,
         unreadCount: c.unreadCount, lastMessageAt: lastTs,
         lastMessagePreview: lastMsg.body.slice(0, 200),
       },
       update: {
-        assignedUserId: c.assignedUserId, status: c.status,
+        assignedUserId: resolveUserId(c.assignedUserId), status: c.status,
         unreadCount: c.unreadCount, lastMessageAt: lastTs,
         lastMessagePreview: lastMsg.body.slice(0, 200),
       },
@@ -256,7 +278,7 @@ async function main() {
         },
         create: {
           teamId: TEAM.id, conversationId: c.id, externalId,
-          senderUserId: m.dir === "out" ? m.senderUserId : null,
+          senderUserId: m.dir === "out" ? resolveUserId(m.senderUserId) : null,
           body: m.body, direction: m.dir, channel: "whatsapp",
           status: m.dir === "out" ? (m.status ?? "delivered") : "delivered",
           rawPayload: { seed: true } as Prisma.InputJsonValue,
@@ -275,7 +297,8 @@ async function main() {
       await db.internalNote.upsert({
         where: { id },
         create: {
-          id, conversationId: c.id, authorUserId: n.authorUserId,
+          id, teamId: TEAM.id, conversationId: c.id,
+          authorUserId: resolveUserId(n.authorUserId),
           body: n.body, timestamp: ago(n.minutesAgo),
         },
         update: { body: n.body, timestamp: ago(n.minutesAgo) },

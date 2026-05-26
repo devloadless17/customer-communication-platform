@@ -139,10 +139,10 @@ function ActivityEntryImpl({ event }: { event: ConversationActivityEvent }) {
   if (!desc) return null;
   const Icon = desc.icon;
   return (
-    <div className="my-1.5 flex w-full justify-center px-4">
-      <div className="inline-flex max-w-2xl items-center gap-1.5 text-[11px] leading-tight text-muted-foreground">
-        <Icon className="size-3 shrink-0 opacity-70" />
-        <span className="wrap-break-word [&>b]:font-semibold [&>b]:text-foreground/80 [&>i]:not-italic [&>i]:opacity-70">
+    <div className="my-1 flex w-full justify-center px-4">
+      <div className="inline-flex max-w-2xl items-center gap-1 text-[10px] leading-tight text-muted-foreground">
+        <Icon className="size-2.5 shrink-0 opacity-70" />
+        <span className="wrap-break-word [&>b]:font-medium [&>b]:text-foreground/80 [&>i]:not-italic [&>i]:opacity-70">
           {desc.text}
         </span>
         <span className="opacity-50">·</span>

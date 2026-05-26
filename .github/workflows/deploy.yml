@@ -330,7 +330,15 @@ jobs:
               deploy/Caddyfile.template > _deploy/Caddyfile
           grep -q '__DOMAIN__\|__ADMIN_EMAIL__' _deploy/Caddyfile && { echo "✗ unrendered placeholders"; exit 1; } || true
           cp docker-compose.yml _deploy/docker-compose.yml
-          cp deploy/ccp.service _deploy/ccp.service
+          # Nightly pg_dump script — installed at /opt/ccp/pg-backup.sh by the
+          # ship job and driven by a one-time cron line on the VPS (see
+          # deploy/README.md "Backups"). Shipping every deploy keeps the
+          # script in lockstep with the compose file it depends on.
+          cp scripts/pg-backup.sh _deploy/pg-backup.sh
+          chmod +x _deploy/pg-backup.sh
+          # NOTE: ccp.service is intentionally NOT bundled — the stack is
+          # driven directly by `docker compose` now, not systemd. The ship
+          # job removes any legacy ccp unit still on the VPS.
           # NO .env in the artifact — uploaded artifacts are downloadable
           # by anyone with repo read access for the retention window. The
           # real /opt/ccp/.env is rendered ON THE VPS in the ship job
@@ -553,24 +561,51 @@ jobs:
             chmod 600 /opt/ccp/.env
 
             # Non-secret config files travel via the artifact (no secrets
-            # inside them post-restructure).
+            # inside them post-restructure). The `ccp` systemd unit is gone:
+            # the stack is driven directly by `docker compose` (see below),
+            # so there is no .service file to install any more.
             mv /tmp/ccp-deploy/docker-compose.yml /opt/ccp/docker-compose.yml
             sudo mv /tmp/ccp-deploy/Caddyfile    /etc/caddy/Caddyfile
-            sudo mv /tmp/ccp-deploy/ccp.service  /etc/systemd/system/ccp.service
+            install -m 0755 /tmp/ccp-deploy/pg-backup.sh /opt/ccp/pg-backup.sh
             rm -f /tmp/ccp-deploy.tar.gz
             rmdir /tmp/ccp-deploy || true
-            # `docker login` is still needed so the systemd ExecStartPre
-            # has fresh credentials; the explicit `compose pull` was
-            # dropped because systemd's pull-then-up sequence already
-            # pulls every service. Saves ~10s per deploy.
+
+            # Decommission the old `ccp` systemd unit if it's still present
+            # from a previous deploy. Idempotent: harmless once it's gone.
+            # This is what made manual `docker stop` "bounce back" — the
+            # unit's `docker compose up` + Restart=always recreated whatever
+            # you stopped. Stopping it WITHOUT taking the containers down
+            # (compose down happens below) avoids a double-bounce.
+            if systemctl list-unit-files ccp.service >/dev/null 2>&1 \
+               && systemctl cat ccp.service >/dev/null 2>&1; then
+              sudo systemctl disable --now ccp.service || true
+              sudo rm -f /etc/systemd/system/ccp.service
+              sudo systemctl daemon-reload
+              echo "✓ removed legacy ccp systemd unit"
+            fi
+
             echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
             sudo mkdir -p /var/log/caddy
             sudo chown -R caddy:caddy /var/log/caddy
             sudo caddy validate --config /etc/caddy/Caddyfile
-            sudo systemctl daemon-reload
-            sudo systemctl enable --now ccp
-            sudo systemctl restart ccp
             sudo systemctl reload-or-restart caddy
+
+            # Drive the stack directly with docker compose (no systemd).
+            # `up -d` recreates only the services whose image/config changed
+            # (the new :latest pull → app/api recreate; postgres/redis stay
+            # up if unchanged, keeping the data plane warm). `--remove-orphans`
+            # drops any service removed from the compose file.
+            cd /opt/ccp
+            docker compose --env-file .env pull
+            docker compose --env-file .env up -d --remove-orphans
+
+            # Reclaim disk: every deploy pulls a fresh :latest-{web,api},
+            # orphaning the prior layers as dangling (untagged) images. This
+            # is what was filling the VPS disk. `-f` skips the confirm prompt;
+            # only DANGLING images are removed, so :latest-* and :previous-*
+            # (needed for rollback) are untouched. Running containers and
+            # their images are never pruned.
+            docker image prune -f
 
       - name: Wait for health
         id: health
@@ -643,7 +678,8 @@ jobs:
       # Only fires if external health failed (not earlier steps), so we
       # don't try to rollback when the VPS was never touched. Retags both
       # :previous-{web,api} → :latest-{web,api} locally on the VPS, then
-      # restarts ccp. Site is back on last-good image pair in ~30s.
+      # recreates via docker compose. Site is back on last-good image pair
+      # in ~30s.
       - name: Auto-rollback on health failure
         if: always() && steps.health.outcome == 'failure'
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
@@ -667,5 +703,6 @@ jobs:
               docker pull "$REPO:previous-$variant"
               docker tag "$REPO:previous-$variant" "$REPO:latest-$variant"
             done
-            sudo systemctl restart ccp
+            cd /opt/ccp
+            docker compose --env-file .env up -d --remove-orphans
             echo "✓ rolled back to :previous-{web,api}"

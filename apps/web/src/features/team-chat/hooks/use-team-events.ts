@@ -34,6 +34,34 @@ function filterParams(filter: Filter | undefined): URLSearchParams {
 }
 
 /**
+ * Pure predicate: does this conversation row belong in the given filter view?
+ * Mirrors the server-side WHERE in queries/conversations.ts so the client can
+ * filter the already-loaded slice instantly (e.g. on a tab switch, before the
+ * server refetch lands) without showing a stale or wrong-filter snapshot.
+ *
+ * Module-scope so BOTH the filter-change effect (instant re-derive) and the
+ * socket effect's local `rowMatchesFilter` (splice-in gating) share one
+ * definition — they must agree or a row could appear in one path and not the
+ * other.
+ */
+export function rowMatchesFilterFor(
+  filter: Filter | undefined,
+  currentUserId: string,
+  row: ConversationWithRefs,
+): boolean {
+  if (!filter) return true; // no filter == "all" non-closed handled below
+  if (filter.kind === "stage") {
+    // Stage is contact-lifecycle, orthogonal to chat status (closed included).
+    return row.contact.stageId === filter.stageId;
+  }
+  if (filter.id === "closed") return row.conversation.status === "closed";
+  if (row.conversation.status === "closed") return false;
+  if (filter.id === "mine") return row.conversation.assignedUserId === currentUserId;
+  if (filter.id === "unassigned") return row.conversation.assignedUserId === null;
+  return true; // "all"
+}
+
+/**
  * Holds the list of conversations and folds in incremental Socket.io events
  * so the inbox updates without a refetch.
  *
@@ -227,12 +255,51 @@ export function useTeamEvents(
 
     let cancelled = false;
     setRefreshing(true);
+
+    // INSTANT re-derive: filter the rows we ALREADY have (which carry the
+    // freshest lastMessagePreview / assignee / status from live socket updates
+    // + optimistic bumps) down to the new filter, synchronously, BEFORE the
+    // server fetch lands. Without this the previous filter's slice stayed on
+    // screen during the ~50-400ms fetch — showing a stale preview ("older
+    // message") until the refetch overwrote it. Now the switch paints correct,
+    // fresh rows immediately; the fetch below only ADDS matching rows that
+    // weren't in the loaded slice yet and prunes any that no longer match.
+    setConversations((prev) =>
+      prev.filter((row) => rowMatchesFilterFor(filter, currentUserId, row)),
+    );
+
     const params = filterParams(filter);
     fetchWithSessionGuard(`/api/conversations?${params.toString()}`)
       .then((r) => (r.ok ? (r.json() as Promise<CursorPage<ConversationWithRefs>>) : null))
       .then((page) => {
         if (cancelled || !page) return;
-        setConversations(page.items);
+        // Reconcile the authoritative page with any fresher rows we already
+        // hold. The server page can be a beat behind a live preview the agent
+        // just saw (a `message:new` that landed between fetch-start and
+        // resolve), so prefer the local row's preview/recency when it's newer.
+        setConversations((prev) => {
+          const localById = new Map(prev.map((c) => [c.conversation.id, c]));
+          return page.items.map((row) => {
+            const local = localById.get(row.conversation.id);
+            // Keep the server row by default, but if our local copy has a
+            // strictly-newer lastMessageAt (a live frame the page missed),
+            // keep the local preview + recency so the row doesn't regress.
+            if (
+              local &&
+              local.conversation.lastMessageAt > row.conversation.lastMessageAt
+            ) {
+              return {
+                ...row,
+                conversation: {
+                  ...row.conversation,
+                  lastMessageAt: local.conversation.lastMessageAt,
+                  lastMessagePreview: local.conversation.lastMessagePreview,
+                },
+              };
+            }
+            return row;
+          });
+        });
         setNextCursor(page.nextCursor);
       })
       .finally(() => {
@@ -241,7 +308,7 @@ export function useTeamEvents(
     return () => {
       cancelled = true;
     };
-  }, [filterKey, filter]);
+  }, [filterKey, filter, currentUserId]);
 
   // Mirror activeConversationId into a ref so the message:new handler reads
   // the latest value without re-subscribing on every navigation. Sync-
@@ -416,21 +483,9 @@ export function useTeamEvents(
     // list. We check whether it matches the active filter; if so, the
     // splice-IN branch inserts it at the recency-sorted slot.
     function rowMatchesFilter(nextRow: ConversationWithRefs): boolean {
-      const f = filterRef.current;
-      if (!f) return true;
-      if (f.kind === "stage") {
-        // Stage filter is keyed off the embedded contact, not the
-        // conversation. Closed status is included on purpose — stage is
-        // contact-lifecycle, orthogonal to chat status.
-        return nextRow.contact.stageId === f.stageId;
-      }
-      // Preset filters.
-      if (f.id === "closed") return nextRow.conversation.status === "closed";
-      const isClosed = nextRow.conversation.status === "closed";
-      if (isClosed) return false;
-      if (f.id === "mine") return nextRow.conversation.assignedUserId === currentUserId;
-      if (f.id === "unassigned") return nextRow.conversation.assignedUserId === null;
-      return true; // "all" — already returned above via empty filter, but here for completeness
+      // Delegates to the module-scope predicate so the splice-in gating here
+      // and the instant filter-switch re-derive can't drift apart.
+      return rowMatchesFilterFor(filterRef.current, currentUserId, nextRow);
     }
 
     // Inserts `row` into the recency-sorted list at the position its

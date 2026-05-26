@@ -15,6 +15,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, initials } from "@ccp/shared/utils";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import {
+  optimisticAssignment,
+  optimisticStatusChange,
+  rollbackOptimisticActivity,
+} from "@/features/inbox/lib/optimistic-activity";
 import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
@@ -48,6 +53,7 @@ export function AssignmentDropdown({
   currentAvatarUrl,
   currentStatus,
   teamMembers,
+  currentUserName,
   onAlert,
 }: {
   teamId: string;
@@ -59,6 +65,8 @@ export function AssignmentDropdown({
    *  predictNextStatus above). Mirrors the server rule. */
   currentStatus: ConversationStatus;
   teamMembers: User[];
+  /** Actor name for the optimistic activity pill (the agent making the change). */
+  currentUserName: string;
   onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
@@ -89,13 +97,33 @@ export function AssignmentDropdown({
       conversationId,
       assignedUser: nextUser,
     });
+    // Matching timeline pill in the same frame as the assignee chip.
+    const assignActivityId = optimisticAssignment({
+      teamId,
+      conversationId,
+      actorName: currentUserName,
+      assignedToName: nextUser?.name ?? null,
+    });
+    let statusActivityId: string | null = null;
     if (statusWillChange) {
       dispatchLocalSocketEvent("conversation:status", {
         teamId,
         conversationId,
         status: nextStatus,
       });
+      statusActivityId = optimisticStatusChange({
+        teamId,
+        conversationId,
+        actorName: currentUserName,
+        status: nextStatus,
+      });
     }
+    const rollbackActivity = () => {
+      rollbackOptimisticActivity(teamId, conversationId, assignActivityId);
+      if (statusActivityId) {
+        rollbackOptimisticActivity(teamId, conversationId, statusActivityId);
+      }
+    };
     try {
       const res = await fetch(`/api/conversations/${conversationId}/assign`, {
         method: "POST",
@@ -116,6 +144,7 @@ export function AssignmentDropdown({
             status: currentStatus,
           });
         }
+        rollbackActivity();
         await onAlert("Couldn't update assignment", await readError(res));
       }
     } catch (err) {
@@ -131,6 +160,7 @@ export function AssignmentDropdown({
           status: currentStatus,
         });
       }
+      rollbackActivity();
       await onAlert(
         "Couldn't update assignment",
         err instanceof Error ? err.message : "Network error",

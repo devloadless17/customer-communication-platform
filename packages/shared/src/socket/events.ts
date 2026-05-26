@@ -10,6 +10,7 @@
 
 import type {
   Contact,
+  ConversationActivityEvent,
   ConversationStatus,
   ConversationWithRefs,
   InternalNote,
@@ -198,6 +199,35 @@ export interface ServerToClientEvents {
     teamId: string;
     conversationId: string;
     readByUserId: string;
+  }) => void;
+
+  /**
+   * CLIENT-ONLY optimistic activity-log pill. The server NEVER fans this out —
+   * the authoritative activity row is fetched via GET
+   * /api/conversations/:id/events after the matching header/contact frame lands
+   * (see use-conversation-events `refreshActivity`). This event exists solely so
+   * the agent who MADE a change (status / assignment / stage / tag) sees the
+   * timeline pill in the SAME frame as the header flips, instead of waiting on
+   * that GET round-trip.
+   *
+   * Dispatched via `dispatchLocalSocketEvent` from the change call sites
+   * (status/assignment dropdowns, stage picker, tag picker). Consumed only by
+   * `use-conversation-events`, which appends the synthetic event to `data.events`
+   * with an `optimistic-…` id. The trailing authoritative GET replaces the
+   * whole `events` array with server rows (correct id + exact server time +
+   * actor for teammates), so the optimistic stub is transparently reconciled —
+   * never persisted, never double-rendered (matched out by `optimisticId`).
+   *
+   * `optimisticId` is the synthetic event's `id`; carried separately so a
+   * rollback dispatch can target the exact stub to remove on a failed PATCH.
+   */
+  "conversation:activity": (payload: {
+    teamId: string;
+    conversationId: string;
+    /** The synthetic event to append. `null` together with `removeId` = remove. */
+    event: ConversationActivityEvent | null;
+    /** When set, splice this optimistic id out (rollback on a failed write). */
+    removeId?: string;
   }) => void;
 
   /**

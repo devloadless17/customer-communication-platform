@@ -71,6 +71,7 @@ export function ThreadHeader({
   assignedUserName,
   assignedUserAvatarUrl,
   teamMembers,
+  currentUserName,
   otherViewers,
   onAlert,
   onOpenSearch,
@@ -91,6 +92,8 @@ export function ThreadHeader({
   assignedUserName: string | null;
   assignedUserAvatarUrl?: string | null;
   teamMembers: User[];
+  /** Current agent's display name — actor on optimistic activity pills. */
+  currentUserName: string;
   /**
    * Other teammates currently viewing this conversation. Empty array = no
    * pill. Driven by `useConversationViewers` in the parent — already
@@ -167,6 +170,7 @@ export function ThreadHeader({
           currentAvatarUrl={assignedUserAvatarUrl ?? null}
           currentStatus={status}
           teamMembers={teamMembers}
+          currentUserName={currentUserName}
           onAlert={onAlert}
         />
         <StatusDropdown
@@ -175,6 +179,7 @@ export function ThreadHeader({
           current={status}
           assignedUserId={assignedUserId}
           teamMembers={teamMembers}
+          currentUserName={currentUserName}
           onAlert={onAlert}
         />
         {canDeleteConversations && (

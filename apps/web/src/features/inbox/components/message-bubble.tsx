@@ -11,7 +11,7 @@ import { highlightQuery } from "./message-search";
 
 import { BubbleActions, FailedRecovery } from "./message-bubble/bubble-actions";
 import { BubbleMeta } from "./message-bubble/bubble-meta";
-import { MediaBlock } from "./message-bubble/media-blocks";
+import { MediaBlock, StickerImage } from "./message-bubble/media-blocks";
 import { QuotedReply } from "./message-bubble/quoted-reply";
 
 interface MessageBubbleProps {
@@ -156,12 +156,7 @@ function BubbleContent({
           </Avatar>
         )}
         <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={media.url}
-            alt="sticker"
-            className="size-32 rounded-md object-contain"
-          />
+          <StickerImage url={media.url} />
           <BubbleMeta
           message={message}
           senderName={senderName}
