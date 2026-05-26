@@ -9,14 +9,18 @@ volumes:
 services:
   postgres:
     image: postgres:16.6-alpine
-    # restart: "no" — nothing auto-restarts. A manual `docker stop` /
-    # `docker compose down` stays down, and a VPS reboot does NOT bring the
-    # stack back: you start it explicitly with `docker compose up -d`. This
-    # replaces the old `unless-stopped` + `ccp` systemd unit, both of which
-    # fought manual stops (the unit's `docker compose up` + `Restart=always`
-    # recreated whatever you stopped). See deploy/README.md "Starting /
-    # stopping the stack".
-    restart: "no"
+    # `unless-stopped` (was "no") — Docker auto-restarts on CRASH and on
+    # VPS REBOOT, but honors a manual `docker stop` / `docker compose
+    # down` (the container stays down until you start it again). This is
+    # the documented safe-upgrade path (CLAUDE.md "Operations & deployment
+    # notes" → "Re-enabling auto-start-on-boot WITHOUT the old bounce-
+    # back bug"): the bounce-back bug was specific to the removed `ccp`
+    # systemd unit (`Restart=always` + `docker compose up` wrapper, which
+    # recreated whatever you stopped). Docker's own policy doesn't have
+    # that pathology — it tracks desired state, so manual stop sticks.
+    # Caddy already uses unless-stopped; matching makes the policy
+    # consistent across services.
+    restart: unless-stopped
     networks: [ccp_net]
     # /dev/shm is where Postgres puts parallel-query workers' shared memory.
     # Docker's default 64MB cap surfaces as `could not resize shared memory
@@ -97,9 +101,9 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    # restart: "no" — see postgres above. Manual control only; no auto-restart
-    # on stop, crash, or VPS reboot.
-    restart: "no"
+    # unless-stopped — see postgres above. Auto-restart on crash + on VPS
+    # reboot; manual `docker stop` sticks.
+    restart: unless-stopped
     networks: [ccp_net]
     # --appendonly yes: AOF durability (~1s loss window).
     # --maxmemory + allkeys-lru: graceful eviction before the container's
@@ -161,9 +165,9 @@ services:
         # target, so it must be a build arg too. Defaults to the api service
         # hostname on the compose network.
         INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:4000}
-    # restart: "no" — see postgres above. Manual control only; no auto-restart
-    # on stop, crash, or VPS reboot.
-    restart: "no"
+    # unless-stopped — see postgres above. Auto-restart on crash + on VPS
+    # reboot; manual `docker stop` sticks.
+    restart: unless-stopped
     networks: [ccp_net]
     depends_on:
       # api owns the migration step (runs as the first thing in its CMD)
@@ -269,9 +273,9 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    # restart: "no" — see postgres above. Manual control only; no auto-restart
-    # on stop, crash, or VPS reboot.
-    restart: "no"
+    # unless-stopped — see postgres above. Auto-restart on crash + on VPS
+    # reboot; manual `docker stop` sticks.
+    restart: unless-stopped
     networks: [ccp_net]
     depends_on:
       # api owns schema migrations (runs `prisma migrate deploy` as the

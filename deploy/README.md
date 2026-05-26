@@ -15,9 +15,12 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
 
 > **No systemd.** The stack is driven directly by `docker compose` (there is
 > no `ccp` systemd unit any more — the deploy auto-removes a legacy one if it
-> finds it). Nothing auto-starts: a `docker compose down` / `docker stop`
-> stays down, and a VPS reboot does NOT bring the stack back. Start it with
-> `docker compose up -d` (see "Starting / stopping the stack" below).
+> finds it). Every service is now `restart: unless-stopped` (was `"no"` up to
+> 2026-05-26): Docker auto-restarts on **crash** and on **VPS reboot**, but a
+> manual `docker compose down` / `docker stop` STICKS. This is Docker's own
+> policy — it doesn't have the bounce-back pathology the removed systemd
+> wrapper had (which fought manual stops). See "Starting / stopping the
+> stack" below.
 
 ## Topology
 
@@ -294,9 +297,10 @@ docker compose --env-file .env logs -f api
 
 > **Why a manual `docker stop` used to bounce back:** the old `ccp` systemd
 > unit ran `docker compose up` with `Restart=always`, so the moment you
-> stopped a container the unit's `up` recreated it. Both that unit and the
-> compose `restart:` policy are gone now (`restart: "no"` on every prod
-> service). The deploy auto-removes the legacy unit if it's still installed.
+> stopped a container the unit's `up` recreated it. That unit is gone now
+> (deploy auto-removes it if it's still installed). The compose `restart:`
+> policy is now `unless-stopped` on every prod service — Docker's own
+> policy honors a manual stop, so the bounce-back doesn't recur.
 
 > **Reclaiming disk:** each deploy already runs `docker image prune -f`, which
 > removes the dangling (untagged) layers a fresh `:latest` pull orphans — the
@@ -484,13 +488,11 @@ target bucket isn't encrypted.
 
 - **Uptime monitoring** — UptimeRobot or BetterStack on `/api/health`.
   Hostinger sends an email when the VPS reboots; not enough on its own.
-  **Extra-important now that nothing auto-starts:** a VPS reboot leaves the
-  app DOWN until you SSH in and run `docker compose up -d` (see "Starting /
-  stopping the stack"). If you want auto-start-on-boot back without the old
-  manual-stop-bounces-back behavior, the clean way is `restart: unless-stopped`
-  in `docker-compose.yml` (Docker's own restart policy honors a manual
-  `docker stop`) — NOT a systemd `docker compose up` wrapper. It's currently
-  `restart: "no"` by deliberate choice (fully manual).
+  Containers now run with `restart: unless-stopped` (since 2026-05-26) so
+  a VPS reboot brings the stack back automatically. External monitoring
+  still matters for the case where the container is stuck in a restart
+  loop (Docker's policy retries on every crash; an unhealthy boot loop
+  needs a human).
 - **Docker Hub image scanning** — Hub's built-in scan, or Trivy in CI before push.
 - **Centralized log aggregation** — `docker compose logs` is fine for one
   VPS; Loki / CloudWatch / Better Stack become worth it when you can't

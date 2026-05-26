@@ -251,6 +251,17 @@ export async function dispatchManualTrigger(args: {
   triggeredByUserId: string | null;
   metadata?: Record<string, string>;
   enforceOncePerContact?: boolean;
+  /**
+   * HTTP-chain depth carried forward from a `trigger_workflow` step in the
+   * parent run. Without this, a chained workflow's own `http_request` step
+   * starts the X-CCP-Depth counter at 0, defeating the cross-system loop
+   * cap when the chain composes `incoming_webhook → trigger_workflow →
+   * http_request → external → incoming_webhook`. The trigger_workflow
+   * step passes `(envelope.depth ?? 0) + 1` so each chain hop adds one.
+   * Undefined / 0 for top-level admin-initiated runs (which can't form an
+   * HTTP loop without first being called from `http_request`).
+   */
+  chainDepth?: number;
 }): Promise<string | null> {
   const wf = await db.workflow.findFirst({
     where: { id: args.workflowId, teamId: args.teamId },
@@ -320,6 +331,15 @@ export async function dispatchManualTrigger(args: {
       : null,
     triggeredByUserId: args.triggeredByUserId ?? "system",
     metadata: args.metadata ?? {},
+    // Carry the HTTP-chain depth forward when this run was triggered by a
+    // `trigger_workflow` step that itself sat inside a chain. The runner
+    // reads this off the envelope at run start (runner.ts:_depth) and the
+    // http_request step stamps depth+1 outbound. Omitted (undefined) on a
+    // top-level admin "Run now" — equivalent to 0, treated identically by
+    // both readers.
+    ...(typeof args.chainDepth === "number" && args.chainDepth > 0
+      ? { _depth: args.chainDepth }
+      : {}),
   };
 
   // Create the run directly (without re-going through dispatch's

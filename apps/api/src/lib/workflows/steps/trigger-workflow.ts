@@ -120,6 +120,17 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
       // ledger only protects `dispatch()`-driven entries, not
       // trigger_workflow-step entries.
       enforceOncePerContact: true,
+      // Carry the HTTP-chain depth forward. Without this a chained
+      // workflow's own http_request step would reset the X-CCP-Depth
+      // counter to 0, so a hostile compose
+      // (incoming_webhook → trigger_workflow → workflow B with
+      // http_request → external → incoming_webhook → …) would clear the
+      // cross-system loop guard at every workflow boundary. Now each
+      // trigger_workflow hop adds one to the HTTP chain depth too, so
+      // the two ceilings (workflow-chain=8, http-chain=8) compose
+      // multiplicatively the hard way (still bounded) rather than the
+      // soft way (each restart).
+      chainDepth: (envelope.depth ?? 0) + 1,
     });
 
     if (runId === null) {

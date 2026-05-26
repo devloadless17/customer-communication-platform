@@ -119,11 +119,16 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
       // expiry keeps sliding forward — matches the "no idle logout until
       // 90 days unused" UX. Idle users still hit the 90-day cap.
       updateAge: SESSION_UPDATE_AGE_S,
-      // OFF intentionally. The NestJS-side 15s ApiSession cache in
-      // `session.guard.ts` is the only cache. BA's 60s cookie cache,
-      // when on, created a layering problem: revocations cleared the
-      // NestJS cache in 15s but BA kept serving the cached payload for
-      // up to 60s. One cache → one TTL → one place to invalidate.
+      // OFF intentionally. The NestJS side runs its own two-tier 15s
+      // cache (`sessionCache` keyed by userId + `cookieCache` keyed by
+      // hashed cookie → userId — both in `session.guard.ts`,
+      // invalidated together via `invalidateSessionCache` /
+      // `invalidateSessionCacheByCookie`). BA's 60s cookie cache, when
+      // on, created a layering problem: revocations cleared the NestJS
+      // pair in 15s but BA kept serving the cached payload for up to
+      // 60s. With BA's cookie cache OFF the NestJS pair becomes the
+      // single source of truth — one TTL across both maps, one
+      // invalidation path that hits both.
       cookieCache: { enabled: false },
     },
 

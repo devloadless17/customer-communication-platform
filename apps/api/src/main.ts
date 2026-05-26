@@ -71,9 +71,17 @@ async function bootstrap(): Promise<void> {
     bodyParser: false,
   });
 
-  // Trust the single Caddy proxy in front of us — same posture as Next.js
-  // middleware uses TRUSTED_PROXY_HOPS=1.
-  app.set("trust proxy", 1);
+  // Trust N reverse-proxy hops in front of us. Single-Caddy topology = 1;
+  // a Cloudflare/CDN → Caddy → api chain = 2; etc. Wrong value silently
+  // breaks per-IP rate-limiting: too low and req.ip is the proxy loopback
+  // (every request collapses onto one bucket); too high and a hostile
+  // client can spoof X-Forwarded-For (every request looks like a fresh
+  // IP). validateEnv enforces the value is an integer 0..10 in prod, so
+  // this read is safe by the time we reach it. Default 1 (today's topology)
+  // when the env is unset in dev. Was hard-coded to 1; making this dynamic
+  // closes the gap the schema was validating but main.ts ignored.
+  const trustProxyHops = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? "1", 10);
+  app.set("trust proxy", trustProxyHops);
 
   // Correlation ID binding MUST run before any other middleware so logs
   // emitted during body parsing, auth, etc. all see the same id. Express

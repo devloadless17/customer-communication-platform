@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
@@ -94,6 +94,13 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   const [pending, startTransition] = useTransition();
   const [testStatus, setTestStatus] = useState<string | null>(null);
 
+  // In-flight save AbortController. Aborted on unmount + before each
+  // fresh save so a slow PATCH from a few keystrokes ago can't land
+  // setState into an unmounted (or navigated-away) component, and a
+  // freshly-typed change supersedes the prior save without two replies
+  // racing into setTopErrors / setStepErrors.
+  const persistCtlRef = useRef<AbortController | null>(null);
+
   // Auto-save in edit mode. Cheap (~one PATCH per couple seconds of
   // idle); the alternative — manual save button only — leads to "I lost
   // my changes" frustration when the tab crashes. We skip the auto-save
@@ -107,7 +114,22 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
 
+  // Unmount: cancel any in-flight save so its .then() / setState calls
+  // don't run after the builder is gone (navigated to /workflows list).
+  useEffect(
+    () => () => {
+      persistCtlRef.current?.abort();
+    },
+    [],
+  );
+
   async function persist(opts: { silent?: boolean } = {}): Promise<boolean> {
+    // Supersede any in-flight save — freshest input wins, prior
+    // response is ignored on its way back.
+    persistCtlRef.current?.abort();
+    const ctl = new AbortController();
+    persistCtlRef.current = ctl;
+
     const body = {
       name,
       trigger,
@@ -121,17 +143,28 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         ? "/api/team/workflows"
         : `/api/team/workflows/${workflow!.id}`;
     const method = mode === "create" ? "POST" : "PATCH";
-    const res = await fetch(path, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    let res: Response;
+    try {
+      res = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: ctl.signal,
+      });
+    } catch (err) {
+      // Aborted (next save kicked in / unmount) → bail silently; the
+      // newer save (or no save) is the authoritative outcome.
+      if (ctl.signal.aborted) return false;
+      throw err;
+    }
+    if (ctl.signal.aborted) return false;
     const json = (await res.json().catch(() => ({}))) as {
       id?: string;
       error?: string;
       details?: string[];
       stepErrors?: Record<string, string>;
     };
+    if (ctl.signal.aborted) return false;
     if (!res.ok) {
       setTopErrors(json.details ?? [json.error ?? `error ${res.status}`]);
       if (json.stepErrors) setStepErrors(json.stepErrors);

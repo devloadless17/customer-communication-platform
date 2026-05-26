@@ -74,6 +74,39 @@ export default tseslint.config(
       "@next/next/no-html-link-for-pages": "off",
       "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "warn",
+      // Nudge bare `fetch("/api/...")` callers toward the centralized
+      // wrapper at `lib/api/client-fetch.ts` (apiFetch / fetchWithSessionGuard).
+      // The wrapper covers cross-port dev (BROWSER_API_BASE), cookie
+      // forwarding, and the session-expiry guard that routes stale-cookie
+      // requests to /logout. Bare fetch papers over all three; new code
+      // copying that pattern is the slow drift toward "session expired
+      // toasts instead of redirects." Warning, not error — migration is
+      // opportunistic per the wrapper's doc-comment; an error would
+      // block every PR until the legacy sites are converted.
+      "no-restricted-syntax": [
+        "warn",
+        {
+          selector:
+            "CallExpression[callee.name='fetch'][arguments.0.type='Literal'][arguments.0.value=/^\\/api\\//]",
+          message:
+            "Use apiFetch / fetchWithSessionGuard from @/lib/api/client-fetch instead of bare fetch() for internal /api/* calls — it handles cross-port dev, cookie forwarding, and stale-session redirects.",
+        },
+        {
+          selector:
+            "CallExpression[callee.name='fetch'][arguments.0.type='TemplateLiteral'][arguments.0.quasis.0.value.raw=/^\\/api\\//]",
+          message:
+            "Use apiFetch / fetchWithSessionGuard from @/lib/api/client-fetch instead of bare fetch() for internal /api/* calls — it handles cross-port dev, cookie forwarding, and stale-session redirects.",
+        },
+      ],
+    },
+  },
+
+  // ---- The centralized fetch wrapper itself ALWAYS calls bare fetch ----
+  // ---- (otherwise this lint would forbid its own implementation). ------
+  {
+    files: ["apps/web/src/lib/api/client-fetch.ts"],
+    rules: {
+      "no-restricted-syntax": "off",
     },
   },
 

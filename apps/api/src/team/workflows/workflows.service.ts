@@ -754,6 +754,39 @@ export class WorkflowsService {
         `[workflow-webhook] workflow ${id} dropped: chain depth ${inboundDepth} >= ` +
           `${MAX_WEBHOOK_CHAIN_DEPTH} — likely an http_request <-> incoming_webhook loop`,
       );
+      // Write a `skipped` WorkflowRun row so the drop is visible in the
+      // runs UI without log-grepping. The body still carries
+      // `dropped: "chain_depth_exceeded"`, but a partner integration that
+      // only checks for 200 won't surface the drop to the customer —
+      // they'd just see workflows silently stop firing. The audit row
+      // gives them a clean "what happened, when, and how often" surface.
+      // Best-effort: if the insert itself fails (Postgres flap), the
+      // drop still propagates via the response body + the log line.
+      try {
+        await this.db.workflowRun.create({
+          data: {
+            workflowId: wf.id,
+            teamId: wf.teamId,
+            trigger: "incoming_webhook",
+            contactId: null,
+            conversationId: null,
+            eventPayload: {
+              dropped: "chain_depth_exceeded",
+              inboundDepth,
+            } as Prisma.InputJsonValue,
+            graphSnapshot: wf.graph as Prisma.InputJsonValue,
+            status: "skipped",
+            errorMessage: `chain_depth_exceeded (depth ${inboundDepth} >= ${MAX_WEBHOOK_CHAIN_DEPTH})`,
+            finishedAt: new Date(),
+          },
+        });
+      } catch (auditErr) {
+        console.warn(
+          `[workflow-webhook] failed to write skipped audit row: ${
+            auditErr instanceof Error ? auditErr.message : String(auditErr)
+          }`,
+        );
+      }
       return { runId: null, dropped: "chain_depth_exceeded" };
     }
 

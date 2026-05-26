@@ -129,29 +129,70 @@ export class MessagesService {
      */
     event: Omit<DomainEventOf<"message.sent">, "unreadCount" | "lastMessageAt">;
   }): Promise<void> {
-    await this.db.$transaction(async (tx) => {
-      const current = await tx.conversation.findUnique({
-        where: { id: args.conversationId },
-        select: { lastMessageAt: true, unreadCount: true },
+    try {
+      await this.db.$transaction(async (tx) => {
+        const current = await tx.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { lastMessageAt: true, unreadCount: true },
+        });
+        if (!current) return;
+        const effectiveBump =
+          current.lastMessageAt >= args.bumpTimestamp
+            ? new Date(current.lastMessageAt.getTime() + 1)
+            : args.bumpTimestamp;
+        await tx.conversation.update({
+          where: { id: args.conversationId },
+          data: {
+            lastMessageAt: effectiveBump,
+            lastMessagePreview: args.preview,
+          },
+        });
+        await publishInTx(tx, {
+          ...args.event,
+          lastMessageAt: effectiveBump.toISOString(),
+          unreadCount: current.unreadCount,
+        });
       });
-      if (!current) return;
-      const effectiveBump =
-        current.lastMessageAt >= args.bumpTimestamp
-          ? new Date(current.lastMessageAt.getTime() + 1)
-          : args.bumpTimestamp;
-      await tx.conversation.update({
-        where: { id: args.conversationId },
-        data: {
-          lastMessageAt: effectiveBump,
-          lastMessagePreview: args.preview,
-        },
-      });
-      await publishInTx(tx, {
-        ...args.event,
-        lastMessageAt: effectiveBump.toISOString(),
-        unreadCount: current.unreadCount,
-      });
-    });
+    } catch (err) {
+      // Best-effort recovery: the tx failed (P2024 / deadlock / pool flap),
+      // so neither the conversation bump NOR the outbox row landed. The
+      // Message row itself is durable (created BEFORE this call), but the
+      // optimistic bubble on the sender's client carries a `clientTempId`
+      // that ONLY reconciles when the `message.sent` event arrives — without
+      // it the 30s send watchdog phantom-fails the bubble even though Meta
+      // delivered. Falling back to in-process `publish()` runs the realtime
+      // subscriber synchronously (closes the reconcile gap immediately) and
+      // writes a best-effort outbox audit row outside the failed tx. The
+      // conversation summary (lastMessageAt + preview) stays stale until
+      // the next inbound or thread re-open reconciles it; that's the
+      // acceptable degraded outcome — bubble UX is preserved.
+      this.logger.warn(
+        `commitOutboundEvent tx failed for conv=${args.conversationId}; falling back to publish(): ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      try {
+        // Re-read conversation OUTSIDE the failed tx so the event carries
+        // the latest known unread + lastMessageAt. Best-effort — if this
+        // ALSO fails, we just lose the realtime emit and accept the
+        // 30s watchdog timeout.
+        const current = await this.db.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { lastMessageAt: true, unreadCount: true },
+        });
+        await this.bus.publish({
+          ...args.event,
+          lastMessageAt: (current?.lastMessageAt ?? args.bumpTimestamp).toISOString(),
+          unreadCount: current?.unreadCount ?? 0,
+        });
+      } catch (publishErr) {
+        this.logger.error(
+          `commitOutboundEvent fallback publish() also failed for conv=${args.conversationId}: ` +
+            (publishErr instanceof Error ? publishErr.message : String(publishErr)),
+        );
+        // Re-throw original tx error so the caller's catch block runs.
+        throw err;
+      }
+    }
   }
 
   /**

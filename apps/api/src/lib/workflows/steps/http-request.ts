@@ -128,6 +128,28 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
     // override it — spread first, then set X-CCP-Depth last.
     const nextDepth = (envelope.depth ?? 0) + 1;
 
+    // Cap envelope body at 256 KB. For a message_received trigger the
+    // envelope carries `recentMessages` (configurable but ~50 by default)
+    // plus contact + conversation snapshots — on a noisy thread with
+    // media payloads JSON.stringify can easily hit 100KB+ and a
+    // misconfigured slow-receiver pinned at the 30s timeout would chew
+    // 3 retries × 30s before advancing. Refuse-loud with a 413 ADVANCE
+    // (not throw — partner-side fix is to either tighten the recentMessages
+    // window or filter the customFields they don't need). Cap is
+    // checked AFTER stringify rather than estimated up-front because
+    // contact.customFields is the dominant unbounded surface and pre-
+    // estimating it accurately costs as much as stringifying.
+    const serializedBody = JSON.stringify(envelope);
+    const MAX_ENVELOPE_BYTES = 256 * 1024;
+    const envelopeBytes = Buffer.byteLength(serializedBody, "utf8");
+    if (envelopeBytes > MAX_ENVELOPE_BYTES) {
+      return advanceWithError(
+        413,
+        `http_request envelope too large (${envelopeBytes} bytes > ${MAX_ENVELOPE_BYTES} cap)`,
+        "Trim the trigger's recentMessages window or remove unused customFields.",
+      );
+    }
+
     let res: Response;
     try {
       res = await safeFetch(resolvedUrl, {
@@ -139,7 +161,7 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
           ...(resolvedHeaders ?? {}),
           "X-CCP-Depth": String(nextDepth),
         },
-        body: JSON.stringify(envelope),
+        body: serializedBody,
         timeoutMs: timeout,
       });
     } catch (err) {
