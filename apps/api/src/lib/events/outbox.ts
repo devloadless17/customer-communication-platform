@@ -116,6 +116,27 @@ export async function markFailed(id: string, lastError: string): Promise<void> {
 }
 
 /**
+ * Stamp a `lastError` on an already-claimed (publishedAt set) row when a
+ * subscriber threw mid-dispatch. The row STAYS marked-published (at-most-
+ * once dispatch was completed; we won't re-fire), but the error trail is
+ * now durable instead of stdout-only. Forensic query:
+ *
+ *   SELECT id, type, "lastError" FROM "OutboundEvent"
+ *   WHERE "publishedAt" IS NOT NULL AND "lastError" IS NOT NULL
+ *   ORDER BY "createdAt" DESC LIMIT 100;
+ */
+export async function markPublishedWithError(
+  id: string,
+  lastError: string,
+): Promise<void> {
+  const truncated = lastError.length > 1000 ? lastError.slice(0, 1000) + "…" : lastError;
+  await db.outboundEvent.updateMany({
+    where: { id, publishedAt: { not: null } },
+    data: { lastError: truncated },
+  });
+}
+
+/**
  * Drainer-side batch fetch. Picks the oldest pending rows up to `limit` and
  * atomically marks them attempted via a single UPDATE…RETURNING so two
  * drainer instances in a hypothetical multi-process future would not pick

@@ -355,6 +355,36 @@ export function ContactPanel({
     contact.tagIds,
   ]);
 
+  // Per-render mirror of every editable field, written each commit so the
+  // socket-listener effect below can read latest values without listing them
+  // as effect deps. Listing them produced a teardown + rebind of the
+  // socket.on / off pair on EVERY keystroke (auto-memory: P1-1 in the
+  // 2026-05-26 pre-deploy audit) — wasteful closure allocation per
+  // character on a hot path. Refs aren't reactive, so writing one per
+  // render is cheap; the listener stays bound from mount to unmount.
+  const editableRef = useRef({
+    name,
+    firstName,
+    lastName,
+    email,
+    location,
+    language,
+    country,
+    customFields,
+    tagIds,
+  });
+  editableRef.current = {
+    name,
+    firstName,
+    lastName,
+    email,
+    location,
+    language,
+    country,
+    customFields,
+    tagIds,
+  };
+
   // Parked teammate update. Set when we DETECTED in-progress local edits a
   // socket event would overwrite. Cleared on Reload (apply the teammate's
   // changes) or Dismiss (keep mine — server already has the teammate's
@@ -371,6 +401,11 @@ export function ContactPanel({
     tagIds: string[];
   } | null>(null);
 
+  // Stable ref mirror of softRefresh — useSoftRefresh returns a fresh fn each
+  // render, listing it as an effect dep would also force a re-bind per render.
+  const softRefreshRef = useRef(softRefresh);
+  softRefreshRef.current = softRefresh;
+
   // Live merge of teammate edits. ContactPanel is a sibling of MessageThread
   // and doesn't share its useConversationEvents state, so we listen directly.
   //
@@ -380,6 +415,11 @@ export function ContactPanel({
   // Previously (auto-memory: "Contact field edit race") this overwrote
   // silently — documented as intentional last-write-wins, but the user has
   // no warning that their typing just got eaten.
+  //
+  // Effect deps are [contact.id] only — every per-render dirty-check value
+  // is read through `editableRef.current` so a keystroke does NOT tear down
+  // and re-bind the two socket listeners. (Pre-2026-05-26: 11 deps incl.
+  // every editable state, every keystroke rebound — wasteful on a hot path.)
   useEffect(() => {
     const socket = getClientSocket();
     const contactId = contact.id;
@@ -399,16 +439,17 @@ export function ContactPanel({
         tagIds: payload.contact.tagIds ?? [],
       };
       const snapshot = serverSnapshotRef.current;
+      const live = editableRef.current;
       const dirty =
-        name !== snapshot.name ||
-        firstName !== snapshot.firstName ||
-        lastName !== snapshot.lastName ||
-        email !== snapshot.email ||
-        location !== snapshot.location ||
-        language !== snapshot.language ||
-        country !== snapshot.country ||
-        !shallowJsonEqual(customFields, snapshot.customFields) ||
-        !arraysEqual(tagIds, snapshot.tagIds);
+        live.name !== snapshot.name ||
+        live.firstName !== snapshot.firstName ||
+        live.lastName !== snapshot.lastName ||
+        live.email !== snapshot.email ||
+        live.location !== snapshot.location ||
+        live.language !== snapshot.language ||
+        live.country !== snapshot.country ||
+        !shallowJsonEqual(live.customFields, snapshot.customFields) ||
+        !arraysEqual(live.tagIds, snapshot.tagIds);
       if (!dirty) {
         // Common path: live-collab. Apply silently + re-seed snapshot so the
         // panel stays in sync with the rest of the team without any banner.
@@ -428,15 +469,15 @@ export function ContactPanel({
       // round-trip. Just re-seed the snapshot so we stop being "dirty"
       // without spamming a banner.
       const wouldOverwrite =
-        incoming.name !== name ||
-        incoming.firstName !== firstName ||
-        incoming.lastName !== lastName ||
-        incoming.email !== email ||
-        incoming.location !== location ||
-        incoming.language !== language ||
-        incoming.country !== country ||
-        !shallowJsonEqual(incoming.customFields, customFields) ||
-        !arraysEqual(incoming.tagIds, tagIds);
+        incoming.name !== live.name ||
+        incoming.firstName !== live.firstName ||
+        incoming.lastName !== live.lastName ||
+        incoming.email !== live.email ||
+        incoming.location !== live.location ||
+        incoming.language !== live.language ||
+        incoming.country !== live.country ||
+        !shallowJsonEqual(incoming.customFields, live.customFields) ||
+        !arraysEqual(incoming.tagIds, live.tagIds);
       if (!wouldOverwrite) {
         serverSnapshotRef.current = incoming;
         return;
@@ -462,18 +503,19 @@ export function ContactPanel({
     >[1] = (payload) => {
       if (!payload.contactIds.includes(contactId)) return;
       const snapshot = serverSnapshotRef.current;
+      const live = editableRef.current;
       const dirty =
-        name !== snapshot.name ||
-        firstName !== snapshot.firstName ||
-        lastName !== snapshot.lastName ||
-        email !== snapshot.email ||
-        location !== snapshot.location ||
-        language !== snapshot.language ||
-        country !== snapshot.country ||
-        !shallowJsonEqual(customFields, snapshot.customFields) ||
-        !arraysEqual(tagIds, snapshot.tagIds);
+        live.name !== snapshot.name ||
+        live.firstName !== snapshot.firstName ||
+        live.lastName !== snapshot.lastName ||
+        live.email !== snapshot.email ||
+        live.location !== snapshot.location ||
+        live.language !== snapshot.language ||
+        live.country !== snapshot.country ||
+        !shallowJsonEqual(live.customFields, snapshot.customFields) ||
+        !arraysEqual(live.tagIds, snapshot.tagIds);
       if (dirty) return;
-      softRefresh();
+      softRefreshRef.current();
     };
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
@@ -481,19 +523,7 @@ export function ContactPanel({
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
     };
-  }, [
-    contact.id,
-    name,
-    firstName,
-    lastName,
-    email,
-    location,
-    language,
-    country,
-    customFields,
-    tagIds,
-    router,
-  ]);
+  }, [contact.id]);
 
   function acceptPendingRemote() {
     if (!pendingRemote) return;

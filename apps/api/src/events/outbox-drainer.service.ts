@@ -9,6 +9,7 @@ import { withCorrelation } from "@/common/correlation";
 import {
   claimBatch,
   markFailed,
+  markPublishedWithError,
 } from "@/lib/events/outbox";
 import type {
   DomainEvent,
@@ -167,12 +168,29 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     } as DomainEvent;
 
     try {
-      await this.bus.dispatchOutboxRow(event as DomainEventOf<DomainEventType>);
+      // Returns aggregated subscriber-error message when any handler threw.
+      // The row STAYS marked-published (at-most-once dispatch), but we
+      // stamp `lastError` on it so the failure is queryable. Without this
+      // a subscriber bug only leaves a console.error trail and the row
+      // looks healthy forever.
+      const subscriberError = await this.bus.dispatchOutboxRow(
+        event as DomainEventOf<DomainEventType>,
+      );
+      if (subscriberError) {
+        try {
+          await markPublishedWithError(row.id, subscriberError);
+        } catch (markErr) {
+          this.logger.error(
+            withCorrelation(`[outbox-drainer] markPublishedWithError row=${row.id}`),
+            markErr instanceof Error ? markErr.message : String(markErr),
+          );
+        }
+      }
     } catch (err) {
-      // Per-subscriber errors are already swallowed inside runSubscribers;
-      // this catch is for unexpected envelope problems (corrupted JSON,
-      // type missing from the bus, etc.). Mark the row failed so the
-      // operator can see it.
+      // Per-subscriber errors are already swallowed inside runSubscribers
+      // (and surfaced via the return value above); this catch is for
+      // unexpected envelope problems (corrupted JSON, type missing from
+      // the bus, etc.). Mark the row failed so the operator can see it.
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(
         withCorrelation(`[outbox-drainer] dispatch row=${row.id} type=${row.type}`),

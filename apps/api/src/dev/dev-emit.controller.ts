@@ -6,14 +6,15 @@ import {
   Post,
   UseGuards,
 } from "@nestjs/common";
+import { z } from "zod";
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
+import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
 import { RealtimeEmitter } from "../realtime/emitter.service";
 import type {
-  ConversationStatus,
   InternalNote,
   Message,
   MessageStatus,
@@ -40,41 +41,59 @@ import type {
  * behavior the DevTools UI was designed around.
  */
 
-interface FakeInboundMessageBody {
-  kind: "fake-inbound-message";
-  conversationId: string;
-  body: string;
-}
+/**
+ * Discriminated-union body schema. The three defenses ([devToolsEnabled],
+ * SessionGuard, per-team scoping) protect against the route being callable;
+ * this schema protects against arbitrary unvalidated input being written
+ * into Message.body / InternalNote.body / emitted into socket frames if the
+ * env-flag guard is EVER bypassed by accident (staging mis-tagged as prod,
+ * Caddy mis-routed, etc.). Defense in depth — every other controller in
+ * this codebase runs zBody; this one was an exception worth closing.
+ *
+ * Bounded body lengths match what the real ingest paths enforce so a dev
+ * payload can't smuggle a row larger than production would ever produce.
+ */
+const ConversationStatusSchema = z.enum(["open", "pending", "closed"]);
 
-interface MarkLastReadBody {
-  kind: "mark-last-read";
-  conversationId: string;
-}
+const FakeInboundMessageSchema = z.object({
+  kind: z.literal("fake-inbound-message"),
+  conversationId: z.string().min(1).max(64),
+  body: z.string().min(1).max(4096),
+});
+const MarkLastReadSchema = z.object({
+  kind: z.literal("mark-last-read"),
+  conversationId: z.string().min(1).max(64),
+});
+const AddNoteSchema = z.object({
+  kind: z.literal("add-fake-note"),
+  conversationId: z.string().min(1).max(64),
+  body: z.string().min(1).max(4096),
+});
+const ToggleStatusSchema = z.object({
+  kind: z.literal("toggle-status"),
+  conversationId: z.string().min(1).max(64),
+  status: ConversationStatusSchema,
+});
+const AssignSchema = z.object({
+  kind: z.literal("assign"),
+  conversationId: z.string().min(1).max(64),
+  assignedUserId: z.union([z.string().min(1).max(64), z.null()]),
+});
 
-interface AddNoteBody {
-  kind: "add-fake-note";
-  conversationId: string;
-  body: string;
-}
+const DevEmitSchema = z.discriminatedUnion("kind", [
+  FakeInboundMessageSchema,
+  MarkLastReadSchema,
+  AddNoteSchema,
+  ToggleStatusSchema,
+  AssignSchema,
+]);
 
-interface ToggleStatusBody {
-  kind: "toggle-status";
-  conversationId: string;
-  status: ConversationStatus;
-}
-
-interface AssignBody {
-  kind: "assign";
-  conversationId: string;
-  assignedUserId: string | null;
-}
-
-type DevEmitBody =
-  | FakeInboundMessageBody
-  | MarkLastReadBody
-  | AddNoteBody
-  | ToggleStatusBody
-  | AssignBody;
+type FakeInboundMessageBody = z.infer<typeof FakeInboundMessageSchema>;
+type MarkLastReadBody = z.infer<typeof MarkLastReadSchema>;
+type AddNoteBody = z.infer<typeof AddNoteSchema>;
+type ToggleStatusBody = z.infer<typeof ToggleStatusSchema>;
+type AssignBody = z.infer<typeof AssignSchema>;
+type DevEmitBody = z.infer<typeof DevEmitSchema>;
 
 function devToolsEnabled(): boolean {
   if (process.env.NODE_ENV === "production") return false;
@@ -92,7 +111,7 @@ export class DevEmitController {
   @Post("emit")
   async emit(
     @CurrentSession() session: ApiSession,
-    @Body() body: DevEmitBody,
+    @Body(zBody(DevEmitSchema)) body: DevEmitBody,
   ): Promise<{ ok: boolean; messageId?: string; noteId?: string; status?: MessageStatus }> {
     if (!devToolsEnabled()) {
       throw new NotFoundException("Not Found");

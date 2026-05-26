@@ -47,10 +47,15 @@ export class EventBus {
    * has already marked the row `publishedAt = NOW()`, so we skip the
    * outbox write inside `publish()` and run subscribers directly. Do NOT
    * call this from feature code; use `publish()` or `publishInTx()`.
+   *
+   * Returns an aggregated subscriber-error message (or null) so the drainer
+   * can stamp `lastError` on the outbox row — otherwise a thrown subscriber
+   * is only visible in stdout. See the `dispatchPersistedEvent` comment in
+   * lib/events/bus.ts for the rationale.
    */
   dispatchOutboxRow<K extends DomainEventType>(
     event: DomainEventOf<K>,
-  ): Promise<void> {
+  ): Promise<string | null> {
     return busDispatchPersistedEvent(event);
   }
 }

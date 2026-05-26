@@ -16,6 +16,7 @@ import type {
   ReplySnapshot,
   Role,
   User,
+  UserAvailabilityStatus,
 } from "@ccp/shared/types";
 
 export const MAX_TAKE = 100;
@@ -71,6 +72,13 @@ export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnaps
 }
 
 export function mapUser(u: PrismaUser): User {
+  // Availability comes off the same row when present (every inbox query that
+  // includes `assignedUser` brings these columns along by default). Only
+  // emit them when set so the wire shape stays terse for clients that
+  // don't read availability. `users.service.ts` used to carry a
+  // near-identical local mapper (`mapAvailabilityRow`) until 2026-05-26;
+  // collapsed into here so a future "availability shows in one panel but
+  // not another" drift can't happen.
   return {
     id: u.id,
     teamId: u.teamId,
@@ -80,6 +88,10 @@ export function mapUser(u: PrismaUser): User {
     avatarUrl: u.avatarUrl ?? undefined,
     createdAt: u.createdAt.toISOString(),
     isActive: u.deactivatedAt === null,
+    ...(u.availabilityStatus
+      ? { availabilityStatus: u.availabilityStatus as UserAvailabilityStatus }
+      : {}),
+    ...(u.availabilityMessage ? { availabilityMessage: u.availabilityMessage } : {}),
   };
 }
 

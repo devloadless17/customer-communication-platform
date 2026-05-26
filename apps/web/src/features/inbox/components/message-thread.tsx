@@ -122,6 +122,7 @@ function MessageThreadImpl({
   const {
     data,
     hasMoreOlder,
+    reachedSliceCap,
     loadingOlder,
     loadOlder,
     addOptimistic,
@@ -905,6 +906,19 @@ function MessageThreadImpl({
               The loading indicator is rendered OUTSIDE the scroll content (a
               floating pill below) so triggering a load never changes layout. */}
           <div ref={topSentinelRef} className="h-px" />
+          {reachedSliceCap && (
+            // The slice cap is the in-memory cap (MAX_THREAD_SLICE = 500 in
+            // use-conversation-events.ts), not a "no more messages" signal —
+            // older messages exist on the server, we stopped paging for
+            // scroll perf. Surfacing the hint here means an agent who clicks
+            // "Load older" 10 times and stops getting more knows what to do
+            // next, instead of assuming the conversation just started.
+            <div className="mx-auto my-3 max-w-md rounded-md border border-dashed border-muted-foreground/30 bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground">
+              Older messages exist beyond this point.{" "}
+              <span className="font-medium">Use search</span> to jump to a
+              specific older message.
+            </div>
+          )}
           {timeline.map((entry, idx) => {
             const dayLabel = dayLabels[idx];
             const showDay = dayLabel !== null;

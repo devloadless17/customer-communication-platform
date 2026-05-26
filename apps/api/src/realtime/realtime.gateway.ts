@@ -358,6 +358,11 @@ export class RealtimeGateway
   async onPresenceRequest(@ConnectedSocket() client: Socket): Promise<void> {
     const teamId = client.data.teamId as string | undefined;
     if (!teamId) return;
+    // Two DB reads per call (online snapshot + availability). Cheap, but
+    // unbounded from a misbehaving client without a budget. Silent-drop on
+    // overrun — the legitimate hook fires this once on connect + once on
+    // reconnect, well below the cap.
+    if (!checkTypingBudget(client)) return;
     const onlineUserIds = await this.buildVisibleOnlineSnapshot(teamId);
     client.emit("presence:update", { teamId, onlineUserIds });
     // Also reseed the availability snapshot — the hook re-fires presence:
@@ -491,6 +496,7 @@ export class RealtimeGateway
     @MessageBody() body: { conversationId: string },
   ): void {
     if (!isValidBody(body, "conversationId")) return;
+    if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
     const typingIn = client.data.typingIn as Set<string> | undefined;
     if (!userId || !typingIn) return;
@@ -519,6 +525,7 @@ export class RealtimeGateway
     @MessageBody() body: { conversationId: string },
   ): void {
     if (!isValidBody(body, "conversationId")) return;
+    if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
     const typingIn = client.data.typingIn as Set<string> | undefined;
     if (!userId || !typingIn) return;
@@ -594,6 +601,7 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string },
   ): void {
     if (!isValidBody(body, "channelId")) return;
+    if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
     const typingInChannel = client.data.typingInChannel as Set<string> | undefined;
     if (!userId || !typingInChannel) return;
@@ -620,6 +628,7 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string },
   ): void {
     if (!isValidBody(body, "channelId")) return;
+    if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
     const typingInChannel = client.data.typingInChannel as Set<string> | undefined;
     if (!userId || !typingInChannel) return;
@@ -649,6 +658,7 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string; threadRootId: string },
   ): void {
     if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
+    if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
     const typingInThread = client.data.typingInThread as Set<string> | undefined;
     if (!userId || !typingInThread) return;
@@ -674,6 +684,7 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string; threadRootId: string },
   ): void {
     if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
+    if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
     const typingInThread = client.data.typingInThread as Set<string> | undefined;
     if (!userId || !typingInThread) return;
@@ -741,7 +752,7 @@ const SUB_CAP = 30;
 const SUB_REFILL_PER_MS = 30 / 10_000;
 function checkSubscribeBudget(client: Socket, label: string): boolean {
   const now = Date.now();
-   
+
   const data = client.data as any;
   let bucket = data.__subBucket as { tokens: number; ts: number } | undefined;
   if (!bucket) {
@@ -761,6 +772,38 @@ function checkSubscribeBudget(client: Socket, label: string): boolean {
     void label;
     return false;
   }
+  bucket.tokens -= 1;
+  return true;
+}
+
+/**
+ * Per-socket token bucket for typing toggles + `presence:request`. Higher
+ * burst ceiling than `subscribe:*` (a typist easily fires 4–6 toggle pairs
+ * a second) but still bounded so a misbehaving / hostile client can't
+ * flood the conversation room with `typing:update` frames or pin the
+ * gateway on `presence:request`'s DB reads. 60 tokens / 10s refill =
+ * ~6/sec average with smoothing for legitimate bursts. Silent-drop matches
+ * `checkSubscribeBudget` — the client's typing indicator skips a beat
+ * instead of getting an error frame.
+ */
+const TYPING_CAP = 60;
+const TYPING_REFILL_PER_MS = 60 / 10_000;
+function checkTypingBudget(client: Socket): boolean {
+  const now = Date.now();
+
+  const data = client.data as any;
+  let bucket = data.__typingBucket as { tokens: number; ts: number } | undefined;
+  if (!bucket) {
+    bucket = { tokens: TYPING_CAP, ts: now };
+    data.__typingBucket = bucket;
+  } else {
+    bucket.tokens = Math.min(
+      TYPING_CAP,
+      bucket.tokens + (now - bucket.ts) * TYPING_REFILL_PER_MS,
+    );
+    bucket.ts = now;
+  }
+  if (bucket.tokens < 1) return false;
   bucket.tokens -= 1;
   return true;
 }

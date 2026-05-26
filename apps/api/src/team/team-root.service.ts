@@ -97,9 +97,22 @@ export class TeamRootService {
       this.sessionInvalidator.revoke(m.id, "team-deletion");
     }
 
-    // Fire-and-forget blob cleanup. blobStorage.delete promises never throw.
+    // Fire-and-forget blob cleanup. blobStorage.delete promises never
+    // throw — UploadThing's deleteFiles is the underlying call and it
+    // batches internally, but throwing thousands of keys in one POST
+    // can hit their request-size cap on a chatty large team. Chunk to
+    // 500 keys per call so the worst-case is ~20 sequential batch calls
+    // for a 10k-key team, not one giant payload. Sequential (not
+    // parallel) inside the fire-and-forget: this is post-delete cleanup,
+    // there's no agent waiting for it to finish, and serializing keeps
+    // us under any provider per-IP burst limit.
     if (blobKeys.length > 0) {
-      void blobStorage.delete(blobKeys);
+      const BATCH = 500;
+      void (async () => {
+        for (let i = 0; i < blobKeys.length; i += BATCH) {
+          await blobStorage.delete(blobKeys.slice(i, i + BATCH));
+        }
+      })();
     }
   }
 }

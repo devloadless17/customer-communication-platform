@@ -36,11 +36,18 @@ export class DbService extends PrismaClient implements OnModuleInit, OnModuleDes
     // `statement_timeout` is a runaway-query guard; without it a stuck query
     // can pin a pool slot indefinitely. `idleTimeoutMillis` reclaims idle
     // connections so transient bursts don't permanently grow the pool.
+    //
+    // 30s ceiling accommodates the longest legitimate transactions —
+    // primarily the inbound-ingest Serializable tx (multi-step writer +
+    // outbox row + Contact bump) under load, and the once-daily
+    // contact-last-inbound-drift sweeper's set-based UPDATE on large
+    // accounts. 10s tripped 503s on webhook ingest during contact-import
+    // bursts even though the retry was structurally safe.
     const pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       max: 25,
       idleTimeoutMillis: 30_000,
-      statement_timeout: 10_000,
+      statement_timeout: 30_000,
     });
     super({
       adapter: new PrismaPg(pool),

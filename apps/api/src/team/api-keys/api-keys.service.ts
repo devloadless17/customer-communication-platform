@@ -111,4 +111,54 @@ export class ApiKeysService {
     });
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "api-keys" });
   }
+
+  /**
+   * Atomic rotate: revoke the existing key + create a new one carrying the
+   * same name and scopes, returning the new plaintext. Lets an operator who
+   * lost the original plaintext recover with one click instead of having to
+   * (a) revoke, (b) re-pick scopes, (c) re-name, (d) re-paste into the
+   * integration. The two writes run in a single $transaction so we never
+   * leave a team with two active keys of the same name (the integration UI
+   * uses name as the "already connected" signal).
+   */
+  async rotate(
+    teamId: string,
+    userId: string,
+    id: string,
+  ): Promise<ApiKeyCreateDto> {
+    const existing = await this.db.teamApiKey.findFirst({
+      where: { id, teamId },
+      select: { id: true, name: true, scopes: true, revokedAt: true },
+    });
+    if (!existing) throw new NotFoundException({ error: "key not found" });
+    const generated = generateApiKey();
+    const created = await this.db.$transaction(async (tx) => {
+      if (!existing.revokedAt) {
+        await tx.teamApiKey.update({
+          where: { id: existing.id },
+          data: { revokedAt: new Date() },
+        });
+      }
+      return tx.teamApiKey.create({
+        data: {
+          teamId,
+          name: existing.name,
+          tokenHash: generated.tokenHash,
+          tokenPrefix: generated.tokenPrefix,
+          createdById: userId,
+          scopes: existing.scopes,
+        },
+        select: { id: true, name: true, tokenPrefix: true, createdAt: true, scopes: true },
+      });
+    });
+    await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "api-keys" });
+    return {
+      id: created.id,
+      name: created.name,
+      tokenPrefix: created.tokenPrefix,
+      createdAt: created.createdAt.toISOString(),
+      scopes: created.scopes,
+      token: generated.token,
+    };
+  }
 }

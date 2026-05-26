@@ -15,6 +15,7 @@ import {
   AvatarUploadError,
   uploadAvatar,
 } from "../lib/blob-storage/avatar";
+import { mapUser } from "../lib/queries/_shared";
 import type {
   UpdateMyAvailabilityInput,
   UpdateMyProfileInput,
@@ -65,21 +66,12 @@ export class UsersService {
     if (typeof input.name === "string") data.name = input.name;
     if (input.avatarUrl !== undefined) data.avatarUrl = input.avatarUrl;
 
+    // Default-select returns the full row — including the availability
+    // columns mapUser carries through. Cheap (single-row read), and lets
+    // us share one mapper across every list/edit path.
     const updated = await this.db.user.update({
       where: { id: userId },
       data,
-      select: {
-        id: true,
-        teamId: true,
-        role: true,
-        name: true,
-        email: true,
-        avatarUrl: true,
-        createdAt: true,
-        deactivatedAt: true,
-        availabilityStatus: true,
-        availabilityMessage: true,
-      },
     });
     // Bust the session cache so the next request from this user sees the
     // new name/avatar without a 15s lag.
@@ -93,7 +85,7 @@ export class UsersService {
       ...(data.avatarUrl !== undefined ? { avatarUrl: data.avatarUrl } : {}),
     });
 
-    return mapAvailabilityRow(updated);
+    return mapUser(updated);
   }
 
   /**
@@ -123,18 +115,6 @@ export class UsersService {
     const updated = await this.db.user.update({
       where: { id: userId },
       data,
-      select: {
-        id: true,
-        teamId: true,
-        role: true,
-        name: true,
-        email: true,
-        avatarUrl: true,
-        createdAt: true,
-        deactivatedAt: true,
-        availabilityStatus: true,
-        availabilityMessage: true,
-      },
     });
     // Availability lives on the User row that `loadActiveUser` reads, so the
     // next request from this user needs to see the new status without a 15s
@@ -149,7 +129,7 @@ export class UsersService {
       ...(input.message !== undefined ? { message: input.message } : {}),
     });
 
-    return mapAvailabilityRow(updated);
+    return mapUser(updated);
   }
 
   /**
@@ -199,7 +179,7 @@ export class UsersService {
       where: { teamId },
       orderBy: { name: "asc" },
     });
-    return rows.map((u) => mapAvailabilityRow(u));
+    return rows.map((u) => mapUser(u));
   }
 
   /**
@@ -363,38 +343,3 @@ export class UsersService {
   }
 }
 
-/**
- * Map a Prisma User row (with the availability columns selected) to the
- * shared `User` wire type. Used by every mutation / list path so the user
- * payload carries availability uniformly. Mirrors `mapUser` in
- * apps/api/src/lib/queries/_shared.ts; kept here because that file's
- * `mapUser` reads from a narrow PrismaUser without the new columns, and
- * widening it would ripple through many call sites that don't need them.
- */
-function mapAvailabilityRow(u: {
-  id: string;
-  teamId: string;
-  role: string;
-  name: string;
-  email: string;
-  avatarUrl: string | null;
-  createdAt: Date;
-  deactivatedAt: Date | null;
-  availabilityStatus: string | null;
-  availabilityMessage: string | null;
-}): User {
-  return {
-    id: u.id,
-    teamId: u.teamId,
-    role: u.role as Role,
-    name: u.name,
-    email: u.email,
-    ...(u.avatarUrl ? { avatarUrl: u.avatarUrl } : {}),
-    createdAt: u.createdAt.toISOString(),
-    isActive: u.deactivatedAt === null,
-    ...(u.availabilityStatus
-      ? { availabilityStatus: u.availabilityStatus as UserAvailabilityStatus }
-      : {}),
-    ...(u.availabilityMessage ? { availabilityMessage: u.availabilityMessage } : {}),
-  };
-}

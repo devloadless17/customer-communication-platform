@@ -734,12 +734,40 @@ export function InboxShell({
   // Warm the cache for the top N conversations on mount so the agent's first
   // click never hits a cold cache. The hover-prefetch on rows covers anything
   // below this slice on demand.
+  //
+  // Released staggered (queue of 4 lanes) instead of mass-firing 12 fetches
+  // at once. The latter was a thundering-herd against a freshly-booted api:
+  // every tab refresh after a deploy fired N×12 parallel
+  // `GET /api/inbox/conversation/:id` against the same process. With 4
+  // lanes the first 4 fire immediately, the next 4 fire as those land
+  // (typically ≤200ms apiece on the local network), and the agent's
+  // first-click latency is functionally unchanged because the slot they
+  // open is always in the first lane.
   useEffect(() => {
     const targets = initialConversations
       .slice(0, PREFETCH_TOP_N)
       .map((c) => c.conversation.id)
       .filter((id) => !cache.has(id));
-    targets.forEach((id) => void fetchThread(id));
+    if (targets.length === 0) return;
+    const PREFETCH_LANES = 4;
+    let cancelled = false;
+    const queue = targets.slice();
+    const drainLane = async () => {
+      while (!cancelled && queue.length > 0) {
+        const id = queue.shift();
+        if (!id) return;
+        await fetchThread(id).catch(() => {
+          // Per-thread failures are surfaced through fetchThread's own
+          // setErrorId path; nothing to do here.
+        });
+      }
+    };
+    for (let i = 0; i < Math.min(PREFETCH_LANES, targets.length); i++) {
+      void drainLane();
+    }
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

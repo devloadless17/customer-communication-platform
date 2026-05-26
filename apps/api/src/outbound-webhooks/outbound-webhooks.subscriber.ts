@@ -18,6 +18,7 @@ import {
 } from "@ccp/shared/outbound-webhooks/public-events";
 
 import { DbService } from "../db/db.service";
+import { runWithConcurrency } from "../common/concurrency";
 import { getCorrelationId } from "../common/correlation";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
 import {
@@ -175,32 +176,36 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
         ...toWirePayload(type, (envelope as { data: unknown }).data, { channelBase }),
       };
 
-      const created = await Promise.all(
-        matching.map(async (w) => {
-          const deliveryId = randomUUID();
-          return this.db.outboundWebhookDelivery.create({
-            data: {
-              id: deliveryId,
-              webhookId: w.id,
-              eventType: type,
-              correlationId,
-              payload: payload as unknown as Parameters<
-                typeof this.db.outboundWebhookDelivery.create
-              >[0]["data"]["payload"],
-            },
-            select: { id: true },
-          });
-        }),
-      );
-      await Promise.all(
-        created.map((d) =>
-          enqueueWebhookDelivery(d.id).catch((err) => {
-            this.logger.error(
-              `enqueue failed for delivery ${d.id}: ${err instanceof Error ? err.message : err}`,
-            );
-          }),
-        ),
-      );
+      // Bounded fan-out (DB insert + BullMQ enqueue per matching webhook).
+      // Was two unbounded `Promise.all`s; a team subscribing many webhooks
+      // to a chatty event (e.g. a 30-message Meta batch hitting 4-5 webhooks
+      // at once) released hundreds of parallel Prisma inserts at once,
+      // which pins the pool slot until the slowest finishes. 8 lanes
+      // bounds the burst without lengthening tail latency meaningfully.
+      // Enqueue is in the SAME pass as create so a failure can't leave an
+      // orphan delivery row with no job.
+      await runWithConcurrency(matching, 8, async (w) => {
+        const deliveryId = randomUUID();
+        await this.db.outboundWebhookDelivery.create({
+          data: {
+            id: deliveryId,
+            webhookId: w.id,
+            eventType: type,
+            correlationId,
+            payload: payload as unknown as Parameters<
+              typeof this.db.outboundWebhookDelivery.create
+            >[0]["data"]["payload"],
+          },
+          select: { id: true },
+        });
+        try {
+          await enqueueWebhookDelivery(deliveryId);
+        } catch (err) {
+          this.logger.error(
+            `enqueue failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      });
     }
   }
 

@@ -96,9 +96,16 @@ export function InboxFilterProvider({
   const setFilter = useCallback((next: Filter) => {
     setFilterState(next);
     // Cookie write keeps the persistence in lockstep with the React state.
-    // SameSite=Lax (default) is fine — the cookie is read only by our own
-    // server during SSR; cross-site requests don't need it.
-    document.cookie = `${COOKIE_NAME}=${serializeInboxFilter(next)}; path=/; max-age=${COOKIE_MAX_AGE}; samesite=lax`;
+    // SameSite=Lax — the cookie is read only by our own server during SSR;
+    // cross-site requests don't need it. `Secure` is appended in prod (HTTPS)
+    // as a hardening hygiene; dropped on http://localhost so dev still works.
+    // Browsers reject `Secure` on http:// URLs silently, which would lose
+    // persistence in dev without the conditional.
+    const secureFlag =
+      typeof window !== "undefined" && window.location.protocol === "https:"
+        ? "; secure"
+        : "";
+    document.cookie = `${COOKIE_NAME}=${serializeInboxFilter(next)}; path=/; max-age=${COOKIE_MAX_AGE}; samesite=lax${secureFlag}`;
   }, []);
 
   const value = useMemo(() => ({ filter, setFilter }), [filter, setFilter]);

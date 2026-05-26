@@ -46,6 +46,20 @@ export function encryptSecret(plaintext: string): string {
 
 export function decryptSecret(value: string): string {
   if (!value.startsWith(VERSION_PREFIX)) {
+    // Plaintext passthrough is a dev-convenience only — it lets seeds and
+    // local fixtures write secrets without setting ENCRYPTION_KEY. In
+    // production, a missing prefix means SOMEONE wrote a secret without
+    // calling `encryptSecret` (forgot the wrapper, raw SQL backfill, etc.)
+    // and it's living plaintext on disk. Fail loudly: silent passthrough
+    // turns an "encrypted at rest" claim into security theater discoverable
+    // only via a DB dump.
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "decryptSecret: unencrypted value found in production. " +
+          "Every secret column must be written via encryptSecret(). " +
+          "Inspect the offending row and re-encrypt in place.",
+      );
+    }
     return value;
   }
   const key = loadKey();

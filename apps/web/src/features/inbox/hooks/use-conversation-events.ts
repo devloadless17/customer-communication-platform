@@ -160,6 +160,15 @@ export interface ConversationEventsState {
   hasMoreOlder: boolean;
   loadingOlder: boolean;
   /**
+   * True ONLY when `loadOlder` stopped paging because the in-memory slice
+   * hit MAX_THREAD_SLICE — i.e. the server had more pages but we capped
+   * for scroll perf. Distinct from `!hasMoreOlder && !reachedSliceCap`
+   * (the normal "nothing older to load"). Lets the UI surface a hint like
+   * "Use search to find older messages" without false-positive on threads
+   * that simply have <500 messages total.
+   */
+  reachedSliceCap: boolean;
+  /**
    * Fetch and prepend the next older page. Returns the number of messages
    * prepended (0 if there was nothing more, the page was a no-op, or a fetch
    * was already in flight).
@@ -231,6 +240,11 @@ export function useConversationEvents(
   const [data, setData] = useState<ConversationWithRefs>(initial);
   const [olderCursor, setOlderCursor] = useState<string | null>(initialNextOlderCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Set true ONLY when loadOlder hit the slice cap with a non-null server
+  // cursor (i.e. the server had more, we chose not to load it). Reset on
+  // conversation switch + on replaceWithContext (the window swap discards
+  // the slice entirely). Drives the "use search for older" hint in the UI.
+  const [reachedSliceCap, setReachedSliceCap] = useState(false);
 
   // True while the loaded slice ends at the live tail (initial load, sends,
   // inbound, load-older — all keep the bottom). Flipped false by a search-jump
@@ -249,6 +263,7 @@ export function useConversationEvents(
     setTrackedId(initial.conversation.id);
     setData(initial);
     setOlderCursor(initialNextOlderCursor);
+    setReachedSliceCap(false);
     // Fresh conversation slice = tail-anchored again.
     tailAnchoredRef.current = true;
   }
@@ -310,6 +325,14 @@ export function useConversationEvents(
   // deferred (hidden → visible) recovery path.
   const hasConnectedOnceRef = useRef(false);
   const reconnectRecoveryRef = useRef(false);
+  // Wall-clock when this hook mounted — used to skip the FIRST-CONNECT
+  // backfill when the socket authenticates within a few seconds of SSR
+  // hydration (the slice we already have IS the live slice; the delta
+  // would just re-fetch the empty interval). A real reconnect-after-drop
+  // is gated by hasConnectedOnceRef, not this timer, and a deferred
+  // recovery (tab returns to foreground) clears the recency window via
+  // backfillNeededRef.
+  const mountedAtRef = useRef<number>(Date.now());
 
   const inFlightOlder = useRef(false);
   const loadOlder = useCallback(
@@ -352,9 +375,13 @@ export function useConversationEvents(
             return { ...prev, messages: merged };
           });
           // Past the slice cap → drop the cursor so the UI stops loading.
-          setOlderCursor(
-            nextSliceLen >= MAX_THREAD_SLICE ? null : page.nextCursor,
-          );
+          // Distinguish the two "no cursor" cases for the UI: server said
+          // there's more (we capped) vs. server returned a null cursor on
+          // its own (genuinely no more). reachedSliceCap drives the hint.
+          const cappedOut =
+            nextSliceLen >= MAX_THREAD_SLICE && page.nextCursor !== null;
+          setOlderCursor(cappedOut ? null : page.nextCursor);
+          if (cappedOut) setReachedSliceCap(true);
         });
         return added;
       } finally {
@@ -442,6 +469,22 @@ export function useConversationEvents(
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         backfillNeededRef.current = true;
         reconnectRecoveryRef.current = isReconnect;
+        return;
+      }
+
+      // First-connect freshness gate. On a hard refresh, SSR delivers the
+      // thread slice and the socket authenticates ~milliseconds later — the
+      // `?after=<latestTimestamp>` delta is a guaranteed no-op (we already
+      // have the live slice). Skip the delta when we're inside the
+      // freshness window; let it run when the gap is wider (slow auth,
+      // network hiccup) since something COULD have arrived in that window.
+      // Reconnect-after-drop (`isReconnect`) is NEVER skipped — the delta
+      // there carries arbitrary state we missed while offline.
+      const SSR_FRESHNESS_MS = 3000;
+      if (
+        !isReconnect &&
+        Date.now() - mountedAtRef.current < SSR_FRESHNESS_MS
+      ) {
         return;
       }
 
@@ -1132,6 +1175,9 @@ export function useConversationEvents(
     (input: { messages: Message[]; nextOlderCursor: string | null }) => {
       setData((prev) => ({ ...prev, messages: input.messages }));
       setOlderCursor(input.nextOlderCursor);
+      // Slice was replaced with a window — the previous "we capped" signal
+      // no longer applies (this is a fresh slice around a search hit).
+      setReachedSliceCap(false);
       // Slice is now a window around an old message, not the live tail — gate
       // the snapshot-on-leave so we don't cache a non-tail slice.
       tailAnchoredRef.current = false;
@@ -1142,6 +1188,7 @@ export function useConversationEvents(
   return {
     data,
     hasMoreOlder: olderCursor !== null,
+    reachedSliceCap,
     loadingOlder,
     loadOlder,
     addOptimistic,

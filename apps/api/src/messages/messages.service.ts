@@ -177,13 +177,14 @@ export class MessagesService {
   private markReadOnAgentSend(teamId: string, userId: string, conversationId: string): void {
     void (async () => {
       try {
-        const convo = await this.db.conversation.findFirst({
-          where: { id: conversationId, teamId },
-          select: { unreadCount: true },
-        });
-        if (!convo || convo.unreadCount <= 0) return;
+        // Single conditional updateMany — the WHERE predicate IS the gate.
+        // `unreadCount > 0` ensures no work when the thread is already
+        // zeroed (common: the agent already opened the thread, which
+        // marked it read on mount). result.count is 0 when nothing
+        // matched → skip the publish. Was 2 round-trips (findFirst then
+        // CAS); the CAS itself can also serve as the read.
         const result = await this.db.conversation.updateMany({
-          where: { id: conversationId, teamId, unreadCount: convo.unreadCount },
+          where: { id: conversationId, teamId, unreadCount: { gt: 0 } },
           data: { unreadCount: 0 },
         });
         if (result.count > 0) {

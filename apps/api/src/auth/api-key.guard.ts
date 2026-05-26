@@ -40,6 +40,24 @@ declare module "express-serve-static-core" {
 // team's key count); idle entries are time- and LRU-evicted.
 const apiKeyBucket = createTokenBucket({ perMin: 60, maxKeys: 10_000 });
 
+// Per-IP rate limit for UNAUTH'd /v1 hits — fires ONLY when a request
+// presents a missing / malformed / wrong token. A valid token never
+// touches this bucket (its meter is `apiKeyBucket` keyed by apiKeyId).
+//
+// Why this exists: ipRateLimitMiddleware explicitly skips /api/external/v1
+// because partners share a small set of integration IPs and the per-key
+// bucket is the right meter for them. But that skip leaves a hole — well-
+// formed-but-wrong tokens still hit a DB index lookup (cheap, but
+// unbounded). A scripted attacker who knows the key prefix (`ccp_…`) can
+// probe the keyspace forever without throttle. 30 req/min/IP for the
+// NEGATIVE path absorbs the probe without affecting legitimate partner
+// traffic: a real partner sees `row != null` and bypasses this gate.
+//
+// Why a separate bucket (not the main IP limiter): we don't want a bursty
+// partner who briefly trips a positive-path quota to subsequently be
+// metered as anonymous probing.
+const unauthIpBucket = createTokenBucket({ perMin: 30, maxKeys: 10_000 });
+
 /**
  * Refund a token on the API-key bucket. Used by handlers that detected an
  * idempotency-cache HIT: the request did no real work, so the upstream
@@ -50,6 +68,24 @@ const apiKeyBucket = createTokenBucket({ perMin: 60, maxKeys: 10_000 });
  */
 export function refundApiKeyBucket(apiKeyId: string): void {
   apiKeyBucket.refund(apiKeyId);
+}
+
+/**
+ * Consume an unauth-IP token, then throw 401 (or 429 if the IP has spent
+ * its budget probing). Centralizes the unauth rejection so every negative
+ * path in canActivate runs the same throttle. `never` return type tells TS
+ * downstream code is unreachable.
+ */
+function rejectUnauth(req: Request, detail: string): never {
+  const ip = req.ip ?? "unknown";
+  const r = unauthIpBucket.consume(ip);
+  if (!r.ok) {
+    throw new HttpException(
+      { error: "rate_limited", detail: "30 unauthenticated req/min/IP on /v1" },
+      429,
+    );
+  }
+  throw new UnauthorizedException(detail);
 }
 
 /**
@@ -71,10 +107,10 @@ export class ApiKeyGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
-      throw new UnauthorizedException("missing bearer token");
+      rejectUnauth(req, "missing bearer token");
     }
     const token = header.slice("Bearer ".length).trim();
-    if (!token) throw new UnauthorizedException("empty bearer token");
+    if (!token) rejectUnauth(req, "empty bearer token");
 
     // Shape gate before DB lookup. Equalizes timing for "garbage in the
     // header" vs "valid-shape but wrong token" — both now take the fast
@@ -82,7 +118,7 @@ export class ApiKeyGuard implements CanActivate {
     // query for you" (longer response) from "we didn't" (shorter), which
     // leaks the token's expected shape.
     if (!looksLikeApiKey(token)) {
-      throw new UnauthorizedException("invalid api key");
+      rejectUnauth(req, "invalid api key");
     }
 
     const tokenHash = createHash("sha256").update(token).digest("hex");
@@ -90,7 +126,7 @@ export class ApiKeyGuard implements CanActivate {
       where: { tokenHash },
       select: { id: true, teamId: true, revokedAt: true, scopes: true },
     });
-    if (!row || row.revokedAt) throw new UnauthorizedException("invalid api key");
+    if (!row || row.revokedAt) rejectUnauth(req, "invalid api key");
 
     // Per-key rate limit — bounds cost on a leaked/abused key. Each request
     // hits Meta's Cloud API and counts against the team's quality rating,

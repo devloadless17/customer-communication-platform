@@ -814,7 +814,25 @@ export function toPublicEnvelopes(
   return out;
 }
 
-/** Set of every DomainEvent type the subscriber must register for. */
+/**
+ * Set of every DomainEvent type the outbound-webhook subscriber must
+ * register for.
+ *
+ * INVARIANT — `webhook.*` events MUST NEVER appear in this list.
+ *
+ * The outbound-webhook delivery worker publishes
+ * `webhook.subscription_disabled` and `webhook.subscription_recovered`
+ * from inside its own job context (see
+ * `apps/api/src/lib/outbound-webhooks/worker.ts`). If a `webhook.*` event
+ * were subscribed here, a partner's failure → circuit-breaker → trip →
+ * `webhook.subscription_disabled` event would feed back into the same
+ * delivery worker as a NEW delivery to enqueue, which on failure would
+ * trip the breaker again, → infinite ping-pong on the BullMQ queue.
+ *
+ * The system is currently safe because no `webhook.*` types are listed
+ * here. Adding one without first re-routing those events to a separate,
+ * non-self-subscribing bus tier breaks this invariant.
+ */
 export function busEventTypesToSubscribe(): DomainEventType[] {
   return [
     "message.received",

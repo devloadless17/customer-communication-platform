@@ -12,9 +12,11 @@ import { CreateApiKeySchema, type CreateApiKeyInput } from "./api-keys.schemas";
  * which can send WhatsApp messages on behalf of the team. Issuing should
  * match the same trust level as inviting an admin.
  *
- *   GET    /api/team/api-keys           — list (never returns plaintext)
- *   POST   /api/team/api-keys           — create. Returns plaintext token ONCE.
- *   DELETE /api/team/api-keys/:id       — revoke (soft — keeps audit row)
+ *   GET    /api/team/api-keys             — list (never returns plaintext)
+ *   POST   /api/team/api-keys             — create. Returns plaintext token ONCE.
+ *   POST   /api/team/api-keys/:id/rotate  — revoke + recreate with same name+scopes.
+ *                                            Returns the NEW plaintext ONCE.
+ *   DELETE /api/team/api-keys/:id         — revoke (soft — keeps audit row)
  */
 @Controller("api/team/api-keys")
 @RequireRole("admin")
@@ -33,6 +35,14 @@ export class ApiKeysController {
     @Body(zBody(CreateApiKeySchema)) body: CreateApiKeyInput,
   ) {
     return this.keys.create(session.teamId, session.userId, body);
+  }
+
+  @Post(":id/rotate")
+  async rotate(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    return this.keys.rotate(session.teamId, session.userId, id);
   }
 
   @Delete(":id")

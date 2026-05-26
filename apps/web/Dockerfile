@@ -100,6 +100,19 @@ RUN --mount=type=cache,target=/app/apps/web/.next/cache,sharing=locked \
 # the Next.js standalone tracer doesn't pick them up. Living in a separate
 # node_modules under /opt avoids fighting the standalone-traced node_modules
 # at /app/node_modules.
+#
+# Post-pilot TODO (~2026-06-15): relocate the seed exec target from the
+# `app` (web) container to the `api` container (which has prisma/tsx/etc
+# via its pnpm install). The `migrate` compose service can ALSO switch to
+# the api image since they share the same prisma schema + config. That
+# lets us delete this whole stage + the `/opt/cli-tools` PATH/NODE_PATH
+# block in the runtime stage, shrinking the web image by ~80 MB AND
+# removing the prisma/pg/bcrypt CVE surface from the front-door image.
+# Deferred from the 2026-05-26 pre-deploy P1 batch because changing the
+# deploy.yml `docker exec app pnpm run db:seed:superadmin` target +
+# repointing compose's `migrate` service introduces deploy-time risk
+# without changing functional correctness — pure hardening, do it after
+# the pilot lands.
 # -----------------------------------------------------------------------------
 FROM base AS cli-tools
 WORKDIR /tools

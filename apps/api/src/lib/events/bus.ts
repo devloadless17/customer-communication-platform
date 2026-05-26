@@ -180,15 +180,30 @@ export async function publish<K extends DomainEventType>(
  * `publishInTx`. Runs subscribers but does NOT write another outbox row —
  * the row already exists; the drainer is responsible for marking it
  * `publishedAt`. Internal API; only the OutboxDrainerService should call.
+ *
+ * Returns an aggregated error message when ANY subscriber threw (otherwise
+ * null) so the drainer can stamp `lastError` on the outbox row. Without
+ * this the per-subscriber console.error is the ONLY trail — the row gets
+ * marked `publishedAt` and looks delivered forever. The in-process
+ * `publish()` path doesn't need this (the entity is already committed
+ * regardless; the audit row carrying the error is best-effort), but for
+ * drainer-dispatched events the row IS the durable record of dispatch
+ * outcome — silent loss there is invisible.
  */
 export async function dispatchPersistedEvent<K extends DomainEventType>(
   event: DomainEventOf<K>,
-): Promise<void> {
-  await runSubscribers(event);
+): Promise<string | null> {
+  const errors: string[] = [];
+  await runSubscribers(event, errors);
+  if (errors.length === 0) return null;
+  // Truncate aggregated message — outbox.lastError is bounded text and the
+  // operator only needs the head of the trail.
+  return errors.slice(0, 4).join(" | ").slice(0, 1024);
 }
 
 async function runSubscribers<K extends DomainEventType>(
   event: DomainEventOf<K>,
+  errorSink?: string[],
 ): Promise<void> {
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
@@ -217,17 +232,23 @@ async function runSubscribers<K extends DomainEventType>(
       const maybe = first.handler(event as DomainEventOf<DomainEventType>);
       if (maybe && typeof (maybe as Promise<void>).then === "function") {
         void (maybe as Promise<void>).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
           console.error(
             withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
-            err instanceof Error ? err.message : err,
+            msg,
           );
+          // Note: this branch runs AFTER `runSubscribers` resolved; the
+          // sink isn't read anymore. The error stays in stdout — same
+          // posture as before.
         });
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error(
         withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
-        err instanceof Error ? err.message : err,
+        msg,
       );
+      errorSink?.push(`#0(realtime): ${msg}`);
     }
   }
 
@@ -242,10 +263,12 @@ async function runSubscribers<K extends DomainEventType>(
     try {
       await record.handler(event as DomainEventOf<DomainEventType>);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error(
         withCorrelation(`[bus] subscriber #${i} for "${event.type}" threw:`),
-        err instanceof Error ? err.message : err,
+        msg,
       );
+      errorSink?.push(`#${i}: ${msg}`);
     }
   }
 }

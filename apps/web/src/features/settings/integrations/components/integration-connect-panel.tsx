@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, Copy, KeyRound, Loader2, Terminal, Zap } from "lucide-react";
+import { CheckCircle2, Copy, KeyRound, Loader2, RefreshCw, Terminal, Zap } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
   const [connected, setConnected] = useState<ApiKeyListItem | null>(existing);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [rotating, setRotating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Filled in after mount — `window` isn't available during the SSR pass,
   // and we want the curls to use the user's actual host (works against
@@ -44,6 +45,22 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
   useEffect(() => {
     setOrigin(window.location.origin);
   }, []);
+
+  /**
+   * Belt-and-braces against the "I forgot to copy it" trap: the plaintext is
+   * shoved onto the clipboard the instant we receive it from the server.
+   * Failure is non-fatal — the reveal stays on screen with a manual Copy
+   * button. We surface the result as a toast so the user knows the
+   * auto-grab happened (or didn't).
+   */
+  async function autoCopy(token: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(token);
+      toast.success("Key copied to clipboard");
+    } catch {
+      toast.info("Couldn't auto-copy — use the Copy button below");
+    }
+  }
 
   async function generate() {
     setError(null);
@@ -80,10 +97,63 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
         scopes: json.scopes ?? preset.recommendedScopes,
       });
       setRevealed(json.token);
+      void autoCopy(json.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : "network error");
     } finally {
       setGenerating(false);
+    }
+  }
+
+  /**
+   * Lost-the-plaintext recovery: revoke the existing key + create a new one
+   * in the same atomic call, then show the new plaintext. The integration
+   * (n8n etc.) only needs its Authorization header updated; the existing
+   * scopes and name carry over.
+   */
+  async function rotate() {
+    if (!connected) return;
+    if (
+      !window.confirm(
+        `Rotate the "${connected.name}" key? The old key stops working immediately. You'll need to paste the new key into ${preset.label}.`,
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setRotating(true);
+    try {
+      const res = await fetch(`/api/team/api-keys/${connected.id}/rotate`, {
+        method: "POST",
+      });
+      const json = (await res.json()) as {
+        id?: string;
+        name?: string;
+        tokenPrefix?: string;
+        createdAt?: string;
+        scopes?: string[];
+        token?: string;
+        error?: string;
+      };
+      if (!res.ok || !json.id || !json.token) {
+        setError(json.error ?? `error ${res.status}`);
+        return;
+      }
+      setConnected({
+        id: json.id,
+        name: json.name ?? preset.defaultName,
+        tokenPrefix: json.tokenPrefix ?? "",
+        createdAt: json.createdAt ?? new Date().toISOString(),
+        lastUsedAt: null,
+        revokedAt: null,
+        scopes: json.scopes ?? preset.recommendedScopes,
+      });
+      setRevealed(json.token);
+      void autoCopy(json.token);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "network error");
+    } finally {
+      setRotating(false);
     }
   }
 
@@ -136,21 +206,49 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
                   "never"
                 )}
               </span>
+              {/* "I lost the plaintext" recovery — one click revokes the old
+                  key + creates a replacement and shows it inline. Same scopes,
+                  same name; only the integration's Authorization header has
+                  to be updated. */}
+              <button
+                type="button"
+                onClick={rotate}
+                disabled={rotating}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                title="Lost your key? Rotate creates a new one and revokes the old."
+              >
+                {rotating ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3" />
+                )}
+                Rotate key
+              </button>
             </div>
           )}
 
           {revealed && (
-            <div className="mt-3 rounded-md border border-emerald-500/40 bg-emerald-500/5 p-3">
+            // Sticky reveal: NO dismiss button. The only way to clear this is
+            // the explicit "I've saved my key" confirm below. The key is also
+            // auto-copied to the clipboard the instant it's generated so a
+            // user who navigates away mid-flow still has it on their clipboard
+            // (until they copy something else). The pulsing border + warning
+            // colour make it unmissable.
+            <div className="mt-3 rounded-md border-2 border-amber-500/60 bg-amber-500/5 p-3 shadow-sm">
               <div className="flex items-start gap-2">
-                <KeyRound className="mt-0.5 size-4 shrink-0 text-emerald-600" />
+                <KeyRound className="mt-0.5 size-4 shrink-0 text-amber-600" />
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium">Copy your key now</div>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    Paste it into {preset.label}. This is the only time the
-                    full token will be displayed — we store only a hash.
+                  <div className="text-xs font-semibold text-amber-700 dark:text-amber-400">
+                    Save your key now — this is the only time it'll be shown
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Already copied to your clipboard. Paste it into {preset.label}
+                    {" "}now. We only store a hash — if you lose it, use{" "}
+                    <span className="font-medium">Rotate key</span> to generate
+                    a replacement.
                   </p>
                   <div className="mt-2 flex items-center gap-2">
-                    <code className="block min-w-0 flex-1 truncate rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs">
+                    <code className="block min-w-0 flex-1 select-all break-all rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs">
                       {revealed}
                     </code>
                     <Button type="button" size="sm" variant="outline" onClick={copyToken}>
@@ -158,13 +256,16 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
                       Copy
                     </Button>
                   </div>
-                  <button
+                  <Button
                     type="button"
+                    size="sm"
+                    variant="default"
                     onClick={() => setRevealed(null)}
-                    className="mt-2 text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+                    className="mt-3"
                   >
-                    Dismiss
-                  </button>
+                    <CheckCircle2 className="size-3.5" />
+                    I&apos;ve saved my key
+                  </Button>
                 </div>
               </div>
             </div>

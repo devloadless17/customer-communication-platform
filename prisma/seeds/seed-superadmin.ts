@@ -29,10 +29,35 @@ const db = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
 });
 
+// Pilot team id — the seed only ever touches this id. If a future deploy
+// shares this DB with a real customer team (cuid id), running the seed there
+// would silently create an orphan "Loadless" team + a default-password
+// superAdmin account on their DB. The guard below refuses to run when ANY
+// non-pilot team is present, so this script becomes a safe no-op the moment
+// you onboard a second tenant on the same Postgres.
+const PILOT_TEAM_ID = "team_1";
+
 async function main() {
+  // Safety gate: if a team exists that isn't the pilot, bail. Idempotent +
+  // visible: the message tells the operator exactly what to do (run the seed
+  // against the pilot's DB only).
+  const otherTeam = await db.team.findFirst({
+    where: { id: { not: PILOT_TEAM_ID } },
+    select: { id: true, name: true },
+  });
+  if (otherTeam) {
+    console.warn(
+      `✗ seed-superadmin refused: a non-pilot team is present in this DB ` +
+        `(id=${otherTeam.id}, name=${JSON.stringify(otherTeam.name)}). ` +
+        `Skipping — this DB is no longer the single-tenant pilot. Run the ` +
+        `seed only against the pilot operator's own database.`,
+    );
+    return;
+  }
+
   const team = await db.team.upsert({
-    where: { id: "team_1" },
-    create: { id: "team_1", name: "Loadless" },
+    where: { id: PILOT_TEAM_ID },
+    create: { id: PILOT_TEAM_ID, name: "Loadless" },
     update: {},
   });
 
