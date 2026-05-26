@@ -71,6 +71,20 @@ export function refundApiKeyBucket(apiKeyId: string): void {
 }
 
 /**
+ * Public hook for OTHER /v1 abuse-blocking layers (e.g. main.ts's CORS
+ * browser-origin refusal) to consume from the same per-IP bucket. Without
+ * this, an attacker stamping `Origin: anything` on every /v1 hit gets
+ * unlimited 403s from main.ts without burning the throttle. Returns
+ * `{ ok: true }` on success; `{ ok: false }` when the bucket is empty
+ * (caller decides whether to upgrade their 4xx to 429).
+ */
+export function consumeUnauthIpToken(
+  ip: string,
+): { ok: true } | { ok: false; retryAfter: number } {
+  return unauthIpBucket.consume(ip);
+}
+
+/**
  * Consume an unauth-IP token, then throw 401 (or 429 if the IP has spent
  * its budget probing). Centralizes the unauth rejection so every negative
  * path in canActivate runs the same throttle. `never` return type tells TS

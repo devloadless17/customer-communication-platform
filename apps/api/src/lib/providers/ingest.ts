@@ -666,6 +666,30 @@ async function ingestInboundMessage(
         tx,
       );
 
+      // A reopen (closed → pending on inbound) is a real customer event, not
+      // a side-effect of the message arriving. The earlier shape carried it
+      // ONLY as `message.received { reopened: true }` plus an inline socket
+      // emit in fanout-rules.ts; every other subscriber (audit timeline,
+      // analytics, workflow dispatch, outbound webhooks) saw nothing. The
+      // workflow `On Conversation opened` trigger and the partner-side
+      // `conversation.status_changed` outbound webhook BOTH silently failed
+      // to fire on a customer reply-after-close. Publishing the dedicated
+      // event in the SAME tx, BEFORE message.received, ensures both
+      // subscribers see the reopen first. `changedByUserId: null` (system —
+      // the customer reopened it by replying). `silent: false` (real event,
+      // partners want to know).
+      if (reopened) {
+        await publishInTx(tx, {
+          type: "conversation.status_changed",
+          teamId,
+          conversationId: conversation.id,
+          previousStatus: "closed",
+          newStatus: "pending",
+          changedByUserId: null,
+          contact: contactSnapshot,
+        });
+      }
+
       await publishInTx(tx, {
         type: "message.received",
         teamId,

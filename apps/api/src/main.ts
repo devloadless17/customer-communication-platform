@@ -11,6 +11,7 @@ import type { Request, Response, NextFunction } from "express";
 import { validateEnv } from "@ccp/config";
 
 import { AppModule } from "./app.module";
+import { consumeUnauthIpToken } from "./auth/api-key.guard";
 import { correlationMiddleware } from "./common/correlation";
 import { ipRateLimitMiddleware } from "./common/ip-rate-limit.middleware";
 import { WsAdapter } from "./realtime/ws-adapter";
@@ -205,6 +206,24 @@ async function bootstrap(): Promise<void> {
   app.use("/api/external/v1", (req: Request, res: Response, next: NextFunction) => {
     const origin = req.headers["origin"];
     if (typeof origin === "string" && origin.length > 0) {
+      // Consume from the api-key guard's per-IP unauth bucket. The
+      // ipRateLimitMiddleware deliberately skips /v1 (partners with valid
+      // keys are metered per-key), but unauthenticated probing must still
+      // be throttled. Without this, a scripted attacker stamping
+      // `Origin: anything` on every /v1 hit would get unlimited cheap
+      // 403s — bypassing the brake on anonymous probing entirely. Upgrade
+      // to 429 when the IP has spent its budget so the attacker can't
+      // distinguish "shape-rejected" from "throttled" by latency alone.
+      const r = consumeUnauthIpToken(req.ip ?? "unknown");
+      if (!r.ok) {
+        res.setHeader("Retry-After", String(r.retryAfter));
+        res.status(429).json({
+          error: "rate_limited",
+          detail: "30 unauthenticated req/min/IP on /v1",
+          retryAfter: r.retryAfter,
+        });
+        return;
+      }
       res.status(403).json({
         error: "browser_origin_forbidden",
         detail:

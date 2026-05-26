@@ -57,16 +57,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
       unreadCount: e.unreadCount,
       ...(e.newConversation ? { newConversation: e.newConversation } : {}),
     });
-    // Reopen broadcast — a previously-closed conversation flipped to
-    // `pending` on this inbound. Tell live clients so the row jumps from
-    // "Closed" back into triage without a refetch.
-    if (e.reopened) {
-      emitter.emitToTeam(e.teamId, "conversation:status", {
-        teamId: e.teamId,
-        conversationId: e.conversationId,
-        status: "pending",
-      });
-    }
+    // Reopen broadcast removed 2026-05-26 — the ingest tx now publishes a
+    // dedicated `conversation.status_changed` event for the reopen FIRST,
+    // and its own fanout rule (below) emits the same `conversation:status`
+    // socket frame. Doing it here too would duplicate the frame AND mean
+    // the bus subscribers (audit, analytics, workflow dispatch, outbound
+    // webhook) never saw the reopen — the audit timeline missed the pill,
+    // `On Conversation opened` workflows silently failed to fire, and
+    // partners listening for `conversation.status_changed` got nothing.
   },
 
   "message.sent": (e, emitter) => {

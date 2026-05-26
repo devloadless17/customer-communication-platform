@@ -8,7 +8,6 @@ import {
 import { withCorrelation } from "@/common/correlation";
 import {
   claimBatch,
-  markFailed,
   markPublishedWithError,
 } from "@/lib/events/outbox";
 import type {
@@ -190,17 +189,20 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       // Per-subscriber errors are already swallowed inside runSubscribers
       // (and surfaced via the return value above); this catch is for
       // unexpected envelope problems (corrupted JSON, type missing from
-      // the bus, etc.). Mark the row failed so the operator can see it.
+      // the bus, etc.). The row's `publishedAt` is ALREADY set by
+      // claimBatch — so we use markPublishedWithError (not markFailed,
+      // whose `WHERE publishedAt IS NULL` predicate would silently match
+      // zero rows and the error trail would only land in stdout).
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(
         withCorrelation(`[outbox-drainer] dispatch row=${row.id} type=${row.type}`),
         message,
       );
       try {
-        await markFailed(row.id, message);
+        await markPublishedWithError(row.id, message);
       } catch (markErr) {
         this.logger.error(
-          withCorrelation(`[outbox-drainer] markFailed row=${row.id}`),
+          withCorrelation(`[outbox-drainer] markPublishedWithError row=${row.id}`),
           markErr instanceof Error ? markErr.message : String(markErr),
         );
       }

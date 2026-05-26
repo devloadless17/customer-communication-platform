@@ -359,10 +359,11 @@ export class RealtimeGateway
     const teamId = client.data.teamId as string | undefined;
     if (!teamId) return;
     // Two DB reads per call (online snapshot + availability). Cheap, but
-    // unbounded from a misbehaving client without a budget. Silent-drop on
-    // overrun — the legitimate hook fires this once on connect + once on
-    // reconnect, well below the cap.
-    if (!checkTypingBudget(client)) return;
+    // unbounded from a misbehaving client without a budget. Dedicated tiny
+    // bucket (4/30s) — kept separate from the typing budget so a fast
+    // typist burning typing tokens doesn't starve a legitimate reseed
+    // (which is fired at most a few times per session).
+    if (!checkPresenceRequestBudget(client)) return;
     const onlineUserIds = await this.buildVisibleOnlineSnapshot(teamId);
     client.emit("presence:update", { teamId, onlineUserIds });
     // Also reseed the availability snapshot — the hook re-fires presence:
@@ -777,12 +778,11 @@ function checkSubscribeBudget(client: Socket, label: string): boolean {
 }
 
 /**
- * Per-socket token bucket for typing toggles + `presence:request`. Higher
- * burst ceiling than `subscribe:*` (a typist easily fires 4–6 toggle pairs
- * a second) but still bounded so a misbehaving / hostile client can't
- * flood the conversation room with `typing:update` frames or pin the
- * gateway on `presence:request`'s DB reads. 60 tokens / 10s refill =
- * ~6/sec average with smoothing for legitimate bursts. Silent-drop matches
+ * Per-socket token bucket for typing toggles. Higher burst ceiling than
+ * `subscribe:*` (a typist easily fires 4–6 toggle pairs a second) but still
+ * bounded so a misbehaving / hostile client can't flood the conversation
+ * room with `typing:update` frames. 60 tokens / 10s refill = ~6/sec average
+ * with smoothing for legitimate bursts. Silent-drop matches
  * `checkSubscribeBudget` — the client's typing indicator skips a beat
  * instead of getting an error frame.
  */
@@ -800,6 +800,37 @@ function checkTypingBudget(client: Socket): boolean {
     bucket.tokens = Math.min(
       TYPING_CAP,
       bucket.tokens + (now - bucket.ts) * TYPING_REFILL_PER_MS,
+    );
+    bucket.ts = now;
+  }
+  if (bucket.tokens < 1) return false;
+  bucket.tokens -= 1;
+  return true;
+}
+
+/**
+ * Dedicated tiny bucket for `presence:request`. Kept separate from the
+ * typing bucket because they have different legitimate cadences: a typist
+ * can burn 60 typing tokens in 10s during a long message, which would
+ * leave a legitimate presence re-seed (fired on connect / reconnect)
+ * empty for ~10s of refill. Presence is fired AT MOST a few times per
+ * session (once per connect + once on long reconnect), so 4 tokens / 30s
+ * is generous for legitimate use and tight on abuse.
+ */
+const PRESENCE_REQUEST_CAP = 4;
+const PRESENCE_REQUEST_REFILL_PER_MS = 4 / 30_000;
+function checkPresenceRequestBudget(client: Socket): boolean {
+  const now = Date.now();
+
+  const data = client.data as any;
+  let bucket = data.__presenceBucket as { tokens: number; ts: number } | undefined;
+  if (!bucket) {
+    bucket = { tokens: PRESENCE_REQUEST_CAP, ts: now };
+    data.__presenceBucket = bucket;
+  } else {
+    bucket.tokens = Math.min(
+      PRESENCE_REQUEST_CAP,
+      bucket.tokens + (now - bucket.ts) * PRESENCE_REQUEST_REFILL_PER_MS,
     );
     bucket.ts = now;
   }

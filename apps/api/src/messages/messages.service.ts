@@ -129,70 +129,43 @@ export class MessagesService {
      */
     event: Omit<DomainEventOf<"message.sent">, "unreadCount" | "lastMessageAt">;
   }): Promise<void> {
-    try {
-      await this.db.$transaction(async (tx) => {
-        const current = await tx.conversation.findUnique({
-          where: { id: args.conversationId },
-          select: { lastMessageAt: true, unreadCount: true },
-        });
-        if (!current) return;
-        const effectiveBump =
-          current.lastMessageAt >= args.bumpTimestamp
-            ? new Date(current.lastMessageAt.getTime() + 1)
-            : args.bumpTimestamp;
-        await tx.conversation.update({
-          where: { id: args.conversationId },
-          data: {
-            lastMessageAt: effectiveBump,
-            lastMessagePreview: args.preview,
-          },
-        });
-        await publishInTx(tx, {
-          ...args.event,
-          lastMessageAt: effectiveBump.toISOString(),
-          unreadCount: current.unreadCount,
-        });
+    // No catch + fallback here on purpose. A short-lived `bus.publish()` retry
+    // was added in the 2026-05-26 P3 batch to close the optimistic-bubble
+    // watchdog gap when the tx failed, but it created a worse failure mode
+    // under "tx-committed-but-client-error" race (commit acked on Postgres
+    // but the connection drop surfaced as a thrown promise to Prisma): the
+    // fallback would fire bus.publish() while the original outbox row also
+    // eventually drained, so workflow-dispatch + outbound-webhook each
+    // ran TWICE — partner integrations saw the same Meta wamid POST'd twice.
+    // The client message dedupe (by externalId) made the bubble itself safe,
+    // but the doubled partner POST is a worse externally-visible problem
+    // than the original "rare bubble shows red but actually delivered."
+    // Caller's own catch block (in sendText/sendMedia/sendTemplate/forward)
+    // logs the warning; the optimistic bubble's 30s watchdog handles the
+    // rare red-but-delivered case.
+    await this.db.$transaction(async (tx) => {
+      const current = await tx.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { lastMessageAt: true, unreadCount: true },
       });
-    } catch (err) {
-      // Best-effort recovery: the tx failed (P2024 / deadlock / pool flap),
-      // so neither the conversation bump NOR the outbox row landed. The
-      // Message row itself is durable (created BEFORE this call), but the
-      // optimistic bubble on the sender's client carries a `clientTempId`
-      // that ONLY reconciles when the `message.sent` event arrives — without
-      // it the 30s send watchdog phantom-fails the bubble even though Meta
-      // delivered. Falling back to in-process `publish()` runs the realtime
-      // subscriber synchronously (closes the reconcile gap immediately) and
-      // writes a best-effort outbox audit row outside the failed tx. The
-      // conversation summary (lastMessageAt + preview) stays stale until
-      // the next inbound or thread re-open reconciles it; that's the
-      // acceptable degraded outcome — bubble UX is preserved.
-      this.logger.warn(
-        `commitOutboundEvent tx failed for conv=${args.conversationId}; falling back to publish(): ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-      try {
-        // Re-read conversation OUTSIDE the failed tx so the event carries
-        // the latest known unread + lastMessageAt. Best-effort — if this
-        // ALSO fails, we just lose the realtime emit and accept the
-        // 30s watchdog timeout.
-        const current = await this.db.conversation.findUnique({
-          where: { id: args.conversationId },
-          select: { lastMessageAt: true, unreadCount: true },
-        });
-        await this.bus.publish({
-          ...args.event,
-          lastMessageAt: (current?.lastMessageAt ?? args.bumpTimestamp).toISOString(),
-          unreadCount: current?.unreadCount ?? 0,
-        });
-      } catch (publishErr) {
-        this.logger.error(
-          `commitOutboundEvent fallback publish() also failed for conv=${args.conversationId}: ` +
-            (publishErr instanceof Error ? publishErr.message : String(publishErr)),
-        );
-        // Re-throw original tx error so the caller's catch block runs.
-        throw err;
-      }
-    }
+      if (!current) return;
+      const effectiveBump =
+        current.lastMessageAt >= args.bumpTimestamp
+          ? new Date(current.lastMessageAt.getTime() + 1)
+          : args.bumpTimestamp;
+      await tx.conversation.update({
+        where: { id: args.conversationId },
+        data: {
+          lastMessageAt: effectiveBump,
+          lastMessagePreview: args.preview,
+        },
+      });
+      await publishInTx(tx, {
+        ...args.event,
+        lastMessageAt: effectiveBump.toISOString(),
+        unreadCount: current.unreadCount,
+      });
+    });
   }
 
   /**

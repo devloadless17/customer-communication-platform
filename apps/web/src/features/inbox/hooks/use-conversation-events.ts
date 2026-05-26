@@ -325,14 +325,6 @@ export function useConversationEvents(
   // deferred (hidden → visible) recovery path.
   const hasConnectedOnceRef = useRef(false);
   const reconnectRecoveryRef = useRef(false);
-  // Wall-clock when this hook mounted — used to skip the FIRST-CONNECT
-  // backfill when the socket authenticates within a few seconds of SSR
-  // hydration (the slice we already have IS the live slice; the delta
-  // would just re-fetch the empty interval). A real reconnect-after-drop
-  // is gated by hasConnectedOnceRef, not this timer, and a deferred
-  // recovery (tab returns to foreground) clears the recency window via
-  // backfillNeededRef.
-  const mountedAtRef = useRef<number>(Date.now());
 
   const inFlightOlder = useRef(false);
   const loadOlder = useCallback(
@@ -472,21 +464,15 @@ export function useConversationEvents(
         return;
       }
 
-      // First-connect freshness gate. On a hard refresh, SSR delivers the
-      // thread slice and the socket authenticates ~milliseconds later — the
-      // `?after=<latestTimestamp>` delta is a guaranteed no-op (we already
-      // have the live slice). Skip the delta when we're inside the
-      // freshness window; let it run when the gap is wider (slow auth,
-      // network hiccup) since something COULD have arrived in that window.
-      // Reconnect-after-drop (`isReconnect`) is NEVER skipped — the delta
-      // there carries arbitrary state we missed while offline.
-      const SSR_FRESHNESS_MS = 3000;
-      if (
-        !isReconnect &&
-        Date.now() - mountedAtRef.current < SSR_FRESHNESS_MS
-      ) {
-        return;
-      }
+      // (SSR-fresh skip was tried 2026-05-26 and reverted same day: the
+      // 3s mount-time heuristic was measured against hook MOUNT, not SSR
+      // RENDER, so on a slow handshake / slow hydration any webhook that
+      // landed between Prisma's SSR read and the first `subscribe:conversation`
+      // was silently lost until the next reconnect / chat switch. The
+      // delta is a tiny indexed keyset query — the cost saving was real
+      // but tiny, while the lost-message risk was silent. Always run the
+      // delta on first-connect; reconnect-after-drop runs the full
+      // refetch. See [[project_predeploy_p1_fixes_2026_05_26]].)
 
       // Random jitter (0–1500ms) breaks the synchronized reconnect storm
       // after a deploy. Without it, every open tab in the team fires its

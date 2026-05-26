@@ -440,8 +440,15 @@ export class ConversationsService {
     actorUserId: string,
     input: StartConversationInput,
   ): Promise<{ conversationId: string; created: boolean; reopened: boolean }> {
+    // `deletedAt: null` — every other contact-lookup path filters tombstoned
+    // rows (contacts list, search, audience groups). Without it here, a
+    // soft-deleted contact's id would still spawn a conversation, surfacing
+    // a "deleted" person in the inbox. By-id lookups elsewhere (e.g.
+    // assignee resolution, sender attribution on historical messages) keep
+    // tombstoned rows on purpose so threads remain intact, but starting a
+    // NEW thread to a deleted contact has no defensible UX.
     const contact = await this.db.contact.findFirst({
-      where: { id: input.contactId, teamId },
+      where: { id: input.contactId, teamId, deletedAt: null },
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });

@@ -1222,7 +1222,22 @@ export function ContactPanel({
           <AssigneePicker
             teamId={conversation.teamId}
             currentId={assigneeId}
-            teamMembers={teamMembers}
+            // ACTIVE members for the dropdown — assigning a NEW conversation
+            // to a deactivated agent has no defensible UX. The picker
+            // resolves the CURRENT id's label from this same list, so
+            // splice the current assignee back in even if they're
+            // deactivated (otherwise the picker shows "no assignee" until
+            // the operator picks someone else, which is misleading — the
+            // thread IS still assigned). Pre-existing UX gap from the
+            // 2026-05-26 cross-cutting audit (D6).
+            teamMembers={(() => {
+              const active = teamMembers.filter((u) => u.isActive);
+              if (assigneeId && !active.some((u) => u.id === assigneeId)) {
+                const current = teamMembers.find((u) => u.id === assigneeId);
+                if (current) return [current, ...active];
+              }
+              return active;
+            })()}
             pending={assigneePending}
             onChange={(next) => void persistAssignee(next)}
           />

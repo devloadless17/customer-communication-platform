@@ -3,6 +3,7 @@ import { Body, Controller, Delete, Get, Param, Post } from "@nestjs/common";
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { RequireRole } from "../../auth/role.guard";
 import type { ApiSession } from "../../auth/session.guard";
+import { RateLimit } from "../../common/rate-limit.guard";
 import { zBody } from "../../common/zod-validation.pipe";
 import { ApiKeysService } from "./api-keys.service";
 import { CreateApiKeySchema, type CreateApiKeyInput } from "./api-keys.schemas";
@@ -38,6 +39,13 @@ export class ApiKeysController {
   }
 
   @Post(":id/rotate")
+  // Tight bucket vs the global 300/min/user default — rotate generates a new
+  // plaintext token and revokes the old one in one shot. A stolen session
+  // firing rotate at the global ceiling could thrash a partner integration
+  // 300 times per minute. 10/min covers the legitimate operator cadence
+  // (clicking rotate every few seconds while debugging) with comfortable
+  // headroom; abuse trips the bucket loudly.
+  @RateLimit({ perMinute: 10 })
   async rotate(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
