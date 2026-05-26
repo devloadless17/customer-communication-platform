@@ -2,11 +2,14 @@ import { cookies } from "next/headers";
 
 import { SectionShell } from "@/components/layouts/section-shell";
 import { InboxSubSidebarLive } from "@/components/layouts/inbox-sub-sidebar-live";
+import { InboxFilterProvider } from "@/features/inbox/contexts/inbox-filter-context";
+// Pure SSR-safe primitives (no "use client") — imported directly from the
+// non-client sibling so server components can call parseInboxFilter without
+// crashing on "Attempted to call X() from the server but X is on the client."
 import {
   INBOX_FILTER_COOKIE,
-  InboxFilterProvider,
   parseInboxFilter,
-} from "@/features/inbox/contexts/inbox-filter-context";
+} from "@/features/inbox/contexts/inbox-filter";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 import { getSession } from "@/lib/auth/current-user";
 import {

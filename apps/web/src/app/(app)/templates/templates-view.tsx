@@ -38,26 +38,25 @@ import { cn } from "@ccp/shared/utils";
  * After mutations we refetch the GET list so server-rendered state matches.
  */
 
-type StatusFilter = "all" | "approved" | "pending" | "rejected" | "paused" | "disabled";
+// Re-export pure primitives so existing client-side imports keep
+// working through this file. Definitions live in `./templates-cookies.ts`
+// (no "use client") so the SSR page can read the cookies without
+// crashing on "Attempted to call X() from the server but X is on the
+// client." Same split as inbox-filter / broadcasts-cookies.
+export {
+  TEMPLATES_SEARCH_COOKIE,
+  TEMPLATES_STATUS_COOKIE,
+  parseTemplatesStatus,
+  type TemplatesStatusFilter,
+} from "./templates-cookies";
 
-const VALID_STATUS_FILTERS: ReadonlySet<StatusFilter> = new Set([
-  "all",
-  "approved",
-  "pending",
-  "rejected",
-  "paused",
-  "disabled",
-]);
+import {
+  TEMPLATES_SEARCH_COOKIE,
+  TEMPLATES_STATUS_COOKIE,
+  type TemplatesStatusFilter,
+} from "./templates-cookies";
 
-export const TEMPLATES_STATUS_COOKIE = "templates-status";
-export const TEMPLATES_SEARCH_COOKIE = "templates-search";
-
-/** Parse the persisted status filter; defaults to "all" on missing/invalid. */
-export function parseTemplatesStatus(raw: string | undefined): StatusFilter {
-  return raw && VALID_STATUS_FILTERS.has(raw as StatusFilter)
-    ? (raw as StatusFilter)
-    : "all";
-}
+type StatusFilter = TemplatesStatusFilter;
 
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 function writeTemplatesCookie(name: string, value: string) {

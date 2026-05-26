@@ -3,12 +3,16 @@ import { cookies } from "next/headers";
 import { getSession } from "@/lib/auth/current-user";
 import { listContactFieldDefinitions, listWhatsappTemplates } from "@/lib/api/queries";
 
+import { TemplatesView } from "./templates-view";
+// Pure SSR-safe primitives (no "use client") — same split pattern as
+// inbox-filter.ts / broadcasts-cookies.ts. Importing parsers / cookie
+// constants from a client component crashes at runtime with
+// "Attempted to call X() from the server but X is on the client."
 import {
   TEMPLATES_SEARCH_COOKIE,
   TEMPLATES_STATUS_COOKIE,
-  TemplatesView,
   parseTemplatesStatus,
-} from "./templates-view";
+} from "./templates-cookies";
 
 /**
  * Templates index. Server component so the initial paint already has the

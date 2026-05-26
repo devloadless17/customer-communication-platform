@@ -2,7 +2,27 @@
 
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 
-import type { Filter, PresetFilterId } from "@/features/inbox/components/inbox-controls";
+import type { Filter } from "@/features/inbox/components/inbox-controls";
+import {
+  INBOX_FILTER_COOKIE,
+  INBOX_FILTER_COOKIE_MAX_AGE_S,
+  INBOX_FILTER_DEFAULT,
+  serializeInboxFilter,
+} from "@/features/inbox/contexts/inbox-filter";
+
+// Re-export pure primitives so existing server-component imports (e.g. the
+// inbox layout) keep working through this file. The actual definitions live
+// in the non-"use client" sibling — moved 2026-05-26 after a Playwright
+// pre-deploy smoke caught `Attempted to call parseInboxFilter() from the
+// server but parseInboxFilter is on the client` (the previous version had
+// the parser + COOKIE constants colocated under the `"use client"` directive
+// at the top of this file, which prevents server components from importing
+// them at runtime even though they're pure functions).
+export {
+  INBOX_FILTER_COOKIE,
+  parseInboxFilter,
+  serializeInboxFilter,
+} from "@/features/inbox/contexts/inbox-filter";
 
 /**
  * The active inbox filter (All / Mine / Unassigned / Closed preset, or a
@@ -25,17 +45,6 @@ import type { Filter, PresetFilterId } from "@/features/inbox/components/inbox-c
  * deletion / id-mismatch case is handled by the layout, which validates the
  * persisted stage id against the live `stages` list before forwarding it.
  */
-const COOKIE_NAME = "inbox-filter";
-const COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
-
-const VALID_PRESETS: ReadonlySet<PresetFilterId> = new Set([
-  "all",
-  "mine",
-  "unassigned",
-  "closed",
-]);
-
-const DEFAULT_FILTER: Filter = { kind: "preset", id: "all" };
 
 interface InboxFilterContextValue {
   filter: Filter;
@@ -43,44 +52,6 @@ interface InboxFilterContextValue {
 }
 
 const InboxFilterContext = createContext<InboxFilterContextValue | null>(null);
-
-/**
- * Serialize a filter into the short cookie value:
- *   - `p:<presetId>` for presets
- *   - `s:<stageId>`  for stage filters
- * Kept small (<80 bytes) so the cookie travels with every request without
- * inflating headers. Stage ids are cuids (~25 chars), so even with a
- * one-byte prefix the cookie stays compact.
- */
-export function serializeInboxFilter(filter: Filter): string {
-  if (filter.kind === "preset") return `p:${filter.id}`;
-  return `s:${filter.stageId}`;
-}
-
-/**
- * Parse the cookie back to a `Filter`. Returns null when the cookie is
- * missing or malformed — callers fall back to the default. The layout
- * additionally validates a returned stage id against its loaded `stages`
- * list and ignores stale ids (deleted stage on another tab / device).
- */
-export function parseInboxFilter(raw: string | undefined): Filter | null {
-  if (!raw) return null;
-  if (raw.startsWith("p:")) {
-    const id = raw.slice(2);
-    if (VALID_PRESETS.has(id as PresetFilterId)) {
-      return { kind: "preset", id: id as PresetFilterId };
-    }
-    return null;
-  }
-  if (raw.startsWith("s:")) {
-    const stageId = raw.slice(2);
-    if (stageId.length > 0) return { kind: "stage", stageId };
-    return null;
-  }
-  return null;
-}
-
-export const INBOX_FILTER_COOKIE = COOKIE_NAME;
 
 export function InboxFilterProvider({
   children,
@@ -91,7 +62,7 @@ export function InboxFilterProvider({
    *  or when the persisted stage id no longer matches a live stage. */
   initialFilter?: Filter;
 }) {
-  const [filter, setFilterState] = useState<Filter>(initialFilter ?? DEFAULT_FILTER);
+  const [filter, setFilterState] = useState<Filter>(initialFilter ?? INBOX_FILTER_DEFAULT);
 
   const setFilter = useCallback((next: Filter) => {
     setFilterState(next);
@@ -105,7 +76,7 @@ export function InboxFilterProvider({
       typeof window !== "undefined" && window.location.protocol === "https:"
         ? "; secure"
         : "";
-    document.cookie = `${COOKIE_NAME}=${serializeInboxFilter(next)}; path=/; max-age=${COOKIE_MAX_AGE}; samesite=lax${secureFlag}`;
+    document.cookie = `${INBOX_FILTER_COOKIE}=${serializeInboxFilter(next)}; path=/; max-age=${INBOX_FILTER_COOKIE_MAX_AGE_S}; samesite=lax${secureFlag}`;
   }, []);
 
   const value = useMemo(() => ({ filter, setFilter }), [filter, setFilter]);

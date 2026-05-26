@@ -28,41 +28,27 @@ import { BroadcastDeleteButton } from "./broadcast-delete-button";
  * Plain React + a debounced fetch — no React Query, matching the app's stack.
  */
 
-export type BroadcastStatusFilter =
-  | "all"
-  | "scheduled"
-  | "queued"
-  | "running"
-  | "completed"
-  | "failed";
+// Re-export the pure primitives so legacy client-side imports keep working
+// through this file. The definitions live in `./broadcasts-cookies.ts`
+// (no "use client") so the SSR page can read the cookie without crashing
+// on "Attempted to call X() from the server but X is on the client."
+export {
+  BROADCASTS_SEARCH_COOKIE,
+  BROADCASTS_STATUS_COOKIE,
+  BROADCASTS_VIEW_COOKIE,
+  parseBroadcastStatus,
+  parseBroadcastView,
+  type BroadcastStatusFilter,
+  type BroadcastView,
+} from "./broadcasts-cookies";
 
-export type BroadcastView = "table" | "calendar";
-
-const VALID_STATUSES: ReadonlySet<BroadcastStatusFilter> = new Set([
-  "all",
-  "scheduled",
-  "queued",
-  "running",
-  "completed",
-  "failed",
-]);
-
-export const BROADCASTS_STATUS_COOKIE = "broadcasts-status";
-export const BROADCASTS_SEARCH_COOKIE = "broadcasts-search";
-export const BROADCASTS_VIEW_COOKIE = "broadcasts-view";
-
-/** Parse the persisted status cookie. Defaults to "all" on missing / invalid. */
-export function parseBroadcastStatus(raw: string | undefined): BroadcastStatusFilter {
-  if (raw && VALID_STATUSES.has(raw as BroadcastStatusFilter)) {
-    return raw as BroadcastStatusFilter;
-  }
-  return "all";
-}
-
-/** Parse the persisted view cookie. Defaults to "table". */
-export function parseBroadcastView(raw: string | undefined): BroadcastView {
-  return raw === "calendar" ? "calendar" : "table";
-}
+import {
+  BROADCASTS_SEARCH_COOKIE,
+  BROADCASTS_STATUS_COOKIE,
+  BROADCASTS_VIEW_COOKIE,
+  type BroadcastStatusFilter,
+  type BroadcastView,
+} from "./broadcasts-cookies";
 
 const FILTERS: { id: BroadcastStatusFilter; label: string; dot: string }[] = [
   { id: "all", label: "All", dot: "bg-sky-500" },
