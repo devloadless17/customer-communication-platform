@@ -1,4 +1,4 @@
-# PR → typecheck only
+# PR → typecheck only.
 # Push to main → typecheck + (changes-detect + conditional builds + smoke +
 #                ship + external health + auto-rollback on failure).
 #
