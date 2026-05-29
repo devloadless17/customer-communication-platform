@@ -24,6 +24,10 @@ import { channelRoom, conversationRoom, teamRoom } from "./rooms";
 import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
+// Per-socket emit cap — see comment at the install site in handleConnection.
+const SOCKET_EMIT_CAP = 240;
+const SOCKET_EMIT_REFILL_PER_MS = 240 / 10_000;
+
 /**
  * Full Socket.io gateway. Owns room topology, handshake auth, idempotent
  * subscribe semantics, multi-tenant ownership checks on conversation and
@@ -175,6 +179,32 @@ export class RealtimeGateway
     // client to send unsubscribe:conversation on tab close (browsers don't
     // reliably get a chance to send anything in beforeunload).
     client.data.viewingConversations = new Set<string>();
+
+    // Per-socket emit rate limit. The HTTP RateLimitGuard short-circuits on
+    // socket frames (no req.session), so without this a compromised tab can
+    // spam typing / reaction / subscribe events unbounded. Token bucket:
+    // 240 events / 10s burst (~24/sec sustained) — well above legitimate
+    // use (typing throttles client-side at 3/sec, message sends are HTTP
+    // not socket), tight enough that a runaway loop or hostile script
+    // can't drown the gateway or fan out spam to teammates.
+    let socketBucketTokens = SOCKET_EMIT_CAP;
+    let socketBucketTs = Date.now();
+    client.use((_, next) => {
+      const now = Date.now();
+      socketBucketTokens = Math.min(
+        SOCKET_EMIT_CAP,
+        socketBucketTokens + (now - socketBucketTs) * SOCKET_EMIT_REFILL_PER_MS,
+      );
+      socketBucketTs = now;
+      if (socketBucketTokens < 1) {
+        // Reject the event silently — emitting an error frame would let a
+        // hostile script trigger reply-amplification. Pure drop is the
+        // right behavior for a runaway client.
+        return next(new Error("rate_limited"));
+      }
+      socketBucketTokens -= 1;
+      next();
+    });
 
     // Auto-join the team room on connect. No explicit subscribe:team
     // round-trip needed — clients always belong to one team for the

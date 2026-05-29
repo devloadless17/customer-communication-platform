@@ -105,7 +105,7 @@ export function useChatScroll({
     const el = viewportRef.current;
     if (!el) return true;
     return el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
-  }, []);
+  }, [viewportRef]);
 
   // Timestamp of the most recent programmatic snap. Setting scrollTop in JS
   // fires a scroll event ASYNCHRONOUSLY (queued by the browser to the next
@@ -128,7 +128,7 @@ export function useChatScroll({
     if (!el) return;
     lastProgrammaticSnapAtRef.current = Date.now();
     el.scrollTop = el.scrollHeight;
-  }, []);
+  }, [viewportRef]);
 
   // Scroll listener — the single arbiter of `stickyRef`. Every other piece
   // of behavior reads from this boolean. Writing it here also means the
@@ -156,7 +156,7 @@ export function useChatScroll({
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, [isAtBottom]);
+  }, [isAtBottom, viewportRef]);
 
   // Conversation change (and initial mount) → always snap to the bottom.
   // Matches WhatsApp Web behavior: every chat open lands at the latest

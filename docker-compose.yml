@@ -358,6 +358,13 @@ services:
       WEB_INTERNAL_URL: ${WEB_INTERNAL_URL:-http://app:3000}
       # Optional: tunable Meta Graph fetch timeout. Default 15s.
       META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
+      # Orphan-blob sweeper cadence (UploadThing files referenced by no live
+      # Message row). Default 6h — bumps to hourly on high-churn deploys.
+      BLOB_ORPHAN_SWEEP_INTERVAL_MS: ${BLOB_ORPHAN_SWEEP_INTERVAL_MS:-21600000}
+      # iOS voice-message transcode profile. Set 0 to disable the WhatsApp
+      # iOS "audio no longer available" fix (off by default in code; explicit
+      # passthrough so compose drift doesn't silently change behavior).
+      WHATSAPP_VOICE_IOS_PROFILE: ${WHATSAPP_VOICE_IOS_PROFILE:-1}
       # In-app /api/dev/emit endpoint that spoofs Meta webhooks for
       # local testing. MUST NOT be set in production — uncommenting this
       # in prod would let any authenticated user inject inbound events.
