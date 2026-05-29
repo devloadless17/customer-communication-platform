@@ -132,6 +132,19 @@ __DOMAIN__ {
 		}
 	}
 
+	# (5a) /api/internal/* — REFUSED at the edge. These routes are designed
+	#      for loopback-only callers (Next.js → NestJS via
+	#      INTERNAL_API_URL=http://127.0.0.1:4000); exposing them publicly
+	#      means a leaked INTERNAL_BUS_SECRET becomes a remote
+	#      forced-logout / session-revoke primitive. The defense in code
+	#      (secret check) is fine, but blocking at the edge means the
+	#      attack surface is invisible to the internet entirely. The
+	#      legitimate web→api call is loopback-direct so it never traverses
+	#      Caddy and stays unaffected.
+	handle /api/internal/* {
+		respond 404
+	}
+
 	# (5) /api/*, /webhooks/* → api (NestJS).
 	#     The Socket.io client connects on `/api/socket/*` (see `SOCKET_PATH`
 	#     in packages/shared/src/socket/events.ts) — that path is covered by

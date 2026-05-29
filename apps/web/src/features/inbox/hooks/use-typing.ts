@@ -112,7 +112,17 @@ export function useTyping(
 
     const onUpdate: Parameters<typeof socket.on<"typing:update">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      setTypingUserIds(payload.typingUserIds.filter((id) => id !== selfUserId));
+      const others = payload.typingUserIds.filter((id) => id !== selfUserId);
+      // Identity-preserve when contents are unchanged. Without this,
+      // every typing:update (fired on each teammate keystroke) returns a
+      // fresh array reference, re-rendering MessageThread + the whole
+      // timeline pipeline even when zero teammates are typing. Pattern
+      // mirrors use-conversation-viewers.ts.
+      setTypingUserIds((prev) =>
+        prev.length === others.length && prev.every((id, i) => id === others[i])
+          ? prev
+          : others,
+      );
     };
     socket.on("typing:update", onUpdate);
 

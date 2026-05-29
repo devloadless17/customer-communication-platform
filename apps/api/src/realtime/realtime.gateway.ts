@@ -629,34 +629,45 @@ export class RealtimeGateway
     @MessageBody() body: { channelId: string },
   ): Promise<void> {
     if (!isValidBody(body, "channelId")) return;
-    if (!checkSubscribeBudget(client, "subscribe:channel")) return;
     const teamId = client.data.teamId as string | undefined;
     const userId = client.data.userId as string | undefined;
     if (!teamId || !userId) return;
     const room = channelRoom(body.channelId);
-    if (client.rooms.has(room)) return;
-    try {
-      // Membership check mirrors `requireChannelMembership` in
-      // ChannelsService — default channels short-circuit; everyone else
-      // must have a TeamChannelMember row. Silently no-op on failure
-      // (don't teach a non-member that the channel exists).
-      const channel = await this.db.teamChannel.findFirst({
-        where: { id: body.channelId, teamId },
-        select: { id: true, isDefault: true },
-      });
-      if (!channel) return;
-      if (!channel.isDefault) {
-        const member = await this.db.teamChannelMember.findUnique({
-          where: { channelId_userId: { channelId: body.channelId, userId } },
-          select: { userId: true },
+
+    // Mirror the subscribe:conversation idempotency split: a re-subscribe
+    // (the common reconnect path after socket.io's connectionStateRecovery
+    // restored the room) skips the membership check + budget charge but
+    // STILL re-emits the typing snapshot. Without the always-emit, a long
+    // reconnect (past recovery window, suspended laptop) left the client
+    // showing stale typing pills until the next change ticked.
+    const alreadyJoined = client.rooms.has(room);
+
+    if (!alreadyJoined) {
+      if (!checkSubscribeBudget(client, "subscribe:channel")) return;
+      try {
+        // Membership check mirrors `requireChannelMembership` in
+        // ChannelsService — default channels short-circuit; everyone else
+        // must have a TeamChannelMember row. Silently no-op on failure
+        // (don't teach a non-member that the channel exists).
+        const channel = await this.db.teamChannel.findFirst({
+          where: { id: body.channelId, teamId },
+          select: { id: true, isDefault: true },
         });
-        if (!member) return;
+        if (!channel) return;
+        if (!channel.isDefault) {
+          const member = await this.db.teamChannelMember.findUnique({
+            where: { channelId_userId: { channelId: body.channelId, userId } },
+            select: { userId: true },
+          });
+          if (!member) return;
+        }
+      } catch (err) {
+        this.logger.error(`subscribe:channel lookup failed: ${err}`);
+        return;
       }
-    } catch (err) {
-      this.logger.error(`subscribe:channel lookup failed: ${err}`);
-      return;
+      client.join(room);
     }
-    client.join(room);
+
     client.emit("team:channel:typing:update", {
       channelId: body.channelId,
       typingUserIds: this.typing.snapshotChannel(body.channelId),

@@ -60,6 +60,31 @@ function calendarDay(d: Date, tz?: string): { y: number; m: number; d: number } 
   };
 }
 
+/**
+ * Stable YYYY-MM-DD-shape calendar-day key for a given instant + tz.
+ * Backed by the SAME formatter cache the day-separator uses — call sites
+ * (e.g. message-thread's `todayKey` memo) MUST go through this helper
+ * instead of `new Intl.DateTimeFormat("en-CA", { timeZone: tz })` so the
+ * 60s `now` tick doesn't allocate a fresh formatter every minute.
+ *
+ * "en-CA" gives `YYYY-MM-DD`; we wrap with try/catch the same way
+ * formatDaySeparator does so a bad tz tag doesn't throw mid-render.
+ */
+const enCaDayFormatters = new Map<string, Intl.DateTimeFormat>();
+export function calendarDayKey(now: number | Date, tz?: string): string {
+  const key = tz ?? "";
+  let fmt = enCaDayFormatters.get(key);
+  if (!fmt) {
+    try {
+      fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz });
+    } catch {
+      fmt = new Intl.DateTimeFormat("en-CA");
+    }
+    enCaDayFormatters.set(key, fmt);
+  }
+  return fmt.format(typeof now === "number" ? new Date(now) : now);
+}
+
 /** Compact relative time used in the conversation list ("now", "12m", "3h", "Mon", "Mar 4"). */
 export function formatListTime(iso: string, tz?: string, now?: number): string {
   const then = new Date(iso);

@@ -35,6 +35,10 @@ services:
     # for any service that hits its cap legitimately in production.
     mem_limit: 1500m
     mem_reservation: 512m
+    # CPU cap: 1.0 vCPU. Postgres is the lowest-spike workload of the four;
+    # a runaway index rebuild or unbounded query can still pin the box, so
+    # cap to avoid starving web/api on the same VPS during ops work.
+    cpus: 1.0
     # Tuning for the 8GB-VPS pilot scale. Defaults (shared_buffers=128MB,
     # work_mem=4MB, effective_cache_size=4GB) are too conservative for the
     # mem_limit above and leave perf on the table once 20-30 agents are
@@ -131,6 +135,9 @@ services:
     # the cap mostly catches a runaway pub/sub or a stuck stream.
     mem_limit: 256m
     mem_reservation: 64m
+    # Redis is single-threaded and never the CPU bottleneck at our scale;
+    # 0.5 vCPU is generous and reserves cycles for app + postgres.
+    cpus: 0.5
     logging:
       driver: json-file
       options:
@@ -228,6 +235,10 @@ services:
     # in steady state.
     mem_limit: 2g
     mem_reservation: 768m
+    # Cap web at 1.5 vCPU. RSC renders + bundler compiles can spike CPU;
+    # the cap keeps a heavy hydration burst from starving the api on the
+    # same VPS. Leaves 2.5 vCPU on a 4-core host for api + postgres + redis.
+    cpus: 1.5
     # Same probe shape as api below — gives compose dependents a real
     # "is web up" signal beyond `docker ps` PID liveness. start_period
     # is short because the web CMD is just `node apps/web/server.js`
@@ -406,6 +417,11 @@ services:
     # for native bindings + socket buffers under fan-out load.
     mem_limit: 3g
     mem_reservation: 1g
+    # Highest CPU cap — api owns websocket fanout, workflow runner, BullMQ
+    # workers, drainer, all sweepers. 2.0 vCPU fits comfortably on a 4-core
+    # host alongside web(1.5) + postgres(1.0) + redis(0.5) = 5.0 reserved.
+    # Burst above is allowed (cpus is a quota cap, not a reservation).
+    cpus: 2.0
     # Must exceed BullMQ lockDuration (90s, see lib/workflows/worker.ts)
     # plus a tail for sweeper stop + queue close. Docker's default 10s
     # would SIGKILL the api mid-job, Redis would release the lock 90s

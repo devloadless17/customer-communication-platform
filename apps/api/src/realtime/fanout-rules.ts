@@ -34,6 +34,26 @@ function stripForWire(m: Message): Message {
  * those also publishes a `contact.updated` carrying the hydrated row, so
  * a duplicate socket frame would just double the reducer cost. The narrow
  * events still drive outbound-webhook routing.
+ *
+ * Room-scoping rules — DO NOT REGRESS (this is the "two tabs disagree" /
+ * "broadcast storm" decision-tree class):
+ *
+ *   - emitToTeam        → use when EVERY agent on the team needs to know.
+ *                          Examples: message:new (list ordering), conversation
+ *                          status / assigned / read (badges), contact:updated
+ *                          (panel + filter pruning), team-wide presence.
+ *   - emitToConversation → use when only viewers OF this thread care.
+ *                          Examples: message:status, message:media:ready,
+ *                          typing:update, conversation:viewers, broadcast
+ *                          recipient frames (storm prevention — a 10k-recipient
+ *                          broadcast must NOT fan team-wide).
+ *   - emitToChannel     → team-chat channel-scoped (membership-gated, default
+ *                          channel auto-passes); never use for customer convos.
+ *
+ *   If you can't articulate "every team member needs this NOW", default to
+ *   the narrower scope. A bug where someone misses a frame they wanted is
+ *   recoverable (next mutation or visibility-resync surfaces it). A bug
+ *   where 10k frames fan out per second to every tab is not.
  */
 
 type Handler<K extends DomainEventType> = (

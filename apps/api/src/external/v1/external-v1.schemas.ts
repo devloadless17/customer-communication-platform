@@ -137,6 +137,11 @@ export type ExternalStatusInput = z.infer<typeof ExternalStatusSchema>;
 export const ExternalNoteSchema = z.object({
   body: z.string().trim().min(1).max(8000),
   authorUserId: z.string().min(1).optional(),
+  // When true, partner integrations subscribed to `note.created` outbound
+  // webhooks do NOT receive an echo for THIS write. Lets an n8n flow that
+  // reacts to a customer message by adding a note break its own webhook
+  // loop without depending on chain-depth alone.
+  silent: SilentFlag,
 });
 export type ExternalNoteInput = z.infer<typeof ExternalNoteSchema>;
 
@@ -272,6 +277,11 @@ export type ExternalContactRemoveTagsInput = z.infer<typeof ExternalContactRemov
 export const ExternalBulkTagSchema = z.object({
   contactIds: z.array(z.string().min(1)).min(1).max(MAX_BULK_IDS),
   tagIds: z.array(z.string().min(1)).min(1).max(50),
+  // When true, partner integrations subscribed to `contact.tag_changed` /
+  // `contact.updated` outbound webhooks do NOT receive echoes for THIS
+  // bulk write. Required for any partner that fans tag changes back to
+  // /v1 — without this they'd loop until chain-depth caps catch up.
+  silent: SilentFlag,
 });
 export type ExternalBulkTagInput = z.infer<typeof ExternalBulkTagSchema>;
 

@@ -74,6 +74,13 @@
 		reverse_proxy app:3000
 	}
 
+	# (5a) /api/internal/* — REFUSED at the edge. Mirrors the prod
+	#      Caddyfile.template guard; see that file for the reasoning.
+	#      Loopback-direct calls (Next.js → NestJS) don't traverse Caddy.
+	handle /api/internal/* {
+		respond 404
+	}
+
 	# (5) /api/*, /webhooks/* → api (NestJS). Socket.io rides /api/socket/*,
 	#     covered by /api/* — no separate matcher needed. Long timeouts for
 	#     the WebSocket + SSE connections.

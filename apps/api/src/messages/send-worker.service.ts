@@ -16,6 +16,7 @@ import { createWorkerConnection } from "@/lib/workflows/queue";
 import { MessagesService } from "./messages.service";
 import {
   MESSAGE_SEND_QUEUE_NAME,
+  closeMessageSendQueue,
   type MessageSendJobData,
 } from "./send-queue";
 
@@ -180,6 +181,10 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
     // instance). disconnect() is synchronous + can't hang.
     this.connection?.disconnect();
     this.connection = null;
+    // Close the lazy producer too — otherwise its ioredis socket (via the
+    // shared connection options) stays bound past the worker drain and
+    // delays process exit ~1-2s past stop_grace_period intent.
+    await closeMessageSendQueue();
   }
 
   /**

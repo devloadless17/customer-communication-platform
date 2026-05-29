@@ -348,6 +348,18 @@ export function useTeamEvents(
      * silently leaves the list stale until the user's next deliberate
      * navigation; with retries we recover transparently.
      */
+    // Skip-window for the visibility-triggered resync after a recent
+    // reconnect resync. Without this, a laptop opening on a fresh network
+    // fires `connect` (→ resyncWithBackoff → resyncOnce) AND `visibilitychange`
+    // within milliseconds, and the visibility handler bypasses the in-flight
+    // queue (it runs through `runCoalescedResync`, the reconnect path runs
+    // `resyncOnce` directly), so two parallel /api/conversations fire. 5s is
+    // long enough to cover the reconnect resync's full backoff sequence in
+    // the success case (~0–500ms) and well below any human-noticeable
+    // refresh lag.
+    let lastResyncCompletedAt = 0;
+    const RESYNC_SKIP_WINDOW_MS = 5000;
+
     async function resyncOnce(): Promise<boolean> {
       try {
         // Filter-aware resync: a reconnect under filter=Mine must come back
@@ -416,6 +428,7 @@ export function useTeamEvents(
             });
           return [...reconciledPage, ...tail].filter(rowMatchesFilter);
         });
+        lastResyncCompletedAt = Date.now();
         return true;
       } catch {
         return false;
@@ -478,11 +491,17 @@ export function useTeamEvents(
       }
     }
     function scheduleFilterResync() {
-      // No-op when there's no filter narrowing — the unfiltered list is
-      // already shown in full; per-event mutations cover it.
-      if (!filterRef.current || filterRef.current.kind === "preset" && filterRef.current.id === "all") {
-        return;
-      }
+      // No-op for the broad inbox views ("active" = open+pending, "all" =
+      // everything). Per-event splice handlers above already mutate the
+      // visible slice for the displayed thread, and for off-screen rows the
+      // broad view will surface them whenever `lastMessageAt` next advances.
+      // Running a /api/conversations refetch on every assign / status / stage
+      // event from any teammate while the agent is on the default view
+      // re-renders the entire list and visibly flickers it — the issue the
+      // user reported as "the whole inbox is vibrating".
+      const f = filterRef.current;
+      if (!f) return;
+      if (f.kind === "preset" && (f.id === "active" || f.id === "all")) return;
       if (resyncTimer !== null) return;
       resyncTimer = window.setTimeout(() => {
         resyncTimer = null;
@@ -920,7 +939,14 @@ export function useTeamEvents(
     // Since unread is team-wide, this is how another agent's "read" disappears
     // here even though we never saw the frame.
     const onVisible = () => {
-      if (document.visibilityState === "visible") void runCoalescedResync();
+      if (document.visibilityState !== "visible") return;
+      // Skip when a reconnect just resynced — they collapse to the same GET
+      // and the reconnect path bypasses runCoalescedResync's in-flight queue,
+      // so without this gate the visibility-driven resync would fire as a
+      // PARALLEL fetch. The lastResyncCompletedAt timestamp is stamped only
+      // on success, so a failed reconnect doesn't suppress the recovery.
+      if (Date.now() - lastResyncCompletedAt < RESYNC_SKIP_WINDOW_MS) return;
+      void runCoalescedResync();
     };
     document.addEventListener("visibilitychange", onVisible);
 

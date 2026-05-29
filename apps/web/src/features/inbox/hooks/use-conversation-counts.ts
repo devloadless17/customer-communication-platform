@@ -27,9 +27,11 @@ const STAGE_SETTLING_MS = 1500;
  *   - conversation:status     — flips open/pending ↔ closed
  *   - conversation:deleted    — drops a row from every bucket
  *   - message:new (new conv)  — adds a row to all + unassigned
- *   - contact:updated         — stage edits change byStage; cheaper to
- *                                refetch than to inspect the payload
- *                                (the event fires for every field edit)
+ *   - contact:updated         — fired for EVERY field edit; we only
+ *                                refetch when the contact's stageId
+ *                                actually moved (tracked via lastStageRef).
+ *                                A bulk field edit on 500 contacts now
+ *                                fires zero GETs instead of 500.
  *   - contacts:bulk_updated   — only when changeKind is stage/mixed; tag &
  *                                field bulk ops don't move any bucket, so the
  *                                common 500-contact tag bulk fires no GET
@@ -69,6 +71,11 @@ export function useConversationCounts(): ConversationCounts | null {
   // stage change that arrived mid-window) get reconciled. Cleared on
   // unmount so the timer doesn't leak.
   const settlingTimerRef = useRef<number | null>(null);
+  // Last-seen stageId per contact. Lets us drop `contact:updated` frames
+  // that don't actually move byStage (name edit, custom field edit, tag
+  // change, …). Seeded on first sight; absent entry = unknown prior state
+  // so we refresh defensively.
+  const lastStageRef = useRef<Map<string, string | null>>(new Map());
 
   const refresh = useCoalescedAsync(async () => {
     try {
@@ -93,6 +100,24 @@ export function useConversationCounts(): ConversationCounts | null {
     void refresh();
     const socket = getClientSocket();
     const trigger = () => {
+      void refresh();
+    };
+    // `contact:updated` carries the full contact row. Only a stageId change
+    // moves any byStage bucket — name / email / custom fields / tags don't.
+    // We track the last-seen stageId per contact and skip the refresh when
+    // it hasn't moved. The first sighting of a contact has no prior to
+    // compare against, so we refresh defensively then.
+    const onContactUpdated: Parameters<
+      typeof socket.on<"contact:updated">
+    >[1] = (payload) => {
+      const contact = payload.contact;
+      if (!contact?.id) return;
+      const nextStage = contact.stageId ?? null;
+      const map = lastStageRef.current;
+      const known = map.has(contact.id);
+      const prevStage = known ? map.get(contact.id) ?? null : null;
+      map.set(contact.id, nextStage);
+      if (known && prevStage === nextStage) return;
       void refresh();
     };
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (
@@ -164,7 +189,7 @@ export function useConversationCounts(): ConversationCounts | null {
     socket.on("conversation:assigned", trigger);
     socket.on("conversation:status", trigger);
     socket.on("conversation:deleted", trigger);
-    socket.on("contact:updated", trigger);
+    socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onBulkUpdated);
     socket.on("message:new", onMessageNew);
     if (typeof window !== "undefined") {
@@ -175,7 +200,7 @@ export function useConversationCounts(): ConversationCounts | null {
       socket.off("conversation:assigned", trigger);
       socket.off("conversation:status", trigger);
       socket.off("conversation:deleted", trigger);
-      socket.off("contact:updated", trigger);
+      socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onBulkUpdated);
       socket.off("message:new", onMessageNew);
       if (typeof window !== "undefined") {

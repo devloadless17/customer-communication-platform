@@ -26,7 +26,10 @@ import { useLiveTeamName } from "@/hooks/use-live-team-name";
 import { useInboxFilter } from "@/features/inbox/contexts/inbox-filter-context";
 import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
 import { ThreadCache, type CachedThread } from "@/features/inbox/lib/thread-cache";
-import { THREAD_REDUCER_EVENTS } from "@/features/inbox/lib/thread-reducers";
+import {
+  assertReducerCoverage,
+  THREAD_REDUCER_EVENTS,
+} from "@/features/inbox/lib/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 
 import dynamic from "next/dynamic";
@@ -622,6 +625,25 @@ export function InboxShell({
       }
       cache.clearExcept(displayedIdRef.current);
     };
+
+    // Dev-only invariant: every event subscribed below (manual or via
+    // THREAD_REDUCER_EVENTS) must be accounted for in thread-reducers.ts
+    // — either in the iterated table or in REDUCER_EXCLUSIONS with a
+    // load-bearing reason. Pairs with the same assertion in the live hook
+    // so both sides of the "Realtime cache patch matrix" CLAUDE.md flags
+    // get checked. No-op in production.
+    const MANUAL_SHELL_EVENTS: readonly string[] = [
+      "connect",
+      "message:new",
+      "note:new",
+      "message:failed",
+      "contacts:bulk_updated",
+      "conversation:deleted",
+    ];
+    assertReducerCoverage([
+      ...THREAD_REDUCER_EVENTS.map((e) => e.event as string),
+      ...MANUAL_SHELL_EVENTS,
+    ]);
 
     socket.on("connect", onConnect);
     socket.on("message:new", evictIfBackground);

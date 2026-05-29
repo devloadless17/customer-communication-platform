@@ -424,7 +424,21 @@ export interface MessageMediaReadyEvent {
 export interface BroadcastStatusChangedEvent {
   teamId: string;
   broadcastId: string;
-  status: "queued" | "running" | "completed" | "failed" | "canceled" | "paused";
+  /**
+   * `scheduled` is emitted ONLY by the create path for delayed broadcasts —
+   * the row sits there for hours/days until the BullMQ delayed job fires,
+   * and without this frame every other open broadcasts-list tab would
+   * never know it exists until the next nav. The runner doesn't transition
+   * INTO scheduled; only out of it (queued → running → terminal).
+   */
+  status:
+    | "scheduled"
+    | "queued"
+    | "running"
+    | "completed"
+    | "failed"
+    | "canceled"
+    | "paused";
   error?: string;
   /**
    * When status === "failed" via the boot reconciler, the count of

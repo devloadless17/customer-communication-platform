@@ -20,6 +20,7 @@ import {
 } from "@/lib/external-shapes";
 import { publishInTx } from "@/lib/events/outbox";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 
 import {
   sendTemplateInternal,
@@ -342,7 +343,28 @@ export class ExternalV1MessagingService {
     input: ExternalSendMessageInput,
     /** Optional idempotency key from the `Idempotency-Key` request header. */
     idempotencyKey?: string,
+    /**
+     * Inbound `X-CCP-Depth`. When a partner forwards our outbound webhook
+     * payload back into /v1, the header rides along. Drop early at the
+     * cross-system ceiling so the http_request -> partner -> /v1 send ->
+     * message.sent -> workflow -> http_request loop can't sustain. Shares
+     * the ceiling (MAX_CHAIN_DEPTH) with the incoming_webhook trigger.
+     */
+    chainDepth?: number,
   ) {
+    if (chainDepth !== undefined && chainDepth >= MAX_CHAIN_DEPTH) {
+      throw new HttpException(
+        {
+          error: "chain_depth_exceeded",
+          detail:
+            `inbound X-CCP-Depth ${chainDepth} >= ${MAX_CHAIN_DEPTH} — request dropped to ` +
+            "break a likely cross-system loop (our outbound webhooks return X-CCP-Depth; " +
+            "a partner integration that calls /v1 send on every webhook must respect the " +
+            "cap when forwarding the header).",
+        },
+        429,
+      );
+    }
     // Idempotency — CLAIM-then-execute via the shared `claimIdempotency`
     // helper (also used by the template path so the two can't drift). A
     // replay returns the prior response with zero side effects; a fresh
@@ -706,7 +728,20 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     input: ExternalTopLevelSendMessageInput,
     idempotencyKey?: string,
+    /** See `sendMessage` chainDepth doc — same cross-system cap. */
+    chainDepth?: number,
   ): Promise<{ ok: true; message: ExternalMessage }> {
+    if (chainDepth !== undefined && chainDepth >= MAX_CHAIN_DEPTH) {
+      throw new HttpException(
+        {
+          error: "chain_depth_exceeded",
+          detail:
+            `inbound X-CCP-Depth ${chainDepth} >= ${MAX_CHAIN_DEPTH} — request dropped to ` +
+            "break a likely cross-system loop.",
+        },
+        429,
+      );
+    }
     if (input.media) {
       throw new BadRequestException({
         error: "media_not_yet_supported",
@@ -886,6 +921,65 @@ export class ExternalV1MessagingService {
 
   async createNote(
     teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalNoteInput,
+    idempotencyKey?: string,
+    chainDepth?: number,
+  ) {
+    // Loop guard — a partner whose `note.created` outbound-webhook
+    // receiver POSTs back here would otherwise note-thrash until the
+    // route's 300/min global rate limit catches up. Cap at MAX_CHAIN_DEPTH
+    // mirroring the send routes.
+    if (chainDepth !== undefined && chainDepth >= MAX_CHAIN_DEPTH) {
+      throw new HttpException(
+        {
+          error: "chain_depth_exceeded",
+          detail:
+            `inbound X-CCP-Depth ${chainDepth} >= ${MAX_CHAIN_DEPTH} — request dropped to ` +
+            "break a likely cross-system loop.",
+        },
+        429,
+      );
+    }
+    // Idempotency — a partner retry of the same note must not write a
+    // second InternalNote + re-publish `note.created` (which audit + outbound
+    // webhooks subscribe to). Same shape as the assign / set_status paths.
+    if (idempotencyKey) {
+      const claim = await this.idem.claim<{
+        note: {
+          id: string;
+          conversationId: string;
+          authorUserId: string;
+          body: string;
+          timestamp: string;
+        };
+      }>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+        this.idem.fingerprint("create_note", {
+          conversationId,
+          authorUserId: input.authorUserId,
+          body: input.body,
+        }),
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+    try {
+      const result = await this.createNoteInternal(teamId, conversationId, input);
+      if (idempotencyKey) {
+        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      }
+      return result;
+    } catch (err) {
+      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      throw err;
+    }
+  }
+
+  private async createNoteInternal(
+    teamId: string,
     conversationId: string,
     input: ExternalNoteInput,
   ) {
@@ -932,6 +1026,10 @@ export class ExternalV1MessagingService {
       teamId,
       conversationId,
       note: notePayload,
+      // Honor `silent: true` so a partner whose `note.created` webhook
+      // receiver creates ANOTHER note (loop) can break their own echo
+      // chain without depending on chain-depth alone.
+      silent: input.silent === true,
     });
 
     return { note: notePayload };

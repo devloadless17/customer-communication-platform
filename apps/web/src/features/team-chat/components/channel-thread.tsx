@@ -104,6 +104,8 @@ export function ChannelThread({
     conversationId: channelId,
     lastEntryKey,
     isOwnSend,
+    // Team-chat timeline holds only messages — no activity-log pills.
+    isActivityTail: false,
     hasMoreOlder,
     loadOlder: onLoadOlder,
   });

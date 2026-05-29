@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
+
+import type { ServerToClientEvents } from "@ccp/shared/socket/events";
+
+type CatalogScope = Parameters<
+  ServerToClientEvents["team:catalog:changed"]
+>[0]["scope"];
 
 /**
  * Listens for `team:catalog:changed` and re-runs the current route's server
@@ -29,9 +35,52 @@ import { getClientSocket } from "@/lib/socket-client";
  */
 const REFRESH_COALESCE_MS = 150;
 
+/**
+ * Scope-vs-pathname affinity: which top-level routes actually CONSUME a given
+ * catalog. A scope event that doesn't intersect the current pathname is
+ * dropped — refreshing the inbox because someone added an API key elsewhere
+ * is wasted bandwidth and a wasted RSC round-trip. Default = refresh, so any
+ * route not listed here keeps current behavior (no regressions when a new
+ * route is added that consumes a known catalog).
+ *
+ * Sidebar-global scopes ("members", "team-channels") are NOT listed — they
+ * always refresh because the rail (avatars, channel list) is rendered above
+ * every route. Same for "stages" / "tags" / "contact-fields" / "snippets" /
+ * "whatsapp-templates" which the inbox reply-box / panels read on every
+ * conversation render.
+ *
+ * Only scopes whose consumers live on a NARROW route set are listed here.
+ */
+const SCOPE_AFFINITY: Partial<Record<CatalogScope, readonly string[]>> = {
+  // Workflow definitions are only on the workflows canvas + lists.
+  workflows: ["/workflows"],
+  // Audience groups are only used inside the broadcasts flow.
+  "audience-groups": ["/broadcasts"],
+  // Pending invites are admin-only and only shown on team settings.
+  invites: ["/settings/team"],
+  // API keys settings page only.
+  "api-keys": ["/settings/api-keys"],
+};
+
+function isPathnameRelevantToScope(
+  scope: CatalogScope,
+  pathname: string | null,
+): boolean {
+  const prefixes = SCOPE_AFFINITY[scope];
+  if (!prefixes) return true;
+  if (!pathname) return true;
+  return prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
 export function useCatalogSync(): void {
   const router = useRouter();
+  const pathname = usePathname();
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
   const pending = useRef<number | null>(null);
+  // Whether a relevant scope was seen in the current coalesce window. A burst
+  // mixing relevant + irrelevant scopes still refreshes (one is enough).
+  const pendingRelevant = useRef(false);
   // Wrap refresh in a transition so Suspense boundaries don't fall back to
   // loading.tsx during the data refetch. Without this, the FIRST mutation
   // to any catalog (e.g. creating the first tag for the team) felt like a
@@ -51,10 +100,16 @@ export function useCatalogSync(): void {
   useEffect(() => {
     const socket = getClientSocket();
 
-    const onChanged: Parameters<typeof socket.on<"team:catalog:changed">>[1] = () => {
+    const onChanged: Parameters<typeof socket.on<"team:catalog:changed">>[1] = (payload) => {
+      if (isPathnameRelevantToScope(payload.scope, pathnameRef.current)) {
+        pendingRelevant.current = true;
+      }
       if (pending.current !== null) return;
       pending.current = window.setTimeout(() => {
         pending.current = null;
+        const shouldRefresh = pendingRelevant.current;
+        pendingRelevant.current = false;
+        if (!shouldRefresh) return;
         startTransition(() => router.refresh());
       }, REFRESH_COALESCE_MS);
     };
@@ -66,6 +121,7 @@ export function useCatalogSync(): void {
         window.clearTimeout(pending.current);
         pending.current = null;
       }
+      pendingRelevant.current = false;
     };
   }, [router, startTransition]);
 }

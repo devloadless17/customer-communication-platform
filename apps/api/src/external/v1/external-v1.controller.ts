@@ -19,6 +19,7 @@ import { RequireScope } from "../../auth/scope.decorator";
 import { ScopeGuard } from "../../auth/scope.guard";
 import { RateLimit } from "../../common/rate-limit.guard";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
+import { parseChainDepth } from "@/lib/workflows/events";
 import { ExternalV1Service } from "./external-v1.service";
 import {
   ExternalAssignSchema,
@@ -146,13 +147,26 @@ export class ExternalV1Controller {
   @RequireScope("write:contacts")
   // Bulk paths accept up to 500 contact ids and fan out per-contact event
   // chains (workflow + audit + outbound webhooks). 20/min/key bounds the
-  // worst case to ~10k contact-events/min from one partner.
+  // worst case to ~10k contact-events/min from one partner. Idempotency-Key
+  // also collapses retries within the key TTL — a partner retrying after a
+  // 5xx replays the fingerprint-matched response with zero side effects.
+  // X-CCP-Depth is the cross-system loop guard: a partner whose own webhook
+  // receiver bounces back here gets 429'd at depth 8 instead of looping.
   @RateLimit({ perMinute: 20 })
   async bulkAddTags(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalBulkTagSchema)) body: ExternalBulkTagInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    return this.api.bulkContactTags(auth.teamId, auth.apiKeyId, "tag-add", body);
+    return this.api.bulkContactTags(
+      auth.teamId,
+      auth.apiKeyId,
+      "tag-add",
+      body,
+      idempotencyKey?.trim() || undefined,
+      parseChainDepth(xCcpDepth),
+    );
   }
 
   @Post("contacts/tags/remove")
@@ -161,8 +175,17 @@ export class ExternalV1Controller {
   async bulkRemoveTags(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalBulkTagSchema)) body: ExternalBulkTagInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    return this.api.bulkContactTags(auth.teamId, auth.apiKeyId, "tag-remove", body);
+    return this.api.bulkContactTags(
+      auth.teamId,
+      auth.apiKeyId,
+      "tag-remove",
+      body,
+      idempotencyKey?.trim() || undefined,
+      parseChainDepth(xCcpDepth),
+    );
   }
 
   // ---- Contacts: create / upsert / update / delete ------------------
@@ -274,8 +297,15 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Param("tagId") tagId: string,
+    @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    const contact = await this.api.removeContactTag(auth.teamId, auth.apiKeyId, id, tagId);
+    const contact = await this.api.removeContactTag(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      tagId,
+      idempotencyKey?.trim() || undefined,
+    );
     return { contact };
   }
 
@@ -502,6 +532,7 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalTopLevelSendMessageSchema)) body: ExternalTopLevelSendMessageInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     const trimmed = idempotencyKey?.trim();
     return this.api.sendTopLevelMessage(
@@ -509,6 +540,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       body,
       trimmed && trimmed.length > 0 && trimmed.length <= 255 ? trimmed : undefined,
+      parseChainDepth(xCcpDepth),
     );
   }
 
@@ -541,6 +573,12 @@ export class ExternalV1Controller {
     // value within 24h returns the same response without re-sending to
     // WhatsApp — the partner's retry-after-5xx flow becomes safe.
     @Headers("idempotency-key") idempotencyKey?: string,
+    // Cross-system loop guard. The /v1 endpoints accept the same X-CCP-Depth
+    // header the incoming_webhook trigger uses (audit 2026-05-29): a partner
+    // that calls /v1/send on every outbound webhook we deliver must forward
+    // the header so we can cap the chain at MAX_CHAIN_DEPTH. Bare requests
+    // from a partner that never receives our webhooks parse as depth=0.
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     const trimmed = idempotencyKey?.trim();
     const out = await this.api.sendMessage(
@@ -549,6 +587,7 @@ export class ExternalV1Controller {
       id,
       body,
       trimmed && trimmed.length > 0 && trimmed.length <= 255 ? trimmed : undefined,
+      parseChainDepth(xCcpDepth),
     );
     return { ok: true, message: out.message };
   }
@@ -561,8 +600,17 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
     @Body(zBody(ExternalNoteSchema)) body: ExternalNoteInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    const out = await this.api.createNote(auth.teamId, id, body);
+    const out = await this.api.createNote(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      body,
+      idempotencyKey?.trim() || undefined,
+      parseChainDepth(xCcpDepth),
+    );
     return { ok: true, note: out.note };
   }
 }

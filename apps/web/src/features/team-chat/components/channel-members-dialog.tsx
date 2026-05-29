@@ -224,7 +224,7 @@ export function ChannelMembersDialog({
           </Button>
         </div>
 
-        <div className="flex max-h-[28rem] flex-col gap-3 overflow-hidden p-4">
+        <div className="flex max-h-112 flex-col gap-3 overflow-hidden p-4">
           {canManage && !channel.isDefault ? (
             <div>
               {addPickerOpen ? (

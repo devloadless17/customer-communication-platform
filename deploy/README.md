@@ -424,7 +424,7 @@ deploy ALL=(root) NOPASSWD: \
   /usr/bin/mkdir -p /var/log/caddy, \
   /usr/bin/chown -R caddy\:caddy /var/log/caddy, \
   /usr/bin/caddy validate --config /etc/caddy/Caddyfile, \
-  /bin/systemctl reload-or-restart caddy, \
+  /bin/systemctl reload caddy, \
   /bin/systemctl disable --now ccp.service, \
   /bin/systemctl daemon-reload, \
   /bin/rm -f /etc/systemd/system/ccp.service

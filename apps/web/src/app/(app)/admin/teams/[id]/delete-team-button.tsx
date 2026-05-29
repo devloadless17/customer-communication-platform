@@ -6,6 +6,7 @@ import { Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 /**
  * superAdmin-only inline delete button for a foreign team. Renders nothing
@@ -39,7 +40,7 @@ export function DeleteTeamButton({
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetch(`/api/admin/teams/${teamId}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/admin/teams/${teamId}`, { method: "DELETE" });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       setError(data.error ?? "Failed to delete organization");

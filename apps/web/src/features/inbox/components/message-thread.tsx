@@ -9,7 +9,7 @@ import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
-import { formatDaySeparator } from "@ccp/shared/utils";
+import { calendarDayKey, formatDaySeparator } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ContactStage,
@@ -312,6 +312,17 @@ function MessageThreadImpl({
     if (s.count === 0) return;
     setForwardIds([...s.selectedIds]);
     setForwardOpen(true);
+  }, []);
+
+  // Stable handlers for ForwardDialog (dynamic-imported, may be memoized
+  // internally). Inline arrows would re-allocate on every parent render
+  // and force the dialog's effect chain to re-run on each pass.
+  const closeForward = useCallback(() => {
+    setForwardOpen(false);
+    selectionRef.current.clear();
+  }, []);
+  const onForwardError = useCallback((summary: string) => {
+    void alert(summary);
   }, []);
 
   const startSelect = useCallback(
@@ -776,13 +787,12 @@ function MessageThreadImpl({
   // day yields identical Today/Yesterday output.
   const nowRef = useRef(now);
   nowRef.current = now;
-  const todayKey = useMemo(() => {
-    try {
-      return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(now);
-    } catch {
-      return new Intl.DateTimeFormat("en-CA").format(now);
-    }
-  }, [tz, now]);
+  // Use the SHARED `calendarDayKey` cache instead of allocating a fresh
+  // `Intl.DateTimeFormat` every 60s tick. Same cache the day-separator
+  // formatter uses — without this, every visible thread re-allocates a
+  // formatter on every `now` tick, defeating the cache that exists
+  // precisely to prevent this (memory: project_no_split_paint_time_rule).
+  const todayKey = useMemo(() => calendarDayKey(now, tz), [tz, now]);
   const dayLabels = useMemo(() => {
     const labels: Array<string | null> = new Array(timeline.length);
     let prevLabel: string | null = null;
@@ -807,6 +817,12 @@ function MessageThreadImpl({
   const lastEntryKey = lastEntry ? `${lastEntry.kind}_${lastEntry.data.id}` : null;
   const isOwnSend =
     lastEntry?.kind === "message" && lastEntry.data.pending === true;
+  // Activity-log pills (assignment / status / stage / tag changes) ride the
+  // same timeline as messages + notes so they sort into chronological order,
+  // but they aren't "new conversation content" — suppress the unread-below
+  // pill bump for them in `useChatScroll` so an assignment never surfaces a
+  // misleading "↓ 1 new message" bubble.
+  const isActivityTail = lastEntry?.kind === "activity";
 
   const { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom } =
     useChatScroll({
@@ -816,6 +832,7 @@ function MessageThreadImpl({
       conversationId: conversation.id,
       lastEntryKey,
       isOwnSend,
+      isActivityTail,
       hasMoreOlder,
       loadOlder,
     });
@@ -1087,13 +1104,8 @@ function MessageThreadImpl({
       <ForwardDialog
         open={forwardOpen}
         messageIds={forwardIds}
-        onClose={() => {
-          setForwardOpen(false);
-          selection.clear();
-        }}
-        onError={(summary) => {
-          void alert(summary);
-        }}
+        onClose={closeForward}
+        onError={onForwardError}
       />
       {confirmDialog}
     </section>

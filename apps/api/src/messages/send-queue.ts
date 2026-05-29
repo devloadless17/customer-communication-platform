@@ -119,3 +119,23 @@ export async function enqueueMessageSend(data: MessageSendJobData): Promise<void
   );
 }
 
+/**
+ * Close the lazy producer + its ioredis socket on shutdown. Without this,
+ * the producer connection (shared via connectionOptions()) outlives the
+ * worker drain by 1-2s, keeping the process from exiting cleanly within
+ * the compose stop_grace_period. Mirrors `closeWebhookDeliverQueue` in
+ * `lib/outbound-webhooks/queue.ts`. Idempotent on re-entry — safe if a
+ * caller invokes it twice.
+ */
+export async function closeMessageSendQueue(): Promise<void> {
+  if (!state.queue) return;
+  const q = state.queue;
+  state.queue = undefined;
+  try {
+    await q.close();
+  } catch {
+    // No-op; we're shutting down and the ioredis socket may already be
+    // disconnected via the shared producer connection's own teardown.
+  }
+}
+

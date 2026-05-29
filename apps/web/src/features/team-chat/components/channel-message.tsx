@@ -537,38 +537,55 @@ export const ChannelMessage = memo(
 
 function MediaAttachment({ media }: { media: NonNullable<TeamChannelMessageDto["media"]> }) {
   if (media.kind === "image" || media.kind === "sticker") {
+    // Fixed-aspect slot: reserve height BEFORE the bytes decode so the
+    // bubble doesn't push every later message down on load. Mirrors the
+    // inbox `media-blocks.tsx` pattern (CLAUDE.md "Image bubble flicker"
+    // — same bug class, team-chat was missed). w-72/aspect-4/3 covers the
+    // common phone-photo + screenshot proportions; very tall portraits
+    // are letterboxed by object-contain. No flash because the slot's
+    // dimensions don't depend on the image.
     return (
       <a
         href={media.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="mt-1.5 block max-w-sm overflow-hidden rounded-lg border border-border"
+        className="relative mt-1.5 block aspect-4/3 w-72 max-w-full overflow-hidden rounded-lg border border-border bg-muted/30"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={media.url}
           alt={media.caption ?? media.filename ?? "attachment"}
-          loading="lazy"
           decoding="async"
-          className="max-h-64 w-auto object-contain"
+          className="absolute inset-0 size-full object-contain"
         />
       </a>
     );
   }
   if (media.kind === "video") {
+    // Same reserved-slot reasoning as image. `preload="metadata"` still
+    // hints at the codec for the controls — only the box dimensions are
+    // pinned, not the file fetch.
     return (
-      <video
-        controls
-        preload="metadata"
-        className="mt-1.5 max-h-72 max-w-sm rounded-lg border border-border"
-      >
-        <source src={media.url} type={media.mimeType} />
-      </video>
+      <div className="mt-1.5 aspect-video w-80 max-w-full overflow-hidden rounded-lg border border-border bg-muted/30">
+        <video
+          controls
+          preload="metadata"
+          className="size-full"
+        >
+          <source src={media.url} type={media.mimeType} />
+        </video>
+      </div>
     );
   }
   if (media.kind === "audio") {
+    // Audio controls have a fixed height in every browser, so a min-height
+    // reservation is enough to keep scroll stable while metadata loads.
     return (
-      <audio controls preload="metadata" className="mt-1.5 w-full max-w-sm">
+      <audio
+        controls
+        preload="metadata"
+        className="mt-1.5 block h-10 w-full max-w-sm"
+      >
         <source src={media.url} type={media.mimeType} />
       </audio>
     );

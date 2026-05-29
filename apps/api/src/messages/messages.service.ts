@@ -263,29 +263,38 @@ export class MessagesService {
         });
         if (!convo) return;
 
+        // Both branches wrap CAS + publish in one transaction via
+        // publishInTx — a crash between commit and emit on the prior
+        // bare-publish posture lost the realtime frame + audit row + any
+        // outbound webhook for the assign/status flip. Same shape as
+        // commitOutboundEvent.
+
         // Branch A: already assigned (to anyone, including this agent).
         // Skip the claim; promote status if not open.
         if (convo.assignedUserId !== null) {
           if (convo.status === "open") return;
           const previousStatus = convo.status;
-          const result = await this.db.conversation.updateMany({
-            where: {
-              id: conversationId,
+          const currentAssignee = convo.assignedUserId;
+          await this.db.$transaction(async (tx) => {
+            const result = await tx.conversation.updateMany({
+              where: {
+                id: conversationId,
+                teamId,
+                assignedUserId: currentAssignee, // pin current owner
+                status: previousStatus,
+              },
+              data: { status: "open" },
+            });
+            if (result.count === 0) return; // lost the CAS race — someone else changed status/assignee first
+            await publishInTx(tx, {
+              type: "conversation.status_changed",
               teamId,
-              assignedUserId: convo.assignedUserId, // pin current owner
-              status: previousStatus,
-            },
-            data: { status: "open" },
-          });
-          if (result.count === 0) return; // lost the CAS race — someone else changed status/assignee first
-          await this.bus.publish({
-            type: "conversation.status_changed",
-            teamId,
-            conversationId,
-            previousStatus,
-            newStatus: "open",
-            changedByUserId: userId,
-            contact: workflowContactSnapshot(convo.contact),
+              conversationId,
+              previousStatus,
+              newStatus: "open",
+              changedByUserId: userId,
+              contact: workflowContactSnapshot(convo.contact),
+            });
           });
           return;
         }
@@ -298,14 +307,8 @@ export class MessagesService {
         const nextStatus = previousStatus !== "open" ? "open" : previousStatus;
         const statusChanged = nextStatus !== previousStatus;
 
-        const result = await this.db.conversation.updateMany({
-          where: { id: conversationId, teamId, assignedUserId: null, status: previousStatus },
-          data: statusChanged
-            ? { assignedUserId: userId, status: nextStatus }
-            : { assignedUserId: userId },
-        });
-        if (result.count === 0) return; // lost the CAS race — someone else claimed/closed first
-
+        // Resolve the assignee snapshot BEFORE opening the tx — it's a
+        // pure read against the same DB and keeps the tx body short.
         const assignee = await this.db.user.findFirst({
           where: { id: userId, teamId },
           select: {
@@ -330,28 +333,38 @@ export class MessagesService {
             }
           : null;
 
-        await this.bus.publish({
-          type: "conversation.assigned",
-          teamId,
-          conversationId,
-          assignedUser,
-          previousAssignedUserId: null,
-          newAssignedUserId: userId,
-          changedByUserId: userId,
-          contact: workflowContactSnapshot(convo.contact),
-        });
+        await this.db.$transaction(async (tx) => {
+          const result = await tx.conversation.updateMany({
+            where: { id: conversationId, teamId, assignedUserId: null, status: previousStatus },
+            data: statusChanged
+              ? { assignedUserId: userId, status: nextStatus }
+              : { assignedUserId: userId },
+          });
+          if (result.count === 0) return; // lost the CAS race — someone else claimed/closed first
 
-        if (statusChanged) {
-          await this.bus.publish({
-            type: "conversation.status_changed",
+          await publishInTx(tx, {
+            type: "conversation.assigned",
             teamId,
             conversationId,
-            previousStatus,
-            newStatus: nextStatus,
+            assignedUser,
+            previousAssignedUserId: null,
+            newAssignedUserId: userId,
             changedByUserId: userId,
             contact: workflowContactSnapshot(convo.contact),
           });
-        }
+
+          if (statusChanged) {
+            await publishInTx(tx, {
+              type: "conversation.status_changed",
+              teamId,
+              conversationId,
+              previousStatus,
+              newStatus: nextStatus,
+              changedByUserId: userId,
+              contact: workflowContactSnapshot(convo.contact),
+            });
+          }
+        });
       } catch (err) {
         this.logger.debug(
           `autoAssignOnAgentSend failed for ${conversationId}: ${String(err)}`,

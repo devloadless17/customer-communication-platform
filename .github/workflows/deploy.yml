@@ -117,6 +117,13 @@ jobs:
             printf '✗ missing GH Actions secret: %s\n' "${missing[@]}"
             exit 1
           fi
+          # Dev escape hatches (ENABLE_DEV_TOOLS / INTEGRATIONS_ALLOW_PRIVATE_HOSTS)
+          # are guarded at boot by apps/api/src/main.ts: prod + flag=1 hard-crashes
+          # before any HTTP. We previously also checked here pre-deploy, but the
+          # boot crash + auto-rollback already covers the misconfig path safely,
+          # and the secrets.* refs tripped a permanent IDE lint warning since the
+          # keys are intentionally undefined in repo settings. Defense-in-depth
+          # without the noise: rely on main.ts + compose defaults (both 0/unset).
           echo "✓ all required GH secrets present"
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
@@ -588,7 +595,12 @@ jobs:
             sudo mkdir -p /var/log/caddy
             sudo chown -R caddy:caddy /var/log/caddy
             sudo caddy validate --config /etc/caddy/Caddyfile
-            sudo systemctl reload-or-restart caddy
+            # reload-ONLY (not reload-or-restart): a fallback restart drops
+            # every in-flight HTTPS connection, including the user reading
+            # this deploy's CI logs. The validate above is the gate — if
+            # config is malformed, fail the deploy here instead of triggering
+            # a restart on the live host.
+            sudo systemctl reload caddy
 
             # Drive the stack directly with docker compose (no systemd).
             # `up -d` recreates only the services whose image/config changed

@@ -64,11 +64,23 @@ export interface Condition {
   field: ConditionField;
   op: ConditionOp;
   value: string;
+  /**
+   * Client-only stable id for React keying. Stamped at insert-time + on
+   * server-hydration; carried forward by every spread (`{...condition,
+   * value}`). Without this, the editor used `key={idx}` and any edit that
+   * recreated the surrounding object (every keystroke goes through
+   * `onChange({...condition, value})`) re-keyed the row → input remount →
+   * focus lost mid-typing. Optional in the type so legacy persisted graphs
+   * deserialize without complaint; `useChildKeys` stamps lazily.
+   */
+  _id?: string;
 }
 
 export interface ConditionGroup {
   op: GroupOp;
   children: Array<Condition | ConditionGroup>;
+  /** See `Condition._id`. */
+  _id?: string;
 }
 
 export function isGroup(c: Condition | ConditionGroup): c is ConditionGroup {

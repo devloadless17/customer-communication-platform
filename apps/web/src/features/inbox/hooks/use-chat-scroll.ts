@@ -37,6 +37,15 @@ interface Options {
    * that case — intent is unambiguous regardless of scroll position.
    */
   isOwnSend: boolean;
+  /**
+   * True when the new tail entry is an activity-log pill (assignment,
+   * status, stage, tag, note-delete) rather than a real message or note.
+   * Activity pills are passive context — bumping the "↓ N new messages"
+   * pill on them is misleading ("1 new message" but it's actually
+   * "Ali assigned to elena"). When true, skip the unread bump AND the
+   * snap, so a user scrolled up reading history is undisturbed.
+   */
+  isActivityTail: boolean;
   /** Whether older history exists to be fetched on top-sentinel entry. */
   hasMoreOlder: boolean;
   /** Fetch + prepend the next older page. Hook wraps the commit in flushSync. */
@@ -68,6 +77,7 @@ export function useChatScroll({
   conversationId,
   lastEntryKey,
   isOwnSend,
+  isActivityTail,
   hasMoreOlder,
   loadOlder,
 }: Options): {
@@ -203,6 +213,14 @@ export function useChatScroll({
       skipNextTailEffectRef.current = false;
       return;
     }
+    // Activity-log pills (assignment / status / stage / tag / note-delete)
+    // are passive context — they shouldn't trigger the "↓ N new messages"
+    // pill or yank the viewport. If the user is reading history when an
+    // assignment lands, the pill quietly slots into the timeline and the
+    // scroll stays put; if they're already at the bottom, the
+    // ResizeObserver below will pin them as the pill mounts. Either way,
+    // the misleading "1 new message" bubble never appears for a log entry.
+    if (isActivityTail) return;
     if (isOwnSend) {
       // Kill any active load-older settle window — its ResizeObserver would
       // otherwise re-pin to the OLD distance-from-bottom and undo this snap.
@@ -221,7 +239,7 @@ export function useChatScroll({
         if (stickyRef.current) snapToBottom();
       });
     });
-  }, [lastEntryKey, isOwnSend, snapToBottom]);
+  }, [lastEntryKey, isOwnSend, isActivityTail, snapToBottom]);
 
   // Action exposed to the pill: clicking it jumps to bottom and clears
   // the unread count. Forces sticky=true so subsequent inbound messages

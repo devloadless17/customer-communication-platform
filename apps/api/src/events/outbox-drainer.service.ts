@@ -162,6 +162,14 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         // If you add a subscriber that reads-then-writes a shared row,
         // either make the write predicate-gated or batch this back to
         // sequential dispatch per event.
+        // claimBatch's outer `UPDATE … RETURNING` has no ORDER BY — Postgres
+        // returns rows in physical-update order, which doesn't match the
+        // inner CTE's createdAt sort. For two `message.sent` events queued
+        // on the SAME conversation in the same drain batch, the realtime
+        // emits would race in arbitrary order → list-row preview can show
+        // the older message's text until the next mutation. Sort by
+        // createdAt before Promise.all to preserve FIFO per stream.
+        rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
         await Promise.all(
           rows.map((row) => this.dispatch(row).catch((err) => {
             this.logger.error(

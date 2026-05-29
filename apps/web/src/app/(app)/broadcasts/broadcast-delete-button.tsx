@@ -5,6 +5,7 @@ import { Loader2, Trash2 } from "lucide-react";
 
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
 /**
@@ -41,7 +42,7 @@ export function BroadcastDeleteButton({
     if (!ok) return;
     setPending(true);
     try {
-      const res = await fetch(`/api/broadcasts/${broadcastId}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/broadcasts/${broadcastId}`, { method: "DELETE" });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
         toast.error("Couldn't delete broadcast", {

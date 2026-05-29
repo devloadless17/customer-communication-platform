@@ -24,6 +24,30 @@ import type { MediaKind } from "@ccp/shared/types";
 
 export type { WorkflowTriggerEvent };
 
+/**
+ * Cross-system chain-depth ceiling shared by every entry point that can
+ * fan back into the platform via a partner round-trip: the per-workflow
+ * `incoming_webhook` trigger AND the /v1 external send/template endpoints
+ * (when called from a partner integration that an outbound webhook can
+ * reach). Each entry point reads `X-CCP-Depth` from the inbound request,
+ * drops at/above this ceiling, and propagates depth+1 into any work it
+ * schedules. The in-process trigger_workflow `TRIGGER_DEPTH_MAX` uses the
+ * same value so both chain axes share one ceiling.
+ */
+export const MAX_CHAIN_DEPTH = 8;
+
+/**
+ * Parse the inbound `X-CCP-Depth` header. Missing / non-numeric / negative
+ * values fall back to 0 (top-level call). Bounded above by Number.MAX_SAFE_*
+ * implicitly via Number.parseInt; we don't cap here so the caller can log
+ * the actual value of an obviously-poisoned request before dropping it.
+ */
+export function parseChainDepth(raw: string | undefined): number {
+  if (!raw) return 0;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /** Wire-format envelope sent to http_request steps. Bump `version` on breaking changes. */
 export interface WorkflowEventEnvelope<P = EventPayload> {
   version: 1;

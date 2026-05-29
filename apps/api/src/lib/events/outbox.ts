@@ -203,6 +203,8 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
     ),
     ranked AS (
       SELECT "id",
+             "teamId",
+             "createdAt",
              ROW_NUMBER() OVER (PARTITION BY "teamId" ORDER BY "createdAt") AS team_rn
       FROM   candidates
     )
@@ -212,6 +214,12 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
     WHERE  "id" IN (
       SELECT "id" FROM ranked
       WHERE team_rn <= ${PER_TEAM_BATCH_CAP}
+      -- Explicit ORDER BY so the LIMIT picks the OLDEST rows across teams,
+      -- not whatever order the planner happens to materialize the CTE in.
+      -- Postgres preserves CTE row order today, but the docs don't guarantee
+      -- it — without this, a future plan change could pick non-oldest rows
+      -- under load, breaking FIFO + fairness.
+      ORDER BY team_rn, "createdAt"
       LIMIT ${limit}
     )
     RETURNING "id", "teamId", "type", "payload", "createdAt", "attempts";

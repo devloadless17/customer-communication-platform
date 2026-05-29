@@ -31,6 +31,7 @@ import {
 } from "@ccp/shared/field-tokens";
 import { parseVariableBindings, type VariableBinding } from "@ccp/shared/template-bindings";
 
+import { apiFetch } from "@/lib/api/client-fetch";
 import { AudiencePicker, type AudienceState } from "@/features/broadcasts/components/audience-picker";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
@@ -155,34 +156,11 @@ export function NewBroadcastForm({
   // -------------------------------------------------------------------------
   // Template fetch + sync
   // -------------------------------------------------------------------------
-  const loadTemplates = useCallback(async () => {
-    setTemplatesError(null);
-    setTemplatesLoading(true);
-    try {
-      const res = await fetch("/api/team/whatsapp/templates");
-      if (!res.ok) throw new Error(await safeReadError(res));
-      const data = (await res.json()) as {
-        templates?: TemplateDto[];
-        hasWabaId?: boolean;
-      };
-      setTemplates(data.templates ?? []);
-      // Auto-sync from Meta if cache is empty and the WABA is set up — same
-      // behavior as the inbox picker so first-time users see something.
-      if ((data.templates ?? []).length === 0 && data.hasWabaId) {
-        void syncTemplates();
-      }
-    } catch (err) {
-      setTemplatesError(err instanceof Error ? err.message : "Failed to load");
-    } finally {
-      setTemplatesLoading(false);
-    }
-  }, []);
-
   const syncTemplates = useCallback(async () => {
     setTemplatesSyncing(true);
     setTemplatesError(null);
     try {
-      const res = await fetch("/api/team/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch("/api/team/whatsapp/templates", { method: "POST" });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -201,6 +179,29 @@ export function NewBroadcastForm({
       setTemplatesSyncing(false);
     }
   }, []);
+
+  const loadTemplates = useCallback(async () => {
+    setTemplatesError(null);
+    setTemplatesLoading(true);
+    try {
+      const res = await apiFetch("/api/team/whatsapp/templates");
+      if (!res.ok) throw new Error(await safeReadError(res));
+      const data = (await res.json()) as {
+        templates?: TemplateDto[];
+        hasWabaId?: boolean;
+      };
+      setTemplates(data.templates ?? []);
+      // Auto-sync from Meta if cache is empty and the WABA is set up — same
+      // behavior as the inbox picker so first-time users see something.
+      if ((data.templates ?? []).length === 0 && data.hasWabaId) {
+        void syncTemplates();
+      }
+    } catch (err) {
+      setTemplatesError(err instanceof Error ? err.message : "Failed to load");
+    } finally {
+      setTemplatesLoading(false);
+    }
+  }, [syncTemplates]);
 
   useEffect(() => {
     void loadTemplates();
@@ -366,7 +367,7 @@ export function NewBroadcastForm({
     setSendError(null);
     setSending(true);
     try {
-      const res = await fetch("/api/broadcasts", {
+      const res = await apiFetch("/api/broadcasts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

@@ -15,6 +15,7 @@ import {
 import { motion } from "framer-motion";
 
 import { LocalTime } from "@/components/local-time";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone } from "@ccp/shared/utils";
 import { BroadcastStatusBadge } from "../broadcast-status-badge";
@@ -89,7 +90,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
     setRetrying(true);
     setRetryError(null);
     try {
-      const res = await fetch(`/api/broadcasts/${data.id}/retry`, { method: "POST" });
+      const res = await apiFetch(`/api/broadcasts/${data.id}/retry`, { method: "POST" });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
         setRetryError(body.detail ?? body.error ?? "Couldn't retry");
@@ -110,7 +111,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   refreshRef.current = async () => {
     try {
-      const res = await fetch(`/api/broadcasts/${data.id}`);
+      const res = await apiFetch(`/api/broadcasts/${data.id}`);
       if (!res.ok) return;
       const json = (await res.json()) as { broadcast?: BroadcastDetailDto };
       if (cancelledRef.current || !json.broadcast) return;

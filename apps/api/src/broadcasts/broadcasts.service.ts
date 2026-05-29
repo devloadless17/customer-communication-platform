@@ -24,6 +24,7 @@ import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { resolveAudienceGroupMembers } from "@/lib/queries";
 
 import { DbService } from "../db/db.service";
+import { EventBus } from "../events/event-bus.module";
 import type {
   BroadcastListQuery,
   CreateBroadcastInput,
@@ -33,7 +34,10 @@ import type {
 export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BroadcastsService.name);
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly bus: EventBus,
+  ) {}
 
   /**
    * Boot-time crash recovery + paused-broadcast resume. See
@@ -331,6 +335,19 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // response returns before any Meta sends happen.
       startBroadcast(broadcast.id);
     }
+
+    // Publish a status frame for the create itself. The runner publishes
+    // its own status_changed on the queued→running flip and again on
+    // terminal states, but a scheduled broadcast sits at "scheduled" for
+    // hours/days with NO bus event — every other open broadcasts-list tab
+    // wouldn't know the row exists until the next nav. This event drives
+    // `broadcasts-browser.tsx` to refetch and surface the new row live.
+    await this.bus.publish({
+      type: "broadcast.status_changed",
+      teamId,
+      broadcastId: broadcast.id,
+      status: isFutureSchedule ? "scheduled" : "queued",
+    });
 
     return {
       broadcastId: broadcast.id,

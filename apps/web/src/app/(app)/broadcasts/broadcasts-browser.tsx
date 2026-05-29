@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   CalendarDays,
@@ -13,6 +13,7 @@ import {
 
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { getClientSocket } from "@/lib/socket-client";
 import { cn } from "@ccp/shared/utils";
 import type { BroadcastListItem } from "@/lib/api/queries";
 
@@ -109,6 +110,48 @@ export function BroadcastsBrowser({
     writeCookie(BROADCASTS_VIEW_COOKIE, next);
   };
 
+  // Track the current filter+search in refs so the socket-driven refetch
+  // (which we want to fire WITHOUT re-running the debounce effect on every
+  // event) reads the latest values without re-subscribing every change.
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
+  const searchRef = useRef(search);
+  searchRef.current = search;
+
+  const refetch = useCallback((opts?: { showLoading?: boolean }) => {
+    if (opts?.showLoading !== false) setLoading(true);
+    const params = new URLSearchParams();
+    if (filterRef.current !== "all") params.set("status", filterRef.current);
+    if (searchRef.current.trim()) params.set("search", searchRef.current.trim());
+    const qs = params.toString();
+    // AbortController so cancel() actually aborts the in-flight HTTP
+    // request — not just suppresses the setState. Under a 10k-recipient
+    // broadcast the socket fires progress events every ~40ms; the prior
+    // flag-only cancel let dozens of GETs race on the wire before they
+    // resolved + got dropped, even though setRows was idempotent.
+    const controller = new AbortController();
+    const promise = apiFetch(`/api/broadcasts${qs ? `?${qs}` : ""}`, {
+      signal: controller.signal,
+    })
+      .then((r) => (r.ok ? (r.json() as Promise<{ broadcasts: BroadcastListItem[] }>) : null))
+      .then((body) => {
+        if (controller.signal.aborted || !body) return;
+        setRows(body.broadcasts);
+      })
+      .catch((err: unknown) => {
+        // AbortError is the cancel path — silent. Anything else is a real
+        // network/parse failure; the next event re-triggers, so swallow.
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          // intentionally no-op; mirrors useConversationCounts' silent
+          // failure posture for socket-driven refetches.
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return { promise, cancel: () => controller.abort() };
+  }, []);
+
   // Debounced server refetch on filter/search change. Skip the very first run
   // (SSR `initial` was fetched matching the persisted filter + search, so
   // they're already current).
@@ -118,28 +161,45 @@ export function BroadcastsBrowser({
       firstRef.current = false;
       return;
     }
-    let cancelled = false;
-    setLoading(true);
+    let ticket: { cancel: () => void } | null = null;
     const t = window.setTimeout(() => {
-      const params = new URLSearchParams();
-      if (filter !== "all") params.set("status", filter);
-      if (search.trim()) params.set("search", search.trim());
-      const qs = params.toString();
-      void apiFetch(`/api/broadcasts${qs ? `?${qs}` : ""}`)
-        .then((r) => (r.ok ? (r.json() as Promise<{ broadcasts: BroadcastListItem[] }>) : null))
-        .then((body) => {
-          if (cancelled || !body) return;
-          setRows(body.broadcasts);
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
-        });
+      ticket = refetch();
     }, 250);
     return () => {
-      cancelled = true;
+      ticket?.cancel();
       window.clearTimeout(t);
     };
-  }, [filter, search]);
+  }, [filter, search, refetch]);
+
+  // Live sync with teammate actions. broadcast:status fires on every flip
+  // (scheduled → queued → running → completed/failed/canceled, plus the new
+  // create-path emit). broadcast:progress fires while a broadcast is
+  // streaming. Both trigger the SAME coalesced refetch: a burst of
+  // progress events during a 10k blast collapses into a single GET. The
+  // refetch silently re-applies the current filter+search so a teammate
+  // completing a broadcast removes it from the "In progress" filter and
+  // adds it to "Completed" without a manual F5.
+  useEffect(() => {
+    const socket = getClientSocket();
+    let pending: number | null = null;
+    let lastTicket: { cancel: () => void } | null = null;
+    const schedule = () => {
+      if (pending !== null) return;
+      pending = window.setTimeout(() => {
+        pending = null;
+        lastTicket?.cancel();
+        lastTicket = refetch({ showLoading: false });
+      }, 300);
+    };
+    socket.on("broadcast:status", schedule);
+    socket.on("broadcast:progress", schedule);
+    return () => {
+      socket.off("broadcast:status", schedule);
+      socket.off("broadcast:progress", schedule);
+      if (pending !== null) window.clearTimeout(pending);
+      lastTicket?.cancel();
+    };
+  }, [refetch]);
 
   return (
     <div className="flex flex-col gap-4">

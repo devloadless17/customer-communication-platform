@@ -322,7 +322,11 @@ export interface ServerToClientEvents {
   "broadcast:status": (payload: {
     teamId: string;
     broadcastId: string;
+    // `scheduled` is emitted only by the create path so other tabs can
+    // pick up newly-created delayed broadcasts live. See
+    // BroadcastStatusChangedEvent in events/types.ts.
     status:
+      | "scheduled"
       | "queued"
       | "running"
       | "completed"

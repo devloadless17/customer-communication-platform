@@ -222,3 +222,74 @@ export const THREAD_REDUCER_EVENTS = [
  */
 export const COALESCED_LIVE_HOOK_EVENTS: ReadonlySet<keyof ServerToClientEvents> =
   new Set(["message:status"]);
+
+/**
+ * Per-thread-mutating events that DELIBERATELY skip THREAD_REDUCER_EVENTS.
+ * Each entry must have a code reason; when you add a new socket event that
+ * mutates per-thread state, either:
+ *   (a) add it to THREAD_REDUCER_EVENTS (auto-wires live hook + cached shell), OR
+ *   (b) add it here with the load-bearing reason.
+ *
+ * Choice (a) is correct for almost every new event. Choice (b) is for the
+ * narrow set of events that need custom handling (list mutation, optimistic
+ * reconcile, navigation side-effect, local-only optimistic frame, etc.).
+ *
+ * The dev-only invariant in `assertReducerCoverage()` below catches any
+ * subscribed event that's neither in the table NOR in this exclusion list,
+ * surfacing the missed-wiring class CLAUDE.md warns about.
+ *
+ * Keys are strings (not `keyof ServerToClientEvents`) so the list can
+ * include built-in Socket.io lifecycle events like `connect` alongside
+ * domain events.
+ */
+export const REDUCER_EXCLUSIONS: ReadonlyMap<string, string> = new Map([
+  // List-mutating: live hook dedupes by externalId + reconciles optimistic;
+  // cached shell evicts the affected thread's snapshot.
+  ["message:new", "list mutation"],
+  ["note:new", "list mutation"],
+  // Optimistic-only: marks the optimistic row failed in the live hook; cached
+  // shell evicts (the pending bubble isn't persisted on the server).
+  ["message:failed", "optimistic-row mutation"],
+  // Coalesced fanout: payload only carries ids, not contact bodies — shell
+  // evicts affected snapshots, list refetches the page on next interaction.
+  ["contacts:bulk_updated", "coalesced bulk fanout"],
+  // Navigation side-effect, not a per-field patch — the thread is gone.
+  ["conversation:deleted", "navigation side-effect"],
+  // Client-only optimistic frame; server never emits this. See
+  // [[project_optimistic_activity_pills]].
+  ["conversation:activity", "client-only optimistic frame"],
+  // Socket lifecycle — not a per-thread payload.
+  ["connect", "socket lifecycle"],
+]);
+
+/**
+ * Dev-only invariant: every event the live hook or shell subscribes to must
+ * be either in `THREAD_REDUCER_EVENTS` (auto-wired) or `REDUCER_EXCLUSIONS`
+ * (explicit). Call once at hook mount; throws a descriptive error in dev to
+ * surface a missed wiring before it ships as a stale-state bug. No-op in
+ * production (cost-conscious + we don't want a guard-throw in front of a
+ * paying customer).
+ *
+ * Pass the list of events you ARE subscribing to — the function asserts
+ * each one is accounted for.
+ */
+export function assertReducerCoverage(
+  subscribedEvents: ReadonlyArray<string>,
+): void {
+  if (process.env.NODE_ENV === "production") return;
+  const known = new Set<string>([
+    ...THREAD_REDUCER_EVENTS.map((e) => e.event as string),
+    ...REDUCER_EXCLUSIONS.keys(),
+  ]);
+  const orphans = subscribedEvents.filter((e) => !known.has(e));
+  if (orphans.length === 0) return;
+  // Fail loudly in dev: an event was subscribed without being declared in
+  // either contract surface, which means the cached shell won't see it →
+  // chat-switch-back will show stale state. Either add it to
+  // THREAD_REDUCER_EVENTS or REDUCER_EXCLUSIONS with a reason.
+  throw new Error(
+    `[thread-reducers] socket event(s) subscribed without coverage: ${orphans.join(
+      ", ",
+    )}. Add to THREAD_REDUCER_EVENTS (auto-wires both consumers) or to REDUCER_EXCLUSIONS with a reason. See thread-reducers.ts header.`,
+  );
+}

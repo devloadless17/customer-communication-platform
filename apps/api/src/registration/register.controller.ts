@@ -37,7 +37,7 @@ const registerBucket = createTokenBucket({ perMin: 5 });
  * Password policy is enforced via zod's min(); we don't gate on HIBP breach
  * status — admins choose their own password.
  *
- * Mirrors the password hashing strategy used by acceptInvite (bcryptjs cost
+ * Mirrors the password hashing strategy used by acceptInvite (bcrypt cost
  * 10) so Better Auth's verify path treats these credentials identically.
  */
 

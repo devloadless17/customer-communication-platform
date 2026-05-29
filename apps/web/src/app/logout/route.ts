@@ -78,20 +78,22 @@ async function handler(req: NextRequest) {
     console.warn(
       `[logout] auth.api.signOut threw (cookie clear still runs): ${err instanceof Error ? err.message : err}`,
     );
-    // Fallback: the cookie is cleared client-side below, but if the Better
-    // Auth path threw mid-flight, the Session row may still exist in DB.
-    // A stolen cookie kept working until the session's expiry. Delete the
-    // SPECIFIC sessionId (not all sessions for the user — that would kick
-    // other devices). Best-effort: a second failure here just leaves the
-    // pre-existing situation; nothing to escalate.
-    if (sessionId) {
-      try {
-        await db.session.deleteMany({ where: { id: sessionId } });
-      } catch (fallbackErr) {
-        console.warn(
-          `[logout] DB session fallback delete also failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`,
-        );
-      }
+  }
+  // ALWAYS delete the Session row by id — not only on the catch path. Better
+  // Auth's signOut is "best effort" on idempotent retry: if it decides the
+  // session is already gone (e.g. a duplicate logout request) it silently
+  // no-ops without throwing. The cookie is cleared below, but a stolen-
+  // cookie attacker would keep working against the still-present DB Session
+  // row until its 90-day expiry. Belt-and-suspenders: one extra cheap
+  // delete on the happy path closes the gap permanently. Scoped to the
+  // SPECIFIC sessionId so other devices aren't kicked.
+  if (sessionId) {
+    try {
+      await db.session.deleteMany({ where: { id: sessionId } });
+    } catch (fallbackErr) {
+      console.warn(
+        `[logout] DB session delete failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`,
+      );
     }
   }
 

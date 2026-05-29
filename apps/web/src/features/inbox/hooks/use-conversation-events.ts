@@ -9,6 +9,7 @@ import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import {
   applyMessageStatus,
+  assertReducerCoverage,
   COALESCED_LIVE_HOOK_EVENTS,
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
@@ -499,6 +500,17 @@ export function useConversationEvents(
         reconnectRecoveryRef.current = isReconnect;
         return;
       }
+      // Skip while the browser reports offline. The Socket.io `connect` can
+      // briefly fire on a flaky network (WS upgrade transient) when HTTP is
+      // still down — the recovery GET would just hang to the 30s timeout
+      // and pile up across tabs. Defer to `online`-event recovery instead;
+      // it re-runs `onConnect`'s effect (the connect listener stays subscribed)
+      // and the visibility/online listener below picks it back up.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        backfillNeededRef.current = true;
+        reconnectRecoveryRef.current = isReconnect;
+        return;
+      }
 
       // (SSR-fresh skip was tried 2026-05-26 and reverted same day: the
       // 3s mount-time heuristic was measured against hook MOUNT, not SSR
@@ -630,15 +642,24 @@ export function useConversationEvents(
     // `?after=` delta doesn't carry. We MERGE the fresh snapshot rather than
     // replace it: blindly swapping in the latest page would unmount any older
     // pages the user scrolled to and yank their scroll. Refetch, don't build a
-    // replay layer (CLAUDE.md). Only when anchored at the live tail — a
-    // search-context window keeps its position and refreshes on the next
-    // navigation, so fall back to the lightweight delta there.
+    // replay layer (CLAUDE.md).
+    //
+    // When NOT anchored at the live tail (search-context window): we still
+    // fetch the full snapshot, but skip the message-slice merge — the user's
+    // older context window doesn't overlap the tail page the API returns, so
+    // merging would just splice tail messages onto an unrelated slice. Header,
+    // contact, notes, events are still applied (those are what the delta
+    // CAN'T carry and what an offline gap most often invalidates). The user's
+    // own scroll/slice is preserved untouched; the lightweight delta runs in
+    // addition to top off any new-message gap from the offline period.
     const runFullRefetch = () => {
       backfillNeededRef.current = false;
       reconnectRecoveryRef.current = false;
-      if (!tailAnchoredRef.current) {
+      const headerOnly = !tailAnchoredRef.current;
+      if (headerOnly) {
+        // Still pull the lightweight delta so messages newer than our tail
+        // get appended — the header-only path below doesn't touch messages.
         runBackfill();
-        return;
       }
       void fetchWithSessionGuard(`/api/inbox/conversation/${conversationId}`)
         .then((r) =>
@@ -653,6 +674,26 @@ export function useConversationEvents(
           if (!res) return;
           const fresh = res.data;
           setData((prev) => {
+            // Header-only branch: agent is anchored to a search-context window,
+            // not the live tail. Adopting fresh.messages would either splice
+            // tail messages onto an unrelated slice or unmount their context.
+            // Refresh only what the delta can't carry — header, contact, notes,
+            // events. The runBackfill above already appended any new tail
+            // messages that arrived after the user's slice (cursor = last
+            // server-confirmed in the slice), so no gap on next scroll-back.
+            if (headerOnly) {
+              return {
+                ...prev,
+                conversation: fresh.conversation,
+                contact: fresh.contact,
+                assignedUser: fresh.assignedUser,
+                notes: fresh.notes,
+                events: mergeAuthoritativeEvents(prev.events, fresh.events),
+                lastInboundAt: fresh.lastInboundAt,
+                ...(fresh.messageCount !== undefined ? { messageCount: fresh.messageCount } : {}),
+                ...(fresh.noteCount !== undefined ? { noteCount: fresh.noteCount } : {}),
+              };
+            }
             // Keep the user's loaded message slice (incl. older pages they
             // scrolled to → preserves scroll position). Reconcile server-owned
             // fields (status/media) for messages we already have, append any
@@ -710,19 +751,18 @@ export function useConversationEvents(
         });
     };
 
-    // If a connect happened while the tab was hidden, re-run the recovery
-    // when the user returns. This is what makes "open laptop after lunch"
-    // recover the gap without forcing a manual reload.
-    const onVisibility = () => {
-      if (typeof document === "undefined" || document.visibilityState !== "visible") {
+    // Shared deferred-recovery dispatch. Called when ANY of the gating
+    // conditions clears (tab becomes visible OR browser comes back online).
+    // Re-checks all gates — the recovery is still skipped if the OTHER gate
+    // is still red.
+    const runDeferredRecoveryIfReady = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
         return;
       }
       if (backfillNeededRef.current && socket.connected) {
-        // A (re)connect happened while hidden; recover now that the agent is
-        // looking. A real reconnect full-refetches (recovers notes / contact /
-        // statuses the delta can't); a first connect just deltas. Either path
-        // resyncs missed messages AND clears unread, so it subsumes the
-        // deferred-read case below.
         sawInboundWhileHiddenRef.current = false;
         if (reconnectRecoveryRef.current) {
           runFullRefetch();
@@ -736,8 +776,24 @@ export function useConversationEvents(
         void markRead();
       }
     };
+
+    // If a connect happened while the tab was hidden / offline, re-run the
+    // recovery when conditions clear. This is what makes "open laptop after
+    // lunch" recover the gap without forcing a manual reload.
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      runDeferredRecoveryIfReady();
+    };
+    const onOnline = () => {
+      runDeferredRecoveryIfReady();
+    };
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisibility);
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", onOnline);
     }
     socket.on("connect", onConnect);
     if (socket.connected) onConnect();
@@ -964,15 +1020,43 @@ export function useConversationEvents(
     const onMessageFailed: Parameters<typeof socket.on<"message:failed">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
       if (!payload.clientTempId) return; // nothing to match against
-      setData((prev) => ({
-        ...prev,
-        messages: prev.messages.map((m) =>
-          m.clientTempId === payload.clientTempId && m.pending
-            ? { ...m, pending: false, failed: true }
-            : m,
-        ),
-      }));
+      // findIndex+slice instead of a blanket .map(): on a 1k-message thread
+      // the failure event was reallocating the whole array even when no row
+      // matched (common under broadcast-failure storms — the failing message
+      // sits on a different conversation but the event still fires once per
+      // listener). Mirrors the pattern in `applyMessageStatus` at
+      // thread-reducers.ts:112.
+      setData((prev) => {
+        const idx = prev.messages.findIndex(
+          (m) => m.clientTempId === payload.clientTempId && m.pending,
+        );
+        if (idx === -1) return prev;
+        const target = prev.messages[idx]!;
+        const next = prev.messages.slice();
+        next[idx] = { ...target, pending: false, failed: true };
+        return { ...prev, messages: next };
+      });
     };
+
+    // Dev-only invariant: every event we subscribe to here must be
+    // accounted for in thread-reducers.ts (either in THREAD_REDUCER_EVENTS
+    // for auto-wiring, or in REDUCER_EXCLUSIONS with a load-bearing reason).
+    // Surfaces the "missed reducer wiring" class CLAUDE.md flags as the root
+    // cause of stuck/stale per-thread state at decision-tree time. No-op
+    // in production.
+    const MANUAL_LIVE_HOOK_EVENTS: readonly string[] = [
+      "message:new",
+      "message:status",
+      "message:failed",
+      "note:new",
+      "conversation:activity",
+      "conversation:deleted",
+      "connect",
+    ];
+    assertReducerCoverage([
+      ...THREAD_REDUCER_EVENTS.map((e) => e.event as string),
+      ...MANUAL_LIVE_HOOK_EVENTS,
+    ]);
 
     socket.on("message:new", onMessageNew);
     // message:status is in COALESCED_LIVE_HOOK_EVENTS — the live hook RAF-
@@ -1146,6 +1230,9 @@ export function useConversationEvents(
       }
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisibility);
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("online", onOnline);
       }
     };
   }, [conversationId, markRead, router]);

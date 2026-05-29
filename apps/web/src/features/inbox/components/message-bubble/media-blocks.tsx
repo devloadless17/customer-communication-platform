@@ -5,6 +5,7 @@ import { Download, FileText, FileAudio, Film, ImageOff, Loader2, X } from "lucid
 
 import { cn } from "@ccp/shared/utils";
 import { useBodyScrollLock } from "@/hooks/use-modal-overlay";
+import { openAttachment } from "@/features/inbox/lib/open-attachment";
 import type { MediaAttachment, MediaKind } from "@ccp/shared/types";
 
 export function MediaBlock({
@@ -369,13 +370,18 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
 }
 
 function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
+  // Open via the probe-aware helper instead of a raw <a target="_blank">.
+  // Without the probe a missing blob (upstream 404 / orphan-swept / never
+  // uploaded) yanks the user to the provider's branded 404 page; the helper
+  // surfaces a clean in-app toast and keeps them in the app.
   return (
-    <a
-      href={media.url}
-      target="_blank"
-      rel="noreferrer"
+    <button
+      type="button"
+      onClick={() => {
+        void openAttachment(media.url, media.filename ?? media.caption ?? null);
+      }}
       className={cn(
-        "flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors",
+        "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",
         isOut
           ? "bg-white/10 hover:bg-white/15"
           : "bg-background/60 hover:bg-background",
@@ -398,7 +404,7 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
         </div>
       </div>
       <Download className={cn("size-4 shrink-0 opacity-70")} />
-    </a>
+    </button>
   );
 }
 

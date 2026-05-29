@@ -24,6 +24,30 @@ import {
 } from "./types";
 
 /**
+ * Stable client-side React key per child. We stamp `_id` directly on each
+ * Condition/Group at insert (see `addCondition` / `addGroup`) and on
+ * first render of server-hydrated rows. Spreads (`{...condition, value}`)
+ * carry `_id` forward, so the changed slot keeps the same key across
+ * edits — input doesn't remount, focus stays on the keystroke.
+ *
+ * Earlier iterations tried WeakMap-keyed-by-reference; that broke focus
+ * on every keystroke because the immutable spread produces a NEW
+ * reference for the row being edited, which got a NEW key, which
+ * remounted the input on every character. The fix is to give the row a
+ * key that survives the spread — `_id` does that since it's just a
+ * field on the object.
+ *
+ * `_id` is optional in the type for back-compat with persisted graphs
+ * that pre-date this scheme; stampLazyId mutates on first render.
+ */
+function stampLazyId<T extends { _id?: string }>(child: T): string {
+  if (!child._id) {
+    child._id = `c-${Math.random().toString(36).slice(2, 11)}`;
+  }
+  return child._id;
+}
+
+/**
  * Recursive AND/OR group editor. Same component is used at the trigger level
  * (trigger conditions, scoped to FIELDS_BY_TRIGGER[trigger]) and inside a
  * `branch` step (any field is allowed — pass trigger="message_received" to
@@ -72,16 +96,20 @@ export function ConditionGroupEditor({
   function addCondition() {
     const field = allowedFields[0];
     if (!field) return;
+    const child: Condition = { field, op: "contains", value: "" };
+    stampLazyId(child);
     onChange({
       ...group,
-      children: [...group.children, { field, op: "contains", value: "" }],
+      children: [...group.children, child],
     });
   }
 
   function addGroup() {
+    const child: Group = { op: "OR", children: [] };
+    stampLazyId(child);
     onChange({
       ...group,
-      children: [...group.children, { op: "OR", children: [] }],
+      children: [...group.children, child],
     });
   }
 
@@ -155,10 +183,11 @@ export function ConditionGroupEditor({
       )}
 
       {group.children.map((child, idx) => {
+        const k = stampLazyId(child);
         if (isGroup(child)) {
           return (
             <ConditionGroupEditor
-              key={idx}
+              key={k}
               trigger={trigger}
               group={child}
               depth={depth + 1}
@@ -171,7 +200,7 @@ export function ConditionGroupEditor({
         }
         return (
           <ConditionRow
-            key={idx}
+            key={k}
             allowedFields={allowedFields}
             condition={child}
             onChange={(c) => updateChild(idx, c)}

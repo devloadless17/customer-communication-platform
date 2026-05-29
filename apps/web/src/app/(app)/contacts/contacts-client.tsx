@@ -4,6 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
+import { apiFetch } from "@/lib/api/client-fetch";
 import {
   Download,
   ListChecks,
@@ -296,7 +297,7 @@ export function ContactsClient({
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetch(`/api/contacts/${contactId}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/contacts/${contactId}`, { method: "DELETE" });
     if (!res.ok) {
       setError(await safeReadError(res));
       return;
@@ -511,7 +512,7 @@ export function ContactsClient({
           );
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
-          const res = await fetch("/api/contacts/bulk", {
+          const res = await apiFetch("/api/contacts/bulk", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ action: "tag-add", contactIds: ids, tagId: tag.id }),

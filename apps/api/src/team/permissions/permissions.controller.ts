@@ -14,6 +14,7 @@ import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
 import { zBody } from "../../common/zod-validation.pipe";
 import { DbService } from "../../db/db.service";
+import { EventBus } from "../../events/event-bus.module";
 
 /**
  * Admin-configurable per-role capability matrix.
@@ -32,7 +33,10 @@ import { DbService } from "../../db/db.service";
 @Controller("api/team/permissions")
 @UseGuards(SessionGuard)
 export class PermissionsController {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly bus: EventBus,
+  ) {}
 
   @Get()
   async get(@CurrentSession() session: ApiSession) {
@@ -67,6 +71,17 @@ export class PermissionsController {
       select: { id: true },
     });
     for (const m of members) invalidateSessionCache(m.id);
+
+    // Fan a catalog-change frame so every open tab on the team re-renders
+    // capability-gated UI on the next router.refresh. Without this, a
+    // demoted user still sees the buttons they no longer have access to
+    // (the server still 403s, but the gated control stays visible) until
+    // they navigate.
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      teamId: session.teamId,
+      scope: "members",
+    });
 
     return {
       ok: true,

@@ -2,9 +2,12 @@ import { Prisma } from "@prisma/client";
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+
+import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 
 import {
   contactRowToExternal,
@@ -160,6 +163,7 @@ export class ExternalV1Service {
     conversationId: string,
     input: ExternalSendMessageInput,
     idempotencyKey?: string,
+    chainDepth?: number,
   ) {
     return this.messaging.sendMessage(
       teamId,
@@ -167,6 +171,7 @@ export class ExternalV1Service {
       conversationId,
       input,
       idempotencyKey,
+      chainDepth,
     );
   }
 
@@ -195,12 +200,27 @@ export class ExternalV1Service {
     apiKeyId: string,
     input: ExternalTopLevelSendMessageInput,
     idempotencyKey?: string,
+    chainDepth?: number,
   ) {
-    return this.messaging.sendTopLevelMessage(teamId, apiKeyId, input, idempotencyKey);
+    return this.messaging.sendTopLevelMessage(teamId, apiKeyId, input, idempotencyKey, chainDepth);
   }
 
-  createNote(teamId: string, conversationId: string, input: ExternalNoteInput) {
-    return this.messaging.createNote(teamId, conversationId, input);
+  createNote(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalNoteInput,
+    idempotencyKey?: string,
+    chainDepth?: number,
+  ) {
+    return this.messaging.createNote(
+      teamId,
+      apiKeyId,
+      conversationId,
+      input,
+      idempotencyKey,
+      chainDepth,
+    );
   }
 
   // ===========================================================================
@@ -1059,46 +1079,22 @@ export class ExternalV1Service {
     apiKeyId: string,
     contactId: string,
     tagId: string,
+    idempotencyKey?: string,
   ): Promise<ExternalContact> {
-    const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
-      include: EXTERNAL_CONTACT_INCLUDE,
-    });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
-
-    const hadTag = contact.tags.some((t) => t.id === tagId);
-    if (!hadTag) {
-      return toExternalContact(contact, contact.tags.map((t) => t.id));
-    }
-
-    let updated;
-    try {
-      updated = await this.db.contact.update({
-        where: { id: contactId, teamId, version: contact.version },
-        data: {
-          tags: { disconnect: { id: tagId } },
-          version: { increment: 1 },
-        },
-        include: EXTERNAL_CONTACT_INCLUDE,
-      });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        throw new ConflictException({
-          error: "contact was modified by another writer, retry",
-        });
-      }
-      throw err;
-    }
-    const tagIds = updated.tags.map((t) => t.id);
-    await this.publishContactTagChange(
+    // Delegate to the plural-tag path with a one-element array. The two
+    // earlier internals (singular + plural) were almost-identical copies
+    // and had drifted (singular had no `silent` param, so the public
+    // DELETE /v1/contacts/:id/tags/:tagId always fanouts while the bulk
+    // DELETE could be silenced). Collapsing closes the asymmetry.
+    return this.withIdempotency(
       teamId,
       apiKeyId,
-      updated,
-      contact.stageId,
-      contact.tags.map((t) => t.id),
-      { added: [], removed: [tagId] },
+      idempotencyKey,
+      "remove_contact_tag",
+      { contactId, tagId },
+      () =>
+        this.removeContactTagsInternal(teamId, apiKeyId, contactId, [tagId], false),
     );
-    return toExternalContact(updated, tagIds);
   }
 
   /**
@@ -1108,6 +1104,39 @@ export class ExternalV1Service {
    * layer fans out a single frame regardless of how many contacts × tags.
    */
   async bulkContactTags(
+    teamId: string,
+    apiKeyId: string,
+    action: "tag-add" | "tag-remove",
+    input: ExternalBulkTagInput,
+    idempotencyKey?: string,
+    chainDepth?: number,
+  ): Promise<{ count: number; tagIds: string[]; contactIds: string[] }> {
+    // Loop guard: a partner whose own `contact.tag_changed` webhook
+    // receiver POSTs back here would otherwise tag-thrash until /v1's
+    // 20/min rate limit catches up. Cap at the same MAX_CHAIN_DEPTH the
+    // send routes use.
+    if (chainDepth !== undefined && chainDepth >= MAX_CHAIN_DEPTH) {
+      throw new HttpException(
+        {
+          error: "chain_depth_exceeded",
+          detail:
+            `inbound X-CCP-Depth ${chainDepth} >= ${MAX_CHAIN_DEPTH} — request dropped to ` +
+            "break a likely cross-system loop.",
+        },
+        429,
+      );
+    }
+    return this.withIdempotency(
+      teamId,
+      apiKeyId,
+      idempotencyKey,
+      action === "tag-add" ? "bulk_contact_tags_add" : "bulk_contact_tags_remove",
+      { action, contactIds: input.contactIds, tagIds: input.tagIds },
+      () => this.bulkContactTagsInternal(teamId, apiKeyId, action, input),
+    );
+  }
+
+  private async bulkContactTagsInternal(
     teamId: string,
     apiKeyId: string,
     action: "tag-add" | "tag-remove",
@@ -1208,6 +1237,10 @@ export class ExternalV1Service {
         changedByApiKeyId: apiKeyId,
         workflowContact: workflowContactSnapshot(c),
         suppressSocketFanout: true,
+        // Honor caller's `silent` for outbound-webhooks + workflow re-trigger,
+        // while leaving suppressSocketFanout on (the coalesced bulk frame is
+        // the only socket fanout clients see for this path).
+        silent: input.silent === true,
       });
 
       if (added.length > 0 || removed.length > 0) {
@@ -1230,6 +1263,7 @@ export class ExternalV1Service {
           removed,
           changedByUserId: null,
           changedByApiKeyId: apiKeyId,
+          silent: input.silent === true,
         });
       }
     });

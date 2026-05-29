@@ -8,6 +8,7 @@ import {
   useConversationAttachments,
 } from "@/features/inbox/hooks/use-conversation-attachments";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { openAttachment } from "@/features/inbox/lib/open-attachment";
 import { cn } from "@ccp/shared/utils";
 import type { Message } from "@ccp/shared/types";
 
@@ -212,14 +213,15 @@ function FileRow({
           {media.sizeBytes > 0 && ` · ${formatBytes(media.sizeBytes)}`}
         </div>
       </div>
-      <a
-        href={media.url}
-        target="_blank"
-        rel="noopener noreferrer"
+      <button
+        type="button"
+        onClick={() => {
+          void openAttachment(media.url, media.filename ?? media.caption ?? null);
+        }}
         className="rounded-md px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10"
       >
         Open
-      </a>
+      </button>
       <button
         type="button"
         onClick={onGoToMessage}

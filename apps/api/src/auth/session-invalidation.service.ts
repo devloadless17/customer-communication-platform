@@ -31,8 +31,17 @@ export class SessionInvalidationService {
 
   revoke(userId: string, reason: string): void {
     if (!userId) return;
-    const dropped = this.realtime.disconnectUserSockets(userId);
+    // Cache bust FIRST, socket disconnect SECOND. The reverse order had a
+    // race: a socket whose handshake middleware had just succeeded reading
+    // the cookie-cache (before deactivation hit) but hadn't yet called
+    // presence.add was INVISIBLE to disconnectUserSockets — it survived the
+    // disconnect with cached identity and kept running until next reconnect.
+    // Cache-bust first means any in-flight handshake that hasn't reached
+    // presence yet will revalidate against the DB on its next request and
+    // see deactivatedAt != null. Worst-case window collapses from "until
+    // next reconnect" to "15s ApiSession cache TTL + next request".
     invalidateSessionCache(userId);
+    const dropped = this.realtime.disconnectUserSockets(userId);
     this.logger.log(`revoked ${userId} (${reason}, dropped ${dropped} socket(s))`);
   }
 }

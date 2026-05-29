@@ -19,6 +19,7 @@ import {
   type WorkflowBody,
 } from "@/lib/workflows/parse";
 import { enqueueWorkflowRun, getRedisConnection } from "@/lib/workflows/queue";
+import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -33,13 +34,10 @@ import type {
 // has seen it once they have what they need to migrate the caller.
 const loggedLegacyTimestampWarn = new Set<string>();
 
-// Cross-system chain-depth ceiling for the incoming_webhook trigger. Our own
-// http_request step stamps `X-CCP-Depth: depth+1`; an external system that
-// bounces back into this webhook carries the header along. At/above this we
-// drop the request (no run) so http_request -> external -> incoming_webhook ->
-// http_request -> ... can't sustain. Matches the in-process trigger_workflow
-// TRIGGER_DEPTH_MAX so both chain axes share one ceiling (audit 2026-05-22).
-const MAX_WEBHOOK_CHAIN_DEPTH = 8;
+// Webhook-specific alias retained so the cross-axis ceiling (MAX_CHAIN_DEPTH,
+// in lib/workflows/events.ts) stays the single source of truth — used here +
+// in the /v1 send/template endpoints + in trigger_workflow.
+const MAX_WEBHOOK_CHAIN_DEPTH = MAX_CHAIN_DEPTH;
 
 // Opt-in idempotency window for the incoming_webhook trigger. When a caller
 // supplies an `Idempotency-Key` header we dedupe run creation in Redis (SET NX)
@@ -47,12 +45,6 @@ const MAX_WEBHOOK_CHAIN_DEPTH = 8;
 // workflow (double Meta sends, double tag changes). 24h matches the /v1
 // idempotency TTL. No schema change — Redis is already required for the queue.
 const WEBHOOK_IDEMPOTENCY_TTL_S = 24 * 60 * 60;
-
-function parseChainDepth(raw: string | undefined): number {
-  if (!raw) return 0;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
 
 @Injectable()
 export class WorkflowsService {
