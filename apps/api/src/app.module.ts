@@ -3,6 +3,7 @@ import { Module } from "@nestjs/common";
 import { AdminModule } from "./admin/admin.module";
 import { AuthModule } from "./auth/auth.module";
 import { BroadcastsModule } from "./broadcasts/broadcasts.module";
+import { CallsModule } from "./calls/calls.module";
 import { CommonModule } from "./common/common.module";
 import { ContactsModule } from "./contacts/contacts.module";
 import { ConversationsModule } from "./conversations/conversations.module";
@@ -51,6 +52,7 @@ import { WorkflowsModule } from "./workflows/workflows.module";
     NotesModule,
     ContactsModule,
     BroadcastsModule,
+    CallsModule,
     TeamChatModule,
     MessagesModule,
     MediaModule,

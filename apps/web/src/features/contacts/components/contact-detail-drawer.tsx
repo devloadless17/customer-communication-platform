@@ -195,9 +195,12 @@ export function ContactDetailDrawer({
       tagIds,
       stageId: "stageId" in patch ? patch.stageId ?? null : stageId,
     };
+    // `optimistic: true` skips inbox-list resync + counts refetch during the
+    // in-flight PATCH — see status-dropdown.tsx for the rationale.
     dispatchLocalSocketEvent("contact:updated", {
       teamId: contact.teamId,
       contact: optimistic,
+      optimistic: true,
     });
     const res = await fetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
@@ -223,6 +226,7 @@ export function ContactDetailDrawer({
     dispatchLocalSocketEvent("contact:updated", {
       teamId: contact.teamId,
       contact: { ...contact, tagIds: nextIds, stageId, customFields },
+      optimistic: true,
     });
     const res = await fetch(`/api/contacts/${contact.id}/tags`, {
       method: "PUT",

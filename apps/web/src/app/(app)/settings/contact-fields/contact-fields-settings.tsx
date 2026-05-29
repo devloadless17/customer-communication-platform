@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import type {
   ContactFieldDefinition,
@@ -72,7 +73,7 @@ export function ContactFieldsSettings({
     setBusyId("__new__");
     setError(null);
     try {
-      const res = await fetch("/api/team/contact-fields", {
+      const res = await apiFetch("/api/team/contact-fields", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ label }),
@@ -101,7 +102,7 @@ export function ContactFieldsSettings({
       setBuiltins(next);
       setError(null);
       try {
-        const res = await fetch("/api/team/contact-fields/builtins", {
+        const res = await apiFetch("/api/team/contact-fields/builtins", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ [key]: next[key] }),
@@ -137,7 +138,7 @@ export function ContactFieldsSettings({
         cur.map((f) => (f.id === field.id ? { ...f, isVisible: next } : f)),
       );
       try {
-        const res = await fetch(`/api/team/contact-fields/${field.id}`, {
+        const res = await apiFetch(`/api/team/contact-fields/${field.id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ isVisible: next }),
@@ -168,7 +169,7 @@ export function ContactFieldsSettings({
       const prev = defs;
       setDefs((cur) => cur.map((f) => (f.id === id ? { ...f, ...patch } : f)));
       try {
-        const res = await fetch(`/api/team/contact-fields/${id}`, {
+        const res = await apiFetch(`/api/team/contact-fields/${id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(patch),
@@ -214,12 +215,12 @@ export function ContactFieldsSettings({
       setBusyId(id);
       try {
         const res = await Promise.all([
-          fetch(`/api/team/contact-fields/${a.id}`, {
+          apiFetch(`/api/team/contact-fields/${a.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ order: b.order }),
           }),
-          fetch(`/api/team/contact-fields/${b.id}`, {
+          apiFetch(`/api/team/contact-fields/${b.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ order: a.order }),
@@ -252,7 +253,7 @@ export function ContactFieldsSettings({
       setBusyId(field.id);
       setError(null);
       try {
-        const res = await fetch(`/api/team/contact-fields/${field.id}`, {
+        const res = await apiFetch(`/api/team/contact-fields/${field.id}`, {
           method: "DELETE",
         });
         if (!res.ok) {

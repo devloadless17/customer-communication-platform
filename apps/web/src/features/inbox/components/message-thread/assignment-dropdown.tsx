@@ -102,10 +102,14 @@ export function AssignmentDropdown({
     // the server's publish order so audit / workflow / analytics
     // subscribers see cause-then-effect even on the local pre-confirm
     // pass.
+    // `optimistic: true` tells the inbox-list resync + counts refetch to skip
+    // their GETs during the in-flight PATCH window — without it, both fire on
+    // every assign and can return pre-change state that flickers the row back.
     dispatchLocalSocketEvent("conversation:assigned", {
       teamId,
       conversationId,
       assignedUser: nextUser,
+      optimistic: true,
     });
     // Matching timeline pill in the same frame as the assignee chip.
     const assignActivityId = optimisticAssignment({
@@ -120,6 +124,7 @@ export function AssignmentDropdown({
         teamId,
         conversationId,
         status: nextStatus,
+        optimistic: true,
       });
       statusActivityId = optimisticStatusChange({
         teamId,

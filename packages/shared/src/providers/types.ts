@@ -95,7 +95,60 @@ export interface NormalizedStatusUpdate {
   rawPayload: Record<string, unknown>;
 }
 
-export type NormalizedEvent = NormalizedInboundMessage | NormalizedStatusUpdate;
+/**
+ * One step of a WhatsApp call's lifecycle as it arrives via webhook. The
+ * Meta provider emits one of these per call webhook (incoming offer, ICE
+ * trickle, terminal status). Ingest dedupes by (teamId, channel, externalCallId)
+ * the same way it does for messages, then maps `phase` to CallStatus.
+ *
+ * The Meta payload carries an SDP offer on incoming and an SDP answer
+ * acknowledgement on outgoing-answered. Phase 1 routes SDP straight through
+ * the bus to the answering agent's browser RTCPeerConnection. Phase 2 (SIP)
+ * intercepts here instead and lets the gateway terminate DTLS+SRTP.
+ *
+ * `phase` is intentionally finer-grained than CallStatus — `ringing_out`
+ * vs `incoming` lets the audit subscriber differentiate direction without a
+ * Call-row read; the ingest mapper collapses both to `CallStatus.ringing`.
+ */
+export interface NormalizedCallEvent {
+  kind: "call";
+  /** Meta-assigned call id; dedup key half. */
+  externalCallId: string;
+  /** E.164 digits, no '+'. Same shape as messages. */
+  contactPhone: string;
+  contactName: string | null;
+  direction: "in" | "out";
+  phase:
+    | "incoming"      // inbound call ringing — first webhook for this call
+    | "ringing_out"   // outbound call we just placed — Meta acknowledged
+    | "answered"      // customer picked up an outbound; carries their SDP offer
+    | "completed"     // ended cleanly
+    | "missed"        // inbound, customer cancel / no agent answered
+    | "rejected"      // explicitly declined
+    | "failed"        // signaling/media error
+    | "permission_granted"   // customer granted calling permission (BIC opt-in)
+    | "permission_revoked";  // Meta auto-revoked (4 consecutive unanswered)
+  /**
+   * WebRTC SDP payload — present on phases that carry one. Meta delivers
+   * setup:actpass which `RTCPeerConnection` cannot accept on the answer
+   * side; the Meta provider rewrites it to setup:active here so every
+   * downstream consumer sees a usable SDP without remembering the gotcha.
+   */
+  sdp?: { type: "offer" | "answer"; sdp: string };
+  /** Trickle ICE candidate. Meta may stream these across multiple webhooks. */
+  iceCandidate?: {
+    candidate: string;
+    sdpMid: string | null;
+    sdpMLineIndex: number | null;
+  };
+  timestamp: Date;
+  rawPayload: Record<string, unknown>;
+}
+
+export type NormalizedEvent =
+  | NormalizedInboundMessage
+  | NormalizedStatusUpdate
+  | NormalizedCallEvent;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */
@@ -347,6 +400,13 @@ export interface ProviderCapabilities {
   templates: boolean;
   readReceipts: boolean;
   typingIndicators: boolean;
+  /**
+   * Voice/video calling. True if the provider implements the call methods
+   * below (placeCall / acceptCall / etc.). Phase 1 (Meta WhatsApp): true.
+   * Gates the inbox "Call" button at the channel level — adding a future
+   * SMS provider with calling = false hides the button on those threads.
+   */
+  calling: boolean;
 }
 
 export interface MessagingProvider<SendConfig = unknown> {
@@ -416,4 +476,91 @@ export interface MessagingProvider<SendConfig = unknown> {
    * hiccup doesn't degrade the local typing UX.
    */
   sendTypingIndicator?(externalId: string, config: SendConfig): Promise<void>;
+
+  // ---- WhatsApp Business Calling (Phase 1: WebRTC, Phase 2: SIP) ---------
+  // All optional so future SMS-only providers can leave them off.
+  // ProviderCapabilities.calling gates them at the channel level.
+  //
+  // The browser-as-WebRTC-peer model means the API just relays SDP + ICE
+  // between Meta and the agent's browser; the provider never terminates
+  // DTLS+SRTP. Phase 2 swaps the impl to route through a SIP gateway that
+  // does — the interface stays the same.
+
+  /**
+   * Request a customer's permission to be called. Required before placeCall
+   * outside the 24h customer-service window. Meta rate-limits these:
+   * 1 / 24h / contact and 2 / 7d / contact, 72h validity once granted, and
+   * auto-revokes after 4 consecutive unanswered calls. The caller
+   * (CallsService) keeps a CallPermissionRequest row that mirrors this.
+   *
+   * Returns the provider's request id (for audit) and the absolute
+   * expiresAt the caller computed (Meta confirms 72h validity but doesn't
+   * echo a precise timestamp — we trust our `requestedAt + 72h` calc).
+   */
+  sendCallPermissionRequest?(
+    args: { to: string },
+    config: SendConfig,
+  ): Promise<{ permissionRequestId: string; expiresAt: Date }>;
+
+  /**
+   * Initiate an outbound call. Meta returns a call id immediately; the
+   * customer's phone starts ringing. The actual SDP exchange happens via
+   * subsequent webhook (`phase: "answered"` carries the customer's offer).
+   */
+  placeCall?(
+    args: { to: string },
+    config: SendConfig,
+  ): Promise<{ externalCallId: string }>;
+
+  /**
+   * REQUIRED preamble before acceptCall. Meta rejects `accept` sent without
+   * a prior `pre_accept` for the same call id. This method exists as a
+   * separate hop because the SDP-answer assembly on the browser side races
+   * with the Graph round-trip — pre-accept locks the call to our number
+   * while the browser generates the SDP, then acceptCall delivers it.
+   */
+  preAcceptCall?(
+    args: { externalCallId: string },
+    config: SendConfig,
+  ): Promise<void>;
+
+  /**
+   * Accept an incoming call by delivering our SDP answer (already generated
+   * by the browser's RTCPeerConnection.createAnswer). After this, media
+   * flows DTLS+SRTP browser ↔ Meta.
+   */
+  acceptCall?(
+    args: { externalCallId: string; sdpAnswer: string },
+    config: SendConfig,
+  ): Promise<void>;
+
+  /** Decline an incoming call before any answer. */
+  rejectCall?(
+    args: { externalCallId: string; reason?: "busy" | "declined" },
+    config: SendConfig,
+  ): Promise<void>;
+
+  /** Hang up an in-progress call from our side. Idempotent — re-calling
+   *  on an already-terminated call is a no-op (Meta returns the same
+   *  success shape). */
+  endCall?(
+    args: { externalCallId: string },
+    config: SendConfig,
+  ): Promise<void>;
+
+  /**
+   * Forward a browser-generated ICE candidate to Meta during signaling.
+   * Trickle ICE — candidates flow over the call's lifetime, not just at
+   * setup. The reverse direction (Meta → us) arrives via webhook and
+   * routes through the bus's `call.ice_candidate` event.
+   */
+  sendIceCandidate?(
+    args: {
+      externalCallId: string;
+      candidate: string;
+      sdpMid: string | null;
+      sdpMLineIndex: number | null;
+    },
+    config: SendConfig,
+  ): Promise<void>;
 }

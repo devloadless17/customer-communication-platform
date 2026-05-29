@@ -743,6 +743,119 @@ export interface TeamRenamedEvent {
 }
 
 // ---------------------------------------------------------------------------
+// WhatsApp Business Calling
+//
+// Each phase of a voice call publishes its own DomainEvent type. The split
+// (instead of one `call.lifecycle_changed` carrying a `phase` field) mirrors
+// the locked `availability:*` split decision — separate event types let
+// subscribers attach to just the phase they care about (audit only writes
+// pills on terminal states; outbound webhooks only route ended/missed/
+// rejected; the fanout-rules map auto-checks exhaustiveness per type).
+//
+// SDP + ICE events carry signaling-only data. They never write to the DB,
+// just relay between Meta and the answering agent's browser via Socket.io.
+// ---------------------------------------------------------------------------
+
+/** Inbound call ringing. Toasts every connected agent (team-room fanout) so
+ *  whoever picks up first wins via the CAS on Call.answeredByUserId. */
+export interface CallIncomingEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  externalCallId: string;
+  /** Embedded so the toast can render contact name + avatar instantly. */
+  contact: WorkflowContactSnapshot;
+  ringingAt: string;
+}
+
+/** Outbound call placed; Meta acknowledged. Only the originating thread's
+ *  room cares (single-user awareness — the agent's own browser shows the
+ *  ringing-out indicator). */
+export interface CallRingingOutEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  externalCallId: string;
+  initiatedByUserId: string;
+  ringingAt: string;
+}
+
+/** First agent successfully accepted (CAS-won). Team room — dismisses the
+ *  incoming-call toast on every OTHER agent's browser. */
+export interface CallAnsweredByAgentEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  answeredByUserId: string;
+  answeredAt: string;
+}
+
+/** Call hung up cleanly. Carries durationSeconds for the timeline pill. */
+export interface CallEndedEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  direction: "in" | "out";
+  endedAt: string;
+  durationSeconds: number | null;
+  /** Who/what initiated the hangup. Surfaces in the audit pill. */
+  reason: "completed" | "hangup_by_agent" | "hangup_by_customer";
+}
+
+/** Incoming call expired without an agent answering. */
+export interface CallMissedEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  ringingAt: string;
+}
+
+/** Agent explicitly declined an incoming call (vs missed). */
+export interface CallRejectedEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  rejectedByUserId: string | null;
+}
+
+/** Signaling / media error. */
+export interface CallFailedEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  reason: string;
+}
+
+/**
+ * Meta delivered an SDP offer for this call. Routed to the answering agent's
+ * browser as `call:sdp_offer`. The browser uses it for
+ * RTCPeerConnection.setRemoteDescription, then generates an answer + POSTs
+ * back via /api/calls/:id/answer.
+ */
+export interface CallSdpOfferEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  sdp: { type: "offer"; sdp: string };
+}
+
+/**
+ * One trickle ICE candidate from the Meta side. Routed to the conversation
+ * room as `call:ice` — only the live-call agent's browser cares. No DB
+ * write, no audit, no analytics — pure signaling relay.
+ */
+export interface CallIceCandidateEvent {
+  teamId: string;
+  conversationId: string;
+  callId: string;
+  candidate: {
+    candidate: string;
+    sdpMid: string | null;
+    sdpMLineIndex: number | null;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Event map — discriminated union by `type`. Use `DomainEventOf<K>` to grab
 // the strongly-typed envelope for a single type.
 // ---------------------------------------------------------------------------
@@ -783,6 +896,18 @@ export interface DomainEventMap {
   "team.renamed": TeamRenamedEvent;
   "webhook.subscription_disabled": WebhookSubscriptionDisabledEvent;
   "webhook.subscription_recovered": WebhookSubscriptionRecoveredEvent;
+  // WhatsApp Business Calling. Per-phase split so subscribers can attach
+  // to just the phase they care about (audit on terminal, outbound webhooks
+  // on ended/missed/rejected, fanout has its own per-phase room scoping).
+  "call.incoming": CallIncomingEvent;
+  "call.ringing_out": CallRingingOutEvent;
+  "call.answered_by_agent": CallAnsweredByAgentEvent;
+  "call.ended": CallEndedEvent;
+  "call.missed": CallMissedEvent;
+  "call.rejected": CallRejectedEvent;
+  "call.failed": CallFailedEvent;
+  "call.sdp_offer": CallSdpOfferEvent;
+  "call.ice_candidate": CallIceCandidateEvent;
 }
 
 export type DomainEventType = keyof DomainEventMap;

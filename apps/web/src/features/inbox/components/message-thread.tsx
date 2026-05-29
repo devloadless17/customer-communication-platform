@@ -11,6 +11,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
 import { calendarDayKey, formatDaySeparator } from "@ccp/shared/utils";
 import type {
+  CallSnapshot,
   ContactFieldDefinition,
   ContactStage,
   ConversationActivityEvent,
@@ -36,6 +37,7 @@ import dynamic from "next/dynamic";
 import { ErrorBoundary } from "@/components/error-boundary";
 
 import { MessageBubble } from "./message-bubble";
+import { CallBubble } from "./message-bubble/call-bubble";
 import { InternalNote as InternalNoteCard } from "./internal-note";
 import { ActivityEntry } from "./activity-entry";
 import { ReplyBox } from "./reply-box";
@@ -66,6 +68,12 @@ type TimelineEntry =
   | {
       kind: "activity";
       data: ConversationActivityEvent & { timestamp: string };
+    }
+  // Voice call rows. Aliased the same way as activity entries — `ringingAt`
+  // becomes `timestamp` so the sort + day-separator code stays uniform.
+  | {
+      kind: "call";
+      data: CallSnapshot & { timestamp: string };
     };
 
 function MessageThreadImpl({
@@ -78,6 +86,8 @@ function MessageThreadImpl({
   fieldDefinitions,
   canManageStages,
   canDeleteConversations,
+  canMakeCalls,
+  onInitiateCall,
   onMarkRead,
   onSnapshot,
   onMobileBack,
@@ -100,6 +110,11 @@ function MessageThreadImpl({
   /** Whether the current user can delete conversations (`conversations:delete`).
    *  Forwarded to ThreadHeader → ConversationMenu to hide the delete action. */
   canDeleteConversations: boolean;
+  /** Whether to show the Phone button in the header. Set by the shell from
+   *  capability check + channel + contact country gate. */
+  canMakeCalls: boolean;
+  /** Click handler — shell-level, runs the POST and handles error UI. */
+  onInitiateCall: () => void | Promise<void>;
   /** Forwarded to useConversationEvents so the shell can patch its cached
    *  unreadCount=0 after the mark-read POST resolves. Optional so tests and
    *  other mount points don't need to thread it. */
@@ -745,6 +760,11 @@ function MessageThreadImpl({
       hasMoreOlder && oldestMessageTs
         ? events.filter((e) => e.at >= oldestMessageTs)
         : events;
+    const calls = data.calls ?? [];
+    const visibleCalls =
+      hasMoreOlder && oldestMessageTs
+        ? calls.filter((c) => c.ringingAt >= oldestMessageTs)
+        : calls;
     const isPending = (e: TimelineEntry) =>
       e.kind === "message" && e.data.pending === true;
     return [
@@ -758,6 +778,15 @@ function MessageThreadImpl({
           data: { ...e, timestamp: e.at },
         }),
       ),
+      // Calls sort by ringingAt — that's when the user-visible event
+      // happened (the row keeps endedAt for the audit trail). Aliased to
+      // `timestamp` like activity entries for the shared sort.
+      ...visibleCalls.map(
+        (c): TimelineEntry => ({
+          kind: "call",
+          data: { ...c, timestamp: c.ringingAt },
+        }),
+      ),
     ].sort((a, b) => {
       const ap = isPending(a);
       const bp = isPending(b);
@@ -767,7 +796,7 @@ function MessageThreadImpl({
         new Date(b.data.timestamp).getTime()
       );
     });
-  }, [messages, notes, events, hasMoreOlder]);
+  }, [messages, notes, events, hasMoreOlder, data.calls]);
 
   // Day-separator labels keyed by timeline index. Pre-computed alongside the
   // timeline so the per-entry render doesn't run formatDaySeparator twice per
@@ -876,6 +905,8 @@ function MessageThreadImpl({
         onStageChange={persistStageId}
         canManageStages={canManageStages}
         canDeleteConversations={canDeleteConversations}
+        canMakeCalls={canMakeCalls}
+        onInitiateCall={onInitiateCall}
         onMobileBack={onMobileBack}
       />
 
@@ -1016,6 +1047,8 @@ function MessageThreadImpl({
                         }
                         onDelete={deleteNote}
                       />
+                    ) : entry.kind === "call" ? (
+                      <CallBubble call={entry.data} />
                     ) : (
                       <ActivityEntry event={entry.data} />
                     )}

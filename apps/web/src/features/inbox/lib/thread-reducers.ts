@@ -1,4 +1,6 @@
 import type {
+  ActiveCallState,
+  CallSnapshot,
   Contact,
   ConversationStatus,
   ConversationWithRefs,
@@ -154,6 +156,121 @@ export function applyNoteDeleted(
 }
 
 // ---------------------------------------------------------------------------
+// Voice-call reducers
+//
+// Set `activeCall` on incoming/ringing, flip to in_progress on answered,
+// clear + append to `calls` history on terminal. The fanout splits incoming
+// (team room toast) from ringing (conversation room) — the live hook
+// dispatches both into the same `activeCall` slot since either represents
+// the same "there is a call happening here" state.
+// ---------------------------------------------------------------------------
+
+export function applyCallIncoming(
+  prev: ConversationWithRefs,
+  payload: {
+    callId: string;
+    externalCallId: string;
+    ringingAt: string;
+  },
+): ConversationWithRefs {
+  if (prev.activeCall?.callId === payload.callId) return prev;
+  const next: ActiveCallState = {
+    callId: payload.callId,
+    externalCallId: payload.externalCallId,
+    direction: "in",
+    status: "ringing",
+    startedAt: payload.ringingAt,
+    answeredAt: null,
+  };
+  return { ...prev, activeCall: next };
+}
+
+export function applyCallRinging(
+  prev: ConversationWithRefs,
+  payload: { callId: string },
+): ConversationWithRefs {
+  if (prev.activeCall?.callId === payload.callId) return prev;
+  const next: ActiveCallState = {
+    callId: payload.callId,
+    externalCallId: payload.callId,
+    direction: "out",
+    status: "ringing",
+    startedAt: new Date().toISOString(),
+    answeredAt: null,
+  };
+  return { ...prev, activeCall: next };
+}
+
+export function applyCallAnswered(
+  prev: ConversationWithRefs,
+  payload: { callId: string; answeredAt: string },
+): ConversationWithRefs {
+  if (!prev.activeCall || prev.activeCall.callId !== payload.callId) return prev;
+  if (prev.activeCall.status === "in_progress") return prev;
+  return {
+    ...prev,
+    activeCall: {
+      ...prev.activeCall,
+      status: "in_progress",
+      answeredAt: payload.answeredAt,
+    },
+  };
+}
+
+export function applyCallEnded(
+  prev: ConversationWithRefs,
+  payload: {
+    callId: string;
+    durationSeconds: number | null;
+    endedAt: string;
+    status: "completed" | "missed" | "rejected" | "failed";
+  },
+): ConversationWithRefs {
+  const wasActive = prev.activeCall?.callId === payload.callId;
+  // Append/update in the history slice so the bubble appears in the
+  // timeline immediately. Idempotent — same callId replaces existing.
+  const history: CallSnapshot[] = prev.calls ?? [];
+  const existingIdx = history.findIndex((c) => c.id === payload.callId);
+  let nextHistory: CallSnapshot[];
+  if (existingIdx >= 0) {
+    const existing = history[existingIdx]!;
+    nextHistory = history.slice();
+    nextHistory[existingIdx] = {
+      ...existing,
+      status: payload.status,
+      endedAt: payload.endedAt,
+      durationSeconds: payload.durationSeconds,
+    };
+  } else if (wasActive && prev.activeCall) {
+    nextHistory = history.slice();
+    nextHistory.push({
+      id: prev.activeCall.callId,
+      conversationId: prev.conversation.id,
+      externalCallId: prev.activeCall.externalCallId,
+      channel: prev.conversation.channel ?? "whatsapp",
+      direction: prev.activeCall.direction,
+      status: payload.status,
+      answeredByUserId: null,
+      ringingAt: prev.activeCall.startedAt,
+      answeredAt: prev.activeCall.answeredAt,
+      endedAt: payload.endedAt,
+      durationSeconds: payload.durationSeconds,
+      recordingUrl: null,
+    });
+  } else {
+    // Terminal frame for a call we never saw an active state for (page
+    // load mid-call, late frame, etc.). Skip — the next full thread fetch
+    // will surface it.
+    nextHistory = history;
+  }
+  return {
+    ...prev,
+    activeCall: wasActive ? null : prev.activeCall ?? null,
+    calls: nextHistory,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Iterated wiring contract
 //
 // Both consumers (use-conversation-events and inbox-shell) loop over this
@@ -201,6 +318,10 @@ export const THREAD_REDUCER_EVENTS = [
     apply: applyContactUpdate,
     target: "all",
   }),
+  reducerEntry({ event: "call:incoming", apply: applyCallIncoming }),
+  reducerEntry({ event: "call:ringing", apply: applyCallRinging }),
+  reducerEntry({ event: "call:answered", apply: applyCallAnswered }),
+  reducerEntry({ event: "call:ended", apply: applyCallEnded }),
 ] as const;
 
 /**
@@ -260,6 +381,11 @@ export const REDUCER_EXCLUSIONS: ReadonlyMap<string, string> = new Map([
   ["conversation:activity", "client-only optimistic frame"],
   // Socket lifecycle — not a per-thread payload.
   ["connect", "socket lifecycle"],
+  // Signaling-only — flow directly into useCall (RTCPeerConnection lifecycle),
+  // not into the thread snapshot. The browser hangs them off the peer
+  // connection, not the rendered state.
+  ["call:sdp_offer", "WebRTC signaling, owned by useCall"],
+  ["call:ice", "WebRTC signaling, owned by useCall"],
 ]);
 
 /**

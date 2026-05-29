@@ -517,4 +517,117 @@ export const FANOUT_RULES: FanoutRuleMap = {
       webhookId: e.webhookId,
     });
   },
+
+  // ---- WhatsApp Business Calling -----------------------------------------
+  // Room-scoping rules per call phase (mirrors the locked availability:*
+  // split decision — each phase rides its own frame for narrowest payload).
+  //
+  //   call.incoming           → TEAM room. Any agent might pick up; toast all.
+  //   call.ringing_out        → CONVERSATION room. Only the originating thread.
+  //   call.answered_by_agent  → TEAM room. Dismisses incoming toast on every
+  //                              OTHER browser. The winning agent's local
+  //                              optimistic dispatch already flipped its UI.
+  //   call.ended / missed /   → TEAM room. Updates the inbox list "ongoing
+  //     rejected / failed       call" badge + thread timeline pill across all
+  //                              agents who might have the thread cached.
+  //   call.sdp_offer          → TEAM room. The answering agent's browser
+  //                              filters by callId; broadcasting it widely
+  //                              avoids the "agent A clicked answer but the
+  //                              SDP only went to agent B" race.
+  //   call.ice_candidate      → CONVERSATION room. Only the live-call agent
+  //                              cares; the call audio peer connection is
+  //                              already established.
+  "call.incoming": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "call:incoming", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      externalCallId: e.externalCallId,
+      contactId: e.contact.id,
+      contactName: e.contact.name,
+      ringingAt: e.ringingAt,
+    });
+  },
+
+  "call.ringing_out": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "call:ringing", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      initiatedByUserId: e.initiatedByUserId,
+    });
+  },
+
+  "call.answered_by_agent": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "call:answered", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      answeredByUserId: e.answeredByUserId,
+      answeredAt: e.answeredAt,
+    });
+  },
+
+  "call.ended": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "call:ended", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      durationSeconds: e.durationSeconds,
+      endedAt: e.endedAt,
+      status: "completed",
+    });
+  },
+
+  "call.missed": (e, emitter) => {
+    // Same wire frame as call:ended — status discriminates the bubble copy.
+    emitter.emitToTeam(e.teamId, "call:ended", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      durationSeconds: null,
+      endedAt: e.ringingAt,
+      status: "missed",
+    });
+  },
+
+  "call.rejected": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "call:ended", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      durationSeconds: null,
+      endedAt: new Date().toISOString(),
+      status: "rejected",
+    });
+  },
+
+  "call.failed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "call:ended", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      durationSeconds: null,
+      endedAt: new Date().toISOString(),
+      status: "failed",
+    });
+  },
+
+  "call.sdp_offer": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "call:sdp_offer", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      sdp: e.sdp,
+    });
+  },
+
+  "call.ice_candidate": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "call:ice", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      callId: e.callId,
+      candidate: e.candidate,
+    });
+  },
 };

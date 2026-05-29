@@ -663,6 +663,7 @@ export function useTeamEvents(
     const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = ({
       conversationId,
       assignedUser,
+      optimistic,
     }) => {
       const nextAssignedUserId = assignedUser?.id ?? null;
       setConversations((prev) => {
@@ -723,12 +724,21 @@ export function useTeamEvents(
       // Splice-IN catcher for the non-displayed case (teammate's change
       // to a row we don't hold). Tight debounce so the gap between
       // optimistic above and canonical reconciliation here is invisible.
-      scheduleFilterResync();
+      //
+      // Skip on OPTIMISTIC local dispatches: the POST /assign hasn't
+      // committed yet, so a re-fetch here can read PRE-change state and
+      // (a) re-add a row we just spliced out, or (b) revert a row we just
+      // patched. The post-commit server frame (optimistic absent) drives
+      // convergence — same gate `onContactUpdated` already uses for stage.
+      // Without this gate the user reports the list "vibrating" on every
+      // assign as the row patches → reverts → patches again.
+      if (!optimistic) scheduleFilterResync();
     };
 
     const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = ({
       conversationId,
       status,
+      optimistic,
     }) => {
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
@@ -781,7 +791,9 @@ export function useTeamEvents(
         };
         return next;
       });
-      scheduleFilterResync();
+      // Same skip-on-optimistic gate as onAssigned/onContactUpdated. See the
+      // comment in onAssigned for the load-bearing rationale.
+      if (!optimistic) scheduleFilterResync();
     };
 
     const onRead: Parameters<typeof socket.on<"conversation:read">>[1] = ({

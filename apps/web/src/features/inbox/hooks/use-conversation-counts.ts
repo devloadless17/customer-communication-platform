@@ -102,6 +102,16 @@ export function useConversationCounts(): ConversationCounts | null {
     const trigger = () => {
       void refresh();
     };
+    // Optimistic frames for status/assigned fire BEFORE their POST commits.
+    // Refetching counts then can return PRE-change numbers, briefly snap the
+    // badge back to the old value, and flicker. Skip the GET on those frames
+    // — the authoritative server frame (optimistic absent) fires the same
+    // listener moments later and drives convergence. Mirrors the gate
+    // `useTeamEvents` uses for the inbox list resync.
+    const triggerSkipOptimistic = (payload: { optimistic?: boolean }) => {
+      if (payload?.optimistic) return;
+      void refresh();
+    };
     // `contact:updated` carries the full contact row. Only a stageId change
     // moves any byStage bucket — name / email / custom fields / tags don't.
     // We track the last-seen stageId per contact and skip the refresh when
@@ -186,8 +196,8 @@ export function useConversationCounts(): ConversationCounts | null {
       }, STAGE_SETTLING_MS + 50);
     };
 
-    socket.on("conversation:assigned", trigger);
-    socket.on("conversation:status", trigger);
+    socket.on("conversation:assigned", triggerSkipOptimistic);
+    socket.on("conversation:status", triggerSkipOptimistic);
     socket.on("conversation:deleted", trigger);
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onBulkUpdated);
@@ -197,8 +207,8 @@ export function useConversationCounts(): ConversationCounts | null {
     }
 
     return () => {
-      socket.off("conversation:assigned", trigger);
-      socket.off("conversation:status", trigger);
+      socket.off("conversation:assigned", triggerSkipOptimistic);
+      socket.off("conversation:status", triggerSkipOptimistic);
       socket.off("conversation:deleted", trigger);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onBulkUpdated);

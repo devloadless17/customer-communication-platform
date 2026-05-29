@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, Search as SearchIcon } from "lucide-react";
+import { ChevronLeft, Phone, Search as SearchIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -80,6 +80,8 @@ export function ThreadHeader({
   onStageChange,
   canManageStages,
   canDeleteConversations,
+  canMakeCalls,
+  onInitiateCall,
   onMobileBack,
 }: {
   teamId: string;
@@ -111,6 +113,14 @@ export function ThreadHeader({
   /** Whether the current user can delete this conversation. Hides the
    *  delete action inside ConversationMenu when false. */
   canDeleteConversations: boolean;
+  /**
+   * Whether to surface the Phone button. The parent has already filtered
+   * for: (a) capability `calls:make`, (b) channel === "whatsapp", and
+   * (c) contact country code NOT on the BIC blocklist. False = hide button.
+   */
+  canMakeCalls: boolean;
+  /** Click handler — kicks off the outbound-call flow + handles 4xx UI. */
+  onInitiateCall: () => void | Promise<void>;
   /** Mobile back-to-list affordance. Only rendered when set + below md. */
   onMobileBack?: () => void;
 }) {
@@ -162,6 +172,18 @@ export function ThreadHeader({
         >
           <SearchIcon className="size-4" />
         </Button>
+        {canMakeCalls && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => void onInitiateCall()}
+            aria-label="Call contact via WhatsApp"
+            title="Call via WhatsApp"
+            className="size-8 text-muted-foreground hover:text-foreground"
+          >
+            <Phone className="size-4" />
+          </Button>
+        )}
         <AssignmentDropdown
           teamId={teamId}
           conversationId={conversationId}

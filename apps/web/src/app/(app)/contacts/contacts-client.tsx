@@ -541,7 +541,7 @@ export function ContactsClient({
         onTagBulk={async (action, tagId) => {
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
-          const res = await fetch("/api/contacts/bulk", {
+          const res = await apiFetch("/api/contacts/bulk", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ action, contactIds: ids, tagId }),
@@ -577,7 +577,7 @@ export function ContactsClient({
             destructive: true,
           });
           if (!ok) return;
-          const res = await fetch("/api/contacts/bulk", {
+          const res = await apiFetch("/api/contacts/bulk", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ action: "delete", contactIds: ids }),
@@ -722,7 +722,7 @@ const ContactRow = memo(function ContactRow({
     onTagsChanged(contact.id, nextIds);
     setTagSaveError(null);
     try {
-      const res = await fetch(`/api/contacts/${contact.id}/tags`, {
+      const res = await apiFetch(`/api/contacts/${contact.id}/tags`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tagIds: nextIds }),
@@ -737,7 +737,7 @@ const ContactRow = memo(function ContactRow({
   async function persistStage(nextStageId: string) {
     const prev = contact.stageId ?? null;
     onStageChanged(contact.id, nextStageId);
-    const res = await fetch(`/api/contacts/${contact.id}`, {
+    const res = await apiFetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ stageId: nextStageId }),
@@ -1037,7 +1037,7 @@ function BulkTagMenu({
     setCreating(true);
     setCreateError(null);
     try {
-      const res = await fetch("/api/team/tags", {
+      const res = await apiFetch("/api/team/tags", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, color: newColor }),

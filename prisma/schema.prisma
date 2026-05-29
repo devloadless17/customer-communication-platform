@@ -155,6 +155,36 @@ enum ConversationEventKind {
   stage_changed
   note_added
   note_deleted
+  // Voice-call lifecycle pills. Written by the audit subscriber on every
+  // terminal call state — the timeline renders inline pills the same way as
+  // status/assignment changes. Carries { callId, direction, durationSeconds }
+  // in `after` so the pill renders without re-joining the Call row.
+  call_completed
+  call_missed
+  call_rejected
+  call_failed
+}
+
+// WhatsApp Business Calling lifecycle. ringing → in_progress on first agent
+// answer (CAS-gated); then exactly one terminal: completed (clean hangup),
+// missed (incoming, no agent picked up), rejected (agent declined), or
+// failed (signaling/media error). `missed` vs `rejected` is intentional —
+// the future workflow trigger "On Missed Call" wants to differentiate
+// nobody-at-the-desk from agent-actively-said-no.
+enum CallStatus {
+  ringing
+  in_progress
+  completed
+  missed
+  rejected
+  failed
+}
+
+// Mirrors MessageDirection on purpose so the list-style UI patterns transfer
+// (filters, badges, color choices) without a new vocabulary.
+enum CallDirection {
+  in
+  out
 }
 
 // Domain events workflows can subscribe to. Adding a new value is half the
@@ -287,6 +317,8 @@ model Team {
   outboundEvents          OutboundEvent[]
   outboundSendAttempts    OutboundSendAttempt[]
   channelConnections      ChannelConnection[]
+  calls                   Call[]
+  callPermissionRequests  CallPermissionRequest[]
 }
 
 // Per-(team, channel) connection: credentials + settings for one provider.
@@ -362,6 +394,10 @@ model User {
   channelReadReceipts     TeamChannelReadReceipt[]
   channelMemberships      TeamChannelMember[]       @relation("ChannelMemberships")
   addedChannelMembers     TeamChannelMember[]       @relation("AddedChannelMembers")
+  // Voice calls this user answered (CAS-won the "who answered first" race).
+  // SetNull on user delete so call audit history survives deactivation, same
+  // discipline as authoredMsgs / authoredNotes.
+  answeredCalls           Call[]                    @relation("AnsweredCalls")
   sessions                Session[]
   accounts                Account[]
 
@@ -547,11 +583,22 @@ model Contact {
   // (GDPR) is a separate explicit action that cascades.
   deletedAt         DateTime?
 
+  // WhatsApp Business Calling — auto-revocation mirror.
+  // Meta revokes calling permission after 4 consecutive unanswered outbound
+  // calls; once revoked, placeCall returns an error until the customer
+  // grants permission again. We mirror that state locally so the inbox can
+  // (a) hide the Phone button when it's revoked and (b) show a warning at 3
+  // unanswered before Meta strips permission. `consecutiveUnansweredOutCalls`
+  // resets to 0 on any answered/completed outbound call.
+  callPermissionRevokedUntil    DateTime?
+  consecutiveUnansweredOutCalls Int       @default(0)
+
   team                Team                 @relation(fields: [teamId], references: [id], onDelete: Cascade)
   stage               ContactStage?        @relation(fields: [stageId], references: [id], onDelete: SetNull)
   conversations       Conversation[]
   broadcastRecipients BroadcastRecipient[]
   workflowAwaitingReplies WorkflowAwaitingReply[]
+  callPermissionRequests CallPermissionRequest[]
   // Many-to-many: an agent tags a contact with one or more labels for
   // segmentation. Implicit join table — Prisma manages the link rows.
   // Tags live on Contact (NOT Conversation): one contact = one conversation
@@ -746,6 +793,9 @@ model Conversation {
   // a global "show me everything" feed) lives on the ConversationEvent.teamId
   // index, independent of cascade.
   events       ConversationEvent[]
+  // Voice calls placed/received on this thread. Cascade with the parent —
+  // deleting a conversation drops its call history alongside its messages.
+  calls        Call[]
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
@@ -1908,4 +1958,110 @@ model OutboundEvent {
   // Prisma DSL, see the init migration).
   // No team-id-keyed index here on purpose: the drainer never filters by
   // teamId, and that index was a non-trivial write tax on every publish.
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp Business Calling
+// ---------------------------------------------------------------------------
+//
+// Voice/video calls placed or received on a conversation. Calls are an
+// independent first-class object, not Message rows — they have their own
+// lifecycle (ringing → answered → ended), their own dedup (Meta's call id,
+// distinct from wamid), and a different audit shape (no body, no media). They
+// DO live on a Conversation (1:1 with the contact) and render inline in the
+// thread timeline alongside messages, but they don't fragment the message
+// stream.
+//
+// Schema rules:
+//   - Compound unique `(teamId, channel, externalCallId)` mirrors Message
+//     dedupe — Meta retries calls webhooks the same way it retries messages,
+//     and the P2002 catch + Serializable wrapper are the same idempotency
+//     pattern.
+//   - Channel column even though there's only one calling channel today —
+//     consistency invariant with Message, and the multi-channel seam already
+//     anticipates non-WhatsApp call events.
+//   - `recordingKey / recordingUrl / transcriptId` are nullable Phase-2 slots.
+//     Phase 1 (WebRTC, audio is browser-peer only) writes null. Phase 2 (SIP
+//     gateway forking the Opus stream) populates them. No migration needed
+//     for the swap.
+//   - Calls do NOT touch `Conversation.lastMessageAt` / lastMessagePreview.
+//     They don't reorder the inbox list (different surface — a future
+//     "Recent calls" sub-tab would read from `Call` directly).
+//   - `missed` vs `rejected` is intentional. Workflow trigger differentiation.
+model Call {
+  id               String        @id @default(cuid())
+  teamId           String
+  conversationId   String
+  // Meta's call id — half of the dedup key. Same shape as Message.externalId.
+  externalCallId   String
+  // Calling channel. Hard-coded `whatsapp` today; mirrors Message.channel
+  // for future-channel parity. Pre-existing rule: channel on the row is the
+  // dedup key half, conversation.channel is the ownership truth.
+  channel          Channel       @default(whatsapp)
+  direction        CallDirection
+  status           CallStatus    @default(ringing)
+
+  // CAS-set when an agent successfully answers. Null until then (also null
+  // for missed / rejected with no answer). One call = at most one answering
+  // agent (Meta enforces this at the call-object level).
+  answeredByUserId String?
+
+  ringingAt        DateTime
+  answeredAt       DateTime?
+  endedAt          DateTime?
+  // Computed at terminal transition: endedAt - answeredAt. Null when the
+  // call never reached `in_progress` (missed / rejected / failed-pre-answer).
+  durationSeconds  Int?
+
+  // Phase-2 seam. Populated by the SIP gateway when call recording lands;
+  // until then, every row writes null.
+  recordingKey     String?
+  recordingUrl     String?
+  transcriptId    String?
+
+  // Verbatim Meta call object (mirrors Message.rawPayload). Kept for
+  // forensics + debugging — call signaling is complex and the raw payload
+  // is the only ground truth when something goes sideways.
+  rawPayload       Json
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  team             Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  conversation     Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  answeredBy       User?         @relation("AnsweredCalls", fields: [answeredByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([teamId, channel, externalCallId])
+  // Thread-timeline read path: GET /api/conversations/:id/calls.
+  @@index([conversationId, ringingAt(sort: Desc)])
+  // "Currently ringing" + "calls today" queues: filter by (teamId, status)
+  // ordered by recency. Also serves the 5-calls-per-24h pre-flight gauntlet.
+  @@index([teamId, status, ringingAt(sort: Desc)])
+  @@index([teamId])
+}
+
+// One row per outbound calling-permission request to a contact. Meta caps
+// these at 1/24h and 2/7d, with 72h validity once granted. We track the
+// state locally so:
+//   - the inbox can show "Permission requested — waiting on customer" UI
+//   - the placeCall pre-flight skips re-requesting when permission is live
+//   - rateLimitedUntil mirrors a Meta 4xx so we don't keep banging on the
+//     endpoint
+model CallPermissionRequest {
+  id                String    @id @default(cuid())
+  teamId            String
+  contactId         String
+  // Meta's permission-request id when the request succeeded; null when we
+  // still have an in-flight error / rate-limit on file.
+  externalRequestId String?
+  requestedAt       DateTime  @default(now())
+  // requestedAt + 72h. Pre-computed so the placeCall pre-flight is one
+  // indexed read, not a date-arithmetic SELECT.
+  expiresAt         DateTime
+  // Set when Meta returned 1/24h or 2/7d; cleared on next successful request.
+  rateLimitedUntil  DateTime?
+
+  team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, contactId, requestedAt(sort: Desc)])
 }

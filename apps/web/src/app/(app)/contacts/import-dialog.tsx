@@ -48,7 +48,7 @@ export function ImportContactsDialog({
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch("/api/contacts/import", {
+      const res = await apiFetch("/api/contacts/import", {
         method: "POST",
         body: form,
         signal: abort.signal,

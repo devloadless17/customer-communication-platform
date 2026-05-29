@@ -404,7 +404,11 @@ export type ConversationEventKind =
   | "tag_removed"
   | "stage_changed"
   | "note_added"
-  | "note_deleted";
+  | "note_deleted"
+  | "call_completed"
+  | "call_missed"
+  | "call_rejected"
+  | "call_failed";
 
 /** Who triggered the change. `system` = no human + no API key (automation). */
 export type ActivityActorKind = "user" | "apiKey" | "system";
@@ -450,6 +454,12 @@ export interface Conversation {
   unreadCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
+  /**
+   * Channel this thread lives on. Drives channel-aware UI affordances —
+   * today the Phone button (whatsapp-only). Optional for source-compat;
+   * absent = whatsapp (the only channel in the data model right now).
+   */
+  channel?: Channel;
 }
 
 /**
@@ -492,6 +502,52 @@ export interface ConversationWithRefs {
    */
   messageCount?: number;
   noteCount?: number;
+  /**
+   * Active in-flight voice call for this thread, if any. Set by the
+   * `call:incoming` / `call:ringing` reducers, cleared by `call:ended`.
+   * The full call HISTORY is `calls` below; this slot is the live one.
+   */
+  activeCall?: ActiveCallState | null;
+  /**
+   * Voice call history, oldest-first to match `messages`/`notes`. Merged
+   * into the thread timeline by `ringingAt`. Optional + defaults to `[]`
+   * so existing construction sites stay valid.
+   */
+  calls?: CallSnapshot[];
+}
+
+/**
+ * In-flight call state — what the inbox shell + thread renders while a call
+ * is ringing or active. Cleared on every terminal state.
+ */
+export interface ActiveCallState {
+  callId: string;
+  externalCallId: string;
+  direction: "in" | "out";
+  status: "ringing" | "in_progress";
+  startedAt: string;
+  answeredAt: string | null;
+}
+
+/**
+ * Wire-shape snapshot of a Call row. Mirrors `apps/api/src/calls/calls.service.ts`
+ * SerializedCall. Lives here so the inbox + contact panel can render call
+ * history with the same shape the API emits.
+ */
+export interface CallSnapshot {
+  id: string;
+  conversationId: string;
+  externalCallId: string;
+  channel: string;
+  direction: "in" | "out";
+  status: "ringing" | "in_progress" | "completed" | "missed" | "rejected" | "failed";
+  answeredByUserId: string | null;
+  ringingAt: string;
+  answeredAt: string | null;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  /** Phase-2 SIP recording URL; null in Phase 1. */
+  recordingUrl: string | null;
 }
 
 /** Patch shape accepted by `PATCH /api/contacts/[id]`. All fields optional. */

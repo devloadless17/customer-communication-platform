@@ -128,6 +128,7 @@ export default async function InboxPage({
         canManageStages={permissions["stages:manage"]}
         canManageContactFields={permissions["contactFields:manage"]}
         canDeleteConversations={permissions["conversations:delete"]}
+        canMakeCalls={permissions["calls:make"]}
         initialActiveConversationId={initialActiveConversationId}
         initialThread={initialThread}
         initialContactPanelCollapsed={contactPanelCollapsed}

@@ -34,12 +34,6 @@ concurrency:
 
 env:
   APP_IMAGE_NAME: customer-communication-platform
-  # Opt the remaining Node-20 JS actions (pnpm/action-setup, docker/login-action,
-  # dorny/paths-filter) onto Node.js 24 ahead of GitHub's 2026-06-02 forced
-  # cutover — silences the deprecation warnings. Runner-level override, so it
-  # works regardless of each action's pinned `runs.using`; covers every job
-  # (incl. typecheck's pnpm setup). Drop once all three ship a Node-24 release.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   typecheck:
@@ -57,7 +51,7 @@ jobs:
       # produced a different node_modules layout than the image build (npm
       # hoists differently than pnpm), so "passes CI, breaks build" was a
       # latent risk. setup-node's pnpm cache key uses pnpm-lock.yaml.
-      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d  # v4.1.0
+      - uses: pnpm/action-setup@d15e628ca66d93ee5f352c71671a7bc6a97af5c9  # v6.0.8
         with:
           version: 10.33.3
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
@@ -126,7 +120,7 @@ jobs:
           # without the noise: rely on main.ts + compose defaults (both 0/unset).
           echo "✓ all required GH secrets present"
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -154,7 +148,7 @@ jobs:
       # changes (deps, prisma, configs, the workflow itself, the
       # docker-compose file, etc.).
       - id: filter
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         with:
           filters: |
             web:
@@ -225,14 +219,14 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build + push web image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
         with:
           context: .
           file: apps/web/Dockerfile
@@ -266,14 +260,14 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build + push api image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
         with:
           context: .
           file: apps/api/Dockerfile
@@ -314,7 +308,7 @@ jobs:
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -476,7 +470,7 @@ jobs:
         working-directory: _deploy
         run: docker compose --env-file .env down -v || true
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: deploy-bundle
           path: ccp-deploy.tar.gz
@@ -493,7 +487,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: deploy-bundle
 

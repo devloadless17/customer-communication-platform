@@ -69,10 +69,16 @@ export function StatusDropdown({
     // Optimistic: fan the same socket frames the server will broadcast so
     // sidebar status badges, the row, the right-rail mirror, and the assignee
     // chip flip instantly instead of waiting on PATCH → bus → socket round-trip.
+    // `optimistic: true` tells the inbox-list resync + counts refetch to skip
+    // their GETs for this frame — otherwise both fire during the in-flight
+    // PATCH window and either (a) return pre-change state that flickers the
+    // row back, or (b) overwrite the optimistic count badge with stale numbers.
+    // The authoritative server frame (optimistic absent) drives convergence.
     dispatchLocalSocketEvent("conversation:status", {
       teamId,
       conversationId,
       status,
+      optimistic: true,
     });
     // Synthesize the matching timeline pill so it lands in the same frame as
     // the status badge, not a GET behind it. Reconciled by the authoritative
@@ -89,6 +95,7 @@ export function StatusDropdown({
         teamId,
         conversationId,
         assignedUser: null,
+        optimistic: true,
       });
       unassignActivityId = optimisticAssignment({
         teamId,

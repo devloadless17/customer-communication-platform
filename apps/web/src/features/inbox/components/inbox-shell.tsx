@@ -40,6 +40,40 @@ import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
+import { CallPanel } from "@/features/calls/components/call-panel";
+import { IncomingCallToast } from "@/features/calls/components/incoming-call-toast";
+import { useCall } from "@/features/calls/hooks/use-call";
+import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
+
+/**
+ * Map a call-initiation 4xx reason from the API to a one-liner the agent
+ * sees in the call panel. Centralised here so both the inbox shell and any
+ * future trigger surface (contact page "Call" button) share the strings.
+ */
+function surfaceCallReason(
+  reason: string,
+  setError: (msg: string | null) => void,
+): void {
+  switch (reason) {
+    case "permission_required":
+      setError("Permission requested — will ring when the customer grants it.");
+      return;
+    case "bic_blocked_region":
+      setError("Outbound calls aren't available in this contact's region.");
+      return;
+    case "permission_revoked":
+      setError("Calling permission was revoked by the customer.");
+      return;
+    case "rate_limited":
+      setError("Slow down — Meta is rate-limiting calls to this number.");
+      return;
+    case "daily_cap_reached":
+      setError("Daily cap reached: max 5 connected calls per 24h per contact.");
+      return;
+    default:
+      setError(`Couldn't start the call (${reason}).`);
+  }
+}
 
 // DevTools is dev-only — it bundles framer-motion + a handful of lucide
 // icons just to render `null` when NODE_ENV === "production". Using
@@ -125,6 +159,7 @@ export function InboxShell({
   canManageStages: canManageStagesPerm,
   canManageContactFields,
   canDeleteConversations,
+  canMakeCalls,
   initialActiveConversationId,
   initialThread,
   initialContactPanelCollapsed,
@@ -142,6 +177,10 @@ export function InboxShell({
   canManageStages: boolean;
   canManageContactFields: boolean;
   canDeleteConversations: boolean;
+  /** Whether the agent can place outbound calls. Combined with channel +
+   *  region check on a per-thread basis to decide whether to show the
+   *  Phone button. */
+  canMakeCalls: boolean;
   initialActiveConversationId: string | null;
   initialThread: CachedThread | null;
   /** Server-read cookie so the right panel SSRs in its persisted rail state. */
@@ -192,6 +231,15 @@ export function InboxShell({
   activeIdRef.current = activeId;
   const displayedIdRef = useRef(displayedId);
   displayedIdRef.current = displayedId;
+
+  // ---- WhatsApp voice calling ----
+  // useCall owns the RTCPeerConnection lifecycle + subscribes to
+  // call:sdp_offer / call:ice / call:ended. Mounted at the shell level so
+  // a call survives thread switches. Side-effect (the IncomingCallToast +
+  // CallPanel below) is rendered as a portal-like overlay; the inbox
+  // layout doesn't shift when a call is in progress.
+  const callApi = useCall();
+  const [callError, setCallError] = useState<string | null>(null);
 
   const fetchControllersRef = useRef<Map<string, AbortController>>(new Map());
 
@@ -825,6 +873,46 @@ export function InboxShell({
     void fetchThread(activeIdRef.current);
   }, [fetchThread]);
 
+  // Outbound call initiator. POSTs to /api/conversations/:id/call and maps
+  // the full 4xx matrix to a single human message in the call panel:
+  //   permission_required → "Permission requested — will ring when granted."
+  //   bic_blocked_region  → "Outbound calls aren't available in this region."
+  //   permission_revoked  → "Calling permission revoked by customer."
+  //   rate_limited        → "Slow down — Meta rate-limited this number."
+  //   daily_cap_reached   → "Limit of 5 calls per day reached for this contact."
+  const initiateCallForActiveThread = useCallback(async () => {
+    const targetId = displayedIdRef.current;
+    if (!targetId) return;
+    setCallError(null);
+    try {
+      const res = await fetchWithSessionGuard(
+        `/api/conversations/${targetId}/call`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      if (res.ok) {
+        const body = (await res.json()) as { ok?: boolean; reason?: string };
+        if (body.ok === false && body.reason) {
+          surfaceCallReason(body.reason, setCallError);
+        }
+        return;
+      }
+      // 4xx with structured `reason` key. Map to a user-facing message.
+      let body: { reason?: string } | null = null;
+      try {
+        body = (await res.json()) as { reason?: string };
+      } catch {
+        body = null;
+      }
+      surfaceCallReason(body?.reason ?? `http_${res.status}`, setCallError);
+    } catch (err) {
+      setCallError(err instanceof Error ? err.message : "Failed to start call");
+    }
+  }, []);
+
   // Below md we run a single-pane mode: either the conversation list OR the
   // thread is on screen. The hamburger (in MobileShellChrome) opens the
   // AppRail + InboxSubSidebar drawer. The "back to list" affordance is the
@@ -900,6 +988,17 @@ export function InboxShell({
                 contactPanelBuiltins={contactPanelBuiltins}
                 canManageContactFields={canManageContactFields}
                 canDeleteConversations={canDeleteConversations}
+                canMakeCalls={
+                  // Per-thread gate: capability + WhatsApp channel + region
+                  // (BIC blocklist via contact country) + no fresh revocation.
+                  // channel may be absent on legacy wire payloads; treat
+                  // unknown as whatsapp (the only channel today).
+                  canMakeCalls &&
+                  (displayedThread.data.conversation.channel ?? "whatsapp") ===
+                    "whatsapp" &&
+                  isBicAllowed(displayedThread.data.contact.countryCode ?? null)
+                }
+                onInitiateCall={initiateCallForActiveThread}
                 tags={tags}
                 initialContactPanelCollapsed={initialContactPanelCollapsed}
                 onMarkRead={handleMarkRead}
@@ -920,6 +1019,26 @@ export function InboxShell({
           </main>
         </div>
         <DevTools conversations={live.conversations} currentUser={currentUser} />
+
+        {/* WhatsApp voice calling overlays — fixed-position, render
+            independent of the thread that's open. The toast stack lives
+            bottom-left, the in-call panel bottom-right; they never overlap
+            with the inbox layout (no shift on mount). */}
+        <IncomingCallToast
+          onAnswer={(callId, contactName, conversationId) => {
+            void callApi.answerIncoming(callId, contactName, conversationId);
+          }}
+          onReject={(callId) => {
+            void callApi.reject(callId);
+          }}
+        />
+        <CallPanel
+          liveCall={callApi.liveCall}
+          error={callError ?? callApi.error}
+          onHangup={() => void callApi.hangup()}
+          onSetMuted={callApi.setMuted}
+          isMuted={callApi.isMuted}
+        />
       </div>
     </SnippetsProvider>
   );
@@ -941,6 +1060,8 @@ function ThreadWorkspace({
   contactPanelBuiltins,
   canManageContactFields,
   canDeleteConversations,
+  canMakeCalls,
+  onInitiateCall,
   tags,
   initialContactPanelCollapsed,
   onMarkRead,
@@ -958,6 +1079,8 @@ function ThreadWorkspace({
   contactPanelBuiltins: ContactPanelBuiltins;
   canManageContactFields: boolean;
   canDeleteConversations: boolean;
+  canMakeCalls: boolean;
+  onInitiateCall: () => void | Promise<void>;
   tags: Tag[];
   initialContactPanelCollapsed: boolean;
   onMarkRead: (conversationId: string) => void;
@@ -986,6 +1109,8 @@ function ThreadWorkspace({
         fieldDefinitions={fieldDefinitions}
         canManageStages={canManageStages}
         canDeleteConversations={canDeleteConversations}
+        canMakeCalls={canMakeCalls}
+        onInitiateCall={onInitiateCall}
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}

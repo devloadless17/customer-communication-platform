@@ -135,9 +135,17 @@ export function mapContact(c: PrismaContact): Contact {
 // soft-delete tombstone — likewise an internal column that never reaches the
 // wire. Listing them alongside `customFields` keeps the strict shape's `Omit`
 // tractable.
+// `callPermissionRevokedUntil` + `consecutiveUnansweredOutCalls` are calling-
+// state internals — never read by the list UI (the contact-panel can fetch
+// them separately when needed), and excluding them keeps the contact-list
+// select narrow.
 type PrismaContactListItem = Omit<
   PrismaContact,
-  "customFields" | "version" | "deletedAt"
+  | "customFields"
+  | "version"
+  | "deletedAt"
+  | "callPermissionRevokedUntil"
+  | "consecutiveUnansweredOutCalls"
 >;
 export function mapContactListItem(c: PrismaContactListItem): Contact {
   return {

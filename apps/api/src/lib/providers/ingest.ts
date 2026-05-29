@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
+import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { ensureDefaultStage } from "@/lib/queries";
 import { mapReplySnapshot, REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
 import {
@@ -70,6 +71,8 @@ export async function ingestEvents(
     try {
       if (evt.kind === "message") {
         await ingestInboundMessage(teamId, channel, evt);
+      } else if (evt.kind === "call") {
+        await ingestCallEvent(teamId, channel, evt);
       } else {
         await ingestStatusUpdate(teamId, channel, evt);
       }
@@ -934,7 +937,7 @@ function toWorkflowConversation(c: {
   };
 }
 
-function toWorkflowContact(c: {
+export function toWorkflowContact(c: {
   id: string;
   phoneNumber: string | null;
   identityChannel?: Channel | null;
@@ -989,7 +992,7 @@ function toWorkflowContact(c: {
  *   "" / null / phone    → { firstName: null,    lastName: null } — caller falls
  *                          back to the literal `name` field.
  */
-function splitContactName(name: string | null | undefined): {
+export function splitContactName(name: string | null | undefined): {
   firstName: string | null;
   lastName: string | null;
 } {
@@ -1177,7 +1180,7 @@ export async function loadReplySnapshotById(
  * can race ahead — we retry both signals so the loser's tx restarts cleanly
  * and finds the row the winner committed.
  */
-async function runWithSerializableRetry<T>(
+export async function runWithSerializableRetry<T>(
   work: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
   for (let attempt = 0; attempt < 2; attempt++) {

@@ -193,6 +193,60 @@ export function registerAuditSubscribers(): () => void {
     }
   });
 
+  // ---- WhatsApp Business Calling: terminal-state pills -------------------
+  // One audit row per terminal call state so the timeline renders inline
+  // pills the same way as message status / assignment changes. Carries
+  // { callId, direction, durationSeconds } in `after` so the renderer
+  // doesn't need to re-join the Call row.
+
+  subscribe("call.ended", async (e) => {
+    await recordConversationEvent({
+      conversationId: e.conversationId,
+      teamId: e.teamId,
+      // Hangup actor is currently inferred from the `reason` field —
+      // `hangup_by_agent` carries no specific userId from the bus, but
+      // the audit row is meaningful regardless ("call completed, X seconds").
+      userId: null,
+      kind: "call_completed",
+      after: {
+        callId: e.callId,
+        direction: e.direction,
+        durationSeconds: e.durationSeconds,
+        reason: e.reason,
+      },
+    });
+  });
+
+  subscribe("call.missed", async (e) => {
+    await recordConversationEvent({
+      conversationId: e.conversationId,
+      teamId: e.teamId,
+      userId: null,
+      kind: "call_missed",
+      after: { callId: e.callId },
+    });
+  });
+
+  subscribe("call.rejected", async (e) => {
+    await recordConversationEvent({
+      conversationId: e.conversationId,
+      teamId: e.teamId,
+      userId: e.rejectedByUserId,
+      kind: "call_rejected",
+      after: { callId: e.callId },
+    });
+  });
+
+  subscribe("call.failed", async (e) => {
+    await recordConversationEvent({
+      conversationId: e.conversationId,
+      teamId: e.teamId,
+      userId: null,
+      kind: "call_failed",
+      after: { callId: e.callId, reason: e.reason },
+    });
+  });
+
   return () => {
     for (const off of offs) off();
   };

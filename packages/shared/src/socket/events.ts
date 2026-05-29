@@ -112,6 +112,18 @@ export interface ServerToClientEvents {
     teamId: string;
     conversationId: string;
     assignedUser: User | null;
+    /**
+     * Set ONLY by client-side optimistic dispatches (dispatchLocalSocketEvent),
+     * before the corresponding POST /assign has committed. Server fan-out never
+     * sets it. Consumers that re-fetch from the server on this event (inbox-list
+     * filter resync, conversation-counts refetch) MUST skip that re-fetch when
+     * this is true — otherwise the read can beat the in-flight write and either
+     * (a) re-introduce a stale row that the optimistic patch already removed or
+     * (b) overwrite the optimistic count badge with pre-change numbers. The
+     * post-commit server frame (optimistic absent) drives convergence. Mirrors
+     * the same flag on `contact:updated`.
+     */
+    optimistic?: boolean;
   }) => void;
 
   /** Conversation status changed (open / pending / closed). */
@@ -119,6 +131,8 @@ export interface ServerToClientEvents {
     teamId: string;
     conversationId: string;
     status: ConversationStatus;
+    /** See `conversation:assigned.optimistic`. */
+    optimistic?: boolean;
   }) => void;
 
   /**
@@ -589,6 +603,74 @@ export interface ServerToClientEvents {
     channelId: string;
     threadRootId: string;
     typingUserIds: string[];
+  }) => void;
+
+  // ---- WhatsApp Business Calling -----------------------------------------
+  // The browser is the WebRTC peer; these frames carry signaling + lifecycle.
+  // The split mirrors the locked `availability:*` event-split decision: each
+  // phase rides its own frame so subscribers attach to the narrowest payload.
+
+  /** Inbound call ringing. Team room — any agent might pick up. */
+  "call:incoming": (payload: {
+    teamId: string;
+    conversationId: string;
+    callId: string;
+    externalCallId: string;
+    contactId: string;
+    contactName: string;
+    ringingAt: string;
+  }) => void;
+
+  /** Outbound call placed; only the originating thread's room. */
+  "call:ringing": (payload: {
+    teamId: string;
+    conversationId: string;
+    callId: string;
+    initiatedByUserId: string;
+  }) => void;
+
+  /** First agent's CAS succeeded. Team room — dismisses every OTHER toast. */
+  "call:answered": (payload: {
+    teamId: string;
+    conversationId: string;
+    callId: string;
+    answeredByUserId: string;
+    answeredAt: string;
+  }) => void;
+
+  /** Call ended (terminal). Same shape used for missed/rejected/failed —
+   *  Call.status differentiates them on the row when the bubble renders. */
+  "call:ended": (payload: {
+    teamId: string;
+    conversationId: string;
+    callId: string;
+    durationSeconds: number | null;
+    endedAt: string;
+    /** Terminal CallStatus value the row was set to. */
+    status: "completed" | "missed" | "rejected" | "failed";
+  }) => void;
+
+  /** SDP offer delivered by Meta; routed to the answering browser. The
+   *  browser feeds it into RTCPeerConnection.setRemoteDescription, generates
+   *  an answer, then POSTs /api/calls/:id/answer with the answer SDP. */
+  "call:sdp_offer": (payload: {
+    teamId: string;
+    conversationId: string;
+    callId: string;
+    sdp: { type: "offer"; sdp: string };
+  }) => void;
+
+  /** Trickle ICE candidate from Meta. Conversation room — only the live-call
+   *  agent's browser feeds it into RTCPeerConnection.addIceCandidate. */
+  "call:ice": (payload: {
+    teamId: string;
+    conversationId: string;
+    callId: string;
+    candidate: {
+      candidate: string;
+      sdpMid: string | null;
+      sdpMLineIndex: number | null;
+    };
   }) => void;
 }
 

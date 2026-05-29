@@ -17,6 +17,7 @@ import {
 } from "@/features/contacts/components/country-code-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import type {
   Contact,
   ContactFieldDefinition,
@@ -106,7 +107,7 @@ export function NewContactDialog({
     try {
       const countryTrim = country.trim().toUpperCase();
 
-      const res = await fetch("/api/contacts", {
+      const res = await apiFetch("/api/contacts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -329,7 +330,7 @@ export function NewContactDialog({
               setCustomValues((prev) => ({ ...prev, [key]: "" }));
             }}
             onAddTeamWide={async (label) => {
-              const res = await fetch("/api/team/contact-fields", {
+              const res = await apiFetch("/api/team/contact-fields", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ label }),

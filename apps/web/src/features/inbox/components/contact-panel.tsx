@@ -606,9 +606,12 @@ function ContactPanelImpl({
       customFields: nextCustomFields,
       tagIds,
     };
+    // `optimistic: true` skips inbox-list resync + counts refetch during the
+    // in-flight PATCH window — see status-dropdown.tsx for the full rationale.
     dispatchLocalSocketEvent("contact:updated", {
       teamId: contact.teamId,
       contact: optimistic,
+      optimistic: true,
     });
     const res = await fetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
@@ -664,10 +667,13 @@ function ContactPanelImpl({
     // will broadcast so every surface flips instantly. Order matches the
     // server publish order: assigned first, then status.
     setAssigneeId(nextId);
+    // `optimistic: true` skips inbox-list resync + counts refetch during the
+    // in-flight PATCH — see status-dropdown.tsx for the full rationale.
     dispatchLocalSocketEvent("conversation:assigned", {
       teamId: conversation.teamId,
       conversationId: conversation.id,
       assignedUser: nextUser,
+      optimistic: true,
     });
     const assignActivityId = optimisticAssignment({
       teamId: conversation.teamId,
@@ -681,6 +687,7 @@ function ContactPanelImpl({
         teamId: conversation.teamId,
         conversationId: conversation.id,
         status: predictedNextStatus,
+        optimistic: true,
       });
       statusActivityId = optimisticStatusChange({
         teamId: conversation.teamId,
@@ -753,9 +760,12 @@ function ContactPanelImpl({
     setTagSaveError(null);
     // Optimistic: fan the canonical contact:updated locally so the sidebar
     // (and any other tag-aware surface) reflects the change instantly.
+    // `optimistic: true` skips inbox-list resync + counts refetch during the
+    // in-flight PUT — see status-dropdown.tsx for the full rationale.
     dispatchLocalSocketEvent("contact:updated", {
       teamId: contact.teamId,
       contact: { ...contact, tagIds: nextIds },
+      optimistic: true,
     });
     // Optimistic timeline pills — one per added/removed tag, mirroring the
     // per-tag audit rows the server writes. Names resolved from the in-hand

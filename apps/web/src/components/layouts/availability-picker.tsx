@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check } from "lucide-react";
 
+import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { cn } from "@ccp/shared/utils";
 import {
@@ -120,7 +121,7 @@ export function AvailabilityPicker({
       if (nextMessage !== undefined) {
         body.message = nextMessage === null || nextMessage === "" ? null : nextMessage;
       }
-      const res = await fetch("/api/users/me/availability", {
+      const res = await apiFetch("/api/users/me/availability", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),

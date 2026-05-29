@@ -111,7 +111,9 @@ export type Capability =
   | "contactFields:manage"
   | "tags:manage"
   | "snippets:manage"
-  | "availability:manage";
+  | "availability:manage"
+  | "calls:make"
+  | "calls:receive";
 
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
@@ -124,6 +126,8 @@ export const ALL_CAPABILITIES: Capability[] = [
   "tags:manage",
   "snippets:manage",
   "availability:manage",
+  "calls:make",
+  "calls:receive",
 ];
 
 /** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
@@ -142,6 +146,8 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "tags:manage": "Create & manage tags",
   "snippets:manage": "Create & manage snippets",
   "availability:manage": "Set own availability (busy / away / offline)",
+  "calls:make": "Place outbound voice calls",
+  "calls:receive": "Answer incoming voice calls",
 };
 
 /**
@@ -176,6 +182,11 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // this off for teams that want fixed online presence (e.g. a call center
     // where agents shouldn't self-mark "away" mid-shift).
     "availability:manage": true,
+    // Calls: default true for all roles. A team that wants to scope outbound
+    // calling to managers only can flip "calls:make" off via the settings
+    // grid — same admin-configurable pattern as every other capability.
+    "calls:make": true,
+    "calls:receive": true,
   },
 };
 
