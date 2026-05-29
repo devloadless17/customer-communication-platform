@@ -33,33 +33,22 @@ export function WindowBadge({
   size?: "xs" | "sm";
   className?: string;
 }) {
-  // Shared 60s tick across the inbox — see hooks/use-now.ts. `now` is null
-  // until after mount so SSR/client first renders agree on the static label;
-  // the time suffix appears on the next commit.
+  // Shared "now" — initialized to the server's clock on SSR (see
+  // TimezoneProvider) so the rendered string is identical on both sides of
+  // hydration. No "Window closed" → "Window closed · 42h ago" flash.
   const now = useNow();
-  const status = computeWindowStatus(lastInboundAt, now ?? Date.now());
-  return (
-    <WindowBadgeFromStatus
-      status={status}
-      size={size}
-      className={className}
-      hideRemaining={now === null}
-    />
-  );
+  const status = computeWindowStatus(lastInboundAt, now);
+  return <WindowBadgeFromStatus status={status} size={size} className={className} />;
 }
 
 export function WindowBadgeFromStatus({
   status,
   size = "sm",
   className,
-  hideRemaining = false,
 }: {
   status: WindowStatus;
   size?: "xs" | "sm";
   className?: string;
-  // When true, omit the "· 8h left" suffix and the time-aware title. Used by
-  // WindowBadge on the first render to keep SSR output deterministic.
-  hideRemaining?: boolean;
 }) {
   const { state } = status;
   const Icon =
@@ -83,6 +72,13 @@ export function WindowBadgeFromStatus({
   const sizing =
     size === "xs" ? "h-5 px-1.5 text-[10px]" : "h-6 px-2 text-[11px]";
 
+  const title =
+    state === "never"
+      ? "This contact hasn't messaged you yet — only templates can be sent."
+      : state === "closed"
+        ? `Free-form replies require a customer message in the last 24h. ${formatWindowRemaining(status)}.`
+        : `The 24h customer service window is ${state === "open" ? "open" : "closing soon"}. ${formatWindowRemaining(status)}.`;
+
   return (
     <span
       className={cn(
@@ -91,25 +87,11 @@ export function WindowBadgeFromStatus({
         tone,
         className,
       )}
-      title={
-        state === "never"
-          ? "This contact hasn't messaged you yet — only templates can be sent."
-          : state === "closed"
-            ? hideRemaining
-              ? "Free-form replies require a customer message in the last 24h."
-              : `Free-form replies require a customer message in the last 24h. ${formatWindowRemaining(status)}.`
-            : hideRemaining
-              ? `The 24h customer service window is ${state === "open" ? "open" : "closing soon"}.`
-              : `The 24h customer service window is ${state === "open" ? "open" : "closing soon"}. ${formatWindowRemaining(status)}.`
-      }
+      title={title}
     >
       <Icon className={size === "xs" ? "size-3" : "size-3.5"} />
       <span className="font-medium">{windowStateLabel(state)}</span>
-      {!hideRemaining && (
-        <span className="opacity-80" suppressHydrationWarning>
-          · {formatWindowRemaining(status)}
-        </span>
-      )}
+      <span className="opacity-80">· {formatWindowRemaining(status)}</span>
     </span>
   );
 }

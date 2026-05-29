@@ -74,12 +74,6 @@
 		reverse_proxy app:3000
 	}
 
-	# (4b) /api/internal/* → web (cache-revalidate bridge). MUST precede the
-	#      /api/* wildcard below.
-	handle /api/internal/* {
-		reverse_proxy app:3000
-	}
-
 	# (5) /api/*, /webhooks/* → api (NestJS). Socket.io rides /api/socket/*,
 	#     covered by /api/* — no separate matcher needed. Long timeouts for
 	#     the WebSocket + SSE connections.

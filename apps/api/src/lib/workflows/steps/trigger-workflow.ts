@@ -73,21 +73,20 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
       return advanceWithError(409, "target_not_runnable", "target workflow is not published");
     }
 
-    // Trace depth via the envelope payload. The dispatcher writes
-    // `metadata.depth` (string) on every manual_trigger child run; a
-    // top-level user-initiated run starts at depth 0 (absent). Other
-    // trigger kinds (message_received / conversation_closed / etc.)
-    // don't carry metadata, but they CAN'T loop back into a
-    // trigger_workflow chain without a deliberate `trigger_workflow`
-    // step, which is what this gate protects.
-    const envMetadata =
-      envelope.event === "manual_trigger"
-        ? (envelope.data as { metadata?: Record<string, string> }).metadata
-        : undefined;
-    const parentDepthRaw = envMetadata?.depth;
-    const parentDepth =
-      typeof parentDepthRaw === "string" ? Number.parseInt(parentDepthRaw, 10) : NaN;
-    const nextDepth = Number.isFinite(parentDepth) ? parentDepth + 1 : 1;
+    // Workflow-chain depth read DIRECTLY from envelope.workflowDepth (set
+    // by `buildEnvelope` from `eventPayload._workflowDepth`, which the
+    // dispatcher stamps on every chained run regardless of the chained
+    // workflow's trigger event). 0 for top-level user-initiated runs;
+    // strictly positive for any chained run.
+    //
+    // Pre-2026-05-29 this read only from `manual_trigger`'s metadata.depth,
+    // which meant a chain through a non-manual trigger (`messageReceived
+    // → trigger_workflow → workflow B (any trigger) → trigger_workflow →
+    // workflow C → …`) reset the counter at every non-manual hop and
+    // bypassed TRIGGER_DEPTH_MAX. Now the depth survives every chain
+    // hop.
+    const parentDepth = envelope.workflowDepth ?? 0;
+    const nextDepth = parentDepth + 1;
     if (nextDepth > TRIGGER_DEPTH_MAX) {
       return advanceWithError(
         409,
@@ -111,8 +110,12 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
       metadata: {
         sourceRunId: ctx.runId,
         sourceWorkflowId: ctx.workflowId,
+        // Kept for backwards-compat (older runs may have read this). The
+        // real chain-depth carrier is `workflowDepth` below, propagated
+        // via `eventPayload._workflowDepth` and read off the envelope.
         depth: String(nextDepth),
       },
+      workflowDepth: nextDepth,
       // Chain calls MUST respect the target workflow's
       // `triggerOncePerContact` ledger. Without this, a workflow with
       // once-per-contact set could be re-fired infinitely (up to

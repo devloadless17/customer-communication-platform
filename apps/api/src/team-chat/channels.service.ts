@@ -44,6 +44,7 @@ import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
+import { RealtimeGateway } from "../realtime/realtime.gateway";
 import type { ApiSession } from "../auth/session.guard";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import type {
@@ -61,6 +62,7 @@ export class ChannelsService {
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
+    private readonly realtime: RealtimeGateway,
   ) {}
 
   // ---- Channels ---------------------------------------------------------
@@ -82,7 +84,8 @@ export class ChannelsService {
    * Fetch a single channel by id (scoped to team). Returns null when the
    * id is foreign — controller turns that into 404.
    */
-  getById(teamId: string, channelId: string) {
+  async getById(teamId: string, userId: string, channelId: string) {
+    await this.requireChannelMembership(teamId, userId, channelId);
     return getChannelById(channelId, teamId);
   }
 
@@ -90,7 +93,8 @@ export class ChannelsService {
    * Pinned messages for a channel, newest-pin first. Each entry carries
    * the full message DTO so the pins panel renders without extra fetches.
    */
-  listPins(teamId: string, channelId: string) {
+  async listPins(teamId: string, userId: string, channelId: string) {
+    await this.requireChannelMembership(teamId, userId, channelId);
     return listChannelPins(channelId, teamId);
   }
 
@@ -305,6 +309,10 @@ export class ChannelsService {
       userIds: [targetUserId],
       changedById: actorUserId,
     });
+    // Force the removed user's live sockets to leave the channel room so
+    // they stop receiving channel frames before they next reload. Without
+    // this, the kicked tab keeps seeing every new message until refresh.
+    this.realtime.evictUserFromChannelRoom(targetUserId, channelId);
   }
 
   private async requireChannelInTeam(teamId: string, channelId: string) {
@@ -399,10 +407,11 @@ export class ChannelsService {
 
   async listMessages(
     teamId: string,
+    userId: string,
     channelId: string,
     opts: { after?: string; before?: string; take?: number },
   ) {
-    await this.requireChannelOwnership(teamId, channelId);
+    await this.requireChannelMembership(teamId, userId, channelId);
 
     if (opts.after) {
       if (Number.isNaN(Date.parse(opts.after))) {
@@ -446,8 +455,8 @@ export class ChannelsService {
     const receivedAt = new Date();
 
     const [, validMentionIds] = await Promise.all([
-      this.requireChannelOwnership(teamId, channelId),
-      this.validateMentions(teamId, input.body),
+      this.requireChannelMembership(teamId, userId, channelId),
+      this.validateMentions(teamId, channelId, input.body),
     ]);
 
     const preview = buildMessagePreview(input.body, false);
@@ -537,7 +546,11 @@ export class ChannelsService {
       });
     }
 
-    const validMentionIds = await this.validateMentions(teamId, input.body);
+    // Membership re-check: a non-member can't edit even messages they
+    // posted before being removed. The mentions validator is also
+    // channel-scoped so they can't @ users who aren't in this channel.
+    await this.requireChannelMembership(teamId, userId, channelId);
+    const validMentionIds = await this.validateMentions(teamId, channelId, input.body);
     const editedAt = new Date();
 
     // Defense-in-depth: teamId is added to every mutate WHERE even though
@@ -602,6 +615,7 @@ export class ChannelsService {
     channelId: string,
     messageId: string,
   ): Promise<void> {
+    await this.requireChannelMembership(teamId, userId, channelId);
     const existing = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: { id: true, authorUserId: true, threadRootId: true },
@@ -619,16 +633,40 @@ export class ChannelsService {
       where: { id: messageId, teamId },
     });
 
+    let threadReplyUpdate: {
+      rootMessageId: string;
+      replyCount: number;
+      lastReplyAt: string | null;
+    } | null = null;
     if (existing.threadRootId) {
       // Reply delete → decrement root's counter so the "X replies" pill stays honest.
-      await this.db.teamChannelMessage
-        .updateMany({
-          where: { id: existing.threadRootId, teamId },
+      try {
+        const updated = await this.db.teamChannelMessage.update({
+          where: { id: existing.threadRootId },
           data: { threadReplyCount: { decrement: 1 } },
-        })
-        .catch((err) =>
-          this.logger.error(`decrement threadReplyCount failed: ${err instanceof Error ? err.message : err}`),
+          select: { threadReplyCount: true },
+        });
+        // Refresh threadLastReplyAt to the new latest sibling (or null if
+        // this was the last reply).
+        const latestSibling = await this.db.teamChannelMessage.findFirst({
+          where: { threadRootId: existing.threadRootId, teamId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: { createdAt: true },
+        });
+        await this.db.teamChannelMessage.updateMany({
+          where: { id: existing.threadRootId, teamId },
+          data: { threadLastReplyAt: latestSibling?.createdAt ?? null },
+        });
+        threadReplyUpdate = {
+          rootMessageId: existing.threadRootId,
+          replyCount: Math.max(0, updated.threadReplyCount),
+          lastReplyAt: latestSibling?.createdAt.toISOString() ?? null,
+        };
+      } catch (err) {
+        this.logger.error(
+          `decrement threadReplyCount failed: ${err instanceof Error ? err.message : err}`,
         );
+      }
     } else {
       // Top-level delete → refresh channel preview to whatever's now latest.
       const latest = await this.db.teamChannelMessage.findFirst({
@@ -654,6 +692,20 @@ export class ChannelsService {
       messageId,
       threadRootId: existing.threadRootId,
     });
+    // Emit a thread-reply count refresh so the parent's "X replies" pill
+    // in the channel feed updates on every other client (the message
+    // delete frame doesn't carry the count). Idempotent — clients dedupe
+    // by lastReplyAt timestamp.
+    if (threadReplyUpdate) {
+      await this.bus.publish({
+        type: "team_channel.thread_reply_count_changed",
+        teamId,
+        channelId,
+        rootMessageId: threadReplyUpdate.rootMessageId,
+        replyCount: threadReplyUpdate.replyCount,
+        lastReplyAt: threadReplyUpdate.lastReplyAt,
+      });
+    }
   }
 
   // ---- Pins -------------------------------------------------------------
@@ -666,6 +718,7 @@ export class ChannelsService {
     messageId: string,
   ): Promise<void> {
     if (!canPinMessage(role)) throw new ForbiddenException({ error: "forbidden" });
+    await this.requireChannelMembership(teamId, userId, channelId);
 
     const msg = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
@@ -698,11 +751,13 @@ export class ChannelsService {
 
   async unpinMessage(
     teamId: string,
+    userId: string,
     role: Role,
     channelId: string,
     messageId: string,
   ): Promise<void> {
     if (!canPinMessage(role)) throw new ForbiddenException({ error: "forbidden" });
+    await this.requireChannelMembership(teamId, userId, channelId);
 
     // Tenant guard via the message — keeps unpin from teaching the caller
     // about another team's message ids.
@@ -731,6 +786,7 @@ export class ChannelsService {
     messageId: string,
     input: ToggleReactionInput,
   ): Promise<{ emoji: string; userIds: string[] }> {
+    await this.requireChannelMembership(teamId, userId, channelId);
     const message = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: { id: true },
@@ -790,7 +846,7 @@ export class ChannelsService {
    * the same user clears its sidebar badge in lock-step.
    */
   async markRead(teamId: string, userId: string, channelId: string) {
-    await this.requireChannelOwnership(teamId, channelId);
+    await this.requireChannelMembership(teamId, userId, channelId);
     const now = new Date();
     await this.db.teamChannelReadReceipt.upsert({
       where: { userId_channelId: { userId, channelId } },
@@ -817,10 +873,12 @@ export class ChannelsService {
    */
   async listThreadReplies(
     teamId: string,
+    userId: string,
     channelId: string,
     rootMessageId: string,
     opts: { after?: string; take?: number } = {},
   ) {
+    await this.requireChannelMembership(teamId, userId, channelId);
     const root = await this.requireThreadRoot(teamId, channelId, rootMessageId);
     if (root.threadRootId !== null) {
       throw new BadRequestException({
@@ -843,6 +901,7 @@ export class ChannelsService {
    */
   async searchMessages(
     teamId: string,
+    userId: string,
     channelId: string,
     q: string,
     opts: { before?: string; take?: number } = {},
@@ -854,7 +913,7 @@ export class ChannelsService {
         detail: "Search needs at least 2 characters.",
       });
     }
-    await this.requireChannelOwnership(teamId, channelId);
+    await this.requireChannelMembership(teamId, userId, channelId);
     const before = opts.before ? this.decodeCursorOrThrow(opts.before) : null;
     return searchChannelMessages(channelId, teamId, query, {
       take: opts.take,
@@ -863,12 +922,15 @@ export class ChannelsService {
   }
 
   /**
-   * Workspace-wide substring search — every channel in the team. Each hit
-   * carries `channelName` so the result row can render context. Same trigram
-   * index, same cursor shape as the per-channel variant.
+   * Workspace-wide substring search — every channel in the team that the
+   * viewer can read. Hits are filtered server-side to channels the viewer
+   * is a member of (plus the default channel, which is implicit-member for
+   * everyone). Without that intersection, a member of one channel could
+   * pull message bodies from private channels they were never in.
    */
   async searchAllMessages(
     teamId: string,
+    userId: string,
     q: string,
     opts: { before?: string; take?: number } = {},
   ) {
@@ -880,7 +942,7 @@ export class ChannelsService {
       });
     }
     const before = opts.before ? this.decodeCursorOrThrow(opts.before) : null;
-    return searchAllChannels(teamId, query, { take: opts.take, before });
+    return searchAllChannels(teamId, userId, query, { take: opts.take, before });
   }
 
   /**
@@ -891,11 +953,12 @@ export class ChannelsService {
    */
   async getMessagesAround(
     teamId: string,
+    userId: string,
     channelId: string,
     messageId: string,
     opts: { take?: number } = {},
   ) {
-    await this.requireChannelOwnership(teamId, channelId);
+    await this.requireChannelMembership(teamId, userId, channelId);
     const result = await listChannelMessagesAround(
       channelId,
       teamId,
@@ -938,10 +1001,11 @@ export class ChannelsService {
     const { teamId, userId } = session;
     const receivedAt = new Date();
 
-    // Root validation + mention check in parallel.
-    const [root, validMentionIds] = await Promise.all([
+    // Membership gate + root validation + mention check in parallel.
+    const [, root, validMentionIds] = await Promise.all([
+      this.requireChannelMembership(teamId, userId, channelId),
       this.requireThreadRoot(teamId, channelId, rootMessageId),
-      this.validateMentions(teamId, input.body),
+      this.validateMentions(teamId, channelId, input.body),
     ]);
     if (root.threadRootId !== null) {
       throw new BadRequestException({
@@ -1026,7 +1090,7 @@ export class ChannelsService {
     },
   ) {
     const receivedAt = new Date();
-    await this.requireChannelOwnership(teamId, channelId);
+    await this.requireChannelMembership(teamId, userId, channelId);
 
     let rootForFanout: { threadReplyCount: number } | null = null;
     if (args.threadRootId) {
@@ -1076,7 +1140,7 @@ export class ChannelsService {
       },
     });
 
-    const validMentionIds = await this.validateMentions(teamId, args.body);
+    const validMentionIds = await this.validateMentions(teamId, channelId, args.body);
     const preview = buildMessagePreview(args.body, true);
     const created = await this.db.$transaction(async (tx) => {
       const msg = await tx.teamChannelMessage.create({
@@ -1165,27 +1229,73 @@ export class ChannelsService {
     return root;
   }
 
-  /** Throw 404 if the channel doesn't exist in this team. */
-  private async requireChannelOwnership(teamId: string, channelId: string): Promise<void> {
+  /**
+   * Throw 404 if the channel doesn't exist in this team OR the caller isn't a
+   * member of it. Default channels short-circuit the membership join — every
+   * team member is implicitly a member of `#general` (per `removeMember`'s
+   * `default_channel_locked` rule, no one can be removed from it).
+   *
+   * Used to gate every per-channel read/write (list/post messages, react,
+   * pin, mark-read, search, around, media, threads). Admin-only ops that
+   * MUST work even for non-members (`listMembers`, `addMembers`, `removeMember`,
+   * `update`, `remove`) keep using `requireChannelInTeam`.
+   *
+   * Returning a 404 (not 403) on the not-a-member path is deliberate: it
+   * doesn't teach a non-member that the channel exists.
+   */
+  private async requireChannelMembership(
+    teamId: string,
+    userId: string,
+    channelId: string,
+  ): Promise<void> {
     const channel = await this.db.teamChannel.findFirst({
       where: { id: channelId, teamId },
-      select: { id: true },
+      select: { id: true, isDefault: true },
     });
     if (!channel) throw new NotFoundException({ error: "channel not found" });
+    if (channel.isDefault) return; // Everyone is implicitly a member.
+    const member = await this.db.teamChannelMember.findUnique({
+      where: { channelId_userId: { channelId, userId } },
+      select: { userId: true },
+    });
+    if (!member) throw new NotFoundException({ error: "channel not found" });
   }
 
-  /** Parse mentions from body + intersect with this team's membership. */
-  private async validateMentions(teamId: string, body: string): Promise<string[]> {
+  /**
+   * Parse mentions from body + intersect with the set of users who are
+   * BOTH on the team AND members of this channel. Default-channel mentions
+   * skip the channel-membership intersection (everyone is a member).
+   *
+   * Filtering by channel membership stops mention rows from being created
+   * for users who can't read the message (otherwise: badge bumps with no
+   * way to reach the content). Deactivated users also dropped — their
+   * @handle still renders as static text via the parser; only the
+   * side-effect mention rows are filtered.
+   */
+  private async validateMentions(
+    teamId: string,
+    channelId: string,
+    body: string,
+  ): Promise<string[]> {
     const parsed = parseMentions(body);
     const ids = Array.from(new Set(parsed.map((m) => m.userId)));
     if (ids.length === 0) return [];
-    // Drop deactivated members — they shouldn't receive a new mention row
-    // (no notification, no unread bump) even if their User row exists for
-    // history. Rendered messages still show their @handle as a static
-    // span via the mention parser; only the side-effect-y mention rows
-    // get filtered out here.
+    const channel = await this.db.teamChannel.findUnique({
+      where: { id: channelId },
+      select: { isDefault: true },
+    });
+    const isDefault = channel?.isDefault ?? false;
+    const where: {
+      teamId: string;
+      id: { in: string[] };
+      deactivatedAt: null;
+      channelMemberships?: { some: { channelId: string } };
+    } = { teamId, id: { in: ids }, deactivatedAt: null };
+    if (!isDefault) {
+      where.channelMemberships = { some: { channelId } };
+    }
     const members = await this.db.user.findMany({
-      where: { teamId, id: { in: ids }, deactivatedAt: null },
+      where,
       select: { id: true },
     });
     return members.map((u) => u.id);

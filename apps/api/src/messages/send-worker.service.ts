@@ -92,6 +92,18 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
         // depends on this). 90s comfortably exceeds Meta's per-call timeout
         // (~30s on a stalled endpoint) plus DB write headroom.
         lockDuration: 90_000,
+        // Explicit lockRenewTime — under a stalled Meta + DB pool stall
+        // chain, the in-flight handler can exceed the default 45s
+        // (lockDuration/2) renewal cadence. 30s is the same value the
+        // webhook worker uses and gives ~3 renewal chances per
+        // lockDuration window.
+        lockRenewTime: 30_000,
+        // Match the other workers' stalled-check posture so config drift
+        // can't silently make a transient blip permanently fail a send
+        // (which OutboundSendAttempt's "refuse to retry" guard would
+        // then surface as a stuck-sent ghost in the UI).
+        stalledInterval: 30_000,
+        maxStalledCount: 3,
       },
     );
     this.worker.on("ready", () => {

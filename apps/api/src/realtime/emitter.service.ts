@@ -103,4 +103,51 @@ export class RealtimeEmitter {
     const onlineUserIds = await snapshot(teamId);
     io.to(teamRoom(teamId)).emit("presence:update", { teamId, onlineUserIds });
   }
+
+  // Snapshotters wired by the gateway so the "also viewing" pill can be
+  // refreshed when a user's availability flips (busy/away/offline drop them
+  // out, going back to available re-adds them). Kept here so fanout-rules
+  // doesn't need a direct ref to PresenceService or the gateway.
+  private conversationViewersSnapshotter:
+    | ((conversationId: string) => Promise<string[]>)
+    | null = null;
+  bindConversationViewersSnapshotter(
+    fn: (conversationId: string) => Promise<string[]>,
+  ): void {
+    this.conversationViewersSnapshotter = fn;
+  }
+  private conversationsViewedByUser: ((userId: string) => string[]) | null = null;
+  bindConversationsViewedByUser(fn: (userId: string) => string[]): void {
+    this.conversationsViewedByUser = fn;
+  }
+
+  /**
+   * Re-emit `conversation:viewers` for every conversation room the user is
+   * currently a viewer in. Used by `user.availability_changed` fanout so
+   * teammates' "also viewing" pills update in the same frame as the badge
+   * — going busy/away/offline removes the user from the pill, going
+   * available adds them back. No-op when the user isn't viewing anything.
+   */
+  async emitConversationViewersForUser(userId: string): Promise<void> {
+    const io = this.server;
+    const conversationsFor = this.conversationsViewedByUser;
+    const viewersFor = this.conversationViewersSnapshotter;
+    if (!io || !conversationsFor || !viewersFor) {
+      this.logger.warn(
+        "emitConversationViewersForUser dropped — IO or snapshotter not ready yet",
+      );
+      return;
+    }
+    const conversationIds = conversationsFor(userId);
+    if (conversationIds.length === 0) return;
+    await Promise.all(
+      conversationIds.map(async (conversationId) => {
+        const viewerUserIds = await viewersFor(conversationId);
+        io.to(conversationRoom(conversationId)).emit("conversation:viewers", {
+          conversationId,
+          viewerUserIds,
+        });
+      }),
+    );
+  }
 }

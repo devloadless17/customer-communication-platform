@@ -45,21 +45,60 @@ export function usePresence(
 
     const onUpdate: Parameters<typeof socket.on<"presence:update">>[1] = (payload) => {
       if (payload.teamId !== teamId) return;
-      setOnlineUserIds(new Set(payload.onlineUserIds));
+      // Diff before reallocating — a team-wide presence:update fires
+      // whenever ANY teammate connects, disconnects, or toggles availability.
+      // On a busy team (20+ agents) this can be many events per minute, each
+      // historically triggering a fresh Set + identity-change-driven re-render
+      // in every consumer (currently 4 separate subtrees: inbox sub-sidebar,
+      // contact panel, assignment dropdown, team-channel sidebar). The set
+      // membership usually doesn't actually change between events for the
+      // viewer; bail when it matches to keep referential identity stable.
+      setOnlineUserIds((prev) => {
+        if (
+          prev.size === payload.onlineUserIds.length &&
+          payload.onlineUserIds.every((id) => prev.has(id))
+        ) {
+          return prev;
+        }
+        return new Set(payload.onlineUserIds);
+      });
     };
     const onAvailabilitySnapshot: Parameters<
       typeof socket.on<"user:availability:snapshot">
     >[1] = (payload) => {
       if (payload.teamId !== teamId) return;
       // Replace wholesale — the snapshot is the authoritative full picture.
-      setAvailabilityByUserId(payload.byUserId);
+      // Diff first so a snapshot identical to current state (common on
+      // reconnect) doesn't trigger a wide re-render.
+      setAvailabilityByUserId((prev) => {
+        const incoming = payload.byUserId;
+        const prevKeys = Object.keys(prev);
+        const incomingKeys = Object.keys(incoming);
+        if (prevKeys.length === incomingKeys.length) {
+          let same = true;
+          for (const k of incomingKeys) {
+            const a = prev[k];
+            const b = incoming[k];
+            if (
+              !a ||
+              !b ||
+              a.status !== b.status ||
+              (a.message ?? null) !== (b.message ?? null)
+            ) {
+              same = false;
+              break;
+            }
+          }
+          if (same) return prev;
+        }
+        return incoming;
+      });
     };
     const onAvailabilityUpdate: Parameters<
       typeof socket.on<"user:availability:updated">
     >[1] = (payload) => {
       if (payload.teamId !== teamId) return;
       setAvailabilityByUserId((prev) => {
-        const next = { ...prev };
         // Drop the entry when the new state is the default (available + no
         // note) so the map stays sparse — matches the snapshot rule and keeps
         // consumers' `byUserId[id] ?? default` lookups correct.
@@ -67,14 +106,24 @@ export function usePresence(
           payload.status === "available" &&
           (payload.message === null || payload.message === undefined);
         if (isDefault) {
+          if (!(payload.userId in prev)) return prev;
+          const next = { ...prev };
           delete next[payload.userId];
-        } else {
-          next[payload.userId] = {
-            status: payload.status,
-            ...(payload.message !== undefined ? { message: payload.message } : {}),
-          };
+          return next;
         }
-        return next;
+        const existing = prev[payload.userId];
+        const nextEntry: TeammateAvailability = {
+          status: payload.status,
+          ...(payload.message !== undefined ? { message: payload.message } : {}),
+        };
+        if (
+          existing &&
+          existing.status === nextEntry.status &&
+          (existing.message ?? null) === (nextEntry.message ?? null)
+        ) {
+          return prev;
+        }
+        return { ...prev, [payload.userId]: nextEntry };
       });
     };
     const requestSnapshot = (): void => {

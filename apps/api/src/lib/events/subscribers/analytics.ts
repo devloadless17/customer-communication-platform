@@ -24,13 +24,16 @@ import {
   trackOnOutboundMessage,
 } from "@/lib/conversations/analytics";
 
-export function registerAnalyticsSubscribers(): void {
+export function registerAnalyticsSubscribers(): () => void {
   // ANALYTICS tier — runs after audit, before workflow-dispatch +
   // outbound-webhooks (both re-read the state these handlers write).
+  const offs: Array<() => void> = [];
   const subscribe = <K extends DomainEventType>(
     type: K,
     handler: (e: DomainEventOf<K>) => void | Promise<void>,
-  ) => busSubscribe(type, handler, SubscriberPriority.ANALYTICS);
+  ) => {
+    offs.push(busSubscribe(type, handler, SubscriberPriority.ANALYTICS));
+  };
 
   subscribe("conversation.assigned", async (e) => {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
@@ -70,4 +73,8 @@ export function registerAnalyticsSubscribers(): void {
       senderUserId: e.senderUserId,
     });
   });
+
+  return () => {
+    for (const off of offs) off();
+  };
 }

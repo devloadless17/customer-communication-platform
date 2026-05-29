@@ -49,16 +49,17 @@ export function rowMatchesFilterFor(
   currentUserId: string,
   row: ConversationWithRefs,
 ): boolean {
-  if (!filter) return true; // no filter == "all" non-closed handled below
+  if (!filter) return true; // no filter == "active" — matches "all" minus closed
   if (filter.kind === "stage") {
     // Stage is contact-lifecycle, orthogonal to chat status (closed included).
     return row.contact.stageId === filter.stageId;
   }
+  if (filter.id === "all") return true; // truly everything, closed included
   if (filter.id === "closed") return row.conversation.status === "closed";
   if (row.conversation.status === "closed") return false;
   if (filter.id === "mine") return row.conversation.assignedUserId === currentUserId;
   if (filter.id === "unassigned") return row.conversation.assignedUserId === null;
-  return true; // "all"
+  return true; // "active"
 }
 
 /**
@@ -115,11 +116,11 @@ export function useTeamEvents(
 ): TeamEventsState {
   // SSR ships the team-wide unfiltered feed (the sub-sidebar's first-paint
   // preset counts depend on having closed rows in the seed too). The LIST
-  // surface, though, has an active client-side filter ("All open" by
-  // default) which excludes closed — so prune the seed through the same
-  // predicate the filter-change effect uses, applied on first paint. Lazy
-  // initializer keeps it synchronous: zero flicker, no closed row ever
-  // renders under "All open" on a hard refresh.
+  // surface, though, has an active client-side filter ("Active" by default)
+  // which excludes closed — so prune the seed through the same predicate
+  // the filter-change effect uses, applied on first paint. Lazy initializer
+  // keeps it synchronous: zero flicker, no closed row ever renders under
+  // "Active" on a hard refresh.
   const [conversations, setConversations] = useState<ConversationWithRefs[]>(
     () => initialConversations.filter((row) => rowMatchesFilterFor(filter, currentUserId, row)),
   );
@@ -554,22 +555,25 @@ export function useTeamEvents(
           if (!newConversation) return prev;
           const f = filterRef.current;
           // Stage view includes closed conversations on purpose — see
-          // queries/conversations.ts. Presets (all/mine/unassigned) still
-          // hide closed; "closed" preset shows only closed.
+          // queries/conversations.ts. "all" preset includes closed; "active"
+          // (and mine/unassigned) hide closed; "closed" preset shows only
+          // closed.
           const matches =
             !f
               ? true
               : f.kind === "stage"
                 ? newConversation.contact.stageId === f.stageId
-                : f.id === "closed"
-                  ? newConversation.conversation.status === "closed"
-                  : f.id === "mine"
-                    ? newConversation.conversation.status !== "closed" &&
-                      newConversation.conversation.assignedUserId === currentUserId
-                    : f.id === "unassigned"
+                : f.id === "all"
+                  ? true
+                  : f.id === "closed"
+                    ? newConversation.conversation.status === "closed"
+                    : f.id === "mine"
                       ? newConversation.conversation.status !== "closed" &&
-                        newConversation.conversation.assignedUserId === null
-                      : newConversation.conversation.status !== "closed"; // "all"
+                        newConversation.conversation.assignedUserId === currentUserId
+                      : f.id === "unassigned"
+                        ? newConversation.conversation.status !== "closed" &&
+                          newConversation.conversation.assignedUserId === null
+                        : newConversation.conversation.status !== "closed"; // "active"
           if (!matches) return prev;
           return [newConversation, ...prev];
         }
@@ -680,7 +684,7 @@ export function useTeamEvents(
               ? nextAssignedUserId === currentUserId
               : f.id === "unassigned"
                 ? nextAssignedUserId === null
-                : true; // "all" / "closed" don't filter on assignment
+                : true; // "active" / "all" / "closed" don't filter on assignment
         if (!stillMatches) {
           const next = prev.slice();
           next.splice(idx, 1);
@@ -731,19 +735,21 @@ export function useTeamEvents(
         // status arrives twice (e.g. a stale tab re-fires after reconnect).
         if (existing.conversation.status === status) return prev;
         // Splice OUT when the new status no longer matches the filter
-        // (e.g. preset "all"/"mine"/"unassigned" + status=closed, or
-        // preset "closed" + status=open|pending). Stage filter keeps
-        // closed conversations on purpose — stage is contact-lifecycle,
-        // not chat status.
+        // (e.g. preset "active"/"mine"/"unassigned" + status=closed, or
+        // preset "closed" + status=open|pending). "all" keeps closed rows
+        // in place; stage filter also keeps closed on purpose — stage is
+        // contact-lifecycle, not chat status.
         const f = filterRef.current;
         const stillMatches =
           !f
             ? true
             : f.kind === "stage"
               ? true
-              : f.id === "closed"
-                ? status === "closed"
-                : status !== "closed";
+              : f.id === "all"
+                ? true
+                : f.id === "closed"
+                  ? status === "closed"
+                  : status !== "closed";
         if (!stillMatches) {
           const next = prev.slice();
           next.splice(idx, 1);

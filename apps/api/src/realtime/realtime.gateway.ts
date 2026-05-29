@@ -62,6 +62,18 @@ export class RealtimeGateway
     this.emitter.bindPresenceSnapshotter((teamId) =>
       this.buildVisibleOnlineSnapshot(teamId),
     );
+    // Same indirection for the per-conversation viewer pill — the
+    // `user.availability_changed` fanout re-emits `conversation:viewers`
+    // for every room the user is in so a status flip drops/restores them
+    // from teammates' "also viewing" pills in the same frame as the badge.
+    this.emitter.bindConversationViewersSnapshotter(async (conversationId) => {
+      const teamId = await this.teamIdForConversation(conversationId);
+      if (teamId === null) return [];
+      return this.buildVisibleViewers(conversationId, teamId);
+    });
+    this.emitter.bindConversationsViewedByUser((userId) =>
+      this.presence.conversationsViewedBy(userId),
+    );
 
     // Handshake auth runs in middleware (not handleConnection) so an auth
     // failure delivers a typed `connect_error` to the client with a parseable
@@ -226,6 +238,60 @@ export class RealtimeGateway
   }
 
   /**
+   * Filter the raw viewer set for a conversation down to "visible viewers":
+   * only users whose `availabilityStatus === "available"`. Busy / away /
+   * appear-offline drop out — they're still viewing the thread, but the
+   * "also viewing" pill is a hand-off signal, not a presence trace.
+   *
+   * Cost is one indexed lookup on a tiny set (active viewers, almost always
+   * ≤ team size). Falls back to the unfiltered set on DB error — the pill
+   * over-showing is a smaller regression than going blank under transient
+   * Postgres flapping.
+   */
+  private async buildVisibleViewers(
+    conversationId: string,
+    teamId: string,
+  ): Promise<string[]> {
+    const viewers = this.presence.snapshotViewers(conversationId);
+    if (viewers.length === 0) return [];
+    try {
+      const rows = await this.db.user.findMany({
+        where: { teamId, id: { in: viewers } },
+        select: { id: true, availabilityStatus: true },
+      });
+      const available = new Set(
+        rows
+          .filter((r) => (r.availabilityStatus ?? "available") === "available")
+          .map((r) => r.id),
+      );
+      return viewers.filter((id) => available.has(id));
+    } catch (err) {
+      this.logger.error(`buildVisibleViewers lookup failed: ${err}`);
+      return viewers;
+    }
+  }
+
+  /**
+   * Resolve the teamId for a conversation room. Used by the viewers
+   * snapshotter so the cross-event re-emit (on availability flip) can
+   * filter by the right team. Cheap indexed read; called rarely.
+   */
+  private async teamIdForConversation(
+    conversationId: string,
+  ): Promise<string | null> {
+    try {
+      const row = await this.db.conversation.findUnique({
+        where: { id: conversationId },
+        select: { teamId: true },
+      });
+      return row?.teamId ?? null;
+    } catch (err) {
+      this.logger.error(`teamIdForConversation lookup failed: ${err}`);
+      return null;
+    }
+  }
+
+  /**
    * Emit a one-frame availability snapshot to a single socket on connect.
    * Reads every teammate's stored status (not just currently-connected — an
    * "Appear offline" user must still surface their status to teammates who
@@ -324,10 +390,16 @@ export class RealtimeGateway
           client.id,
         );
         if (userLeft) {
-          this.server.to(conversationRoom(conversationId)).emit("conversation:viewers", {
-            conversationId,
-            viewerUserIds: this.presence.snapshotViewers(conversationId),
-          });
+          void this.buildVisibleViewers(conversationId, teamId).then(
+            (viewerUserIds) => {
+              this.server
+                .to(conversationRoom(conversationId))
+                .emit("conversation:viewers", {
+                  conversationId,
+                  viewerUserIds,
+                });
+            },
+          );
         }
       }
       viewing.clear();
@@ -436,9 +508,13 @@ export class RealtimeGateway
     // Snapshot to THIS socket immediately so the pill paints without
     // waiting for the next change — same posture as team presence. Fires
     // on every (re-)subscribe so a long reconnect catches a fresh snapshot.
+    const visibleViewers = await this.buildVisibleViewers(
+      body.conversationId,
+      teamId,
+    );
     client.emit("conversation:viewers", {
       conversationId: body.conversationId,
-      viewerUserIds: this.presence.snapshotViewers(body.conversationId),
+      viewerUserIds: visibleViewers,
     });
     // Broadcast a fresh snapshot to the rest of the room only when this
     // user crossed 0→1 sockets. Multiple tabs from the same user must not
@@ -446,7 +522,7 @@ export class RealtimeGateway
     if (startedViewing) {
       this.server.to(room).emit("conversation:viewers", {
         conversationId: body.conversationId,
-        viewerUserIds: this.presence.snapshotViewers(body.conversationId),
+        viewerUserIds: visibleViewers,
       });
     }
   }
@@ -481,12 +557,18 @@ export class RealtimeGateway
         client.id,
       );
       if (userLeft) {
-        this.server
-          .to(conversationRoom(body.conversationId))
-          .emit("conversation:viewers", {
-            conversationId: body.conversationId,
-            viewerUserIds: this.presence.snapshotViewers(body.conversationId),
-          });
+        const teamId = client.data.teamId as string | undefined;
+        if (!teamId) return;
+        void this.buildVisibleViewers(body.conversationId, teamId).then(
+          (viewerUserIds) => {
+            this.server
+              .to(conversationRoom(body.conversationId))
+              .emit("conversation:viewers", {
+                conversationId: body.conversationId,
+                viewerUserIds,
+              });
+          },
+        );
       }
     }
   }
@@ -549,15 +631,27 @@ export class RealtimeGateway
     if (!isValidBody(body, "channelId")) return;
     if (!checkSubscribeBudget(client, "subscribe:channel")) return;
     const teamId = client.data.teamId as string | undefined;
-    if (!teamId) return;
+    const userId = client.data.userId as string | undefined;
+    if (!teamId || !userId) return;
     const room = channelRoom(body.channelId);
     if (client.rooms.has(room)) return;
     try {
-      const owns = await this.db.teamChannel.findFirst({
+      // Membership check mirrors `requireChannelMembership` in
+      // ChannelsService — default channels short-circuit; everyone else
+      // must have a TeamChannelMember row. Silently no-op on failure
+      // (don't teach a non-member that the channel exists).
+      const channel = await this.db.teamChannel.findFirst({
         where: { id: body.channelId, teamId },
-        select: { id: true },
+        select: { id: true, isDefault: true },
       });
-      if (!owns) return;
+      if (!channel) return;
+      if (!channel.isDefault) {
+        const member = await this.db.teamChannelMember.findUnique({
+          where: { channelId_userId: { channelId: body.channelId, userId } },
+          select: { userId: true },
+        });
+        if (!member) return;
+      }
     } catch (err) {
       this.logger.error(`subscribe:channel lookup failed: ${err}`);
       return;
@@ -719,6 +813,22 @@ export class RealtimeGateway
     }
     return count;
   }
+
+  /**
+   * Force every live socket of `userId` to leave a channel room. Called by
+   * `ChannelsService.removeMember` so a removed member's open tab stops
+   * receiving live channel frames before they next reload. Channel events
+   * are scoped to the channel room (see `fanout-rules.ts`), so leaving the
+   * room is sufficient — no need to disconnect the socket entirely.
+   */
+  evictUserFromChannelRoom(userId: string, channelId: string): void {
+    const room = channelRoom(channelId);
+    const socketIds = this.presence.socketsFor(userId);
+    for (const id of socketIds) {
+      const s = this.server.sockets.sockets.get(id);
+      if (s) s.leave(room);
+    }
+  }
 }
 
 // Re-export Server typed event names for ergonomic consumer imports.
@@ -813,12 +923,16 @@ function checkTypingBudget(client: Socket): boolean {
  * typing bucket because they have different legitimate cadences: a typist
  * can burn 60 typing tokens in 10s during a long message, which would
  * leave a legitimate presence re-seed (fired on connect / reconnect)
- * empty for ~10s of refill. Presence is fired AT MOST a few times per
- * session (once per connect + once on long reconnect), so 4 tokens / 30s
- * is generous for legitimate use and tight on abuse.
+ * empty for ~10s of refill.
+ *
+ * 8 tokens / 30s (bumped from 4 / 30s on 2026-05-29). The prior 4 was
+ * tight enough that a shaky WiFi causing 5 reconnects in 30s on a single
+ * tab silently dropped the 5th presence-snapshot request — presence dots
+ * showed stale teammates until the next status flip. 8 still bounds a
+ * hostile loop while accommodating reconnect-flap.
  */
-const PRESENCE_REQUEST_CAP = 4;
-const PRESENCE_REQUEST_REFILL_PER_MS = 4 / 30_000;
+const PRESENCE_REQUEST_CAP = 8;
+const PRESENCE_REQUEST_REFILL_PER_MS = 8 / 30_000;
 function checkPresenceRequestBudget(client: Socket): boolean {
   const now = Date.now();
 

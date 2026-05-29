@@ -108,23 +108,38 @@ export function useConversationAttachments(
   // try to splice the row in by hand: the new row's position in the global
   // newest-first order is the same as page 1's first slot, and the server
   // call is one cheap round-trip. Older pages stay loaded.
+  //
+  // Debounced 300ms (trailing) so a burst of 4-5 media frames (e.g. a
+  // customer sending 5 photos in one batch + 5 media:ready follow-ups)
+  // collapses to ONE refetch instead of 10. The bubble itself paints
+  // live via the main thread, so this purely-gallery refresh latency is
+  // imperceptible to the agent.
   useEffect(() => {
     if (!conversationId) return;
     const socket = getClientSocket();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefetch = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        void fetchPage(null, false);
+      }, 300);
+    };
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
       if (!payload.message.media) return;
-      void fetchPage(null, false);
+      scheduleRefetch();
     };
     const onMediaReady: Parameters<typeof socket.on<"message:media:ready">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
-      void fetchPage(null, false);
+      scheduleRefetch();
     };
     socket.on("message:new", onMessageNew);
     socket.on("message:media:ready", onMediaReady);
     return () => {
       socket.off("message:new", onMessageNew);
       socket.off("message:media:ready", onMediaReady);
+      if (timer) clearTimeout(timer);
     };
   }, [conversationId, fetchPage]);
 

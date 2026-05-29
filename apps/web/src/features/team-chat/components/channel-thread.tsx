@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -69,21 +69,21 @@ export function ChannelThread({
   searchQuery: string | null;
   onOpenThread: (rootMessageId: string) => void;
 }) {
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
 
-  // Resolve Radix's inner viewport once — the same selector useChatScroll
-  // uses internally. Both must point at the same element so virtualizer
-  // math and chat-scroll math agree.
+  // Direct viewport ref via ScrollArea's `viewportRef` prop. Both the
+  // virtualizer and useChatScroll need the same viewport element; the
+  // callback ref populates both `scrollEl` (state — drives re-render so
+  // the virtualizer sees a real getScrollElement on its first render
+  // after mount) and `viewportRef` (passed to useChatScroll without
+  // requiring another round-trip).
+  const viewportRef = useRef<HTMLElement | null>(null);
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
-  useLayoutEffect(() => {
-    const root = scrollAreaRef.current;
-    if (!root) return;
-    setScrollEl(
-      root.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]") ?? root,
-    );
+  const setViewport = useCallback((node: HTMLDivElement | null) => {
+    viewportRef.current = node;
+    setScrollEl(node);
   }, []);
 
   const lastMessage = messages.at(-1);
@@ -98,7 +98,7 @@ export function ChannelThread({
     lastMessage?.pending === true && lastMessage.authorUserId === currentUser.id;
 
   const { unreadBelow, scrollToBottom } = useChatScroll({
-    scrollAreaRef,
+    viewportRef,
     contentRef,
     topSentinelRef,
     conversationId: channelId,
@@ -153,7 +153,7 @@ export function ChannelThread({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <ScrollArea ref={scrollAreaRef} className="flex-1">
+      <ScrollArea viewportRef={setViewport} className="flex-1">
         <div
           ref={contentRef}
           // overflow-anchor:none — useChatScroll manages scroll position

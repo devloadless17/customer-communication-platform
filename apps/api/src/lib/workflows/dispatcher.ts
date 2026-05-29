@@ -262,6 +262,15 @@ export async function dispatchManualTrigger(args: {
    * HTTP loop without first being called from `http_request`).
    */
   chainDepth?: number;
+  /**
+   * In-process workflow-chain depth carried forward from a `trigger_workflow`
+   * step. Stored on the chained run's `eventPayload._workflowDepth` so the
+   * runner's `buildEnvelope` surfaces it as `envelope.workflowDepth`. The
+   * `trigger_workflow` step reads it back to check against TRIGGER_DEPTH_MAX,
+   * keeping the chain bounded across non-`manual_trigger` workflows.
+   * Undefined on top-level admin runs (treated as 0).
+   */
+  workflowDepth?: number;
 }): Promise<string | null> {
   const wf = await db.workflow.findFirst({
     where: { id: args.workflowId, teamId: args.teamId },
@@ -339,6 +348,12 @@ export async function dispatchManualTrigger(args: {
     // both readers.
     ...(typeof args.chainDepth === "number" && args.chainDepth > 0
       ? { _depth: args.chainDepth }
+      : {}),
+    // Workflow-chain depth — stamped on every chained run regardless of the
+    // chained workflow's trigger event. See WorkflowEventEnvelope.workflowDepth
+    // for the full rationale. Omitted on top-level runs (treated as 0).
+    ...(typeof args.workflowDepth === "number" && args.workflowDepth > 0
+      ? { _workflowDepth: args.workflowDepth }
       : {}),
   };
 

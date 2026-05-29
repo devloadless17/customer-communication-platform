@@ -12,12 +12,13 @@ import type { Filter, PresetFilterId } from "@/features/inbox/components/inbox-c
 
 export const INBOX_FILTER_COOKIE = "inbox-filter";
 // 1 year. The browser may evict it sooner under storage pressure; on
-// next mount the default ("All open") takes over silently.
+// next mount the default ("Active") takes over silently.
 export const INBOX_FILTER_COOKIE_MAX_AGE_S = 60 * 60 * 24 * 365;
 
-export const INBOX_FILTER_DEFAULT: Filter = { kind: "preset", id: "all" };
+export const INBOX_FILTER_DEFAULT: Filter = { kind: "preset", id: "active" };
 
 const VALID_PRESETS: ReadonlySet<PresetFilterId> = new Set([
+  "active",
   "all",
   "mine",
   "unassigned",

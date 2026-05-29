@@ -461,13 +461,15 @@ export interface ServerToClientEvents {
     clientTempId?: string;
   }) => void;
 
-  /** Reply landed in a thread. Fired in addition to `team:channel:message`. */
+  /** Reply landed in a thread. Fired in addition to `team:channel:message`.
+   *  Also fired (with a possibly-null `lastReplyAt`) on reply DELETE so the
+   *  parent's "X replies" pill keeps the count + timestamp in sync. */
   "team:channel:thread:reply": (payload: {
     teamId: string;
     channelId: string;
     rootMessageId: string;
     replyCount: number;
-    lastReplyAt: string;
+    lastReplyAt: string | null;
   }) => void;
 
   /**

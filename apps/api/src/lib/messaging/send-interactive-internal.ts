@@ -5,7 +5,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { publish } from "@/lib/events/bus";
+import { publishInTx } from "@/lib/events/outbox";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
@@ -183,34 +183,15 @@ export async function sendInteractiveInternal(
     timestamp: messageTimestamp,
   });
 
-  // Bump conversation.lastMessageAt + preview inside a tx using FRESH
-  // values so a racing inbound webhook can't regress the clock. Same
-  // pattern as sendTextInternal.
+  // Bump conversation.lastMessageAt + preview AND publish `message.sent`
+  // ATOMICALLY via publishInTx — same crash-window-closing pattern as
+  // sendTextInternal / sendTemplateInternal / MessagesService.commitOutbound
+  // Event. A post-tx bare publish() would lose the realtime emit + audit
+  // row + workflow-dispatch + outbound webhook on a crash between commit
+  // and publish; on retry the externalId is already in DB so nothing
+  // re-publishes. Backend audit 2026-05-29 flagged this and external-v1
+  // as the two paths missed by the earlier text/template migration.
   const previewBody = bodyText.slice(0, 200);
-  const bumped = await db.$transaction(async (tx) => {
-    const current = await tx.conversation.findUnique({
-      where: { id: args.conversationId },
-      select: { lastMessageAt: true, unreadCount: true },
-    });
-    if (!current) {
-      throw new SendTextValidationError(
-        "conversation_not_found",
-        "conversation_disappeared_mid_send",
-      );
-    }
-    const effectiveBump =
-      current.lastMessageAt && current.lastMessageAt >= messageTimestamp
-        ? new Date(current.lastMessageAt.getTime() + 1)
-        : messageTimestamp;
-    await tx.conversation.update({
-      where: { id: args.conversationId },
-      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
-    });
-    return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
-  });
-
-  // Publish on the bus so the realtime socket sees the new message and
-  // analytics counters tick the same way they do for plain text sends.
   const senderUserId = args.senderUserId ?? null;
   const message: Message = {
     id: created.id,
@@ -231,16 +212,36 @@ export async function sendInteractiveInternal(
     },
     timestamp: messageTimestamp.toISOString(),
   };
-  await publish({
-    type: "message.sent",
-    teamId: args.teamId,
-    conversationId: args.conversationId,
-    contactId: conversation.contactId,
-    message,
-    preview: previewBody,
-    lastMessageAt: bumped.lastMessageAt.toISOString(),
-    unreadCount: bumped.unreadCount,
-    senderUserId,
+  await db.$transaction(async (tx) => {
+    const current = await tx.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { lastMessageAt: true, unreadCount: true },
+    });
+    if (!current) {
+      throw new SendTextValidationError(
+        "conversation_not_found",
+        "conversation_disappeared_mid_send",
+      );
+    }
+    const effectiveBump =
+      current.lastMessageAt && current.lastMessageAt >= messageTimestamp
+        ? new Date(current.lastMessageAt.getTime() + 1)
+        : messageTimestamp;
+    await tx.conversation.update({
+      where: { id: args.conversationId },
+      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
+    });
+    await publishInTx(tx, {
+      type: "message.sent",
+      teamId: args.teamId,
+      conversationId: args.conversationId,
+      contactId: conversation.contactId,
+      message,
+      preview: previewBody,
+      lastMessageAt: effectiveBump.toISOString(),
+      unreadCount: current.unreadCount,
+      senderUserId,
+    });
   });
 
   return { messageId: created.id, externalId: send.externalId };

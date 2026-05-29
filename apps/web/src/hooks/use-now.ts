@@ -1,59 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useTzNow } from "@/providers/tz-provider";
 
 /**
- * One process-wide 60-second tick. Every consumer in the tree (`WindowBadge`,
- * `ReplyBox`, eventually anything that needs "now"-ish for the 24h
- * customer-service window) reads from this so we don't have N parallel
- * intervals each scheduling their own re-render. Subtle but real perf win
- * on busy inboxes — and removes the SSR/client `Date.now()` mismatch since
- * the initial value is null until after mount.
+ * Shared "now" used by relative-time UI (24h-window badge, etc.). Re-exports
+ * `TimezoneProvider`'s ticking clock — initialized to the server's `Date.now()`
+ * on first render so SSR and the first client paint produce identical strings
+ * (no "Window closed" → "Window closed · 8h left" flash on refresh).
  *
- * Default tick is 60s. Pass a smaller value if a component needs a faster
- * cadence; the shared interval still ticks at 60s but consumers can pull a
- * fresh value on render between ticks.
+ * Ticks every 60s via the provider's interval. Consumers that don't need the
+ * live tick should read absolute times via `useTimezone()` instead so the
+ * minute heartbeat doesn't re-render them.
+ *
+ * Returns a non-null number. The old null-then-fill posture was the actual
+ * source of the split-paint flicker the rest of the file was working around
+ * with `hideRemaining` / `?? Date.now()` fallbacks — removed throughout.
  */
-const subscribers = new Set<() => void>();
-let timer: ReturnType<typeof setInterval> | null = null;
-let cachedNow: number | null = null;
-
-function ensureTimer(): void {
-  if (timer !== null) return;
-  cachedNow = Date.now();
-  timer = setInterval(() => {
-    cachedNow = Date.now();
-    subscribers.forEach((notify) => notify());
-  }, 60_000);
-}
-
-function teardownIfIdle(): void {
-  if (subscribers.size > 0 || timer === null) return;
-  clearInterval(timer);
-  timer = null;
-  cachedNow = null;
-}
-
-/**
- * Returns a `Date.now()` value that updates every 60s, shared across all
- * consumers. SSR-safe: returns `null` until after mount so server and client
- * first renders agree, then resyncs via useEffect.
- */
-export function useNow(): number | null {
-  const [, force] = useState(0);
-
-  useEffect(() => {
-    ensureTimer();
-    const notify = () => force((n) => n + 1);
-    subscribers.add(notify);
-    // Sync once on mount so the first render after hydration has the live
-    // value instead of waiting up to 60s for the next tick.
-    force((n) => n + 1);
-    return () => {
-      subscribers.delete(notify);
-      teardownIfIdle();
-    };
-  }, []);
-
-  return cachedNow;
+export function useNow(): number {
+  return useTzNow().now;
 }

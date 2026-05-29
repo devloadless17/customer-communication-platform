@@ -41,6 +41,15 @@ export interface WorkflowEventEnvelope<P = EventPayload> {
    * HTTP boundary (audit 2026-05-22). 0 for top-level / non-chained runs.
    */
   depth?: number;
+  /**
+   * In-process workflow-chain depth. Incremented by every `trigger_workflow`
+   * step. Bounded by `TRIGGER_DEPTH_MAX` (see `steps/trigger-workflow.ts`).
+   * Stored on every CHAINED run's `eventPayload._workflowDepth` regardless
+   * of the chained workflow's trigger event — so a chain through a
+   * non-`manual_trigger` workflow doesn't reset the counter. 0 for top-
+   * level user-initiated runs.
+   */
+  workflowDepth?: number;
   /** URLs n8n / external apps can call back to fetch more context. */
   _links: {
     conversation: string;

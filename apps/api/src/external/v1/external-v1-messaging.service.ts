@@ -18,6 +18,7 @@ import {
   EXTERNAL_CONVERSATION_INCLUDE,
   type ExternalMessage,
 } from "@/lib/external-shapes";
+import { publishInTx } from "@/lib/events/outbox";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 
 import {
@@ -521,11 +522,28 @@ export class ExternalV1MessagingService {
     });
 
     const preview = input.body.slice(0, 200);
-    // Read-then-write so a concurrent inbound that landed during the Meta
-    // call doesn't get regressed backward in time by this bare UPDATE.
-    // Without the +1ms guard, the partner's send timestamp can be older
-    // than the inbound's, and writing it would flip inbox sort order.
-    const bumped = await this.db.$transaction(async (tx) => {
+    const message: Message = {
+      id: created.id,
+      teamId,
+      conversationId,
+      externalId: send.externalId,
+      senderUserId: null,
+      body: input.body,
+      direction: "out",
+      channel: provider,
+      status: "sent",
+      rawPayload: { sentVia: "api/external/v1", apiKeyId },
+      timestamp: send.timestamp.toISOString(),
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    };
+    // Atomic bump + publish via publishInTx — closes the same crash
+    // window the user-facing path (messages.service.ts commitOutboundEvent)
+    // closes. The earlier post-tx bare publish() lost the message.sent
+    // event entirely if the process died between tx commit and publish;
+    // on retry the externalId already exists, so nothing re-publishes.
+    // Backend audit 2026-05-29 H1 flagged external-v1 + interactive as
+    // the two paths missed by the original text/template migration.
+    await this.db.$transaction(async (tx) => {
       const current = await tx.conversation.findUnique({
         where: { id: conversationId },
         select: { lastMessageAt: true, unreadCount: true },
@@ -543,39 +561,18 @@ export class ExternalV1MessagingService {
         where: { id: conversationId },
         data: { lastMessageAt: effectiveBump, lastMessagePreview: preview },
       });
-      return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
-    });
-
-    const message: Message = {
-      id: created.id,
-      teamId,
-      conversationId,
-      externalId: send.externalId,
-      senderUserId: null,
-      body: input.body,
-      direction: "out",
-      channel: provider,
-      status: "sent",
-      rawPayload: { sentVia: "api/external/v1", apiKeyId },
-      timestamp: send.timestamp.toISOString(),
-      ...(replyToMessageId ? { replyToMessageId } : {}),
-    };
-
-    await this.bus.publish({
-      type: "message.sent",
-      teamId,
-      conversationId,
-      contactId: conversation.contactId,
-      message,
-      preview,
-      // Use the effective bump so the frontend's lastMessageAt stays in
-      // sync with DB even when the +1ms guard kicked in above.
-      lastMessageAt: bumped.lastMessageAt.toISOString(),
-      // Outbound doesn't bump unread; the row's current value is the
-      // accurate absolute count.
-      unreadCount: bumped.unreadCount,
-      senderUserId: null,
-      senderApiKeyId: apiKeyId,
+      await publishInTx(tx, {
+        type: "message.sent",
+        teamId,
+        conversationId,
+        contactId: conversation.contactId,
+        message,
+        preview,
+        lastMessageAt: effectiveBump.toISOString(),
+        unreadCount: current.unreadCount,
+        senderUserId: null,
+        senderApiKeyId: apiKeyId,
+      });
     });
 
     const result = { message: toExternalMessage(created) };

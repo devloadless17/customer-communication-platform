@@ -41,13 +41,16 @@ import {
   type WorkflowConversationSnapshot,
 } from "@/lib/workflows/events";
 
-export function registerWorkflowDispatchSubscribers(): void {
+export function registerWorkflowDispatchSubscribers(): () => void {
   // WORKFLOW_DISPATCH tier — runs after analytics so the snapshot reads the
   // counters/closedAt analytics just wrote.
+  const offs: Array<() => void> = [];
   const subscribe = <K extends DomainEventType>(
     type: K,
     handler: (e: DomainEventOf<K>) => void | Promise<void>,
-  ) => busSubscribe(type, handler, SubscriberPriority.WORKFLOW_DISPATCH);
+  ) => {
+    offs.push(busSubscribe(type, handler, SubscriberPriority.WORKFLOW_DISPATCH));
+  };
 
   // ---- message.received → message_received (+ conversation_created on first) ----
   subscribe("message.received", async (e) => {
@@ -187,6 +190,10 @@ export function registerWorkflowDispatchSubscribers(): void {
     // re-thrown error after that log.
     if (dispatches.length > 0) await Promise.allSettled(dispatches);
   });
+
+  return () => {
+    for (const off of offs) off();
+  };
 }
 
 /**

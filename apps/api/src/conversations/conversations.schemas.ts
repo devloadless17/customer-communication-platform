@@ -8,10 +8,12 @@ const takeQuery = z.coerce.number().int().min(1).max(200).optional();
 
 /**
  * Inbox preset filter ids. Mirrors the client-side `PresetFilterId` so the
- * server can shape the WHERE clause to match. `all` excludes closed; `closed`
- * is the only preset that shows closed threads.
+ * server can shape the WHERE clause to match. `active` = open + pending
+ * (everyday view); `all` = truly everything including closed; `mine` /
+ * `unassigned` exclude closed; `closed` is the only preset that shows
+ * exclusively closed threads.
  */
-const PresetFilterIdSchema = z.enum(["all", "mine", "unassigned", "closed"]);
+const PresetFilterIdSchema = z.enum(["active", "all", "mine", "unassigned", "closed"]);
 export type PresetFilterId = z.infer<typeof PresetFilterIdSchema>;
 
 export const ListConversationsQuerySchema = z.object({

@@ -10,6 +10,7 @@ import { Prisma } from "@prisma/client";
 import { generateInviteToken, hashInviteToken, inviteExpiry } from "@/auth/invite-token";
 import { hashPassword } from "@/auth/password";
 import { assignableRoles } from "@ccp/shared/auth/permissions";
+import { validatePasswordStructure } from "@ccp/shared/auth/password-policy";
 import type { Role } from "@ccp/shared/types";
 
 import { EventBus } from "../events/event-bus.module";
@@ -210,6 +211,15 @@ export class InvitesService {
   async accept(
     input: AcceptInviteInput,
   ): Promise<{ email: string; teamId: string }> {
+    // Server-side password policy: the web action runs validatePasswordStructure
+    // in @ccp/shared, but a direct POST to /api/invites/accept bypasses the form.
+    // Without this gate any string ≥ 6 chars would be accepted, even though
+    // policy may tighten over time (NIST/OWASP floor is currently above the
+    // schema's min(6)). Re-validate here as second-line defense.
+    const policyError = validatePasswordStructure(input.password);
+    if (policyError) {
+      throw new BadRequestException({ error: "weak_password", detail: policyError });
+    }
     const tokenHash = hashInviteToken(input.token);
     const passwordHash = await hashPassword(input.password);
 

@@ -1,9 +1,8 @@
-import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 
 import { RealtimeFanoutService } from "@/realtime/realtime-fanout.service";
 import { registerAnalyticsSubscribers } from "@/lib/events/subscribers/analytics";
 import { registerAuditSubscribers } from "@/lib/events/subscribers/audit";
-import { registerWebCacheRevalidateSubscriber } from "@/lib/events/subscribers/web-cache-revalidate";
 import { registerWorkflowDispatchSubscribers } from "@/lib/events/subscribers/workflow-dispatch";
 
 /**
@@ -24,9 +23,19 @@ import { registerWorkflowDispatchSubscribers } from "@/lib/events/subscribers/wo
  * Idempotent — `registered` flag + the bus's per-process global state.
  */
 @Injectable()
-export class WorkflowSubscribersService implements OnModuleInit {
+export class WorkflowSubscribersService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkflowSubscribersService.name);
   private registered = false;
+  // Unsubscribe callbacks captured at registration time. Called on shutdown
+  // so a hot-reload / programmatic NestFactory restart can't double-register
+  // handlers. Without this, every re-init layered a second copy of each
+  // subscriber on the `globalThis.__ccpEventBus` map — every event then
+  // fired every subscriber twice, producing double Meta sends, double
+  // outbound webhook deliveries, double audit rows. The `registered`
+  // flag at the top guards single-process re-init within ONE lifecycle;
+  // these unsubs guard MULTI-lifecycle within one process (test harness,
+  // dev hot-restart, future programmatic re-init).
+  private unsubs: Array<() => void> = [];
 
   constructor(private readonly realtimeFanout: RealtimeFanoutService) {}
 
@@ -34,12 +43,25 @@ export class WorkflowSubscribersService implements OnModuleInit {
     if (this.registered) return;
     this.registered = true;
 
-    this.realtimeFanout.registerSubscribers();
-    registerAuditSubscribers();
-    registerAnalyticsSubscribers();
-    registerWorkflowDispatchSubscribers();
-    registerWebCacheRevalidateSubscriber();
+    this.unsubs.push(this.realtimeFanout.registerSubscribers());
+    this.unsubs.push(registerAuditSubscribers());
+    this.unsubs.push(registerAnalyticsSubscribers());
+    this.unsubs.push(registerWorkflowDispatchSubscribers());
 
     this.logger.log("Bus subscribers registered");
+  }
+
+  onModuleDestroy(): void {
+    for (const off of this.unsubs) {
+      try {
+        off();
+      } catch (err) {
+        this.logger.warn(
+          `unsubscribe failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    this.unsubs = [];
+    this.registered = false;
   }
 }

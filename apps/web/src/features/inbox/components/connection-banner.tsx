@@ -4,35 +4,22 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Loader2, WifiOff } from "lucide-react";
 
 import { useConnectionStatus } from "@/hooks/use-connection-status";
-import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { cn } from "@ccp/shared/utils";
 
 /**
  * Top-of-app banner showing realtime/network state. Hidden when everything's
  * fine; slides down when the socket drops or the browser goes offline.
  *
- * On recovery, the banner ALSO calls `router.refresh()`. This re-runs the
- * server components for the active route, which re-fetches the inbox list
- * and the active conversation's most recent messages — closing the
- * "events arrived during the disconnect were silently lost" gap that
- * Socket.io's connectionStateRecovery window doesn't cover for longer drops.
- *
- * Side-effects via the banner (not its own hook) so it only runs on screens
- * that mount it. A background tab with no inbox shouldn't be ping-refreshing
- * the server on every wifi blip.
+ * Recovery refetch lives ON the per-route hooks (`useConversationEvents` for
+ * the active thread, `useTeamEvents` for the inbox list). The banner used
+ * to also call `router.refresh()` here on recovery, but that fired in
+ * PARALLEL with the per-route full-refetch — every reconnect doubled the
+ * recovery payload AND defeated the jitter the per-route refetch deliberately
+ * applies. The per-route paths cover the full surface; this banner is now
+ * purely visual.
  */
 export function ConnectionBanner() {
-  const softRefresh = useSoftRefresh();
-  const { state } = useConnectionStatus({
-    onRecovered: () => {
-      // Re-fetch server-rendered slices (inbox list + active thread). The
-      // socket has already reconnected and re-subscribed by this point;
-      // refresh fills in anything that landed during the gap. Wrapped in
-      // a transition (via useSoftRefresh) so the recovery doesn't briefly
-      // flash the inbox loading skeleton.
-      softRefresh();
-    },
-  });
+  const { state } = useConnectionStatus({});
 
   const visible = state !== "online";
 

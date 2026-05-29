@@ -152,6 +152,12 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
       // worker still extends while genuinely active.
       lockDuration: 120_000,
       lockRenewTime: 30_000,
+      // Explicit stalled-check tuning. See workflows/worker.ts for the
+      // full rationale — same posture applied to every BullMQ worker so
+      // a transient lock-renewal blip doesn't fail the delivery (and
+      // double-POST the partner on retry).
+      stalledInterval: 30_000,
+      maxStalledCount: 3,
     },
   );
 

@@ -55,14 +55,15 @@ export function useConnectionStatus(opts?: {
   /** Fires once each time we transition back to `online` after a drop. */
   onRecovered?: () => void;
 }): ConnectionStatus {
-  // Optimistic start: assume online until we have proof otherwise. The lazy
-  // initializer used to return "reconnecting" when the socket hadn't finished
-  // its handshake yet — that's what flashed the banner on every refresh.
-  const [state, setState] = useState<ConnectionState>(() => {
-    if (typeof window === "undefined") return "online";
-    if (!navigator.onLine) return "offline";
-    return "online";
-  });
+  // Optimistic start: ALWAYS render "online" on first paint. Reading
+  // navigator.onLine in the lazy initializer SSR-rendered "online" but the
+  // client mount of an offline user produced "offline" — a hydration
+  // mismatch that flashed the banner on every refresh for offline users.
+  // The post-hydration effect below resyncs the real value, which causes
+  // the banner to slide in on the first frame after hydration if the user
+  // is actually offline. Net result: no hydration warning, banner appears
+  // ~16ms after paint instead of during hydration.
+  const [state, setState] = useState<ConnectionState>("online");
   const [recovered, setRecovered] = useState(false);
   // Always start as `false`. Reading `socket.connected` in the initializer
   // SSR-renders `false` but the client mount could read `true` — that delta

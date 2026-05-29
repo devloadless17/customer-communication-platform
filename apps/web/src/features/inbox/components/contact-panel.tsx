@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { Check, ChevronDown, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
@@ -107,7 +107,7 @@ interface PanelProps {
   onGoToMessage: (messageId: string) => void;
 }
 
-export function ContactPanel({
+function ContactPanelImpl({
   data,
   fieldDefinitions,
   builtins,
@@ -1307,6 +1307,74 @@ export function ContactPanel({
     </aside>
   );
 }
+
+/**
+ * React.memo wrapper with a custom equality function. Without memo this
+ * panel re-rendered on every `message:new` / `message:status` / etc. —
+ * the parent passes a fresh `data: ConversationWithRefs` reference on
+ * every reducer write. The panel only cares about contact + notes +
+ * conversation header (assignedUserId / status / unreadCount), so a
+ * per-field shallow check skips renders triggered by message-only state
+ * changes. At 10 inbound/sec on a hot pilot, that's 10 wasted full
+ * renders/sec of the right rail (custom fields, attachments tab, tags).
+ *
+ * `messages` is omitted from the equality check ON PURPOSE — the panel
+ * uses `messages.length` for the "Messages" tally, which falls out of
+ * `data.messageCount` (which IS in the check). The Attachments tab
+ * runs its own `useConversationAttachments` hook that re-fetches on
+ * message:new + message:media:ready independently of this prop, so
+ * shallow message-array changes don't need to invalidate the panel.
+ */
+export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
+  if (prev.initialCollapsed !== next.initialCollapsed) return false;
+  if (prev.canManageFields !== next.canManageFields) return false;
+  if (prev.currentUserName !== next.currentUserName) return false;
+  if (prev.onGoToMessage !== next.onGoToMessage) return false;
+  if (prev.builtins !== next.builtins) return false;
+  if (prev.fieldDefinitions !== next.fieldDefinitions) return false;
+  if (prev.tagCatalog !== next.tagCatalog) return false;
+  if (prev.teamMembers !== next.teamMembers) return false;
+  const a = prev.data;
+  const b = next.data;
+  if (a === b) return true;
+  // Contact (the bulk of what the panel renders).
+  if (a.contact !== b.contact) {
+    // Shallow check the fields the panel actually reads.
+    const ac = a.contact;
+    const bc = b.contact;
+    if (
+      ac.id !== bc.id ||
+      ac.phoneNumber !== bc.phoneNumber ||
+      ac.name !== bc.name ||
+      ac.email !== bc.email ||
+      ac.stageId !== bc.stageId ||
+      ac.firstName !== bc.firstName ||
+      ac.lastName !== bc.lastName ||
+      ac.countryCode !== bc.countryCode ||
+      ac.language !== bc.language ||
+      ac.avatarUrl !== bc.avatarUrl ||
+      !arraysEqual(ac.tagIds ?? [], bc.tagIds ?? []) ||
+      !shallowJsonEqual(ac.customFields ?? {}, bc.customFields ?? {})
+    ) {
+      return false;
+    }
+  }
+  // Conversation header bits the panel renders (status pill, assignee, unread).
+  if (
+    a.conversation.status !== b.conversation.status ||
+    a.conversation.assignedUserId !== b.conversation.assignedUserId ||
+    a.conversation.unreadCount !== b.conversation.unreadCount
+  ) {
+    return false;
+  }
+  if ((a.assignedUser?.id ?? null) !== (b.assignedUser?.id ?? null)) return false;
+  if (a.lastInboundAt !== b.lastInboundAt) return false;
+  // Notes — reference compare is fine; the notes array is replaced wholesale
+  // on add/delete by the live reducer.
+  if (a.notes !== b.notes) return false;
+  if (a.messageCount !== b.messageCount) return false;
+  return true;
+});
 
 /**
  * Sidebar assignee picker. Mirrors the conversation header's

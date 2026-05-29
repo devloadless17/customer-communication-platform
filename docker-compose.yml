@@ -318,6 +318,16 @@ services:
       # Per-team max concurrent workflow steps. Stops one busy team from
       # starving every other team's queue.
       WORKFLOW_PER_TEAM_CONCURRENCY: ${WORKFLOW_PER_TEAM_CONCURRENCY:-2}
+      # Per-team max concurrent broadcast deliveries (in-process broadcast
+      # runner). Same fairness shape as the workflow worker.
+      BROADCAST_PER_TEAM_CONCURRENCY: ${BROADCAST_PER_TEAM_CONCURRENCY:-2}
+      # Per-team max concurrent outbound-webhook deliveries (in-process
+      # worker). Tuned higher than workflows since each delivery is mostly
+      # network-bound on the partner.
+      WEBHOOK_PER_TEAM_CONCURRENCY: ${WEBHOOK_PER_TEAM_CONCURRENCY:-4}
+      # ConversationEvent (audit timeline) retention. Older rows pruned by
+      # the daily sweeper.
+      CONVERSATION_EVENT_RETENTION_DAYS: ${CONVERSATION_EVENT_RETENTION_DAYS:-90}
       # Outbound-webhook delivery worker concurrency + retention + orphan-
       # recovery sweeper grace (each one HTTP POST, idempotent retry on 5xx).
       WEBHOOK_WORKER_CONCURRENCY: ${WEBHOOK_WORKER_CONCURRENCY:-10}

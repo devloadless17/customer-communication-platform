@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useMemo, useState } from "react";
 import Link from "next/link";
 import { Hash, Plus, Search, X } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -56,16 +56,13 @@ export function ChannelList({
     return channels.filter((c) => c.name.toLowerCase().includes(q));
   }, [channels, deferredQuery]);
 
-  // Resolve Radix's inner viewport so the virtualizer measures real scroll.
-  const scrollRootRef = useRef<HTMLDivElement>(null);
+  // Direct viewport ref via ScrollArea's `viewportRef` prop — callback ref
+  // fires synchronously on attach, no useLayoutEffect + querySelector
+  // round-trip. Virtualizer sees a real scrollElement on the first render
+  // after mount.
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
-  useLayoutEffect(() => {
-    const root = scrollRootRef.current;
-    if (!root) return;
-    const viewport = root.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]",
-    );
-    setScrollEl(viewport ?? root);
+  const viewportRef = useCallback((node: HTMLDivElement | null) => {
+    setScrollEl(node);
   }, []);
 
   const rowVirtualizer = useVirtualizer({
@@ -161,7 +158,7 @@ export function ChannelList({
         Channels
       </div>
 
-      <ScrollArea ref={scrollRootRef} className="flex-1">
+      <ScrollArea viewportRef={viewportRef} className="flex-1">
         {visible.length === 0 ? (
           <div className="px-4 py-6 text-center text-xs text-muted-foreground">
             {query ? "No matches." : "No channels yet."}

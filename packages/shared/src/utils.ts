@@ -29,15 +29,30 @@ export function initials(name: string): string {
 // `tz` undefined means "use the runtime default zone" — only happens in
 // raw test/script contexts; in-app calls always go through <LocalTime>.
 
-/** Returns `{ y, m, d }` for `d` interpreted in `tz` (the calendar day
- *  the user sees, not the runtime's day). */
+/**
+ * `Intl.DateTimeFormat` constructor is the expensive part of locale
+ * formatting; `formatToParts` itself is cheap. Cache one formatter per tz
+ * so a 500-message thread's day-separator memo doesn't construct 1000
+ * formatters per re-memo (each `formatDaySeparator` call hits this twice
+ * — once for `now`, once for the message). At 10 inbound/sec rendering
+ * 30-min worth of bubbles, that's ~hundreds of MS of pure formatter
+ * construction per re-render saved. Tiny memory footprint (one formatter
+ * per active tz, typically 1-3 per process).
+ */
+const calendarDayFormatters = new Map<string, Intl.DateTimeFormat>();
 function calendarDay(d: Date, tz?: string): { y: number; m: number; d: number } {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  }).formatToParts(d);
+  const key = tz ?? "";
+  let fmt = calendarDayFormatters.get(key);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    });
+    calendarDayFormatters.set(key, fmt);
+  }
+  const parts = fmt.formatToParts(d);
   return {
     y: Number(parts.find((p) => p.type === "year")?.value),
     m: Number(parts.find((p) => p.type === "month")?.value),

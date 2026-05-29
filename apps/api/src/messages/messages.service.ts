@@ -218,26 +218,37 @@ export class MessagesService {
   }
 
   /**
-   * Claim-on-reply: when a human agent sends into an UNASSIGNED conversation,
-   * assign it to them. The agent is already chatting — making them click the
-   * assignee dropdown first is friction; replying IS the claim.
+   * Claim-on-reply + promote-on-reply: when a human agent sends into a
+   * conversation, either claim it (if unassigned) and/or promote its status
+   * to `open` (if pending/closed). The agent is already chatting — making them
+   * click the assignee or status dropdown first is friction; replying IS the
+   * claim AND the (re)open.
    *
-   * Only fires when `assignedUserId IS NULL` — never steals a thread already
-   * owned by a teammate (that would silently reassign their work the moment
-   * anyone else replies). Mirrors `ConversationsService.assign`'s observable
-   * behaviour so the result is indistinguishable from a manual claim:
-   *   - publishes `conversation.assigned` (drives socket UI + audit timeline +
-   *     on-assigned workflows + outbound webhooks — NOT silent, per product
-   *     decision: a reply-claim is a real assignment)
-   *   - if the claim moves a pending/closed thread, also flips it to `open`
-   *     and publishes `conversation.status_changed`, exactly like assign().
+   * Two branches, gated on current ownership:
    *
-   * CAS on `assignedUserId: null` (+ pinned status) so a concurrent manual
-   * assign or a racing second reply can't double-assign — the loser's update
-   * matches zero rows and is a no-op. Deliberately NOT in the shared
-   * send-*-internal helpers: workflow auto-replies and external-API sends must
-   * NOT claim a thread (no human is replying). Fire-and-forget with a
-   * self-contained try/catch — an assign failure must never fail the send.
+   *   A. Already assigned (to anyone — sender or teammate). Skip the claim;
+   *      we never steal a thread owned by a teammate. But if the thread is
+   *      pending/closed, flip it to `open` and publish
+   *      `conversation.status_changed`. This covers the assignee-replying-in-
+   *      their-own-pending-thread case (and the teammate-replying case too —
+   *      chatting is chatting, regardless of who owns it).
+   *
+   *   B. Unassigned. Claim the thread for the sender, AND if it was
+   *      pending/closed flip it to `open`. Mirrors `ConversationsService.assign`'s
+   *      observable behaviour so the result is indistinguishable from a manual
+   *      claim:
+   *        - publishes `conversation.assigned` (drives socket UI + audit
+   *          timeline + on-assigned workflows + outbound webhooks — NOT silent,
+   *          per product decision: a reply-claim is a real assignment)
+   *        - if the claim moves a pending/closed thread, also publishes
+   *          `conversation.status_changed`, exactly like assign().
+   *
+   * CAS on both branches so a concurrent manual assign / close / racing second
+   * reply can't clobber state — the loser's update matches zero rows and is a
+   * no-op (no event fired). Deliberately NOT in the shared send-*-internal
+   * helpers: workflow auto-replies and external-API sends must NOT claim or
+   * (re)open a thread (no human is replying). Fire-and-forget with a
+   * self-contained try/catch — a failure here must never fail the send.
    */
   private autoAssignOnAgentSend(teamId: string, userId: string, conversationId: string): void {
     void (async () => {
@@ -250,9 +261,36 @@ export class MessagesService {
             contact: { include: { tags: { select: { id: true } } } },
           },
         });
-        // Already owned (by anyone, including this agent) → nothing to claim.
-        if (!convo || convo.assignedUserId !== null) return;
+        if (!convo) return;
 
+        // Branch A: already assigned (to anyone, including this agent).
+        // Skip the claim; promote status if not open.
+        if (convo.assignedUserId !== null) {
+          if (convo.status === "open") return;
+          const previousStatus = convo.status;
+          const result = await this.db.conversation.updateMany({
+            where: {
+              id: conversationId,
+              teamId,
+              assignedUserId: convo.assignedUserId, // pin current owner
+              status: previousStatus,
+            },
+            data: { status: "open" },
+          });
+          if (result.count === 0) return; // lost the CAS race — someone else changed status/assignee first
+          await this.bus.publish({
+            type: "conversation.status_changed",
+            teamId,
+            conversationId,
+            previousStatus,
+            newStatus: "open",
+            changedByUserId: userId,
+            contact: workflowContactSnapshot(convo.contact),
+          });
+          return;
+        }
+
+        // Branch B: unassigned — claim + promote (existing path).
         // Same pending/closed → open flip assign() applies on a claim, so a
         // reply-claim leaves the thread in the identical state as the manual
         // path. (Open stays open.)
@@ -747,33 +785,6 @@ export class MessagesService {
       });
     }
 
-    // Meta succeeded — mark the attempt completed BEFORE writing the
-    // Message row. Order matters: if we crash between Meta returning and
-    // the Message insert, a retry would see `completedAt` set + no
-    // Message row, fall through to the refuse-to-retry path, and the
-    // user re-sends with a new clientTempId. The Meta-sent message
-    // remains uncatalogued in our inbox — rare, manually recoverable.
-    // (Alternative: write Message first, then stamp attempt completed.
-    // But the symmetric race exists: crash between Meta and Message,
-    // retry would proceed and double-send.)
-    if (attemptCreated && jobId) {
-      await this.db.outboundSendAttempt
-        .update({
-          where: { jobId },
-          data: {
-            completedAt: new Date(),
-            externalId: send.externalId,
-          },
-        })
-        .catch((err) => {
-          this.logger.warn(
-            `OutboundSendAttempt completed-stamp failed for jobId=${jobId}: ${
-              err instanceof Error ? err.message : err
-            }`,
-          );
-        });
-    }
-
     // Timestamp monotonicity guard — outbound must sort strictly after any
     // inbound it might be responding to. Meta's webhook timestamps are
     // second-precision (rounded), so an outbound landing in the same
@@ -783,19 +794,58 @@ export class MessagesService {
       exists.lastMessageAt && exists.lastMessageAt >= receivedAt
         ? new Date(exists.lastMessageAt.getTime() + 1)
         : receivedAt;
+    // Atomic Message insert + OutboundSendAttempt completed-stamp.
+    // Pre-2026-05-29 these were two separate writes with a race window:
+    // a crash between (stamp completed) and (insert message) left the
+    // attempt marked complete but no Message row → retry path refused
+    // to retry → user re-sends with new clientTempId → message that
+    // Meta actually delivered stayed uncatalogued. Wrapping both in
+    // one tx closes the window: either both commit (happy path) or
+    // both roll back (retry can re-stamp + re-insert; createOutbound's
+    // P2002 catch handles the case where Meta delivered the same wamid
+    // twice across the retry).
+    //
+    // createOutboundMessageIdempotent has internal retries for transient
+    // DB errors. Inside a tx those retries would just rollback-retry the
+    // whole tx, which is the correct semantic.
     const [created, replySnapshot] = await Promise.all([
-      createOutboundMessageIdempotent({
-        teamId,
-        conversationId,
-        externalId: send.externalId,
-        senderUserId: userId,
-        body,
-        direction: "out",
-        channel,
-        status: "sent",
-        rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
-        timestamp: messageTimestamp,
-        ...(replyToMessageId ? { replyToMessageId } : {}),
+      this.db.$transaction(async (tx) => {
+        if (attemptCreated && jobId) {
+          // Same scope guard as the standalone update used to do —
+          // ignore failures (e.g. attempt row vanished); the Message
+          // insert is the load-bearing write.
+          await tx.outboundSendAttempt
+            .update({
+              where: { jobId },
+              data: {
+                completedAt: new Date(),
+                externalId: send.externalId,
+              },
+            })
+            .catch((err) => {
+              this.logger.warn(
+                `OutboundSendAttempt completed-stamp failed for jobId=${jobId}: ${
+                  err instanceof Error ? err.message : err
+                }`,
+              );
+            });
+        }
+        return createOutboundMessageIdempotent(
+          {
+            teamId,
+            conversationId,
+            externalId: send.externalId,
+            senderUserId: userId,
+            body,
+            direction: "out",
+            channel,
+            status: "sent",
+            rawPayload: { sentVia: "api/messages" } as Prisma.InputJsonValue,
+            timestamp: messageTimestamp,
+            ...(replyToMessageId ? { replyToMessageId } : {}),
+          },
+          tx,
+        );
       }),
       replySnapshotPromise,
     ]);
@@ -973,6 +1023,25 @@ export class MessagesService {
           lastInboundAt,
         });
       }
+    }
+
+    // Same per-conversation send ceiling as sendText. Catches partner-driven
+    // hot-potato loops at the thread level (30/min/thread) before the per-key
+    // bucket bites.
+    try {
+      consumeConversationSendBudget(teamId, conversationId);
+    } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        throw new HttpException(
+          {
+            error: "conversation_rate_limited",
+            detail: err.message,
+            retryAfter: err.retryAfter,
+          },
+          429,
+        );
+      }
+      throw err;
     }
 
     let replyToMessageId: string | null = null;
@@ -1924,6 +1993,23 @@ export class MessagesService {
   ): Promise<{ messageId: string }> {
     this.markReadOnAgentSend(teamId, userId, input.conversationId);
     this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+    // Per-thread send ceiling. Mirrors sendText/sendMedia — bounds
+    // partner-driven hot-potato loops at the conversation level (30/min).
+    try {
+      consumeConversationSendBudget(teamId, input.conversationId);
+    } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        throw new HttpException(
+          {
+            error: "conversation_rate_limited",
+            detail: err.message,
+            retryAfter: err.retryAfter,
+          },
+          429,
+        );
+      }
+      throw err;
+    }
     return runWithSendIdempotency(
       {
         teamId,
@@ -1993,6 +2079,22 @@ export class MessagesService {
   ): Promise<{ messageId: string }> {
     this.markReadOnAgentSend(teamId, userId, input.conversationId);
     this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+    // Per-thread send ceiling, same as sendText/sendMedia/sendTemplate.
+    try {
+      consumeConversationSendBudget(teamId, input.conversationId);
+    } catch (err) {
+      if (err instanceof ConversationSendRateLimitedError) {
+        throw new HttpException(
+          {
+            error: "conversation_rate_limited",
+            detail: err.message,
+            retryAfter: err.retryAfter,
+          },
+          429,
+        );
+      }
+      throw err;
+    }
     try {
       const result = await sendInteractiveInternal({
         teamId,

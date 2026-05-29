@@ -297,9 +297,16 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   // ---- team_channel.* (internal channels) -------------------------------
+  // Channel events fan out to the CHANNEL room, not the team room. Only
+  // members of the channel join the room (gateway's subscribe:channel
+  // handler enforces `requireChannelMembership`), so non-members never
+  // see message bodies, authors, reactions, or pins for channels they
+  // were excluded from. members_changed + catalog_changed stay on the
+  // team room — they drive the sidebar channel list, which every team
+  // member needs to refresh.
   "team_channel.message_created": (e, emitter) => {
     const threadRootId = e.message.threadRootId;
-    emitter.emitToTeam(e.teamId, "team:channel:message", {
+    emitter.emitToChannel(e.channelId, "team:channel:message", {
       teamId: e.teamId,
       channelId: e.channelId,
       message: e.message,
@@ -308,10 +315,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
       ...(e.clientTempId ? { clientTempId: e.clientTempId } : {}),
     });
     if (threadRootId) {
-      // Thread-room emit of `team:channel:message` would duplicate the
-      // team-room emit above (every socket is auto-joined to the team
-      // room). Only the thread-summary signal goes to the thread room.
-      emitter.emitToTeam(e.teamId, "team:channel:thread:reply", {
+      emitter.emitToChannel(e.channelId, "team:channel:thread:reply", {
         teamId: e.teamId,
         channelId: e.channelId,
         rootMessageId: threadRootId,
@@ -322,7 +326,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "team_channel.message_edited": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "team:channel:message:edited", {
+    emitter.emitToChannel(e.channelId, "team:channel:message:edited", {
       teamId: e.teamId,
       channelId: e.channelId,
       messageId: e.messageId,
@@ -332,7 +336,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "team_channel.message_deleted": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "team:channel:message:deleted", {
+    emitter.emitToChannel(e.channelId, "team:channel:message:deleted", {
       teamId: e.teamId,
       channelId: e.channelId,
       messageId: e.messageId,
@@ -341,7 +345,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "team_channel.reaction_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "team:channel:reaction:changed", {
+    emitter.emitToChannel(e.channelId, "team:channel:reaction:changed", {
       teamId: e.teamId,
       channelId: e.channelId,
       messageId: e.messageId,
@@ -352,7 +356,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "team_channel.pin_changed": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "team:channel:pin:changed", {
+    emitter.emitToChannel(e.channelId, "team:channel:pin:changed", {
       teamId: e.teamId,
       channelId: e.channelId,
       messageId: e.messageId,
@@ -361,11 +365,37 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "team_channel.read": (e, emitter) => {
+    // EXCEPTION to the channel-scoped fanout rule: read receipts go to the
+    // TEAM room, not the channel room. Two reasons:
+    //   (1) Sidebar badge clearing — the team-channels-list hook (which
+    //       holds the sidebar's `unreadForMe` per channel) subscribes to
+    //       the team room, not per-channel rooms. Scoping reads to the
+    //       channel room left the badge stuck in the reader's OTHER tabs
+    //       that weren't currently viewing that channel.
+    //   (2) Read receipts are PER-USER, not per-message — only the reader's
+    //       own tabs filter to them (everyone else's onRead handler bails
+    //       on userId mismatch). Putting them on the team room means the
+    //       reader's whole device cohort sees the clear; everyone else
+    //       gets a single frame they ignore. Net cost is tiny.
+    // Messages / edits / deletes / reactions / pins / thread-replies stay
+    // channel-scoped — those carry confidential content.
     emitter.emitToTeam(e.teamId, "team:channel:read", {
       teamId: e.teamId,
       channelId: e.channelId,
       readByUserId: e.readByUserId,
       lastReadAt: e.lastReadAt,
+    });
+  },
+
+  "team_channel.thread_reply_count_changed": (e, emitter) => {
+    // Reuses the existing socket frame the create-reply rule emits — clients
+    // already handle it as a counter+lastReplyAt update on the parent pill.
+    emitter.emitToChannel(e.channelId, "team:channel:thread:reply", {
+      teamId: e.teamId,
+      channelId: e.channelId,
+      rootMessageId: e.rootMessageId,
+      replyCount: e.replyCount,
+      lastReplyAt: e.lastReplyAt,
     });
   },
 
@@ -407,6 +437,13 @@ export const FANOUT_RULES: FanoutRuleMap = {
     if (e.status === "offline" || e.status === "available") {
       emitter.emitPresenceSnapshot(e.teamId);
     }
+    // "Also viewing" pills are gated on `availabilityStatus === "available"`.
+    // ANY status change can shift the set (available ↔ busy / away / offline),
+    // so re-emit `conversation:viewers` for every conversation this user is
+    // currently viewing — teammates' pills add/drop them in the same frame
+    // as the badge. No-op (early-returns) when the user isn't viewing
+    // anything, so the cost is one in-memory walk for the common case.
+    void emitter.emitConversationViewersForUser(e.userId);
   },
 
   "user.profile_updated": (e, emitter) => {

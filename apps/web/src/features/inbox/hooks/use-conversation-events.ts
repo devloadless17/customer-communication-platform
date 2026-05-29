@@ -220,6 +220,42 @@ export interface ConversationEventsState {
  * unread counter and broadcasts `conversation:read`, which the team-events
  * hook uses to clear the badge in the inbox list.
  */
+/**
+ * Schedule a `URL.revokeObjectURL` on the next macrotask. Used after an
+ * optimistic media bubble reconciles with its server-confirmed twin:
+ * the bubble is swapped to use the server's URL, so the optimistic
+ * blob is no longer needed. The brief delay lets the React commit that
+ * swapped `<img src>` settle before the blob handle goes away — some
+ * browsers race the revoke against the second `<img>`'s initial load
+ * when both happen in the same microtask.
+ *
+ * `revokedBlobs` tracks already-scheduled URLs so duplicate frames
+ * (broadcast republish, reconnect refetch) don't double-schedule a
+ * revoke. We also clear seen entries on a long-running cap to bound
+ * the set under a busy session (a few hundred sends per agent per shift
+ * × 30 chars per blob URL = trivial — but capped for hygiene).
+ */
+const revokedBlobs = new Set<string>();
+const REVOKED_BLOBS_MAX = 1_000;
+function scheduleBlobRevoke(url: string): void {
+  if (typeof URL === "undefined" || revokedBlobs.has(url)) return;
+  if (revokedBlobs.size >= REVOKED_BLOBS_MAX) {
+    // LRU-ish: drop the oldest entry by iteration order to cap memory.
+    const oldest = revokedBlobs.values().next().value;
+    if (oldest !== undefined) revokedBlobs.delete(oldest);
+  }
+  revokedBlobs.add(url);
+  // ~100ms gives a comfortable window for React commit + browser layout
+  // to complete the `<img src>` swap before the blob handle disappears.
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // Some browsers throw if the URL was never registered; harmless.
+    }
+  }, 100);
+}
+
 export function useConversationEvents(
   initial: ConversationWithRefs,
   initialNextOlderCursor: string | null,
@@ -514,6 +550,7 @@ export function useConversationEvents(
                   assignedUserId: string | null;
                   assignedUser: ConversationWithRefs["assignedUser"];
                   unreadCount: number;
+                  lastInboundAt: string | null;
                 };
               }>)
             : null,
@@ -529,6 +566,10 @@ export function useConversationEvents(
             // the socket was disconnected stays stuck on the stale value
             // until the agent navigates away and back. The reducer-style
             // identity-bail keeps this a no-op when nothing changed.
+            //
+            // `lastInboundAt` is also re-synced — drives the 24h-window
+            // composer lock. A reconnect during which an inbound landed
+            // would otherwise leave the composer falsely greyed out.
             let next = prev;
             if (freshState) {
               const headerChanged =
@@ -536,7 +577,8 @@ export function useConversationEvents(
                 next.conversation.assignedUserId !== freshState.assignedUserId ||
                 next.conversation.unreadCount !== freshState.unreadCount ||
                 (next.assignedUser?.id ?? null) !==
-                  (freshState.assignedUser?.id ?? null);
+                  (freshState.assignedUser?.id ?? null) ||
+                next.lastInboundAt !== freshState.lastInboundAt;
               if (headerChanged) {
                 next = {
                   ...next,
@@ -547,6 +589,7 @@ export function useConversationEvents(
                     unreadCount: freshState.unreadCount,
                   },
                   assignedUser: freshState.assignedUser,
+                  lastInboundAt: freshState.lastInboundAt,
                 };
               }
             }
@@ -729,26 +772,45 @@ export function useConversationEvents(
               // stable — otherwise the DOM node unmounts and the entrance
               // animation re-fires.
               //
-              // Media-url preservation: if the optimistic carried a `blob:`
-              // URL, keep it across the swap rather than overwriting with
-              // /api/media/<id>. The image is already painted; rewriting
-              // forces the browser to refetch through the auth redirect →
-              // CDN, producing a visible flicker (and the "Downloading…"
-              // gap if anything below is slow). Next page load reads the
-              // persisted URL via mapMessage naturally.
+              // Media-url swap: when the server returns a media URL,
+              // SWAP to it (don't preserve the blob:). The /api/media/<id>
+              // path 302s to UploadThing's CDN with
+              // `Cache-Control: immutable, max-age=31536000`, so the
+              // browser fetches the redirect target once and caches it
+              // forever — back-navigation, page reload, snapshot replay
+              // all hit the disk cache. Preserving the blob URL across
+              // reconcile pinned the underlying File bytes in V8 heap
+              // for the lifetime of the LRU cache snapshot (~hours);
+              // earlier we patched that with a 5s delayed revoke, but
+              // that broke back-navigation within the 5s window because
+              // the LRU snapshot held a now-dangling blob URL. Swapping
+              // to the server URL on reconcile is the cleanest fix:
+              // memory is released immediately AND back-nav always works.
               //
-              // If the server dropped media entirely (blob upload failed
-              // server-side), keep the optimistic blob too — Meta did
-              // deliver to the customer, we just can't render across
-              // reloads, so don't yank the image out from under the agent
-              // in the current session.
+              // If the server DROPPED media entirely (blob upload failed
+              // server-side but Meta delivery succeeded), keep the
+              // optimistic blob — the customer got the image, we just
+              // can't render across reloads in this session, so don't
+              // yank it from the current agent's view.
               const optimisticMedia = m.media;
               const serverMedia = payload.message.media;
               let media = serverMedia;
-              if (optimisticMedia?.url.startsWith("blob:")) {
-                media = serverMedia
-                  ? { ...serverMedia, url: optimisticMedia.url }
-                  : optimisticMedia;
+              if (!serverMedia && optimisticMedia) {
+                media = optimisticMedia;
+              }
+              // Revoke the optimistic blob URL once we've swapped to the
+              // server URL — small microtask delay so the React commit
+              // that swaps `<img src>` has a chance to settle before the
+              // blob handle goes away. Without the delay, the same render
+              // commit holds two refs to the same blob URL briefly; some
+              // browsers race the revoke against the second `<img>`'s
+              // initial load.
+              if (
+                serverMedia &&
+                optimisticMedia?.url.startsWith("blob:") &&
+                optimisticMedia.url !== serverMedia.url
+              ) {
+                scheduleBlobRevoke(optimisticMedia.url);
               }
               return {
                 ...payload.message,

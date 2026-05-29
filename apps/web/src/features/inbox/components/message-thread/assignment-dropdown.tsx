@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -202,7 +202,7 @@ export function AssignmentDropdown({
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-48">
+      <DropdownMenuContent align="end" className="w-56">
         <DropdownMenuLabel>Assign to…</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void assign(null)}>
@@ -211,56 +211,160 @@ export function AssignmentDropdown({
             Unassigned
           </span>
         </DropdownMenuItem>
-        {teamMembers.map((u) => {
-          // Status dot rule mirrors the sidebar: offline color wins when the
-          // user has no socket OR picked "Appear offline" (server filtered);
-          // otherwise the availability badge color, defaulting to emerald.
-          const online = onlineUserIds.has(u.id);
-          const availability = availabilityByUserId[u.id];
-          const dotClass = online
-            ? (availability
-                ? AVAILABILITY_DOT_CLASSES[availability.status]
-                : AVAILABILITY_DOT_CLASSES.available)
-            : AVAILABILITY_DOT_CLASSES.offline;
-          // Cue text — render only when the user has set busy/away or is
-          // offline, so the row reads "Sara" for the common "Available" case
-          // (no noise) but "Maria · Busy" / "Omar · Offline" when relevant.
-          const cue = !online
-            ? "Offline"
-            : availability && availability.status !== "available"
-              ? AVAILABILITY_LABELS[availability.status]
-              : null;
-          return (
-            <DropdownMenuItem
-              key={u.id}
-              onSelect={() => void assign(u.id)}
-              title={availability?.message ?? undefined}
-            >
-              {currentId === u.id ? (
-                <Check className="size-3.5" />
-              ) : (
-                <div className="relative">
-                  <Avatar className="size-5">
-                    {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                    <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
-                  </Avatar>
-                  <span
-                    className={cn(
-                      "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
-                      dotClass,
-                    )}
-                    aria-hidden
-                  />
-                </div>
-              )}
-              <span className="flex-1">{u.name}</span>
-              {cue && (
-                <span className="text-[10px] text-muted-foreground">{cue}</span>
-              )}
-            </DropdownMenuItem>
-          );
-        })}
+        <AssignableMembers
+          teamMembers={teamMembers}
+          currentId={currentId}
+          onlineUserIds={onlineUserIds}
+          availabilityByUserId={availabilityByUserId}
+          onPick={(id) => void assign(id)}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * Two-section member list: Available first (online + status="available"),
+ * then a labeled "Offline" group under a separator for everyone else
+ * (offline, appear-offline, busy, away). The user can still assign to
+ * anyone — the grouping is purely a sort/affordance.
+ *
+ * Live: derived from `usePresence`, so a teammate flipping to "Available"
+ * jumps from the offline section to the available section in the same
+ * frame the badge updates — no list rebuild needed.
+ *
+ * Within each group, sorted alphabetically by name so the order is stable
+ * across status flips and renders.
+ */
+function AssignableMembers({
+  teamMembers,
+  currentId,
+  onlineUserIds,
+  availabilityByUserId,
+  onPick,
+}: {
+  teamMembers: User[];
+  currentId: string | null;
+  onlineUserIds: Set<string>;
+  availabilityByUserId: Record<string, { status: "available" | "busy" | "away" | "offline"; message?: string | null }>;
+  onPick: (id: string) => void;
+}) {
+  const { available, offline } = useMemo(() => {
+    const isAvailable = (u: User): boolean => {
+      if (!onlineUserIds.has(u.id)) return false;
+      const a = availabilityByUserId[u.id];
+      // No entry = the sparse-snapshot default of "available, no note".
+      if (!a) return true;
+      return a.status === "available";
+    };
+    const byName = (a: User, b: User): number => a.name.localeCompare(b.name);
+    const av: User[] = [];
+    const off: User[] = [];
+    for (const u of teamMembers) (isAvailable(u) ? av : off).push(u);
+    av.sort(byName);
+    off.sort(byName);
+    return { available: av, offline: off };
+  }, [teamMembers, onlineUserIds, availabilityByUserId]);
+
+  return (
+    <>
+      {available.length > 0 && (
+        <>
+          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+            Available
+          </DropdownMenuLabel>
+          {available.map((u) => (
+            <MemberRow
+              key={u.id}
+              user={u}
+              isCurrent={currentId === u.id}
+              online={onlineUserIds.has(u.id)}
+              availability={availabilityByUserId[u.id]}
+              onPick={onPick}
+            />
+          ))}
+        </>
+      )}
+      {offline.length > 0 && (
+        <>
+          {available.length > 0 && <DropdownMenuSeparator className="my-1" />}
+          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+            Offline
+          </DropdownMenuLabel>
+          {offline.map((u) => (
+            <MemberRow
+              key={u.id}
+              user={u}
+              isCurrent={currentId === u.id}
+              online={onlineUserIds.has(u.id)}
+              availability={availabilityByUserId[u.id]}
+              onPick={onPick}
+              dimmed
+            />
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
+function MemberRow({
+  user,
+  isCurrent,
+  online,
+  availability,
+  onPick,
+  dimmed,
+}: {
+  user: User;
+  isCurrent: boolean;
+  online: boolean;
+  availability?: { status: "available" | "busy" | "away" | "offline"; message?: string | null };
+  onPick: (id: string) => void;
+  dimmed?: boolean;
+}) {
+  // Status dot rule mirrors the sidebar: offline color wins when the
+  // user has no socket OR picked "Appear offline" (server filtered);
+  // otherwise the availability badge color, defaulting to emerald.
+  const dotClass = online
+    ? (availability
+        ? AVAILABILITY_DOT_CLASSES[availability.status]
+        : AVAILABILITY_DOT_CLASSES.available)
+    : AVAILABILITY_DOT_CLASSES.offline;
+  // Cue text — only when the user is in the offline group, since the
+  // available group's rows are uniformly "available" by definition.
+  const cue = !online
+    ? "Offline"
+    : availability && availability.status !== "available"
+      ? AVAILABILITY_LABELS[availability.status]
+      : null;
+  return (
+    <DropdownMenuItem
+      onSelect={() => onPick(user.id)}
+      title={availability?.message ?? undefined}
+      className={cn(dimmed && "text-muted-foreground")}
+    >
+      {isCurrent ? (
+        <Check className="size-3.5" />
+      ) : (
+        <div className="relative">
+          <Avatar className={cn("size-5", dimmed && "opacity-80")}>
+            {user.avatarUrl ? <AvatarImage src={user.avatarUrl} alt={user.name} /> : null}
+            <AvatarFallback seed={user.id} className="text-[10px]">{initials(user.name)}</AvatarFallback>
+          </Avatar>
+          <span
+            className={cn(
+              "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
+              dotClass,
+            )}
+            aria-hidden
+          />
+        </div>
+      )}
+      <span className="flex-1">{user.name}</span>
+      {cue && (
+        <span className="text-[10px] text-muted-foreground">{cue}</span>
+      )}
+    </DropdownMenuItem>
   );
 }

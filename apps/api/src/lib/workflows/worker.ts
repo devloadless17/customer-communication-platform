@@ -166,6 +166,14 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
       // renews before the lock can expire.
       lockDuration: WORKFLOW_LOCK_DURATION_MS,
       lockRenewTime: Math.floor(WORKFLOW_LOCK_DURATION_MS / 2),
+      // Explicit stalled-check tuning. BullMQ defaults `maxStalledCount=1`
+      // which means a single missed lock-renewal under GC pause / pool
+      // stall fails the job permanently after one stall cycle. 3 gives
+      // headroom for transient blips while still surfacing genuine stuck
+      // jobs in a single minute. Documents the contract so config drift
+      // can't silently regress it.
+      stalledInterval: 30_000,
+      maxStalledCount: 3,
     },
   );
 

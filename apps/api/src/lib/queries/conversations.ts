@@ -58,7 +58,7 @@ export const ACTIVITY_WINDOW = 100;
  * thread page hydrates those separately to keep the list query lean).
  */
 export type ListConversationsFilter =
-  | { kind: "preset"; id: "all" | "mine" | "unassigned" | "closed" }
+  | { kind: "preset"; id: "active" | "all" | "mine" | "unassigned" | "closed" }
   | { kind: "stage"; stageId: string };
 
 export async function listConversations(
@@ -115,17 +115,27 @@ export async function listConversations(
   //   - assignedUserId filters use `(teamId, assignedUserId)` index
   //   - stage filter joins through Contact, which has `(teamId, stageId)`
   //
-  // Closed threads are excluded from every preset EXCEPT `closed`. The
-  // STAGE view, by contrast, shows all conversations (open + closed) in
-  // that stage — stages model the contact's lifecycle, which is
-  // orthogonal to chat status. A "customer"-stage contact with a closed
-  // chat is still a customer; hiding them under the stage view caused
-  // the badge count to disagree with what appeared after clicking.
+  // Preset semantics:
+  //   - `active`      → open + pending (the everyday working view).
+  //   - `all`         → truly everything, closed included.
+  //   - `mine`        → open + pending assigned to the viewer.
+  //   - `unassigned`  → open + pending with no assignee.
+  //   - `closed`      → closed only.
+  //
+  // The STAGE view shows all conversations (open + closed) in that stage
+  // — stages model the contact's lifecycle, orthogonal to chat status.
+  // A "customer"-stage contact with a closed chat is still a customer;
+  // hiding them under the stage view caused the badge count to disagree
+  // with what appeared after clicking.
   let filterClause: Prisma.ConversationWhereInput | null = null;
   if (opts.filter?.kind === "preset") {
     switch (opts.filter.id) {
-      case "all":
+      case "active":
         filterClause = { status: { not: "closed" } };
+        break;
+      case "all":
+        // No status narrowing — team scope is applied by the outer where.
+        filterClause = null;
         break;
       case "mine":
         // `mine` without a viewer never matches — server-to-server callers
@@ -473,6 +483,14 @@ export async function listNewerMessages(
     assignedUserId: string | null;
     assignedUser: import("@ccp/shared/types").User | null;
     unreadCount: number;
+    /**
+     * Customer's most-recent inbound timestamp — drives the 24h-window
+     * lock on the reply-box composer. Pulled from `Contact.lastInboundAt`
+     * (the same denormalized field the SSR thread reads) so a reconnect
+     * during which an inbound arrived doesn't leave the composer stuck
+     * on the pre-gap value and falsely greyed out.
+     */
+    lastInboundAt: string | null;
   };
 }> {
   const afterDate = new Date(opts.after);
@@ -484,7 +502,10 @@ export async function listNewerMessages(
   // fields are cheap and avoid a second query.
   const owns = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
-    include: { assignedUser: true },
+    include: {
+      assignedUser: true,
+      contact: { select: { lastInboundAt: true } },
+    },
   });
   if (!owns) return { items: [] };
 
@@ -504,6 +525,9 @@ export async function listNewerMessages(
       assignedUserId: owns.assignedUserId,
       assignedUser: owns.assignedUser ? mapUser(owns.assignedUser) : null,
       unreadCount: owns.unreadCount,
+      lastInboundAt: owns.contact.lastInboundAt
+        ? owns.contact.lastInboundAt.toISOString()
+        : null,
     },
   };
 }

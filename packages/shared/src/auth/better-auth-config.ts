@@ -121,14 +121,14 @@ export function buildSharedAuthOptions(p: SharedAuthOptionsParams): BetterAuthOp
       updateAge: SESSION_UPDATE_AGE_S,
       // OFF intentionally. The NestJS side runs its own two-tier 15s
       // cache (`sessionCache` keyed by userId + `cookieCache` keyed by
-      // hashed cookie → userId — both in `session.guard.ts`,
-      // invalidated together via `invalidateSessionCache` /
-      // `invalidateSessionCacheByCookie`). BA's 60s cookie cache, when
-      // on, created a layering problem: revocations cleared the NestJS
-      // pair in 15s but BA kept serving the cached payload for up to
-      // 60s. With BA's cookie cache OFF the NestJS pair becomes the
-      // single source of truth — one TTL across both maps, one
-      // invalidation path that hits both.
+      // hashed cookie → userId — both in `session.guard.ts`, both
+      // invalidated together by `invalidateSessionCache(userId)` which
+      // walks the cookieCache dropping every entry pointing to the
+      // userId). BA's 60s cookie cache, when on, created a layering
+      // problem: revocations cleared the NestJS pair in 15s but BA kept
+      // serving the cached payload for up to 60s. With BA's cookie
+      // cache OFF the NestJS pair becomes the single source of truth —
+      // one TTL across both maps, one invalidation path that hits both.
       cookieCache: { enabled: false },
     },
 

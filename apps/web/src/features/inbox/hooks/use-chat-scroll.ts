@@ -11,8 +11,15 @@ import {
 import { flushSync } from "react-dom";
 
 interface Options {
-  /** The Radix `ScrollArea` container. We resolve its inner viewport from it. */
-  scrollAreaRef: RefObject<HTMLDivElement | null>;
+  /**
+   * Direct ref to the scrolling viewport (the Radix ScrollArea inner
+   * `[data-radix-scroll-area-viewport]` element). Pass via the new
+   * `ScrollArea` `viewportRef` prop. Replaced the previous
+   * `scrollAreaRef + querySelector` indirection so the hook reads scroll
+   * state synchronously on the first render after the viewport mounts,
+   * with no useLayoutEffect round-trip.
+   */
+  viewportRef: RefObject<HTMLElement | null>;
   /** The scrollable content wrapper — what the ResizeObserver watches. */
   contentRef: RefObject<HTMLDivElement | null>;
   /** Sentinel above the first message; the "load older" trigger. */
@@ -55,7 +62,7 @@ interface Options {
  * back to true and snap once; the observer does the rest.
  */
 export function useChatScroll({
-  scrollAreaRef,
+  viewportRef,
   contentRef,
   topSentinelRef,
   conversationId,
@@ -69,7 +76,6 @@ export function useChatScroll({
   markBenignTailUpdate: () => void;
   releaseStickToBottom: () => void;
 } {
-  const viewportRef = useRef<HTMLElement | null>(null);
   const stickyRef = useRef(true);
   const settleStopRef = useRef<(() => void) | null>(null);
   // Set by the consumer before a `lastEntryKey` shift that isn't a real
@@ -84,16 +90,6 @@ export function useChatScroll({
   // change, on own-send (we snapped anyway), and when the user scrolls
   // back to the bottom naturally.
   const [unreadBelow, setUnreadBelow] = useState(0);
-
-  // Resolve Radix's viewport once. Querying its data attribute is more
-  // reliable than walking up by `overflow` — Radix keeps the viewport's
-  // overflow `hidden` until content actually exceeds the container.
-  useLayoutEffect(() => {
-    viewportRef.current =
-      scrollAreaRef.current?.querySelector<HTMLElement>(
-        "[data-radix-scroll-area-viewport]",
-      ) ?? null;
-  }, [scrollAreaRef]);
 
   const isAtBottom = useCallback((slack = 80) => {
     const el = viewportRef.current;

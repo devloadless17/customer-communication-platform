@@ -609,6 +609,20 @@ export interface TeamChannelMembersChangedEvent {
 }
 
 /**
+ * A thread reply was deleted (or rarely, a chained refresh op). Carries the
+ * post-decrement reply count + the new last-reply timestamp so the parent
+ * message's "X replies" pill in the channel feed stays honest on every
+ * other client. Fired alongside `message.deleted` for reply-row deletions.
+ */
+export interface TeamChannelThreadReplyCountChangedEvent {
+  teamId: string;
+  channelId: string;
+  rootMessageId: string;
+  replyCount: number;
+  lastReplyAt: string | null;
+}
+
+/**
  * A user updated their own profile (name / avatar). Subscribers fan this to
  * the team so every cached sender-name + avatar around the inbox + assignment
  * surfaces reflects the new value without a refetch.
@@ -748,6 +762,7 @@ export interface DomainEventMap {
   "team_channel.pin_changed": TeamChannelPinChangedEvent;
   "team_channel.read": TeamChannelReadEvent;
   "team_channel.members_changed": TeamChannelMembersChangedEvent;
+  "team_channel.thread_reply_count_changed": TeamChannelThreadReplyCountChangedEvent;
   "user.profile_updated": UserProfileUpdatedEvent;
   "user.availability_changed": UserAvailabilityChangedEvent;
   "team.catalog_changed": TeamCatalogChangedEvent;

@@ -61,8 +61,8 @@ export class ConversationsService {
       take?: number;
       cursor?: string | null;
       search?: string;
-      /** Preset (`all`/`mine`/`unassigned`/`closed`) or `stage:<id>`. */
-      filter?: "all" | "mine" | "unassigned" | "closed";
+      /** Preset (`active`/`all`/`mine`/`unassigned`/`closed`) or `stage:<id>`. */
+      filter?: "active" | "all" | "mine" | "unassigned" | "closed";
       stageId?: string;
     },
   ) {
@@ -108,15 +108,19 @@ export class ConversationsService {
     teamId: string,
     viewerUserId: string,
   ): Promise<{
+    active: number;
     all: number;
     mine: number;
     unassigned: number;
     closed: number;
     byStage: Record<string, number>;
   }> {
-    const [all, mine, unassigned, closed, stageGroups] = await Promise.all([
+    const [active, all, mine, unassigned, closed, stageGroups] = await Promise.all([
       this.db.conversation.count({
         where: { teamId, status: { not: "closed" } },
+      }),
+      this.db.conversation.count({
+        where: { teamId },
       }),
       this.db.conversation.count({
         where: { teamId, status: { not: "closed" }, assignedUserId: viewerUserId },
@@ -139,7 +143,7 @@ export class ConversationsService {
       if (g.stageId) byStage[g.stageId] = g._count;
     }
 
-    return { all, mine, unassigned, closed, byStage };
+    return { active, all, mine, unassigned, closed, byStage };
   }
 
   /**
@@ -561,39 +565,46 @@ export class ConversationsService {
    * publish and the next message:received re-syncs the badge.
    */
   async markRead(teamId: string, userId: string, conversationId: string): Promise<void> {
-    const conversation = await this.db.conversation.findFirst({
-      where: { id: conversationId, teamId },
-      select: { id: true, unreadCount: true },
-    });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
-
-    // Fast path: already read. The client now calls markRead on EVERY visible
-    // thread mount (not just when its cached snapshot claims unread>0) so the
-    // team-wide counter converges to server truth even when that snapshot was
-    // stale-low — see use-conversation-events. That makes the "already read"
-    // call the common case, so keep it to a single cheap read with NO Meta
-    // round-trip: the markRead that originally cleared the counter already sent
-    // the read receipt, and re-sending it on every open would spam Meta's API
-    // (and burn rate budget) for zero benefit.
-    if (conversation.unreadCount <= 0) return;
-
+    // Single-round-trip CAS. The client calls markRead on EVERY visible
+    // thread mount (not just when its cached snapshot claims unread>0) so
+    // the team-wide counter converges to server truth even when that
+    // snapshot was stale-low — see use-conversation-events. The common case
+    // is therefore "already read"; the previous shape paid a read + CAS for
+    // it. Now: one conditional updateMany whose WHERE doubles as the gate.
+    // `result.count === 0` means EITHER already-read OR conversation
+    // missing — the 404 case is rare (UI doesn't navigate to vanished
+    // conversations); a follow-up cheap PK probe only fires for that
+    // ambiguous branch so the 99% case is one round-trip.
+    //
+    // Mirrors the markReadOnAgentSend helper at messages.service.ts:200-211
+    // (the 2026-05-26 P1 batch's markRead-1-RTT fix); was previously
+    // applied there but missed this call site.
     const result = await this.db.conversation.updateMany({
-      where: { id: conversationId, teamId, unreadCount: conversation.unreadCount },
+      where: { id: conversationId, teamId, unreadCount: { gt: 0 } },
       data: { unreadCount: 0 },
     });
-    if (result.count > 0) {
-      await this.bus.publish({
-        type: "conversation.read",
-        teamId,
-        conversationId,
-        readByUserId: userId,
+    if (result.count === 0) {
+      // Either already-read OR missing. Probe to distinguish so callers
+      // still see 404 when the conversation truly vanished.
+      const exists = await this.db.conversation.findFirst({
+        where: { id: conversationId, teamId },
+        select: { id: true },
       });
+      if (!exists) throw new NotFoundException({ error: "conversation not found" });
+      return; // already-read fast path
     }
+    await this.bus.publish({
+      type: "conversation.read",
+      teamId,
+      conversationId,
+      readByUserId: userId,
+    });
 
     // Meta read receipt (best-effort) — only when there was unread to clear.
-    // A CAS that lost (a concurrent inbound bumped the counter between the read
-    // and the update) still sends it: the agent IS looking, so mark the latest
-    // inbound read on Meta regardless of who won the counter race.
+    // A CAS that lost (a concurrent inbound bumped the counter between the
+    // read and the update) still sends it: the agent IS looking, so mark
+    // the latest inbound read on Meta regardless of who won the counter
+    // race.
     const latestInbound = await this.db.message.findFirst({
       where: { conversationId, direction: "in" },
       orderBy: { timestamp: "desc" },

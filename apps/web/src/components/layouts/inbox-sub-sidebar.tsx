@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Inbox as InboxIcon,
+  Layers,
   type LucideIcon,
   UserPlus,
 } from "lucide-react";
@@ -29,9 +30,12 @@ import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-c
 import { SubSidebar, SubSidebarSection } from "./sub-sidebar";
 
 /**
- * Inbox sub-sidebar — All / Mine / Unassigned / Closed presets, plus the
- * per-stage filter rows. Renders inside the `SubSidebar` shell so the
- * column lines up with every other section's sub-sidebar.
+ * Inbox sub-sidebar — Active / All / Mine / Unassigned / Closed presets,
+ * plus the per-stage filter rows. Renders inside the `SubSidebar` shell so
+ * the column lines up with every other section's sub-sidebar.
+ *
+ * "Active" = open + pending (everyday working view, default for new users).
+ * "All"    = truly everything, including closed.
  */
 interface PresetDef {
   id: PresetFilterId;
@@ -40,7 +44,8 @@ interface PresetDef {
 }
 
 const PRESETS: PresetDef[] = [
-  { id: "all", label: "All", icon: InboxIcon },
+  { id: "active", label: "Active", icon: InboxIcon },
+  { id: "all", label: "All", icon: Layers },
   { id: "mine", label: "Mine", icon: AtSign },
   { id: "unassigned", label: "Unassigned", icon: UserPlus },
   { id: "closed", label: "Closed", icon: CheckCircle2 },
@@ -94,6 +99,7 @@ export function InboxSubSidebar({
   const presetCounts = useMemo(() => {
     if (serverCounts) {
       return {
+        active: serverCounts.active,
         all: serverCounts.all,
         mine: serverCounts.mine,
         unassigned: serverCounts.unassigned,
@@ -105,7 +111,8 @@ export function InboxSubSidebar({
     // useConversationCounts response.
     const c = conversations.map((x) => x.conversation);
     return {
-      all: c.filter((x) => x.status !== "closed").length,
+      active: c.filter((x) => x.status !== "closed").length,
+      all: c.length,
       mine: c.filter((x) => x.assignedUserId === currentUser.id && x.status !== "closed").length,
       unassigned: c.filter((x) => x.assignedUserId === null && x.status !== "closed").length,
       closed: c.filter((x) => x.status === "closed").length,

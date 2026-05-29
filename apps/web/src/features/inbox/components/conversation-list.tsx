@@ -2,8 +2,8 @@
 
 import {
   memo,
+  useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -26,7 +26,8 @@ import { InboxSearchPanel, type SearchResultTarget } from "./inbox-search-panel"
 import type { Filter, PresetFilterId } from "./inbox-controls";
 
 const PRESET_LABELS: Record<PresetFilterId, string> = {
-  all: "All open",
+  active: "Active",
+  all: "All chats",
   mine: "Assigned to me",
   unassigned: "Unassigned",
   closed: "Closed",
@@ -194,20 +195,15 @@ function ConversationListImpl({
   // Virtualization caps the rendered set to viewport + small overscan
   // (typically 15-30 rows) regardless of list length. Same UX, ~90% DOM
   // reduction on large lists.
-  const scrollRootRef = useRef<HTMLDivElement>(null);
+  // Direct viewport ref via ScrollArea's `viewportRef` prop — no more
+  // useLayoutEffect + querySelector round-trip. The callback ref fires as
+  // soon as the viewport node attaches, triggering one re-render in which
+  // the virtualizer immediately has a scrollElement and produces real
+  // measured items instead of the fallback estimate. Net: the empty-list
+  // window between mount and the layout-effect closing is gone.
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
-
-  // useLayoutEffect (not useEffect) so the virtualizer sees the scroll
-  // element on its second render, before the browser paints — otherwise
-  // the user briefly sees an empty list while the virtualizer waits for
-  // the scrollElement to arrive.
-  useLayoutEffect(() => {
-    const root = scrollRootRef.current;
-    if (!root) return;
-    const viewport = root.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]",
-    );
-    setScrollEl(viewport ?? root);
+  const viewportRef = useCallback((node: HTMLDivElement | null) => {
+    setScrollEl(node);
   }, []);
 
   // Row height: each ConversationListItem is ~76px (avatar + 3 stacked lines
@@ -231,24 +227,27 @@ function ConversationListImpl({
   //
   // Fall back to rendering the first ~viewportful of rows at predictable
   // offsets (index * ROW_HEIGHT — what the virtualizer will eventually
-  // produce from estimateSize). When the virtualizer takes over, the
-  // positions match exactly so there's no visual jump.
+  // produce from estimateSize). `measureElement` is attached on the
+  // fallback rows too so the virtualizer captures real heights during the
+  // pre-mount paint — by the time `scrollEl` arrives, the first measured
+  // render already has correct positions instead of re-deriving from the
+  // 76px estimate. Closes the theoretical estimate-vs-measure layout-shift
+  // window on rows that turn out taller than the estimate (long-name wraps,
+  // future row variants).
   const virtualItems = rowVirtualizer.getVirtualItems();
   const fallbackRows = 30; // covers ~2x typical viewport height
-  type RenderItem = { key: string; index: number; start: number; measured: boolean };
+  type RenderItem = { key: string; index: number; start: number };
   const renderItems: RenderItem[] =
     virtualItems.length > 0
       ? virtualItems.map((v) => ({
           key: String(v.key),
           index: v.index,
           start: v.start,
-          measured: true,
         }))
       : visible.slice(0, fallbackRows).map((item, idx) => ({
           key: item.conversation.id,
           index: idx,
           start: idx * ROW_HEIGHT,
-          measured: false,
         }));
   // Total scroll height: virtualizer's value once measured, otherwise the
   // estimated total so the scrollbar handle reflects real list length.
@@ -345,7 +344,7 @@ function ConversationListImpl({
           onStartContactChat={onStartContactChat}
         />
       ) : (
-        <ScrollArea ref={scrollRootRef} className="flex-1">
+        <ScrollArea viewportRef={viewportRef} className="flex-1">
         {visible.length === 0 ? (
           <div className="px-3 py-12 text-center text-xs text-muted-foreground">
             No conversations match.
@@ -368,10 +367,12 @@ function ConversationListImpl({
               return (
                 <div
                   key={row.key}
-                  // measureElement only attaches once the virtualizer owns
-                  // the row — fallback rows are at estimated offsets and
-                  // shouldn't feed back into the virtualizer's measurements.
-                  ref={row.measured ? rowVirtualizer.measureElement : undefined}
+                  // measureElement attaches on EVERY row (fallback too) so
+                  // the virtualizer captures real heights before scrollEl
+                  // arrives. Its first owned render then uses measured
+                  // values instead of the 76px estimate — no estimate-vs-
+                  // measure shift on rows that turn out taller.
+                  ref={rowVirtualizer.measureElement}
                   data-index={row.index}
                   className="absolute left-0 top-0 w-full"
                   style={{ transform: `translateY(${row.start}px)` }}

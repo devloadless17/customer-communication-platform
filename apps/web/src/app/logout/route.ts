@@ -8,14 +8,18 @@ import {
 } from "@ccp/shared/auth/better-auth-config";
 
 import { auth } from "@/lib/auth/better-auth";
+import { db } from "@/lib/db";
 import { fireSessionInvalidated } from "@/lib/auth/session-invalidation";
 
 /**
  * Canonical sign-out exit. Every caller that needs to end a session hard-
  * navigates here. Steps:
  *
- *   1. Capture the userId (before the Session row is deleted).
- *   2. `auth.api.signOut` — deletes the Session row.
+ *   1. Capture the userId + sessionId (before the Session row is deleted).
+ *   2. `auth.api.signOut` — deletes the Session row. If it throws (DB flap),
+ *      a fallback `Session.deleteMany({ id: sessionId })` runs so the row
+ *      doesn't outlive the cookie clear — without it a stolen cookie kept
+ *      working until session expiry.
  *   3. Clear every owned cookie on a fresh redirect response. Attributes
  *      must mirror how they were set: `Secure` for `__Secure-`/`__Host-`
  *      names, and for everything in prod. Without that the browser
@@ -24,7 +28,12 @@ import { fireSessionInvalidated } from "@/lib/auth/session-invalidation";
  *      forget; the 15s NestJS cache TTL is the fallback if the call fails.
  *   5. Redirect to `/login?next=<safe>` (forwarded from `?next=` if present).
  *
- * Both GET and POST so anchor clicks and form submits both work.
+ * Both GET and POST so anchor clicks and form submits both work — GET is
+ * also reachable from cross-origin `<img src>` / `<link href>`, which is a
+ * classic CSRF logout vector. The Sec-Fetch-Site guard at the top of the
+ * handler refuses cross-site GETs (`cross-site` / `same-site` from a
+ * different domain) before any state change runs. Same-origin GETs (a
+ * top-level navigation from our own login chain) keep working.
  */
 
 export const runtime = "nodejs";
@@ -38,10 +47,27 @@ function safeNext(raw: string | null): string | null {
 }
 
 async function handler(req: NextRequest) {
+  // CSRF guard: cross-origin GETs (typical of `<img src=/logout>` from a
+  // hostile third-party page) MUST not log the user out. Top-level same-
+  // origin navigations report `Sec-Fetch-Site: same-origin` (or `none` for
+  // user-typed addresses / bookmarks). Cross-site requests report
+  // `cross-site` or `same-site` (cousin subdomains). Refuse those silently.
+  // Modern browsers (Chrome ≥76, Firefox ≥90, Safari ≥16.4) always set the
+  // header; we treat missing as `none` (same-origin posture). POSTs are
+  // also guarded — a CSRF token isn't strictly necessary here because the
+  // owned cookies are `SameSite=Lax`, but a defense-in-depth check costs
+  // nothing.
+  const fetchSite = req.headers.get("sec-fetch-site");
+  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+    return new NextResponse("forbidden", { status: 403 });
+  }
+
   let userId: string | undefined;
+  let sessionId: string | undefined;
   try {
     const session = await auth.api.getSession({ headers: req.headers });
     userId = session?.user?.id;
+    sessionId = session?.session?.id;
   } catch {
     // Stale cookie — nothing useful to invalidate. Cookie clear below still runs.
   }
@@ -52,6 +78,21 @@ async function handler(req: NextRequest) {
     console.warn(
       `[logout] auth.api.signOut threw (cookie clear still runs): ${err instanceof Error ? err.message : err}`,
     );
+    // Fallback: the cookie is cleared client-side below, but if the Better
+    // Auth path threw mid-flight, the Session row may still exist in DB.
+    // A stolen cookie kept working until the session's expiry. Delete the
+    // SPECIFIC sessionId (not all sessions for the user — that would kick
+    // other devices). Best-effort: a second failure here just leaves the
+    // pre-existing situation; nothing to escalate.
+    if (sessionId) {
+      try {
+        await db.session.deleteMany({ where: { id: sessionId } });
+      } catch (fallbackErr) {
+        console.warn(
+          `[logout] DB session fallback delete also failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`,
+        );
+      }
+    }
   }
 
   const base = process.env.BETTER_AUTH_URL || new URL(req.url).origin;

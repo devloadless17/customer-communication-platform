@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 
 import { useTeamChannelsList } from "@/features/team-chat/hooks/use-team-channels-events";
@@ -54,11 +54,15 @@ export function TeamChatLayoutDataProvider({
   const activeChannelId = channelIdFromPathname(usePathname());
   const channels = useTeamChannelsList(initialChannels, currentUserId, activeChannelId);
 
-  // Plain object — identity changes on every render. That's intentional:
-  // consumers re-read the fresh live list on each provider render (channel
-  // switch via pathname, or a socket-driven unread change).
+  // useMemo the context value so identity is stable across renders that
+  // didn't change channels OR teamMembers. Previously a plain object
+  // literal here re-rendered every consumer (channel sidebar, mentions
+  // surface, workspace) on EVERY parent render — and the parent renders
+  // on every `usePathname()` change inside `/team/*`. Per re-audit
+  // 2026-05-29 finding #1.
+  const value = useMemo(() => ({ channels, teamMembers }), [channels, teamMembers]);
   return (
-    <TeamChatLayoutDataContext.Provider value={{ channels, teamMembers }}>
+    <TeamChatLayoutDataContext.Provider value={value}>
       {children}
     </TeamChatLayoutDataContext.Provider>
   );

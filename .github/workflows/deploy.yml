@@ -702,7 +702,17 @@ jobs:
               fi
               docker pull "$REPO:previous-$variant"
               docker tag "$REPO:previous-$variant" "$REPO:latest-$variant"
+              # CRITICAL: push the rollback tag back to the registry, NOT just
+              # retag locally. Without this, the registry's :latest-$variant
+              # still points at the broken image — and the NEXT deploy's
+              # `changes` job runs `buildx imagetools create :previous-$variant
+              # :latest-$variant` which OVERWRITES the known-good :previous-
+              # $variant with the still-broken :latest-$variant. After that,
+              # one re-deploy reaches "rollback target = previously-rolled-back
+              # broken image". Push keeps registry truth aligned with the
+              # actual recovered state.
+              docker push "$REPO:latest-$variant"
             done
             cd /opt/ccp
             docker compose --env-file .env up -d --remove-orphans
-            echo "✓ rolled back to :previous-{web,api}"
+            echo "✓ rolled back to :previous-{web,api} (registry + local in sync)"

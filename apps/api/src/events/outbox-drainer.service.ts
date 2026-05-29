@@ -92,11 +92,18 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    // Best-effort flush of anything still in-flight before exit. If a drain
-    // is currently running, wait up to a couple seconds for it to finish so
-    // we don't leave rows half-dispatched. If the drain hangs past that
-    // (slow subscriber), let systemd's TimeoutStopSec take over.
-    const flushDeadline = Date.now() + 2_000;
+    // Best-effort flush of anything still in-flight before exit. Bounded
+    // generously (25s) — the compose `stop_grace_period` on the api
+    // service is 100s, and the BullMQ worker drain owns the lion's share
+    // (90s lockDuration + tail). 25s comfortably fits two full batches
+    // through the new parallel-dispatch path even under slow-subscriber
+    // worst case. The earlier 2s deadline routinely SIGKILL'd the drainer
+    // mid-batch under burst load — its rows were pre-marked `publishedAt`
+    // (at-most-once), so the side effects downstream of those subscribers
+    // (audit rows, outbound webhook enqueues) were silently skipped.
+    // The `this.stopping` check inside `tick`'s loop also lets in-flight
+    // dispatches drain without picking up new batches.
+    const flushDeadline = Date.now() + 25_000;
     while (this.inflight && Date.now() < flushDeadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -122,11 +129,47 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     try {
       let drains = 0;
       while (drains < OutboxDrainerService.MAX_DRAINS_PER_TICK) {
+        if (this.stopping) break;
         const rows = await claimBatch(OutboxDrainerService.BATCH_SIZE);
         if (rows.length === 0) break;
-        for (const row of rows) {
-          await this.dispatch(row);
-        }
+        // Dispatch rows in bounded-parallel lanes. Each `dispatch()` runs
+        // the FULL subscriber chain (realtime + audit + analytics +
+        // workflow-dispatch + outbound-webhooks). Sequential per-row
+        // dispatch made a single 200-row batch take up to 15s under
+        // moderate subscriber latency, with realtime emits visibly lagging
+        // for the tail of the batch even though they're priority-0 inside
+        // each event. Concurrency:8 mirrors the outbound-webhook lane fan
+        // and keeps any one team's events from monopolizing.
+        //
+        // `Promise.all` so an unexpected throw bubbles to the catch below
+        // (per-subscriber errors are already caught by `dispatchPersistedEvent`
+        // and recorded via `markPublishedWithError`).
+        //
+        // INVARIANT for new subscribers: parallel dispatch is correctness-
+        // safe ONLY if every subscriber's writes are atomic at the DB
+        // level (single `.update()` / predicate-gated `.updateMany()` /
+        // `.create()` / `$transaction`). A subscriber that does
+        // read-from-DB → mutate-in-JS → write-to-DB can race itself for
+        // two events touching the same row. Current subscribers verified
+        // safe 2026-05-29:
+        //   - analytics: trackOn{Assigned,StatusChanged,OutboundMessage}
+        //     all use direct `.update()` or predicate-gated `.updateMany()`.
+        //   - audit: reads stage/tag names then INSERTS new event rows
+        //     (no shared-row contention).
+        //   - workflow-dispatch: reads fresh conversation snapshot then
+        //     calls `dispatch()` whose create-then-enqueue is per-run
+        //     idempotent (P2002 on @@unique).
+        // If you add a subscriber that reads-then-writes a shared row,
+        // either make the write predicate-gated or batch this back to
+        // sequential dispatch per event.
+        await Promise.all(
+          rows.map((row) => this.dispatch(row).catch((err) => {
+            this.logger.error(
+              withCorrelation(`[outbox-drainer] dispatch row=${row.id} failed`),
+              err instanceof Error ? err.message : String(err),
+            );
+          })),
+        );
         drains += 1;
         if (rows.length < OutboxDrainerService.BATCH_SIZE) break;
       }

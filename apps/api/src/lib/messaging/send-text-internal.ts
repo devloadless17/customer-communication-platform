@@ -5,7 +5,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { publish } from "@/lib/events/bus";
+import { publishInTx } from "@/lib/events/outbox";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import {
@@ -191,12 +191,33 @@ export async function sendTextInternal(
   });
 
   const previewBody = body.slice(0, 200);
+  const message: Message = {
+    id: created.id,
+    teamId: args.teamId,
+    conversationId: args.conversationId,
+    externalId: send.externalId,
+    senderUserId: null,
+    body,
+    direction: "out",
+    channel: provider,
+    status: "sent",
+    rawPayload: { sentVia: args.sentVia },
+    timestamp: messageTimestamp.toISOString(),
+  };
+
   // Compute the bump inside a tx using FRESH `lastMessageAt` — the value
   // we snapshotted in `conversation.lastMessageAt` above is stale by the
   // Meta-call duration, so a bare UPDATE here could REGRESS the
   // conversation's clock if an inbound webhook landed in that window.
   // Read-then-write guarantees strict monotonicity even under race.
-  const bumped = await db.$transaction(async (tx) => {
+  //
+  // Publish via `publishInTx` (NOT bare `publish()`) so the outbox row
+  // commits atomically with the bump. The earlier post-tx `publish()`
+  // shape lost the `message.sent` event entirely on a crash between the
+  // tx commit and the publish call — and on retry the externalId was
+  // already in the DB so nothing re-published. Mirrors the user-facing
+  // `MessagesService.commitOutboundEvent` shape exactly.
+  await db.$transaction(async (tx) => {
     const current = await tx.conversation.findUnique({
       where: { id: args.conversationId },
       select: { lastMessageAt: true, unreadCount: true },
@@ -215,41 +236,19 @@ export async function sendTextInternal(
       where: { id: args.conversationId },
       data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
     });
-    return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
-  });
-
-  const message: Message = {
-    id: created.id,
-    teamId: args.teamId,
-    conversationId: args.conversationId,
-    externalId: send.externalId,
-    senderUserId: null,
-    body,
-    direction: "out",
-    channel: provider,
-    status: "sent",
-    rawPayload: { sentVia: args.sentVia },
-    timestamp: messageTimestamp.toISOString(),
-  };
-
-  // Publish through the bus so socket-fanout emits `message:new` AND the
-  // analytics subscriber bumps counters + firstResponseAt. Workflow auto-
-  // sends ride exactly the same subscriber chain as user-driven sends.
-  await publish({
-    type: "message.sent",
-    teamId: args.teamId,
-    conversationId: args.conversationId,
-    contactId: conversation.contactId,
-    message,
-    preview: previewBody,
-    // The conversation's recency reflects the effective bump (which may be
-    // > messageTimestamp if a concurrent write raced ahead). Publishing the
-    // stale messageTimestamp here would race the frontend out of sync.
-    lastMessageAt: bumped.lastMessageAt.toISOString(),
-    // Outbound doesn't bump unread; the row's current value is the
-    // accurate absolute count.
-    unreadCount: bumped.unreadCount,
-    senderUserId: null,
+    await publishInTx(tx, {
+      type: "message.sent",
+      teamId: args.teamId,
+      conversationId: args.conversationId,
+      contactId: conversation.contactId,
+      message,
+      preview: previewBody,
+      lastMessageAt: effectiveBump.toISOString(),
+      // Outbound doesn't bump unread; the row's current value is the
+      // accurate absolute count.
+      unreadCount: current.unreadCount,
+      senderUserId: null,
+    });
   });
 
   return { messageId: created.id, externalId: send.externalId, previewBody };

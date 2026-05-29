@@ -1,11 +1,30 @@
-import { Body, ConflictException, Controller, Post } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  ConflictException,
+  Controller,
+  HttpException,
+  Post,
+  Req,
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import type { Request } from "express";
 import { z } from "zod";
 
 import { hashPassword } from "@/auth/password";
+import { validatePasswordStructure } from "@ccp/shared/auth/password-policy";
 
+import { createTokenBucket } from "../common/token-bucket";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
+
+// Per-IP register bucket. Tighter than the global 600/min/IP cap because
+// register is unauthenticated AND creates an entire Team+User+Account+...
+// chain — a single IP at the global cap could fabricate 36k teams/hour.
+// 5/min/IP fits "legitimate human signs up via the form" comfortably while
+// bounding adversarial fan-out. In-process — moves to Redis when a second
+// app instance ships.
+const registerBucket = createTokenBucket({ perMin: 5 });
 
 /**
  * Public org self-signup — replaces the inline `db.$transaction` from
@@ -35,7 +54,27 @@ export class RegisterController {
   constructor(private readonly db: DbService) {}
 
   @Post()
-  async register(@Body(zBody(RegisterSchema)) body: RegisterInput) {
+  async register(@Req() req: Request, @Body(zBody(RegisterSchema)) body: RegisterInput) {
+    // Per-IP throttle BEFORE any DB work. See `registerBucket` above for
+    // rationale; main.ts sets `trust proxy: TRUSTED_PROXY_HOPS` so `req.ip`
+    // is the real client behind Caddy.
+    const ip = req.ip ?? "unknown";
+    const r = registerBucket.consume(ip);
+    if (!r.ok) {
+      throw new HttpException(
+        { error: "rate_limited", detail: "Too many registrations from this IP.", retryAfter: r.retryAfter },
+        429,
+      );
+    }
+
+    // Server-side password policy. The web form runs the same check, but a
+    // direct POST to /api/register bypasses it. Without this gate any string
+    // ≥ 6 chars creates an admin account (this endpoint always grants
+    // `admin` role on a new team — see hard-coded role below).
+    const policyError = validatePasswordStructure(body.password);
+    if (policyError) {
+      throw new BadRequestException({ error: "weak_password", detail: policyError });
+    }
     const passwordHash = await hashPassword(body.password);
 
     try {

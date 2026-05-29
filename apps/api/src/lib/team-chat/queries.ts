@@ -535,15 +535,28 @@ export async function searchChannelMessages(
  */
 export async function searchAllChannels(
   teamId: string,
+  viewerUserId: string,
   q: string,
   opts: { take?: number; before?: { createdAt: string; id: string } | null } = {},
 ): Promise<WorkspaceSearchPage> {
   const take = Math.min(opts.take ?? PAGE_SIZE, MAX_PAGE_SIZE);
+  // CRITICAL: filter hits to channels the viewer is a member of, plus the
+  // team's default channel (everyone is implicitly a member). Without this
+  // intersection, a member of only `#general` could search the workspace
+  // for "salaries" and pull body+channel-name from a private leadership
+  // channel they were never invited to — the same data-leak class the
+  // per-channel membership gate closes for direct reads.
   const rows = await db.teamChannelMessage.findMany({
     where: {
       teamId,
       threadRootId: null,
       body: { contains: q, mode: "insensitive" },
+      channel: {
+        OR: [
+          { isDefault: true },
+          { members: { some: { userId: viewerUserId } } },
+        ],
+      },
       ...(opts.before
         ? {
             OR: [

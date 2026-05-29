@@ -654,6 +654,7 @@ function buildEnvelope(
     conversation?: { id?: string };
     contact?: { id?: string };
     _depth?: unknown;
+    _workflowDepth?: unknown;
   };
   const conversationId = p?.conversation?.id ?? "";
   const contactId = p?.contact?.id ?? "";
@@ -662,6 +663,18 @@ function buildEnvelope(
   // 0 for every other trigger. The http_request step reads this off the
   // envelope and stamps depth+1 on its outbound call.
   const depth = typeof p?._depth === "number" && Number.isFinite(p._depth) ? p._depth : 0;
+  // Workflow-chain depth — incremented by `trigger_workflow` step on each
+  // chained dispatch. Stored on every chained run's eventPayload regardless
+  // of which trigger event the chained workflow listens to. Without this,
+  // a chain `messageReceived → trigger_workflow → workflow B (any trigger)
+  // → trigger_workflow → workflow C → …` would reset the workflow-chain
+  // counter to 0 at every non-`manual_trigger` hop, bypassing
+  // TRIGGER_DEPTH_MAX. Top-level user-initiated runs carry no field and
+  // start at 0; chained runs carry the parent's depth.
+  const workflowDepth =
+    typeof p?._workflowDepth === "number" && Number.isFinite(p._workflowDepth)
+      ? p._workflowDepth
+      : 0;
   const base = process.env.APP_PUBLIC_URL ?? "http://localhost:3000";
   return {
     version: 1,
@@ -670,6 +683,7 @@ function buildEnvelope(
     occurredAt: new Date().toISOString(),
     data: payload as WorkflowEventEnvelope["data"],
     depth,
+    workflowDepth,
     _links: {
       conversation: `${base}/api/external/v1/conversations/${conversationId}`,
       messages: `${base}/api/external/v1/conversations/${conversationId}/messages`,

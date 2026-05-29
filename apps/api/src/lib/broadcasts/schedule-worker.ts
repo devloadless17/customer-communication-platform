@@ -71,6 +71,25 @@ export function startBroadcastScheduleWorker(): void {
       // One scheduled broadcast firing just CAS-flips + hands off — trivial
       // work, the runner does the heavy lifting. Low concurrency is plenty.
       concurrency: 4,
+      // Match every other worker's lock semantics (workflow/send/webhook
+      // all use 90s lockDuration + half-of-it lockRenewTime). The previous
+      // BullMQ-default 30s left a too-narrow window: under any Postgres
+      // pool stall, fireScheduled's CAS+findUnique+publish+startBroadcast
+      // chain could exceed 30s, the lock would expire mid-handler, BullMQ
+      // would re-deliver, and a second worker would race the CAS. The
+      // CAS predicate (`status: "scheduled"`) prevents double-promote
+      // today, but in-process inFlightRuns dedupe only because both
+      // deliveries land in the same process — a second api instance
+      // would actually double-fire the broadcast.
+      lockDuration: 90_000,
+      lockRenewTime: 30_000,
+      // Set stalledInterval + maxStalledCount explicitly so config drift
+      // can't silently break the scheduler. Default is maxStalled=1 which
+      // means one missed renewal fails the job permanently — for a
+      // scheduled broadcast that means "row stays `scheduled`, fires never"
+      // until the boot reconciler picks it up on next restart.
+      stalledInterval: 30_000,
+      maxStalledCount: 3,
     },
   );
   state.worker.on("failed", (job, err) => {

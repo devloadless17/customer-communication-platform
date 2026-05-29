@@ -191,14 +191,17 @@ Inbox unread is **team-wide only** (`Conversation.unreadCount`) — there is NO 
 ### Coalesced bulk fanout
 Bulk paths (`/api/contacts/bulk` tag-add/tag-remove today) publish per-contact `contact.updated` events with `suppressSocketFanout: true` (workflow + audit subscribers still fire — they don't read the flag), AND publish one `contact.bulk_updated` event for socket fanout. Clients listening to `contacts:bulk_updated` should invalidate / refetch the affected ids in one query. Bounds a 500-contact × 25-agent bulk operation from ~12,500 socket frames to 25.
 
-### Dev-environment OOM (`tsx watch` chewing memory) 
-Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `tsx watch` + Next.js dev mode accumulate bundler/AST state across hot-reloads. Fix order:
+### Time rendering — one source of truth, no split-paint
+Every "now"-dependent UI MUST read from `useTzNow()` (or `useNow()` which re-exports it). The provider initializes `now` to the server's `Date.now()` so SSR and the first client paint render identical strings — no "Window closed" → "Window closed · 42h ago" flash on refresh, no `hideRemaining` workaround, no `?? Date.now()` fallback. Splitting `tz` (stable) from `now` (60s tick) on separate contexts means absolute timestamps don't re-render every minute. DON'T add a fresh `useState(null) + useEffect(setNow(Date.now()))` pattern in a new component — that's exactly the source of the bug class fixed 2026-05-29. `LocalTime` is the canonical example: absolute formats subscribe only to `useTimezone()`; relative formats read `useTzNow()`. The same rule applies to anything not time-related: don't gate render on a `useEffect`-set boolean to "wait until hydration" — render the right thing on first paint or wrap the region in a Suspense boundary with a tight skeleton.
+
+### Dev-environment OOM (`next dev` / `node --watch` chewing memory)
+Symptom: `FATAL ERROR: Ineffective mark-compacts near heap limit` after a long edit session. Cause: `next dev` (Turbopack) + `node --watch -r @swc-node/register` (api) accumulate bundler/AST state across hot-reloads. (The earlier `tsx watch` posture was retired when the api switched to `@swc-node/register` for decorator metadata.) Fix order:
 1. `rm -rf .next` (the dev cache bloats past 500MB after heavy days)
 2. Restart `pnpm dev`
 3. Re-bump heap to 6GB if even 4GB isn't enough during a particularly heavy session
 4. As a habit, restart dev once an hour during heavy work
 
-This is a `tsx watch` artifact, NOT a memory leak in our code. Don't chase phantom leaks in app code based on the dev-mode OOM alone.
+This is a dev-watcher artifact, NOT a memory leak in our code. Don't chase phantom leaks in app code based on the dev-mode OOM alone.
 
 ### Skip until forced to revisit (with trigger conditions)
 - **pm2** — only if we move beyond a single VPS or want clustered Node workers.

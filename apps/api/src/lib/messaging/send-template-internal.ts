@@ -6,7 +6,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { publish } from "@/lib/events/bus";
+import { publishInTx } from "@/lib/events/outbox";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
@@ -245,31 +245,6 @@ export async function sendTemplateInternal(
     timestamp: messageTimestamp,
   });
 
-  // Read-then-write so a concurrent write that landed during the Meta
-  // call doesn't get clobbered backward in time by this bare UPDATE. See
-  // send-text-internal.ts for the full rationale.
-  const bumped = await db.$transaction(async (tx) => {
-    const current = await tx.conversation.findUnique({
-      where: { id: args.conversationId },
-      select: { lastMessageAt: true, unreadCount: true },
-    });
-    if (!current) {
-      throw new SendTemplateValidationError(
-        "conversation_not_found",
-        "conversation_disappeared_mid_send",
-      );
-    }
-    const effectiveBump =
-      current.lastMessageAt >= messageTimestamp
-        ? new Date(current.lastMessageAt.getTime() + 1)
-        : messageTimestamp;
-    await tx.conversation.update({
-      where: { id: args.conversationId },
-      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
-    });
-    return { lastMessageAt: effectiveBump, unreadCount: current.unreadCount };
-  });
-
   const message: Message = {
     id: created.id,
     teamId: args.teamId,
@@ -288,22 +263,47 @@ export async function sendTemplateInternal(
     timestamp: messageTimestamp.toISOString(),
   };
 
-  // Publish through the bus so socket-fanout emits `message:new` AND the
-  // analytics subscriber bumps counters + firstResponseAt. Template sends
-  // ride the same chain as free-form sends.
-  await publish({
-    type: "message.sent",
-    teamId: args.teamId,
-    conversationId: args.conversationId,
-    contactId: conversation.contactId,
-    message,
-    preview: previewBody,
-    lastMessageAt: bumped.lastMessageAt.toISOString(),
-    // Outbound doesn't bump unread; the row's current value is the
-    // accurate absolute count.
-    unreadCount: bumped.unreadCount,
-    senderUserId: args.senderUserId,
-    ...(args.senderApiKeyId ? { senderApiKeyId: args.senderApiKeyId } : {}),
+  // Read-then-write so a concurrent write that landed during the Meta
+  // call doesn't get clobbered backward in time by this bare UPDATE. See
+  // send-text-internal.ts for the full rationale.
+  //
+  // Publish via `publishInTx` (NOT bare `publish()`) so the outbox row
+  // commits atomically with the bump — closes the same crash-window
+  // gap that `MessagesService.commitOutboundEvent` closes for the
+  // user-facing path.
+  await db.$transaction(async (tx) => {
+    const current = await tx.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { lastMessageAt: true, unreadCount: true },
+    });
+    if (!current) {
+      throw new SendTemplateValidationError(
+        "conversation_not_found",
+        "conversation_disappeared_mid_send",
+      );
+    }
+    const effectiveBump =
+      current.lastMessageAt >= messageTimestamp
+        ? new Date(current.lastMessageAt.getTime() + 1)
+        : messageTimestamp;
+    await tx.conversation.update({
+      where: { id: args.conversationId },
+      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
+    });
+    await publishInTx(tx, {
+      type: "message.sent",
+      teamId: args.teamId,
+      conversationId: args.conversationId,
+      contactId: conversation.contactId,
+      message,
+      preview: previewBody,
+      lastMessageAt: effectiveBump.toISOString(),
+      // Outbound doesn't bump unread; the row's current value is the
+      // accurate absolute count.
+      unreadCount: current.unreadCount,
+      senderUserId: args.senderUserId,
+      ...(args.senderApiKeyId ? { senderApiKeyId: args.senderApiKeyId } : {}),
+    });
   });
 
   return {

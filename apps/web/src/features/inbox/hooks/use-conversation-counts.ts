@@ -41,6 +41,7 @@ const STAGE_SETTLING_MS = 1500;
  * response lands.
  */
 export interface ConversationCounts {
+  active: number;
   all: number;
   mine: number;
   unassigned: number;

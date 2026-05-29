@@ -403,8 +403,13 @@ function MessageThreadImpl({
   // Scroll refs (also consumed by useChatScroll further down). Declared up
   // here so the search-jump helper below can install its settle-window
   // ResizeObserver + media-load listeners against the same content + viewport
-  // the chat-scroll hook does.
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  // the chat-scroll hook does. `viewportRef` is populated via the
+  // ScrollArea's `viewportRef` prop — a callback ref that attaches the
+  // moment the viewport DOM node mounts (no useLayoutEffect indirection).
+  const viewportRef = useRef<HTMLElement | null>(null);
+  const setViewportRef = useCallback((node: HTMLDivElement | null) => {
+    viewportRef.current = node;
+  }, []);
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
 
@@ -547,9 +552,7 @@ function MessageThreadImpl({
         el.scrollIntoView({ behavior: "smooth", block: "center" });
 
         const content = contentRef.current;
-        const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-          "[data-radix-scroll-area-viewport]",
-        );
+        const viewport = viewportRef.current;
         if (!content || !viewport) return;
 
         let done = false;
@@ -807,7 +810,7 @@ function MessageThreadImpl({
 
   const { unreadBelow, scrollToBottom, markBenignTailUpdate, releaseStickToBottom } =
     useChatScroll({
-      scrollAreaRef,
+      viewportRef,
       contentRef,
       topSentinelRef,
       conversationId: conversation.id,
@@ -887,7 +890,7 @@ function MessageThreadImpl({
       )}
 
       <ScrollArea
-        ref={scrollAreaRef}
+        viewportRef={setViewportRef}
         className="flex-1"
         // Marker for the SSR bottom-snap script in InboxShell. Lets the
         // script find this thread's viewport unambiguously — the script

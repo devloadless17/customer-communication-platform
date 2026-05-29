@@ -132,16 +132,6 @@ __DOMAIN__ {
 		}
 	}
 
-	# (4b) /api/internal/* → web (Next.js). Internal cache-revalidate
-	#      bridge called by NestJS via shared INTERNAL_BUS_SECRET. The
-	#      endpoint lives on Next.js because revalidateTag() is only
-	#      available there. MUST come before the /api/* → api wildcard.
-	handle /api/internal/* {
-		reverse_proxy 127.0.0.1:3000 {
-			header_up X-Real-IP {remote_host}
-		}
-	}
-
 	# (5) /api/*, /webhooks/* → api (NestJS).
 	#     The Socket.io client connects on `/api/socket/*` (see `SOCKET_PATH`
 	#     in packages/shared/src/socket/events.ts) — that path is covered by
@@ -178,8 +168,23 @@ __DOMAIN__ {
 			# upgrades skip retry (single-shot handshake), but HTTP gets a
 			# seamless cutover for the user. Caps the retry budget at 5s
 			# so a real outage still surfaces fast.
+			#
+			# `lb_retry_match { method GET HEAD OPTIONS }` restricts retries
+			# to IDEMPOTENT methods only. POSTs are NOT retried: a POST
+			# that the upstream partially processed before its connection
+			# dropped (HMAC verified + row written, then container
+			# SIGTERM'd before the 200 reply landed) would otherwise be
+			# re-sent by Caddy on retry — same body, same processing,
+			# duplicate side effects. Meta webhooks are dedupe-safe
+			# (unique on external_id), but the workflow incoming-webhook
+			# and a few /v1 mutating routes are NOT. Health-probed
+			# upstreams already avoid sending new requests to a down
+			# container; the retry was only ever for the brief cutover edge.
 			lb_try_duration 5s
 			lb_try_interval 250ms
+			lb_retry_match {
+				method GET HEAD OPTIONS
+			}
 		}
 	}
 
@@ -199,9 +204,13 @@ __DOMAIN__ {
 			health_timeout 2s
 			health_status 200
 			# Brief retry budget during cutover so a page load mid-deploy
-			# doesn't 502; see api block above for rationale.
+			# doesn't 502; see api block above for rationale. Idempotent
+			# methods only — same posture as the api block above.
 			lb_try_duration 5s
 			lb_try_interval 250ms
+			lb_retry_match {
+				method GET HEAD OPTIONS
+			}
 		}
 	}
 }

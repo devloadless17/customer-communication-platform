@@ -4,7 +4,7 @@
  * shape stays colocated with the inbox feature.
  */
 
-export type PresetFilterId = "all" | "mine" | "unassigned" | "closed";
+export type PresetFilterId = "active" | "all" | "mine" | "unassigned" | "closed";
 
 /**
  * Active inbox filter. Presets and stage filters are mutually exclusive —

@@ -43,14 +43,17 @@ async function resolveConversationIdForContact(
   return conv?.id ?? null;
 }
 
-export function registerAuditSubscribers(): void {
+export function registerAuditSubscribers(): () => void {
   // All audit handlers run at the AUDIT tier (after realtime, before
   // analytics / workflow-dispatch). Bind the priority once so each call
   // below stays terse and the tier can't be forgotten on a new handler.
+  const offs: Array<() => void> = [];
   const subscribe = <K extends DomainEventType>(
     type: K,
     handler: (e: DomainEventOf<K>) => void | Promise<void>,
-  ) => busSubscribe(type, handler, SubscriberPriority.AUDIT);
+  ) => {
+    offs.push(busSubscribe(type, handler, SubscriberPriority.AUDIT));
+  };
 
   subscribe("conversation.assigned", async (e) => {
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
@@ -189,4 +192,8 @@ export function registerAuditSubscribers(): void {
       });
     }
   });
+
+  return () => {
+    for (const off of offs) off();
+  };
 }

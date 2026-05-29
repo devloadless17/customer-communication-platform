@@ -441,7 +441,7 @@ function UserMenu({
         <DropdownMenuContent
           align="end"
           side={collapsed ? "right" : "top"}
-          className="min-w-64"
+          className="w-72"
         >
           <DropdownMenuLabel>
             <div className="flex flex-col">

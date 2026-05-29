@@ -27,9 +27,82 @@ import { drainParkedStatus } from "@/lib/providers/ingest";
  * a Postgres restart or a brief connection blip without leaking the
  * "send-without-persist" gap to the UI.
  */
+/**
+ * Optional tx client — when provided, the Message INSERT participates in the
+ * caller's transaction so the row commits atomically with sibling writes
+ * (e.g. `OutboundSendAttempt.completedAt` stamping). When omitted, falls
+ * back to the global `db` client and the legacy retry-with-backoff path.
+ *
+ * Inside a tx the retry loop is COLLAPSED to a single attempt: Postgres
+ * doesn't let you retry inside a single tx anyway (failure rolls back the
+ * outer scope), and the caller's own tx-retry policy (if any) is the right
+ * place to handle transient DB errors.
+ */
+type TxOrDb = Prisma.TransactionClient | typeof db;
+
 export async function createOutboundMessageIdempotent(
   data: Prisma.MessageUncheckedCreateInput,
+  txOrDb?: TxOrDb,
 ): Promise<Message> {
+  // Tx path: single attempt, P2002 still returns existing row, no retry.
+  // The drain-parked-status fire-and-forget normally happens here too,
+  // but inside a tx it could try to drain BEFORE the row commits — and a
+  // racing status webhook would re-park because the message isn't visible
+  // yet. Defer the drain to AFTER tx commit via a microtask scheduled
+  // post-return; by the time the microtask runs, the caller will have
+  // exited the tx scope (Prisma `$transaction` resolves only after commit).
+  if (txOrDb && txOrDb !== db) {
+    let created: Message;
+    try {
+      created = await (txOrDb as Prisma.TransactionClient).message.create({ data });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002" &&
+        data.externalId &&
+        data.channel
+      ) {
+        const existing = await (txOrDb as Prisma.TransactionClient).message.findUnique({
+          where: {
+            teamId_channel_externalId: {
+              teamId: data.teamId,
+              channel: data.channel,
+              externalId: data.externalId,
+            },
+          },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
+    if (created.externalId && created.channel) {
+      // Run on the next macrotask so the tx has fully committed by the
+      // time `drainWithRetry` reads the row. A microtask would still be
+      // INSIDE the tx's pending promise chain — the drain would race
+      // a row that isn't visible to other connections yet.
+      const c = created;
+      setTimeout(() => {
+        void (async () => {
+          const convo = await db.conversation.findUnique({
+            where: { id: c.conversationId },
+            select: { contactId: true },
+          });
+          if (convo) {
+            void drainWithRetry(
+              c.teamId,
+              c.channel as Channel,
+              c.externalId,
+              c.id,
+              c.conversationId,
+              convo.contactId,
+            );
+          }
+        })();
+      }, 0);
+    }
+    return created;
+  }
+
   const MAX_ATTEMPTS = 5;
   let lastErr: unknown;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import type { Channel as ChannelMedium } from "@prisma/client";
 
 import { subscribe, SubscriberPriority } from "@/lib/events/bus";
@@ -53,7 +53,7 @@ import {
  * with subsequent webhooks even when one match fails to persist.
  */
 @Injectable()
-export class OutboundWebhooksSubscriber implements OnModuleInit {
+export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboundWebhooksSubscriber.name);
   private registered = false;
 
@@ -70,42 +70,65 @@ export class OutboundWebhooksSubscriber implements OnModuleInit {
 
   constructor(private readonly db: DbService) {}
 
+  // Captured unsubscribe fns so a programmatic re-init (test harness /
+  // hot-reload) can't layer duplicate handlers on the bus's per-process
+  // global. See WorkflowSubscribersService for the parallel posture.
+  private offs: Array<() => void> = [];
+
   onModuleInit(): void {
     if (this.registered) return;
     this.registered = true;
 
     for (const eventType of busEventTypesToSubscribe()) {
-      subscribe(
-        eventType,
-        async (event) => {
-          try {
-            await this.handle(event);
-          } catch (err) {
-            this.logger.error(
-              `outbound-webhook dispatch failed for ${eventType}: ${
-                err instanceof Error ? err.message : err
-              }`,
-            );
-          }
-        },
-        SubscriberPriority.OUTBOUND_WEBHOOKS,
+      this.offs.push(
+        subscribe(
+          eventType,
+          async (event) => {
+            try {
+              await this.handle(event);
+            } catch (err) {
+              this.logger.error(
+                `outbound-webhook dispatch failed for ${eventType}: ${
+                  err instanceof Error ? err.message : err
+                }`,
+              );
+            }
+          },
+          SubscriberPriority.OUTBOUND_WEBHOOKS,
+        ),
       );
     }
     // Cache invalidator: a team-catalog change is the closest reliable
     // signal that the Meta phone number (the only team-row field we cache)
     // may have changed. Drop the row so the next event re-reads from DB.
-    subscribe(
-      "team.catalog_changed",
-      (event) => {
-        if (this.channelCache.has(event.teamId)) {
-          this.channelCache.delete(event.teamId);
-        }
-      },
-      SubscriberPriority.OUTBOUND_WEBHOOKS,
+    this.offs.push(
+      subscribe(
+        "team.catalog_changed",
+        (event) => {
+          if (this.channelCache.has(event.teamId)) {
+            this.channelCache.delete(event.teamId);
+          }
+        },
+        SubscriberPriority.OUTBOUND_WEBHOOKS,
+      ),
     );
     this.logger.log(
       `Outbound webhook subscriber registered for ${busEventTypesToSubscribe().length} event types`,
     );
+  }
+
+  onModuleDestroy(): void {
+    for (const off of this.offs) {
+      try {
+        off();
+      } catch (err) {
+        this.logger.warn(
+          `unsubscribe failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    this.offs = [];
+    this.registered = false;
   }
 
   private async handle(event: { teamId: string; type: string; silent?: boolean }) {

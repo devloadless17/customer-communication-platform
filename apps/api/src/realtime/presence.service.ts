@@ -111,4 +111,18 @@ export class PresenceService {
     const conv = this.byConversation.get(conversationId);
     return conv ? [...conv.keys()] : [];
   }
+
+  /**
+   * Every conversation the user is currently a viewer of (≥1 socket in the
+   * conversation's viewer set). Used by the availability-changed fanout to
+   * re-broadcast `conversation:viewers` for each affected room — without
+   * walking every conversation in the map.
+   */
+  conversationsViewedBy(userId: string): string[] {
+    const out: string[] = [];
+    for (const [conversationId, byUser] of this.byConversation) {
+      if (byUser.has(userId)) out.push(conversationId);
+    }
+    return out;
+  }
 }

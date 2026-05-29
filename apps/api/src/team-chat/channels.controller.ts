@@ -95,7 +95,7 @@ export class ChannelsController {
     @Query("before") before?: string,
     @Query("take") take?: string,
   ) {
-    return this.channels.searchAllMessages(session.teamId, q ?? "", {
+    return this.channels.searchAllMessages(session.teamId, session.userId, q ?? "", {
       before,
       take: take ? Number.parseInt(take, 10) : undefined,
     });
@@ -106,7 +106,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const channel = await this.channels.getById(session.teamId, id);
+    const channel = await this.channels.getById(session.teamId, session.userId, id);
     return { channel };
   }
 
@@ -115,7 +115,7 @@ export class ChannelsController {
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
   ) {
-    const pins = await this.channels.listPins(session.teamId, id);
+    const pins = await this.channels.listPins(session.teamId, session.userId, id);
     return { pins };
   }
 
@@ -197,7 +197,7 @@ export class ChannelsController {
     @Query("before") before?: string,
     @Query("take") take?: string,
   ) {
-    return this.channels.listMessages(session.teamId, id, {
+    return this.channels.listMessages(session.teamId, session.userId, id, {
       after,
       before,
       take: take ? Number.parseInt(take, 10) : undefined,
@@ -257,7 +257,7 @@ export class ChannelsController {
     @Param("id") id: string,
     @Param("mid") mid: string,
   ) {
-    await this.channels.unpinMessage(session.teamId, session.role, id, mid);
+    await this.channels.unpinMessage(session.teamId, session.userId, session.role, id, mid);
     return { ok: true };
   }
 
@@ -289,7 +289,7 @@ export class ChannelsController {
     @Query("after") after?: string,
     @Query("take") take?: string,
   ) {
-    return this.channels.listThreadReplies(session.teamId, id, mid, {
+    return this.channels.listThreadReplies(session.teamId, session.userId, id, mid, {
       after,
       take: take ? Number.parseInt(take, 10) : undefined,
     });
@@ -309,7 +309,7 @@ export class ChannelsController {
     @Query("before") before?: string,
     @Query("take") take?: string,
   ) {
-    return this.channels.searchMessages(session.teamId, id, q ?? "", {
+    return this.channels.searchMessages(session.teamId, session.userId, id, q ?? "", {
       before,
       take: take ? Number.parseInt(take, 10) : undefined,
     });
@@ -331,7 +331,7 @@ export class ChannelsController {
     if (!messageId) {
       throw new BadRequestException({ error: "messageId required" });
     }
-    return this.channels.getMessagesAround(session.teamId, id, messageId, {
+    return this.channels.getMessagesAround(session.teamId, session.userId, id, messageId, {
       take: take ? Number.parseInt(take, 10) : undefined,
     });
   }

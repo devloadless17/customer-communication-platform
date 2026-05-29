@@ -56,23 +56,6 @@ export interface ApiOptions {
   /** Default `"redirect"` for RSC; pass `"throw"` from server actions. */
   on401?: "redirect" | "throw";
   signal?: AbortSignal;
-  /**
-   * Opt into Next.js' data cache for THIS call. Default behavior is
-   * `cache: "no-store"` — every render hits the api fresh. Pass `next` to
-   * enable caching for read-mostly catalogs (tags, stages, fields, etc.)
-   * so subsequent renders return from the data cache. Tags allow targeted
-   * busting via `revalidateTag(tag)` from mutation routes.
-   *
-   * Per-request cookies are NOT mixed into the cache key, so this is only
-   * safe for team-scoped reads where the api derives the team from the
-   * cookie — two users on the same team share the cache, which is correct
-   * for these catalogs.
-   */
-  next?: {
-    tags?: string[];
-    /** Seconds. 0 disables time-based revalidation (tag-only). */
-    revalidate?: number;
-  };
 }
 
 export class ApiError extends Error {
@@ -137,10 +120,12 @@ export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   }
 
-  // Caller opted into Next.js' data cache for this read — drop `cache:
-  // "no-store"` (which would override `next`) and let Next.js manage
-  // freshness via tags + revalidate.
-  const useDataCache = opts.next !== undefined;
+  // RSC reads always go fresh — Socket.io drives staleness for hot data,
+  // and the catalog reads are cheap enough not to need fetch-cache layering.
+  // The fetch-cache opt-in + `/api/internal/revalidate` bridge that lived
+  // here was removed 2026-05-29: every caller passed `cache: "no-store"`
+  // anyway, so the bridge was firing a cross-process round-trip to
+  // invalidate tags nothing ever fetched with.
   const fetchInit: RequestInit = {
     method: opts.method ?? "GET",
     headers: {
@@ -151,9 +136,7 @@ export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
       "x-forwarded-for": headerStore.get("x-forwarded-for") ?? "",
     },
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    // RSC reads default to fresh (Socket.io drives staleness for hot data).
-    // Opt-in caching for read-mostly catalogs via the `next` option.
-    ...(useDataCache ? { next: opts.next } : { cache: "no-store" }),
+    cache: "no-store",
     signal: opts.signal,
   };
   const res = await fetchWithDevRestartRetry(url, fetchInit, opts.method ?? "GET");

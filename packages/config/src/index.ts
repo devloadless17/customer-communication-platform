@@ -74,9 +74,11 @@ const prodRequired: Check[] = [
   {
     name: "INTERNAL_BUS_SECRET",
     hint:
-      "Shared secret for the cross-process cache-revalidate bridge. NestJS " +
-      "calls /api/internal/revalidate on Next.js when catalogs mutate; this " +
-      "endpoint requires the same value. Generate with: openssl rand -base64 32.",
+      "Shared secret for cross-process internal RPCs between NestJS and " +
+      "Next.js. Today used by /api/internal/session-invalidated (NestJS → " +
+      "Next.js, on signout/deactivation to drop NestJS's session caches + " +
+      "force-disconnect sockets). Same value MUST be set in both processes. " +
+      "Generate with: openssl rand -base64 32.",
   },
   {
     name: "TRUSTED_PROXY_HOPS",

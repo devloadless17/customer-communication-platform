@@ -148,11 +148,40 @@ export async function markPublishedWithError(
  * as `attempts = 1 AND publishedAt IS NOT NULL`. The operator can then
  * manually decide whether to re-publish.
  */
+/**
+ * Per-team fairness: how many rows the drainer is willing to pull from a
+ * single team per tick. Without this, a 5k-row bulk import from one team
+ * publishes a contiguous block; the strict `ORDER BY createdAt` claim
+ * meant every other team's realtime events waited behind it until the
+ * block drained. With per-team windowing, each team contributes up to
+ * `PER_TEAM_BATCH_CAP` rows per tick — slow-but-fair on a hot tenant.
+ *
+ * Net effect at the modeled 100 tenants × 10 msg/sec target: no single
+ * tenant's burst can starve realtime fanout for another tenant beyond
+ * the per-tick budget. The total batch ceiling is still bounded by
+ * `limit`; the window function just reorders WITHIN that budget.
+ */
+const PER_TEAM_BATCH_CAP = 4;
+
 export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   // Raw SQL because Prisma can't express UPDATE…WHERE…ORDER BY…LIMIT…
   // RETURNING in one query. The FOR UPDATE SKIP LOCKED clause makes this
   // safe under a future multi-drainer rollout — today there's only one
   // drainer per process, but the clause is free.
+  //
+  // Postgres rejects `FOR UPDATE` in any query that uses window functions
+  // (SQLSTATE 0A000). To get BOTH the SKIP-LOCKED safety AND the per-team
+  // fairness, split into two steps:
+  //   1. CTE `candidates`: select a wider window (limit × 4) of oldest
+  //      unpublished rows, taking the row-level lock with FOR UPDATE SKIP
+  //      LOCKED. No window functions in this CTE.
+  //   2. CTE `ranked`: apply ROW_NUMBER() to the locked candidates and
+  //      keep at most PER_TEAM_BATCH_CAP per team.
+  //   3. Outer UPDATE: mark the ranked subset published.
+  // This preserves both invariants: nothing else can claim our locked
+  // rows (the candidates' locks are held until commit), and a single
+  // bursty tenant can't monopolize a batch — at most 4 of their rows per
+  // tick interleave with other tenants' events.
   const rows = await db.$queryRaw<
     Array<{
       id: string;
@@ -163,16 +192,27 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       attempts: number;
     }>
   >`
+    WITH candidates AS (
+      SELECT "id", "teamId", "createdAt"
+      FROM   "OutboundEvent"
+      WHERE  "publishedAt" IS NULL
+        AND  "failedAt"    IS NULL
+      ORDER BY "createdAt" ASC
+      LIMIT  ${limit * 4}
+      FOR UPDATE SKIP LOCKED
+    ),
+    ranked AS (
+      SELECT "id",
+             ROW_NUMBER() OVER (PARTITION BY "teamId" ORDER BY "createdAt") AS team_rn
+      FROM   candidates
+    )
     UPDATE "OutboundEvent"
     SET    "publishedAt" = NOW(),
            "attempts" = "attempts" + 1
     WHERE  "id" IN (
-      SELECT "id" FROM "OutboundEvent"
-      WHERE  "publishedAt" IS NULL
-        AND  "failedAt"    IS NULL
-      ORDER BY "createdAt" ASC
-      LIMIT  ${limit}
-      FOR UPDATE SKIP LOCKED
+      SELECT "id" FROM ranked
+      WHERE team_rn <= ${PER_TEAM_BATCH_CAP}
+      LIMIT ${limit}
     )
     RETURNING "id", "teamId", "type", "payload", "createdAt", "attempts";
   `;

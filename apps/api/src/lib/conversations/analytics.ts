@@ -111,40 +111,53 @@ export async function trackOnOutboundMessage(args: OnOutboundMessageArgs): Promi
   // one inbound message COUNTS as a response. If we've never had an
   // inbound on this conversation yet, the outbound is broadcast/outreach
   // and doesn't count toward responsesCount.
+  //
+  // Two concurrent outbounds against the same conversation both run this
+  // function. The prior shape did read-then-write with the response
+  // decision held in JS state, which could undercount responsesCount on a
+  // tight inbound/outbound interleave: both reads saw incomingMessagesCount=0
+  // at the moment, and neither incremented. The fix: push the conditional
+  // into a single `updateMany` whose WHERE clause does the check
+  // atomically. Two outbounds after one inbound: both updateMany rows match
+  // `incomingMessagesCount > 0`, both increment — correct. Two outbounds
+  // BEFORE any inbound: neither matches, neither increments — correct.
+  // The firstResponseAt + firstResponseByUserId pair already use
+  // predicate-gated updateMany, which keeps "first writer wins" correct.
   try {
-    const conv = await db.conversation.findFirst({
-      where: { id: args.conversationId, teamId: args.teamId },
-      select: {
-        firstResponseAt: true,
-        incomingMessagesCount: true,
+    const result = await db.conversation.updateMany({
+      where: {
+        id: args.conversationId,
+        teamId: args.teamId,
+        incomingMessagesCount: { gt: 0 },
+      },
+      data: {
+        outgoingMessagesCount: { increment: 1 },
+        responsesCount: { increment: 1 },
       },
     });
-    if (!conv) return;
-
-    const data: Record<string, unknown> = {
-      outgoingMessagesCount: { increment: 1 },
-    };
-    if (conv.incomingMessagesCount > 0) {
-      data.responsesCount = { increment: 1 };
-    }
-    await db.conversation.update({
-      where: { id: args.conversationId, teamId: args.teamId },
-      data,
-    });
-    // Conditional firstResponseAt — only when null AND there's been an inbound.
-    if (conv.firstResponseAt === null && conv.incomingMessagesCount > 0) {
+    if (result.count === 0) {
+      // No inbound yet — outbound is outreach. Bump outgoing only.
       await db.conversation.updateMany({
-        where: {
-          id: args.conversationId,
-          teamId: args.teamId,
-          firstResponseAt: null,
-        },
-        data: {
-          firstResponseAt: new Date(),
-          firstResponseByUserId: args.senderUserId,
-        },
+        where: { id: args.conversationId, teamId: args.teamId },
+        data: { outgoingMessagesCount: { increment: 1 } },
       });
+      return;
     }
+    // First-response stamp — single predicate-gated updateMany. Race-safe:
+    // only the FIRST concurrent outbound after an inbound matches
+    // `firstResponseAt: null`; subsequent ones match zero rows.
+    await db.conversation.updateMany({
+      where: {
+        id: args.conversationId,
+        teamId: args.teamId,
+        firstResponseAt: null,
+        incomingMessagesCount: { gt: 0 },
+      },
+      data: {
+        firstResponseAt: new Date(),
+        firstResponseByUserId: args.senderUserId,
+      },
+    });
   } catch (err) {
     console.error(
       `[conversations/analytics] trackOnOutboundMessage conversation=${args.conversationId}:`,

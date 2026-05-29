@@ -165,10 +165,12 @@ export function ReplyBox({
   prefill?: { body: string; nonce: string; clientTempId?: string } | null;
 }) {
   // Shared 60s tick across the inbox so we don't run N parallel intervals
-  // (one in WindowBadge, one here, …). `now` stays null until the first
-  // post-mount tick fires, keeping SSR deterministic.
+  // (one in WindowBadge, one here, …). Initialized to the server's clock on
+  // SSR so the window state + suffix render identical on first paint —
+  // dropping the prior null-then-fill posture that caused a "Window closed"
+  // flash on refresh.
   const now = useNow();
-  const windowStatus = computeWindowStatus(lastInboundAt, now ?? Date.now());
+  const windowStatus = computeWindowStatus(lastInboundAt, now);
   const windowClosed =
     windowStatus.state === "closed" || windowStatus.state === "never";
   const [mode, setMode] = useState<Mode>("reply");
@@ -847,9 +849,7 @@ export function ReplyBox({
             <ToggleButton active={mode === "reply"} onClick={() => setMode("reply")} icon={MessageSquare} label="Reply" />
             <ToggleButton active={mode === "note"} onClick={() => setMode("note")} icon={StickyNote} label="Note" />
           </div>
-          {!isNote && (
-            <WindowBadgeFromStatus status={windowStatus} size="sm" hideRemaining={now === null} />
-          )}
+          {!isNote && <WindowBadgeFromStatus status={windowStatus} size="sm" />}
           {!isNote && windowClosed && (
             <Button
               type="button"

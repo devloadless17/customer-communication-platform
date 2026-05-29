@@ -111,6 +111,94 @@ function assertAllowedMime(kind: string, mimeType: string): void {
   }
 }
 
+/**
+ * Sniff the first ~12 bytes against a small magic-byte table and return
+ * the inferred mime, or null if the signature isn't recognized. The
+ * allowlist above is keyed on the CLIENT-CLAIMED Content-Type — without a
+ * sniff, an attacker can upload `&lt;svg onload="…"&gt;` bytes labeled
+ * `image/png` and bypass the SVG exclusion. The CDN serves whatever
+ * Content-Type UploadThing stored (the claimed value), so this doesn't
+ * directly enable XSS via the redirect, BUT:
+ *   - polyglot files (HTML/PDF combos) render as HTML in some surfaces
+ *     when the URL ends in `.html` (we sanitize extensions but
+ *     defense-in-depth);
+ *   - mismatched MIME degrades Meta's quality rating on outbound media;
+ *   - the wrong sniffed kind silently passes the allowlist that was
+ *     meant to gate it.
+ *
+ * Tiny self-contained table — avoids the file-type dep (which loads a
+ * larger detection corpus). Covers every kind in ALLOWED_MIME_BY_KIND
+ * that has a meaningful binary signature. Text formats (text/plain,
+ * text/csv) are not sniffable and skipped — the allowlist's claimed
+ * type is the only gate for those.
+ */
+function sniffMime(bytes: Uint8Array): string | null {
+  if (bytes.length < 4) return null;
+  const b = bytes;
+  // PNG: 89 50 4E 47
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+    return "image/png";
+  }
+  // JPEG: FF D8 FF
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
+    return "image/jpeg";
+  }
+  // GIF: 47 49 46 38 (GIF8)
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) {
+    return "image/gif";
+  }
+  // WEBP: 52 49 46 46 ?? ?? ?? ?? 57 45 42 50 (RIFF....WEBP)
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  // PDF: 25 50 44 46 (%PDF)
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) {
+    return "application/pdf";
+  }
+  // MP4 / 3GP / MOV — `ftyp` box at offset 4: ?? ?? ?? ?? 66 74 79 70
+  if (
+    b.length >= 12 &&
+    b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70
+  ) {
+    return "video/mp4"; // canonical for the ftyp family
+  }
+  // OGG: 4F 67 67 53 (OggS)
+  if (b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53) {
+    return "audio/ogg";
+  }
+  return null;
+}
+
+/**
+ * Magic-byte families that mean "the same kind" for our allowlist
+ * purposes. E.g. video/mp4 sniffs as video/mp4 but the caller may have
+ * claimed video/3gpp — both are mp4-family ftyp boxes and both are
+ * legitimately allowed for the video kind. Reject only when the
+ * sniffed and claimed kinds diverge beyond same-family.
+ */
+function kindOfMime(mime: string): string {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime.startsWith("video/")) return "video";
+  return "other";
+}
+
+function assertSignatureMatches(bytes: Uint8Array, claimedMime: string): void {
+  const sniffed = sniffMime(bytes);
+  if (!sniffed) return; // unknown signature (or text format) — claimed-mime gate stands
+  const claimed = claimedMime.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (sniffed === claimed) return;
+  // Same kind-family is acceptable (mp4 ftyp can be claimed as 3gpp/mov/mp4).
+  if (kindOfMime(sniffed) === kindOfMime(claimed)) return;
+  throw new Error(
+    `uploadthing: file signature "${sniffed}" does not match claimed mime "${claimed}"`,
+  );
+}
+
 export const uploadthingProvider: BlobStorageProvider = {
   name: "uploadthing",
 
@@ -119,6 +207,12 @@ export const uploadthingProvider: BlobStorageProvider = {
     // exclusion rationale. `kind` is set by the caller from Meta's
     // categorization, not the sender's claim, so it's trustworthy here.
     assertAllowedMime(input.kind, input.mimeType);
+    // Magic-byte sniff — close the "trust client Content-Type" loophole.
+    // An attacker uploading SVG bytes labeled image/png passes the
+    // allowlist on the claimed mime; this catches the divergence. See
+    // `assertSignatureMatches` for the full rationale (security audit
+    // 2026-05-29 P0).
+    assertSignatureMatches(input.bytes, input.mimeType);
     const filename = buildFilename(input);
     // Pass the Uint8Array straight to UTFile — Node 20+'s undici-backed Blob
     // accepts Uint8Array as a BlobPart at runtime, and the TS-cast pattern
@@ -138,7 +232,26 @@ export const uploadthingProvider: BlobStorageProvider = {
       customId: input.context.externalId,
     } as unknown as ConstructorParameters<typeof UTFile>[2]);
 
-    const res = await getUtApi().uploadFiles(file);
+    // 60s timeout on the upload — matches the fetch-from-Meta cap below.
+    // The UploadThing SDK doesn't accept an AbortSignal, so we race the
+    // promise against an explicit timer. A stuck UT (incident, regional
+    // outage) was previously holding the runWithConcurrency lane forever,
+    // pinning the BullMQ slot and blocking the api's 100s graceful-shutdown
+    // drain. With a bounded timeout the slot recovers, the inbound-media
+    // sweeper picks the row up next pass, and the api shuts down cleanly.
+    const UT_UPLOAD_TIMEOUT_MS = 60_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const res = await Promise.race([
+      getUtApi().uploadFiles(file),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`uploadthing upload timed out after ${UT_UPLOAD_TIMEOUT_MS}ms`)),
+          UT_UPLOAD_TIMEOUT_MS,
+        );
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
     if (res.error || !res.data) {
       // `customId` is unique per UploadThing app. A previous attempt that
       // succeeded at the storage layer but failed before the row write

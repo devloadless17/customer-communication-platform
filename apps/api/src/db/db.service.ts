@@ -43,11 +43,24 @@ export class DbService extends PrismaClient implements OnModuleInit, OnModuleDes
     // contact-last-inbound-drift sweeper's set-based UPDATE on large
     // accounts. 10s tripped 503s on webhook ingest during contact-import
     // bursts even though the retry was structurally safe.
+    // Pool sizing for one api process under realistic concurrent load:
+    //   REST handlers + Socket.io gateway lookups + ~5 BullMQ workflow
+    //   workers + ~5 message-send workers + ~10 webhook-deliver workers +
+    //   broadcast runner + ~14 sweepers + bus subscribers (audit + analytics
+    //   + workflow-dispatch + outbound-webhooks) + outbox drainer at
+    //   concurrency:8 per batch + Better Auth + ingest 8-lane Serializable.
+    //   Steady-state at 10 msg/sec routinely holds 18-22 slots; one bulk
+    //   import or one broadcast pre-flight can push to 25 and queue.
+    // 50 leaves headroom for the burst without sitting unused at idle.
+    // `connectionTimeoutMillis` fail-fast so a starved pool surfaces as
+    // 503 rather than blocking forever (acquisition hang would otherwise
+    // pin Node's event loop on every request).
     const pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 25,
+      max: 50,
       idleTimeoutMillis: 30_000,
       statement_timeout: 30_000,
+      connectionTimeoutMillis: 5_000,
     });
     super({
       adapter: new PrismaPg(pool),

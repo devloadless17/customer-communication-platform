@@ -22,12 +22,14 @@ import { FANOUT_RULES } from "./fanout-rules";
  */
 @Injectable()
 export class RealtimeFanoutService {
+  private offs: Array<() => void> = [];
+
   constructor(
     private readonly bus: EventBus,
     private readonly emitter: RealtimeEmitter,
   ) {}
 
-  registerSubscribers(): void {
+  registerSubscribers(): () => void {
     for (const [type, handler] of Object.entries(FANOUT_RULES) as Array<
       [DomainEventType, (typeof FANOUT_RULES)[DomainEventType]]
     >) {
@@ -37,11 +39,17 @@ export class RealtimeFanoutService {
       if (handler === null) continue;
       // Per-key handler is `Handler<K>` for its own K, but Object.entries
       // widens to the union — cast per iteration the way the bus expects.
-      this.bus.subscribe(
-        type,
-        (e) => (handler as (e: unknown, emitter: RealtimeEmitter) => void)(e, this.emitter),
-        SubscriberPriority.REALTIME,
+      this.offs.push(
+        this.bus.subscribe(
+          type,
+          (e) => (handler as (e: unknown, emitter: RealtimeEmitter) => void)(e, this.emitter),
+          SubscriberPriority.REALTIME,
+        ),
       );
     }
+    return () => {
+      for (const off of this.offs) off();
+      this.offs = [];
+    };
   }
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { Check } from "lucide-react";
 
 import { getClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { cn } from "@ccp/shared/utils";
@@ -19,11 +19,12 @@ import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
  * Three concerns:
  *   1. Seed the displayed status + note from the session-provided `currentUser`
  *      so the first paint is correct without a fetch.
- *   2. Mutate via PATCH /api/users/me/availability. The picker UI is
- *      optimistic: we flip the local mirror BEFORE the request and dispatch a
- *      local `user:availability:updated` so the teammate sidebar + any other
- *      live surface reflects it in the same frame as the menu item check.
- *      On failure we roll back and show a brief inline error.
+ *   2. Mutate via PATCH /api/users/me/availability. Fully optimistic — the UI
+ *      flips immediately on click and the local socket dispatch fans the
+ *      change to every open surface; the server PATCH is fire-and-forget at
+ *      the UI layer (rollback fires another local frame on failure). No
+ *      "Saving…" affordance, no disabled buttons mid-flight; that produced
+ *      a visible dropdown re-layout / jump on every click.
  *   3. Subscribe to `user:availability:updated` for THIS user so a change made
  *      on another device / tab keeps every open client in sync without a
  *      page reload.
@@ -44,7 +45,6 @@ export function AvailabilityPicker({
     resolveAvailabilityStatus(currentUser.availabilityStatus),
   );
   const [message, setMessage] = useState<string>(currentUser.availabilityMessage ?? "");
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Debounce the message PATCH so a typing burst doesn't fire one POST per
   // keystroke; the status buttons commit immediately.
@@ -89,16 +89,24 @@ export function AvailabilityPicker({
     nextStatus: UserAvailabilityStatus | undefined,
     nextMessage: string | null | undefined,
   ): Promise<void> {
-    if (disabled || pending) return;
-    setPending(true);
+    if (disabled) return;
     setError(null);
-    // Optimistic local dispatch — sidebar/etc. flip in the same frame as the
-    // menu check. The server fanout will land moments later with the same
-    // payload; reducers' identity-bail keeps the second pass invisible.
+    const prevStatus = status;
+    const prevMessage = lastCommittedMessageRef.current;
+    // Optimistic local state + dispatch — sidebar, viewer pill, user menu
+    // all flip in the same frame as the click. Server fanout will land
+    // moments later with the same payload; reducers' identity-bail keeps
+    // the second pass invisible.
+    if (nextStatus !== undefined) setStatus(nextStatus);
+    if (nextMessage !== undefined) {
+      const committed = nextMessage === null ? "" : nextMessage;
+      setMessage(committed);
+      lastCommittedMessageRef.current = committed;
+    }
     if (nextStatus !== undefined || nextMessage !== undefined) {
-      const effectiveStatus = nextStatus ?? status;
+      const effectiveStatus = nextStatus ?? prevStatus;
       const effectiveMessage =
-        nextMessage === undefined ? message : nextMessage ?? "";
+        nextMessage === undefined ? prevMessage : nextMessage ?? "";
       dispatchLocalSocketEvent("user:availability:updated", {
         teamId: currentUser.teamId,
         userId: currentUser.id,
@@ -120,25 +128,28 @@ export function AvailabilityPicker({
       if (!res.ok) {
         const detail = await res.text().catch(() => "");
         setError(res.status === 403 ? "Not allowed" : detail || "Couldn't update");
-        // Roll back the optimistic dispatch by re-fanning the previous state.
+        // Roll back the optimistic state + dispatch.
+        setStatus(prevStatus);
+        setMessage(prevMessage);
+        lastCommittedMessageRef.current = prevMessage;
         dispatchLocalSocketEvent("user:availability:updated", {
           teamId: currentUser.teamId,
           userId: currentUser.id,
-          status,
-          message: lastCommittedMessageRef.current || null,
+          status: prevStatus,
+          message: prevMessage || null,
         });
-        return;
-      }
-      if (nextStatus !== undefined) setStatus(nextStatus);
-      if (nextMessage !== undefined) {
-        const committed = nextMessage === null ? "" : nextMessage;
-        setMessage(committed);
-        lastCommittedMessageRef.current = committed;
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Network error");
-    } finally {
-      setPending(false);
+      setStatus(prevStatus);
+      setMessage(prevMessage);
+      lastCommittedMessageRef.current = prevMessage;
+      dispatchLocalSocketEvent("user:availability:updated", {
+        teamId: currentUser.teamId,
+        userId: currentUser.id,
+        status: prevStatus,
+        message: prevMessage || null,
+      });
     }
   }
 
@@ -158,56 +169,64 @@ export function AvailabilityPicker({
   }
 
   return (
-    <div className="flex flex-col gap-1 px-1 py-1">
-      <div className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+    <div className="flex flex-col px-1 py-1">
+      <div className="px-2 pb-1.5 pt-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
         Availability
       </div>
-      {ALL_AVAILABILITY_STATUSES.map((s) => {
-        const active = s === status;
-        return (
-          <button
-            key={s}
-            type="button"
-            disabled={disabled || pending}
-            onClick={() => onPickStatus(s)}
-            className={cn(
-              "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors",
-              active ? "bg-accent text-foreground" : "text-muted-foreground",
-              !disabled && "hover:bg-accent/60 hover:text-foreground",
-              disabled && "cursor-not-allowed opacity-60",
-            )}
-            aria-pressed={active}
-          >
-            <span className={cn("size-2 rounded-full", AVAILABILITY_DOT_CLASSES[s])} />
-            <span className="flex-1">{AVAILABILITY_LABELS[s]}</span>
-            {active && <Check className="size-3.5 text-foreground/70" />}
-          </button>
-        );
-      })}
-      <div className="mt-1 px-1">
+      <div className="flex flex-col gap-0.5">
+        {ALL_AVAILABILITY_STATUSES.map((s) => {
+          const active = s === status;
+          return (
+            <button
+              key={s}
+              type="button"
+              disabled={disabled}
+              onClick={() => onPickStatus(s)}
+              className={cn(
+                "group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] outline-none transition-[background-color,color] duration-150",
+                active
+                  ? "bg-accent/80 text-foreground"
+                  : "text-foreground/80 hover:bg-accent/50 hover:text-foreground",
+                disabled && "cursor-not-allowed opacity-60",
+                !disabled && "cursor-pointer focus-visible:bg-accent/60",
+              )}
+              aria-pressed={active}
+            >
+              <span
+                className={cn(
+                  "size-2.5 shrink-0 rounded-full ring-2 ring-background transition-shadow",
+                  AVAILABILITY_DOT_CLASSES[s],
+                  active && "ring-accent/80",
+                )}
+              />
+              <span className="flex-1 font-medium">{AVAILABILITY_LABELS[s]}</span>
+              <Check
+                className={cn(
+                  "size-3.5 text-foreground/70 transition-opacity duration-150",
+                  active ? "opacity-100" : "opacity-0",
+                )}
+              />
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-1.5 px-1">
         <input
           type="text"
           value={message}
           maxLength={100}
-          disabled={disabled || pending}
+          disabled={disabled}
           onChange={(e) => onMessageChange(e.target.value)}
           placeholder="Add a status note (optional)"
           className={cn(
-            "w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12px] outline-none transition-colors",
-            "placeholder:text-muted-foreground/60 focus:border-foreground/30",
-            (disabled || pending) && "cursor-not-allowed opacity-60",
+            "h-8 w-full rounded-md border border-border/60 bg-muted/30 px-2.5 text-[12px] outline-none transition-colors",
+            "placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:bg-background",
+            disabled && "cursor-not-allowed opacity-60",
           )}
         />
-        <div className="mt-1 flex items-center justify-between px-1 text-[10px] text-muted-foreground/70">
+        <div className="mt-1 flex h-3.5 items-center justify-between px-1 text-[10px] text-muted-foreground/60">
           <span>{message.length > 0 ? `${message.length}/100` : ""}</span>
-          {pending ? (
-            <span className="inline-flex items-center gap-1">
-              <Loader2 className="size-3 animate-spin" />
-              Saving
-            </span>
-          ) : error ? (
-            <span className="text-destructive">{error}</span>
-          ) : null}
+          {error ? <span className="text-destructive">{error}</span> : null}
         </div>
       </div>
     </div>

@@ -9,6 +9,7 @@ import {
   computeWindowStatus,
   formatWindowRemaining,
 } from "@ccp/shared/utils/window";
+import { useNow } from "@/hooks/use-now";
 import type { ContactListItem } from "@ccp/shared/types";
 
 /**
@@ -46,6 +47,10 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
   const [results, setResults] = useState<ContactListItem[]>([]);
   const [loading, setLoading] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // SSR-stable "now" — initialized to the server's clock on first render so
+  // the window-status string ("8h left" / "closed 2h ago") paints the same
+  // server-side and client-side, no hydration flash.
+  const now = useNow();
 
   // Close on outside-click. Same idiom the StepPickerPopover uses.
   useEffect(() => {
@@ -113,7 +118,7 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
   // reopen the picker; × to clear.
   if (value && !open) {
     const status = value.lastInboundAt
-      ? computeWindowStatus(value.lastInboundAt)
+      ? computeWindowStatus(value.lastInboundAt, now)
       : null;
     const statusLabel = status ? formatWindowRemaining(status) : null;
     return (
@@ -200,6 +205,7 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
               <ContactRow
                 key={item.contact.id}
                 item={item}
+                now={now}
                 selected={item.contact.id === value?.contactId}
                 onPick={() => onPick(item)}
               />
@@ -212,16 +218,18 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
 
 function ContactRow({
   item,
+  now,
   selected,
   onPick,
 }: {
   item: ContactListItem;
+  now: number;
   selected: boolean;
   onPick: () => void;
 }) {
   const status = useMemo(
-    () => computeWindowStatus(item.lastInboundAt),
-    [item.lastInboundAt],
+    () => computeWindowStatus(item.lastInboundAt, now),
+    [item.lastInboundAt, now],
   );
   const remaining = useMemo(() => formatWindowRemaining(status), [status]);
   return (

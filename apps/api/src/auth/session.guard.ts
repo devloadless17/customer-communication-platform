@@ -119,7 +119,9 @@ const sessionCache = new Map<string, { session: ApiSession; expiresAt: number }>
 // Auth, so a deploy + 80-agent reconnect storm starves the pool. We can't
 // key on the cookie string directly (don't want secrets in heap dumps), so
 // hash it. Same 15s TTL as the user cache. Cleared on signout/deactivation
-// via `invalidateSessionCacheByCookie`.
+// via `invalidateSessionCache(userId)`, which walks the cookieCache and
+// drops every entry pointing to the given userId — the only mutation paths
+// (signout, deactivation, role change, password change) all know the userId.
 const cookieCache = new Map<string, { userId: string; expiresAt: number }>();
 
 import { createHash } from "node:crypto";
