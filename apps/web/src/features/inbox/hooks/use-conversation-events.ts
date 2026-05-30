@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
 import {
   applyMessageStatus,
@@ -99,13 +100,49 @@ function reconcileOptimisticAgainst(
   existing: Message[],
   fresh: Message[],
 ): Message[] {
-  const confirmed = new Set(
+  // (1) Text confirmation: a pending OUT bubble whose body matches a fresh OUT
+  // row is the same send. Empty bodies are skipped here (media-only) and
+  // handled by (2).
+  const confirmedBodies = new Set(
     fresh.filter((m) => m.direction === "out" && m.body).map((m) => m.body),
   );
-  if (confirmed.size === 0) return existing;
-  return existing.filter(
-    (m) => !(m.pending && m.direction === "out" && m.body && confirmed.has(m.body)),
-  );
+
+  // (2) Media confirmation: a caption-less media send (voice / image / video /
+  // doc) has an EMPTY body, so (1) can't match it — and the server row never
+  // carries clientTempId (it's a BullMQ jobId, not a Message column). Without
+  // this branch the optimistic blob bubble survived a recovery refetch ALONGSIDE
+  // the server copy → the message rendered twice and the 30s watchdog flipped
+  // the orphan to a phantom "failed" with a Retry button (a double-send trap).
+  // Match a pending OUT bubble whose media is a LOCAL blob: url to a fresh OUT
+  // server media row of the SAME mediaKind, consuming each fresh row once so two
+  // distinct same-kind sends in one window aren't collapsed into one.
+  const freshMediaByKind = new Map<string, number>();
+  for (const m of fresh) {
+    if (m.direction !== "out") continue;
+    const kind = m.media?.kind;
+    // Server media rows have a real (non-blob) media url; an optimistic copy
+    // that leaked into `fresh` would still carry blob: — exclude those.
+    if (!kind || m.media?.url?.startsWith("blob:")) continue;
+    freshMediaByKind.set(kind, (freshMediaByKind.get(kind) ?? 0) + 1);
+  }
+
+  if (confirmedBodies.size === 0 && freshMediaByKind.size === 0) return existing;
+
+  return existing.filter((m) => {
+    if (!(m.pending && m.direction === "out")) return true;
+    // Text optimistic confirmed by body.
+    if (m.body && confirmedBodies.has(m.body)) return false;
+    // Media optimistic (local blob) confirmed by a same-kind server row.
+    const localKind = m.media?.url?.startsWith("blob:") ? m.media.kind : undefined;
+    if (!m.body && localKind) {
+      const remaining = freshMediaByKind.get(localKind) ?? 0;
+      if (remaining > 0) {
+        freshMediaByKind.set(localKind, remaining - 1);
+        return false;
+      }
+    }
+    return true;
+  });
 }
 
 /**
@@ -433,7 +470,7 @@ export function useConversationEvents(
   onMarkReadRef.current = onMarkRead;
   const markRead = useCoalescedAsync(async () => {
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/read`, { method: "POST" });
+      const res = await apiFetch(`/api/conversations/${conversationId}/read`, { method: "POST" });
       if (res.ok) onMarkReadRef.current?.(conversationId);
     } catch {
       // Silent — server state reconciles on the next call / page reload.

@@ -177,8 +177,8 @@ export function ThreadHeader({
             variant="ghost"
             size="icon"
             onClick={() => void onInitiateCall()}
-            aria-label="Call contact via WhatsApp"
-            title="Call via WhatsApp"
+            aria-label="Start a WhatsApp call with this contact"
+            title="Call on WhatsApp"
             className="size-8 text-muted-foreground hover:text-foreground"
           >
             <Phone className="size-4" />

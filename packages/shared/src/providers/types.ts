@@ -97,18 +97,14 @@ export interface NormalizedStatusUpdate {
 
 /**
  * One step of a WhatsApp call's lifecycle as it arrives via webhook. The
- * Meta provider emits one of these per call webhook (incoming offer, ICE
- * trickle, terminal status). Ingest dedupes by (teamId, channel, externalCallId)
- * the same way it does for messages, then maps `phase` to CallStatus.
- *
- * The Meta payload carries an SDP offer on incoming and an SDP answer
- * acknowledgement on outgoing-answered. Phase 1 routes SDP straight through
- * the bus to the answering agent's browser RTCPeerConnection. Phase 2 (SIP)
- * intercepts here instead and lets the gateway terminate DTLS+SRTP.
+ * Meta provider emits one of these per call webhook (incoming offer,
+ * outbound answer, terminal status). Ingest dedupes by
+ * (teamId, channel, externalCallId) the same way it does for messages,
+ * then maps `phase` to CallStatus.
  *
  * `phase` is intentionally finer-grained than CallStatus — `ringing_out`
- * vs `incoming` lets the audit subscriber differentiate direction without a
- * Call-row read; the ingest mapper collapses both to `CallStatus.ringing`.
+ * vs `incoming` lets the audit subscriber differentiate direction without
+ * a Call-row read; the ingest mapper collapses both to `CallStatus.ringing`.
  */
 export interface NormalizedCallEvent {
   kind: "call";
@@ -119,28 +115,22 @@ export interface NormalizedCallEvent {
   contactName: string | null;
   direction: "in" | "out";
   phase:
-    | "incoming"      // inbound call ringing — first webhook for this call
-    | "ringing_out"   // outbound call we just placed — Meta acknowledged
-    | "answered"      // customer picked up an outbound; carries their SDP offer
+    | "incoming"      // inbound call ringing
+    | "ringing_out"   // outbound call we just placed
+    | "answered"      // customer picked up our outbound (carries SDP answer)
     | "completed"     // ended cleanly
-    | "missed"        // inbound, customer cancel / no agent answered
+    | "missed"        // no answer
     | "rejected"      // explicitly declined
     | "failed"        // signaling/media error
-    | "permission_granted"   // customer granted calling permission (BIC opt-in)
-    | "permission_revoked";  // Meta auto-revoked (4 consecutive unanswered)
+    | "permission_granted"
+    | "permission_revoked";
   /**
-   * WebRTC SDP payload — present on phases that carry one. Meta delivers
-   * setup:actpass which `RTCPeerConnection` cannot accept on the answer
-   * side; the Meta provider rewrites it to setup:active here so every
-   * downstream consumer sees a usable SDP without remembering the gotcha.
+   * WebRTC SDP. For inbound calls: customer's `offer`. For outbound:
+   * customer's `answer` after they pick up. Meta sometimes sends answers
+   * with `a=setup:actpass` which RTCPeerConnection rejects on the
+   * offerer side; the Meta provider rewrites those to `setup:active`.
    */
   sdp?: { type: "offer" | "answer"; sdp: string };
-  /** Trickle ICE candidate. Meta may stream these across multiple webhooks. */
-  iceCandidate?: {
-    candidate: string;
-    sdpMid: string | null;
-    sdpMLineIndex: number | null;
-  };
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -401,10 +391,9 @@ export interface ProviderCapabilities {
   readReceipts: boolean;
   typingIndicators: boolean;
   /**
-   * Voice/video calling. True if the provider implements the call methods
-   * below (placeCall / acceptCall / etc.). Phase 1 (Meta WhatsApp): true.
-   * Gates the inbox "Call" button at the channel level — adding a future
-   * SMS provider with calling = false hides the button on those threads.
+   * Voice calling. True if the provider implements placeCall / acceptCall /
+   * etc. Gates the inbox "Call" button at the channel level — a future
+   * SMS provider with calling=false hides the button on its threads.
    */
   calling: boolean;
 }
@@ -477,14 +466,11 @@ export interface MessagingProvider<SendConfig = unknown> {
    */
   sendTypingIndicator?(externalId: string, config: SendConfig): Promise<void>;
 
-  // ---- WhatsApp Business Calling (Phase 1: WebRTC, Phase 2: SIP) ---------
-  // All optional so future SMS-only providers can leave them off.
-  // ProviderCapabilities.calling gates them at the channel level.
-  //
-  // The browser-as-WebRTC-peer model means the API just relays SDP + ICE
-  // between Meta and the agent's browser; the provider never terminates
-  // DTLS+SRTP. Phase 2 swaps the impl to route through a SIP gateway that
-  // does — the interface stays the same.
+  // ---- WhatsApp Business Calling ---------------------------------------
+  // All optional so future SMS-only providers can leave them off;
+  // ProviderCapabilities.calling gates them at the channel level. The
+  // browser is the WebRTC peer — the API only relays SDP between Meta
+  // and the browser (Meta uses ICE-lite, so trickle is unnecessary).
 
   /**
    * Request a customer's permission to be called. Required before placeCall
@@ -503,24 +489,31 @@ export interface MessagingProvider<SendConfig = unknown> {
   ): Promise<{ permissionRequestId: string; expiresAt: Date }>;
 
   /**
-   * Initiate an outbound call. Meta returns a call id immediately; the
-   * customer's phone starts ringing. The actual SDP exchange happens via
-   * subsequent webhook (`phase: "answered"` carries the customer's offer).
+   * Initiate an outbound call. The BROWSER generates an SDP offer first
+   * (via `RTCPeerConnection.createOffer`) and we forward it to Meta in the
+   * connect-action payload. Meta returns a call_id immediately; the
+   * customer's phone starts ringing. When the customer answers, Meta sends
+   * a webhook with the SDP ANSWER, which the browser feeds into
+   * `setRemoteDescription` to complete the WebRTC handshake.
+   *
+   * This is the SHAPE FIX for Meta error 131009 "Missing session parameter"
+   * — the original placeCall { to } payload omitted the session.sdp field
+   * Meta requires for business-initiated calling.
    */
   placeCall?(
-    args: { to: string },
+    args: { to: string; sdpOffer: string; from?: string },
     config: SendConfig,
   ): Promise<{ externalCallId: string }>;
 
   /**
    * REQUIRED preamble before acceptCall. Meta rejects `accept` sent without
-   * a prior `pre_accept` for the same call id. This method exists as a
-   * separate hop because the SDP-answer assembly on the browser side races
-   * with the Graph round-trip — pre-accept locks the call to our number
-   * while the browser generates the SDP, then acceptCall delivers it.
+   * a prior `pre_accept` for the same call id. Both calls carry the SAME
+   * SDP answer (verified — pre_accept without session.sdp returns
+   * 131009 "Missing session parameter"). The two hops exist for media
+   * timing, not for separate payloads.
    */
   preAcceptCall?(
-    args: { externalCallId: string },
+    args: { externalCallId: string; sdpAnswer: string },
     config: SendConfig,
   ): Promise<void>;
 
@@ -549,18 +542,19 @@ export interface MessagingProvider<SendConfig = unknown> {
   ): Promise<void>;
 
   /**
-   * Forward a browser-generated ICE candidate to Meta during signaling.
-   * Trickle ICE — candidates flow over the call's lifetime, not just at
-   * setup. The reverse direction (Meta → us) arrives via webhook and
-   * routes through the bus's `call.ice_candidate` event.
+   * Admin helper: enable Calling on the provider's phone number via the
+   * settings endpoint. Required ONCE per number before placeCall works
+   * (else Meta returns 138000 "Calling API not enabled"). Distinct from
+   * the "Display call buttons" toggle in WhatsApp Manager (UI-only).
+   * Idempotent on the provider side.
    */
-  sendIceCandidate?(
-    args: {
-      externalCallId: string;
-      candidate: string;
-      sdpMid: string | null;
-      sdpMLineIndex: number | null;
-    },
-    config: SendConfig,
-  ): Promise<void>;
+  enableCalling?(config: SendConfig): Promise<{ ok: true; raw: unknown }>;
+
+  /**
+   * Admin helper: GET the provider's stored phone-number settings.
+   * Diagnostic — lets ops see what calling fields are actually set on
+   * the provider side (status, call_icon_visibility, call_hours, etc.)
+   * to debug why inbound calls aren't arriving at the webhook.
+   */
+  getPhoneNumberSettings?(config: SendConfig): Promise<{ raw: unknown }>;
 }

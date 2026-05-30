@@ -1,48 +1,67 @@
 "use client";
 
-import { Phone, PhoneIncoming, PhoneMissed, PhoneOff } from "lucide-react";
+import {
+  Phone,
+  PhoneCall,
+  PhoneIncoming,
+  PhoneMissed,
+  PhoneOff,
+} from "lucide-react";
 
 import type { CallSnapshot } from "@ccp/shared/types";
 
 /**
- * Inline call entry in the thread timeline. Renders like the existing
- * activity pills (`assigned`, `status_changed`) so it slots into the
- * mixed-content timeline without a new visual idiom.
+ * Inline call entry in the thread timeline. Same visual idiom as the
+ * activity pills (assignment / status / stage / tag changes) so it sorts
+ * cleanly into the mixed-content timeline.
  *
- * Phase 2 (SIP + recording) will add a Play button when `recordingUrl`
- * is non-null — the bubble already plumbs the field through.
+ * Copy is direction-aware: an inbound missed call reads "Missed call from
+ * customer" while a no-answer outbound reads "Customer didn't answer." A
+ * completed call shows just direction + duration ("Call · 1:23"); ringing
+ * shows nothing terminal (it's still ongoing).
  */
 export function CallBubble({ call }: { call: CallSnapshot }) {
-  const status = call.status;
   const isInbound = call.direction === "in";
 
   let Icon = Phone;
   let label: string;
-  let tone: "neutral" | "warn" | "danger" = "neutral";
+  let tone: "neutral" | "info" | "warn" | "danger" = "neutral";
 
-  if (status === "missed") {
-    Icon = PhoneMissed;
-    label = isInbound ? "Missed call" : "No answer";
-    tone = "warn";
-  } else if (status === "rejected") {
-    Icon = PhoneOff;
-    label = isInbound ? "Call declined" : "Call rejected by customer";
-    tone = "danger";
-  } else if (status === "failed") {
-    Icon = PhoneOff;
-    label = "Call failed";
-    tone = "danger";
-  } else if (status === "completed") {
-    Icon = isInbound ? PhoneIncoming : Phone;
-    label = isInbound ? "Incoming call" : "Outgoing call";
-  } else {
-    Icon = isInbound ? PhoneIncoming : Phone;
-    label = isInbound ? "Incoming call" : "Outgoing call";
+  switch (call.status) {
+    case "ringing":
+    case "in_progress":
+      Icon = PhoneCall;
+      label = isInbound ? "Incoming call" : "Outgoing call";
+      tone = "info";
+      break;
+    case "missed":
+      Icon = PhoneMissed;
+      label = isInbound ? "Missed call from customer" : "Customer didn't answer";
+      tone = "warn";
+      break;
+    case "rejected":
+      Icon = PhoneOff;
+      label = isInbound ? "Call declined" : "Customer declined the call";
+      tone = "danger";
+      break;
+    case "failed":
+      Icon = PhoneOff;
+      label = "Call couldn't connect";
+      tone = "danger";
+      break;
+    case "completed":
+    default:
+      Icon = isInbound ? PhoneIncoming : Phone;
+      label = isInbound ? "Incoming call" : "Outgoing call";
+      tone = "neutral";
+      break;
   }
 
   const tones = {
     neutral:
       "border-border bg-muted/40 text-muted-foreground",
+    info:
+      "border-sky-300/50 bg-sky-50 text-sky-900 dark:border-sky-700/40 dark:bg-sky-900/20 dark:text-sky-200",
     warn:
       "border-amber-300/50 bg-amber-50 text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200",
     danger:

@@ -31,6 +31,7 @@ import {
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 import dynamic from "next/dynamic";
 
@@ -44,34 +45,41 @@ import { CallPanel } from "@/features/calls/components/call-panel";
 import { IncomingCallToast } from "@/features/calls/components/incoming-call-toast";
 import { useCall } from "@/features/calls/hooks/use-call";
 import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
+import { toast } from "@/lib/toast";
 
 /**
- * Map a call-initiation 4xx reason from the API to a one-liner the agent
- * sees in the call panel. Centralised here so both the inbox shell and any
- * future trigger surface (contact page "Call" button) share the strings.
+ * Map a call-initiation 4xx reason to a one-line message for the call
+ * panel. Centralised so every trigger surface (inbox header, future
+ * contact-page Call button) shows the same copy.
  */
-function surfaceCallReason(
-  reason: string,
-  setError: (msg: string | null) => void,
-): void {
+// Map a structured call-failure reason to human copy. Pure so the caller can
+// BOTH set the in-panel error AND raise a toast — a pre-flight rejection tears
+// down `liveCall` (which unmounts CallPanel, the only consumer of `callError`),
+// so without the toast the message would never be seen.
+function callReasonMessage(reason: string): string {
   switch (reason) {
     case "permission_required":
-      setError("Permission requested — will ring when the customer grants it.");
-      return;
+      return "Permission request sent to the customer. Try again once they accept.";
     case "bic_blocked_region":
-      setError("Outbound calls aren't available in this contact's region.");
-      return;
+      return "Outbound WhatsApp calls aren't supported in this customer's country.";
     case "permission_revoked":
-      setError("Calling permission was revoked by the customer.");
-      return;
+      return "Calling permission was revoked. Wait for the customer to message you first.";
     case "rate_limited":
-      setError("Slow down — Meta is rate-limiting calls to this number.");
-      return;
+      return "WhatsApp is rate-limiting calls to this customer. Try again in a few minutes.";
     case "daily_cap_reached":
-      setError("Daily cap reached: max 5 connected calls per 24h per contact.");
-      return;
+      return "Daily limit reached: 5 connected calls per customer per 24 hours.";
+    case "provider_not_configured":
+      return "WhatsApp calling isn't configured for this team. Open Settings → WhatsApp.";
+    case "provider_rejected":
+      return "WhatsApp rejected the call. Make sure calling is enabled on your number.";
+    case "mic_permission_denied":
+      return "Allow microphone access in your browser to place calls.";
+    case "rtc_setup_failed":
+      return "Couldn't start the call. Check your microphone and try again.";
+    case "network_error":
+      return "Network problem. Check your connection and retry.";
     default:
-      setError(`Couldn't start the call (${reason}).`);
+      return "Couldn't start the call. Try again in a moment.";
   }
 }
 
@@ -234,7 +242,9 @@ export function InboxShell({
 
   // ---- WhatsApp voice calling ----
   // useCall owns the RTCPeerConnection lifecycle + subscribes to
-  // call:sdp_offer / call:ice / call:ended. Mounted at the shell level so
+  // call:sdp_offer / call:ended (call:sdp_offer carries BOTH the inbound offer
+  // and the customer's answer SDP — trickle-ICE was removed since Meta uses
+  // ICE-LITE, so there's no separate call:ice event). Mounted at the shell level so
   // a call survives thread switches. Side-effect (the IncomingCallToast +
   // CallPanel below) is rendered as a portal-like overlay; the inbox
   // layout doesn't shift when a call is in progress.
@@ -457,7 +467,7 @@ export function InboxShell({
   const onStartContactChat = useCallback(
     async (contactId: string) => {
       try {
-        const res = await fetch("/api/conversations/start", {
+        const res = await apiFetch("/api/conversations/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ contactId }),
@@ -873,45 +883,26 @@ export function InboxShell({
     void fetchThread(activeIdRef.current);
   }, [fetchThread]);
 
-  // Outbound call initiator. POSTs to /api/conversations/:id/call and maps
-  // the full 4xx matrix to a single human message in the call panel:
-  //   permission_required → "Permission requested — will ring when granted."
-  //   bic_blocked_region  → "Outbound calls aren't available in this region."
-  //   permission_revoked  → "Calling permission revoked by customer."
-  //   rate_limited        → "Slow down — Meta rate-limited this number."
-  //   daily_cap_reached   → "Limit of 5 calls per day reached for this contact."
+  // Outbound call initiator. Delegated to useCall — the hook does the
+  // WebRTC SDP-offer dance (browser-generated) and the POST. We only need
+  // to look up the displayed thread's contact name for the panel chrome
+  // and surface any pre-flight rejection.
   const initiateCallForActiveThread = useCallback(async () => {
     const targetId = displayedIdRef.current;
     if (!targetId) return;
     setCallError(null);
-    try {
-      const res = await fetchWithSessionGuard(
-        `/api/conversations/${targetId}/call`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({}),
-        },
-      );
-      if (res.ok) {
-        const body = (await res.json()) as { ok?: boolean; reason?: string };
-        if (body.ok === false && body.reason) {
-          surfaceCallReason(body.reason, setCallError);
-        }
-        return;
-      }
-      // 4xx with structured `reason` key. Map to a user-facing message.
-      let body: { reason?: string } | null = null;
-      try {
-        body = (await res.json()) as { reason?: string };
-      } catch {
-        body = null;
-      }
-      surfaceCallReason(body?.reason ?? `http_${res.status}`, setCallError);
-    } catch (err) {
-      setCallError(err instanceof Error ? err.message : "Failed to start call");
+    const snapshot = cache.get(targetId);
+    const contactName = snapshot?.data.contact.name ?? "Customer";
+    const result = await callApi.initiateOutbound(targetId, contactName);
+    if (!result.ok) {
+      const msg = callReasonMessage(result.reason);
+      setCallError(msg);
+      // Toast too — the pre-flight rejection already tore down `liveCall`, so
+      // CallPanel (the only consumer of callError) is unmounted and wouldn't
+      // show it. The toast guarantees the agent sees why the call didn't start.
+      toast.error(msg);
     }
-  }, []);
+  }, [cache, callApi]);
 
   // Below md we run a single-pane mode: either the conversation list OR the
   // thread is on screen. The hamburger (in MobileShellChrome) opens the

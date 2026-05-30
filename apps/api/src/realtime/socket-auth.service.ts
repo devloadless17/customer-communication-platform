@@ -101,7 +101,7 @@ export class SocketAuthService {
     // handshakes get the same single-DB-hit-per-window economics.
     const cached = sessionCacheGet(userId);
     if (cached) {
-      sessionCacheSetByCookie(cookieHeader, userId);
+      sessionCacheSetByCookie(cookieHeader, userId, sessionId);
       return {
         kind: "ok",
         identity: { userId, teamId: cached.teamId, role: cached.role },
@@ -141,7 +141,7 @@ export class SocketAuthService {
       avatarUrl: dbUser.avatarUrl ?? null,
       rolePermissions: dbUser.team?.rolePermissions ?? {},
     });
-    sessionCacheSetByCookie(cookieHeader, dbUser.id);
+    sessionCacheSetByCookie(cookieHeader, dbUser.id, sessionId);
     return {
       kind: "ok",
       identity: { userId, teamId: dbUser.teamId, role: dbUser.role as Role },

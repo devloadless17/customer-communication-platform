@@ -139,6 +139,13 @@ export class ContactFieldsService {
       });
     }
 
+    // Reject a duplicate LABEL (case-insensitive). There's a [teamId, key]
+    // unique but NONE on label, so two fields named "Notes" both write to
+    // row["Notes"] on CSV export (last-write-wins → the first field's data
+    // silently vanishes + a duplicate column) and collapse to one key on
+    // import (the other is unimportable). Silent CRM data loss; guard it here.
+    await this.assertLabelAvailable(teamId, input.label, null);
+
     // Disambiguate against existing keys — two labels that collapse to the
     // same slug would otherwise hit the [teamId, key] unique index.
     const usedKeys = new Set(existing.map((e) => e.key));
@@ -190,6 +197,12 @@ export class ContactFieldsService {
       });
     }
 
+    // Block a rename that collides with another field's label (case-insensitive,
+    // excluding this row) — same CSV-corruption guard as create().
+    if (typeof input.label === "string") {
+      await this.assertLabelAvailable(teamId, input.label, id);
+    }
+
     const updated = await this.db.contactFieldDefinition.update({
       where: { id },
       data: input,
@@ -232,6 +245,32 @@ export class ContactFieldsService {
       teamId,
       scope: "contact-fields",
     });
+  }
+
+  /**
+   * Throw 409 if another field on this team already uses `label` (compared by
+   * its normalized slug, so "Notes" / "notes " / "NOTES" all collide). Pass
+   * `excludeId` on update so a field doesn't conflict with itself. Prevents the
+   * duplicate-label CSV-corruption class — distinct keys but identical export
+   * column headers, which silently drops one field's data on export/import.
+   */
+  private async assertLabelAvailable(
+    teamId: string,
+    label: string,
+    excludeId: string | null,
+  ): Promise<void> {
+    const slug = slugifyKey(label);
+    if (!slug) return; // empty/invalid labels are rejected elsewhere by the key check
+    const siblings = await this.db.contactFieldDefinition.findMany({
+      where: { teamId, ...(excludeId ? { id: { not: excludeId } } : {}) },
+      select: { label: true },
+    });
+    if (siblings.some((s) => slugifyKey(s.label) === slug)) {
+      throw new ConflictException({
+        error: "duplicate_label",
+        detail: `A contact field named "${label}" already exists — pick a different name.`,
+      });
+    }
   }
 }
 

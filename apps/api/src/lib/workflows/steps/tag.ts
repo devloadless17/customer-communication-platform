@@ -155,11 +155,15 @@ async function runTagMutation(
     added: kind === "add" ? [tag.id] : [],
     removed: kind === "remove" ? [tag.id] : [],
     changedByUserId: null,
-    // Defensive — workflow-dispatch doesn't subscribe to this event
-    // today, but the day someone wires the "On Contact Tag updated"
-    // trigger they MUST honor `silent` or this step infinite-loops into
-    // itself. Mirrors the catch-all `contact.updated` publish above.
+    // `silent: true` keeps this loop-safe — a future "On Contact Tag updated"
+    // trigger MUST NOT re-fire workflows on this step-driven change.
     silent: true,
+    // ...but partners subscribed to "On Contact Tag updated" DO want to see
+    // step-driven changes (that's the whole point of pipeline automation), so
+    // override the webhook gate to deliver. Without this the narrow event was
+    // published-but-never-delivered — the comment promised delivery, the
+    // `silent`-gated subscriber dropped it.
+    skipOutboundWebhook: false,
   });
 
   return advance({ contactId, tagId: tag.id, kind, tagIds: payload.tagIds });

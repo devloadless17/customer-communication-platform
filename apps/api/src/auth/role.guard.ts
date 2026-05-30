@@ -53,11 +53,11 @@ export class RoleGuard implements CanActivate {
 
     const role: Role = session.role;
     if (required === "superAdmin") {
-      if (role !== "superAdmin") throw new ForbiddenException("forbidden");
+      if (role !== "superAdmin") throw new ForbiddenException({ error: "forbidden" });
       return true;
     }
     // admin OR superAdmin
-    if (!canManageUsers(role)) throw new ForbiddenException("forbidden");
+    if (!canManageUsers(role)) throw new ForbiddenException({ error: "forbidden" });
     return true;
   }
 }

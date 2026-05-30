@@ -11,10 +11,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@ccp/shared/utils";
-import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import { dispatchLocalSocketEvent, dispatchLocalSocketEvents } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 import {
-  optimisticAssignment,
-  optimisticStatusChange,
+  buildOptimisticAssignment,
+  buildOptimisticStatusChange,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import type { ConversationStatus, User } from "@ccp/shared/types";
@@ -67,43 +68,49 @@ export function StatusDropdown({
       ? teamMembers.find((u) => u.id === assignedUserId) ?? null
       : null;
     // Optimistic: fan the same socket frames the server will broadcast so
-    // sidebar status badges, the row, the right-rail mirror, and the assignee
-    // chip flip instantly instead of waiting on PATCH → bus → socket round-trip.
+    // sidebar status badges, the row, the right-rail mirror, the assignee
+    // chip, AND the matching activity pill flip in ONE paint cycle. Each
+    // individual `dispatchLocalSocketEvent` wraps its own `flushSync`, so
+    // calling them in sequence produced N paints in a row — the gap between
+    // the status-frame paint and the activity-frame paint is what surfaced as
+    // "the activity log is slower than everything else". Bundling into one
+    // `dispatchLocalSocketEvents` collapses all frames into a single commit.
+    //
     // `optimistic: true` tells the inbox-list resync + counts refetch to skip
-    // their GETs for this frame — otherwise both fire during the in-flight
-    // PATCH window and either (a) return pre-change state that flickers the
-    // row back, or (b) overwrite the optimistic count badge with stale numbers.
-    // The authoritative server frame (optimistic absent) drives convergence.
-    dispatchLocalSocketEvent("conversation:status", {
-      teamId,
-      conversationId,
-      status,
-      optimistic: true,
-    });
-    // Synthesize the matching timeline pill so it lands in the same frame as
-    // the status badge, not a GET behind it. Reconciled by the authoritative
-    // events fetch; rolled back below on a failed write.
-    const statusActivityId = optimisticStatusChange({
+    // their GETs during the in-flight PATCH window — otherwise both fire and
+    // either (a) return pre-change state that flickers the row back, or (b)
+    // overwrite the optimistic count badge with stale numbers. The
+    // authoritative server frame (optimistic absent) drives convergence.
+    const statusActivity = buildOptimisticStatusChange({
       teamId,
       conversationId,
       actorName: currentUserName,
       status,
     });
+    const statusActivityId = statusActivity.id;
     let unassignActivityId: string | null = null;
+    const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
+      [
+        "conversation:status",
+        { teamId, conversationId, status, optimistic: true },
+      ],
+      statusActivity.frame,
+    ];
     if (willUnassign) {
-      dispatchLocalSocketEvent("conversation:assigned", {
-        teamId,
-        conversationId,
-        assignedUser: null,
-        optimistic: true,
-      });
-      unassignActivityId = optimisticAssignment({
+      const unassignActivity = buildOptimisticAssignment({
         teamId,
         conversationId,
         actorName: currentUserName,
         assignedToName: null,
       });
+      unassignActivityId = unassignActivity.id;
+      frames.push([
+        "conversation:assigned",
+        { teamId, conversationId, assignedUser: null, optimistic: true },
+      ]);
+      frames.push(unassignActivity.frame);
     }
+    dispatchLocalSocketEvents(frames);
     const rollbackActivity = () => {
       rollbackOptimisticActivity(teamId, conversationId, statusActivityId);
       if (unassignActivityId) {
@@ -111,7 +118,7 @@ export function StatusDropdown({
       }
     };
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/status`, {
+      const res = await apiFetch(`/api/conversations/${conversationId}/status`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ status }),
@@ -171,7 +178,15 @@ export function StatusDropdown({
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent
+        align="end"
+        // Don't return focus to the trigger on close — Radix's programmatic
+        // `.focus()` triggers `:focus-visible`, painting the persistent ring
+        // that read as "the button stays selected after picking". The user
+        // already used the mouse to pick; the focus return is keyboard-a11y
+        // boilerplate that doesn't apply here.
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         {items.map(({ value, icon: ItemIcon, cls }) => (
           <DropdownMenuItem key={value} onSelect={() => void setStatus(value)}>
             {value === current ? (

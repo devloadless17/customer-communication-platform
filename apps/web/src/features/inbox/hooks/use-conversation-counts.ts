@@ -126,6 +126,16 @@ export function useConversationCounts(): ConversationCounts | null {
       const map = lastStageRef.current;
       const known = map.has(contact.id);
       const prevStage = known ? map.get(contact.id) ?? null : null;
+      // FIFO cap: this Map gains one entry per distinct contact touched for the
+      // life of the tab. Bounded by the team's contact count, but on a busy,
+      // long-lived inbox it's grow-only. Evict the oldest insertion once over
+      // the cap — a re-seen contact just re-refreshes defensively (the absent
+      // entry is treated as "unknown prior", which is correct).
+      const MAX_TRACKED = 5_000;
+      if (!known && map.size >= MAX_TRACKED) {
+        const oldest = map.keys().next().value;
+        if (oldest !== undefined) map.delete(oldest);
+      }
       map.set(contact.id, nextStage);
       if (known && prevStage === nextStage) return;
       void refresh();

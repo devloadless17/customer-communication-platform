@@ -5,10 +5,13 @@
  * built-in `Contact.location` column and the contact panel renders two
  * fields with the same label that write to different storage.
  *
- * Stays in shared/ so the CSV import header recognizer and the Zod schemas
- * can both reference the same list.
+ * Module-private — only `isReservedFieldKey` (the single public entry point)
+ * reads this list + the normalizer below. Previously both were exported "so
+ * the CSV import recognizer and Zod schemas can reference them", but nothing
+ * ever did; de-exported to keep the public surface to the one function callers
+ * actually use.
  */
-export const RESERVED_FIELD_KEYS: ReadonlyArray<string> = [
+const RESERVED_FIELD_KEYS: ReadonlyArray<string> = [
   // Identity
   "id",
   "phone",
@@ -57,7 +60,7 @@ const RESERVED_SET = new Set(RESERVED_FIELD_KEYS);
  * (lowercase, underscored) so collision checks aren't fooled by case or
  * inner whitespace ("First Name" → "first_name").
  */
-export function normalizeFieldKey(label: string): string {
+function normalizeFieldKey(label: string): string {
   return label
     .toLowerCase()
     .normalize("NFKD")

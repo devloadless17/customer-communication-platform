@@ -114,7 +114,7 @@ export class DevEmitController {
     @Body(zBody(DevEmitSchema)) body: DevEmitBody,
   ): Promise<{ ok: boolean; messageId?: string; noteId?: string; status?: MessageStatus }> {
     if (!devToolsEnabled()) {
-      throw new NotFoundException("Not Found");
+      throw new NotFoundException({ error: "not_found" });
     }
     const { teamId, userId } = session;
 

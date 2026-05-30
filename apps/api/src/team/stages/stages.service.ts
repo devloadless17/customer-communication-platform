@@ -160,7 +160,8 @@ export class StagesService {
     if (!stage) throw new NotFoundException({ error: "not found" });
 
     // Refuse delete-while-in-use; carry the count back so the UI can
-    // render "12 contacts still here — move them first".
+    // render "12 contacts still here — move them first". (Fast pre-check for a
+    // friendly error; the authoritative re-check happens inside the tx below.)
     const contactCount = await this.db.contact.count({
       // Only live contacts block stage deletion — a tombstoned contact that
       // still carries this stageId shouldn't keep the stage un-deletable.
@@ -174,22 +175,44 @@ export class StagesService {
       });
     }
 
-    // Deleting the default while siblings exist is refused — admin must
-    // promote one first. Deleting the LAST stage is allowed (ensureDefaultStage
-    // re-creates one on next contact create).
-    if (stage.isDefault) {
-      const otherCount = await this.db.contactStage.count({
-        where: { teamId, NOT: { id } },
-      });
-      if (otherCount > 0) {
-        throw new ConflictException({
-          error: "default stage",
-          detail: "This is the default stage. Promote another stage to default before deleting.",
+    // Re-check in-use AND default-protection INSIDE a Serializable tx, then
+    // delete — so a concurrent assign-into-this-stage (manual/setTags/bulk) or
+    // a concurrent default-promotion can't slip between the check and the
+    // delete. Without this, the FK `onDelete: SetNull` would silently null the
+    // racing contact's stageId (TOCTOU orphan). Serializable (no retry loop —
+    // stage delete is a rare admin op; a P2034 conflict surfaces as a clean
+    // error the admin re-tries) closes the window cheaply.
+    await this.db.$transaction(
+      async (tx) => {
+        const liveInStage = await tx.contact.count({
+          where: { teamId, stageId: id, deletedAt: null },
         });
-      }
-    }
-
-    await this.db.contactStage.delete({ where: { id } });
+        if (liveInStage > 0) {
+          throw new ConflictException({
+            error: "stage in use",
+            detail: `${liveInStage} contact${liveInStage === 1 ? " is" : "s are"} still in this stage. Move them to another stage first.`,
+            contactCount: liveInStage,
+          });
+        }
+        // Deleting the default while siblings exist is refused — admin must
+        // promote one first. Deleting the LAST stage is allowed
+        // (ensureDefaultStage re-creates one on next contact create).
+        if (stage.isDefault) {
+          const otherCount = await tx.contactStage.count({
+            where: { teamId, NOT: { id } },
+          });
+          if (otherCount > 0) {
+            throw new ConflictException({
+              error: "default stage",
+              detail:
+                "This is the default stage. Promote another stage to default before deleting.",
+            });
+          }
+        }
+        await tx.contactStage.delete({ where: { id } });
+      },
+      { isolationLevel: "Serializable" },
+    );
     // Bust the default-stage memo so a cached pointer to the just-deleted
     // stage can't hand a deleted id to the webhook hot path.
     if (stage.isDefault) invalidateDefaultStageCache(teamId);

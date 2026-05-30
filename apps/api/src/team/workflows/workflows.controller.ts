@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from "@nestjs/common";
 
@@ -13,11 +14,13 @@ import { CurrentSession } from "../../auth/current-session.decorator";
 import { RequireRole } from "../../auth/role.guard";
 import { SessionGuard } from "../../auth/session.guard";
 import type { ApiSession } from "../../auth/session.guard";
-import { zBody } from "../../common/zod-validation.pipe";
+import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import {
+  ListWorkflowRunsQuerySchema,
   ManualTriggerSchema,
   PublishWorkflowSchema,
   TestWorkflowSchema,
+  type ListWorkflowRunsQuery,
   type ManualTriggerInput,
   type PublishWorkflowInput,
   type TestWorkflowInput,
@@ -118,8 +121,9 @@ export class WorkflowsController {
   async listRuns(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
+    @Query(zQuery(ListWorkflowRunsQuerySchema)) query: ListWorkflowRunsQuery,
   ) {
-    return this.workflows.listRuns(session.teamId, id);
+    return this.workflows.listRuns(session.teamId, id, query);
   }
 
   @Get(":id/runs/:runId")

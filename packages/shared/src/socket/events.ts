@@ -650,28 +650,17 @@ export interface ServerToClientEvents {
     status: "completed" | "missed" | "rejected" | "failed";
   }) => void;
 
-  /** SDP offer delivered by Meta; routed to the answering browser. The
-   *  browser feeds it into RTCPeerConnection.setRemoteDescription, generates
-   *  an answer, then POSTs /api/calls/:id/answer with the answer SDP. */
+  /** SDP delivered by Meta. Inbound: type="offer" (customer's offer →
+   *  browser generates answer → POST /answer). Outbound: type="answer"
+   *  (customer's answer to our offer → browser calls setRemoteDescription
+   *  to complete handshake). Branches on payload.sdp.type. */
   "call:sdp_offer": (payload: {
     teamId: string;
     conversationId: string;
     callId: string;
-    sdp: { type: "offer"; sdp: string };
+    sdp: { type: "offer" | "answer"; sdp: string };
   }) => void;
 
-  /** Trickle ICE candidate from Meta. Conversation room — only the live-call
-   *  agent's browser feeds it into RTCPeerConnection.addIceCandidate. */
-  "call:ice": (payload: {
-    teamId: string;
-    conversationId: string;
-    callId: string;
-    candidate: {
-      candidate: string;
-      sdpMid: string | null;
-      sdpMLineIndex: number | null;
-    };
-  }) => void;
 }
 
 // -------------------------------------------------------------------------

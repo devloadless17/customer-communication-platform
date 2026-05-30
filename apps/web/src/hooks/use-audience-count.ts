@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { apiFetch } from "@/lib/api/client-fetch";
+
 /**
  * Live recipient count for an audience expressed as `{ tagIds, contactIds }` —
  * the UNION semantics the server resolves (contacts carrying ANY chosen tag,
@@ -36,7 +38,7 @@ export function useAudienceCount(
     setLoading(true);
     const t = window.setTimeout(async () => {
       try {
-        const res = await fetch("/api/contacts/count", {
+        const res = await apiFetch("/api/contacts/count", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ tagIds, contactIds }),

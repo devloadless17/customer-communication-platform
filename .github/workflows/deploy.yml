@@ -96,6 +96,12 @@ jobs:
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          # Postgres DB + user feed the smoke .env AND the on-VPS /opt/ccp/.env
+          # rendering below. Empty values silently produce a broken DATABASE_URL
+          # ("postgres://:@…/") that fails at boot in a confusing way — validate
+          # them here with everything else.
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -104,6 +110,7 @@ jobs:
           missing=()
           for v in ENCRYPTION_KEY BETTER_AUTH_SECRET INTERNAL_BUS_SECRET POSTGRES_PASSWORD UPLOADTHING_TOKEN \
                    APP_DOMAIN ADMIN_EMAIL HEALTHCHECK_URL DOCKER_USERNAME DOCKER_PASSWORD \
+                   POSTGRES_DB POSTGRES_USER \
                    VPS_HOST VPS_USER VPS_SSH_KEY; do
             [ -z "${!v:-}" ] && missing+=("$v")
           done
@@ -402,7 +409,8 @@ jobs:
           # migration that can rebuild indexes in 30-60s). web only flips
           # healthy after api flips healthy (depends_on chain), so we budget
           # api 120s + web's own ~5s boot + a margin = 180s.
-          deadline=$((SECONDS + 180))
+          budget=180
+          deadline=$((SECONDS + budget))
           while [ $SECONDS -lt $deadline ]; do
             app_id=$(docker compose --env-file .env ps -q app)
             if [ -z "$app_id" ]; then
@@ -424,7 +432,7 @@ jobs:
             sleep 2
           done
           if [ "$health" != "healthy" ]; then
-            echo "✗ app never reported healthy in 120s"
+            echo "✗ app never reported healthy in ${budget}s"
             docker compose --env-file .env logs app
             exit 1
           fi
@@ -618,11 +626,19 @@ jobs:
         env:
           HEALTH_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
-          for i in $(seq 1 30); do
-            if curl -fsS -m 3 "$HEALTH_URL" > /dev/null; then echo "✓ live"; exit 0; fi
+          # 150s budget (75 × 2s). MUST exceed the api container's compose
+          # start_period (120s) — that window exists precisely because a
+          # stack-of-migrations `prisma migrate deploy` can take ~60-120s on a
+          # meaty schema change. The old 60s budget timed out WHILE a healthy
+          # deploy's migration was still running → tripped the auto-rollback
+          # below → retagged :previous against the ALREADY-migrated schema →
+          # Prisma threw on the now-mismatched client. The safety net created
+          # the outage. 150s gives the migration its full window plus margin.
+          for i in $(seq 1 75); do
+            if curl -fsS -m 3 "$HEALTH_URL" > /dev/null; then echo "✓ live after $((i*2))s"; exit 0; fi
             sleep 2
           done
-          echo "✗ health never green in 60s"
+          echo "✗ health never green in 150s"
           exit 1
 
       # Warm-up the public origin via the api path through Caddy. The

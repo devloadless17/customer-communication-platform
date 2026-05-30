@@ -24,6 +24,7 @@ import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
 import type {
+  ListWorkflowRunsQuery,
   ManualTriggerInput,
   TestWorkflowInput,
 } from "./workflows.schemas";
@@ -869,17 +870,30 @@ export class WorkflowsService {
   // Runs
   // -------------------------------------------------------------------------
 
-  async listRuns(teamId: string, id: string) {
+  async listRuns(teamId: string, id: string, query?: ListWorkflowRunsQuery) {
     const wf = await this.db.workflow.findFirst({
       where: { id, teamId },
       select: { id: true },
     });
     if (!wf) throw new NotFoundException({ error: "not found" });
 
+    // Keyset pagination on (startedAt DESC, id DESC) — rides the existing
+    // (workflowId, startedAt DESC) index. Previously hard-capped at 50 with no
+    // cursor, so older runs were unreachable. Default page 50, max 200.
+    const take = query?.take ?? 50;
+    const cursor = parseRunCursor(query?.cursor);
     const rows = await this.db.workflowRun.findMany({
-      where: { workflowId: id },
-      orderBy: { startedAt: "desc" },
-      take: 50,
+      where: cursor
+        ? {
+            workflowId: id,
+            OR: [
+              { startedAt: { lt: cursor.startedAt } },
+              { startedAt: cursor.startedAt, id: { lt: cursor.id } },
+            ],
+          }
+        : { workflowId: id },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      take: take + 1,
       select: {
         id: true,
         status: true,
@@ -893,8 +907,13 @@ export class WorkflowsService {
         stepLog: true,
       },
     });
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const last = page.at(-1);
+    const nextCursor =
+      hasMore && last ? `${last.startedAt.getTime()}_${last.id}` : null;
     return {
-      runs: rows.map((r) => ({
+      runs: page.map((r) => ({
         id: r.id,
         status: r.status,
         trigger: r.trigger,
@@ -906,6 +925,7 @@ export class WorkflowsService {
         finishedAt: r.finishedAt?.toISOString() ?? null,
         stepCount: Array.isArray(r.stepLog) ? r.stepLog.length : 0,
       })),
+      nextCursor,
     };
   }
 
@@ -983,6 +1003,22 @@ export class WorkflowsService {
       scope: "workflows",
     });
   }
+}
+
+/**
+ * Decode a `<startedAtMs>_<id>` workflow-run list cursor. Returns null on any
+ * malformed input so a bad cursor degrades to "first page" rather than 500.
+ */
+function parseRunCursor(
+  raw: string | undefined,
+): { startedAt: Date; id: string } | null {
+  if (!raw) return null;
+  const sep = raw.indexOf("_");
+  if (sep <= 0) return null;
+  const ms = Number(raw.slice(0, sep));
+  const id = raw.slice(sep + 1);
+  if (!Number.isFinite(ms) || !id) return null;
+  return { startedAt: new Date(ms), id };
 }
 
 /**

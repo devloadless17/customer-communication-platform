@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type { MediaKind, MessageDirection } from "@ccp/shared/types";
 
@@ -107,7 +108,7 @@ export function MessageSearch({
     setError(null);
     const t = window.setTimeout(async () => {
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/conversations/${conversationId}/messages/search?q=${encodeURIComponent(trimmed)}&take=100`,
         );
         if (reqId.current !== my) return;

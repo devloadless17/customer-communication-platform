@@ -144,7 +144,11 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
       before: { stageId: previousStageId },
       after: { stageId: updated.stageId },
       changedByUserId: null,
+      // Loop-safe (no workflow re-trigger) but partner-visible: a workflow
+      // moving a contact's pipeline stage is exactly the signal n8n flows
+      // subscribed to. See tag.ts + ContactTagChangedEvent.skipOutboundWebhook.
       silent: true,
+      skipOutboundWebhook: false,
     });
 
     return advance({ contactId, previousStageId, newStageId: stage.id });

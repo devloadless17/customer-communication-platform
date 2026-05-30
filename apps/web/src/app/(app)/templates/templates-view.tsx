@@ -21,6 +21,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { LocalTime } from "@/components/local-time";
 import { TemplatePreview } from "@/features/templates/components/template-preview";
 import { VariableBindingsEditor } from "@/features/templates/components/variable-bindings-editor";
+import { apiFetch } from "@/lib/api/client-fetch";
 import type { ContactFieldDefinition, TemplateDto } from "@ccp/shared/types";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import { parseVariableBindings, type VariableBindings } from "@ccp/shared/template-bindings";
@@ -132,7 +133,7 @@ export function TemplatesView({
   }, [templates, query, statusFilter]);
 
   const reload = useCallback(async () => {
-    const res = await fetch("/api/team/whatsapp/templates");
+    const res = await apiFetch("/api/team/whatsapp/templates");
     if (!res.ok) return;
     const data = (await res.json()) as { templates?: TemplateDto[] };
     if (data.templates) setTemplates(data.templates);
@@ -142,7 +143,7 @@ export function TemplatesView({
     setSyncError(null);
     setSyncing(true);
     try {
-      const res = await fetch("/api/team/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch("/api/team/whatsapp/templates", { method: "POST" });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -171,7 +172,7 @@ export function TemplatesView({
       setDeleteError(null);
       setDeleting(true);
       try {
-        const res = await fetch(`/api/team/whatsapp/templates/${target.id}`, {
+        const res = await apiFetch(`/api/team/whatsapp/templates/${target.id}`, {
           method: "DELETE",
         });
         if (!res.ok) {

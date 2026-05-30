@@ -42,9 +42,9 @@ const isProd = process.env.NODE_ENV === "production";
 // builder evaluates every route module to collect page data, which loads
 // this file and constructs the auth instance below. We don't want the build
 // to fail just because the build environment doesn't have the production
-// secret — runtime validation in lib/env.ts (called from server.ts) is the
-// real gate. So during build, fall through to a placeholder; at runtime,
-// throw fast on missing secret.
+// secret — runtime env validation in instrumentation.ts (the Next.js boot
+// hook that replaced the removed server.ts) is the real gate. So during build,
+// fall through to a placeholder; at runtime, throw fast on missing secret.
 const IS_BUILD_PHASE = process.env.NEXT_PHASE === "phase-production-build";
 
 function readSecret(): string {
@@ -52,8 +52,8 @@ function readSecret(): string {
   if (!s) {
     if (IS_BUILD_PHASE) {
       // Build-time only: the resulting bundle never reads this string;
-      // server.ts validates env on boot and exits if the real secret is
-      // missing. Using a deterministic placeholder keeps the build cache
+      // instrumentation.ts validates env on boot and exits if the real secret
+      // is missing. Using a deterministic placeholder keeps the build cache
       // hash stable across CI runs.
       return "build-time-placeholder-not-used-at-runtime";
     }

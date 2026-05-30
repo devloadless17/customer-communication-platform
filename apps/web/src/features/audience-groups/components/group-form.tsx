@@ -14,6 +14,7 @@ import {
   type AudienceValue,
 } from "@/features/broadcasts/components/audience-builder";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
 import type { ContactFieldDefinition, ContactStage, Tag } from "@ccp/shared/types";
@@ -84,12 +85,12 @@ export function GroupForm({
         contactIds: audience.contactIds,
       };
       const res = initial
-        ? await fetch(`/api/team/audience-groups/${initial.id}`, {
+        ? await apiFetch(`/api/team/audience-groups/${initial.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
           })
-        : await fetch("/api/team/audience-groups", {
+        : await apiFetch("/api/team/audience-groups", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
@@ -141,7 +142,7 @@ export function GroupForm({
     if (!ok) return;
     setDeleting(true);
     try {
-      const res = await fetch(`/api/team/audience-groups/${initial.id}`, {
+      const res = await apiFetch(`/api/team/audience-groups/${initial.id}`, {
         method: "DELETE",
       });
       if (!res.ok) {

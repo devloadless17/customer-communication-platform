@@ -207,6 +207,56 @@ export function dispatchLocalSocketEvent<E extends keyof ServerToClientEvents>(
 }
 
 /**
+ * Batched form — fan multiple `ServerToClient` events through their subscribers
+ * in ONE `flushSync` so every queued setState commits in a single paint cycle.
+ *
+ * Why this exists: an optimistic mutation typically pairs a state-changing
+ * frame (`conversation:status`) with a matching timeline pill
+ * (`conversation:activity`). Calling `dispatchLocalSocketEvent` twice in a row
+ * wraps each in its OWN flushSync, so React commits TWO paints in quick
+ * succession — the header chip in paint 1, the activity pill in paint 2. The
+ * gap (one rAF tick + the browser's commit work) reads as the activity log
+ * lagging the rest of the UI. Bundling both into one flushSync collapses them
+ * into a single commit, so the chip + pill land in the same frame.
+ *
+ * Each entry runs through its own subscriber list; an unsubscribed event is a
+ * no-op (matches the single-event form).
+ */
+type DispatchTuple = {
+  [E in keyof ServerToClientEvents]: [E, Parameters<ServerToClientEvents[E]>[0]];
+}[keyof ServerToClientEvents];
+
+export function dispatchLocalSocketEvents(events: DispatchTuple[]): void {
+  const s = socket;
+  if (!s) return;
+  if (events.length === 0) return;
+  // Snapshot listeners up front for the same iteration-stability reason as
+  // the single-event form.
+  const plan: { listeners: AnyListener[]; payload: unknown; name: string }[] = [];
+  for (const [event, payload] of events) {
+    const ls = (s.listeners(event as any) as AnyListener[]).slice();
+    if (ls.length > 0) plan.push({ listeners: ls, payload, name: String(event) });
+  }
+  if (plan.length === 0) return;
+  const run = () => {
+    for (const { listeners, payload, name } of plan) {
+      for (const fn of listeners) {
+        try {
+          fn(payload);
+        } catch (err) {
+          console.error(`[socket] local batched dispatch ${name} subscriber threw`, err);
+        }
+      }
+    }
+  };
+  try {
+    flushSync(run);
+  } catch {
+    run();
+  }
+}
+
+/**
  * Tear the singleton down. Called on sign-out so:
  *   1) the server fires a `disconnect` for this socket and removes the user
  *      from the presence set (other tabs see the green dot drop immediately),

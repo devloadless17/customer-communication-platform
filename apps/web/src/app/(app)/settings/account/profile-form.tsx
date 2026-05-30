@@ -11,7 +11,6 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 
 interface ProfileFormProps {
   user: {
@@ -60,13 +59,11 @@ export function ProfileForm({ user }: ProfileFormProps) {
         return;
       }
       setDone("name");
-      dispatchLocalSocketEvent("user:profile:updated", {
-        teamId: user.teamId,
-        userId: user.id,
-        name: next,
-      });
-      // Server name changes don't bust the RSC cache automatically — refresh
-      // so the header pill (which reads `getSession`) shows the new name.
+      // No local socket dispatch: `dispatchLocalSocketEvent` only runs THIS
+      // tab's listeners (and none subscribe to user:profile:updated), so it was
+      // a pure no-op. Teammates get the change via the SERVER `user.profile_updated`
+      // bus event the PATCH publishes (→ team:catalog:changed → roster refetch);
+      // this tab's own header pill updates via router.refresh() below.
       router.refresh();
     });
   };
@@ -110,11 +107,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
       }
       setAvatarUrl(data.url);
       setDone("avatar");
-      dispatchLocalSocketEvent("user:profile:updated", {
-        teamId: user.teamId,
-        userId: user.id,
-        avatarUrl: data.url,
-      });
+      // See onSubmit: teammates get this via the server bus event; this tab via refresh.
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't upload avatar");
@@ -140,11 +133,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
       }
       setAvatarUrl(null);
       setDone("avatar");
-      dispatchLocalSocketEvent("user:profile:updated", {
-        teamId: user.teamId,
-        userId: user.id,
-        avatarUrl: null,
-      });
+      // See onSubmit: teammates get this via the server bus event; this tab via refresh.
       router.refresh();
       toast.success("Avatar removed");
     } finally {

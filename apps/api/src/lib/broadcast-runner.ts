@@ -90,7 +90,7 @@ const SEND_CONCURRENCY = 5;
  * config drift (audience-group blow-up, accidental "send to all") can't
  * OOM the Next.js server.
  */
-const MAX_RECIPIENTS_IN_PROCESS = 10_000;
+export const MAX_RECIPIENTS_IN_PROCESS = 10_000;
 
 /**
  * Per-broadcast 429 streak tracking. Keyed by broadcast id; bumped on

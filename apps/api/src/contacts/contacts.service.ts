@@ -47,7 +47,10 @@ export interface ImportResult {
   total: number;
   /** Newly-inserted rows. */
   created: number;
-  /** Phone-number matches; left untouched. */
+  /** Soft-deleted rows the import brought back (un-tombstoned). Counted
+   *  separately from `created` so the UI can say "X new, Y restored". */
+  revived: number;
+  /** Phone-number matches (active rows); left untouched. */
   skippedExisting: number;
   /** Rows we couldn't parse (missing phone, invalid format). */
   errors: Array<{ row: number; reason: string }>;
@@ -346,7 +349,7 @@ export class ContactsService {
     try {
       result = await this.db.$transaction(async (tx) => {
         const existing = await tx.contact.findFirst({
-          where: { id: contactId, teamId },
+          where: { id: contactId, teamId, deletedAt: null },
           include: { tags: { select: { id: true } } },
         });
         if (!existing) return null;
@@ -522,11 +525,13 @@ export class ContactsService {
     action?: BulkContactsInput["action"];
     failed?: number;
   }> {
-    // Scope to actually-owned rows. Downstream calls already filter by
-    // teamId, but doing it explicitly lets us emit accurate per-id events
-    // and refuse client-supplied ids that aren't ours.
+    // Scope to actually-owned, LIVE rows. Downstream calls already filter by
+    // teamId, but doing it explicitly lets us emit accurate per-id events and
+    // refuse client-supplied ids that aren't ours. `deletedAt: null` keeps a
+    // bulk tag/stage/field op from mutating tombstoned contacts (which would
+    // resurrect them invisibly in tag/stage joins).
     const ownContacts = await this.db.contact.findMany({
-      where: { teamId, id: { in: input.contactIds } },
+      where: { teamId, id: { in: input.contactIds }, deletedAt: null },
       select: { id: true },
     });
     const ownedIds = ownContacts.map((c) => c.id);
@@ -714,7 +719,11 @@ export class ContactsService {
    * export→import flips inbound→manual on the second pass; only NEW rows
    * change, since matching phones are left untouched).
    */
-  async importCsv(teamId: string, fileBytes: Buffer): Promise<ImportResult> {
+  async importCsv(
+    teamId: string,
+    userId: string,
+    fileBytes: Buffer,
+  ): Promise<ImportResult> {
     if (fileBytes.length > MAX_BYTES) {
       throw new BadRequestException({
         error: `file too large (max ${MAX_BYTES} bytes)`,
@@ -962,34 +971,53 @@ export class ContactsService {
       });
     }
 
-    const existing = await this.db.contact.findMany({
-      where: { teamId, phoneNumber: { in: pending.map((p) => p.phoneNumber) } },
-      select: { phoneNumber: true },
-    });
-    const existingSet = new Set(existing.map((e) => e.phoneNumber));
+    // Split pending rows three ways by their phone's current state:
+    //   - active row exists      → skippedExisting (left untouched)
+    //   - soft-deleted row exists → REVIVE (un-tombstone; mirrors the single-
+    //                               create revive contract so "delete then
+    //                               re-upload my list" works instead of silently
+    //                               no-op'ing the deleted contacts)
+    //   - no row at all           → create
+    // Two narrow lookups (active + tombstoned) instead of one un-filtered query
+    // so tombstoned rows don't masquerade as duplicates.
+    const phones = pending.map((p) => p.phoneNumber);
+    const [activeRows, tombstonedRows] = await Promise.all([
+      this.db.contact.findMany({
+        where: { teamId, phoneNumber: { in: phones }, deletedAt: null },
+        select: { phoneNumber: true },
+      }),
+      this.db.contact.findMany({
+        where: { teamId, phoneNumber: { in: phones }, deletedAt: { not: null } },
+        select: { id: true, phoneNumber: true },
+      }),
+    ]);
+    const activeSet = new Set(activeRows.map((e) => e.phoneNumber));
+    const tombstonedIdByPhone = new Map(
+      tombstonedRows.map((r) => [r.phoneNumber, r.id]),
+    );
 
-    const toCreate = pending.filter((p) => !existingSet.has(p.phoneNumber));
-    const skippedExisting = pending.length - toCreate.length;
+    const toCreate = pending.filter(
+      (p) => !activeSet.has(p.phoneNumber) && !tombstonedIdByPhone.has(p.phoneNumber),
+    );
+    const toRevive = pending.filter((p) => tombstonedIdByPhone.has(p.phoneNumber));
+    const skippedExisting = activeSet.size;
 
     let created = 0;
+    let revived = 0;
     const unknownStages = new Set<string>();
-    if (toCreate.length > 0) {
-      // Default stage looked up once for the whole batch — rows with no (or an
-      // unknown) stage land here.
-      const defaultStageId = await ensureDefaultStage(teamId);
 
-      // Resolve the DISTINCT stage names present in the CSV to ids in one
-      // query (stages are a small curated set). Case-insensitive match;
-      // unknown names fall back to default and are reported in the summary.
-      // Stages are NEVER auto-created — a typo shouldn't multiply the pipeline.
-      const stageNameKeys = new Set(
-        toCreate
-          .map((p) => p.stageName)
-          .filter((s) => s.length > 0)
-          .map((s) => s.toLowerCase()),
+    // Stage resolver — shared by the create AND revive paths so an imported
+    // row lands in the right stage either way. Default stage + the team's
+    // stage catalog looked up once. Stages are NEVER auto-created (a typo
+    // shouldn't multiply the pipeline); unknown names fall back to default and
+    // are reported in the summary.
+    const defaultStageId = await ensureDefaultStage(teamId);
+    const stageIdByNameKey = new Map<string, string>();
+    {
+      const anyStageNames = [...toCreate, ...toRevive].some(
+        (p) => p.stageName.length > 0,
       );
-      const stageIdByNameKey = new Map<string, string>();
-      if (stageNameKeys.size > 0) {
+      if (anyStageNames) {
         const stageRows = await this.db.contactStage.findMany({
           where: { teamId },
           select: { id: true, name: true },
@@ -998,14 +1026,94 @@ export class ContactsService {
           stageIdByNameKey.set(s.name.toLowerCase(), s.id);
         }
       }
-      const resolveStage = (name: string): string => {
-        if (!name) return defaultStageId;
-        const hit = stageIdByNameKey.get(name.toLowerCase());
-        if (hit) return hit;
-        unknownStages.add(name);
-        return defaultStageId;
-      };
+    }
+    const resolveStage = (name: string): string => {
+      if (!name) return defaultStageId;
+      const hit = stageIdByNameKey.get(name.toLowerCase());
+      if (hit) return hit;
+      unknownStages.add(name);
+      return defaultStageId;
+    };
 
+    // ---- Revive tombstoned rows ------------------------------------------
+    // Un-tombstone each soft-deleted match, restamp the imported fields, and
+    // republish `contact.created` — same contract as reviveSoftDeletedByPhone
+    // (to every subscriber a revived contact is a new one). Tags are linked in
+    // the shared block below, which keys off phone for both created + revived.
+    for (const p of toRevive) {
+      const id = tombstonedIdByPhone.get(p.phoneNumber);
+      if (!id) continue;
+      try {
+        // CAS-guard the revive on the row STILL being tombstoned. Between the
+        // earlier tombstoned-row read and this write, a concurrent inbound
+        // message/call (or a parallel single-create revive) may have already
+        // un-tombstoned the same phone — in that case this stale CSV write
+        // would clobber the now-live row's name/stage/customFields and bump
+        // version. `updateMany` lets us add `deletedAt: { not: null }` to the
+        // WHERE (Prisma `update` only accepts unique fields), so the write
+        // CAS-misses (count 0) on an already-live row and we skip it. The
+        // count===0 branch makes the surrounding try/catch comment finally true.
+        const flip = await this.db.contact.updateMany({
+          where: { id, teamId, deletedAt: { not: null } },
+          data: {
+            name: p.name,
+            firstName: p.firstName ?? null,
+            lastName: p.lastName ?? null,
+            email: p.email ?? null,
+            location: p.location ?? null,
+            language: p.language ?? null,
+            countryCode:
+              p.countryCode ?? getCountryFromPhone(p.phoneNumber) ?? null,
+            customFields: p.customFields,
+            stageId: resolveStage(p.stageName),
+            source: "manual",
+            deletedAt: null,
+            version: { increment: 1 },
+          },
+        });
+        if (flip.count === 0) {
+          // Already revived by a concurrent path — don't clobber, don't double-
+          // count, don't re-publish. The contact exists and is live either way.
+          continue;
+        }
+        const updated = await this.db.contact.findUniqueOrThrow({
+          where: { id },
+          include: { tags: { select: { id: true } } },
+        });
+        revived += 1;
+        await this.bus.publish({
+          type: "contact.created",
+          teamId,
+          contact: {
+            id: updated.id,
+            teamId: updated.teamId,
+            phoneNumber: updated.phoneNumber,
+            identityChannel: updated.identityChannel,
+            externalContactId: updated.externalContactId,
+            name: updated.name,
+            firstName: updated.firstName,
+            lastName: updated.lastName,
+            language: updated.language,
+            countryCode: updated.countryCode,
+            avatarUrl: updated.avatarUrl ?? undefined,
+            email: updated.email ?? undefined,
+            location: updated.location ?? undefined,
+            customFields: normalizeStringMap(updated.customFields),
+            source: updated.source,
+            stageId: updated.stageId,
+            tagIds: updated.tags.map((t) => t.id),
+            createdAt: updated.createdAt.toISOString(),
+          },
+          source: "manual",
+          createdByUserId: userId,
+        });
+      } catch {
+        // A concurrent inbound may have revived this phone already (the row is
+        // no longer tombstoned). Skip — the contact exists either way.
+      }
+    }
+
+    if (toCreate.length > 0) {
       // createMany is fast but can't connect M2M tags, so do it in two steps:
       // bulk-insert the rows, then bulk-link tags by reading the created ids
       // back by phone. skipDuplicates guards the (teamId, phone) unique against
@@ -1036,70 +1144,77 @@ export class ContactsService {
         skipDuplicates: true,
       });
       created = result.count;
+    }
 
-      // ---- Tag links --------------------------------------------------------
-      // Only the rows that actually carry tags. Resolve every distinct name to
-      // an id via get-or-create (auto-create unknown tags, slate color — same
-      // as the UI), then one bulk INSERT into the implicit M2M join table.
-      const rowsWithTags = toCreate.filter((p) => p.tagNames.length > 0);
-      if (rowsWithTags.length > 0) {
-        const distinctTagNames = new Map<string, string>(); // key → first-seen name
-        for (const p of rowsWithTags) {
-          for (const t of p.tagNames) {
-            const k = t.toLowerCase();
-            if (!distinctTagNames.has(k)) distinctTagNames.set(k, t);
-          }
+    // ---- Tag links (created + revived) ------------------------------------
+    // Covers BOTH freshly-created and revived rows — both are keyed by phone,
+    // and the join lookup below resolves phone → current contact id either way.
+    // Only rows that actually carry tags. Resolve every distinct name to an id
+    // via get-or-create (auto-create unknown tags, slate color — same as the
+    // UI), then one bulk INSERT into the implicit M2M join table.
+    const rowsWithTags = [...toCreate, ...toRevive].filter(
+      (p) => p.tagNames.length > 0,
+    );
+    if (rowsWithTags.length > 0) {
+      const distinctTagNames = new Map<string, string>(); // key → first-seen name
+      for (const p of rowsWithTags) {
+        for (const t of p.tagNames) {
+          const k = t.toLowerCase();
+          if (!distinctTagNames.has(k)) distinctTagNames.set(k, t);
         }
-        const tagIdByNameKey = await this.resolveTagIdsByName(
+      }
+      const tagIdByNameKey = await this.resolveTagIdsByName(
+        teamId,
+        [...distinctTagNames.values()],
+      );
+
+      // Map phone → contact id (createMany returns no ids; revived ids aren't
+      // threaded here either). Scope to the phones that carry tags.
+      const taggedRows = await this.db.contact.findMany({
+        where: {
           teamId,
-          [...distinctTagNames.values()],
-        );
+          phoneNumber: { in: rowsWithTags.map((p) => p.phoneNumber) },
+        },
+        select: { id: true, phoneNumber: true },
+      });
+      const idByPhone = new Map(taggedRows.map((r) => [r.phoneNumber, r.id]));
 
-        // Map phone → created contact id (createMany returns no ids). Scope to
-        // the phones we just tried to create.
-        const createdRows = await this.db.contact.findMany({
-          where: {
-            teamId,
-            phoneNumber: { in: rowsWithTags.map((p) => p.phoneNumber) },
-          },
-          select: { id: true, phoneNumber: true },
-        });
-        const idByPhone = new Map(createdRows.map((r) => [r.phoneNumber, r.id]));
-
-        // Build the (contactId, tagId) pairs, de-duped.
-        const pairs: Array<{ contactId: string; tagId: string }> = [];
-        const seenPair = new Set<string>();
-        for (const p of rowsWithTags) {
-          const contactId = idByPhone.get(p.phoneNumber);
-          if (!contactId) continue; // lost to a concurrent create — skip
-          for (const t of p.tagNames) {
-            const tagId = tagIdByNameKey.get(t.toLowerCase());
-            if (!tagId) continue;
-            const pk = `${contactId}:${tagId}`;
-            if (seenPair.has(pk)) continue;
-            seenPair.add(pk);
-            pairs.push({ contactId, tagId });
-          }
+      // Build the (contactId, tagId) pairs, de-duped.
+      const pairs: Array<{ contactId: string; tagId: string }> = [];
+      const seenPair = new Set<string>();
+      for (const p of rowsWithTags) {
+        const contactId = idByPhone.get(p.phoneNumber);
+        if (!contactId) continue; // lost to a concurrent create — skip
+        for (const t of p.tagNames) {
+          const tagId = tagIdByNameKey.get(t.toLowerCase());
+          if (!tagId) continue;
+          const pk = `${contactId}:${tagId}`;
+          if (seenPair.has(pk)) continue;
+          seenPair.add(pk);
+          pairs.push({ contactId, tagId });
         }
-        if (pairs.length > 0) {
-          // Single bulk insert into the implicit join table, mirroring the
-          // bulk tag-add path. ON CONFLICT DO NOTHING so a re-import / racing
-          // link is a no-op. Prisma's implicit M2M table is "_ContactToTag"
-          // with A=Contact.id, B=Tag.id.
-          const contactIds = pairs.map((p) => p.contactId);
-          const tagIds = pairs.map((p) => p.tagId);
-          await this.db.$executeRaw`
-            INSERT INTO "_ContactToTag" ("A", "B")
-            SELECT * FROM UNNEST(${contactIds}::text[], ${tagIds}::text[])
-            ON CONFLICT DO NOTHING
-          `;
-        }
+      }
+      if (pairs.length > 0) {
+        // Single bulk insert into the implicit join table, mirroring the
+        // bulk tag-add path. ON CONFLICT DO NOTHING so a re-import / racing
+        // link is a no-op. Prisma's implicit M2M table is "_ContactToTag"
+        // with A=Contact.id, B=Tag.id.
+        const contactIds = pairs.map((p) => p.contactId);
+        const tagIds = pairs.map((p) => p.tagId);
+        await this.db.$executeRaw`
+          INSERT INTO "_ContactToTag" ("A", "B")
+          SELECT * FROM UNNEST(${contactIds}::text[], ${tagIds}::text[])
+          ON CONFLICT DO NOTHING
+        `;
       }
     }
 
     return {
       total: parsed.rows.length,
       created,
+      revived,
+      // A createMany skipDuplicates collision (concurrent inbound created the
+      // same phone mid-import) lands the row in skippedExisting, not created.
       skippedExisting: skippedExisting + (toCreate.length - created),
       errors,
       unknownColumns,
@@ -1193,7 +1308,7 @@ export class ContactsService {
     input: SetContactTagsInput,
   ): Promise<{ tagIds: string[] }> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
+      where: { id: contactId, teamId, deletedAt: null },
       include: { tags: { select: { id: true } } },
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });

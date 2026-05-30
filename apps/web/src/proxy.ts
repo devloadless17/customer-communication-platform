@@ -323,7 +323,8 @@ export default function proxy(req: NextRequest): NextResponse {
   // Base for absolute redirects. Behind our Caddy → Node setup, `req.url`
   // can fall back to the server's listening address (0.0.0.0:3000) when
   // building the Location header, which the browser then can't reach.
-  // BETTER_AUTH_URL is `prodRequired` (lib/env.ts), so in prod we always
+  // BETTER_AUTH_URL is validated as required in prod by instrumentation.ts
+  // (the boot hook that replaced lib/env.ts + server.ts), so in prod we always
   // have the canonical public origin to anchor redirects against.
   const redirectBase = process.env.BETTER_AUTH_URL || new URL(req.url).origin;
 

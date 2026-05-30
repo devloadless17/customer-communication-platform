@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 
+import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -94,7 +95,7 @@ export function SnippetsSettings({
   }, [editingId, snippets]);
 
   const reload = useCallback(async () => {
-    const res = await fetch("/api/team/snippets");
+    const res = await apiFetch("/api/team/snippets");
     if (!res.ok) return;
     const data = (await res.json()) as { snippets?: SnippetDto[] };
     if (data.snippets) setSnippets(data.snippets);
@@ -132,7 +133,7 @@ export function SnippetsSettings({
         destructive: true,
       });
       if (!ok) return;
-      const res = await fetch(`/api/team/snippets/${target.id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/team/snippets/${target.id}`, { method: "DELETE" });
       if (!res.ok) {
         setError(`Delete failed (HTTP ${res.status})`);
         return;
@@ -323,7 +324,7 @@ function SnippetEditor({
     try {
       const path = isNew ? "/api/team/snippets" : `/api/team/snippets/${snippet.id}`;
       const method = isNew ? "POST" : "PATCH";
-      const res = await fetch(path, {
+      const res = await apiFetch(path, {
         method,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, label, body }),

@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { TemplatePreview } from "@/features/templates/components/template-preview";
 import { VariableBindingsEditor } from "@/features/templates/components/variable-bindings-editor";
+import { apiFetch } from "@/lib/api/client-fetch";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import type {
   TemplateCategory,
@@ -276,7 +277,7 @@ export function TemplateForm({
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await fetch("/api/team/whatsapp/templates/upload-media", {
+        const res = await apiFetch("/api/team/whatsapp/templates/upload-media", {
           method: "POST",
           body: fd,
           signal: abort.signal,
@@ -312,7 +313,7 @@ export function TemplateForm({
     setSubmitError(null);
     setSubmitting(true);
     try {
-      const res = await fetch("/api/team/whatsapp/templates/create", {
+      const res = await apiFetch("/api/team/whatsapp/templates/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

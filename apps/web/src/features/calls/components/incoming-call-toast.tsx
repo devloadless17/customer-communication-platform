@@ -128,7 +128,7 @@ function IncomingCallCard({
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">{call.contactName}</div>
-        <div className="text-xs text-muted-foreground">Incoming WhatsApp call…</div>
+        <div className="text-xs text-muted-foreground">is calling you on WhatsApp</div>
       </div>
       <Button
         size="icon"

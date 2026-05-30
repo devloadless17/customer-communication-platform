@@ -2092,6 +2092,26 @@ export class MessagesService {
   ): Promise<{ messageId: string }> {
     this.markReadOnAgentSend(teamId, userId, input.conversationId);
     this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+    // Pre-Meta idempotency lock (same as sendText/Media/Template). A double-
+    // click / network-retry that re-POSTs the same clientTempId returns the
+    // first result instead of consuming budget + sending a second interactive
+    // message to Meta. No-ops when clientTempId is absent.
+    return runWithSendIdempotency(
+      {
+        teamId,
+        userId,
+        conversationId: input.conversationId,
+        clientTempId: input.clientTempId,
+      },
+      () => this.sendInteractiveInner(teamId, userId, input),
+    );
+  }
+
+  private async sendInteractiveInner(
+    teamId: string,
+    userId: string,
+    input: import("./messages.schemas").SendInteractiveInput,
+  ): Promise<{ messageId: string }> {
     // Per-thread send ceiling, same as sendText/sendMedia/sendTemplate.
     try {
       consumeConversationSendBudget(teamId, input.conversationId);

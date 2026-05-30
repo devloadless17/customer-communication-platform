@@ -5,6 +5,7 @@ import { Check, Loader2, Plus, Search, Tag as TagIcon } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
@@ -75,7 +76,7 @@ export function TagMultiPicker({
     setCreating(true);
     setCreateError(null);
     try {
-      const res = await fetch("/api/team/tags", {
+      const res = await apiFetch("/api/team/tags", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, color: newColor }),

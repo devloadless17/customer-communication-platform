@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 import { closeClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
@@ -101,7 +102,7 @@ export function TeamSettings({
       email: form.get("email"),
       role: form.get("role") || "agent",
     };
-    const res = await fetch("/api/invites", {
+    const res = await apiFetch("/api/invites", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -123,7 +124,7 @@ export function TeamSettings({
 
   async function patchUser(id: string, body: { role?: Role; deactivated?: boolean }) {
     setError(null);
-    const res = await fetch(`/api/users/${id}`, {
+    const res = await apiFetch(`/api/users/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -148,7 +149,7 @@ export function TeamSettings({
     // `pending` flag from lighting up every other button on the page while
     // the user is still reading the confirm dialog.
     startTransition(async () => {
-      const res = await fetch(`/api/users/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/users/${id}`, { method: "DELETE" });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         setError(data.error ?? "Failed to delete user");
@@ -169,7 +170,7 @@ export function TeamSettings({
     });
     if (!ok) return;
     startTransition(async () => {
-      const res = await fetch(`/api/invites/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/invites/${id}`, { method: "DELETE" });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         setError(data.error ?? "Failed to revoke invite");
@@ -202,7 +203,7 @@ export function TeamSettings({
       renamedByUserId: currentUserId,
     });
 
-    const res = await fetch("/api/team", {
+    const res = await apiFetch("/api/team", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: trimmed }),
@@ -246,7 +247,7 @@ export function TeamSettings({
     // browser tears down in parallel, not after their own next 401.
     broadcastSignout();
     closeClientSocket();
-    const res = await fetch("/api/team", { method: "DELETE" });
+    const res = await apiFetch("/api/team", { method: "DELETE" });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       setError(data.error ?? "Failed to delete organization");

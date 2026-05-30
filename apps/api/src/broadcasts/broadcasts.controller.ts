@@ -59,8 +59,9 @@ export class BroadcastsController {
     @CurrentSession() session: ApiSession,
     @Query(zQuery(BroadcastListQuerySchema)) query: BroadcastListQuery,
   ) {
-    const broadcasts = await this.broadcasts.list(session.teamId, query);
-    return { broadcasts };
+    // Service returns { broadcasts, nextCursor }. Spread so the existing client
+    // reads `body.broadcasts` unchanged and a paging client can read nextCursor.
+    return this.broadcasts.list(session.teamId, query);
   }
 
   @Get(":id")

@@ -239,6 +239,16 @@ export interface ContactUpdatedEvent {
   /** Workflow steps set this to skip chain-trigger dispatch. See ConversationAssignedEvent.silent. */
   silent?: boolean;
   /**
+   * Gates ONLY outbound-webhook delivery, independent of `silent` (which gates
+   * workflow re-trigger). Unset → falls back to `silent`, preserving the legacy
+   * "one flag, both effects" behavior for every existing publisher (incl. the
+   * /v1-echo case: a partner field edit stays silent AND undelivered). A workflow
+   * step that WANTS partners to see a step-driven field change (`update_field`,
+   * ask_question `saveTo`) sets this to `false` while keeping `silent: true` for
+   * loop safety — mirrors ContactTagChangedEvent / ContactLifecycleChangedEvent.
+   */
+  skipOutboundWebhook?: boolean;
+  /**
    * Bulk paths set this so the realtime fanout subscriber SKIPS the per-contact
    * socket emit — the bulk-path also publishes one `contact.bulk_updated` that
    * carries the whole id set, and that's what fans out to clients. Workflow +
@@ -335,14 +345,23 @@ export interface ContactTagChangedEvent {
   /** Set on /v1 mutations for audit attribution. */
   changedByApiKeyId?: string | null;
   /**
-   * Skip downstream reactions — see ConversationAssignedEvent.silent.
-   * The outbound-webhook subscriber honors it TODAY (no echo back to the
-   * partner that just changed the tag via /v1). Workflow-dispatch does not
-   * yet subscribe to `contact.tag_changed`, so the workflow side is dormant
-   * until that trigger is wired — but the flag is set by the tag step now so
-   * that future trigger can't infinite-loop into itself.
+   * Skip workflow chain-trigger dispatch — see ConversationAssignedEvent.silent.
+   * Set by the tag step so a future `contact.tag_changed` trigger can't
+   * infinite-loop into itself. NOTE: this gates WORKFLOWS only. Outbound
+   * webhook delivery is gated by `skipOutboundWebhook` (below), which defaults
+   * to `silent` — so the /v1-echo case (partner changed the tag, don't echo
+   * back) stays silent, but a WORKFLOW STEP can deliver to partners while
+   * staying loop-safe by setting `skipOutboundWebhook: false`.
    */
   silent?: boolean;
+  /**
+   * Gates ONLY outbound-webhook delivery, independent of `silent` (which gates
+   * workflow re-trigger). Unset → falls back to `silent`, preserving the legacy
+   * "one flag, both effects" behavior for every existing publisher. A workflow
+   * step that WANTS partners to see a step-driven change sets this to `false`
+   * while keeping `silent: true` for loop safety.
+   */
+  skipOutboundWebhook?: boolean;
 }
 
 /**
@@ -359,29 +378,22 @@ export interface ContactLifecycleChangedEvent {
   changedByUserId: string | null;
   /** Set on /v1 mutations for audit attribution. */
   changedByApiKeyId?: string | null;
-  /**
-   * Skip downstream reactions — see ConversationAssignedEvent.silent.
-   * Honored by the outbound-webhook subscriber TODAY; the workflow side is
-   * dormant until a lifecycle-changed trigger is wired (the `update_lifecycle`
-   * step sets it now so that future trigger can't loop into itself). Mirrors
-   * `ContactTagChangedEvent.silent`.
-   */
+  /** Skip workflow chain-trigger dispatch. See ContactTagChangedEvent.silent. */
   silent?: boolean;
+  /** Gate outbound-webhook delivery independently of `silent`. Defaults to
+   *  `silent` when unset. See ContactTagChangedEvent.skipOutboundWebhook. */
+  skipOutboundWebhook?: boolean;
 }
 
 export interface NoteCreatedEvent {
   teamId: string;
   conversationId: string;
   note: InternalNote;
-  /**
-   * Set by workflow steps (`add_comment`) so a future workflow trigger on
-   * `note_added` doesn't re-fire workflows on system-authored notes. Today
-   * no such trigger exists; the flag is forward-compatible discipline so
-   * the workflow-step author doesn't have to remember to add it later
-   * after a downstream subscriber starts caring. Mirrors the silent flag
-   * on ConversationAssignedEvent / ContactUpdatedEvent.
-   */
+  /** Skip workflow chain-trigger dispatch. See ContactTagChangedEvent.silent. */
   silent?: boolean;
+  /** Gate outbound-webhook delivery independently of `silent`. Defaults to
+   *  `silent` when unset. See ContactTagChangedEvent.skipOutboundWebhook. */
+  skipOutboundWebhook?: boolean;
 }
 
 export interface NoteDeletedEvent {
@@ -530,15 +542,17 @@ export interface ConversationReadEvent {
 
 /**
  * Top-level message OR thread reply landed in a channel. Discriminated by
- * `threadRootId`:
+ * `threadRootId`. Fanout is CHANNEL-room scoped (membership-gated via
+ * `emitToChannel(channelId, …)`), NOT team-wide — non-members never see channel
+ * traffic (see fanout-rules.ts `team_channel.message_created`):
  *   - null → top-level. Socket fanout emits `team:channel:message` to the
- *            team room with preview + lastMessageAt populated.
+ *            channel room with preview + lastMessageAt populated.
  *   - set  → reply. Socket fanout emits:
- *            (a) `team:channel:message` to team room (preview/lastMessageAt
- *                null — the channel feed doesn't surface replies),
- *            (b) `team:channel:thread:reply` to team room with replyCount,
- *            (c) `team:channel:message` to the channel-thread room so any
- *                open side panel gets the new reply.
+ *            (a) `team:channel:message` to the channel room (preview/
+ *                lastMessageAt null — the channel feed doesn't surface replies),
+ *            (b) `team:channel:thread:reply` to the channel room with replyCount,
+ *            (c) `team:channel:message` again so any open side panel gets the
+ *                new reply.
  *
  * `threadReplyCount` is only meaningful when threadRootId is set — it's the
  * post-increment count carried so the team-room `team:channel:thread:reply`
@@ -827,32 +841,24 @@ export interface CallFailedEvent {
 }
 
 /**
- * Meta delivered an SDP offer for this call. Routed to the answering agent's
- * browser as `call:sdp_offer`. The browser uses it for
- * RTCPeerConnection.setRemoteDescription, then generates an answer + POSTs
- * back via /api/calls/:id/answer.
+ * Meta delivered an SDP for this call. Routed to the agent's browser as
+ * `call:sdp_offer`. Two cases share this frame:
+ *
+ *   - INBOUND: `sdp.type === "offer"` — customer's offer. Browser calls
+ *     setRemoteDescription, generates an answer, POSTs via /answer.
+ *   - OUTBOUND: `sdp.type === "answer"` — customer's answer to our
+ *     previously-sent offer. Browser calls setRemoteDescription to
+ *     complete the handshake; audio flows after.
+ *
+ * The frame name has "offer" baked in for the original inbound design
+ * but carries both — splitting would force a frontend reshuffle for
+ * negligible benefit.
  */
 export interface CallSdpOfferEvent {
   teamId: string;
   conversationId: string;
   callId: string;
-  sdp: { type: "offer"; sdp: string };
-}
-
-/**
- * One trickle ICE candidate from the Meta side. Routed to the conversation
- * room as `call:ice` — only the live-call agent's browser cares. No DB
- * write, no audit, no analytics — pure signaling relay.
- */
-export interface CallIceCandidateEvent {
-  teamId: string;
-  conversationId: string;
-  callId: string;
-  candidate: {
-    candidate: string;
-    sdpMid: string | null;
-    sdpMLineIndex: number | null;
-  };
+  sdp: { type: "offer" | "answer"; sdp: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -907,7 +913,6 @@ export interface DomainEventMap {
   "call.rejected": CallRejectedEvent;
   "call.failed": CallFailedEvent;
   "call.sdp_offer": CallSdpOfferEvent;
-  "call.ice_candidate": CallIceCandidateEvent;
 }
 
 export type DomainEventType = keyof DomainEventMap;

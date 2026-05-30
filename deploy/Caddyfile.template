@@ -209,10 +209,14 @@ __DOMAIN__ {
 			transport http {
 				dial_timeout 2s
 			}
-			# Probe Next.js's /api/health for upstream liveness — Caddy
-			# returns 502 immediately during the ~3s restart window instead
-			# of holding the request until upstream times out.
-			health_uri /api/health
+			# Probe Next.js's SHALLOW /api/health/web (db + process only, NO
+			# api dependency) for upstream liveness. The deep /api/health
+			# would mark THIS web upstream unhealthy during a routine api-only
+			# restart / drain → 502 on /login + every RSC page even though
+			# Next.js is fine. The shallow probe answers "is web alive?" so an
+			# api blip never blacks out the login page. (The DEEP probe stays
+			# the Docker HEALTHCHECK for operator data-plane visibility.)
+			health_uri /api/health/web
 			health_interval 2s
 			health_timeout 2s
 			health_status 200

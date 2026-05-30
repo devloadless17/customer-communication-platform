@@ -170,25 +170,23 @@ interface MetaCall {
   to?: string;
   timestamp?: string;
   /**
-   * Calling lifecycle. Known values, mapped to NormalizedCallEvent.phase:
-   *   "connect"          → "incoming" (in-leg) or "answered" (out-leg, when direction=out)
-   *   "ringing"          → "incoming" (alias of connect for inbound first webhook)
-   *   "terminate"        → "completed" | "missed" | "rejected" | "failed" per terminate_reason
-   *   "permission_granted" / "permission_revoked" — pass-through phases
+   * Meta's call event values (verified live 2026-05-29):
+   *   "connect"    → inbound: customer rang us; outbound: customer picked up
+   *   "terminate"  → call ended (use `status` field below for the reason)
+   *   "permission_granted" / "permission_revoked" → permission lifecycle
    */
   event?: string;
-  direction?: "incoming" | "outgoing" | "business_initiated" | "user_initiated";
-  /** Why a "terminate" event fired. Drives missed/rejected/failed split. */
-  terminate_reason?: string;
-  /** SDP payload for setup. `type` is "offer" on incoming, "answer" on
-   *  outbound-customer-accepted. */
+  /** UPPER_CASE in real payloads ("USER_INITIATED" / "BUSINESS_INITIATED"). */
+  direction?: string;
+  /**
+   * Top-level call status. On `event: "terminate"` Meta carries the
+   * reason here as UPPERCASE: "COMPLETED" | "FAILED" | "MISSED" | etc.
+   * The earlier `terminate_reason` field referenced in older docs is NOT
+   * what live webhooks use.
+   */
+  status?: string;
+  /** SDP payload for setup. */
   session?: { sdp_type?: string; sdp?: string };
-  /** Trickle ICE candidate. May be on a webhook by itself. */
-  ice_candidate?: {
-    candidate?: string;
-    sdp_mid?: string | null;
-    sdp_mline_index?: number | null;
-  };
 }
 
 interface MetaStatus {
@@ -271,12 +269,10 @@ function mapMetaStatus(s: string | undefined): MessageStatus | null {
 }
 
 /**
- * Meta delivers SDP with `a=setup:actpass`, which RTCPeerConnection rejects
- * when used as an answer's remote description. Rewriting to `a=setup:active`
- * once in the parser means every downstream consumer (the answering
- * browser, the SIP gateway in Phase 2, replay tooling) sees a usable SDP
- * without needing to remember this specific Meta gotcha. The browser does
- * its own `setup:passive` on the answer it generates.
+ * Meta sometimes delivers SDP ANSWERS with `a=setup:actpass`, which
+ * RTCPeerConnection rejects on `setRemoteDescription` when applied to
+ * the offerer side. Rewriting once in the parser keeps every downstream
+ * consumer free of this gotcha.
  */
 function rewriteSdpForBrowser(sdp: string): string {
   return sdp.replace(/^a=setup:actpass$/gm, "a=setup:active");
@@ -294,33 +290,36 @@ function rewriteSdpForBrowser(sdp: string): string {
 function mapMetaCallPhase(
   event: string | undefined,
   direction: "in" | "out",
-  terminateReason: string | undefined,
+  status: string | undefined,
 ): NormalizedCallEvent["phase"] | null {
   switch (event) {
-    case "ringing":
     case "connect":
-      // On inbound: this IS the incoming call. On outbound: customer picked
-      // up (carries their SDP). Phase distinction lets ingest map correctly.
+      // Inbound: customer ringing us. Outbound: customer picked up.
       return direction === "in" ? "incoming" : "answered";
-    case "ack":
-      // Meta's acknowledgement that our placeCall succeeded; carries no SDP.
-      return direction === "out" ? "ringing_out" : null;
     case "terminate":
-      switch (terminateReason) {
-        case "completed":
-        case "ended":
-        case "normal":
+      // Top-level `status` carries the reason (UPPERCASE in live payloads).
+      switch (status?.toUpperCase()) {
+        case "COMPLETED":
+        case "ACCEPTED":
           return "completed";
-        case "missed":
-        case "no_answer":
-        case "timeout":
+        case "MISSED":
+        case "NO_ANSWER":
+        case "TIMEOUT":
+        case "EXPIRED":
           return "missed";
-        case "rejected":
-        case "declined":
-        case "busy":
+        case "REJECTED":
+        case "DECLINED":
+        case "BUSY":
           return "rejected";
-        default:
+        case "FAILED":
+        case "ERROR":
           return "failed";
+        default:
+          // An unknown terminate reason — log + treat as completed rather
+          // than failed. Most "unknown" terminates we've seen are normal
+          // hangups Meta hasn't documented a string for, and marking them
+          // as `failed` is worse UX than marking them `completed`.
+          return "completed";
       }
     case "permission_granted":
       return "permission_granted";
@@ -342,55 +341,52 @@ function parseMetaCall(
   rawPayload: Record<string, unknown>,
 ): NormalizedCallEvent | null {
   const externalCallId = c.id;
-  // Meta sends digits with no '+'; strip just-in-case for parity with the
-  // message ingest path.
-  const phone = c.from ? c.from.replace(/\D/g, "") : undefined;
-  if (!externalCallId || !phone) return null;
+  if (!externalCallId) return null;
 
-  // Direction normalization. Meta uses a few synonyms; we collapse them to
-  // our two-value `direction` field. business_initiated → out (we're calling
-  // the customer); user_initiated / incoming → in.
+  // Direction. Live payloads use "USER_INITIATED" / "BUSINESS_INITIATED";
+  // older partner docs reference "incoming"/"outgoing". Handle both.
+  const dirRaw = (c.direction ?? "").toString().toUpperCase();
   const direction: "in" | "out" =
-    c.direction === "outgoing" || c.direction === "business_initiated"
+    dirRaw === "OUTGOING" || dirRaw === "BUSINESS_INITIATED"
       ? "out"
       : "in";
 
-  const phase = mapMetaCallPhase(c.event, direction, c.terminate_reason);
+  // Pick the CUSTOMER's phone number based on direction. For outbound calls
+  // `from` is the BUSINESS number; using it blindly creates phantom contacts.
+  const rawPhone = direction === "in" ? c.from : c.to;
+  const phone = rawPhone ? rawPhone.replace(/\D/g, "") : undefined;
+  if (!phone) return null;
+
+  const phase = mapMetaCallPhase(c.event, direction, c.status);
   if (!phase) return null;
 
   const tsSecs = c.timestamp ? Number(c.timestamp) : NaN;
   const ts = Number.isFinite(tsSecs) ? new Date(tsSecs * 1000) : new Date();
 
-  const sdp =
-    c.session?.sdp_type &&
-    c.session.sdp &&
+  // SDP. Rewrite `a=setup:actpass` → `setup:active` ONLY on answers —
+  // RTCPeerConnection.setRemoteDescription rejects answer SDPs with
+  // `actpass`. Offers are passed through unchanged; the browser commits
+  // to a concrete role in its generated answer.
+  let sdp: { type: "offer" | "answer"; sdp: string } | undefined;
+  if (
+    c.session?.sdp &&
     (c.session.sdp_type === "offer" || c.session.sdp_type === "answer")
-      ? {
-          type: c.session.sdp_type as "offer" | "answer",
-          sdp: rewriteSdpForBrowser(c.session.sdp),
-        }
-      : undefined;
-
-  const iceCandidate = c.ice_candidate?.candidate
-    ? {
-        candidate: c.ice_candidate.candidate,
-        sdpMid: c.ice_candidate.sdp_mid ?? null,
-        sdpMLineIndex: c.ice_candidate.sdp_mline_index ?? null,
-      }
-    : undefined;
+  ) {
+    const type: "offer" | "answer" = c.session.sdp_type;
+    sdp = {
+      type,
+      sdp: type === "answer" ? rewriteSdpForBrowser(c.session.sdp) : c.session.sdp,
+    };
+  }
 
   return {
     kind: "call",
     externalCallId,
     contactPhone: phone,
-    // Meta's calling webhook doesn't carry a profile name on call rows.
-    // Ingest falls back to the existing contact row (or the phone number)
-    // when contactName is null — same fallback the message ingest uses.
     contactName: null,
     direction,
     phase,
     ...(sdp ? { sdp } : {}),
-    ...(iceCandidate ? { iceCandidate } : {}),
     timestamp: ts,
     rawPayload,
   };
@@ -406,9 +402,8 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     templates: true,
     readReceipts: true,
     typingIndicators: true,
-    // WhatsApp Business Calling — GA July 2025. Phase 1 uses WebRTC mode
-    // (audio peers directly to the agent's browser). Phase 2 swaps in SIP
-    // for recording + transcription; the interface is unchanged.
+    // WhatsApp Business Calling (GA July 2025): WebRTC mode, audio peers
+    // directly between Meta and the agent's browser.
     calling: true,
   },
 
@@ -421,7 +416,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     for (const entry of env.entry ?? []) {
       for (const change of entry.changes ?? []) {
-        if (change.field !== "messages") continue;
+        // Meta uses two relevant `field` values:
+        //   "messages" — text / media / interactive / status updates
+        //   "calls"    — voice call lifecycle (offer, answer, terminate, ICE,
+        //                permission granted/revoked, etc.) — confirmed by
+        //                live webhook payloads 2026-05-29.
+        // We accept both; the per-array walkers below safely no-op on the
+        // other type since `value.messages` / `value.calls` / `value.statuses`
+        // are independently present.
+        if (change.field !== "messages" && change.field !== "calls") continue;
         const value = change.value;
         if (!value) continue;
 
@@ -1223,7 +1226,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async placeCall(
-    args: { to: string },
+    args: { to: string; sdpOffer: string; from?: string },
     config: MetaSendConfig,
   ): Promise<{ externalCallId: string }> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
@@ -1233,11 +1236,18 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
       },
+      // Meta's outbound-call shape requires `session.sdp_type=offer` +
+      // `session.sdp=<browser RTCPeerConnection.createOffer SDP>`. Without
+      // session.* the API returns 131009 "Missing session parameter". The
+      // `from` field is optional (Meta defaults to phoneNumberId's number);
+      // we forward it when caller supplies for parity with YCloud-shape
+      // clients but rely on Meta's default in the common case.
       body: JSON.stringify({
         messaging_product: "whatsapp",
-        recipient_type: "individual",
         to: args.to,
         action: "connect",
+        ...(args.from ? { from: args.from } : {}),
+        session: { sdp_type: "offer", sdp: args.sdpOffer },
       }),
     });
     if (!res.ok) {
@@ -1248,8 +1258,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         text,
       );
     }
-    const json = (await res.json()) as { calls?: Array<{ id?: string }> };
-    const externalCallId = json.calls?.[0]?.id;
+    const json = (await res.json()) as {
+      calls?: Array<{ id?: string }>;
+      // Some Meta variants return id at top level. Belt + suspenders.
+      id?: string;
+    };
+    const externalCallId = json.calls?.[0]?.id ?? json.id;
     if (!externalCallId) {
       throw new Error(`meta placeCall missing call id: ${JSON.stringify(json)}`);
     }
@@ -1257,12 +1271,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   },
 
   async preAcceptCall(
-    args: { externalCallId: string },
+    args: { externalCallId: string; sdpAnswer: string },
     config: MetaSendConfig,
   ): Promise<void> {
-    // Load-bearing: Meta rejects `accept` sent before `pre_accept`. The two
-    // hops exist because pre_accept locks the call to our number while the
-    // browser is still generating its SDP answer.
+    // Meta requires `session.sdp_type=answer + session.sdp=<answer SDP>`
+    // on pre_accept just like on accept — verified by Meta error 131009
+    // "Missing session parameter" when the body omits session. The two
+    // hops (pre_accept → accept) exist for media timing; both carry the
+    // same SDP answer. Without this Meta rejects pre_accept with 400 and
+    // the call never connects on the answering side.
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
     const res = await metaFetch(url, {
       method: "POST",
@@ -1274,6 +1291,7 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         messaging_product: "whatsapp",
         call_id: args.externalCallId,
         action: "pre_accept",
+        session: { sdp_type: "answer", sdp: args.sdpAnswer },
       }),
     });
     if (!res.ok) {
@@ -1374,16 +1392,66 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
   },
 
-  async sendIceCandidate(
-    args: {
-      externalCallId: string;
-      candidate: string;
-      sdpMid: string | null;
-      sdpMLineIndex: number | null;
-    },
+  /**
+   * Admin helper: enable WhatsApp Cloud API Calling on the phone number.
+   *
+   * Phone-number-level setting that's REQUIRED before placeCall works
+   * (else Meta returns 138000 "Calling API not enabled"). Distinct from
+   * the "Display call buttons" toggle in WhatsApp Manager (UI-only).
+   *
+   * Called once per number per team via POST /api/calls/admin/enable.
+   * Safe to re-run — Meta returns success even when already enabled.
+   */
+  /**
+   * Read the current settings on the phone number — used for diagnosing
+   * which calling fields are set, what call_hours look like, whether
+   * inbound is actually enabled, etc. Phase-1 admin helper.
+   */
+  async getPhoneNumberSettings(
     config: MetaSendConfig,
-  ): Promise<void> {
-    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+  ): Promise<{ raw: unknown }> {
+    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/settings`;
+    const res = await metaFetch(url, {
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
+    const text = await safeMetaText(res);
+    if (!res.ok) {
+      throw new MetaSendError(
+        `meta getPhoneNumberSettings failed: ${res.status} ${text}`,
+        res.status,
+        text,
+      );
+    }
+    let raw: unknown = text;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      // ignore
+    }
+    return { raw };
+  },
+
+  async enableCalling(config: MetaSendConfig): Promise<{ ok: true; raw: unknown }> {
+    const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/settings`;
+    // 24/7 calling hours. Meta REQUIRES both `timezone_id` and
+    // `weekly_operating_hours` even when status is set — confirmed by
+    // their schema-constraint error message. With `status: ENABLED` +
+    // every day fully open, the customer can reach us at any time. The
+    // alternative (calling without hours configured) means Meta auto-
+    // rejects every inbound call as "outside business hours".
+    const allWeek24h = [
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+      "SUNDAY",
+    ].map((day) => ({
+      day_of_week: day,
+      open_time: "0000",
+      close_time: "2359",
+    }));
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -1392,25 +1460,35 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       },
       body: JSON.stringify({
         messaging_product: "whatsapp",
-        call_id: args.externalCallId,
-        action: "ice_candidate",
-        ice_candidate: {
-          candidate: args.candidate,
-          sdp_mid: args.sdpMid,
-          sdp_mline_index: args.sdpMLineIndex,
+        calling: {
+          status: "ENABLED",
+          call_icon_visibility: "DEFAULT",
+          callback_permission_status: "ENABLED",
+          call_hours: {
+            status: "ENABLED",
+            timezone_id: "UTC",
+            weekly_operating_hours: allWeek24h,
+          },
         },
       }),
     });
+    const text = await safeMetaText(res);
     if (!res.ok) {
-      // ICE-candidate failures are non-fatal — the call may still establish
-      // via a different candidate. Log and swallow, same posture as
-      // sendTypingIndicator/markIncomingRead.
-      const body = await safeMetaText(res);
-      console.warn(
-        `[meta] sendIceCandidate failed for call=${args.externalCallId}: ${res.status} ${body}`,
+      throw new MetaSendError(
+        `meta enableCalling failed: ${res.status} ${text}`,
+        res.status,
+        text,
       );
     }
+    let raw: unknown = text;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      // ignore — keep as string
+    }
+    return { ok: true, raw };
   },
+
 };
 
 export class MetaSendError extends Error {

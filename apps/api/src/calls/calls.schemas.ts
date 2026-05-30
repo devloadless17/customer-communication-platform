@@ -6,8 +6,20 @@ import { z } from "zod";
  * the typed input flows into the service.
  */
 
-/** No body — call target is derived from the conversation's contact. */
-export const InitiateCallSchema = z.object({}).strict();
+/**
+ * Outbound-call initiation body.
+ *
+ * `sdp` is the WebRTC OFFER the agent's browser generated via
+ * `RTCPeerConnection.createOffer` — Meta's calling API requires it on the
+ * connect payload (otherwise error 131009 "Missing session parameter").
+ * Same upper bound as the answer SDP — well above any real SDP size
+ * (~3-5KB typical).
+ */
+export const InitiateCallSchema = z
+  .object({
+    sdp: z.string().min(1).max(64_000),
+  })
+  .strict();
 export type InitiateCallInput = z.infer<typeof InitiateCallSchema>;
 
 /** Permission request — no body. */
@@ -36,20 +48,6 @@ export type RejectCallInput = z.infer<typeof RejectCallSchema>;
 /** End body — no fields. */
 export const EndCallSchema = z.object({}).strict();
 export type EndCallInput = z.infer<typeof EndCallSchema>;
-
-/**
- * ICE candidate body. `candidate` can be the empty string (browser signals
- * end-of-candidates that way), so it's only required to exist; sdpMid /
- * sdpMLineIndex can be null per WebRTC's contract.
- */
-export const IceCandidateSchema = z
-  .object({
-    candidate: z.string(),
-    sdpMid: z.string().nullable(),
-    sdpMLineIndex: z.number().int().nullable(),
-  })
-  .strict();
-export type IceCandidateInput = z.infer<typeof IceCandidateSchema>;
 
 /** Listing — keyset cursor on (ringingAt DESC, id DESC). */
 export const ListCallsQuerySchema = z

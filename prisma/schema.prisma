@@ -916,6 +916,14 @@ model Message {
   // index already covers the common case. Add a mediaCaption trgm index if
   // caption search shows up hot in EXPLAIN.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "Message_body_trgm_idx")
+  // Team-wide search SORT support. The trgm index above serves the ILIKE
+  // filter, but the global "Messages" search then ORDER BY (timestamp DESC,
+  // id DESC) had no composite to satisfy it — a broad search term returned a
+  // large GIN bitmap that Postgres had to sort in memory. This btree lets the
+  // planner walk newest-first and stop at LIMIT for broad terms. Selective
+  // terms still ride the trgm path. Mirrors the conversation-scoped keyset
+  // index above, but keyed on teamId for the cross-conversation search.
+  @@index([teamId, timestamp(sort: Desc), id(sort: Desc)], map: "Message_teamId_timestamp_id_idx")
 }
 
 // One-row-per-attempt log for outbound text sends, written BEFORE the Meta
@@ -1232,6 +1240,11 @@ model InternalNote {
   // Message_body_trgm_idx: no conversation predicate to narrow the team-wide
   // scan, so the index carries it.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "InternalNote_body_trgm_idx")
+  // Team-wide "Comments" search SORT support — same rationale as
+  // Message_teamId_timestamp_id_idx: the trgm index filters, this btree serves
+  // the ORDER BY (timestamp DESC, id DESC) so a broad term doesn't sort a large
+  // GIN bitmap in memory.
+  @@index([teamId, timestamp(sort: Desc), id(sort: Desc)], map: "InternalNote_teamId_timestamp_id_idx")
 }
 
 // ---------------------------------------------------------------------------
@@ -1980,10 +1993,6 @@ model OutboundEvent {
 //   - Channel column even though there's only one calling channel today —
 //     consistency invariant with Message, and the multi-channel seam already
 //     anticipates non-WhatsApp call events.
-//   - `recordingKey / recordingUrl / transcriptId` are nullable Phase-2 slots.
-//     Phase 1 (WebRTC, audio is browser-peer only) writes null. Phase 2 (SIP
-//     gateway forking the Opus stream) populates them. No migration needed
-//     for the swap.
 //   - Calls do NOT touch `Conversation.lastMessageAt` / lastMessagePreview.
 //     They don't reorder the inbox list (different surface — a future
 //     "Recent calls" sub-tab would read from `Call` directly).
@@ -2012,12 +2021,6 @@ model Call {
   // Computed at terminal transition: endedAt - answeredAt. Null when the
   // call never reached `in_progress` (missed / rejected / failed-pre-answer).
   durationSeconds  Int?
-
-  // Phase-2 seam. Populated by the SIP gateway when call recording lands;
-  // until then, every row writes null.
-  recordingKey     String?
-  recordingUrl     String?
-  transcriptId    String?
 
   // Verbatim Meta call object (mirrors Message.rawPayload). Kept for
   // forensics + debugging — call signaling is complex and the raw payload

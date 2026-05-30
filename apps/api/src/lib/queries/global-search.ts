@@ -247,11 +247,11 @@ export async function searchAllNotes(
   const query = opts.query.trim();
   if (query.length === 0) return { items: [], nextCursor: null };
 
-  // InternalNote has no (timestamp, id) keyset index, but it does have
-  // (conversationId, timestamp) and teamId. The result set per query is small
-  // (notes are sparse vs messages), so a (timestamp desc, id desc) keyset on
-  // the trgm-filtered set is cheap. Reuse the message cursor codec — same
-  // (timestamp, id) shape.
+  // InternalNote_teamId_timestamp_id_idx (teamId, timestamp desc, id desc)
+  // backs this team-wide (timestamp desc, id desc) keyset ORDER BY — added in
+  // migration 20260530140000, same shape as the Message search path. The result
+  // set per query is small (notes are sparse vs messages) and the trgm GIN on
+  // body filters first. Reuse the message cursor codec — same (timestamp, id) shape.
   const cursor = parseMessageCursor(opts.cursor ?? null);
   const matchWhere = {
     teamId,

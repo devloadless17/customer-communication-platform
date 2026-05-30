@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Popover } from "@/components/ui/popover";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { TagChip } from "@/features/tags/components/tag-chip";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type {
   Contact,
@@ -85,7 +86,7 @@ export async function fetchContactsPage(
   if (filters.tagIds.length > 0) params.set("tagIds", filters.tagIds.join(","));
   if (filters.stageFilter !== "any") params.set("stageId", filters.stageFilter);
   if (cursor) params.set("cursor", cursor);
-  const res = await fetch(`/api/contacts?${params.toString()}`);
+  const res = await apiFetch(`/api/contacts?${params.toString()}`);
   if (!res.ok) throw new Error("fetch failed");
   return (await res.json()) as CursorPage<ContactListItem>;
 }

@@ -37,6 +37,7 @@ import { Sheet } from "@/components/ui/sheet";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getClientSocket } from "@/lib/socket-client";
 import { toast } from "@/lib/toast";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 interface Webhook {
   id: string;
@@ -99,10 +100,13 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
     [eventGroups],
   );
 
-  // Listen for circuit-breaker trips. The worker publishes
-  // `webhook:subscription_disabled` to the team room whenever auto-disable
-  // fires; we toast the admin + refresh the list so they see the new
-  // "Auto-disabled" badge without a manual reload.
+  // Listen for circuit-breaker trips AND recoveries. The worker publishes
+  // `webhook:subscription_disabled` on auto-disable and the symmetric
+  // `webhook:subscription_recovered` once a previously-failing endpoint comes
+  // back and the breaker re-enables it. We reflect BOTH live so the admin sees
+  // the badge flip (disabled ↔ active) without a manual reload — previously the
+  // recovered frame had no consumer, so a self-healed webhook kept showing
+  // "Auto-disabled" until the next refresh.
   useEffect(() => {
     const socket = getClientSocket();
     function onDisabled(payload: { webhookId: string; reason: string }) {
@@ -124,9 +128,25 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
         { description: payload.reason },
       );
     }
+    function onRecovered(payload: { webhookId: string }) {
+      setWebhooks((prev) =>
+        prev.map((w) =>
+          w.id === payload.webhookId
+            ? { ...w, enabled: true, disabledAt: null, disabledReason: null }
+            : w,
+        ),
+      );
+      const target = webhooks.find((w) => w.id === payload.webhookId);
+      toast.success(
+        target ? `Webhook "${target.name}" recovered` : "A webhook recovered",
+        { description: "The endpoint is responding again — deliveries resumed." },
+      );
+    }
     socket.on("webhook:subscription_disabled", onDisabled);
+    socket.on("webhook:subscription_recovered", onRecovered);
     return () => {
       socket.off("webhook:subscription_disabled", onDisabled);
+      socket.off("webhook:subscription_recovered", onRecovered);
     };
   }, [webhooks]);
 
@@ -244,7 +264,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                           destructive: true,
                         });
                         if (!ok) return;
-                        const res = await fetch(`/api/team/outbound-webhooks/${w.id}`, {
+                        const res = await apiFetch(`/api/team/outbound-webhooks/${w.id}`, {
                           method: "DELETE",
                         });
                         if (!res.ok) {
@@ -262,7 +282,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                           confirmLabel: "Rotate",
                         });
                         if (!ok) return;
-                        const res = await fetch(
+                        const res = await apiFetch(
                           `/api/team/outbound-webhooks/${w.id}/rotate-secret`,
                           { method: "POST" },
                         );
@@ -275,7 +295,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                         toast.success("Secret rotated");
                       }}
                       onTest={async () => {
-                        const res = await fetch(`/api/team/outbound-webhooks/${w.id}/test`, {
+                        const res = await apiFetch(`/api/team/outbound-webhooks/${w.id}/test`, {
                           method: "POST",
                         });
                         if (!res.ok) {
@@ -288,7 +308,7 @@ export function OutboundWebhooksManager({ initialWebhooks, eventGroups }: Props)
                         });
                       }}
                       onToggleEnabled={async () => {
-                        const res = await fetch(`/api/team/outbound-webhooks/${w.id}`, {
+                        const res = await apiFetch(`/api/team/outbound-webhooks/${w.id}`, {
                           method: "PATCH",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ enabled: !w.enabled }),
@@ -386,7 +406,7 @@ function WebhookForm({
       if (editing) {
         // Edit reuses the existing PATCH endpoint. The secret is never
         // touched here (rotate is a separate action), so nothing is revealed.
-        const res = await fetch(`/api/team/outbound-webhooks/${initial.id}`, {
+        const res = await apiFetch(`/api/team/outbound-webhooks/${initial.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body,
@@ -400,7 +420,7 @@ function WebhookForm({
         return;
       }
 
-      const res = await fetch("/api/team/outbound-webhooks", {
+      const res = await apiFetch("/api/team/outbound-webhooks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
@@ -855,7 +875,7 @@ function DeliveriesSheet({
       try {
         const qs = new URLSearchParams({ limit: "25" });
         if (cursor) qs.set("cursor", cursor);
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/team/outbound-webhooks/${webhook.id}/deliveries?${qs.toString()}`,
         );
         if (!res.ok) {

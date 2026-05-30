@@ -79,5 +79,11 @@ export const BroadcastListQuerySchema = z.object({
     .enum(["all", "scheduled", "queued", "running", "completed", "failed", "canceled", "paused"])
     .optional(),
   search: z.string().trim().max(120).optional(),
+  // Keyset pagination. `cursor` is the opaque `<createdAtMs>_<id>` of the last
+  // row from the previous page; `take` bounds the page (default 100, max 200).
+  // Older history beyond the first page is reachable by paging — previously the
+  // list was hard-capped at 100 with no way to reach row 101+.
+  cursor: z.string().optional(),
+  take: z.coerce.number().int().min(1).max(200).optional(),
 });
 export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;

@@ -223,7 +223,8 @@ the first deploy on a fresh DB:
 
 ```bash
 ssh deploy@central.loadless.site
-docker exec -it $(docker ps -q --filter "name=app") npm run db:seed:superadmin
+# pnpm, NOT npm — the web runtime image strips npm/npx (corepack-pinned pnpm only)
+docker exec -it $(docker ps -q --filter "name=app") pnpm run db:seed:superadmin
 ```
 
 Credentials are hardcoded in `prisma/seeds/seed-superadmin.ts` (currently
@@ -324,19 +325,19 @@ Two modes.
 
 ```bash
 docker compose up -d postgres redis     # backing services only
-npm install
-npm run db:migrate
-npm run db:seed
-npm run dev                              # tsx watch + Next dev
+pnpm install                             # pnpm-only — npm install breaks the workspace:* lockfile
+pnpm db:migrate
+pnpm db:seed
+pnpm dev                                 # Next dev + NestJS (@swc-node/register) watch
 ```
 
-App at `http://localhost:3000`. NOT a prod mirror — uses npm directly, no
+App at `http://localhost:3000`. NOT a prod mirror — uses pnpm directly, no
 Docker for the app.
 
 ## Production mirror (before merging to main)
 
 ```bash
-npm run prod:local                       # docker compose up --build
+pnpm prod:local                          # docker compose up --build
 ```
 
 Uses the single `docker-compose.yml` (which has both `image:` and `build:`).
@@ -398,7 +399,7 @@ bad, or for non-urgent rollbacks.
 `docker-compose.yml` pins both. To bump:
 
 1. Edit the `image:` line for `postgres` or `redis` in `docker-compose.yml`.
-2. `npm run prod:local` — verify nothing broke.
+2. `pnpm prod:local` — verify nothing broke.
 3. Open a PR to `main`, merge.
 
 # Pre-pilot hardening (DO BEFORE accepting real traffic)

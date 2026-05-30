@@ -534,9 +534,6 @@ export const FANOUT_RULES: FanoutRuleMap = {
   //                              filters by callId; broadcasting it widely
   //                              avoids the "agent A clicked answer but the
   //                              SDP only went to agent B" race.
-  //   call.ice_candidate      → CONVERSATION room. Only the live-call agent
-  //                              cares; the call audio peer connection is
-  //                              already established.
   "call.incoming": (e, emitter) => {
     emitter.emitToTeam(e.teamId, "call:incoming", {
       teamId: e.teamId,
@@ -603,7 +600,13 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "call.failed": (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "call:ended", {
+    // TEAM-room, matching every sibling terminal phase (call.ended/missed/
+    // rejected above). A failed call must dismiss the team-wide incoming-call
+    // toast + tear down the live call for the SAME population that received
+    // call:incoming — agents who saw the toast but aren't viewing the thread
+    // are NOT in the conversation room, so a conversation-scoped frame would
+    // leave them with a stuck phantom "Customer is calling you" toast.
+    emitter.emitToTeam(e.teamId, "call:ended", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,
@@ -622,12 +625,4 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  "call.ice_candidate": (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "call:ice", {
-      teamId: e.teamId,
-      conversationId: e.conversationId,
-      callId: e.callId,
-      candidate: e.candidate,
-    });
-  },
 };

@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 import { StepEditorDrawer } from "./step-editor-drawer";
 import { TriggerEditorDrawer } from "./trigger-editor-drawer";
@@ -145,7 +146,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     const method = mode === "create" ? "POST" : "PATCH";
     let res: Response;
     try {
-      res = await fetch(path, {
+      res = await apiFetch(path, {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -202,7 +203,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       const ok = await persist({ silent: true });
       if (!ok) return;
     }
-    const res = await fetch(`/api/team/workflows/${workflow.id}/publish`, {
+    const res = await apiFetch(`/api/team/workflows/${workflow.id}/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ publish: goLive }),
@@ -224,7 +225,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   async function handleTest() {
     if (!workflow) return;
     setTestStatus("Running…");
-    const res = await fetch(`/api/team/workflows/${workflow.id}/test`, {
+    const res = await apiFetch(`/api/team/workflows/${workflow.id}/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -247,7 +248,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetch(`/api/team/workflows/${workflow.id}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/team/workflows/${workflow.id}`, { method: "DELETE" });
     if (res.ok) router.push("/workflows");
     else setTopErrors([`delete failed: ${res.status}`]);
   }

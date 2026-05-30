@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 export function ConversationMenu({
   conversationId,
@@ -46,7 +47,7 @@ export function ConversationMenu({
     if (!ok) return;
     setPending(true);
     try {
-      const res = await fetch(`/api/conversations/${conversationId}`, {
+      const res = await apiFetch(`/api/conversations/${conversationId}`, {
         method: "DELETE",
       });
       if (!res.ok) {

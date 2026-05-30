@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Wrench, X, Inbox as InboxIcon, CheckCheck, StickyNote, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type { ConversationWithRefs, User } from "@ccp/shared/types";
 
@@ -37,7 +38,7 @@ export function DevTools({
   async function fire(body: object, key: string) {
     setPendingId(key);
     try {
-      const res = await fetch("/api/dev/emit", {
+      const res = await apiFetch("/api/dev/emit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),

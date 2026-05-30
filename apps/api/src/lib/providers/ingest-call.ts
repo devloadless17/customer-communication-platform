@@ -71,27 +71,12 @@ export async function ingestCallEvent(
     return;
   }
 
-  // ICE-candidate-only webhooks (no `phase` matters past the gate): publish
-  // straight to the bus without touching the Call row. The browser is the
-  // only consumer; the row's state isn't changing.
-  if (
-    evt.iceCandidate &&
-    !evt.sdp &&
-    evt.phase !== "completed" &&
-    evt.phase !== "missed" &&
-    evt.phase !== "rejected" &&
-    evt.phase !== "failed"
-  ) {
-    await publishIceCandidateOnly(teamId, channel, evt);
-    return;
-  }
-
   // Resolve contact + conversation (1:1 invariant). Reuses the same
   // Serializable-with-retry pattern as message ingest so two concurrent
   // first-time call webhooks for the same brand-new number can't race-
   // create duplicate rows.
   const defaultStageId = await ensureDefaultStage(teamId);
-  const { contact, conversation, reopened } = await runWithSerializableRetry(
+  const { contact, conversation, needsReopen } = await runWithSerializableRetry(
     async (tx) => {
       const existingContact = await tx.contact.findFirst({
         where: { teamId, phoneNumber: evt.contactPhone },
@@ -132,7 +117,17 @@ export async function ingestCallEvent(
         orderBy: { lastMessageAt: "desc" },
       });
       let conversation = existingConvo;
-      let reopened = false;
+      // NOTE: we do NOT perform the closed→pending reopen UPDATE here. The
+      // matching `conversation.status_changed` event must commit atomically
+      // with the status flip, but it's published via publishInTx in the SECOND
+      // (Call-upsert) transaction below. Flipping here (tx1) and publishing
+      // there (tx2) splits them — a transient tx2 failure after tx1 commits
+      // would leave the conversation silently reopened with NO event (workflows
+      // / audit / partners miss it), and the outer ingestEvents catch swallows
+      // the error so Meta never retries. So we only DETECT the reopen here and
+      // do the flip + publish together in tx2. Mirrors the message-ingest
+      // invariant (ingest.ts co-commits reopen + publishInTx in one tx).
+      let needsReopen = false;
       if (!conversation) {
         conversation = await tx.conversation.create({
           data: {
@@ -144,22 +139,13 @@ export async function ingestCallEvent(
             lastMessagePreview: "",
           },
         });
-      } else if (
-        existingConvo &&
-        existingConvo.status === "closed" &&
-        evt.direction === "in"
-      ) {
+      } else if (conversation.status === "closed" && evt.direction === "in") {
         // Only INBOUND calls reopen a closed thread. An outbound call to a
-        // closed-thread contact stays closed at the conversation level
-        // (the agent already chose to close it; reopening on every call
-        // would be noisy).
-        conversation = await tx.conversation.update({
-          where: { id: existingConvo.id },
-          data: { status: "pending" },
-        });
-        reopened = true;
+        // closed-thread contact stays closed at the conversation level (the
+        // agent already chose to close it; reopening on every call is noisy).
+        needsReopen = true;
       }
-      return { contact, conversation: conversation!, reopened };
+      return { contact, conversation, needsReopen };
     },
   );
 
@@ -190,6 +176,18 @@ export async function ingestCallEvent(
 
       let callRow: { id: string; status: CallStatus };
       let isFirstInsert = false;
+      // True when this webhook lands on a row that was ALREADY terminal — i.e.
+      // a duplicate/redundant terminal delivery (Meta is at-least-once with no
+      // ordering guarantee). The phase-event publishes + the unanswered-counter
+      // increment below are gated on `!alreadyTerminal` so a redelivered
+      // `missed`/`completed`/`rejected`/`failed` webhook is a true no-op for
+      // side effects: re-publishing call.* would re-fire any future call-event
+      // subscriber, and re-incrementing consecutiveUnansweredOutCalls (which
+      // mirrors Meta's auto-revocation counter + drives the contact-panel
+      // warning) is NOT idempotent and would inflate on every retry.
+      const alreadyTerminal = existing
+        ? TERMINAL_STATUSES.has(existing.status)
+        : false;
       if (existing) {
         // Terminal-state guard. If the row already landed in a terminal
         // state, a later non-terminal webhook (out-of-order delivery) must
@@ -252,19 +250,30 @@ export async function ingestCallEvent(
         isFirstInsert = true;
       }
 
-      // Publish via outbox so subscribers see the mutation atomically with
-      // the commit. The reopen frame goes first so audit/workflow see the
-      // status change before the call event arrives.
-      if (reopened) {
-        await publishInTx(tx, {
-          type: "conversation.status_changed",
-          teamId,
-          conversationId: conversation.id,
-          previousStatus: "closed",
-          newStatus: "pending",
-          changedByUserId: null,
-          contact: toWorkflowContact(contact),
+      // Reopen the closed thread HERE (tx2), atomically with its event. The
+      // CAS `where status: "closed"` makes it idempotent across Meta retries:
+      // if a concurrent path already reopened it, count===0 and we skip the
+      // publish too, so we never emit a phantom closed→pending for a thread
+      // that wasn't actually closed at flip time. publishInTx co-commits the
+      // event with this UPDATE — a tx2 rollback drops both together.
+      if (needsReopen) {
+        const flip = await tx.conversation.updateMany({
+          where: { id: conversation.id, status: "closed" },
+          data: { status: "pending" },
         });
+        if (flip.count > 0) {
+          // Reopen frame goes first so audit/workflow see the status change
+          // before the call event arrives.
+          await publishInTx(tx, {
+            type: "conversation.status_changed",
+            teamId,
+            conversationId: conversation.id,
+            previousStatus: "closed",
+            newStatus: "pending",
+            changedByUserId: null,
+            contact: toWorkflowContact(contact),
+          });
+        }
       }
 
       // Emit the phase-specific domain event. Inserts always emit the
@@ -297,72 +306,106 @@ export async function ingestCallEvent(
           ringingAt: evt.timestamp.toISOString(),
         });
       }
-      if (evt.phase === "completed") {
-        await publishInTx(tx, {
-          type: "call.ended",
-          teamId,
-          conversationId: conversation.id,
-          callId: callRow.id,
-          direction: evt.direction,
-          endedAt: evt.timestamp.toISOString(),
-          durationSeconds: null,
-          reason: "hangup_by_customer",
-        });
-      } else if (evt.phase === "missed") {
-        await publishInTx(tx, {
-          type: "call.missed",
-          teamId,
-          conversationId: conversation.id,
-          callId: callRow.id,
-          ringingAt: evt.timestamp.toISOString(),
-        });
-        // Unanswered outbound — mirror Meta's auto-revocation counter.
-        if (evt.direction === "out") {
-          await tx.contact.update({
-            where: { id: contact.id },
-            data: { consecutiveUnansweredOutCalls: { increment: 1 } },
+      // Terminal phase-events + the unanswered-counter mutation fire ONLY on a
+      // genuine non-terminal→terminal transition. `alreadyTerminal` means this
+      // is a duplicate/redundant terminal webhook (Meta at-least-once) landing
+      // on a row that already terminalized — re-publishing call.* would re-fire
+      // downstream subscribers and re-incrementing the (non-idempotent) counter
+      // would inflate it. A duplicate terminal webhook thus becomes a true
+      // no-op for side effects (the row UPDATE above is idempotent). Inserts
+      // (isFirstInsert) are never alreadyTerminal, so a terminal-on-first-
+      // webhook call still fires its event exactly once.
+      if (!alreadyTerminal) {
+        if (evt.phase === "completed") {
+          await publishInTx(tx, {
+            type: "call.ended",
+            teamId,
+            conversationId: conversation.id,
+            callId: callRow.id,
+            direction: evt.direction,
+            endedAt: evt.timestamp.toISOString(),
+            // Carry the duration computed on the row UPDATE above (endedAt -
+            // answeredAt) instead of null, so a customer-hangup call shows its
+            // real length in the timeline/partner payload. Null only when the
+            // call never reached in_progress (no answeredAt to subtract from).
+            durationSeconds:
+              existing?.answeredAt
+                ? Math.max(
+                    0,
+                    Math.floor(
+                      (evt.timestamp.getTime() - existing.answeredAt.getTime()) /
+                        1000,
+                    ),
+                  )
+                : null,
+            reason: "hangup_by_customer",
+          });
+        } else if (evt.phase === "missed") {
+          await publishInTx(tx, {
+            type: "call.missed",
+            teamId,
+            conversationId: conversation.id,
+            callId: callRow.id,
+            ringingAt: evt.timestamp.toISOString(),
+          });
+          // Unanswered outbound — mirror Meta's auto-revocation counter.
+          if (evt.direction === "out") {
+            await tx.contact.update({
+              where: { id: contact.id },
+              data: { consecutiveUnansweredOutCalls: { increment: 1 } },
+            });
+          }
+        } else if (evt.phase === "rejected") {
+          await publishInTx(tx, {
+            type: "call.rejected",
+            teamId,
+            conversationId: conversation.id,
+            callId: callRow.id,
+            rejectedByUserId: null,
+          });
+        } else if (evt.phase === "failed") {
+          await publishInTx(tx, {
+            type: "call.failed",
+            teamId,
+            conversationId: conversation.id,
+            callId: callRow.id,
+            reason: "provider_error",
           });
         }
-      } else if (evt.phase === "rejected") {
-        await publishInTx(tx, {
-          type: "call.rejected",
-          teamId,
-          conversationId: conversation.id,
-          callId: callRow.id,
-          rejectedByUserId: null,
-        });
-      } else if (evt.phase === "failed") {
-        await publishInTx(tx, {
-          type: "call.failed",
-          teamId,
-          conversationId: conversation.id,
-          callId: callRow.id,
-          reason: "provider_error",
-        });
+
+        // Reset the unanswered counter on any successful completion. The
+        // counter is "consecutive" — a single answered call resets it.
+        if (evt.phase === "completed" && evt.direction === "out") {
+          await tx.contact.update({
+            where: { id: contact.id },
+            data: { consecutiveUnansweredOutCalls: 0 },
+          });
+        }
       }
 
-      // Reset the unanswered counter on any successful completion. The
-      // counter is "consecutive" — a single answered call resets it.
-      if (evt.phase === "completed" && evt.direction === "out") {
-        await tx.contact.update({
-          where: { id: contact.id },
-          data: { consecutiveUnansweredOutCalls: 0 },
-        });
-      }
-
-      // SDP offer goes on its own frame regardless of phase, so the browser
-      // gets it as soon as it lands. Outside the tx for ICE; bundled here
-      // for SDP because losing it = the call can't establish (vs an ICE
-      // candidate where redundancy means we can lose one).
-      if (evt.sdp && evt.sdp.type === "offer") {
+      // Forward SDP to the browser regardless of type — for inbound calls
+      // it's an OFFER (browser feeds into setRemoteDescription, generates
+      // answer); for OUTBOUND calls it's the customer's ANSWER (browser
+      // feeds into setRemoteDescription to complete the handshake). The
+      // socket event was originally named `call:sdp_offer` for the inbound
+      // case but is reused for both — payload carries the actual type so
+      // the browser's onSdpOffer handler can branch.
+      //
+      // CRITICAL: losing this frame on outbound = call never establishes
+      // media, connectionState goes to "failed" after ~15s ICE timeout,
+      // and the user sees a panel that closes itself. This was a real bug
+      // in the first outbound flow.
+      if (evt.sdp) {
         await publishInTx(tx, {
           type: "call.sdp_offer",
           teamId,
           conversationId: conversation.id,
           callId: callRow.id,
-          // Re-narrow the SDP envelope: TS doesn't carry the type-guard
-          // through the publishInTx call site, so reconstruct explicitly.
-          sdp: { type: "offer", sdp: evt.sdp.sdp },
+          // The shared event type narrows `sdp.type` to "offer"; carry
+          // the actual type through with an `as` so the wire payload
+          // stays honest. Browser branches on type to decide
+          // setRemoteDescription role.
+          sdp: { type: evt.sdp.type as "offer", sdp: evt.sdp.sdp },
         });
       }
     });
@@ -418,37 +461,3 @@ async function handlePermissionEvent(
   }
 }
 
-/**
- * ICE-candidate-only webhook. No DB write — the live agent's browser is
- * the only consumer. We need a Call row to resolve `callId`, so look it up
- * by externalCallId; if no row exists yet (rare race — first webhook is
- * the ICE one), drop the candidate. The browser will see subsequent ones.
- */
-async function publishIceCandidateOnly(
-  teamId: string,
-  channel: Channel,
-  evt: NormalizedCallEvent,
-): Promise<void> {
-  if (!evt.iceCandidate) return;
-  const row = await db.call.findUnique({
-    where: {
-      teamId_channel_externalCallId: {
-        teamId,
-        channel,
-        externalCallId: evt.externalCallId,
-      },
-    },
-    select: { id: true, conversationId: true },
-  });
-  if (!row) return;
-  // Publish through bus (no outbox needed — ICE is ephemeral signaling and
-  // a missed candidate is recoverable from the next one).
-  const { publish } = await import("@/lib/events/bus");
-  await publish({
-    type: "call.ice_candidate",
-    teamId,
-    conversationId: row.conversationId,
-    callId: row.id,
-    candidate: evt.iceCandidate,
-  });
-}

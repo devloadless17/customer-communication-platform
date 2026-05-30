@@ -33,8 +33,14 @@ const BodySchema = z.object({
 type Input = z.infer<typeof BodySchema>;
 
 function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  // Compare BYTE lengths, not string char lengths — `timingSafeEqual` throws
+  // "Input buffers must have the same byte length" when the two UTF-8 encodings
+  // differ in size even if `a.length === b.length` (a non-ASCII probe value
+  // could otherwise crash this with a 500 instead of returning a clean false).
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 @Controller("api/internal/session-invalidated")
@@ -53,7 +59,7 @@ export class InternalSessionController {
         ? req.headers["x-internal-secret"]
         : "";
     if (!safeEqual(got, expected)) {
-      throw new UnauthorizedException("unauthorized");
+      throw new UnauthorizedException({ error: "unauthorized" });
     }
 
     this.invalidator.revoke(body.userId, body.reason);

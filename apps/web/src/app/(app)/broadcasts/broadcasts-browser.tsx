@@ -29,20 +29,6 @@ import { BroadcastDeleteButton } from "./broadcast-delete-button";
  * Plain React + a debounced fetch — no React Query, matching the app's stack.
  */
 
-// Re-export the pure primitives so legacy client-side imports keep working
-// through this file. The definitions live in `./broadcasts-cookies.ts`
-// (no "use client") so the SSR page can read the cookie without crashing
-// on "Attempted to call X() from the server but X is on the client."
-export {
-  BROADCASTS_SEARCH_COOKIE,
-  BROADCASTS_STATUS_COOKIE,
-  BROADCASTS_VIEW_COOKIE,
-  parseBroadcastStatus,
-  parseBroadcastView,
-  type BroadcastStatusFilter,
-  type BroadcastView,
-} from "./broadcasts-cookies";
-
 import {
   BROADCASTS_SEARCH_COOKIE,
   BROADCASTS_STATUS_COOKIE,

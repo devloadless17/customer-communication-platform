@@ -59,19 +59,6 @@ function base(
   };
 }
 
-function fan(
-  teamId: string,
-  conversationId: string,
-  event: ConversationActivityEvent,
-): string {
-  dispatchLocalSocketEvent("conversation:activity", {
-    teamId,
-    conversationId,
-    event,
-  });
-  return event.id;
-}
-
 /** Roll back one stub (failed PATCH) so the pill doesn't linger as a lie. */
 export function rollbackOptimisticActivity(
   teamId: string,
@@ -86,63 +73,93 @@ export function rollbackOptimisticActivity(
   });
 }
 
-// --- per-kind builders. Each returns the stub's id so the caller can roll it
-//     back on a failed write. ---------------------------------------------
+// --- per-kind builders ----------------------------------------------------
+// Each returns the dispatch tuple + the stub id WITHOUT fanning. The caller
+// bundles the activity-pill frame with the state-changing frame
+// (`conversation:status`, `conversation:assigned`, `contact:updated`) into ONE
+// `dispatchLocalSocketEvents([...])` call — so React commits header chip +
+// pill in a single paint cycle. Two separate `dispatchLocalSocketEvent` calls
+// each wrap their own flushSync, which produces two paints back-to-back —
+// that's the visible "the activity log lags everything else" gap.
+// -------------------------------------------------------------------------
 
-export function optimisticStatusChange(args: {
+type ActivityDispatch = [
+  "conversation:activity",
+  { teamId: string; conversationId: string; event: ConversationActivityEvent },
+];
+
+export interface OptimisticActivityBuild {
+  /** Tuple to pass into `dispatchLocalSocketEvents([..., frame])`. */
+  frame: ActivityDispatch;
+  /** Stub id — pass to `rollbackOptimisticActivity` on a failed write. */
+  id: string;
+}
+
+function build(
+  teamId: string,
+  conversationId: string,
+  event: ConversationActivityEvent,
+): OptimisticActivityBuild {
+  return {
+    id: event.id,
+    frame: ["conversation:activity", { teamId, conversationId, event }],
+  };
+}
+
+export function buildOptimisticStatusChange(args: {
   teamId: string;
   conversationId: string;
   actorName: string;
   status: ConversationStatus;
-}): string {
+}): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "status_changed");
   e.after = { status: args.status };
-  return fan(args.teamId, args.conversationId, e);
+  return build(args.teamId, args.conversationId, e);
 }
 
-export function optimisticAssignment(args: {
+export function buildOptimisticAssignment(args: {
   teamId: string;
   conversationId: string;
   actorName: string;
-  /** New assignee display name; null = unassigned. */
   assignedToName: string | null;
-}): string {
+}): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "assigned");
   e.assignedToName = args.assignedToName;
-  return fan(args.teamId, args.conversationId, e);
+  return build(args.teamId, args.conversationId, e);
 }
 
-export function optimisticStageChange(args: {
+export function buildOptimisticStageChange(args: {
   teamId: string;
   conversationId: string;
   actorName: string;
   fromStageName: string | null;
   toStageName: string | null;
-}): string {
+}): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "stage_changed");
   e.before = { stageName: args.fromStageName };
   e.after = { stageName: args.toStageName };
-  return fan(args.teamId, args.conversationId, e);
+  return build(args.teamId, args.conversationId, e);
 }
 
-export function optimisticTagAdded(args: {
+export function buildOptimisticTagAdded(args: {
   teamId: string;
   conversationId: string;
   actorName: string;
   tagName: string;
-}): string {
+}): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "tag_added");
   e.after = { tagName: args.tagName };
-  return fan(args.teamId, args.conversationId, e);
+  return build(args.teamId, args.conversationId, e);
 }
 
-export function optimisticTagRemoved(args: {
+export function buildOptimisticTagRemoved(args: {
   teamId: string;
   conversationId: string;
   actorName: string;
   tagName: string;
-}): string {
+}): OptimisticActivityBuild {
   const e = base(args.conversationId, args.actorName, "tag_removed");
   e.before = { tagName: args.tagName };
-  return fan(args.teamId, args.conversationId, e);
+  return build(args.teamId, args.conversationId, e);
 }
+

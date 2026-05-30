@@ -10,22 +10,22 @@ import {
 } from "@nestjs/common";
 
 import { RequireCapability } from "../auth/capability.guard";
+import { RequireRole } from "../auth/role.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
+import { RateLimit } from "../common/rate-limit.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { CallsService } from "./calls.service";
 import {
   AnswerCallSchema,
   EndCallSchema,
-  IceCandidateSchema,
   InitiateCallSchema,
   ListCallsQuerySchema,
   RejectCallSchema,
   RequestCallPermissionSchema,
   type AnswerCallInput,
   type EndCallInput,
-  type IceCandidateInput,
   type InitiateCallInput,
   type ListCallsQuery,
   type RejectCallInput,
@@ -35,24 +35,35 @@ import {
 /**
  * Calls API.
  *
- * Two URL spaces to keep paths intuitive:
- *
  *   /api/conversations/:id/call             — initiate outbound from a thread
- *   /api/conversations/:id/call-permission  — request permission
+ *   /api/conversations/:id/call-permission  — request calling permission
  *   /api/conversations/:id/calls            — list history
  *   /api/calls/:id/answer                   — accept incoming
  *   /api/calls/:id/reject                   — decline incoming
  *   /api/calls/:id/end                      — terminate in-progress
- *   /api/calls/:id/ice                      — relay browser ICE candidate
+ *   /api/calls/admin/enable                 — one-time Meta calling enablement
+ *   /api/calls/admin/settings               — read Meta's calling config
  *
- * Capability gates:
- *   - calls:make on initiate / permission / end
- *   - calls:receive on answer / reject / end
+ * Capability gates: `calls:make` on initiate/permission; `calls:receive` on
+ * answer/reject; `calls:make || calls:receive` on list (inline check) and end
+ * (inline check). The two `/admin/*` endpoints are ADMIN-only (`@RequireRole`)
+ * — they mutate/disclose the team's Meta phone-number calling config, a
+ * team-administration operation structurally identical to the WhatsApp settings
+ * controller, NOT a per-agent "allowed to dial" action. `calls:make` defaults
+ * true for agents, so gating the admin routes on it let any agent reconfigure
+ * the number — fixed to @RequireRole("admin").
  *
- * /end accepts either capability; the service does the actual inline check.
+ * Rate limit: class-level 60/min mirroring MessagesController — every initiate/
+ * permission handler hits Meta's Cloud API synchronously and counts against the
+ * number's quality rating (Meta caps calling tightly; a retry storm at the
+ * 300/min global default could get the number flagged/throttled).
+ *
+ * NOTE: there's no `/ice` endpoint — Meta uses ICE-LITE (all candidates
+ * baked into the SDP) so client-side trickle isn't possible.
  */
 @Controller()
 @UseGuards(SessionGuard)
+@RateLimit({ perMinute: 60 })
 export class CallsController {
   constructor(private readonly calls: CallsService) {}
 
@@ -63,9 +74,9 @@ export class CallsController {
   async initiate(
     @CurrentSession() session: ApiSession,
     @Param("conversationId") conversationId: string,
-    @Body(zBody(InitiateCallSchema)) _body: InitiateCallInput,
+    @Body(zBody(InitiateCallSchema)) body: InitiateCallInput,
   ) {
-    return this.calls.initiateCall(session, conversationId);
+    return this.calls.initiateCall(session, conversationId, body.sdp);
   }
 
   @Post("api/conversations/:conversationId/call-permission")
@@ -85,6 +96,35 @@ export class CallsController {
     @Query(zQuery(ListCallsQuerySchema)) query: ListCallsQuery,
   ) {
     return this.calls.list(session, conversationId, query.take, query.cursor);
+  }
+
+  // --- Admin -----------------------------------------------------------------
+
+  /**
+   * One-time setup endpoint: enables Cloud API Calling on this team's
+   * phone number via Meta's settings API. Required before placeCall
+   * works (Meta error 138000 otherwise). Idempotent. ADMIN-only: this
+   * OVERWRITES the team's Meta calling config (status, call_icon_visibility,
+   * call_hours → 24/7), a team-administration mutation — not something a
+   * per-agent `calls:make` (default-true) should authorize.
+   */
+  @Post("api/calls/admin/enable")
+  @HttpCode(200)
+  @RequireRole("admin")
+  async enableCalling(@CurrentSession() session: ApiSession) {
+    return this.calls.enableCallingForTeam(session);
+  }
+
+  /**
+   * Diagnostic GET: dumps Meta's current phone-number settings so we can
+   * see what's actually configured (calling.status, call_icon_visibility,
+   * call_hours, etc.). Use when inbound calls aren't reaching the webhook.
+   * ADMIN-only — discloses the team's full Meta calling configuration.
+   */
+  @Get("api/calls/admin/settings")
+  @RequireRole("admin")
+  async getSettings(@CurrentSession() session: ApiSession) {
+    return this.calls.getPhoneNumberSettings(session);
   }
 
   // --- Call-scoped -----------------------------------------------------------
@@ -121,19 +161,4 @@ export class CallsController {
     return this.calls.endCall(session, callId);
   }
 
-  @Post("api/calls/:callId/ice")
-  @HttpCode(200)
-  async ice(
-    @CurrentSession() session: ApiSession,
-    @Param("callId") callId: string,
-    @Body(zBody(IceCandidateSchema)) body: IceCandidateInput,
-  ) {
-    return this.calls.forwardIce(
-      session,
-      callId,
-      body.candidate,
-      body.sdpMid,
-      body.sdpMLineIndex,
-    );
-  }
 }

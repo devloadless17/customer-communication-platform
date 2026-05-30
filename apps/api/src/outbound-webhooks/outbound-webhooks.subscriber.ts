@@ -131,14 +131,25 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     this.registered = false;
   }
 
-  private async handle(event: { teamId: string; type: string; silent?: boolean }) {
-    // `silent` = internal/cascaded mutation — skip downstream reactions. The
-    // workflow-dispatch subscriber already skips chain-triggering on this flag;
-    // we mirror that for webhook delivery so an API/workflow-driven change
-    // doesn't echo a webhook back to the system that caused it (echo-loop
-    // avoidance). Socket fanout + audit + analytics still ran upstream — those
-    // are user-visible truth, not reactions. See ConversationAssignedEvent.silent.
-    if (event.silent) return;
+  private async handle(event: {
+    teamId: string;
+    type: string;
+    silent?: boolean;
+    skipOutboundWebhook?: boolean;
+  }) {
+    // Webhook delivery is gated by `skipOutboundWebhook`, which DEFAULTS to
+    // `silent` when unset. So:
+    //   - /v1 partner mutation (silent: true, flag unset) → skipped (no echo
+    //     back to the partner that caused the change).
+    //   - workflow STEP-driven change (silent: true for loop safety, but
+    //     skipOutboundWebhook: false) → delivered, because partners DID
+    //     subscribe to "On Contact Tag/Lifecycle changed" and a workflow that
+    //     moves a contact's pipeline is exactly the signal they want.
+    // The two concerns (skip workflow re-trigger vs skip webhook echo) used to
+    // share one `silent` flag; splitting them is what lets a step be loop-safe
+    // AND partner-visible. Socket fanout + audit + analytics still ran upstream.
+    const skipWebhook = event.skipOutboundWebhook ?? event.silent ?? false;
+    if (skipWebhook) return;
 
     // Capture the correlation id of the request that CAUSED this event NOW —
     // we're still synchronous within the publish() call chain, so the ALS scope
@@ -167,22 +178,53 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     if (webhooks.length === 0) return;
 
     // Enrich each public payload with everything the framework-agnostic mapper
-    // couldn't derive (it has no DB access). Best-effort: a failed lookup
-    // leaves the documented `null` in place rather than dropping the delivery.
+    // couldn't derive (it has no DB access). Best-effort: a failed lookup must
+    // leave the documented `null` in place rather than DROP THE DELIVERY. Each
+    // enrichment is independently try/caught — without this, a single rejected
+    // Prisma findMany (pool flap, lock-wait timeout) anywhere in the chain threw
+    // out of handle() and silently lost every webhook delivery for this publish.
+    // The downstream `toWirePayload` already tolerates the un-enriched (null)
+    // shape, so degrading is strictly better than dropping.
     //   1. media CDN urls on file messages (image/video/doc links)
     //   2. full contact + conversation (status, assignee) on message.sent so
     //      it matches message.received's context
     //   3. assignee + sender display names / emails wherever they're id-only
-    await this.enrichMessages(envelopes);
-    await this.enrichSentMessageContext(envelopes);
-    await this.hydrateUsers(envelopes);
+    try {
+      await this.enrichMessages(envelopes);
+    } catch (err) {
+      this.logger.warn(
+        `enrichMessages failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      await this.enrichSentMessageContext(envelopes);
+    } catch (err) {
+      this.logger.warn(
+        `enrichSentMessageContext failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      await this.hydrateUsers(envelopes);
+    } catch (err) {
+      this.logger.warn(
+        `hydrateUsers failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
+      );
+    }
 
     // Channel is derived from the event itself (message/contact/conversation),
     // so a Telegram/Instagram event stamps its own connection — not WhatsApp.
-    const channelBase = await this.resolveChannel(
-      event.teamId,
-      deriveEventChannel(event as unknown as Record<string, unknown>),
-    );
+    // Also degrade-on-failure: a null channelBase is tolerated by toWirePayload.
+    let channelBase: Awaited<ReturnType<typeof this.resolveChannel>> | null = null;
+    try {
+      channelBase = await this.resolveChannel(
+        event.teamId,
+        deriveEventChannel(event as unknown as Record<string, unknown>),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `resolveChannel failed, delivering without channel: ${err instanceof Error ? err.message : err}`,
+      );
+    }
 
     for (const { type, envelope } of envelopes) {
       const matching = webhooks.filter((w) => w.eventTypes.includes(type));

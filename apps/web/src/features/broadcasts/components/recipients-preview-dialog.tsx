@@ -7,6 +7,7 @@ import { Loader2, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { TagChip } from "@/features/tags/components/tag-chip";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { formatPhone, initials } from "@ccp/shared/utils";
 import type { Tag } from "@ccp/shared/types";
 
@@ -53,7 +54,7 @@ export function RecipientsPreviewDialog({
     setData(null);
     void (async () => {
       try {
-        const res = await fetch("/api/contacts/preview", {
+        const res = await apiFetch("/api/contacts/preview", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),

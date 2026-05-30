@@ -5,6 +5,7 @@ import { Check, Loader2, Save } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type {
@@ -109,7 +110,7 @@ export function VariableBindingsEditor({
     setError(null);
     setSaving(true);
     try {
-      const res = await fetch(`/api/team/whatsapp/templates/${templateId}`, {
+      const res = await apiFetch(`/api/team/whatsapp/templates/${templateId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ variableBindings: bindings }),

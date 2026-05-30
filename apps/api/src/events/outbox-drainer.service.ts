@@ -6,6 +6,7 @@ import {
 } from "@nestjs/common";
 
 import { withCorrelation } from "@/common/correlation";
+import { runWithConcurrency } from "@/common/concurrency";
 import {
   claimBatch,
   markPublishedWithError,
@@ -72,6 +73,14 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
    */
   private static readonly MAX_DRAINS_PER_TICK = 10;
 
+  /**
+   * Bounded fan-out for per-row dispatch within a batch. 8 lanes mirrors the
+   * outbound-webhook delivery fan; bounds the event-loop pressure of a hot
+   * 200-row batch (each row runs the full subscriber chain) so one team's
+   * burst can't pin the loop for every other tenant.
+   */
+  private static readonly DISPATCH_CONCURRENCY = 8;
+
   private timer: NodeJS.Timeout | null = null;
   private inflight = false;
   private stopping = false;
@@ -112,6 +121,11 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
 
   private schedule(): void {
     if (this.stopping) return;
+    // Clear any existing pending timer first so two schedule() calls can't
+    // leave two live timers racing (each setTimeout overwrites this.timer but
+    // the orphaned handle still fires). Idempotent scheduling — exactly one
+    // pending tick at a time.
+    if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       void this.tick();
     }, OutboxDrainerService.POLL_INTERVAL_MS);
@@ -120,9 +134,11 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
   private async tick(): Promise<void> {
     if (this.stopping) return;
     if (this.inflight) {
-      // Previous tick still running — reschedule and bail. Prevents a slow
-      // batch from concurrently re-entering and double-dispatching rows.
-      this.schedule();
+      // Previous tick still running — bail WITHOUT rescheduling. The running
+      // tick's `finally` already calls schedule() when it completes, so a
+      // reschedule here would create a second timer chain that double-dispatch
+      // races (the in-flight guard catches most, but two timers compound over
+      // time). Let the owner reschedule.
       return;
     }
     this.inflight = true;
@@ -138,12 +154,15 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         // dispatch made a single 200-row batch take up to 15s under
         // moderate subscriber latency, with realtime emits visibly lagging
         // for the tail of the batch even though they're priority-0 inside
-        // each event. Concurrency:8 mirrors the outbound-webhook lane fan
-        // and keeps any one team's events from monopolizing.
+        // each event. DISPATCH_CONCURRENCY lanes (mirrors the outbound-webhook
+        // lane fan) keep any one team's events from monopolizing the loop —
+        // an UNBOUNDED Promise.all over a 200-row batch pushed every subscriber
+        // chain into the event loop at once (the comment used to claim
+        // concurrency:8 while the code fanned all 200; this now matches).
         //
-        // `Promise.all` so an unexpected throw bubbles to the catch below
-        // (per-subscriber errors are already caught by `dispatchPersistedEvent`
-        // and recorded via `markPublishedWithError`).
+        // Per-dispatch errors are caught inline (logged) so one bad row can't
+        // abort the lane; per-subscriber errors are ALSO caught deeper by
+        // `dispatchPersistedEvent` and recorded via `markPublishedWithError`.
         //
         // INVARIANT for new subscribers: parallel dispatch is correctness-
         // safe ONLY if every subscriber's writes are atomic at the DB
@@ -170,13 +189,16 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         // the older message's text until the next mutation. Sort by
         // createdAt before Promise.all to preserve FIFO per stream.
         rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-        await Promise.all(
-          rows.map((row) => this.dispatch(row).catch((err) => {
-            this.logger.error(
-              withCorrelation(`[outbox-drainer] dispatch row=${row.id} failed`),
-              err instanceof Error ? err.message : String(err),
-            );
-          })),
+        await runWithConcurrency(
+          rows,
+          OutboxDrainerService.DISPATCH_CONCURRENCY,
+          (row) =>
+            this.dispatch(row).catch((err) => {
+              this.logger.error(
+                withCorrelation(`[outbox-drainer] dispatch row=${row.id} failed`),
+                err instanceof Error ? err.message : String(err),
+              );
+            }),
         );
         drains += 1;
         if (rows.length < OutboxDrainerService.BATCH_SIZE) break;

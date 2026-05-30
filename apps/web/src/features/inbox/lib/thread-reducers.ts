@@ -255,7 +255,6 @@ export function applyCallEnded(
       answeredAt: prev.activeCall.answeredAt,
       endedAt: payload.endedAt,
       durationSeconds: payload.durationSeconds,
-      recordingUrl: null,
     });
   } else {
     // Terminal frame for a call we never saw an active state for (page
@@ -385,7 +384,6 @@ export const REDUCER_EXCLUSIONS: ReadonlyMap<string, string> = new Map([
   // not into the thread snapshot. The browser hangs them off the peer
   // connection, not the rendered state.
   ["call:sdp_offer", "WebRTC signaling, owned by useCall"],
-  ["call:ice", "WebRTC signaling, owned by useCall"],
 ]);
 
 /**

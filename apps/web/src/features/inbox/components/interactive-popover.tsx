@@ -5,6 +5,7 @@ import { Loader2, MousePointerClick, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
 
 /**
@@ -128,7 +129,7 @@ export function InteractivePopover({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/messages/interactive", {
+      const res = await apiFetch("/api/messages/interactive", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

@@ -2,6 +2,7 @@
 
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ContactSelectDialog } from "@/features/contacts/components/contact-select-dialog";
+import { apiFetch } from "@/lib/api/client-fetch";
 import type { ForwardResult } from "@ccp/shared/types";
 
 /**
@@ -60,7 +61,7 @@ async function runForward(
   onAnySent: () => void,
 ) {
   try {
-    const res = await fetch("/api/messages/forward", {
+    const res = await apiFetch("/api/messages/forward", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ messageIds, contactIds }),

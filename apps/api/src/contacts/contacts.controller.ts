@@ -100,7 +100,7 @@ export class ContactsController {
     // the body, so this lives here rather than on @RequireCapability.
     if (body.action === "delete") {
       const perms = resolvePermissions(session.role, session.rolePermissions);
-      if (!perms["contacts:delete"]) throw new ForbiddenException("forbidden");
+      if (!perms["contacts:delete"]) throw new ForbiddenException({ error: "forbidden" });
     }
     return this.contacts.bulk(session.teamId, session.userId, body);
   }
@@ -122,7 +122,7 @@ export class ContactsController {
     if (!file) {
       throw new BadRequestException({ error: "missing 'file' field" });
     }
-    return this.contacts.importCsv(session.teamId, file.buffer);
+    return this.contacts.importCsv(session.teamId, session.userId, file.buffer);
   }
 
   @Get("lookup")

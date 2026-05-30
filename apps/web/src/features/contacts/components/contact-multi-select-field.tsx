@@ -5,6 +5,7 @@ import { UserPlus, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { apiFetch } from "@/lib/api/client-fetch";
 import {
   ContactSelectDialog,
   type ContactLabel,
@@ -64,7 +65,7 @@ export function ContactMultiSelectField({
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/contacts/lookup?ids=${encodeURIComponent(missing.join(","))}`,
         );
         if (!res.ok || cancelled) return;

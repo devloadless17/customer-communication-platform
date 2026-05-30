@@ -546,8 +546,6 @@ export interface CallSnapshot {
   answeredAt: string | null;
   endedAt: string | null;
   durationSeconds: number | null;
-  /** Phase-2 SIP recording URL; null in Phase 1. */
-  recordingUrl: string | null;
 }
 
 /** Patch shape accepted by `PATCH /api/contacts/[id]`. All fields optional. */

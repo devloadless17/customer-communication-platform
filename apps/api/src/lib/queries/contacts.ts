@@ -113,6 +113,19 @@ export async function listContacts(
               c.name ILIKE ${"%" + search + "%"}
               OR c."phoneNumber" ILIKE ${"%" + search + "%"}
               OR COALESCE(c.email, '') ILIKE ${"%" + search + "%"}
+              -- KNOWN INDEX-MISS (acceptable at pilot scale): the
+              -- jsonb::text ILIKE can't use the customFields jsonb_path_ops
+              -- GIN index (that index serves containment ops @>/?/, not
+              -- substring match), so this branch seq-scans. It runs ONLY over
+              -- this team's LIVE rows (the teamId + deletedAt IS NULL predicates
+              -- above narrow first via Contact_teamId_active_idx), so it's
+              -- bounded by one tenant's contact count. Dropping it would lose
+              -- "find a contact by any custom-field value" from quick-search —
+              -- a real UX regression — so we keep it. TRIGGER to revisit: a
+              -- team crosses ~50k contacts AND EXPLAIN shows this as the hot
+              -- cost. Fix then: a generated tsvector/trgm column over the
+              -- flattened customFields values, or push custom-field search to
+              -- the explicit fieldKey+fieldValue filter only.
               OR c."customFields"::text ILIKE ${"%" + search + "%"}
             )`
           : Prisma.empty
@@ -253,7 +266,10 @@ export async function lookupContacts(
   ).slice(0, 1000);
   if (clean.length === 0) return [];
   return db.contact.findMany({
-    where: { teamId, id: { in: clean } },
+    // deletedAt:null so a tombstoned contact can't flash back into picker chips
+    // / the contacts:bulk_updated refetch — matches every other read surface
+    // (countContacts, list, remove, update, bulk, setTags all filter it).
+    where: { teamId, deletedAt: null, id: { in: clean } },
     select: { id: true, name: true, phoneNumber: true },
   });
 }

@@ -79,7 +79,7 @@ export class MediaController {
         res.status(200).json({ available: false, reason: "missing" });
         return;
       }
-      throw new NotFoundException("not found");
+      throw new NotFoundException({ error: "not_found" });
     }
     if (!blobStorage.isOwnUrl(message.mediaUrl)) {
       // Open-redirect guard — keep the response indistinguishable from
@@ -88,7 +88,7 @@ export class MediaController {
         res.status(200).json({ available: false, reason: "missing" });
         return;
       }
-      throw new NotFoundException("not found");
+      throw new NotFoundException({ error: "not_found" });
     }
     if (probe) {
       // HEAD the upstream so the client can avoid opening a tab that would
@@ -125,10 +125,10 @@ export class MediaController {
       select: { mediaThumbnailUrl: true },
     });
     if (!message?.mediaThumbnailUrl) {
-      throw new NotFoundException("not found");
+      throw new NotFoundException({ error: "not_found" });
     }
     if (!blobStorage.isOwnUrl(message.mediaThumbnailUrl)) {
-      throw new NotFoundException("not found");
+      throw new NotFoundException({ error: "not_found" });
     }
     res.set("Cache-Control", "private, max-age=31536000, immutable");
     res.set("Vary", "Cookie");

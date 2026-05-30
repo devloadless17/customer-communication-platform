@@ -72,7 +72,24 @@ export async function ingestEvents(
       if (evt.kind === "message") {
         await ingestInboundMessage(teamId, channel, evt);
       } else if (evt.kind === "call") {
-        await ingestCallEvent(teamId, channel, evt);
+        // Kill-switch: WhatsApp calling is in-flight and reaches browsers via
+        // realtime WebRTC signaling. DISABLE_WHATSAPP_CALLING=1 (wired in
+        // docker-compose api.environment) lets ops dark-stop call ingest WITHOUT
+        // a redeploy if a signaling bug surfaces — call webhooks become a no-op
+        // (logged) while message ingest keeps flowing. Default OFF (calling on),
+        // so this is a pure opt-out lever, no behavior change unless set.
+        if (process.env.DISABLE_WHATSAPP_CALLING === "1") {
+          console.warn(
+            JSON.stringify({
+              event: "ingest.call_skipped_killswitch",
+              severity: "warn",
+              teamId,
+              channel,
+            }),
+          );
+        } else {
+          await ingestCallEvent(teamId, channel, evt);
+        }
       } else {
         await ingestStatusUpdate(teamId, channel, evt);
       }

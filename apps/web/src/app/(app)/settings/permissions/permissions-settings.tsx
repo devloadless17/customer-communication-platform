@@ -13,6 +13,7 @@ import {
 } from "@ccp/shared/auth/permissions";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn } from "@ccp/shared/utils";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
 type EditableMatrix = Record<EditableRole, Record<Capability, boolean>>;
@@ -32,7 +33,7 @@ export function PermissionsSettings() {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch("/api/team/permissions");
+        const res = await apiFetch("/api/team/permissions");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as {
           permissions: EditableMatrix;
@@ -57,7 +58,7 @@ export function PermissionsSettings() {
     };
     setSaving(true);
     try {
-      const res = await fetch("/api/team/permissions", {
+      const res = await apiFetch("/api/team/permissions", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -68,7 +69,7 @@ export function PermissionsSettings() {
       toast("Couldn't save — reverted");
       // Re-fetch authoritative state so the UI doesn't drift from the server.
       try {
-        const res = await fetch("/api/team/permissions");
+        const res = await apiFetch("/api/team/permissions");
         if (res.ok) {
           const json = (await res.json()) as { permissions: EditableMatrix };
           setMatrix(json.permissions);

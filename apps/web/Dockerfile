@@ -206,11 +206,12 @@ ENV NODE_ENV=production \
     # Prisma 7's `prisma.config.ts` does `import { defineConfig, env } from
     # "prisma/config"`. The Node resolver walks up from /app/prisma.config.ts
     # → /app/node_modules → /node_modules, none of which contain prisma (the
-    # standalone-traced tree has no CLI dependencies). Without NODE_PATH the
-    # `prisma migrate deploy` step on container start fails with
-    # `Cannot find module 'prisma/config'`. Pointing NODE_PATH at the CLI
-    # tools tree lets the resolver find prisma/config without symlinking
-    # into the standalone node_modules.
+    # standalone-traced tree has no CLI dependencies). The web image carries
+    # the Prisma CLI at /opt/cli-tools so the deploy job's manual
+    # `pnpm run db:seed:superadmin` step (same image) can resolve prisma/config;
+    # NODE_PATH points the resolver there without symlinking into the standalone
+    # node_modules. NOTE: the web container itself does NOT run migrations — the
+    # api container owns `prisma migrate deploy` (see docker-compose.yml api CMD).
     NODE_PATH="/opt/cli-tools/node_modules"
 USER node
 EXPOSE 3000
@@ -223,10 +224,10 @@ EXPOSE 3000
 # instant the standalone server.js responds (~2-3s).
 HEALTHCHECK --start-interval=500ms --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
-# Direct node invocation — no `sh -c` wrapper. Migrations run in the
-# one-shot `migrate` compose service before app/api boot (docker-
-# compose.yml: depends_on { migrate: service_completed_successfully }).
-# This image keeps the Prisma CLI at /opt/cli-tools so the migrate
-# service (same image) can still invoke `prisma migrate deploy`.
-# Node runs as PID 1, so SIGTERM reaches Next.js cleanly on shutdown.
+# Direct node invocation — no `sh -c` wrapper. Migrations run as the first
+# step of the API container's CMD (`pnpm prisma migrate deploy && exec node …`,
+# see docker-compose.yml) — the standalone `migrate` compose service was folded
+# into api on 2026-05-19. The web image keeps the Prisma CLI at /opt/cli-tools
+# only for the deploy job's manual `db:seed:superadmin` step, NOT for its own
+# migrations. Node runs as PID 1, so SIGTERM reaches Next.js cleanly on shutdown.
 CMD ["node", "apps/web/server.js"]

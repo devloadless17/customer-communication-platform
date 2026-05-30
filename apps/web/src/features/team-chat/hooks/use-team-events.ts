@@ -13,8 +13,6 @@ export interface TeamEventsState {
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
-  /** True while the initial list for a freshly-selected filter is loading. */
-  refreshing: boolean;
 }
 
 /**
@@ -126,7 +124,6 @@ export function useTeamEvents(
   );
   const [nextCursor, setNextCursor] = useState<string | null>(initialNextCursor);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
 
   // Stable filter ref so socket handlers + resync can read the latest
   // without re-binding on every change. Sync-assigned during render (not
@@ -269,7 +266,6 @@ export function useTeamEvents(
     lastFilterKeyRef.current = filterKey;
 
     let cancelled = false;
-    setRefreshing(true);
 
     // INSTANT re-derive: filter the rows we ALREADY have (which carry the
     // freshest lastMessagePreview / assignee / status from live socket updates
@@ -316,9 +312,6 @@ export function useTeamEvents(
           });
         });
         setNextCursor(page.nextCursor);
-      })
-      .finally(() => {
-        if (!cancelled) setRefreshing(false);
       });
     return () => {
       cancelled = true;
@@ -979,5 +972,5 @@ export function useTeamEvents(
     };
   }, [teamId, currentUserId]);
 
-  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore, refreshing };
+  return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore };
 }

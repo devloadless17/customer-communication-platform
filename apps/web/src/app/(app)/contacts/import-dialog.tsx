@@ -220,6 +220,8 @@ export function ImportContactsDialog({
 interface ImportResult {
   total: number;
   created: number;
+  /** Soft-deleted contacts the import brought back (un-tombstoned). */
+  revived: number;
   skippedExisting: number;
   errors: Array<{ row: number; reason: string }>;
   unknownColumns: string[];
@@ -241,6 +243,12 @@ function ImportResultView({
           Imported {result.created} new contact{result.created === 1 ? "" : "s"}.
         </div>
         <div className="mt-1 text-xs text-muted-foreground">
+          {result.revived > 0 && (
+            <div>
+              Restored {result.revived} previously-deleted contact
+              {result.revived === 1 ? "" : "s"}.
+            </div>
+          )}
           {result.skippedExisting > 0 && (
             <div>
               Skipped {result.skippedExisting} that already existed (matched by phone

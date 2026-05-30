@@ -95,7 +95,11 @@ export const addCommentStepHandler: StepHandler<AddCommentStepConfig> = {
         body,
         timestamp: note.timestamp.toISOString(),
       },
+      // Loop-safe (no workflow re-trigger on this system-authored note) but
+      // partner-visible: `note.created` is a public webhook event a partner
+      // can sync. See tag.ts + ContactTagChangedEvent.skipOutboundWebhook.
       silent: true,
+      skipOutboundWebhook: false,
     });
 
     return advance({ noteId: note.id, conversationId });

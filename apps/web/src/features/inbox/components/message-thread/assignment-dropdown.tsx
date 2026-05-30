@@ -18,37 +18,18 @@ import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
 } from "@ccp/shared/presence";
-import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import { dispatchLocalSocketEvent, dispatchLocalSocketEvents } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 import {
-  optimisticAssignment,
-  optimisticStatusChange,
+  buildOptimisticAssignment,
+  buildOptimisticStatusChange,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { usePresence } from "@/hooks/use-presence";
+import { predictAssignmentStatus } from "@/features/inbox/lib/predict-status";
 import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
-
-/**
- * Mirror of `conversations.service.ts:assign`'s status side-effect rule.
- * Keep these in sync — divergence would show as a one-frame UI flash
- * (client predicts X, server returns Y, client snaps to Y).
- *
- * Assignment NEVER sets "open" — only the assignee chatting does (claim-on-
- * reply). So:
- *   - Assign to user + status=closed → pending (reopen into triage, assigned)
- *   - Assign to user + status=pending → unchanged (stays pending)
- *   - Unassign       + status=open    → pending (back to triage)
- *   - everything else                 → status unchanged
- */
-function predictNextStatus(
-  current: ConversationStatus,
-  nextAssignedUserId: string | null,
-): ConversationStatus {
-  if (nextAssignedUserId !== null && current === "closed") return "pending";
-  if (nextAssignedUserId === null && current === "open") return "pending";
-  return current;
-}
 
 export function AssignmentDropdown({
   teamId,
@@ -83,11 +64,11 @@ export function AssignmentDropdown({
 
   const assign = async (assignedUserId: string | null) => {
     if (pending) return;
-    const nextStatus = predictNextStatus(currentStatus, assignedUserId);
+    const nextStatus = predictAssignmentStatus(currentStatus, assignedUserId);
     const statusWillChange = nextStatus !== currentStatus;
     // Re-picking the CURRENT assignee is a no-op UNLESS it would still flip
-    // status — e.g. claiming an assigned-but-pending chat (bulk-assigned, or
-    // manually set back to pending) should still move it to open.
+    // status — e.g. re-assigning a CLOSED chat to its prior assignee reopens it
+    // to pending. (Assignment never sets "open" — see predictAssignmentStatus.)
     if (assignedUserId === currentId && !statusWillChange) return;
     setPending(true);
     const prevUser = currentId
@@ -102,37 +83,43 @@ export function AssignmentDropdown({
     // the server's publish order so audit / workflow / analytics
     // subscribers see cause-then-effect even on the local pre-confirm
     // pass.
-    // `optimistic: true` tells the inbox-list resync + counts refetch to skip
-    // their GETs during the in-flight PATCH window — without it, both fire on
-    // every assign and can return pre-change state that flickers the row back.
-    dispatchLocalSocketEvent("conversation:assigned", {
-      teamId,
-      conversationId,
-      assignedUser: nextUser,
-      optimistic: true,
-    });
-    // Matching timeline pill in the same frame as the assignee chip.
-    const assignActivityId = optimisticAssignment({
+    // Bundle every optimistic frame into ONE flushSync so the assignee chip,
+    // the status badge (when assign auto-flips status), AND the matching
+    // activity pills all commit in a single paint. Two separate dispatches
+    // (state + activity) produced two back-to-back paints — the gap was the
+    // perceptible "log lags the rest of the UI". `optimistic: true` skips
+    // the inbox-list resync + counts refetch during the in-flight PATCH;
+    // the authoritative server frame (optimistic absent) drives convergence.
+    const assignActivity = buildOptimisticAssignment({
       teamId,
       conversationId,
       actorName: currentUserName,
       assignedToName: nextUser?.name ?? null,
     });
+    const assignActivityId = assignActivity.id;
     let statusActivityId: string | null = null;
+    const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
+      [
+        "conversation:assigned",
+        { teamId, conversationId, assignedUser: nextUser, optimistic: true },
+      ],
+      assignActivity.frame,
+    ];
     if (statusWillChange) {
-      dispatchLocalSocketEvent("conversation:status", {
-        teamId,
-        conversationId,
-        status: nextStatus,
-        optimistic: true,
-      });
-      statusActivityId = optimisticStatusChange({
+      const statusActivity = buildOptimisticStatusChange({
         teamId,
         conversationId,
         actorName: currentUserName,
         status: nextStatus,
       });
+      statusActivityId = statusActivity.id;
+      frames.push([
+        "conversation:status",
+        { teamId, conversationId, status: nextStatus, optimistic: true },
+      ]);
+      frames.push(statusActivity.frame);
     }
+    dispatchLocalSocketEvents(frames);
     const rollbackActivity = () => {
       rollbackOptimisticActivity(teamId, conversationId, assignActivityId);
       if (statusActivityId) {
@@ -140,7 +127,7 @@ export function AssignmentDropdown({
       }
     };
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/assign`, {
+      const res = await apiFetch(`/api/conversations/${conversationId}/assign`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ assignedUserId }),
@@ -207,7 +194,14 @@ export function AssignmentDropdown({
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuContent
+        align="end"
+        className="w-56"
+        // Suppress Radix's focus-return so the trigger doesn't keep a
+        // `:focus-visible` ring after a mouse pick. See status-dropdown.tsx
+        // for the full rationale.
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         <DropdownMenuLabel>Assign to…</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void assign(null)}>

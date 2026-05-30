@@ -4,34 +4,41 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
+import { toast } from "@/lib/toast";
 
 /**
  * Voice-call hook. Owns the browser side of the WhatsApp WebRTC peer
  * connection. Mounted once at InboxShell so a call persists across thread
  * switches and the panel stays visible no matter where the user navigates.
  *
- * Lifecycle:
- *   1. `call:sdp_offer` socket frame arrives (incoming + targeted by callId).
- *   2. answerIncoming(callId) creates the RTCPeerConnection, sets remote
- *      description (the offer), generates a local answer, POSTs it to
- *      /api/calls/:id/answer.
- *   3. ICE candidates trickle in both directions:
- *        browser → server  via /api/calls/:id/ice
- *        server  → browser via `call:ice` socket event
- *   4. End on hangup (POST /end) OR `call:ended` socket frame.
+ * Inbound flow:
+ *   1. `call:incoming` socket frame → IncomingCallToast renders.
+ *   2. `call:sdp_offer` socket frame → stash the offer in pendingOffersRef.
+ *   3. Agent clicks Answer → `answerIncoming()`: create RTCPeerConnection,
+ *      setRemoteDescription(offer), createAnswer, setLocalDescription,
+ *      POST /api/calls/:id/answer with the answer SDP.
  *
- * Outbound calls (initiate) work the same: the API POST returns immediately
- * with a callId; the SDP offer arrives via socket once the customer
- * accepts; from there it's identical to incoming.
+ * Outbound flow:
+ *   1. Agent clicks Phone → `initiateOutbound()`: create RTCPeerConnection,
+ *      createOffer, setLocalDescription, POST /api/conversations/:id/call
+ *      with the offer SDP. Panel opens optimistically as "ringing".
+ *   2. Customer picks up → Meta webhook → `call:sdp_offer` socket frame
+ *      with `sdp.type === "answer"` → setRemoteDescription(answer) →
+ *      panel flips to "in_progress" and audio flows.
  *
- * Design notes:
- *   - Single peer connection at a time. WhatsApp calling is 1:1; managing
- *     concurrent calls would need a Map keyed by callId. Out of scope.
- *   - The PeerConnection is a ref, not state — replacing it triggers no
- *     re-render. The state slot tracks the "live" call's metadata so the
- *     panel can render contact name + timer.
- *   - All errors are surfaced via the `error` slot, not thrown. The panel
- *     renders inline; nothing catastrophic about a failed call.
+ * Teardown:
+ *   - End button → POST /api/calls/:id/end → fan-out → `call:ended`.
+ *   - Customer hangs up → WebRTC peer goes disconnected/failed → we POST
+ *     /end ourselves and tear down immediately (Meta's terminate webhook
+ *     can lag by seconds).
+ *   - `call:ended` socket frame → tearDown.
+ *
+ * ICE: Meta uses ICE-LITE (all candidates baked into the SDP). The browser
+ * still gathers locally to match against Meta's candidates; we don't try
+ * to forward trickle candidates (Meta's API has no action for it).
+ *
+ * Concurrency: single peer connection at a time. WhatsApp calling is 1:1;
+ * supporting parallel calls would require a Map keyed by callId.
  */
 
 export interface LiveCallState {
@@ -51,9 +58,8 @@ interface PendingOffer {
 }
 
 /**
- * Default ICE config. Meta provides their own ICE servers via the SDP
- * answer; we add a STUN fallback so candidates can be generated even in
- * networks where Meta's hints don't include public STUN.
+ * Default ICE config. STUN fallback so the browser can gather local
+ * candidates even in networks where Meta's hints don't include one.
  */
 const DEFAULT_RTC_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -64,7 +70,15 @@ export function useCall(): {
   liveCall: LiveCallState | null;
   pendingOffers: Map<string, PendingOffer>;
   error: string | null;
-  answerIncoming: (callId: string, contactName: string, conversationId: string) => Promise<void>;
+  answerIncoming: (
+    callId: string,
+    contactName: string,
+    conversationId: string,
+  ) => Promise<void>;
+  initiateOutbound: (
+    conversationId: string,
+    contactName: string,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
   reject: (callId: string) => Promise<void>;
   hangup: () => Promise<void>;
   setMuted: (muted: boolean) => void;
@@ -73,91 +87,73 @@ export function useCall(): {
   const [liveCall, setLiveCall] = useState<LiveCallState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Pending offers keyed by callId. The browser may receive the SDP offer
-  // BEFORE the agent clicks Answer (incoming-toast race); we stash it so
-  // answerIncoming can consume it without waiting for a fresh frame.
+  // Surface a call error BOTH in `error` (for CallPanel) AND as a toast. Use
+  // this at any error site that also calls tearDown() — tearDown nulls liveCall,
+  // which unmounts CallPanel, so the `error` state alone would never be seen
+  // (e.g. the answer-race 409 "another teammate picked up"). The toast is the
+  // only reliably-visible channel once the panel is gone.
+
+  // Pending offers keyed by callId. Stashed when call:sdp_offer arrives so
+  // answerIncoming can consume the offer without waiting on a fresh frame.
   const pendingOffersRef = useRef<Map<string, PendingOffer>>(new Map());
 
-  // The active peer connection + local media stream. Refs so swapping
-  // them doesn't trigger a re-render; we only re-render when liveCall
-  // changes.
+  // Pending ANSWER SDP for an outbound call. The customer's answer arrives as a
+  // `call:sdp_offer` (type:"answer") frame keyed by Meta's REAL callId, fanned
+  // team-room — it can beat the POST /call response that rebinds our optimistic
+  // `tmp_` id to the real one. If it arrives before the PC has a local offer set
+  // (or before we can match it), we stash it here and drain it on rebind, rather
+  // than dropping it (a dropped answer = the call never establishes media, ICE
+  // times out ~15s, panel closes itself — the documented "first outbound flow"
+  // bug). Only one outbound PC exists at a time, so a single slot suffices.
+  const pendingAnswerRef = useRef<{ callId: string; sdp: string } | null>(null);
+
+  // Peer connection + media stream live as refs so swapping doesn't trigger
+  // a re-render. Re-renders are driven by liveCall changes only.
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudioElRef = useRef<HTMLAudioElement | null>(null);
-
-  // Subscribe to call:sdp_offer + call:ice + call:ended once on mount.
+  // Mirror liveCall in a ref so socket handlers (bound once) read the
+  // current call state without forcing the effect to re-subscribe.
+  const liveCallRef = useRef<LiveCallState | null>(null);
   useEffect(() => {
-    const socket = getClientSocket();
+    liveCallRef.current = liveCall;
+  }, [liveCall]);
 
-    const onSdpOffer = (payload: {
-      callId: string;
-      conversationId: string;
-      sdp: { type: "offer"; sdp: string };
-    }) => {
-      pendingOffersRef.current.set(payload.callId, {
-        callId: payload.callId,
-        conversationId: payload.conversationId,
-        sdp: payload.sdp.sdp,
-      });
-    };
+  const fail = useCallback((msg: string) => {
+    setError(msg);
+    toast.error(msg);
+  }, []);
 
-    const onIce = async (payload: {
-      callId: string;
-      candidate: {
-        candidate: string;
-        sdpMid: string | null;
-        sdpMLineIndex: number | null;
-      };
-    }) => {
-      const pc = pcRef.current;
-      if (!pc || !liveCall || liveCall.callId !== payload.callId) return;
-      try {
-        await pc.addIceCandidate(
-          new RTCIceCandidate({
-            candidate: payload.candidate.candidate,
-            sdpMid: payload.candidate.sdpMid,
-            sdpMLineIndex: payload.candidate.sdpMLineIndex,
-          }),
-        );
-      } catch (err) {
-        // Late candidates after the connection is established sometimes
-        // fail to apply — non-fatal.
-        console.warn("[useCall] addIceCandidate failed", err);
-      }
-    };
-
-    const onEnded = (payload: { callId: string }) => {
-      if (liveCall?.callId === payload.callId) {
-        tearDown();
-      }
-      pendingOffersRef.current.delete(payload.callId);
-    };
-
-    socket.on("call:sdp_offer", onSdpOffer);
-    socket.on("call:ice", onIce);
-    socket.on("call:ended", onEnded);
-
-    return () => {
-      socket.off("call:sdp_offer", onSdpOffer);
-      socket.off("call:ice", onIce);
-      socket.off("call:ended", onEnded);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- liveCall is captured via ref inside the handlers, see onIce comment
-  }, [liveCall?.callId]);
-
-  // Ensure the hidden <audio> element exists exactly once.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (remoteAudioElRef.current) return;
-    const el = document.createElement("audio");
-    el.autoplay = true;
-    el.setAttribute("data-ccp-call-audio", "true");
-    document.body.appendChild(el);
-    remoteAudioElRef.current = el;
-    return () => {
-      el.remove();
-      remoteAudioElRef.current = null;
-    };
+  // Apply an outbound call's answer SDP to the live peer connection. Returns
+  // true if applied. Deliberately matches on PC signaling state + direction
+  // ("out"), NOT on callId equality: the answer frame is keyed by Meta's real
+  // callId but our liveCall may still hold the `tmp_` id (the POST rebind hasn't
+  // committed yet). Since only ONE outbound PC exists at a time, a PC in
+  // `have-local-offer` IS the call this answer belongs to. Flips the call to
+  // in_progress so the panel + timeline advance.
+  const applyOutboundAnswer = useCallback(async (sdp: string): Promise<boolean> => {
+    const pc = pcRef.current;
+    const live = liveCallRef.current;
+    if (
+      !pc ||
+      !live ||
+      live.direction !== "out" ||
+      pc.signalingState !== "have-local-offer"
+    ) {
+      return false;
+    }
+    try {
+      await pc.setRemoteDescription({ type: "answer", sdp });
+      setLiveCall((prev) =>
+        prev && prev.direction === "out"
+          ? { ...prev, status: "in_progress", answeredAt: Date.now() }
+          : prev,
+      );
+      return true;
+    } catch (err) {
+      console.warn("[useCall] setRemoteDescription(answer) failed", err);
+      return false;
+    }
   }, []);
 
   const tearDown = useCallback(() => {
@@ -175,74 +171,135 @@ export function useCall(): {
     if (remoteAudioElRef.current) {
       remoteAudioElRef.current.srcObject = null;
     }
+    // Clear any stashed answer so it can't leak into the next call's PC.
+    pendingAnswerRef.current = null;
     setLiveCall(null);
   }, []);
 
-  const setupPeer = useCallback(
-    async (callId: string): Promise<RTCPeerConnection> => {
-      const pc = new RTCPeerConnection(DEFAULT_RTC_CONFIG);
+  // Socket subscribers. Bound once on mount; read liveCallRef inside
+  // handlers so a callId change doesn't force a re-subscribe.
+  useEffect(() => {
+    const socket = getClientSocket();
 
-      // Local mic.
-      const local = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: false,
-      });
-      localStreamRef.current = local;
-      for (const track of local.getAudioTracks()) {
-        pc.addTrack(track, local);
+    const onSdpOffer = async (payload: {
+      callId: string;
+      conversationId: string;
+      sdp: { type: "offer" | "answer"; sdp: string };
+    }) => {
+      // Answer SDP: customer accepted our outbound call. Apply it now if the PC
+      // is ready; otherwise STASH it (it may have beaten the tmp_→real rebind or
+      // the local-offer set) so initiateOutbound can drain it on rebind. Never
+      // drop it — a dropped answer = the call never establishes media.
+      if (payload.sdp.type === "answer") {
+        const applied = await applyOutboundAnswer(payload.sdp.sdp);
+        if (!applied) {
+          pendingAnswerRef.current = {
+            callId: payload.callId,
+            sdp: payload.sdp.sdp,
+          };
+        }
+        return;
       }
+      // Offer SDP: inbound call from the customer. Stash so answerIncoming
+      // can consume it when the agent clicks Answer.
+      pendingOffersRef.current.set(payload.callId, {
+        callId: payload.callId,
+        conversationId: payload.conversationId,
+        sdp: payload.sdp.sdp,
+      });
+    };
 
-      // Remote audio → hidden <audio> element so the user can actually hear
-      // the call. Same pattern every WebRTC demo uses.
-      pc.ontrack = (e) => {
-        const el = remoteAudioElRef.current;
-        if (el && e.streams[0]) {
-          el.srcObject = e.streams[0];
+    const onEnded = (payload: { callId: string }) => {
+      if (liveCallRef.current?.callId === payload.callId) {
+        tearDown();
+      }
+      pendingOffersRef.current.delete(payload.callId);
+      if (pendingAnswerRef.current?.callId === payload.callId) {
+        pendingAnswerRef.current = null;
+      }
+    };
+
+    socket.on("call:sdp_offer", onSdpOffer);
+    socket.on("call:ended", onEnded);
+    return () => {
+      socket.off("call:sdp_offer", onSdpOffer);
+      socket.off("call:ended", onEnded);
+    };
+  }, [tearDown, applyOutboundAnswer]);
+
+  // Hidden <audio> element for remote audio playback. Created once.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (remoteAudioElRef.current) return;
+    const el = document.createElement("audio");
+    el.autoplay = true;
+    el.setAttribute("data-ccp-call-audio", "true");
+    document.body.appendChild(el);
+    remoteAudioElRef.current = el;
+    return () => {
+      el.remove();
+      remoteAudioElRef.current = null;
+    };
+  }, []);
+
+  /**
+   * Build an RTCPeerConnection with mic capture, remote-audio routing,
+   * and a connection-state watcher that auto-terminates on disconnect.
+   */
+  const setupPeer = useCallback(async (): Promise<RTCPeerConnection> => {
+    const pc = new RTCPeerConnection(DEFAULT_RTC_CONFIG);
+
+    // Local mic → outbound audio track.
+    const local = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: false,
+    });
+    localStreamRef.current = local;
+    for (const track of local.getAudioTracks()) {
+      pc.addTrack(track, local);
+    }
+
+    // Remote audio → hidden <audio> element so the user can hear it.
+    pc.ontrack = (e) => {
+      const el = remoteAudioElRef.current;
+      if (el && e.streams[0]) {
+        el.srcObject = e.streams[0];
+      }
+    };
+
+    // Customer hangs up → connectionState goes disconnected → failed →
+    // closed. Tear down immediately AND POST /end so the audit row gets
+    // a terminal status. Don't wait on Meta's terminate webhook (lag-prone).
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      if (state === "failed" || state === "disconnected" || state === "closed") {
+        const live = liveCallRef.current;
+        if (live && !live.callId.startsWith("tmp_")) {
+          void fetchWithSessionGuard(`/api/calls/${live.callId}/end`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({}),
+          }).catch(() => {});
         }
-      };
+        tearDown();
+      }
+    };
 
-      // Trickle ICE → server → Meta.
-      pc.onicecandidate = (e) => {
-        if (!e.candidate) return;
-        void fetchWithSessionGuard(`/api/calls/${callId}/ice`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            candidate: e.candidate.candidate,
-            sdpMid: e.candidate.sdpMid ?? null,
-            sdpMLineIndex: e.candidate.sdpMLineIndex ?? null,
-          }),
-        }).catch((err) => {
-          console.warn("[useCall] ICE relay failed", err);
-        });
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (
-          pc.connectionState === "failed" ||
-          pc.connectionState === "disconnected"
-        ) {
-          setError("Call connection lost.");
-        }
-      };
-
-      pcRef.current = pc;
-      return pc;
-    },
-    [],
-  );
+    pcRef.current = pc;
+    return pc;
+  }, [tearDown]);
 
   const answerIncoming = useCallback(
     async (callId: string, contactName: string, conversationId: string) => {
       setError(null);
       const offer = pendingOffersRef.current.get(callId);
       if (!offer) {
-        setError("Call setup pending — try again in a moment.");
+        setError("Hold on — the call is still connecting.");
         return;
       }
 
       try {
-        const pc = await setupPeer(callId);
+        const pc = await setupPeer();
         await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -258,10 +315,8 @@ export function useCall(): {
           answeredAt: startedAt,
         });
 
-        // Optimistic dispatch — the answer button flips the local UI
-        // immediately. The server frame arrives moments later via the
-        // bus → fanout path; reducers are idempotent so the duplicate
-        // is harmless.
+        // Optimistic local dispatch — dismiss the toast on this browser
+        // before the server's call:answered frame arrives.
         dispatchLocalSocketEvent("call:answered", {
           teamId: "",
           conversationId,
@@ -276,28 +331,112 @@ export function useCall(): {
           body: JSON.stringify({ sdp: answer.sdp }),
         });
         if (!res.ok) {
-          if (res.status === 409) {
-            setError("Another agent already answered this call.");
-          } else {
-            setError(`Failed to accept call (${res.status}).`);
-          }
+          fail(
+            res.status === 409
+              ? "Another teammate already picked up this call."
+              : "Couldn't accept the call. Try again.",
+          );
           tearDown();
-          pendingOffersRef.current.delete(callId);
-          return;
         }
         pendingOffersRef.current.delete(callId);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        // getUserMedia failure (no mic permission) is the most common case.
-        setError(
+        fail(
           /permission|denied|notallowed/i.test(message)
-            ? "Microphone access is required to answer calls."
-            : `Failed to start call: ${message}`,
+            ? "Allow microphone access to answer calls."
+            : "Couldn't start the call. Check your microphone and try again.",
         );
         tearDown();
       }
     },
-    [setupPeer, tearDown],
+    [setupPeer, tearDown, fail],
+  );
+
+  const initiateOutbound = useCallback(
+    async (
+      conversationId: string,
+      contactName: string,
+    ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+      setError(null);
+
+      // The browser doesn't know the real callId until placeCall returns
+      // (Meta assigns it). Use a temp id so onicecandidate / state handlers
+      // can wire up before the rebind; the panel rebinds on POST success.
+      const tempCallId = `tmp_${Math.random().toString(36).slice(2)}`;
+
+      let pc: RTCPeerConnection;
+      let sdpOffer: string;
+      try {
+        pc = await setupPeer();
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+        if (!offer.sdp) throw new Error("SDP generation failed");
+        sdpOffer = offer.sdp;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const reason = /permission|denied|notallowed/i.test(message)
+          ? "mic_permission_denied"
+          : "rtc_setup_failed";
+        tearDown();
+        return { ok: false, reason };
+      }
+
+      // Optimistic ringing UI.
+      setLiveCall({
+        callId: tempCallId,
+        conversationId,
+        contactName,
+        direction: "out",
+        status: "ringing",
+        startedAt: Date.now(),
+        answeredAt: null,
+      });
+
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/conversations/${conversationId}/call`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ sdp: sdpOffer }),
+          },
+        );
+        const body = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          callId?: string;
+          reason?: string;
+        };
+        if (!res.ok || body.ok === false) {
+          tearDown();
+          return { ok: false, reason: body.reason ?? `http_${res.status}` };
+        }
+        // Rebind to Meta's real callId so the `call:ended` frame (which targets
+        // by real id) matches. (The answer frame no longer needs the rebind to
+        // match — applyOutboundAnswer keys on PC state, not callId.)
+        const realCallId = body.callId ?? tempCallId;
+        setLiveCall((prev) =>
+          prev && prev.callId === tempCallId
+            ? { ...prev, callId: realCallId }
+            : prev,
+        );
+        // Drain any answer SDP that arrived BEFORE this rebind (the team-room
+        // answer frame can beat the POST response). Without this drain, a fast
+        // customer pickup would leave the stashed answer unapplied and the call
+        // would never connect. liveCallRef is already rebound via the setState
+        // above on the next tick, but applyOutboundAnswer matches on PC state so
+        // it doesn't depend on that — apply immediately.
+        const stashed = pendingAnswerRef.current;
+        if (stashed) {
+          pendingAnswerRef.current = null;
+          void applyOutboundAnswer(stashed.sdp);
+        }
+        return { ok: true };
+      } catch {
+        tearDown();
+        return { ok: false, reason: "network_error" };
+      }
+    },
+    [setupPeer, tearDown, applyOutboundAnswer],
   );
 
   const reject = useCallback(async (callId: string) => {
@@ -314,7 +453,7 @@ export function useCall(): {
   }, []);
 
   const hangup = useCallback(async () => {
-    const current = liveCall;
+    const current = liveCallRef.current;
     if (!current) return;
     setLiveCall((prev) => (prev ? { ...prev, status: "ending" } : prev));
     try {
@@ -328,7 +467,7 @@ export function useCall(): {
     } finally {
       tearDown();
     }
-  }, [liveCall, tearDown]);
+  }, [tearDown]);
 
   const setMuted = useCallback((muted: boolean) => {
     const stream = localStreamRef.current;
@@ -350,6 +489,7 @@ export function useCall(): {
     pendingOffers: pendingOffersRef.current,
     error,
     answerIncoming,
+    initiateOutbound,
     reject,
     hangup,
     setMuted,

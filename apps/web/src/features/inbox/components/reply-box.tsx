@@ -31,6 +31,7 @@ import type {
 import type { ContactLike } from "@ccp/shared/field-tokens";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import { useNow } from "@/hooks/use-now";
@@ -400,7 +401,7 @@ export function ReplyBox({
     setTemplatesLoading(true);
     setTemplatesError(null);
     try {
-      const res = await fetch("/api/team/whatsapp/templates");
+      const res = await apiFetch("/api/team/whatsapp/templates");
       if (!res.ok) throw new Error(await safeReadError(res));
       const data = (await res.json()) as {
         templates?: TemplateDto[];
@@ -428,7 +429,7 @@ export function ReplyBox({
     setTemplatesSyncing(true);
     setTemplatesError(null);
     try {
-      const res = await fetch("/api/team/whatsapp/templates", { method: "POST" });
+      const res = await apiFetch("/api/team/whatsapp/templates", { method: "POST" });
       const data = (await res.json()) as {
         templates?: TemplateDto[];
         error?: string;
@@ -476,7 +477,7 @@ export function ReplyBox({
     }) => {
       const clientTempId = newClientTempId();
       try {
-        const res = await fetch("/api/messages/template", {
+        const res = await apiFetch("/api/messages/template", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -743,7 +744,7 @@ export function ReplyBox({
           fd.append("clientTempId", clientTempId);
           if (replyToMessageId) fd.append("replyToMessageId", replyToMessageId);
           if (overrideVoice) fd.append("voice", "true");
-          const res = await fetch("/api/messages/media", {
+          const res = await apiFetch("/api/messages/media", {
             method: "POST",
             body: fd,
             signal: abort.signal,

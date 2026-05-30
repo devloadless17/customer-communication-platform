@@ -71,7 +71,30 @@ export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnaps
   };
 }
 
-export function mapUser(u: PrismaUser): User {
+/**
+ * Exactly the User columns `mapUser` reads. Use as the `select` for an
+ * `assignedUser` include on hot list paths so Prisma stops shipping every
+ * User column (password hash, updatedAt, deactivatedAt timestamp value, …)
+ * across Postgres → Node → wire on every conversation-list row. The full
+ * `findUniqueOrThrow` row is structurally assignable to `MappableUser`, so
+ * existing full-row callers of `mapUser` still type-check.
+ */
+export const ASSIGNED_USER_SELECT = {
+  id: true,
+  teamId: true,
+  role: true,
+  name: true,
+  email: true,
+  avatarUrl: true,
+  createdAt: true,
+  deactivatedAt: true,
+  availabilityStatus: true,
+  availabilityMessage: true,
+} as const;
+
+type MappableUser = Pick<PrismaUser, keyof typeof ASSIGNED_USER_SELECT>;
+
+export function mapUser(u: MappableUser): User {
   // Availability comes off the same row when present (every inbox query that
   // includes `assignedUser` brings these columns along by default). Only
   // emit them when set so the wire shape stays terse for clients that

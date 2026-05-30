@@ -146,9 +146,12 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       createdAt: updated.createdAt.toISOString(),
     };
 
-    // `silent: true` — step-driven mutations don't re-trigger workflows.
-    // The fieldChanges list still carries the diff so future subscribers
-    // (e.g. outbound webhooks) can see what changed.
+    // `silent: true` — step-driven mutations don't re-trigger workflows (loop
+    // safety). `skipOutboundWebhook: false` so partners subscribed to
+    // `contact.updated` DO receive the step-driven field change — a workflow
+    // moving a contact's custom field is exactly the pipeline signal an
+    // n8n/CRM flow wants. Mirrors tag.ts / update-lifecycle.ts; the /v1-echo
+    // case stays undelivered because it publishes `silent` with the flag unset.
     await publish({
       type: "contact.updated",
       teamId: ctx.teamId,
@@ -158,6 +161,7 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       changedByUserId: null,
       workflowContact: workflowContactSnapshot(updated),
       silent: true,
+      skipOutboundWebhook: false,
     });
 
     return advance({

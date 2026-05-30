@@ -13,6 +13,7 @@ import {
   mapContact,
   mapContactListItem,
   mapConversation,
+  ASSIGNED_USER_SELECT,
   mapMessage,
   mapNote,
   mapUser,
@@ -153,8 +154,11 @@ export async function listConversations(
         break;
     }
   } else if (opts.filter?.kind === "stage") {
+    // deletedAt:null so the stage-filtered list matches the stage badge count
+    // (ConversationsService.counts byStage) and the settings/stages directory
+    // count — all three now exclude tombstoned contacts.
     filterClause = {
-      contact: { stageId: opts.filter.stageId },
+      contact: { stageId: opts.filter.stageId, deletedAt: null },
     };
   }
 
@@ -208,7 +212,7 @@ export async function listConversations(
           tags: { select: { id: true } },
         },
       },
-      assignedUser: true,
+      assignedUser: { select: ASSIGNED_USER_SELECT },
     },
   });
 
@@ -269,7 +273,7 @@ export async function getConversationWithRefs(
     where: { id: conversationId, teamId },
     include: {
       contact: { include: { tags: { select: { id: true } } } },
-      assignedUser: true,
+      assignedUser: { select: ASSIGNED_USER_SELECT },
       // +1 to detect "more older exists" without a count query.
       messages: {
         orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -291,6 +295,26 @@ export async function getConversationWithRefs(
         include: {
           user: { select: { name: true } },
           apiKey: { select: { name: true } },
+        },
+      },
+      // Recent calls — same shape as the GET /conversations/:id/calls
+      // endpoint emits. Bounded the same way `events` is so the thread
+      // hydration payload stays small on chat-switch / SSR refresh.
+      calls: {
+        orderBy: [{ ringingAt: "desc" }, { id: "desc" }],
+        take: ACTIVITY_WINDOW,
+        select: {
+          id: true,
+          conversationId: true,
+          externalCallId: true,
+          channel: true,
+          direction: true,
+          status: true,
+          answeredByUserId: true,
+          ringingAt: true,
+          answeredAt: true,
+          endedAt: true,
+          durationSeconds: true,
         },
       },
       // Totals computed in the SAME round-trip via a relation aggregate —
@@ -323,6 +347,22 @@ export async function getConversationWithRefs(
 
   const events = await mapActivityEventRows(row.events);
 
+  // Calls were fetched DESC; reverse to chronological so they merge into
+  // the timeline alongside messages/notes the same way.
+  const callsAsc = [...row.calls].reverse().map((c) => ({
+    id: c.id,
+    conversationId: c.conversationId,
+    externalCallId: c.externalCallId,
+    channel: c.channel,
+    direction: c.direction === "in" ? ("in" as const) : ("out" as const),
+    status: c.status,
+    answeredByUserId: c.answeredByUserId,
+    ringingAt: c.ringingAt.toISOString(),
+    answeredAt: c.answeredAt?.toISOString() ?? null,
+    endedAt: c.endedAt?.toISOString() ?? null,
+    durationSeconds: c.durationSeconds,
+  }));
+
   return {
     data: {
       conversation: mapConversation(row),
@@ -334,6 +374,7 @@ export async function getConversationWithRefs(
       messages: messagesAsc.map(mapMessage),
       notes: row.notes.map(mapNote),
       events,
+      calls: callsAsc,
       lastInboundAt: lastInboundAtIso,
       messageCount,
       noteCount,
@@ -503,7 +544,7 @@ export async function listNewerMessages(
   const owns = await db.conversation.findFirst({
     where: { id: conversationId, teamId },
     include: {
-      assignedUser: true,
+      assignedUser: { select: ASSIGNED_USER_SELECT },
       contact: { select: { lastInboundAt: true } },
     },
   });

@@ -13,6 +13,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 
 import { cn } from "@ccp/shared/utils";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -222,7 +223,7 @@ function SaveAudienceAsGroup({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch("/api/team/audience-groups", {
+      const res = await apiFetch("/api/team/audience-groups", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: name.trim(), tagIds, contactIds }),

@@ -133,7 +133,17 @@ export class ConversationsService {
       }),
       this.db.contact.groupBy({
         by: ["stageId"],
-        where: { teamId, stageId: { not: null }, conversations: { some: {} } },
+        // deletedAt:null so the inbox stage badge agrees with the settings/
+        // stages count (StagesService.counts filters deletedAt:null) and the
+        // listConversations stage filter (also deletedAt:null below). Stages
+        // are a contact-directory concept — a tombstoned contact shouldn't
+        // inflate the badge.
+        where: {
+          teamId,
+          stageId: { not: null },
+          deletedAt: null,
+          conversations: { some: {} },
+        },
         _count: true,
       }),
     ]);
@@ -305,33 +315,30 @@ export class ConversationsService {
    * (only when the assignee actually changes) so socket-fanout, audit,
    * analytics, and workflow-dispatch all react.
    *
-   * **Status side-effect** (product rule, see thread w/ user on 2026-05-20):
-   * Assignment carries an ownership signal — closed chats getting picked
-   * back up should reopen, and chats that lose their assignee should drop
-   * back to "waiting" state. Applied atomically with the assignment write
-   * so the two never desync:
+   * **Status side-effect** — the canonical rule lives in
+   * `lib/conversations/mutations.ts:assignConversation` (this method only
+   * delegates); the client predictor `features/inbox/lib/predict-status.ts`
+   * mirrors it. **Assignment NEVER sets `open` — only the assignee chatting
+   * does (claim-on-reply).** Applied atomically with the assignment write (one
+   * CAS update pinning both columns) so the two never desync:
    *
-   *   - Assign to a user + status was `pending`/`closed`  →  becomes `open`
-   *   - Unassign (→ null) + status was `open`             →  becomes `pending`
-   *   - All other combinations                            →  status unchanged
+   *   - Assign to a user + status was `closed`  →  becomes `pending` (reopen into triage)
+   *   - Unassign (→ null) + status was `open`   →  becomes `pending` (back to triage)
+   *   - Assign to a user + status was `pending`/`open`  →  status unchanged
+   *   - All other combinations                          →  status unchanged
    *
    * The side-effect is keyed on STATUS, not on whether the assignee changed:
-   * re-assigning the SAME already-assigned user while the chat is `pending`
-   * (or `closed`) still promotes it to `open`. In that case only
+   * re-assigning the SAME already-assigned user while the chat is `closed`
+   * still reopens it to `pending`. In that case only
    * `conversation.status_changed` fires — `conversation.assigned` is gated on
    * an actual assignee change, so on-assignment workflows don't re-run.
    *
-   * Both transitions are bounded (`closed → open` and `open → pending` are
-   * single-step), so an explicit "after one auto-promote, the next won't
-   * cascade" guard isn't needed. When status DOES change, a second event
-   * `conversation.status_changed` is published with the same actor — that
-   * way audit log, analytics, workflow triggers (e.g. "on reopen, ping
-   * channel"), and the realtime sidebar all reflect both changes without
-   * needing to special-case auto-promotes.
-   *
-   * Bulk-assign opts out of the side-effect (see `assignBulk`) — bulk
-   * operations should be predictable; auto-reopening 50 closed chats in a
-   * batch would be a footgun.
+   * Both transitions are single-step (`closed → pending`, `open → pending`), so
+   * no auto-cascade guard is needed. When status DOES change, a second
+   * `conversation.status_changed` event is published with the same actor, so
+   * audit log, analytics, workflow triggers, and the realtime sidebar reflect
+   * both changes. (There is no bulk-assign endpoint today; if one is added it
+   * should decide deliberately whether to carry this per-row side-effect.)
    */
   async assign(
     teamId: string,

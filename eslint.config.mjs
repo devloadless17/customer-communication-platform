@@ -101,10 +101,17 @@ export default tseslint.config(
     },
   },
 
-  // ---- The centralized fetch wrapper itself ALWAYS calls bare fetch ----
-  // ---- (otherwise this lint would forbid its own implementation). ------
+  // ---- Files that MUST call bare fetch (would otherwise forbid their own
+  // ---- implementation or self-recurse through the wrapper). ------------
+  //   - client-fetch.ts IS the apiFetch wrapper.
+  //   - client-session-guard.ts is the 401 handler apiFetch delegates to; its
+  //     own session-validation probe (`/api/auth/get-session`) can't go through
+  //     apiFetch without infinite recursion (apiFetch → session-guard → apiFetch).
   {
-    files: ["apps/web/src/lib/api/client-fetch.ts"],
+    files: [
+      "apps/web/src/lib/api/client-fetch.ts",
+      "apps/web/src/lib/auth/client-session-guard.ts",
+    ],
     rules: {
       "no-restricted-syntax": "off",
     },

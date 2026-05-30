@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import { formatPhone } from "@ccp/shared/utils";
 
@@ -80,7 +81,7 @@ export function WhatsappSettings({
       wabaId: form.get("wabaId") ?? "",
       appId: form.get("appId") ?? "",
     };
-    const res = await fetch("/api/team/whatsapp", {
+    const res = await apiFetch("/api/team/whatsapp", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -109,7 +110,7 @@ export function WhatsappSettings({
       destructive: true,
     });
     if (!ok) return;
-    const res = await fetch("/api/team/whatsapp", { method: "DELETE" });
+    const res = await apiFetch("/api/team/whatsapp", { method: "DELETE" });
     if (!res.ok) {
       setError("Failed to disconnect");
       return;

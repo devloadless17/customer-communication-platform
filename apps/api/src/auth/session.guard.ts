@@ -73,11 +73,11 @@ export class SessionGuard implements CanActivate {
         // are now logged out." HTTP path still rejects the request; the
         // alternative (503 here) would risk false-positive sign-outs in
         // the web app's session-refresh path.
-        throw new UnauthorizedException("auth_unavailable");
+        throw new UnauthorizedException({ error: "auth_unavailable" });
       }
       throw err;
     }
-    if (!session) throw new UnauthorizedException("unauthorized");
+    if (!session) throw new UnauthorizedException({ error: "unauthorized" });
     req.session = session;
     return true;
   }
@@ -122,7 +122,17 @@ const sessionCache = new Map<string, { session: ApiSession; expiresAt: number }>
 // via `invalidateSessionCache(userId)`, which walks the cookieCache and
 // drops every entry pointing to the given userId — the only mutation paths
 // (signout, deactivation, role change, password change) all know the userId.
-const cookieCache = new Map<string, { userId: string; expiresAt: number }>();
+// Entry carries `sessionId` (this cookie's Session row id) ALONGSIDE userId.
+// The deactivation snapshot is keyed by userId and shared across a user's
+// browsers, but `sessionId` is per-cookie. A user with two browsers has two
+// Session rows; the cookie-cache fast path MUST return THIS cookie's sessionId,
+// not whichever row last populated the userId cache — otherwise change-password
+// ("sign out my other devices") deletes the wrong Session row. Mirrors the
+// explicit re-bind on the slow path (`return { ...cached, sessionId }`).
+const cookieCache = new Map<
+  string,
+  { userId: string; sessionId: string; expiresAt: number }
+>();
 
 import { createHash } from "node:crypto";
 
@@ -157,12 +167,19 @@ export function sessionCacheGetByCookie(cookieHeader: string): ApiSession | null
     cookieCache.delete(key);
     return null;
   }
-  return cacheGet(entry.userId);
+  const cached = cacheGet(entry.userId);
+  if (!cached) return null;
+  // Re-bind THIS cookie's sessionId over the userId-keyed snapshot — same
+  // reason the slow path does `{ ...cached, sessionId }`. Without it, a user
+  // with two browsers gets the other browser's sessionId here, and
+  // change-password deletes the wrong Session row.
+  return { ...cached, sessionId: entry.sessionId };
 }
 
 export function sessionCacheSetByCookie(
   cookieHeader: string,
   userId: string,
+  sessionId: string,
 ): void {
   const key = hashCookie(cookieHeader);
   if (cookieCache.size >= SESSION_CACHE_MAX) {
@@ -171,6 +188,7 @@ export function sessionCacheSetByCookie(
   }
   cookieCache.set(key, {
     userId,
+    sessionId,
     expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
   });
 }
@@ -301,7 +319,7 @@ export async function resolveSession(
   };
   cacheSet(user.id, session);
   if (typeof cookieHeader === "string" && cookieHeader.length > 0) {
-    sessionCacheSetByCookie(cookieHeader, user.id);
+    sessionCacheSetByCookie(cookieHeader, user.id, sessionId);
   }
   return session;
 }

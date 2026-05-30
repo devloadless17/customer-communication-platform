@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 
 /**
  * Two-way typing state for one conversation.
@@ -70,7 +71,7 @@ export function useTyping(
     // Fire-and-forget; server handles the "no inbound to anchor on" case
     // and Meta failures are logged server-side. Errors here must not pop
     // up in the agent UI — keystroke side-effect should be invisible.
-    void fetch(`/api/conversations/${conversationId}/typing`, {
+    void apiFetch(`/api/conversations/${conversationId}/typing`, {
       method: "POST",
     }).catch(() => {});
   }, [conversationId]);

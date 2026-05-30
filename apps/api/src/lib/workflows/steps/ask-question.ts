@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { publish } from "@/lib/events/bus";
 import {
   SendTextValidationError,
   sendTextInternal,
@@ -11,7 +12,9 @@ import {
   consumeConversationSendBudget,
 } from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
+import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
+import type { Contact } from "@ccp/shared/types";
 import type { InteractiveOption } from "@ccp/shared/providers/types";
 
 import {
@@ -314,18 +317,7 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
         const contactId = c?.id;
         if (contactId) {
           const trimmed = valueToSave.slice(0, 2048);
-          // jsonb concatenation: existing keys are preserved, the target
-          // key is overwritten. Same pattern as the manual contact-panel
-          // edit flow (update-field step + contact PATCH).
-          await db.contact.update({
-            where: { id: contactId },
-            data: {
-              customFields: {
-                ...((c.customFields ?? {}) as Record<string, string>),
-                [config.saveTo.key]: trimmed,
-              },
-            },
-          });
+          await saveAnswerToField(ctx.teamId, contactId, config.saveTo.key, trimmed);
         }
       }
       return {
@@ -457,3 +449,99 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
     };
   },
 };
+
+/**
+ * Persist the answer onto Contact.customFields, mirroring update-field.ts.
+ *
+ * CRITICAL: read the contact FRESH here — do NOT merge from the envelope's
+ * contact snapshot. The envelope was captured at dispatch time, up to 7 days
+ * ago (MAX_TIMEOUT_HOURS=168). Spreading its stale customFields would silently
+ * delete every key edited during the pause window (agent UI, /v1 API, other
+ * workflows). The `version` CAS turns a concurrent edit into a no-op-on-conflict
+ * (the run can be retried) instead of a silent overwrite. We then publish
+ * `contact.updated` (silent — step-driven, doesn't re-trigger workflows) so
+ * realtime fanout / audit / analytics / outbound-webhooks all see the write,
+ * exactly like update-field.ts.
+ */
+async function saveAnswerToField(
+  teamId: string,
+  contactId: string,
+  key: string,
+  value: string,
+): Promise<void> {
+  const contact = await db.contact.findFirst({
+    where: { id: contactId, teamId },
+    include: { tags: { select: { id: true } } },
+  });
+  if (!contact) return;
+
+  const currentFields = normalizeStringMap(contact.customFields);
+  const previousValue = currentFields[key] ?? null;
+  if (previousValue === value) return;
+  const nextFields = { ...currentFields, [key]: value };
+
+  let updated;
+  try {
+    updated = await db.contact.update({
+      where: { id: contactId, teamId, version: contact.version },
+      data: {
+        customFields: nextFields as Prisma.InputJsonValue,
+        version: { increment: 1 },
+      },
+      include: { tags: { select: { id: true } } },
+    });
+  } catch (err) {
+    // CAS miss (a user/API edit landed between read and write) → drop the
+    // save rather than clobber the concurrent write. The run already routed
+    // on the answer; losing the field write is the safe failure here.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      return;
+    }
+    throw err;
+  }
+
+  const payload: Contact = {
+    id: updated.id,
+    teamId: updated.teamId,
+    phoneNumber: updated.phoneNumber,
+    identityChannel: updated.identityChannel,
+    externalContactId: updated.externalContactId,
+    name: updated.name,
+    firstName: updated.firstName,
+    lastName: updated.lastName,
+    language: updated.language,
+    countryCode: updated.countryCode,
+    avatarUrl: updated.avatarUrl ?? undefined,
+    email: updated.email ?? undefined,
+    location: updated.location ?? undefined,
+    customFields: nextFields,
+    source: updated.source,
+    stageId: updated.stageId,
+    tagIds: updated.tags.map((t) => t.id),
+    createdAt: updated.createdAt.toISOString(),
+  };
+
+  await publish({
+    type: "contact.updated",
+    teamId,
+    contact: payload,
+    previousStageId: updated.stageId, // stage didn't change here
+    fieldChanges: [{ key, previous: previousValue, next: value }],
+    changedByUserId: null,
+    workflowContact: workflowContactSnapshot(updated),
+    // `silent: true` for loop safety; `skipOutboundWebhook: false` so a saved
+    // answer reaches partners subscribed to contact.updated. Mirrors
+    // update-field.ts (this path is the ask_question equivalent of update_field).
+    silent: true,
+    skipOutboundWebhook: false,
+  });
+}
+
+function normalizeStringMap(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}

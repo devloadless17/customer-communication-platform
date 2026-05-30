@@ -6,6 +6,7 @@ import { CheckCircle2, Copy, KeyRound, Loader2, RefreshCw, Terminal, Zap } from 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/lib/toast";
+import { apiFetch } from "@/lib/api/client-fetch";
 import type { ApiKeyListItem } from "@/lib/api/queries";
 
 import type { CurlExample, IntegrationPreset } from "../presets";
@@ -66,7 +67,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
     setError(null);
     setGenerating(true);
     try {
-      const res = await fetch("/api/team/api-keys", {
+      const res = await apiFetch("/api/team/api-keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -123,7 +124,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
     setError(null);
     setRotating(true);
     try {
-      const res = await fetch(`/api/team/api-keys/${connected.id}/rotate`, {
+      const res = await apiFetch(`/api/team/api-keys/${connected.id}/rotate`, {
         method: "POST",
       });
       const json = (await res.json()) as {

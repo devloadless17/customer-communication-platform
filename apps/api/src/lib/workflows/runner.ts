@@ -85,6 +85,27 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
     return { runId: run.id, status: "failed" };
   }
 
+  // Terminal-status guard. A run that already reached a terminal state
+  // (completed / failed / skipped) must NEVER re-execute. The canonical
+  // trigger is the dangling `ask_question` TIMEOUT job: when a contact replies
+  // early, the inbound resume advances the run to completion, but NOTHING
+  // cancels the timeout job (`resume-${runId}-${waitSeq}`), so it fires hours
+  // later (default 24h). On a terminal run `currentStepId` is NULL, so without
+  // this guard the `?? graph.startNodeId` fallback below would silently restart
+  // the ENTIRE workflow from the start node — re-sending WhatsApp messages,
+  // re-applying tags/fields, re-dispatching child workflows. The per-step
+  // orphan-journaling can't catch it (a from-start re-run has empty per-step
+  // history), so the only safe answer is to refuse the pickup outright. The
+  // `waiting`-only guard below does NOT cover this case (a completed run is not
+  // `waiting`). Cheap: a stale resume on a finished run becomes a no-op.
+  if (
+    run.status === "completed" ||
+    run.status === "failed" ||
+    run.status === "skipped"
+  ) {
+    return { runId: run.id, status: run.status };
+  }
+
   // Stale / not-yet-due resume guard.
   //
   // A BullMQ resume job can fire for a wait the run already advanced past —
@@ -124,6 +145,21 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
   });
 
   const envelope = buildEnvelope(wf.teamId, run.trigger, run.eventPayload);
+  // Resolve the entry step. A NULL `currentStepId` only means "start from the
+  // beginning" for a genuinely-fresh run (the initial `queued` pickup with no
+  // stepLog). The terminal-status guard above already rejects completed/failed/
+  // skipped runs, so a NULL here on a run that has ALREADY made progress
+  // (non-empty stepLog, status running/waiting) is a corruption signal, not a
+  // restart instruction — defend against it rather than silently re-running
+  // the graph from the start node (defense-in-depth behind the terminal guard).
+  const hasPriorProgress = Array.isArray(run.stepLog) && run.stepLog.length > 0;
+  if (run.currentStepId == null && hasPriorProgress) {
+    await markFailed(
+      run.id,
+      "resume with null currentStepId on an in-progress run (corrupt state; refusing to restart from start node)",
+    );
+    return { runId: run.id, status: "failed" };
+  }
   let currentStepId: string | null = run.currentStepId ?? graph.startNodeId;
   // Tracks the step we advanced FROM to reach the current step. Drives
   // `$var.previousStep.X` token expansion. Carried over resumes via the
@@ -522,10 +558,28 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
       nextId = findNextStep(graph, node.id, result.selectedLabel);
     } else if (result.kind === "jump") {
       jumpsUsed += 1;
-      // Cap jumps per run at the global ceiling minus the step buffer; a
-      // workflow that loops forever should fail fast rather than chew the
-      // worker. Step config can tighten this further.
+      // Per-step `maxJumps` cap: a loop author can bound how many times THIS
+      // jump node fires for a run, tighter than the global ceiling. Count how
+      // often this node has already jumped (prior success entries in stepLog
+      // for this stepId+type) and, once at/over the cap, take the node's
+      // fall-through edge instead of jumping again. Read maxJumps off the raw
+      // node config (the parsed `config` is scoped to the try block above; the
+      // jump handler's parseConfig already floors/validates this value, but we
+      // re-read defensively since the raw shape is `unknown` here).
+      const rawJumpConfig = (node.config ?? {}) as { maxJumps?: unknown };
+      const maxJumps =
+        typeof rawJumpConfig.maxJumps === "number" && rawJumpConfig.maxJumps > 0
+          ? Math.floor(rawJumpConfig.maxJumps)
+          : undefined;
+      const priorJumpsThisNode = stepLog.filter(
+        (e) => e.stepId === node.id && e.type === "jump_to_step" && e.status === "success",
+      ).length;
+      // Cap jumps per run at the global ceiling; a workflow that loops forever
+      // should fail fast rather than chew the worker. Per-step maxJumps tightens
+      // it further — this jump already counts as `priorJumpsThisNode + 1`.
       if (jumpsUsed > MAX_STEPS_PER_RUN) {
+        nextId = findNextStep(graph, node.id);
+      } else if (maxJumps !== undefined && priorJumpsThisNode + 1 > maxJumps) {
         nextId = findNextStep(graph, node.id);
       } else {
         nextId = result.targetStepId;

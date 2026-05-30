@@ -43,3 +43,15 @@ export type TestWorkflowInput = z.infer<typeof TestWorkflowSchema>;
 // validation (graph, trigger conditions, per-step configs against the
 // step registry); duplicating that in Zod would mean ~300 lines of
 // trigger/step parsing in two places. Controllers pass raw body through.
+
+/**
+ * GET /api/team/workflows/:id/runs query — keyset pagination. Previously the
+ * runs list was hard-capped at 50 with no cursor, so older runs were
+ * unreachable. `cursor` is `<startedAtMs>_<id>` of the last row of the prior
+ * page; `take` bounds the page (default 50, max 200).
+ */
+export const ListWorkflowRunsQuerySchema = z.object({
+  cursor: z.string().optional(),
+  take: z.coerce.number().int().min(1).max(200).optional(),
+});
+export type ListWorkflowRunsQuery = z.infer<typeof ListWorkflowRunsQuerySchema>;

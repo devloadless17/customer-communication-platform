@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   Headers,
+  HttpException,
   Param,
   Patch,
   Post,
@@ -19,7 +20,7 @@ import { RequireScope } from "../../auth/scope.decorator";
 import { ScopeGuard } from "../../auth/scope.guard";
 import { RateLimit } from "../../common/rate-limit.guard";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
-import { parseChainDepth } from "@/lib/workflows/events";
+import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
 import { ExternalV1Service } from "./external-v1.service";
 import {
   ExternalAssignSchema,
@@ -118,6 +119,33 @@ import {
 export class ExternalV1Controller {
   constructor(private readonly api: ExternalV1Service) {}
 
+  /**
+   * Cross-system loop guard for EVERY mutating /v1 route that publishes a
+   * domain event (which can fan an outbound webhook back to the partner, who
+   * may POST back here). The outbound-webhook deliverer stamps an incrementing
+   * `X-CCP-Depth` on each delivery; if a request arrives already at/over the
+   * cap, refuse it with 429 to break the loop. The send + bulk-tag routes
+   * already do this via their service methods; this centralizes the SAME check
+   * for the contact + conversation mutation routes that previously omitted it
+   * (createContact, upsert, update, delete, tag add/remove, assign, setStatus,
+   * and the contact-keyed assign/status aliases). HTTP-boundary concern, so it
+   * lives in the controller — the service signatures stay untouched.
+   */
+  private guardChainDepth(xCcpDepth: string | undefined): void {
+    const depth = parseChainDepth(xCcpDepth);
+    if (depth >= MAX_CHAIN_DEPTH) {
+      throw new HttpException(
+        {
+          error: "chain_depth_exceeded",
+          detail:
+            `inbound X-CCP-Depth ${depth} >= ${MAX_CHAIN_DEPTH} — request dropped ` +
+            "to break a likely cross-system loop.",
+        },
+        429,
+      );
+    }
+  }
+
   // ---- Contacts: list + find -----------------------------------------
 
   @Get("contacts")
@@ -195,7 +223,9 @@ export class ExternalV1Controller {
   async createContact(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalCreateContactSchema)) body: ExternalCreateContactInput,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     const contact = await this.api.createContact(auth.teamId, auth.apiKeyId, body);
     return { contact };
   }
@@ -206,7 +236,9 @@ export class ExternalV1Controller {
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalUpsertContactSchema)) body: ExternalUpsertContactInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.api.upsertContact(
       auth.teamId,
       auth.apiKeyId,
@@ -228,7 +260,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body() rawBody: Record<string, unknown>,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     if (rawBody && Object.prototype.hasOwnProperty.call(rawBody, "phoneNumber")) {
       throw new BadRequestException({
         error:
@@ -257,7 +291,9 @@ export class ExternalV1Controller {
   async deleteContact(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     await this.api.deleteContact(auth.teamId, auth.apiKeyId, id);
     return { ok: true };
   }
@@ -280,7 +316,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalContactAddTagsSchema)) body: ExternalContactAddTagsInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     const contact = await this.api.addContactTags(
       auth.teamId,
       auth.apiKeyId,
@@ -298,7 +336,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Param("tagId") tagId: string,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     const contact = await this.api.removeContactTag(
       auth.teamId,
       auth.apiKeyId,
@@ -322,7 +362,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalContactRemoveTagsSchema)) body: ExternalContactRemoveTagsInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     const contact = await this.api.removeContactTags(
       auth.teamId,
       auth.apiKeyId,
@@ -458,7 +500,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalAssignSchema)) body: ExternalAssignInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     await this.api.assign(auth.teamId, auth.apiKeyId, id, body, idempotencyKey?.trim() || undefined);
     return { ok: true };
   }
@@ -470,7 +514,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalStatusSchema)) body: ExternalStatusInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, idempotencyKey?.trim() || undefined);
     return { ok: true };
   }
@@ -488,7 +534,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalContactAssignSchema)) body: ExternalContactAssignInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.api.assignByContact(
       auth.teamId,
       auth.apiKeyId,
@@ -505,7 +553,9 @@ export class ExternalV1Controller {
     @Param("id") id: string,
     @Body(zBody(ExternalContactStatusSchema)) body: ExternalContactStatusInput,
     @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    this.guardChainDepth(xCcpDepth);
     return this.api.setStatusByContact(
       auth.teamId,
       auth.apiKeyId,

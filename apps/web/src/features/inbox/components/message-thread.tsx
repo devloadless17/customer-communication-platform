@@ -4,7 +4,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Loader2, X } from "lucide-react";
 
-import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import { dispatchLocalSocketEvent, dispatchLocalSocketEvents } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -23,7 +24,7 @@ import type {
   User,
 } from "@ccp/shared/types";
 import {
-  optimisticStageChange,
+  buildOptimisticStageChange,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { useConversationEvents } from "@/features/inbox/hooks/use-conversation-events";
@@ -189,27 +190,45 @@ function MessageThreadImpl({
     async (next: string) => {
       const prev = stageId;
       setStageId(next);
-      // Fan a synthetic `contact:updated` to local socket listeners so the
-      // sidebar stage counts, the LRU cache, and the right-rail contact
-      // panel all flip immediately — without waiting on PATCH → bus →
-      // socket round-trip (~50-200ms of visible lag). When the real frame
-      // arrives, reducers re-apply with the server-canonical contact;
-      // both passes mutate the same fields so the second is invisible.
-      dispatchLocalSocketEvent("contact:updated", {
-        teamId: contact.teamId,
-        contact: { ...contact, stageId: next },
-        // Optimistic: the PATCH below hasn't committed yet. Tells the inbox
-        // list to splice optimistically but NOT re-fetch (a pre-commit read
-        // would re-add this row to its old stage-filter; the post-commit
-        // server frame converges). See use-team-events onContactUpdated.
-        optimistic: true,
-      });
+      // Bundle `contact:updated` + the matching stage-changed activity pill
+      // into ONE flushSync so the sidebar chip, LRU cache, contact panel, AND
+      // the timeline pill commit in a single paint. Two separate
+      // `dispatchLocalSocketEvent` calls (state + activity) produced two
+      // paints in a row — the second-paint gap was the visible "log lags
+      // everything else". `optimistic: true` tells the inbox-list resync /
+      // counts refetch to skip the in-flight PATCH window; the authoritative
+      // server frame drives convergence. See use-team-events onContactUpdated.
+      let stageActivityId: string | null = null;
+      const stageActivity =
+        prev !== next
+          ? buildOptimisticStageChange({
+              teamId: contact.teamId,
+              conversationId: conversation.id,
+              actorName: currentUser.name,
+              fromStageName: stageCatalog.find((s) => s.id === prev)?.name ?? null,
+              toStageName: stageCatalog.find((s) => s.id === next)?.name ?? null,
+            })
+          : null;
+      if (stageActivity) stageActivityId = stageActivity.id;
+      const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
+        [
+          "contact:updated",
+          {
+            teamId: contact.teamId,
+            contact: { ...contact, stageId: next },
+            optimistic: true,
+          },
+        ],
+      ];
+      if (stageActivity) frames.push(stageActivity.frame);
+      dispatchLocalSocketEvents(frames);
       // Sidebar stage badges are computed from a server-fetched `byStage`
       // map (useConversationCounts). The `contact:updated` event triggers
       // a refetch there, but the refetch is a 50-300ms round-trip — the
       // badge would lag the thread header. Fire a delta event so the
       // counts hook can patch byStage locally and the badge flips in the
-      // same frame as the thread header.
+      // same frame as the thread header. Window CustomEvents have their own
+      // sync dispatch, so this stays outside the batched socket dispatch.
       if (prev !== next && typeof window !== "undefined") {
         window.dispatchEvent(
           new CustomEvent("ccp:contact-stage-delta", {
@@ -217,21 +236,7 @@ function MessageThreadImpl({
           }),
         );
       }
-      // Optimistic timeline pill for the stage move — only when it actually
-      // changed (matches when the server writes the audit row). Names resolved
-      // from the in-hand stage catalog so the pill reads identically to the
-      // server row the trailing GET reconciles in.
-      let stageActivityId: string | null = null;
-      if (prev !== next) {
-        stageActivityId = optimisticStageChange({
-          teamId: contact.teamId,
-          conversationId: conversation.id,
-          actorName: currentUser.name,
-          fromStageName: stageCatalog.find((s) => s.id === prev)?.name ?? null,
-          toStageName: stageCatalog.find((s) => s.id === next)?.name ?? null,
-        });
-      }
-      const res = await fetch(`/api/contacts/${contact.id}`, {
+      const res = await apiFetch(`/api/contacts/${contact.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ stageId: next }),
@@ -657,7 +662,7 @@ function MessageThreadImpl({
     setSearchError(null);
     void (async () => {
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/conversations/${conversation.id}/messages/context?messageId=${encodeURIComponent(jumpTargetId)}`,
         );
         if (cancelled) return;
@@ -717,7 +722,7 @@ function MessageThreadImpl({
         conversationId: conversation.id,
         noteId,
       });
-      const res = await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/notes/${noteId}`, { method: "DELETE" });
       if (!res.ok) {
         await alert("Couldn't delete note", "Please try again.");
         // No good rollback path — the note object isn't around to re-insert

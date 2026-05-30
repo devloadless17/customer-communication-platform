@@ -46,6 +46,12 @@ export const SendInteractiveSchema = z
       .min(1)
       .max(10),
     listCtaLabel: z.string().min(1).max(20).optional(),
+    // Pre-Meta idempotency key (same as text/media/template sends). A double-
+    // click or network-retry that re-POSTs the same clientTempId within the
+    // window short-circuits to the first result instead of producing a second
+    // interactive message + Meta send. Optional — legacy clients run through
+    // un-deduped exactly as before.
+    clientTempId: z.string().min(1).optional(),
   })
   .refine((b) => b.kind !== "buttons" || b.options.length <= 3, {
     message: "buttons supports at most 3 options — use kind=list for more",

@@ -10,6 +10,7 @@ import {
 } from "@nestjs/common";
 
 import {
+  MAX_RECIPIENTS_IN_PROCESS,
   getInFlightRunPromises,
   reconcileOrphanedBroadcasts,
   signalShutdown,
@@ -291,29 +292,67 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    const broadcast = await this.db.broadcast.create({
-      data: {
-        teamId,
-        createdById: userId,
-        // Scheduled → the delayed job will flip it to queued + run at time.
-        // Otherwise queued → runs immediately below.
-        status: isFutureSchedule ? "scheduled" : "queued",
-        name,
-        scheduledAt: scheduledAtDate,
-        templateId: template.id,
-        templateName: template.name,
-        templateLanguage: template.language,
-        variables: variables as unknown as Prisma.InputJsonValue,
-        audienceMode: audience.mode,
-        audienceTagIds: validatedTagIds,
-        audienceGroupId: resolvedGroupId,
-        audienceGroupName: resolvedGroupName,
-        totalCount: recipientIds.length,
-        recipients: {
-          create: recipientIds.map((id) => ({ contactId: id })),
+    // Enforce the in-process recipient cap HERE, before writing any rows. The
+    // runner also checks it, but only after the recipient rows are persisted —
+    // so an "all contacts" send on a 50k-contact team would build a 50k-row
+    // nested INSERT and a 50k-id array in memory just to be rejected. Refuse
+    // early with an actionable message instead.
+    if (recipientIds.length > MAX_RECIPIENTS_IN_PROCESS) {
+      throw new BadRequestException({
+        error: "audience too large",
+        detail: `This audience has ${recipientIds.length} recipients; the limit is ${MAX_RECIPIENTS_IN_PROCESS}. Split it into smaller broadcasts.`,
+      });
+    }
+
+    // Create the broadcast row + recipients in ONE transaction, but write the
+    // recipients via CHUNKED createMany rather than a nested create. A single
+    // nested-create of N recipients ships one unbounded INSERT with N value
+    // tuples — fine at 100, a multi-MB statement at the 10k cap. Chunked
+    // createMany keeps each statement bounded and Postgres-plannable; the
+    // transaction keeps it all-or-nothing so a mid-write crash can't leave a
+    // broadcast whose totalCount disagrees with its recipient rows (the runner
+    // would then under-send and mark complete). At the 10k cap that's ≤10
+    // bounded inserts in the tx — short-lived.
+    const RECIPIENT_CHUNK = 1_000;
+    const broadcast = await this.db.$transaction(async (tx) => {
+      const created = await tx.broadcast.create({
+        data: {
+          teamId,
+          createdById: userId,
+          // Scheduled → the delayed job will flip it to queued + run at time.
+          // Otherwise queued → runs immediately below.
+          status: isFutureSchedule ? "scheduled" : "queued",
+          name,
+          scheduledAt: scheduledAtDate,
+          templateId: template.id,
+          templateName: template.name,
+          templateLanguage: template.language,
+          variables: variables as unknown as Prisma.InputJsonValue,
+          audienceMode: audience.mode,
+          audienceTagIds: validatedTagIds,
+          audienceGroupId: resolvedGroupId,
+          audienceGroupName: resolvedGroupName,
+          totalCount: recipientIds.length,
         },
-      },
-      select: { id: true, totalCount: true },
+        select: { id: true, totalCount: true },
+      });
+      for (let i = 0; i < recipientIds.length; i += RECIPIENT_CHUNK) {
+        const slice = recipientIds.slice(i, i + RECIPIENT_CHUNK);
+        await tx.broadcastRecipient.createMany({
+          data: slice.map((id) => ({ broadcastId: created.id, contactId: id })),
+          skipDuplicates: true,
+        });
+      }
+      return created;
+    }, {
+      // Prisma's default interactive-tx timeout is 5s (wall-clock BEGIN→COMMIT
+      // across every await). At the 10k-recipient cap this tx does 1 create +
+      // up to 10 sequential 1k-row createMany round-trips; under pool contention
+      // that can exceed 5s and roll back the ENTIRE broadcast create (P2028 →
+      // opaque 500, no row). Give it the same 30s headroom as the statement
+      // timeout ceiling. maxWait bumped so it can also wait for a pool slot.
+      timeout: 30_000,
+      maxWait: 5_000,
     });
 
     if (isFutureSchedule && scheduledAtDate) {
@@ -368,29 +407,51 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         { templateName: { contains: query.search, mode: "insensitive" } },
       ];
     }
+    // Keyset pagination on (createdAt DESC, id DESC). Previously hard-capped at
+    // 100 with no cursor, so a team with >100 broadcasts couldn't reach the
+    // older ones at all. `cursor` is `<createdAtMs>_<id>` of the last row of
+    // the prior page. Default page 100, max 200.
+    const take = query?.take ?? 100;
+    const cursor = parseBroadcastCursor(query?.cursor);
+    const cursorWhere: Prisma.BroadcastWhereInput | undefined = cursor
+      ? {
+          OR: [
+            { createdAt: { lt: cursor.createdAt } },
+            { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+          ],
+        }
+      : undefined;
     const rows = await this.db.broadcast.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      take: 100,
+      where: cursorWhere ? { AND: [where, cursorWhere] } : where,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: take + 1,
       include: { createdBy: { select: { id: true, name: true } } },
     });
-    return rows.map((b) => ({
-      id: b.id,
-      status: b.status,
-      name: b.name,
-      scheduledAt: b.scheduledAt?.toISOString() ?? null,
-      templateName: b.templateName,
-      templateLanguage: b.templateLanguage,
-      audienceMode: b.audienceMode,
-      totalCount: b.totalCount,
-      sentCount: b.sentCount,
-      failedCount: b.failedCount,
-      createdById: b.createdById,
-      createdByName: b.createdBy?.name ?? "Removed user",
-      createdAt: b.createdAt.toISOString(),
-      startedAt: b.startedAt?.toISOString() ?? null,
-      completedAt: b.completedAt?.toISOString() ?? null,
-    }));
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const last = page.at(-1);
+    const nextCursor =
+      hasMore && last ? `${last.createdAt.getTime()}_${last.id}` : null;
+    return {
+      broadcasts: page.map((b) => ({
+        id: b.id,
+        status: b.status,
+        name: b.name,
+        scheduledAt: b.scheduledAt?.toISOString() ?? null,
+        templateName: b.templateName,
+        templateLanguage: b.templateLanguage,
+        audienceMode: b.audienceMode,
+        totalCount: b.totalCount,
+        sentCount: b.sentCount,
+        failedCount: b.failedCount,
+        createdById: b.createdById,
+        createdByName: b.createdBy?.name ?? "Removed user",
+        createdAt: b.createdAt.toISOString(),
+        startedAt: b.startedAt?.toISOString() ?? null,
+        completedAt: b.completedAt?.toISOString() ?? null,
+      })),
+      nextCursor,
+    };
   }
 
   async get(teamId: string, id: string) {
@@ -578,30 +639,68 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         detail: "Wait for the broadcast to finish before retrying failed recipients.",
       });
     }
-    const reset = await this.db.broadcastRecipient.updateMany({
-      where: { broadcastId: id, status: "failed" },
-      data: { status: "queued", errorMessage: null, sentAt: null, externalId: null },
-    });
-    if (reset.count === 0) {
-      throw new ConflictException({
-        error: "nothing to retry",
-        detail: "This broadcast has no failed recipients.",
+    // Reset recipients + re-open the broadcast atomically in ONE transaction.
+    // Two separate writes could leave recipients `queued` while the parent
+    // still shows the old terminal status + failedCount if the process died
+    // between them — the runner would then never pick it up (or double-count).
+    // The parent update CAS-guards on the terminal-status set so a concurrent
+    // runner flip / parallel retry can't race us. A throw inside the tx rolls
+    // the whole thing back.
+    const requeued = await this.db.$transaction(async (tx) => {
+      // Grab the failed recipient ids up front so we can both reset them and
+      // clear their OutboundSendAttempt rows (below) by id.
+      const failed = await tx.broadcastRecipient.findMany({
+        where: { broadcastId: id, status: "failed" },
+        select: { id: true },
       });
-    }
-    // Recompute counters off the reset and re-open the broadcast. failedCount
-    // drops by the number we just re-queued; the runner re-increments as it
-    // re-processes. lastError cleared so the detail page banner goes away.
-    await this.db.broadcast.update({
-      where: { id },
-      data: {
-        status: "queued",
-        failedCount: { decrement: reset.count },
-        lastError: null,
-        completedAt: null,
-      },
+      if (failed.length === 0) {
+        throw new ConflictException({
+          error: "nothing to retry",
+          detail: "This broadcast has no failed recipients.",
+        });
+      }
+      const failedIds = failed.map((r) => r.id);
+      const reset = await tx.broadcastRecipient.updateMany({
+        where: { id: { in: failedIds } },
+        data: { status: "queued", errorMessage: null, sentAt: null, externalId: null },
+      });
+
+      // Delete the surviving OutboundSendAttempt rows (jobId `bc-recipient-<id>`)
+      // for the recipients we're re-queuing. A recipient that failed via the
+      // "attempt may have reached Meta" ABORT branch left its attempt row intact
+      // with neither completedAt nor failedAt; without this delete the runner's
+      // claim would P2002 → re-hit that abort → flip the recipient straight back
+      // to failed, so the Retry button would be a permanent no-op (until the 7d
+      // retention sweeper GC'd it). An EXPLICIT operator retry consciously accepts
+      // the small double-send risk for a message that may never have landed, so
+      // clearing the row to start a clean attempt is the right call.
+      await tx.outboundSendAttempt.deleteMany({
+        where: { jobId: { in: failedIds.map((rid) => `bc-recipient-${rid}`) } },
+      });
+      // Recompute counters off the reset and re-open the broadcast. failedCount
+      // drops by the number we re-queued; the runner re-increments as it
+      // re-processes. lastError cleared so the detail page banner goes away.
+      const flipped = await tx.broadcast.updateMany({
+        where: { id, status: { in: ["completed", "failed", "canceled"] } },
+        data: {
+          status: "queued",
+          failedCount: { decrement: reset.count },
+          lastError: null,
+          completedAt: null,
+        },
+      });
+      if (flipped.count === 0) {
+        // A concurrent retry/runner already moved this broadcast out of a
+        // terminal state — abort so we don't double-process.
+        throw new ConflictException({
+          error: "broadcast in progress",
+          detail: "Another retry or run started for this broadcast.",
+        });
+      }
+      return reset.count;
     });
     startBroadcast(id);
-    return { requeued: reset.count };
+    return { requeued };
   }
 
   /**
@@ -623,4 +722,20 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     }
     await this.db.broadcast.delete({ where: { id } });
   }
+}
+
+/**
+ * Decode a `<createdAtMs>_<id>` broadcast list cursor. Returns null on any
+ * malformed input so a bad cursor degrades to "first page" rather than 500.
+ */
+function parseBroadcastCursor(
+  raw: string | undefined,
+): { createdAt: Date; id: string } | null {
+  if (!raw) return null;
+  const sep = raw.indexOf("_");
+  if (sep <= 0) return null;
+  const ms = Number(raw.slice(0, sep));
+  const id = raw.slice(sep + 1);
+  if (!Number.isFinite(ms) || !id) return null;
+  return { createdAt: new Date(ms), id };
 }

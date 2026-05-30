@@ -33,7 +33,6 @@ import type { ApiSession } from "../auth/session.guard";
  *                     THEN acceptCall (Meta requires that order).
  *   rejectCall      — incoming-only.
  *   endCall         — terminate in-progress.
- *   forwardIce      — relay ICE candidate browser → Meta.
  *   list            — call history for a conversation, keyset paginated.
  *
  * All Meta SDK calls happen AFTER the local DB write so a Meta hiccup
@@ -45,7 +44,9 @@ export type InitiateCallFailure =
   | { ok: false; reason: "bic_blocked_region" }
   | { ok: false; reason: "permission_revoked" }
   | { ok: false; reason: "rate_limited"; retryAt: string }
-  | { ok: false; reason: "daily_cap_reached" };
+  | { ok: false; reason: "daily_cap_reached" }
+  | { ok: false; reason: "provider_not_configured" }
+  | { ok: false; reason: "provider_rejected" };
 
 export interface InitiateCallSuccess {
   ok: true;
@@ -77,6 +78,7 @@ export class CallsService {
   async initiateCall(
     session: ApiSession,
     conversationId: string,
+    sdpOffer: string,
   ): Promise<InitiateCallSuccess | InitiateCallFailure> {
     const conversation = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId: session.teamId },
@@ -152,25 +154,38 @@ export class CallsService {
         // Fire the permission request opportunistically — if Meta accepts,
         // log it; if Meta rate-limits, write the rateLimitedUntil row.
         // Either way the UI surfaces "permission_required" and the agent
-        // re-clicks once granted.
-        await this.requestPermissionInternal(
-          session.teamId,
-          contact.id,
-          contact.phoneNumber,
-        );
+        // re-clicks once granted. Swallow the throw: the permission row
+        // (success OR rate-limit) is the source of truth for the next click;
+        // a 5xx-bubble here would 502 the inbox button on every contact
+        // that's never received a permission request.
+        try {
+          await this.requestPermissionInternal(
+            session.teamId,
+            contact.id,
+            contact.phoneNumber,
+          );
+        } catch (err) {
+          this.logger.warn(
+            `sendCallPermissionRequest failed for team=${session.teamId} contact=${contact.id}: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        }
         return { ok: false, reason: "permission_required" };
       }
     } else {
-      // 5-per-24h cap. Only counts COMPLETED outbound calls — failed /
-      // rejected / missed don't burn the cap (the customer doesn't pay
-      // attention to those either).
+      // 5-per-24h cap. Counts ONLY calls where the customer actually
+      // picked up (answeredAt is non-null) — Meta's "5 connected calls
+      // per 24h per contact" rule is about CONNECTED calls. A failed
+      // handshake that we tear down as "completed" with answeredAt=null
+      // shouldn't burn the cap.
       const since = new Date(now - 24 * 60 * 60 * 1000);
       const dailyOutboundConnected = await this.db.call.count({
         where: {
           teamId: session.teamId,
           conversationId,
           direction: CallDirection.out,
-          status: CallStatus.completed,
+          answeredAt: { not: null },
           ringingAt: { gte: since },
         },
       });
@@ -183,57 +198,109 @@ export class CallsService {
     // Call row, then publish call.ringing_out. Order matters: Meta first
     // so we capture the real externalCallId on the row; a failure here
     // surfaces a clean error and we haven't written a phantom Call row.
-    const binding = getProviderBinding(conversation.channel);
-    const placeCall = requireProviderMethod(
-      binding.provider,
-      "placeCall",
-      conversation.channel,
-    );
-    const sendConfig = await binding.getSendConfig(session.teamId);
-    let placed;
+    //
+    // EVERYTHING below the gauntlet returns a structured `{ ok: false, reason }`
+    // on failure — no 5xx ever bubbles to the inbox. Two infra failures
+    // we explicitly handle:
+    //   - Channel missing or no provider registered → `provider_unsupported`
+    //   - Team has no Meta credentials → `provider_not_configured`
+    //   - Meta API call itself throws (network / 4xx / 5xx) → `provider_rejected`
+    // The UI maps every reason to a human one-liner; the alternative (502 → "Bad
+    // Gateway" in console) is the failure mode we just hit in prod.
+    const channelForCall = conversation.channel ?? "whatsapp";
+    let placed: { externalCallId: string };
     try {
-      placed = await placeCall({ to: contact.phoneNumber }, sendConfig);
+      const binding = getProviderBinding(channelForCall);
+      const placeCall = requireProviderMethod(
+        binding.provider,
+        "placeCall",
+        channelForCall,
+      );
+      const sendConfig = await binding.getSendConfig(session.teamId);
+      placed = await placeCall(
+        { to: contact.phoneNumber, sdpOffer },
+        sendConfig,
+      );
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(
-        `placeCall failed for team=${session.teamId} contact=${contact.id}: ${
-          err instanceof Error ? err.message : err
-        }`,
+        `placeCall failed for team=${session.teamId} contact=${contact.id}: ${message}`,
       );
-      throw new HttpException(
-        { error: "provider_rejected" },
-        502,
-      );
+      // Differentiate config errors from provider-side rejections so the UI
+      // can render the right copy. Both come back as 4xx, never 5xx.
+      const reason: "provider_not_configured" | "provider_rejected" =
+        /credentials|config|channel.connection|not.configured/i.test(message)
+          ? "provider_not_configured"
+          : "provider_rejected";
+      return { ok: false, reason } as InitiateCallFailure;
     }
 
     const ringingAt = new Date();
-    const created = await this.db.$transaction(async (tx) => {
-      const row = await tx.call.create({
-        data: {
-          teamId: session.teamId,
-          conversationId,
-          externalCallId: placed.externalCallId,
-          channel: conversation.channel,
-          direction: CallDirection.out,
-          status: CallStatus.ringing,
-          ringingAt,
-          // Verbatim provider response for forensics.
-          rawPayload: { placedAt: ringingAt.toISOString() } as Prisma.InputJsonValue,
-        },
-        select: { id: true, status: true, externalCallId: true },
+    let created: { id: string; status: CallStatus; externalCallId: string };
+    let createdHere = true;
+    try {
+      created = await this.db.$transaction(async (tx) => {
+        return tx.call.create({
+          data: {
+            teamId: session.teamId,
+            conversationId,
+            externalCallId: placed.externalCallId,
+            channel: conversation.channel,
+            direction: CallDirection.out,
+            status: CallStatus.ringing,
+            ringingAt,
+            // Verbatim provider response for forensics.
+            rawPayload: { placedAt: ringingAt.toISOString() } as Prisma.InputJsonValue,
+          },
+          select: { id: true, status: true, externalCallId: true },
+        });
       });
-      return row;
-    });
+    } catch (err) {
+      // P2002: Meta's first webhook for this call (ringing_out for the same
+      // externalCallId) raced us and ingestCallEvent inserted the row first.
+      // That's benign — the call IS placed and ringing. Re-read the existing
+      // row and return success from it instead of letting the @@unique
+      // violation surface (the global filter would map it to a 409, which the
+      // FE treats as failure → tears down a live call → the agent re-clicks →
+      // a SECOND real call). Honors the method's "no error ever bubbles" invariant.
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        const existing = await this.db.call.findUnique({
+          where: {
+            teamId_channel_externalCallId: {
+              teamId: session.teamId,
+              channel: conversation.channel,
+              externalCallId: placed.externalCallId,
+            },
+          },
+          select: { id: true, status: true, externalCallId: true },
+        });
+        if (!existing) throw err; // shouldn't happen — re-throw if the row vanished
+        created = existing;
+        createdHere = false;
+      } else {
+        throw err;
+      }
+    }
 
-    // Publish so the originating thread room shows ringing-out state.
-    await this.bus.publish({
-      type: "call.ringing_out",
-      teamId: session.teamId,
-      conversationId,
-      callId: created.id,
-      externalCallId: created.externalCallId,
-      initiatedByUserId: session.userId,
-      ringingAt: ringingAt.toISOString(),
-    });
+    // Publish ringing-out so the originating thread shows the right state with
+    // the REAL initiator. Skip the publish on the P2002-recovery path: the
+    // ingest insert already emitted its own call.ringing_out frame (with an
+    // empty initiatedByUserId), so we'd otherwise double-publish. The FE's
+    // optimistic ringing panel already covers the initiator's own view.
+    if (createdHere) {
+      await this.bus.publish({
+        type: "call.ringing_out",
+        teamId: session.teamId,
+        conversationId,
+        callId: created.id,
+        externalCallId: created.externalCallId,
+        initiatedByUserId: session.userId,
+        ringingAt: ringingAt.toISOString(),
+      });
+    }
 
     return {
       ok: true,
@@ -241,6 +308,72 @@ export class CallsService {
       externalCallId: created.externalCallId,
       status: created.status,
     };
+  }
+
+  /**
+   * Admin: read Meta's current phone-number settings. Lets us see what
+   * calling fields are currently set (status, call_icon_visibility,
+   * call_hours, etc.) so we can diagnose why inbound calls aren't
+   * arriving at our webhook.
+   */
+  async getPhoneNumberSettings(
+    session: ApiSession,
+    channel: "whatsapp" = "whatsapp",
+  ): Promise<{ raw: unknown }> {
+    const binding = getProviderBinding(channel);
+    const fn = binding.provider.getPhoneNumberSettings;
+    if (!fn) {
+      throw new BadRequestException({
+        error: "provider does not support getPhoneNumberSettings",
+      });
+    }
+    const config = await binding.getSendConfig(session.teamId);
+    try {
+      return await fn(config);
+    } catch (err) {
+      throw new HttpException(
+        {
+          error: "provider_rejected",
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        502,
+      );
+    }
+  }
+
+  /**
+   * Admin: enable WhatsApp Cloud API Calling on this team's phone number.
+   * One-time setup — Meta requires this before any placeCall succeeds.
+   * Returns Meta's response verbatim for diagnosis. Idempotent.
+   */
+  async enableCallingForTeam(
+    session: ApiSession,
+    channel: "whatsapp" = "whatsapp",
+  ): Promise<{ ok: true; raw: unknown }> {
+    const binding = getProviderBinding(channel);
+    const fn = binding.provider.enableCalling;
+    if (!fn) {
+      throw new BadRequestException({
+        error: "provider does not support enableCalling",
+      });
+    }
+    const config = await binding.getSendConfig(session.teamId);
+    try {
+      return await fn(config);
+    } catch (err) {
+      this.logger.warn(
+        `enableCalling failed for team=${session.teamId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      throw new HttpException(
+        {
+          error: "provider_rejected",
+          detail: err instanceof Error ? err.message : String(err),
+        },
+        502,
+      );
+    }
   }
 
   /**
@@ -389,7 +522,12 @@ export class CallsService {
     );
     const config = await binding.getSendConfig(session.teamId);
     try {
-      await preAccept({ externalCallId: call.externalCallId }, config);
+      // Both pre_accept and accept carry the SAME SDP answer. Meta returns
+      // 131009 "Missing session parameter" on pre_accept without it.
+      await preAccept(
+        { externalCallId: call.externalCallId, sdpAnswer },
+        config,
+      );
       await accept(
         { externalCallId: call.externalCallId, sdpAnswer },
         config,
@@ -580,54 +718,6 @@ export class CallsService {
   }
 
   /**
-   * Forward a browser-generated ICE candidate to Meta. Best-effort —
-   * candidates trickle; missing one is recoverable from the next.
-   */
-  async forwardIce(
-    session: ApiSession,
-    callId: string,
-    candidate: string,
-    sdpMid: string | null,
-    sdpMLineIndex: number | null,
-  ): Promise<{ ok: true }> {
-    const call = await this.db.call.findFirst({
-      where: { id: callId, teamId: session.teamId },
-      select: { externalCallId: true, channel: true, status: true },
-    });
-    if (!call) throw new NotFoundException({ error: "call not found" });
-    if (
-      call.status !== CallStatus.ringing &&
-      call.status !== CallStatus.in_progress
-    ) {
-      // Late ICE after the call ended — drop silently.
-      return { ok: true };
-    }
-    const binding = getProviderBinding(call.channel);
-    const sendIce = binding.provider.sendIceCandidate;
-    if (!sendIce) return { ok: true };
-    const config = await binding.getSendConfig(session.teamId);
-    try {
-      await sendIce(
-        {
-          externalCallId: call.externalCallId,
-          candidate,
-          sdpMid,
-          sdpMLineIndex,
-        },
-        config,
-      );
-    } catch (err) {
-      // Non-fatal — log only.
-      this.logger.debug(
-        `sendIceCandidate failed for call=${callId}: ${
-          err instanceof Error ? err.message : err
-        }`,
-      );
-    }
-    return { ok: true };
-  }
-
-  /**
    * List call history for a conversation. Keyset paginated on
    * (ringingAt DESC, id DESC).
    */
@@ -637,6 +727,20 @@ export class CallsService {
     take: number,
     cursor: string | undefined,
   ): Promise<{ items: SerializedCall[]; cursor: string | null }> {
+    // Capability gate: viewing call history requires either calling capability,
+    // mirroring endCall's inline make-OR-receive check. Without this the read
+    // path would leak full call history (who called whom, durations, answered-by)
+    // to roles an admin has deliberately scoped OUT of calling — every mutating
+    // calling route is gated, so the read path must be too. Decorators are
+    // single-capability, hence the inline OR.
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (
+      !perms["calls:make" as Capability] &&
+      !perms["calls:receive" as Capability]
+    ) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+
     // Team scope via the conversation FK — defensive lookup.
     const conv = await this.db.conversation.findFirst({
       where: { id: conversationId, teamId: session.teamId },
@@ -661,7 +765,6 @@ export class CallsService {
         answeredAt: true,
         endedAt: true,
         durationSeconds: true,
-        recordingUrl: true,
       },
     });
     const hasMore = rows.length > take;
@@ -683,7 +786,6 @@ export interface SerializedCall {
   answeredAt: string | null;
   endedAt: string | null;
   durationSeconds: number | null;
-  recordingUrl: string | null;
 }
 
 function serializeCall(row: {
@@ -698,7 +800,6 @@ function serializeCall(row: {
   answeredAt: Date | null;
   endedAt: Date | null;
   durationSeconds: number | null;
-  recordingUrl: string | null;
 }): SerializedCall {
   return {
     id: row.id,
@@ -712,6 +813,5 @@ function serializeCall(row: {
     answeredAt: row.answeredAt?.toISOString() ?? null,
     endedAt: row.endedAt?.toISOString() ?? null,
     durationSeconds: row.durationSeconds,
-    recordingUrl: row.recordingUrl,
   };
 }

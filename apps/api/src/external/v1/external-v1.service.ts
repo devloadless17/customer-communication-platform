@@ -672,7 +672,10 @@ export class ExternalV1Service {
     try {
       result = await this.db.$transaction(async (tx) => {
         const existing = await tx.contact.findFirst({
-          where: { id: contactId, teamId },
+          // deletedAt:null — a partner holding a tombstoned id (cached / from a
+          // prior export) must not be able to edit a soft-deleted contact via
+          // /v1. Mirrors the contacts.service M5 mutation guards.
+          where: { id: contactId, teamId, deletedAt: null },
           include: EXTERNAL_CONTACT_INCLUDE,
         });
         if (!existing) return null;
@@ -951,7 +954,9 @@ export class ExternalV1Service {
     input: ExternalContactAddTagsInput,
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
+      // deletedAt:null — don't tag a tombstoned contact (would write join rows +
+      // fan out workflow/webhook events for a contact hidden everywhere else).
+      where: { id: contactId, teamId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
@@ -1032,7 +1037,8 @@ export class ExternalV1Service {
     silent = false,
   ): Promise<ExternalContact> {
     const contact = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
+      // deletedAt:null — consistent with the other /v1 contact mutators.
+      where: { id: contactId, teamId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
     if (!contact) throw new NotFoundException({ error: "contact not found" });
@@ -1143,7 +1149,12 @@ export class ExternalV1Service {
     input: ExternalBulkTagInput,
   ): Promise<{ count: number; tagIds: string[]; contactIds: string[] }> {
     const ownContacts = await this.db.contact.findMany({
-      where: { teamId, id: { in: input.contactIds } },
+      // deletedAt:null — this ownedIds set is the load-bearing pre-filter fed
+      // into the tag-join raw SQL below, so filtering here keeps tombstoned
+      // contacts out of the join + the per-contact fanout (the DELETE join keys
+      // off _ContactToTag.A only and can't reference Contact.deletedAt, so this
+      // pre-filter is the gate). Mirrors the contacts.service bulk M5 guard.
+      where: { teamId, deletedAt: null, id: { in: input.contactIds } },
       select: { id: true },
     });
     const ownedIds = ownContacts.map((c) => c.id);

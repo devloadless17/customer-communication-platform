@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronsUpDown, Search, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { formatPhone } from "@ccp/shared/utils";
 import {
   computeWindowStatus,
@@ -77,7 +78,7 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
         const params = new URLSearchParams();
         params.set("window", "open");
         if (query.trim()) params.set("search", query.trim());
-        const res = await fetch(`/api/contacts?${params.toString()}`);
+        const res = await apiFetch(`/api/contacts?${params.toString()}`);
         if (!res.ok) {
           setResults([]);
           return;

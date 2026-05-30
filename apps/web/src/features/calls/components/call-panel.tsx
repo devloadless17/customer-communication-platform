@@ -69,9 +69,10 @@ export function CallPanel({
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{liveCall.contactName}</div>
           <div className="text-xs text-muted-foreground">
-            {liveCall.status === "ringing" && "Ringing…"}
+            {liveCall.status === "ringing" &&
+              (liveCall.direction === "out" ? "Calling…" : "Incoming call…")}
             {liveCall.status === "in_progress" && formatDuration(duration)}
-            {liveCall.status === "ending" && "Ending…"}
+            {liveCall.status === "ending" && "Hanging up…"}
           </div>
         </div>
         <div

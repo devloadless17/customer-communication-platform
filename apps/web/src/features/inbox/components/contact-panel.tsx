@@ -27,14 +27,20 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
-import { dispatchLocalSocketEvent, getClientSocket } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 import {
-  optimisticAssignment,
-  optimisticStatusChange,
-  optimisticTagAdded,
-  optimisticTagRemoved,
+  dispatchLocalSocketEvent,
+  dispatchLocalSocketEvents,
+  getClientSocket,
+} from "@/lib/socket-client";
+import {
+  buildOptimisticAssignment,
+  buildOptimisticStatusChange,
+  buildOptimisticTagAdded,
+  buildOptimisticTagRemoved,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
+import { predictAssignmentStatus } from "@/features/inbox/lib/predict-status";
 import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
@@ -613,7 +619,7 @@ function ContactPanelImpl({
       contact: optimistic,
       optimistic: true,
     });
-    const res = await fetch(`/api/contacts/${contact.id}`, {
+    const res = await apiFetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
@@ -640,20 +646,14 @@ function ContactPanelImpl({
    */
   async function persistAssignee(nextId: string | null) {
     if (assigneePending) return;
-    // Mirror conversations.service.ts:assign's status side-effect — kept
-    // identical to assignment-dropdown.tsx so a header change and a panel
-    // change produce the same end state.
-    //   - assign + (pending | closed) → open
-    //   - unassign + open → pending
-    // Driven off `liveStatus` (the panel's local mirror of the conversation
-    // status) so a teammate's concurrent close/reopen is already reflected
-    // when we evaluate the rule here.
-    const predictedNextStatus =
-      nextId !== null && liveStatus !== "open"
-        ? "open"
-        : nextId === null && liveStatus === "open"
-          ? "pending"
-          : liveStatus;
+    // Predict the status side-effect via the SHARED predictAssignmentStatus —
+    // the same function the thread-header AssignmentDropdown uses, mirroring the
+    // server rule (assignment NEVER sets "open"; assign+closed → pending,
+    // unassign+open → pending, else unchanged). Driven off `liveStatus` (the
+    // panel's local mirror) so a teammate's concurrent close/reopen is already
+    // reflected. (This inline ternary previously resurrected the removed
+    // "assign → open" rule — single-sourcing it closes that drift for good.)
+    const predictedNextStatus = predictAssignmentStatus(liveStatus, nextId);
     const statusWillChange = predictedNextStatus !== liveStatus;
     // Re-picking the CURRENT assignee is a no-op UNLESS it would still flip
     // status (claim an assigned-but-pending chat → open).
@@ -667,35 +667,52 @@ function ContactPanelImpl({
     // will broadcast so every surface flips instantly. Order matches the
     // server publish order: assigned first, then status.
     setAssigneeId(nextId);
+    // Bundle every optimistic frame (assigned + activity + maybe status +
+    // status-activity) into ONE flushSync so chip + pill commit in a single
+    // paint. See status-dropdown.tsx for the full rationale on why splitting
+    // into two flushSync calls produces a visible "log lags everything" gap.
     // `optimistic: true` skips inbox-list resync + counts refetch during the
-    // in-flight PATCH — see status-dropdown.tsx for the full rationale.
-    dispatchLocalSocketEvent("conversation:assigned", {
-      teamId: conversation.teamId,
-      conversationId: conversation.id,
-      assignedUser: nextUser,
-      optimistic: true,
-    });
-    const assignActivityId = optimisticAssignment({
+    // in-flight PATCH; the authoritative server frame drives convergence.
+    const assignActivity = buildOptimisticAssignment({
       teamId: conversation.teamId,
       conversationId: conversation.id,
       actorName: currentUserName,
       assignedToName: nextUser?.name ?? null,
     });
+    const assignActivityId = assignActivity.id;
     let statusActivityId: string | null = null;
+    const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
+      [
+        "conversation:assigned",
+        {
+          teamId: conversation.teamId,
+          conversationId: conversation.id,
+          assignedUser: nextUser,
+          optimistic: true,
+        },
+      ],
+      assignActivity.frame,
+    ];
     if (statusWillChange) {
-      dispatchLocalSocketEvent("conversation:status", {
-        teamId: conversation.teamId,
-        conversationId: conversation.id,
-        status: predictedNextStatus,
-        optimistic: true,
-      });
-      statusActivityId = optimisticStatusChange({
+      const statusActivity = buildOptimisticStatusChange({
         teamId: conversation.teamId,
         conversationId: conversation.id,
         actorName: currentUserName,
         status: predictedNextStatus,
       });
+      statusActivityId = statusActivity.id;
+      frames.push([
+        "conversation:status",
+        {
+          teamId: conversation.teamId,
+          conversationId: conversation.id,
+          status: predictedNextStatus,
+          optimistic: true,
+        },
+      ]);
+      frames.push(statusActivity.frame);
     }
+    dispatchLocalSocketEvents(frames);
     const rollbackActivity = () => {
       rollbackOptimisticActivity(conversation.teamId, conversation.id, assignActivityId);
       if (statusActivityId) {
@@ -703,7 +720,7 @@ function ContactPanelImpl({
       }
     };
     try {
-      const res = await fetch(`/api/conversations/${conversation.id}/assign`, {
+      const res = await apiFetch(`/api/conversations/${conversation.id}/assign`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ assignedUserId: nextId }),
@@ -758,21 +775,25 @@ function ContactPanelImpl({
     const prevIds = tagIds;
     setTagIds(nextIds);
     setTagSaveError(null);
-    // Optimistic: fan the canonical contact:updated locally so the sidebar
-    // (and any other tag-aware surface) reflects the change instantly.
-    // `optimistic: true` skips inbox-list resync + counts refetch during the
-    // in-flight PUT — see status-dropdown.tsx for the full rationale.
-    dispatchLocalSocketEvent("contact:updated", {
-      teamId: contact.teamId,
-      contact: { ...contact, tagIds: nextIds },
-      optimistic: true,
-    });
-    // Optimistic timeline pills — one per added/removed tag, mirroring the
-    // per-tag audit rows the server writes. Names resolved from the in-hand
-    // catalog so each pill reads identically to the row the trailing GET
-    // reconciles in.
+    // Bundle the canonical `contact:updated` plus EVERY per-tag activity pill
+    // into ONE flushSync. Without batching, a 3-tag swap fired 4 separate
+    // flushSyncs (1 contact:updated + 3 activity) → 4 paints in a row, with the
+    // sidebar chip painting first and the pills trickling in over the next ~50ms
+    // — the visible "log lags everything" gap. See status-dropdown.tsx for
+    // background. `optimistic: true` skips the inbox-list resync + counts
+    // refetch during the in-flight PUT.
     const tagActivityIds: string[] = [];
     const conversationId = conversation.id;
+    const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
+      [
+        "contact:updated",
+        {
+          teamId: contact.teamId,
+          contact: { ...contact, tagIds: nextIds },
+          optimistic: true,
+        },
+      ],
+    ];
     {
       const prevSet = new Set(prevIds);
       const nextSet = new Set(nextIds);
@@ -781,30 +802,31 @@ function ContactPanelImpl({
         if (prevSet.has(id)) continue;
         const name = nameOf(id);
         if (name == null) continue;
-        tagActivityIds.push(
-          optimisticTagAdded({
-            teamId: contact.teamId,
-            conversationId,
-            actorName: currentUserName,
-            tagName: name,
-          }),
-        );
+        const built = buildOptimisticTagAdded({
+          teamId: contact.teamId,
+          conversationId,
+          actorName: currentUserName,
+          tagName: name,
+        });
+        tagActivityIds.push(built.id);
+        frames.push(built.frame);
       }
       for (const id of prevIds) {
         if (nextSet.has(id)) continue;
         const name = nameOf(id);
         if (name == null) continue;
-        tagActivityIds.push(
-          optimisticTagRemoved({
-            teamId: contact.teamId,
-            conversationId,
-            actorName: currentUserName,
-            tagName: name,
-          }),
-        );
+        const built = buildOptimisticTagRemoved({
+          teamId: contact.teamId,
+          conversationId,
+          actorName: currentUserName,
+          tagName: name,
+        });
+        tagActivityIds.push(built.id);
+        frames.push(built.frame);
       }
     }
-    const res = await fetch(`/api/contacts/${contact.id}/tags`, {
+    dispatchLocalSocketEvents(frames);
+    const res = await apiFetch(`/api/contacts/${contact.id}/tags`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tagIds: nextIds }),
@@ -1204,7 +1226,7 @@ function ContactPanelImpl({
               await save({ customFields: { [key]: "" } });
             }}
             onAddTeamWide={async (label) => {
-              const res = await fetch("/api/team/contact-fields", {
+              const res = await apiFetch("/api/team/contact-fields", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ label }),
@@ -1442,7 +1464,14 @@ function AssigneePicker({
           <ChevronDown className="ml-auto size-3.5 text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-56">
+      <DropdownMenuContent
+        align="start"
+        className="w-56"
+        // Suppress Radix focus-return so the trigger doesn't keep the
+        // `:focus-visible` ring after a mouse pick. See status-dropdown.tsx
+        // for the full rationale.
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         <DropdownMenuLabel>Assigned agent</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => onChange(null)}>

@@ -56,7 +56,7 @@ export class CapabilityGuard implements CanActivate {
     if (!session) throw new UnauthorizedException();
 
     const perms = resolvePermissions(session.role, session.rolePermissions);
-    if (!perms[required]) throw new ForbiddenException("forbidden");
+    if (!perms[required]) throw new ForbiddenException({ error: "forbidden" });
     return true;
   }
 }

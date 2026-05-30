@@ -52,6 +52,8 @@ next-env.d.ts
 
 # Claude Code session/memory data (skills under .claude/skills ARE tracked; this is not)
 .claude/projects/
+# Claude Code runtime locks (transient scheduler/loop artifacts — never commit)
+.claude/*.lock
 
 # Playwright auth storage (per-machine session cookies)
 tests/e2e/.auth/

@@ -22,6 +22,7 @@ import {
 import { EditableField } from "@/features/inbox/components/contact-panel/editable-field";
 import { EditableHeading } from "@/features/inbox/components/contact-panel/editable-heading";
 import { Section } from "@/features/inbox/components/contact-panel/section";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
@@ -107,7 +108,7 @@ export function ContactDetailDrawer({
     setStarting(true);
     setError(null);
     try {
-      const res = await fetch("/api/conversations/start", {
+      const res = await apiFetch("/api/conversations/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ contactId: contact.id }),
@@ -202,7 +203,7 @@ export function ContactDetailDrawer({
       contact: optimistic,
       optimistic: true,
     });
-    const res = await fetch(`/api/contacts/${contact.id}`, {
+    const res = await apiFetch(`/api/contacts/${contact.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
@@ -228,7 +229,7 @@ export function ContactDetailDrawer({
       contact: { ...contact, tagIds: nextIds, stageId, customFields },
       optimistic: true,
     });
-    const res = await fetch(`/api/contacts/${contact.id}/tags`, {
+    const res = await apiFetch(`/api/contacts/${contact.id}/tags`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tagIds: nextIds }),
@@ -498,7 +499,7 @@ export function ContactDetailDrawer({
                 await save({ customFields: { [key]: "" } });
               }}
               onAddTeamWide={async (label) => {
-                const res = await fetch("/api/team/contact-fields", {
+                const res = await apiFetch("/api/team/contact-fields", {
                   method: "POST",
                   headers: { "content-type": "application/json" },
                   body: JSON.stringify({ label }),

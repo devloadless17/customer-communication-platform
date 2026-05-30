@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type {
   ContactStage,
@@ -150,7 +151,7 @@ function ConversationListImpl({
     if (!ok) return;
     setDeleting(true);
     try {
-      const res = await fetch("/api/conversations/bulk", {
+      const res = await apiFetch("/api/conversations/bulk", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ conversationIds: ids }),
