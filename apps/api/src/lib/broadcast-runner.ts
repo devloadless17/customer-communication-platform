@@ -1304,6 +1304,14 @@ function emitProgress(broadcastId: string, state: ProgressThrottle["latest"]): v
     sentCount: state.sentCount,
     failedCount: state.failedCount,
     totalCount: state.totalCount,
+  }).catch((err) => {
+    // Progress frames are best-effort UI sugar — a throwing publish must not
+    // surface as an unhandledRejection (Node 24 `--unhandled-rejections=throw`
+    // would terminate the worker mid-broadcast). Log and carry on.
+    console.error(
+      `[broadcast-runner] emitProgress publish failed (broadcastId=${broadcastId})`,
+      err,
+    );
   });
 }
 

@@ -13,6 +13,7 @@ import {
   consumeConversationSendBudget,
 } from "@/lib/messaging/conversation-send-budget";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
+import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
 import type { Contact } from "@ccp/shared/types";
@@ -501,26 +502,9 @@ async function saveAnswerToField(
     throw err;
   }
 
-  const payload: Contact = {
-    id: updated.id,
-    teamId: updated.teamId,
-    phoneNumber: updated.phoneNumber,
-    identityChannel: updated.identityChannel,
-    externalContactId: updated.externalContactId,
-    name: updated.name,
-    firstName: updated.firstName,
-    lastName: updated.lastName,
-    language: updated.language,
-    countryCode: updated.countryCode,
-    avatarUrl: updated.avatarUrl ?? undefined,
-    email: updated.email ?? undefined,
-    location: updated.location ?? undefined,
-    customFields: nextFields,
-    source: updated.source,
-    stageId: updated.stageId,
+  const payload: Contact = toContactWire(updated, {
     tagIds: updated.tags.map((t) => t.id),
-    createdAt: updated.createdAt.toISOString(),
-  };
+  });
 
   await publish({
     type: "contact.updated",

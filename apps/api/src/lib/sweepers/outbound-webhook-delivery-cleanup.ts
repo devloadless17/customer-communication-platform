@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Nightly cleanup for `OutboundWebhookDelivery` rows.
@@ -40,7 +41,9 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Serialize through the shared sweeper mutex so this nightly deleteMany
+    // can't pile pool pressure on top of the other heavy sweepers.
+    await withSweeperMutex("outbound-webhook-delivery-cleanup", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.webhook-delivery-cleanup] ${label} failed`, err);
   } finally {

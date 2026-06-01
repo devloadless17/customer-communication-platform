@@ -174,6 +174,87 @@ export async function enqueueWorkflowInboundResume(
   return job.id as string;
 }
 
+/**
+ * Per-RUN mutual exclusion. BullMQ locks per-JOB, not per-run, so two jobs that
+ * target the SAME WorkflowRun can execute `runWorkflow()` concurrently. The
+ * canonical case is an inbound `ask_question` reply landing at the same instant
+ * its dangling timeout job (`resume-${runId}-${waitSeq}`) becomes due: both jobs
+ * pass the runner's terminal/stale guards and both re-execute the resume branch,
+ * double-firing its side effects (duplicate WhatsApp send, duplicate tag/field
+ * mutation, duplicate child-workflow dispatch — none idempotent). This Redis
+ * `SET NX` lock makes a pickup single-flight per run. The lock is RENEWED by a
+ * heartbeat (runWorkflow renews at TTL/3) for as long as the pickup runs, so an
+ * arbitrarily long pickup — several maxed http_request steps can blow past any
+ * static TTL — never lets the lock lapse mid-flight (which would let a second
+ * lane, e.g. a due ask_question timeout job, acquire the freed lock and
+ * double-execute). If a lane DIES holding the lock the heartbeat stops and the
+ * TTL expires, so a BullMQ retry / waiting-sweeper re-runs cleanly.
+ */
+const RUN_LOCK_PREFIX = "wf-run-lock:";
+
+export async function acquireWorkflowRunLock(
+  runId: string,
+  ttlMs: number,
+): Promise<string | null> {
+  // Unique token so release only deletes OUR lock (not one a successor lane
+  // acquired after our TTL expired). pid + time + random is collision-safe here.
+  const token = `${runId}:${process.pid}:${Date.now()}:${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  const res = await getRedisConnection().set(
+    `${RUN_LOCK_PREFIX}${runId}`,
+    token,
+    "PX",
+    ttlMs,
+    "NX",
+  );
+  return res === "OK" ? token : null;
+}
+
+// Compare-and-PEXPIRE: extend OUR lock's TTL only (no-op if a successor lane
+// already holds it). The heartbeat in runWorkflow calls this while a pickup runs.
+const RENEW_LOCK_LUA =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
+
+export async function renewWorkflowRunLock(
+  runId: string,
+  token: string,
+  ttlMs: number,
+): Promise<void> {
+  await getRedisConnection()
+    .eval(RENEW_LOCK_LUA, 1, `${RUN_LOCK_PREFIX}${runId}`, token, String(ttlMs))
+    .catch(() => undefined);
+}
+
+// Compare-and-delete so a lane whose TTL already lapsed can't delete a
+// successor's freshly-acquired lock.
+const RELEASE_LOCK_LUA =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+
+export async function releaseWorkflowRunLock(
+  runId: string,
+  token: string,
+): Promise<void> {
+  // Retry once on a transient Redis error: a SWALLOWED release would leave the
+  // key holding our token for the full TTL, locking out a legitimate BullMQ
+  // retry of the same run (the loser returns 'skipped' and never re-runs, so
+  // the run could strand until the waiting-sweeper notices). One retry closes
+  // the common blip; a true outage still self-heals via the TTL + heartbeat-stop.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await getRedisConnection().eval(
+        RELEASE_LOCK_LUA,
+        1,
+        `${RUN_LOCK_PREFIX}${runId}`,
+        token,
+      );
+      return;
+    } catch {
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
 export async function closeWorkflowQueue(): Promise<void> {
   if (state.queue) {
     await state.queue.close();

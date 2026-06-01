@@ -31,7 +31,9 @@ type SweeperName =
   | "workflow-run-retention"
   | "auth-cleanup"
   | "api-idempotency"
-  | "inbound-media";
+  | "inbound-media"
+  | "conversation-analytics-drift"
+  | "outbound-webhook-delivery-cleanup";
 
 // Single in-process mutex; sweepers serialize through it. Boolean is enough
 // because Node's event loop is single-threaded — the only way two callers
@@ -54,6 +56,8 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "auth-cleanup": 25 * 60 * 60 * 1000,
   "api-idempotency": 75 * 60 * 1000, // hourly
   "inbound-media": 5 * 60 * 1000, // 60s cadence
+  "conversation-analytics-drift": 25 * 60 * 60 * 1000, // 24h cadence
+  "outbound-webhook-delivery-cleanup": 25 * 60 * 60 * 1000, // nightly cadence
 };
 
 /**

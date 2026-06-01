@@ -639,6 +639,32 @@ jobs:
             # drops any service removed from the compose file.
             cd /opt/ccp
             docker compose --env-file .env pull
+
+            # Pre-migration snapshot. The api container runs `prisma migrate
+            # deploy` as the FIRST step of its CMD during the `up` below, so the
+            # schema moves FORWARD before the health gate runs. If a migration
+            # applies-then-crashes the app, the auto-rollback step only swaps
+            # CODE images (it is DB-unaware) → old code against the new schema.
+            # The nightly cron dump can be up to ~24h stale; this gives a
+            # recovery point seconds before the migration. Best-effort: a backup
+            # blip warns but does NOT block the deploy (nightly dump is the
+            # fallback). For destructive (drop/rename) migrations, prefer
+            # expand-contract so :previous code stays schema-compatible.
+            set -a; [ -f .env ] && . ./.env; set +a
+            : "${POSTGRES_USER:=app}"; : "${POSTGRES_DB:=ccp}"
+            mkdir -p /opt/ccp/backups && chmod 700 /opt/ccp/backups
+            PRE="/opt/ccp/backups/pre-deploy-${POSTGRES_DB}-$(date -u +%Y%m%dT%H%M%SZ)-${{ github.sha }}.sql.gz"
+            if docker compose --env-file .env exec -T postgres pg_dump \
+                 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" \
+                 --no-owner --no-privileges --clean --if-exists 2>/dev/null \
+                 | gzip -9 > "$PRE.tmp"; then
+              mv "$PRE.tmp" "$PRE"
+              echo "✓ pre-migration snapshot: $PRE"
+            else
+              rm -f "$PRE.tmp"
+              echo "⚠ pre-migration snapshot FAILED — proceeding (nightly dump is the fallback). If this deploy's migration misbehaves, a manual restore decision is required."
+            fi
+
             docker compose --env-file .env up -d --remove-orphans
 
             # Reclaim disk: every deploy pulls a fresh :latest-{web,api},
@@ -808,3 +834,12 @@ jobs:
               fi
             fi
             echo "✓ rolled back to :previous-{web,api} (registry + local in sync)"
+            # MIGRATION SAFETY NOTE (read before trusting this rollback):
+            # this step swaps CODE images only — it does NOT revert any database
+            # migration that already applied during `up`. If THIS deploy shipped
+            # a migration, the rolled-back :previous code is now running against
+            # a FORWARD-migrated schema and may 500 on schema-incompatible
+            # queries. The pre-migration snapshot is at
+            # /opt/ccp/backups/pre-deploy-*-<this-sha>.sql.gz — a human must
+            # decide whether to restore it (see deploy/README.md "Rollback").
+            echo "⚠ if this deploy included a DB migration, restore may be needed: see /opt/ccp/backups/pre-deploy-*-$(echo "${{ github.sha }}").sql.gz and deploy/README.md 'Rollback'"

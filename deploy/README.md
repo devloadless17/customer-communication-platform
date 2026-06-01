@@ -362,6 +362,20 @@ those four rows.
 Two paths depending on urgency. Database migrations do NOT auto-revert
 either way — fix forward at the schema layer.
 
+> ⚠️ **Migration-aware rollback.** The api container runs `prisma migrate
+> deploy` as the first step of boot, so a deploy that ships a migration moves
+> the schema FORWARD before the health gate runs. Both rollback paths below
+> swap **code only** — they do NOT undo an applied migration. If the failed
+> deploy included a migration, the rolled-back `:previous` code is now running
+> against a newer schema and may 500 on schema-incompatible queries. The deploy
+> job writes a **pre-migration snapshot** to
+> `/opt/ccp/backups/pre-deploy-*-<sha>.sql.gz` right before `up`. Decide
+> per-incident whether to restore it (see **Backups → Restore** below):
+> additive migrations (new nullable column/table) are usually safe to leave
+> forward; destructive ones (drop/rename) need the snapshot restore or a
+> hand-written down-migration. Prefer expand-contract for destructive changes
+> so `:previous` stays schema-compatible and this decision never arises.
+
 ## Fast rollback (~30s) — `:previous` swap
 
 Every deploy retags the prior `:latest-{web,api}` as `:previous-{web,api}`
@@ -450,9 +464,15 @@ to the VPS alongside the other deploy files.
 
 ```bash
 # Cron line — runs every night at 03:17 UTC (off the top of the hour to avoid
-# bunching with everyone else's 3:00 jobs). Stdout/stderr → syslog via logger,
-# so failures surface in `journalctl -t ccp-backup`.
-( crontab -l 2>/dev/null; echo '17 3 * * * cd /opt/ccp && ./pg-backup.sh 2>&1 | logger -t ccp-backup' ) | crontab -
+# bunching with everyone else's 3:00 jobs). MUST be byte-identical to the line
+# the deploy workflow auto-installs (.github/workflows/deploy.yml: absolute
+# /opt/ccp/pg-backup.sh path + the same `>> pg-backup.log` redirect), and uses
+# the same `grep -Fv` filter-then-append so it dedupes against the deploy job's
+# line instead of stacking a second (double-backup) entry. The earlier form
+# here used a RELATIVE `./pg-backup.sh | logger` which the deploy job's
+# absolute-path filter couldn't match → two cron lines.
+CRON_LINE="17 3 * * * cd /opt/ccp && /opt/ccp/pg-backup.sh >> /opt/ccp/pg-backup.log 2>&1"
+( crontab -l 2>/dev/null | grep -Fv "/opt/ccp/pg-backup.sh" || true; echo "$CRON_LINE" ) | crontab -
 ```
 
 **Restore** (the only step that matters — practice it once before you need it):

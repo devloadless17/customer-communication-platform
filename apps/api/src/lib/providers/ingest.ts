@@ -1,11 +1,16 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { ensureDefaultStage } from "@/lib/queries";
-import { mapReplySnapshot, REPLY_TO_INCLUDE } from "@/lib/queries/_shared";
+import {
+  mapReplySnapshot,
+  REPLY_TO_INCLUDE,
+  toContactWire,
+} from "@/lib/queries/_shared";
 import {
   enqueueWorkflowInboundResume,
   getRedisConnection,
@@ -23,7 +28,6 @@ import type {
   NormalizedStatusUpdate,
 } from "@ccp/shared/providers/types";
 import type {
-  Contact,
   Conversation,
   ConversationStatus,
   ConversationWithRefs,
@@ -685,7 +689,7 @@ async function ingestInboundMessage(
               lastMessagePreview: preview,
               unreadCount: 1,
             }),
-            contact: toDomainContact(contact),
+            contact: toContactWire(contact),
             assignedUser: null,
             messages: [],
             notes: [],
@@ -856,7 +860,7 @@ async function ingestInboundMessage(
       await publish({
         type: "contact.created",
         teamId,
-        contact: toDomainContact(contact),
+        contact: toContactWire(contact),
         source: "inbound",
         createdByUserId: null,
       });
@@ -1040,7 +1044,7 @@ export function toWorkflowContact(c: {
     email: c.email ?? null,
     stageId: c.stageId ?? null,
     tagIds: (c.tags ?? []).map((t) => t.id),
-    customFields: normalizeCustomFields(c.customFields),
+    customFields: normalizeStringMap(c.customFields),
     firstName: c.firstName ?? null,
     lastName: c.lastName ?? null,
     language: c.language ?? null,
@@ -1153,58 +1157,6 @@ function toDomainConversation(c: {
   };
 }
 
-function toDomainContact(c: {
-  id: string;
-  teamId: string;
-  phoneNumber: string | null;
-  identityChannel?: Channel | null;
-  externalContactId?: string | null;
-  name: string;
-  firstName?: string | null;
-  lastName?: string | null;
-  language?: string | null;
-  countryCode?: string | null;
-  avatarUrl: string | null;
-  email?: string | null;
-  location?: string | null;
-  customFields?: unknown;
-  source?: "inbound" | "manual";
-  createdAt?: Date | string | null;
-}): Contact {
-  return {
-    id: c.id,
-    teamId: c.teamId,
-    phoneNumber: c.phoneNumber,
-    identityChannel: c.identityChannel ?? null,
-    externalContactId: c.externalContactId ?? null,
-    name: c.name,
-    firstName: c.firstName ?? null,
-    lastName: c.lastName ?? null,
-    language: c.language ?? null,
-    countryCode: c.countryCode ?? null,
-    avatarUrl: c.avatarUrl ?? undefined,
-    email: c.email ?? undefined,
-    location: c.location ?? undefined,
-    customFields: normalizeCustomFields(c.customFields),
-    // Webhook-driven contacts default to 'inbound' on the schema; the row
-    // we read back may not always include it (legacy callers), so treat
-    // missing as inbound.
-    source: c.source ?? "inbound",
-    createdAt:
-      c.createdAt instanceof Date
-        ? c.createdAt.toISOString()
-        : c.createdAt ?? undefined,
-  };
-}
-
-function normalizeCustomFields(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}
 
 /**
  * Build a ReplySnapshot from the original message (looked up by externalId or

@@ -21,6 +21,7 @@ import type {
   WorkflowTriggerEvent,
 } from "@prisma/client";
 import type { MediaKind } from "@ccp/shared/types";
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 
 export type { WorkflowTriggerEvent };
 
@@ -381,7 +382,7 @@ export function workflowContactSnapshot(c: {
     email: c.email ?? null,
     stageId: c.stageId ?? null,
     tagIds,
-    customFields: normalizeCustomFields(c.customFields),
+    customFields: normalizeStringMap(c.customFields),
     firstName: c.firstName ?? null,
     lastName: c.lastName ?? null,
     language: c.language ?? null,
@@ -414,14 +415,6 @@ function computeWindowStateFromIso(
   return "open";
 }
 
-function normalizeCustomFields(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}
 
 export interface WorkflowUserSnapshot {
   id: string;

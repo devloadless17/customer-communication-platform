@@ -1,9 +1,9 @@
-import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import type { Contact } from "@ccp/shared/types";
+import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import {
@@ -95,26 +95,9 @@ export const updateLifecycleStepHandler: StepHandler<UpdateLifecycleStepConfig> 
       throw err;
     }
 
-    const payload: Contact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: normalizeStringMap(updated.customFields),
-      source: updated.source,
-      stageId: updated.stageId,
+    const payload: Contact = toContactWire(updated, {
       tagIds: updated.tags.map((t) => t.id),
-      createdAt: updated.createdAt.toISOString(),
-    };
+    });
 
     // `silent: true` — step-driven stage change. Without this, workflow-
     // dispatch would fire `contact_lifecycle_updated` and the next workflow

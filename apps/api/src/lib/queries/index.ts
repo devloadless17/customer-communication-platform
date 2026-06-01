@@ -56,3 +56,8 @@ export {
 } from "./global-search";
 
 export { ensureDefaultStage, listContactStages } from "./stages";
+
+// The single Contact wire serializer — use for every contact.created/updated
+// payload instead of hand-rolling a literal (hand-rolled copies dropped
+// callPermissionRevokedUntil; see _shared.ts).
+export { toContactWire } from "./_shared";

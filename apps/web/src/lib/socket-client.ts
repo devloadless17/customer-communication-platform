@@ -71,6 +71,14 @@ export function getClientSocket(): ClientSocket {
     withCredentials: true,
   });
 
+  // Debug / E2E handle on the singleton. Lets console debugging and the
+  // reconnect e2e force a real disconnect+reconnect cycle
+  // (`window.__ccpSocket.disconnect(); .connect()`) — Playwright's
+  // context.setOffline does NOT reliably close an already-open WebSocket, so
+  // it can't exercise the `connect`-driven reconnect-convergence paths. Inert
+  // and low-risk: any same-origin script already has full access to the page.
+  (window as unknown as { __ccpSocket?: ClientSocket }).__ccpSocket = socket;
+
   // One-shot DX guard. The most common dev misconfig is "Next.js and NestJS
   // running on different ports without NEXT_PUBLIC_API_URL set" — the
   // socket falls back to same-origin (current page) where there's nothing

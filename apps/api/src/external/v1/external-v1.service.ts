@@ -16,7 +16,7 @@ import {
   EXTERNAL_CONTACT_INCLUDE,
   type ExternalContact,
 } from "@/lib/external-shapes";
-import { ensureDefaultStage } from "@/lib/queries";
+import { ensureDefaultStage, toContactWire } from "@/lib/queries";
 import type {
   Contact as DomainContact,
   ContactStage,
@@ -442,26 +442,7 @@ export class ExternalV1Service {
     }
 
     const tagIds = created.tags.map((t) => t.id);
-    const contact: DomainContact = {
-      id: created.id,
-      teamId: created.teamId,
-      phoneNumber: created.phoneNumber,
-      identityChannel: created.identityChannel,
-      externalContactId: created.externalContactId,
-      name: created.name,
-      firstName: created.firstName,
-      lastName: created.lastName,
-      language: created.language,
-      countryCode: created.countryCode,
-      avatarUrl: created.avatarUrl ?? undefined,
-      email: created.email ?? undefined,
-      location: created.location ?? undefined,
-      customFields,
-      source: created.source,
-      stageId: created.stageId,
-      tagIds,
-      createdAt: created.createdAt.toISOString(),
-    };
+    const contact: DomainContact = toContactWire(created, { tagIds });
 
     // Fire `contact.created` FIRST (audited as the first-class trigger for the
     // "On Contact created" outbound webhook), then `contact.updated` for any
@@ -553,26 +534,7 @@ export class ExternalV1Service {
     });
 
     const tagIds = updated.tags.map((t) => t.id);
-    const contact: DomainContact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: normalizeStringMap(updated.customFields),
-      source: updated.source,
-      stageId: updated.stageId,
-      tagIds,
-      createdAt: updated.createdAt.toISOString(),
-    };
+    const contact: DomainContact = toContactWire(updated, { tagIds });
 
     await this.bus.publish({
       type: "contact.created",
@@ -744,26 +706,7 @@ export class ExternalV1Service {
       if (prev !== next) fieldChanges.push({ key, previous: prev, next });
     }
 
-    const contact: DomainContact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: newCustom,
-      source: updated.source,
-      stageId: updated.stageId,
-      tagIds,
-      createdAt: updated.createdAt.toISOString(),
-    };
+    const contact: DomainContact = toContactWire(updated, { tagIds });
 
     // `silent: true` → skip reactions on every event this update fans out, so
     // a partner that edits a contact via /v1 doesn't re-trigger a workflow
@@ -1212,26 +1155,7 @@ export class ExternalV1Service {
     // the event loop for hundreds of ms on the single VPS.
     await runWithConcurrency(updated, 16, async (c) => {
       const tagIds = c.tags.map((t) => t.id);
-      const payload: DomainContact = {
-        id: c.id,
-        teamId: c.teamId,
-        phoneNumber: c.phoneNumber,
-        identityChannel: c.identityChannel,
-        externalContactId: c.externalContactId,
-        name: c.name,
-        firstName: c.firstName,
-        lastName: c.lastName,
-        language: c.language,
-        countryCode: c.countryCode,
-        avatarUrl: c.avatarUrl ?? undefined,
-        email: c.email ?? undefined,
-        location: c.location ?? undefined,
-        customFields: normalizeStringMap(c.customFields),
-        source: c.source,
-        stageId: c.stageId,
-        tagIds,
-        createdAt: c.createdAt.toISOString(),
-      };
+      const payload: DomainContact = toContactWire(c, { tagIds });
       const added =
         action === "tag-add" ? validTagIds.filter((t) => tagIds.includes(t)) : [];
       const removed =
@@ -1549,26 +1473,7 @@ export class ExternalV1Service {
     silent = false,
   ) {
     const tagIds = updated.tags.map((t) => t.id);
-    const payload: DomainContact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: normalizeStringMap(updated.customFields),
-      source: updated.source,
-      stageId: updated.stageId,
-      tagIds,
-      createdAt: updated.createdAt.toISOString(),
-    };
+    const payload: DomainContact = toContactWire(updated, { tagIds });
     // Existing catch-all for legacy subscribers.
     await this.bus.publish({
       type: "contact.updated",

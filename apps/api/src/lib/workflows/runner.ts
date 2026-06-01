@@ -2,8 +2,13 @@ import { Prisma, type WorkflowStepType, type WorkflowTriggerEvent } from "@prism
 
 import { db } from "@/lib/db";
 import { type WorkflowEventEnvelope } from "@/lib/workflows/events";
-import { findNextStep, toGraph } from "@/lib/workflows/graph";
-import { enqueueWorkflowResume } from "@/lib/workflows/queue";
+import { findNextStep, MAX_WORKFLOW_NODES, toGraph } from "@/lib/workflows/graph";
+import {
+  acquireWorkflowRunLock,
+  enqueueWorkflowResume,
+  releaseWorkflowRunLock,
+  renewWorkflowRunLock,
+} from "@/lib/workflows/queue";
 import {
   UnknownStepTypeError,
   getStepHandler,
@@ -25,7 +30,14 @@ import { StepConfigError, type StepResult } from "@/lib/workflows/steps/types";
  *   - stepLog       — append-only per-step audit; capped at MAX_STEPS_PER_RUN
  */
 
-const MAX_STEPS_PER_RUN = 100;
+// Aligned with the publish-time node cap (graph.ts MAX_WORKFLOW_NODES): a valid
+// acyclic workflow can traverse at most one distinct step per node, so the
+// runtime ceiling MUST cover the largest publishable graph or a legitimate
+// 101–200-node workflow would run halfway and then FAIL as if it were a loop.
+// Loops remain bounded: jump_to_step increments `jumpsUsed` (capped at this
+// value) and re-runs spike `executedThisPickup` (also capped here), while the
+// per-step send budget caps externally-visible side effects independently.
+const MAX_STEPS_PER_RUN = MAX_WORKFLOW_NODES;
 
 // Tolerance for the "resume isn't due yet" guard below — absorbs BullMQ
 // delayed-job jitter and small clock skew so an on-time resume is never
@@ -50,7 +62,47 @@ export interface RunWorkflowResult {
   status: "completed" | "failed" | "waiting" | "skipped";
 }
 
+// Per-run lock TTL. A single pickup has NO reliable wall-clock bound (it runs
+// steps until a wait/terminal, and one http_request step alone can take up to
+// 60s), so this is NOT a "max pickup" — it's the lapse window if the process
+// DIES. While the pickup is alive a heartbeat renews the lock at TTL/3, so it
+// never lapses mid-flight; on a dead lane the heartbeat stops and the lock
+// expires after one TTL so a retry / waiting-sweeper recovers.
+const RUN_LOCK_TTL_MS = 120_000;
+
+/**
+ * Per-run mutual-exclusion wrapper around the real runner. BullMQ's per-JOB
+ * lock does NOT prevent two jobs for the SAME run executing concurrently (the
+ * inbound `ask_question` reply ≈ dangling timeout-job race), so without this a
+ * resume branch could double-fire non-idempotent side effects. See
+ * acquireWorkflowRunLock for the full rationale.
+ */
 export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowResult> {
+  const lockToken = await acquireWorkflowRunLock(input.runId, RUN_LOCK_TTL_MS);
+  if (!lockToken) {
+    // Another lane already holds this run — yield. The holder advances the run
+    // exactly once. "skipped" tells BullMQ this job is done (no retry needed);
+    // it does NOT touch run state, so the winning lane's outcome stands.
+    return { runId: input.runId, status: "skipped" };
+  }
+  // Heartbeat: keep the lock alive for the WHOLE pickup, however long. Without
+  // this a long pickup (several maxed http_request steps) could outlive the
+  // static TTL, freeing the lock for a second lane (a due ask_question timeout
+  // job) to acquire and double-execute. Renew at TTL/3; `unref` so it never
+  // keeps the process alive past shutdown.
+  const heartbeat = setInterval(() => {
+    void renewWorkflowRunLock(input.runId, lockToken, RUN_LOCK_TTL_MS);
+  }, Math.floor(RUN_LOCK_TTL_MS / 3));
+  heartbeat.unref?.();
+  try {
+    return await runWorkflowLocked(input);
+  } finally {
+    clearInterval(heartbeat);
+    await releaseWorkflowRunLock(input.runId, lockToken);
+  }
+}
+
+async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowResult> {
   const run = await db.workflowRun.findUnique({
     where: { id: input.runId },
     include: {
@@ -70,8 +122,24 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
     return { runId: input.runId, status: "skipped" };
   }
   const wf = run.workflow;
-  if (!wf || !wf.published) {
-    await markSkipped(run.id, "workflow unpublished or deleted");
+  // A TEST run (created by WorkflowsService.test, tagged with the `__test`
+  // sentinel on its eventPayload) is allowed to execute a DRAFT workflow —
+  // that is the entire point of "test this draft from the canvas", which was
+  // previously a silent no-op because the published gate below short-circuited
+  // every draft run. The gate is still read LIVE for every NON-test run
+  // (dispatch / manual / webhook), so only an explicit test bypasses it; a
+  // deleted workflow is always skipped.
+  const isTestRun =
+    !!run.eventPayload &&
+    typeof run.eventPayload === "object" &&
+    !Array.isArray(run.eventPayload) &&
+    (run.eventPayload as { __test?: unknown }).__test === true;
+  if (!wf) {
+    await markSkipped(run.id, "workflow deleted");
+    return { runId: run.id, status: "skipped" };
+  }
+  if (!wf.published && !isTestRun) {
+    await markSkipped(run.id, "workflow unpublished");
     return { runId: run.id, status: "skipped" };
   }
 

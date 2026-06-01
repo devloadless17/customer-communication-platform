@@ -594,7 +594,14 @@ export class WorkflowsService {
         trigger: wf.trigger,
         contactId,
         conversationId,
-        eventPayload: eventPayload as Prisma.InputJsonValue,
+        // `__test: true` lets the runner execute this run even when the
+        // workflow is a DRAFT (published=false) — see the runner's published
+        // gate. Only this test path sets it, so real dispatch/manual/webhook
+        // runs still respect the live published gate.
+        eventPayload: {
+          ...(eventPayload as Record<string, unknown>),
+          __test: true,
+        } as Prisma.InputJsonValue,
         graphSnapshot: wf.graph as Prisma.InputJsonValue,
         status: "queued",
       },

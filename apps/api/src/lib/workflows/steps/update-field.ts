@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import type { Contact } from "@ccp/shared/types";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { toContactWire } from "@/lib/queries/_shared";
 import { workflowContactSnapshot } from "@/lib/workflows/events";
 
 import {
@@ -126,26 +127,9 @@ export const updateFieldStepHandler: StepHandler<UpdateFieldStepConfig> = {
       throw err;
     }
 
-    const payload: Contact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: nextFields,
-      source: updated.source,
-      stageId: updated.stageId,
+    const payload: Contact = toContactWire(updated, {
       tagIds: updated.tags.map((t) => t.id),
-      createdAt: updated.createdAt.toISOString(),
-    };
+    });
 
     // `silent: true` — step-driven mutations don't re-trigger workflows (loop
     // safety). `skipOutboundWebhook: false` so partners subscribed to

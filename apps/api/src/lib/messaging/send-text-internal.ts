@@ -5,7 +5,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { publishInTx } from "@/lib/events/outbox";
+import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import {
@@ -205,50 +205,27 @@ export async function sendTextInternal(
     timestamp: messageTimestamp.toISOString(),
   };
 
-  // Compute the bump inside a tx using FRESH `lastMessageAt` — the value
-  // we snapshotted in `conversation.lastMessageAt` above is stale by the
-  // Meta-call duration, so a bare UPDATE here could REGRESS the
-  // conversation's clock if an inbound webhook landed in that window.
-  // Read-then-write guarantees strict monotonicity even under race.
-  //
-  // Publish via `publishInTx` (NOT bare `publish()`) so the outbox row
-  // commits atomically with the bump. The earlier post-tx `publish()`
-  // shape lost the `message.sent` event entirely on a crash between the
-  // tx commit and the publish call — and on retry the externalId was
-  // already in the DB so nothing re-published. Mirrors the user-facing
-  // `MessagesService.commitOutboundEvent` shape exactly.
-  await db.$transaction(async (tx) => {
-    const current = await tx.conversation.findUnique({
-      where: { id: args.conversationId },
-      select: { lastMessageAt: true, unreadCount: true },
-    });
-    if (!current) {
-      throw new SendTextValidationError(
-        "conversation_not_found",
-        "conversation_disappeared_mid_send",
-      );
-    }
-    const effectiveBump =
-      current.lastMessageAt >= messageTimestamp
-        ? new Date(current.lastMessageAt.getTime() + 1)
-        : messageTimestamp;
-    await tx.conversation.update({
-      where: { id: args.conversationId },
-      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
-    });
-    await publishInTx(tx, {
+  // Strict-monotonic bump + atomic message.sent publish, unified in
+  // commitOutboundSend (see that file for the full rationale).
+  await commitOutboundSend({
+    conversationId: args.conversationId,
+    bumpTimestamp: messageTimestamp,
+    preview: previewBody,
+    event: {
       type: "message.sent",
       teamId: args.teamId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,
       preview: previewBody,
-      lastMessageAt: effectiveBump.toISOString(),
-      // Outbound doesn't bump unread; the row's current value is the
-      // accurate absolute count.
-      unreadCount: current.unreadCount,
       senderUserId: null,
-    });
+    },
+    onMissing: () => {
+      throw new SendTextValidationError(
+        "conversation_not_found",
+        "conversation_disappeared_mid_send",
+      );
+    },
   });
 
   return { messageId: created.id, externalId: send.externalId, previewBody };

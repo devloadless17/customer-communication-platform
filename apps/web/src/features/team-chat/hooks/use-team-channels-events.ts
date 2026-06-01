@@ -94,11 +94,7 @@ export function useTeamChannelsList(
       });
     };
 
-    const onCatalog: Parameters<typeof socket.on<"team:catalog:changed">>[1] = (payload) => {
-      if (payload.scope !== "team-channels") return;
-      // Refetch — a create/rename/delete is rare enough that an extra GET
-      // is fine, and applying a delta event per scope would triple the
-      // surface area for catalog changes.
+    const refetchChannels = () => {
       void fetchWithSessionGuard("/api/team/channels")
         .then((r) => (r.ok ? r.json() : null))
         .then((res) => {
@@ -106,6 +102,24 @@ export function useTeamChannelsList(
         })
         .catch(() => {});
     };
+
+    const onCatalog: Parameters<typeof socket.on<"team:catalog:changed">>[1] = (payload) => {
+      if (payload.scope !== "team-channels") return;
+      // Refetch — a create/rename/delete is rare enough that an extra GET
+      // is fine, and applying a delta event per scope would triple the
+      // surface area for catalog changes.
+      refetchChannels();
+    };
+
+    // Reconnect recovery. This sidebar applies live deltas (message/read/
+    // members) but has no other convergence path, so a socket drop longer than
+    // the 30s connection-state-recovery window silently misses every frame —
+    // most importantly a teammate's read clearing an unread dot, or a new
+    // channel created while we were offline. On (re)connect, refetch the full
+    // list so the badges/previews converge to server truth. (`connect` fires
+    // only on a genuine (re)connection; a redundant fetch on a cold first
+    // connect is harmless and rare.)
+    const onConnect = () => refetchChannels();
 
     const onMembersChanged: Parameters<
       typeof socket.on<"team:channel:members:changed">
@@ -131,12 +145,14 @@ export function useTeamChannelsList(
     socket.on("team:channel:read", onRead);
     socket.on("team:catalog:changed", onCatalog);
     socket.on("team:channel:members:changed", onMembersChanged);
+    socket.on("connect", onConnect);
 
     return () => {
       socket.off("team:channel:message", onMessage);
       socket.off("team:channel:read", onRead);
       socket.off("team:catalog:changed", onCatalog);
       socket.off("team:channel:members:changed", onMembersChanged);
+      socket.off("connect", onConnect);
     };
   }, [currentUserId]);
 

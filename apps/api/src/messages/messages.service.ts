@@ -25,6 +25,7 @@ import {
   ConversationSendRateLimitedError,
 } from "@/lib/messaging/conversation-send-budget";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import {
@@ -147,28 +148,15 @@ export class MessagesService {
     // Caller's own catch block (in sendText/sendMedia/sendTemplate/forward)
     // logs the warning; the optimistic bubble's 30s watchdog handles the
     // rare red-but-delivered case.
-    await this.db.$transaction(async (tx) => {
-      const current = await tx.conversation.findUnique({
-        where: { id: args.conversationId },
-        select: { lastMessageAt: true, unreadCount: true },
-      });
-      if (!current) return;
-      const effectiveBump =
-        current.lastMessageAt >= args.bumpTimestamp
-          ? new Date(current.lastMessageAt.getTime() + 1)
-          : args.bumpTimestamp;
-      await tx.conversation.update({
-        where: { id: args.conversationId },
-        data: {
-          lastMessageAt: effectiveBump,
-          lastMessagePreview: args.preview,
-        },
-      });
-      await publishInTx(tx, {
-        ...args.event,
-        lastMessageAt: effectiveBump.toISOString(),
-        unreadCount: current.unreadCount,
-      });
+    await commitOutboundSend({
+      conversationId: args.conversationId,
+      bumpTimestamp: args.bumpTimestamp,
+      preview: args.preview,
+      event: args.event,
+      // Controller path: a conversation that vanished mid-send is a no-op (the
+      // optimistic bubble's 30s watchdog handles the rare red-but-delivered
+      // case). Matches the prior `if (!current) return`.
+      onMissing: () => {},
     });
   }
 
@@ -785,10 +773,15 @@ export class MessagesService {
             // refuse-to-retry path; user can re-send with a new
             // clientTempId.
           }
-          // (b) Prior attempt incomplete (no completedAt, or completed
-          // but Message row not findable) — Meta MAY have already sent
-          // the message. Refusing to retry avoids the rare double-charge.
-          // Non-recoverable so BullMQ stops retrying; the worker
+          // (b) Prior attempt incomplete and AMBIGUOUS — Meta MAY have already
+          // sent the message. Reached for the AMBIGUOUS failure classes whose
+          // prior catch KEPT the row: a Meta 5xx (Meta may have accepted then
+          // errored its response) or a transport error / timeout with
+          // `failedAt` stamped, plus a death mid-Meta-fetch (no failedAt, no
+          // completedAt). A PROVABLY-NOT-SENT rejection (Meta <500 / rate_limit)
+          // DELETED its row in the prior catch, so its retry re-creates the row
+          // fresh above and never lands here. Refusing to retry here avoids the
+          // rare double-send. Non-recoverable so BullMQ stops retrying; the worker
           // categorizes this `error` field as non-recoverable, publishes
           // message.send_failed, and the client's failed-bubble UI lets
           // the user retry with a new clientTempId.
@@ -814,24 +807,48 @@ export class MessagesService {
         config,
       );
     } catch (err) {
-      // Stamp the attempt as failed so any retry sees `failedAt` set and
-      // proceeds normally (failed attempts are bookkeeping; BullMQ already
-      // decided whether to retry via categorizeSendError).
-      if (attemptCreated && jobId) {
-        await this.db.outboundSendAttempt
-          .update({
-            where: { jobId },
-            data: {
-              failedAt: new Date(),
-              failureReason: (err instanceof Error
-                ? err.message
-                : String(err)
-              ).slice(0, 500),
-            },
-          })
-          .catch(() => undefined);
-      }
       const normalized = normalizeMetaSendError(err);
+      // The OutboundSendAttempt row is the double-send guard. How we treat it on
+      // failure decides whether a BullMQ retry can SAFELY re-send:
+      //
+      //  - PROVABLY-NOT-SENT — Meta returned a non-2xx response BELOW 500, or an
+      //    explicit rate-limit. The message was definitively not accepted →
+      //    DELETE the row so a retry re-creates it and actually re-sends.
+      //    (Business 4xx is classified non-recoverable so no retry fires anyway;
+      //    `rate_limited` IS recoverable and safe to re-send — Meta never
+      //    processed it.) This is what makes a rate-limited send actually retry
+      //    instead of dying in branch (b) as `send_in_progress_or_lost`.
+      //  - AMBIGUOUS — a Meta 5xx (Meta MAY have accepted the message then
+      //    errored its RESPONSE) OR a transport error / timeout (`normalized`
+      //    null). KEEP the row + stamp `failedAt` so the P2002 guard's branch (b)
+      //    REFUSES the retry. Both classes are `recoverable` per
+      //    categorizeSendError, so deleting the row would let the retry re-POST
+      //    and DOUBLE-SEND (no idempotency key, no externalId captured yet). A
+      //    one-shot failed bubble the agent can re-send beats a duplicate
+      //    WhatsApp message.
+      const provablyNotSent =
+        !!normalized &&
+        (normalized.httpStatus < 500 || normalized.code === "rate_limited");
+      if (attemptCreated && jobId) {
+        if (provablyNotSent) {
+          await this.db.outboundSendAttempt
+            .delete({ where: { jobId } })
+            .catch(() => undefined);
+        } else {
+          await this.db.outboundSendAttempt
+            .update({
+              where: { jobId },
+              data: {
+                failedAt: new Date(),
+                failureReason: (err instanceof Error
+                  ? err.message
+                  : String(err)
+                ).slice(0, 500),
+              },
+            })
+            .catch(() => undefined);
+        }
+      }
       if (normalized) {
         throw new UnprocessableEntityException({
           error: normalized.code,

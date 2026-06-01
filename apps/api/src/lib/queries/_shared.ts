@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 import type {
   ActivityActorKind,
   Contact,
@@ -137,10 +138,31 @@ export function mapContact(c: PrismaContact): Contact {
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,
-    customFields: normalizeCustomFields(c.customFields),
+    customFields: normalizeStringMap(c.customFields),
     source: c.source,
     stageId: c.stageId,
     createdAt: c.createdAt.toISOString(),
+  };
+}
+
+/**
+ * THE single Prisma-row → Contact WIRE serializer for every `contact.created` /
+ * `contact.updated` publisher (HTTP edit, CSV import, /v1 API, workflow steps,
+ * inbound ingest). Use this instead of hand-rolling a `Contact` literal: those
+ * hand-rolled copies drifted and dropped `callPermissionRevokedUntil`, so a
+ * workflow/edit touching a call-revoked contact broadcast a frame that
+ * re-enabled the inbox Phone button for every agent until the next full read.
+ * `mapContact` is the field source of truth (incl. callPermissionRevokedUntil);
+ * `tagIds` is wire-only (the cross-conversation tag union the list/panel reduce
+ * against) and is opt-in because not every publisher JOINs the tags.
+ */
+export function toContactWire(
+  c: PrismaContact,
+  opts?: { tagIds?: string[] },
+): Contact {
+  return {
+    ...mapContact(c),
+    ...(opts?.tagIds ? { tagIds: opts.tagIds } : {}),
   };
 }
 
@@ -196,21 +218,10 @@ export function mapContactListItem(c: PrismaContactListItem): Contact {
   };
 }
 
-/**
- * The customFields column is `Json` so Prisma types it as `JsonValue`.
- * Coerce to a flat string-map at this boundary so the rest of the app can
- * just do `contact.customFields[key]` without runtime checks. Anything
- * non-string is dropped (defensive — should never happen since the API
- * validates writes, but keeps the UI from crashing on legacy data).
- */
-export function normalizeCustomFields(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}
+// `normalizeCustomFields` is the canonical `normalizeStringMap` — re-exported
+// under the contacts-domain name so existing import sites keep working while
+// the implementation lives in exactly one place (see normalize-string-map.ts).
+export { normalizeStringMap as normalizeCustomFields } from "@/lib/normalize-string-map";
 
 export function mapConversation(c: PrismaConversation): Conversation {
   return {

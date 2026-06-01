@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "SWC_NODE_PROJECT=./tsconfig.json NODE_OPTIONS='--max-old-space-size=2048 --conditions=react-server' node --env-file=../../.env --watch -r @swc-node/register ./src/main.ts",
-    "start": "SWC_NODE_PROJECT=./tsconfig.json NODE_OPTIONS='--max-old-space-size=4096 --conditions=react-server' node -r @swc-node/register ./src/main.ts",
+    "start": "SWC_NODE_PROJECT=./tsconfig.json NODE_OPTIONS='--max-old-space-size=2048 --conditions=react-server' node -r @swc-node/register ./src/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

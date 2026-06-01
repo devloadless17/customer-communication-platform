@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Phone, PhoneOff } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -35,9 +35,25 @@ export function IncomingCallToast({
   onReject: (callId: string) => void;
 }) {
   const [calls, setCalls] = useState<IncomingCall[]>([]);
+  // Per-card auto-expire timers. Without this, a missed terminal frame
+  // (call:answered/call:ended dropped during a socket blip or throttled tab)
+  // would leave a phantom "is calling you" card on screen forever. Meta stops
+  // ringing well before 60s, so the card self-dismisses then.
+  const expiryTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const RING_EXPIRY_MS = 60_000;
 
   useEffect(() => {
     const socket = getClientSocket();
+    const timers = expiryTimers.current;
+
+    const drop = (callId: string) => {
+      setCalls((prev) => prev.filter((c) => c.callId !== callId));
+      const t = timers.get(callId);
+      if (t) {
+        clearTimeout(t);
+        timers.delete(callId);
+      }
+    };
 
     const onIncoming = (payload: {
       callId: string;
@@ -57,15 +73,16 @@ export function IncomingCallToast({
           },
         ];
       });
+      if (!timers.has(payload.callId)) {
+        timers.set(
+          payload.callId,
+          setTimeout(() => drop(payload.callId), RING_EXPIRY_MS),
+        );
+      }
     };
 
-    const onAnswered = (payload: { callId: string }) => {
-      setCalls((prev) => prev.filter((c) => c.callId !== payload.callId));
-    };
-
-    const onEnded = (payload: { callId: string }) => {
-      setCalls((prev) => prev.filter((c) => c.callId !== payload.callId));
-    };
+    const onAnswered = (payload: { callId: string }) => drop(payload.callId);
+    const onEnded = (payload: { callId: string }) => drop(payload.callId);
 
     socket.on("call:incoming", onIncoming);
     socket.on("call:answered", onAnswered);
@@ -74,6 +91,8 @@ export function IncomingCallToast({
       socket.off("call:incoming", onIncoming);
       socket.off("call:answered", onAnswered);
       socket.off("call:ended", onEnded);
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
     };
   }, []);
 

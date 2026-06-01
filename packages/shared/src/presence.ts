@@ -51,14 +51,3 @@ export function resolveAvailabilityStatus(
 ): UserAvailabilityStatus {
   return status ?? "available";
 }
-
-/**
- * Whether this user should appear in the team-wide online list. Marked-
- * offline users keep their socket connected (so coming back is instant) but
- * teammates see them as offline — same rule everywhere this matters.
- */
-export function isVisiblyOnline(
-  status: UserAvailabilityStatus | null | undefined,
-): boolean {
-  return resolveAvailabilityStatus(status) !== "offline";
-}

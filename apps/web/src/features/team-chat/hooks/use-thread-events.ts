@@ -112,9 +112,50 @@ export function useThreadEvents(
     // Thread events ride the channel's team-room frames and are filtered
     // here by `threadRootId === rootMessageId`. The dedicated thread room
     // was removed — nothing on the server targeted it.
+
+    // Reconnect convergence. A drop longer than the 30s recovery window —
+    // during which a teammate posted/edited/deleted a reply in THIS thread —
+    // would leave the panel stale (the live handlers below missed those frames),
+    // so on a genuine RECONNECT we refetch + replace, preserving the user's own
+    // in-flight optimistic replies.
+    //
+    // `firstConnect` / `cancelled` are EFFECT-LOCAL (the effect re-runs on
+    // [channelId, rootMessageId], so a thread switch gives a fresh pair):
+    //  - firstConnect skips the synchronous `if (socket.connected) onConnect()`
+    //    mount/switch call below — the hydrate effect already loads the thread,
+    //    so refetching there would be a redundant double-GET.
+    //  - cancelled (set in cleanup) discards a slow in-flight refetch after a
+    //    switch, so a late thread-X response can't write into thread-Y's panel.
+    let firstConnect = true;
+    let cancelled = false;
     const onConnect = () => {
-      // no-op kept for symmetry with sibling event hooks; the channel
-      // subscribe is owned by use-team-channel-events.
+      if (firstConnect) {
+        firstConnect = false;
+        return;
+      }
+      void fetchWithSessionGuard(
+        `/api/team/channels/${channelId}/messages/${rootMessageId}/thread`,
+      )
+        .then((r) =>
+          r.ok
+            ? (r.json() as Promise<{
+                items: TeamChannelMessageDto[];
+                nextCursor: string | null;
+              }>)
+            : null,
+        )
+        .then((res) => {
+          if (cancelled || !res?.items) return;
+          setReplies((prev) => {
+            const serverIds = new Set(res.items.map((m) => m.id));
+            const keptOptimistic = prev.filter(
+              (m) => (m.pending || m.failed) && !serverIds.has(m.id),
+            );
+            return [...res.items, ...keptOptimistic];
+          });
+          setNextCursor(res.nextCursor);
+        })
+        .catch(() => {});
     };
 
     const onMessage: Parameters<typeof socket.on<"team:channel:message">>[1] = (payload) => {
@@ -209,6 +250,9 @@ export function useThreadEvents(
     if (socket.connected) onConnect();
 
     return () => {
+      // Discard any in-flight reconnect refetch so a slow response from THIS
+      // (channel, root) can't write into the next thread after a switch.
+      cancelled = true;
       socket.off("connect", onConnect);
       socket.off("team:channel:message", onMessage);
       socket.off("team:channel:message:edited", onEdited);

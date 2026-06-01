@@ -1949,9 +1949,12 @@ model LoginAttempt {
 // To go at-least-once, every non-idempotent subscriber would need to track
 // `(dispatch_id, side_effect_id)` — deferred.
 //
-// Retention: published rows accumulate indefinitely for forensic queries.
-// A cleanup sweep should DELETE rows where `publishedAt < NOW() - INTERVAL
-// '30 days'` once the table gets large; not wired yet (no scale pressure).
+// Retention: WIRED — the outbound-event-retention sweeper (see
+// apps/api/src/lib/sweepers/outbound-event-retention.ts, scheduled by the
+// workflow worker service) DELETEs published rows past its retention window
+// daily, under the shared sweeper mutex. (This comment previously claimed the
+// sweep was "not wired yet"; it has been wired since the retention-index
+// migration.)
 model OutboundEvent {
   id     String @id @default(cuid())
   teamId String

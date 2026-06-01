@@ -17,6 +17,7 @@ import {
   listContacts,
   lookupContacts,
   previewAudienceContacts,
+  toContactWire,
   type ListContactsOpts,
 } from "@/lib/queries";
 import type { Contact } from "@ccp/shared/types";
@@ -191,26 +192,7 @@ export class ContactsService {
       throw err;
     }
 
-    const contact: Contact = {
-      id: created.id,
-      teamId: created.teamId,
-      phoneNumber: created.phoneNumber,
-      identityChannel: created.identityChannel,
-      externalContactId: created.externalContactId,
-      name: created.name,
-      firstName: created.firstName,
-      lastName: created.lastName,
-      language: created.language,
-      countryCode: created.countryCode,
-      avatarUrl: created.avatarUrl ?? undefined,
-      email: created.email ?? undefined,
-      location: created.location ?? undefined,
-      customFields: normalizeStringMap(created.customFields),
-      source: created.source,
-      stageId: created.stageId,
-      tagIds: [],
-      createdAt: created.createdAt.toISOString(),
-    };
+    const contact: Contact = toContactWire(created, { tagIds: [] });
 
     await this.bus.publish({
       type: "contact.created",
@@ -274,26 +256,9 @@ export class ContactsService {
       include: { tags: { select: { id: true } } },
     });
 
-    const contact: Contact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: normalizeStringMap(updated.customFields),
-      source: updated.source,
-      stageId: updated.stageId,
+    const contact: Contact = toContactWire(updated, {
       tagIds: updated.tags.map((t) => t.id),
-      createdAt: updated.createdAt.toISOString(),
-    };
+    });
 
     await this.bus.publish({
       type: "contact.created",
@@ -415,26 +380,7 @@ export class ContactsService {
     const { existing, updated } = result;
 
     const tagIds = updated.tags.map((t) => t.id);
-    const contact: Contact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: normalizeStringMap(updated.customFields),
-      source: updated.source,
-      stageId: updated.stageId,
-      tagIds,
-      createdAt: updated.createdAt.toISOString(),
-    };
+    const contact: Contact = toContactWire(updated, { tagIds });
 
     const oldCustom = normalizeStringMap(existing.customFields);
     const newCustom = normalizeStringMap(updated.customFields);
@@ -634,26 +580,7 @@ export class ContactsService {
     // prevents one bad subscriber from breaking the rest.
     await runWithConcurrency(updated, 16, async (c) => {
         const tagIds = c.tags.map((t) => t.id);
-        const payload: Contact = {
-          id: c.id,
-          teamId: c.teamId,
-          phoneNumber: c.phoneNumber,
-          identityChannel: c.identityChannel,
-          externalContactId: c.externalContactId,
-          name: c.name,
-          firstName: c.firstName,
-          lastName: c.lastName,
-          language: c.language,
-          countryCode: c.countryCode,
-          avatarUrl: c.avatarUrl ?? undefined,
-          email: c.email ?? undefined,
-          location: c.location ?? undefined,
-          customFields: normalizeStringMap(c.customFields),
-          source: c.source,
-          stageId: c.stageId,
-          tagIds,
-          createdAt: c.createdAt.toISOString(),
-        };
+        const payload: Contact = toContactWire(c, { tagIds });
         const before = hadTag.get(c.id) ?? false;
         const now = tagIds.includes(tagId);
         const actuallyChanged = before !== now;
@@ -1093,26 +1020,9 @@ export class ContactsService {
         await this.bus.publish({
           type: "contact.created",
           teamId,
-          contact: {
-            id: updated.id,
-            teamId: updated.teamId,
-            phoneNumber: updated.phoneNumber,
-            identityChannel: updated.identityChannel,
-            externalContactId: updated.externalContactId,
-            name: updated.name,
-            firstName: updated.firstName,
-            lastName: updated.lastName,
-            language: updated.language,
-            countryCode: updated.countryCode,
-            avatarUrl: updated.avatarUrl ?? undefined,
-            email: updated.email ?? undefined,
-            location: updated.location ?? undefined,
-            customFields: normalizeStringMap(updated.customFields),
-            source: updated.source,
-            stageId: updated.stageId,
+          contact: toContactWire(updated, {
             tagIds: updated.tags.map((t) => t.id),
-            createdAt: updated.createdAt.toISOString(),
-          },
+          }),
           source: "manual",
           createdByUserId: userId,
         });
@@ -1365,26 +1275,7 @@ export class ContactsService {
       throw err;
     }
 
-    const payload: Contact = {
-      id: updated.id,
-      teamId: updated.teamId,
-      phoneNumber: updated.phoneNumber,
-      identityChannel: updated.identityChannel,
-      externalContactId: updated.externalContactId,
-      name: updated.name,
-      firstName: updated.firstName,
-      lastName: updated.lastName,
-      language: updated.language,
-      countryCode: updated.countryCode,
-      avatarUrl: updated.avatarUrl ?? undefined,
-      email: updated.email ?? undefined,
-      location: updated.location ?? undefined,
-      customFields: normalizeStringMap(updated.customFields),
-      source: updated.source,
-      stageId: updated.stageId,
-      tagIds: validIds,
-      createdAt: updated.createdAt.toISOString(),
-    };
+    const payload: Contact = toContactWire(updated, { tagIds: validIds });
 
     await this.bus.publish({
       type: "contact.updated",

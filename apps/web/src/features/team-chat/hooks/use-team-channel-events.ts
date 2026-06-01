@@ -88,6 +88,16 @@ export function useTeamChannelEvents(
   const [pendingLiveCount, setPendingLiveCount] = useState(0);
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
 
+  // First socket connection vs a genuine RECONNECT (drives the connect handler:
+  // first → cheap delta backfill against the fresh SSR seed; reconnect → the
+  // recoverOnReconnect full-page converge). Declared BEFORE the channel-switch
+  // reset block below, which clears them so a keyless-workspace navigation is
+  // treated as a first connect, not a reconnect.
+  const hasConnectedOnceRef = useRef(false);
+  // Set when a reconnect lands while the tab is hidden — the visibility handler
+  // then runs the converge-refetch instead of the delta.
+  const reconnectNeededRef = useRef(false);
+
   // Sync from server props when the channel changes.
   const [trackedId, setTrackedId] = useState(channelId);
   if (trackedId !== channelId) {
@@ -97,6 +107,17 @@ export function useTeamChannelEvents(
     setNewerCursor(null);
     setPendingLiveCount(0);
     setTypingUserIds([]);
+    // CRITICAL: TeamChatWorkspace is rendered KEYLESS (team/[channelId]/page.tsx),
+    // so a /team/A → /team/B navigation REUSES this hook instance (refs persist)
+    // rather than remounting (unlike the inbox thread, which is key={id}). Reset
+    // the connect gate so the post-switch `if (socket.connected) onConnect()`
+    // (re-fired because the socket effect re-runs on channelId) is treated as a
+    // FIRST connect → cheap delta runBackfill against the fresh SSR seed — NOT a
+    // recoverOnReconnect full-page refetch+replace, which would fire on every
+    // navigation and could clobber live socket state. Only a genuine socket
+    // reconnect (no channel change) now runs recoverOnReconnect.
+    hasConnectedOnceRef.current = false;
+    reconnectNeededRef.current = false;
   }
 
   const messagesRef = useRef(messages);
@@ -311,12 +332,61 @@ export function useTeamChannelEvents(
 
     const onConnect = () => {
       socket.emit("subscribe:channel", { channelId });
+      const firstConnect = !hasConnectedOnceRef.current;
+      hasConnectedOnceRef.current = true;
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         backfillNeededRef.current = true;
+        // Remember a reconnect so the visibility handler converges (not just
+        // delta) when the tab returns.
+        if (!firstConnect) reconnectNeededRef.current = true;
         return;
       }
       const delay = Math.floor(Math.random() * 1500);
-      window.setTimeout(() => runBackfill(), delay);
+      // First connect → delta backfill (SSR seed is fresh). Reconnect →
+      // converge the loaded slice to server truth (the delta can't carry
+      // edits/reactions/pins/deletes to already-loaded messages).
+      window.setTimeout(
+        () => (firstConnect ? runBackfill() : void recoverOnReconnect()),
+        delay,
+      );
+    };
+
+    // Reconnect convergence: refetch the latest page and REPLACE the loaded
+    // slice so edits/reactions/pins/deletes a teammate made while we were
+    // offline are reflected (a delta-only backfill would miss them). Preserves
+    // the user's own in-flight optimistic sends (pending/failed have no server
+    // row yet) so they don't vanish. Skipped in anchored (search-jump) mode —
+    // we don't yank the user off their slice; the delta keeps their tail fresh.
+    const recoverOnReconnect = async (): Promise<void> => {
+      backfillNeededRef.current = false;
+      reconnectNeededRef.current = false;
+      if (anchoredRef.current) {
+        runBackfill();
+        return;
+      }
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/team/channels/${channelId}/messages`,
+        );
+        if (!res.ok) {
+          runBackfill();
+          return;
+        }
+        const page = (await res.json()) as {
+          items: TeamChannelMessageDto[];
+          nextCursor: string | null;
+        };
+        setMessages((prev) => {
+          const serverIds = new Set(page.items.map((m) => m.id));
+          const keptOptimistic = prev.filter(
+            (m) => (m.pending || m.failed) && !serverIds.has(m.id),
+          );
+          return [...page.items, ...keptOptimistic];
+        });
+        setOlderCursor(page.nextCursor);
+      } catch {
+        runBackfill();
+      }
     };
 
     const runBackfill = () => {
@@ -351,10 +421,15 @@ export function useTeamChannelEvents(
       if (
         typeof document !== "undefined" &&
         document.visibilityState === "visible" &&
-        backfillNeededRef.current &&
         socket.connected
       ) {
-        runBackfill();
+        // A reconnect that landed while hidden needs the full converge; a plain
+        // deferred backfill (tab hidden across a live message) just needs delta.
+        if (reconnectNeededRef.current) {
+          void recoverOnReconnect();
+        } else if (backfillNeededRef.current) {
+          runBackfill();
+        }
       }
     };
 

@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 import {
@@ -102,17 +103,26 @@ export class MessagesController {
         error: "conversationId and file are required",
       });
     }
-    const out = await this.messages.sendMedia(
-      session.teamId,
-      session.userId,
-      form,
-      file,
-    );
-    return {
-      ok: true,
-      messageId: out.messageId,
-      ...(out.warning ? { warning: out.warning } : {}),
-    };
+    try {
+      const out = await this.messages.sendMedia(
+        session.teamId,
+        session.userId,
+        form,
+        file,
+      );
+      return {
+        ok: true,
+        messageId: out.messageId,
+        ...(out.warning ? { warning: out.warning } : {}),
+      };
+    } finally {
+      // Always remove the multipart temp file. sendMediaInner's own `finally`
+      // only runs when the work executes; on an idempotency-replay
+      // short-circuit (same clientTempId within the TTL) it never runs, which
+      // orphaned this request's freshly-parsed temp file in /tmp. ENOENT-
+      // tolerant because the service already unlinks on the work path.
+      await unlink(file.path).catch(() => undefined);
+    }
   }
 
   @Post("template")

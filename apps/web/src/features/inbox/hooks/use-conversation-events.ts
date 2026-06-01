@@ -927,7 +927,13 @@ export function useConversationEvents(
         }
         const messages = tempId
           ? prev.messages.map((m) => {
-              if (m.clientTempId !== tempId || !m.pending) return m;
+              // Match pending OR failed optimistic rows. The background send
+              // worker publishes `message.send_failed` (→ failed bubble) BEFORE
+              // BullMQ retries; when a retry then succeeds, `message:new` carries
+              // the SAME clientTempId and must CONSUME the failed bubble. Gating
+              // on `!m.pending` alone left the failed row in place → a duplicate
+              // bubble with a stale Retry button on every failed→succeeded send.
+              if (m.clientTempId !== tempId || (!m.pending && !m.failed)) return m;
               // Swap the optimistic row with the server's authoritative
               // copy so the bubble's id, externalId, status, etc. line up
               // with reality. Preserve clientTempId so the React key stays

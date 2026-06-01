@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reconciler for the `Conversation` analytics MESSAGE COUNTERS
@@ -39,7 +40,10 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Serialize through the shared sweeper mutex — this is the heaviest
+    // full-Message-table UPDATE and must not run concurrently with the other
+    // pool-pressuring sweepers (contact-drift, retention scans).
+    await withSweeperMutex("conversation-analytics-drift", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.analytics-drift] ${label} failed`, err);
   } finally {

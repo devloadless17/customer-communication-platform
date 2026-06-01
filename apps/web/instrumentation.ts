@@ -17,4 +17,18 @@ export async function register(): Promise<void> {
 
   const { validateEnv } = await import("@ccp/config");
   validateEnv("web");
+
+  // Global last-resort net, mirroring the api process (main.ts). A stray
+  // unhandled rejection (e.g. a fire-and-forget fetch in a server action that
+  // loses its `.catch`) would otherwise terminate the web process under
+  // Node 24's default `--unhandled-rejections=throw`, turning a single bad
+  // request into a hard 502 for everyone until the container restarts. Log so
+  // it's visible, then survive — the request that triggered it already failed
+  // on its own path; the process staying up keeps every other user served.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[web][unhandledRejection]", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[web][uncaughtException]", err);
+  });
 }

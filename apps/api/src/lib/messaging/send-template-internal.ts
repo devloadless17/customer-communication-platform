@@ -6,7 +6,7 @@
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { publishInTx } from "@/lib/events/outbox";
+import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
 import {
@@ -263,47 +263,28 @@ export async function sendTemplateInternal(
     timestamp: messageTimestamp.toISOString(),
   };
 
-  // Read-then-write so a concurrent write that landed during the Meta
-  // call doesn't get clobbered backward in time by this bare UPDATE. See
-  // send-text-internal.ts for the full rationale.
-  //
-  // Publish via `publishInTx` (NOT bare `publish()`) so the outbox row
-  // commits atomically with the bump — closes the same crash-window
-  // gap that `MessagesService.commitOutboundEvent` closes for the
-  // user-facing path.
-  await db.$transaction(async (tx) => {
-    const current = await tx.conversation.findUnique({
-      where: { id: args.conversationId },
-      select: { lastMessageAt: true, unreadCount: true },
-    });
-    if (!current) {
-      throw new SendTemplateValidationError(
-        "conversation_not_found",
-        "conversation_disappeared_mid_send",
-      );
-    }
-    const effectiveBump =
-      current.lastMessageAt >= messageTimestamp
-        ? new Date(current.lastMessageAt.getTime() + 1)
-        : messageTimestamp;
-    await tx.conversation.update({
-      where: { id: args.conversationId },
-      data: { lastMessageAt: effectiveBump, lastMessagePreview: previewBody },
-    });
-    await publishInTx(tx, {
+  // Strict-monotonic bump + atomic message.sent publish, unified in
+  // commitOutboundSend (see that file for the full rationale).
+  await commitOutboundSend({
+    conversationId: args.conversationId,
+    bumpTimestamp: messageTimestamp,
+    preview: previewBody,
+    event: {
       type: "message.sent",
       teamId: args.teamId,
       conversationId: args.conversationId,
       contactId: conversation.contactId,
       message,
       preview: previewBody,
-      lastMessageAt: effectiveBump.toISOString(),
-      // Outbound doesn't bump unread; the row's current value is the
-      // accurate absolute count.
-      unreadCount: current.unreadCount,
       senderUserId: args.senderUserId,
       ...(args.senderApiKeyId ? { senderApiKeyId: args.senderApiKeyId } : {}),
-    });
+    },
+    onMissing: () => {
+      throw new SendTemplateValidationError(
+        "conversation_not_found",
+        "conversation_disappeared_mid_send",
+      );
+    },
   });
 
   return {

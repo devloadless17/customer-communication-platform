@@ -1,3 +1,4 @@
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 import type {
   Contact as DbContact,
   Conversation as DbConversation,
@@ -161,7 +162,7 @@ export function toExternalContact(
     avatarUrl: c.avatarUrl ?? null,
     email: c.email ?? null,
     location: c.location ?? null,
-    customFields: normalizeCustomFields(c.customFields),
+    customFields: normalizeStringMap(c.customFields),
     stageId: c.stageId,
     tagIds,
     createdAt: c.createdAt.toISOString(),
@@ -255,11 +256,3 @@ export function toExternalMessage(
   };
 }
 
-function normalizeCustomFields(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}

@@ -16,12 +16,14 @@ import { rateLimit } from "@/lib/rate-limit";
  *
  * Why cookie presence and not full session validation: doing a DB lookup on
  * every request from every route is the wrong place to pay for it.
- * Better Auth signs the session cookie, so a forged cookie fails parse here
- * (`getSessionCookie` returns null). A cookie that *parses* but points to a
- * deleted/expired session row is allowed through here — the route handler
- * (`requireSession` for APIs, `getSession` for pages) does the DB recheck and
- * returns 401 / redirects through /logout. That's the right division of work:
- * cheap at the edge, authoritative in the handler.
+ * This edge check tests only for the session cookie's PRESENCE —
+ * `getSessionCookie` reads the cookie value; it does NOT verify Better Auth's
+ * signature. So a forged/tampered cookie (or one that points at a deleted/
+ * expired session row) PASSES here and is rejected downstream: the route
+ * handler (`requireSession` for APIs, `getSession` for pages) does the
+ * authoritative DB recheck and returns 401 / redirects through /logout. That's
+ * the right division of work: cheap presence gate at the edge, authoritative
+ * validation in the handler.
  *
  * Public routes never check cookies. Protected routes check cookies and
  * bounce when missing.
@@ -318,9 +320,11 @@ export default function proxy(req: NextRequest): NextResponse {
     // NestJS ApiKeyGuard (apps/api/src/auth/api-key.guard.ts) does the auth.
     pathname.startsWith("/api/external/");
 
-  // Cookie presence + signature check. Returns null for missing or tampered
-  // cookies, the cookie value otherwise. Does NOT verify the session row
-  // exists in the DB — that's the route handler's job.
+  // Cookie PRESENCE check only. Returns null for a missing cookie, the cookie
+  // value otherwise — it does NOT verify the cookie's signature, nor that the
+  // session row exists in the DB. Both of those are the route handler's job
+  // (authoritative DB recheck). A forged/tampered cookie passes here and is
+  // rejected downstream.
   //
   // cookiePrefix MUST match `advanced.cookiePrefix` in the shared Better
   // Auth config. Imported from `@ccp/shared` so we have one source of truth

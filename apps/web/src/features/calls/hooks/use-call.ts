@@ -284,6 +284,67 @@ export function useCall(): {
     };
   }, []);
 
+  // SPA navigation mid-call: a client-side route change unmounts this hook
+  // WITHOUT firing beforeunload/pagehide, so the tab-close beacon above never
+  // runs. Without this cleanup the mic stays hot (browser recording indicator
+  // stays on) and the RTCPeerConnection leaks, and the customer is left in a
+  // one-sided call until the ICE timeout. Release the hardware and, for a real
+  // (non-tmp) call, tell the server to end it. Empty deps so this runs ONLY on
+  // true unmount — never mid-call (refs are always current inside the cleanup).
+  useEffect(() => {
+    return () => {
+      const live = liveCallRef.current;
+      if (live && !live.callId.startsWith("tmp_")) {
+        try {
+          navigator.sendBeacon?.(
+            `/api/calls/${live.callId}/end`,
+            new Blob([JSON.stringify({})], { type: "application/json" }),
+          );
+        } catch {
+          // best-effort — nothing more we can do as the component unmounts
+        }
+      }
+      pcRef.current?.getSenders().forEach((s) => {
+        try {
+          s.track?.stop();
+        } catch {
+          // ignore
+        }
+      });
+      pcRef.current?.close();
+      pcRef.current = null;
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
+    };
+  }, []);
+
+  // Ring timeout. A call can sit in "ringing" indefinitely if the terminal
+  // `call:ended` frame is missed (socket drop / throttled tab / the 30s
+  // connection-state-recovery window exceeded) AND the PC never reaches a
+  // failed state because no answer was ever applied — leaving the mic hot.
+  // Meta stops ringing well before 60s, so this backstop terminates a stuck
+  // ring: POST /end for a real call, then tear down. Re-arms whenever a new
+  // call starts ringing; cleared the moment it's answered (→ in_progress),
+  // torn down, or the tmp_→real callId rebinds.
+  useEffect(() => {
+    if (liveCall?.status !== "ringing") return;
+    const RING_TIMEOUT_MS = 60_000;
+    const timer = setTimeout(() => {
+      const live = liveCallRef.current;
+      if (!live || live.status !== "ringing") return;
+      if (!live.callId.startsWith("tmp_")) {
+        void fetchWithSessionGuard(`/api/calls/${live.callId}/end`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }).catch(() => undefined);
+      }
+      tearDown();
+      toast.info("No answer");
+    }, RING_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [liveCall?.status, liveCall?.callId, tearDown]);
+
   /**
    * Build an RTCPeerConnection with mic capture, remote-audio routing,
    * and a connection-state watcher that auto-terminates on disconnect.

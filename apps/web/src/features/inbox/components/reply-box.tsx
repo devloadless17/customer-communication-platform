@@ -274,6 +274,19 @@ export function ReplyBox({
   // gets the same message twice.
   const sendInFlightRef = useRef(false);
   const [sendInFlight, setSendInFlight] = useState(false);
+  // Active post-send stuck-watchdogs (timer + window-listener pairs). Tracked
+  // so a chat-switch (this reply-box unmounts) before a send confirms can't
+  // leave a 30s timer that later fires `onOptimisticFail` for the PREVIOUS
+  // conversation's bubble (the parent inbox-shell stays mounted, so a stale
+  // timer would mark a possibly-delivered message failed in the cached thread).
+  const watchdogCleanupsRef = useRef<Set<() => void>>(new Set());
+  useEffect(() => {
+    const cleanups = watchdogCleanupsRef.current;
+    return () => {
+      for (const c of cleanups) c();
+      cleanups.clear();
+    };
+  }, []);
 
   // -------------------------------------------------------------------------
   // Slash-trigger snippet state.
@@ -838,14 +851,20 @@ export function ReplyBox({
       if (!isNote) {
         const STUCK_WATCHDOG_MS = 30_000;
         const ev = `ccp:optimistic-confirmed:${clientTempId}`;
+        let cleanup = () => {};
         const watchdogId = window.setTimeout(() => {
-          window.removeEventListener(ev, onConfirmed);
+          cleanup();
           onOptimisticFail?.(clientTempId);
         }, STUCK_WATCHDOG_MS);
-        const onConfirmed = () => {
+        const onConfirmed = () => cleanup();
+        cleanup = () => {
           window.clearTimeout(watchdogId);
           window.removeEventListener(ev, onConfirmed);
+          watchdogCleanupsRef.current.delete(cleanup);
         };
+        // Registered so unmount (chat-switch) clears it; self-removes on
+        // confirm or after firing.
+        watchdogCleanupsRef.current.add(cleanup);
         window.addEventListener(ev, onConfirmed, { once: true });
       }
     })();
