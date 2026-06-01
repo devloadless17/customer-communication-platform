@@ -18,7 +18,7 @@ import {
   EXTERNAL_CONVERSATION_INCLUDE,
   type ExternalMessage,
 } from "@/lib/external-shapes";
-import { publishInTx } from "@/lib/events/outbox";
+import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { MAX_CHAIN_DEPTH } from "@/lib/workflows/events";
 
@@ -558,43 +558,31 @@ export class ExternalV1MessagingService {
       timestamp: send.timestamp.toISOString(),
       ...(replyToMessageId ? { replyToMessageId } : {}),
     };
-    // Atomic bump + publish via publishInTx — closes the same crash
-    // window the user-facing path (messages.service.ts commitOutboundEvent)
-    // closes. The earlier post-tx bare publish() lost the message.sent
-    // event entirely if the process died between tx commit and publish;
-    // on retry the externalId already exists, so nothing re-publishes.
-    // Backend audit 2026-05-29 H1 flagged external-v1 + interactive as
-    // the two paths missed by the original text/template migration.
-    await this.db.$transaction(async (tx) => {
-      const current = await tx.conversation.findUnique({
-        where: { id: conversationId },
-        select: { lastMessageAt: true, unreadCount: true },
-      });
-      if (!current) {
-        throw new BadGatewayException({
-          error: "conversation_disappeared_mid_send",
-        });
-      }
-      const effectiveBump =
-        current.lastMessageAt >= send.timestamp
-          ? new Date(current.lastMessageAt.getTime() + 1)
-          : send.timestamp;
-      await tx.conversation.update({
-        where: { id: conversationId },
-        data: { lastMessageAt: effectiveBump, lastMessagePreview: preview },
-      });
-      await publishInTx(tx, {
+    // Strict-monotonic bump + atomic message.sent publish, unified in
+    // commitOutboundSend — the same helper the user-facing + lib send paths
+    // use (closes the crash window between tx commit and a post-tx publish()).
+    // Backend audit 2026-05-29 H1 flagged external-v1 + interactive as the two
+    // paths missed by the original text/template migration; this routes the
+    // last hand-rolled copy through the canonical commit.
+    await commitOutboundSend({
+      conversationId,
+      bumpTimestamp: send.timestamp,
+      preview,
+      event: {
         type: "message.sent",
         teamId,
         conversationId,
         contactId: conversation.contactId,
         message,
         preview,
-        lastMessageAt: effectiveBump.toISOString(),
-        unreadCount: current.unreadCount,
         senderUserId: null,
         senderApiKeyId: apiKeyId,
-      });
+      },
+      onMissing: () => {
+        throw new BadGatewayException({
+          error: "conversation_disappeared_mid_send",
+        });
+      },
     });
 
     const result = { message: toExternalMessage(created) };

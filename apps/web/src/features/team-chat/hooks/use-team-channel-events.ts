@@ -146,6 +146,13 @@ export function useTeamChannelEvents(
 
   const backfillNeededRef = useRef(false);
 
+  // Holds the pending onConnect backfill/recover timer so the socket effect's
+  // cleanup can cancel it. Without this, a channel switch (A→B→C faster than the
+  // 0–1500ms jitter) leaves channel A's delayed timer alive; it fires while B/C
+  // is shown and its closure writes A's page into the shared messages state — a
+  // transient cross-channel render until the next event corrects it.
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Mark-read: throttled via `useCoalescedAsync` (shared with the inbox
   // hook so the in-flight + queued pattern stays consistent). Stamps the
   // receipt to "now" so the sidebar badge clears for this user across
@@ -344,11 +351,15 @@ export function useTeamChannelEvents(
       const delay = Math.floor(Math.random() * 1500);
       // First connect → delta backfill (SSR seed is fresh). Reconnect →
       // converge the loaded slice to server truth (the delta can't carry
-      // edits/reactions/pins/deletes to already-loaded messages).
-      window.setTimeout(
-        () => (firstConnect ? runBackfill() : void recoverOnReconnect()),
-        delay,
-      );
+      // edits/reactions/pins/deletes to already-loaded messages). Tracked in a
+      // ref + cancelled on cleanup so a channel switch can't leave the prior
+      // channel's timer firing into the shared messages state.
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (firstConnect) runBackfill();
+        else void recoverOnReconnect();
+      }, delay);
     };
 
     // Reconnect convergence: refetch the latest page and REPLACE the loaded
@@ -597,6 +608,10 @@ export function useTeamChannelEvents(
     if (socket.connected) onConnect();
 
     return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       socket.emit("unsubscribe:channel", { channelId });
       socket.off("connect", onConnect);
       socket.off("team:channel:message", onMessage);

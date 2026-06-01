@@ -129,7 +129,15 @@ function reconcileOptimisticAgainst(
   if (confirmedBodies.size === 0 && freshMediaByKind.size === 0) return existing;
 
   return existing.filter((m) => {
-    if (!(m.pending && m.direction === "out")) return true;
+    // Match pending OR failed OUT bubbles. The live `onMessageNew` path already
+    // consumes a failed twin by clientTempId (a failed→succeeded retry); the
+    // recovery path (runBackfill / runFullRefetch) reconciles by body/media
+    // instead — without `|| m.failed` a send that flipped to `failed` (watchdog
+    // fired, or message.send_failed before a retry succeeded) survived a refetch
+    // ALONGSIDE the confirmed server row → duplicate bubble with a stale Retry
+    // button (a double-send trap). A genuinely-failed send has no server row, so
+    // its body/media won't be in the confirmed sets below and it stays put.
+    if (!((m.pending || m.failed) && m.direction === "out")) return true;
     // Text optimistic confirmed by body.
     if (m.body && confirmedBodies.has(m.body)) return false;
     // Media optimistic (local blob) confirmed by a same-kind server row.

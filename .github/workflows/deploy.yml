@@ -650,7 +650,14 @@ jobs:
             # blip warns but does NOT block the deploy (nightly dump is the
             # fallback). For destructive (drop/rename) migrations, prefer
             # expand-contract so :previous code stays schema-compatible.
-            set -a; [ -f .env ] && . ./.env; set +a
+            # Read ONLY the two vars we need, literally — do NOT `source` the
+            # compose env-file. It is compose-format (KEY=value, unquoted), not
+            # shell: `. ./.env` under `set -e` would EVALUATE every value, so a
+            # password containing a shell metachar (& ` $ space) would abort the
+            # ship step on every deploy (or worse). grep|cut takes the bytes
+            # verbatim and never evaluates the password or any other line.
+            POSTGRES_USER="$(grep -E '^POSTGRES_USER=' .env | head -n1 | cut -d= -f2-)"
+            POSTGRES_DB="$(grep -E '^POSTGRES_DB=' .env | head -n1 | cut -d= -f2-)"
             : "${POSTGRES_USER:=app}"; : "${POSTGRES_DB:=ccp}"
             mkdir -p /opt/ccp/backups && chmod 700 /opt/ccp/backups
             PRE="/opt/ccp/backups/pre-deploy-${POSTGRES_DB}-$(date -u +%Y%m%dT%H%M%SZ)-${{ github.sha }}.sql.gz"
