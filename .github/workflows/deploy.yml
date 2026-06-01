@@ -574,6 +574,13 @@ jobs:
             # the stack is driven directly by `docker compose` (see below),
             # so there is no .service file to install any more.
             mv /tmp/ccp-deploy/docker-compose.yml /opt/ccp/docker-compose.yml
+            # Snapshot the live Caddyfile BEFORE overwriting so auto-rollback
+            # can revert the proxy config too — not just the images. When a
+            # bad deploy changes BOTH (e.g. a new web-block health_uri that the
+            # app gates with a 401), reverting images alone leaves the broken
+            # new Caddyfile in place and the site stays dark. They must move
+            # together. Restored by the "Auto-rollback" step below.
+            sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.prev 2>/dev/null || true
             sudo mv /tmp/ccp-deploy/Caddyfile    /etc/caddy/Caddyfile
             install -m 0755 /tmp/ccp-deploy/pg-backup.sh /opt/ccp/pg-backup.sh
             rm -f /tmp/ccp-deploy.tar.gz
@@ -625,6 +632,7 @@ jobs:
         id: health
         env:
           HEALTH_URL: ${{ secrets.HEALTHCHECK_URL }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
         run: |
           # 150s budget (75 × 2s). MUST exceed the api container's compose
           # start_period (120s) — that window exists precisely because a
@@ -634,12 +642,33 @@ jobs:
           # below → retagged :previous against the ALREADY-migrated schema →
           # Prisma threw on the now-mismatched client. The safety net created
           # the outage. 150s gives the migration its full window plus margin.
+          green=0
           for i in $(seq 1 75); do
-            if curl -fsS -m 3 "$HEALTH_URL" > /dev/null; then echo "✓ live after $((i*2))s"; exit 0; fi
+            if curl -fsS -m 3 "$HEALTH_URL" > /dev/null; then echo "✓ HEALTH_URL live after $((i*2))s"; green=1; break; fi
             sleep 2
           done
-          echo "✗ health never green in 150s"
-          exit 1
+          if [ "$green" != 1 ]; then
+            echo "✗ health never green in 150s"
+            exit 1
+          fi
+          # ALSO assert the real user path through Caddy's DEFAULT (web) block.
+          # HEALTH_URL hits /api/health (block 3 — NO active health check), so a
+          # web upstream that Caddy's block-6 active `health_uri` probe has
+          # marked DOWN is INVISIBLE to it. That blind spot is exactly how a
+          # dark site (503 on every page) once shipped as a "green" deploy:
+          # /api/health stayed 200 while `/` 503'd. `/` rides block 6, so a 503
+          # here means the web upstream is unhealthy → fail → auto-rollback.
+          # A normal unauthenticated `/` is a 302→/login (passes); only a real
+          # Caddy 5xx / connection failure trips this.
+          if [ -n "${APP_DOMAIN:-}" ]; then
+            code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "https://$APP_DOMAIN/" || echo 000)
+            if [ "$code" = "000" ] || [ "$code" -ge 500 ]; then
+              echo "✗ public root https://$APP_DOMAIN/ returned $code — web upstream is dark"
+              exit 1
+            fi
+            echo "✓ public root https://$APP_DOMAIN/ returned $code"
+          fi
+          exit 0
 
       # Warm-up the public origin via the api path through Caddy. The
       # `Wait for health` step above hits HEALTHCHECK_URL (whatever the
@@ -737,4 +766,19 @@ jobs:
             done
             cd /opt/ccp
             docker compose --env-file .env up -d --remove-orphans
+            # Revert the proxy config too if the failed deploy changed it. A
+            # rollback that restores images but keeps the NEW Caddyfile can
+            # leave a working app behind a broken proxy (e.g. a health_uri the
+            # rolled-back image doesn't satisfy → web upstream stays down →
+            # site still 503s). /etc/caddy/Caddyfile.prev is snapshotted by the
+            # ship step before it overwrites the live config.
+            if [ -f /etc/caddy/Caddyfile.prev ]; then
+              sudo cp -a /etc/caddy/Caddyfile.prev /etc/caddy/Caddyfile
+              if sudo caddy validate --config /etc/caddy/Caddyfile; then
+                sudo systemctl reload caddy
+                echo "✓ reverted /etc/caddy/Caddyfile to previous + reloaded Caddy"
+              else
+                echo "⚠ previous Caddyfile failed validation — left current config in place"
+              fi
+            fi
             echo "✓ rolled back to :previous-{web,api} (registry + local in sync)"

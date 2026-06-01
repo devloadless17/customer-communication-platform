@@ -172,7 +172,9 @@ function clientIp(req: NextRequest): string {
  *   - /api/auth/*            — Better Auth's own endpoints
  *   - /api/webhooks/*        — Meta posts here unauthenticated; verified by HMAC
  *   - /api/socket            — Socket.io handshake (separately authenticated)
- *   - /api/health            — Caddy / systemd liveness probes; no privileged data
+ *   - /api/health*           — Caddy / Docker / monitor liveness probes
+ *                              (deep /api/health AND shallow /api/health/web);
+ *                              no privileged data
  *   - /api/external/*        — bearer-token auth, not session cookies
  *
  * Everything else requires a session cookie. Unauthenticated page requests
@@ -302,7 +304,15 @@ export default function proxy(req: NextRequest): NextResponse {
     // secret. The route handler does its own timing-safe check.
     pathname.startsWith("/api/internal/") ||
     pathname.startsWith("/api/socket") ||
-    pathname === "/api/health" ||
+    // Liveness probes — `startsWith`, NOT `=== "/api/health"`. The SHALLOW
+    // web probe `/api/health/web` (what Caddy's web-upstream `health_uri`
+    // hits every 2s) lives under this prefix. An exact match left it gated,
+    // so the cookie-less probe got a 401, Caddy marked the ONLY web upstream
+    // down, and every page 503'd — while `/api/health` (matched exactly)
+    // still passed and the deploy's health gate stayed green. No health
+    // response carries privileged data, so the prefix is safe. Keep this in
+    // sync with the Caddyfile web-block `health_uri` (deploy/Caddyfile.template).
+    pathname.startsWith("/api/health") ||
     // External API uses bearer-token auth (TeamApiKey), not session cookies —
     // bypass the cookie gate so n8n / partner integrations can reach it. The
     // NestJS ApiKeyGuard (apps/api/src/auth/api-key.guard.ts) does the auth.
