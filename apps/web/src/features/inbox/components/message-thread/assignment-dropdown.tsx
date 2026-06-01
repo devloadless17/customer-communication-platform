@@ -337,11 +337,11 @@ function MemberRow({
     : availability && availability.status !== "available"
       ? AVAILABILITY_LABELS[availability.status]
       : null;
+  const note = availability?.message?.trim() || null;
   return (
     <DropdownMenuItem
       onSelect={() => onPick(user.id)}
-      title={availability?.message ?? undefined}
-      className={cn(dimmed && "text-muted-foreground")}
+      className={cn("items-start", dimmed && "text-muted-foreground")}
     >
       {isCurrent ? (
         <Check className="size-3.5" />
@@ -360,10 +360,24 @@ function MemberRow({
           />
         </div>
       )}
-      <span className="flex-1">{user.name}</span>
-      {cue && (
-        <span className="text-[10px] text-muted-foreground">{cue}</span>
-      )}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate">{user.name}</span>
+          {cue && (
+            <span className="shrink-0 text-[10px] text-muted-foreground">{cue}</span>
+          )}
+        </div>
+        {/* Availability note — the teammate's own status message. Surfaced
+            inline (was a hover-only `title` tooltip nobody could find). */}
+        {note && (
+          <span
+            className="truncate text-[10px] leading-tight text-muted-foreground/80"
+            title={note}
+          >
+            {note}
+          </span>
+        )}
+      </div>
     </DropdownMenuItem>
   );
 }

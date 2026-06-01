@@ -23,7 +23,9 @@ import { AvailabilityPicker } from "@/components/layouts/availability-picker";
 import { MobileSubSidebarProvider } from "@/components/layouts/sub-sidebar";
 import { useSignOutOverlay } from "@/components/auth/signout-overlay";
 import { useLiveTeamName } from "@/hooks/use-live-team-name";
+import { getClientSocket } from "@/lib/socket-client";
 import { roleLabel } from "@ccp/shared/auth/permissions";
+import { resolveAvailabilityStatus } from "@ccp/shared/presence";
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User } from "@ccp/shared/types";
 
@@ -115,6 +117,33 @@ export function MobileShellChrome({
   const { trigger: signOut, overlay: signOutOverlay } = useSignOutOverlay();
   // Live org name — patches in place on `team:renamed`.
   const teamName = useLiveTeamName(team.name);
+
+  // Live mirror of THIS user's availability so the picker survives a drawer
+  // close→reopen (the Sheet unmounts its content on close, re-seeding the
+  // picker). Same pattern as the desktop AppRail. Seeded from the session
+  // payload, kept current by the picker's own local dispatch + cross-device
+  // frames — so the reopened picker shows the last saved value, not the stale
+  // SSR `currentUser`.
+  const [liveAvailability, setLiveAvailability] = useState(() => ({
+    status: resolveAvailabilityStatus(currentUser.availabilityStatus),
+    message: currentUser.availabilityMessage ?? null,
+  }));
+  useEffect(() => {
+    const socket = getClientSocket();
+    const handler: Parameters<
+      typeof socket.on<"user:availability:updated">
+    >[1] = (payload) => {
+      if (payload.userId !== currentUser.id) return;
+      setLiveAvailability((prev) => ({
+        status: payload.status,
+        message: payload.message === undefined ? prev.message : payload.message,
+      }));
+    };
+    socket.on("user:availability:updated", handler);
+    return () => {
+      socket.off("user:availability:updated", handler);
+    };
+  }, [currentUser.id]);
 
   // Close the drawer when the route changes — without this, navigating
   // via a drawer link leaves it open over the new page.
@@ -226,6 +255,8 @@ export function MobileShellChrome({
               <AvailabilityPicker
                 currentUser={currentUser}
                 disabled={!canManageAvailability}
+                seedStatus={liveAvailability.status}
+                seedMessage={liveAvailability.message}
               />
             </div>
             <div className="mt-1 flex flex-col gap-0.5 border-t border-border pt-1">

@@ -10,7 +10,6 @@ import {
   ALL_AVAILABILITY_STATUSES,
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
-  resolveAvailabilityStatus,
 } from "@ccp/shared/presence";
 import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
 
@@ -18,8 +17,13 @@ import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
  * Availability picker rendered inside the AppRail user menu.
  *
  * Three concerns:
- *   1. Seed the displayed status + note from the session-provided `currentUser`
- *      so the first paint is correct without a fetch.
+ *   1. Seed the displayed status + note from the LIVE availability the AppRail
+ *      tracks (`seedStatus` / `seedMessage`), NOT the frozen session
+ *      `currentUser`. The dropdown unmounts this picker on close, so it re-seeds
+ *      on every reopen — seeding from `currentUser` (which never updates after a
+ *      PATCH) showed the pre-save value until a full refresh. The AppRail's live
+ *      mirror is updated by this picker's own local dispatch + cross-device
+ *      frames, so it's always the freshest known value.
  *   2. Mutate via PATCH /api/users/me/availability.
  *      - Status is optimistic: the UI flips immediately on click and a local
  *        socket dispatch fans the change to every open surface; the PATCH is
@@ -42,14 +46,18 @@ import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
 export function AvailabilityPicker({
   currentUser,
   disabled,
+  seedStatus,
+  seedMessage,
 }: {
   currentUser: User;
   disabled: boolean;
+  /** Live status/note from the AppRail mirror — survives a menu reopen because
+   *  it reflects the last saved value, unlike the frozen session `currentUser`. */
+  seedStatus: UserAvailabilityStatus;
+  seedMessage: string | null;
 }) {
-  const initialMessage = currentUser.availabilityMessage ?? "";
-  const [status, setStatus] = useState<UserAvailabilityStatus>(
-    resolveAvailabilityStatus(currentUser.availabilityStatus),
-  );
+  const initialMessage = seedMessage ?? "";
+  const [status, setStatus] = useState<UserAvailabilityStatus>(seedStatus);
   // `message` is the live input; `committedMessage` is the last server-known
   // value. `dirty` (their inequality) drives the Save affordance.
   const [message, setMessage] = useState<string>(initialMessage);
@@ -64,11 +72,13 @@ export function AvailabilityPicker({
   const messageRef = useRef(message);
   const committedRef = useRef(committedMessage);
   const disabledRef = useRef(disabled);
+  const statusRef = useRef(status);
   const savingRef = useRef(false);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   messageRef.current = message;
   committedRef.current = committedMessage;
   disabledRef.current = disabled;
+  statusRef.current = status;
 
   // Cross-device sync: when our own user's availability changes elsewhere,
   // mirror it here so the picker doesn't drift. Never clobber an unsaved local
@@ -103,6 +113,16 @@ export function AvailabilityPicker({
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       const latest = messageRef.current;
       if (!disabledRef.current && !savingRef.current && latest !== committedRef.current) {
+        // Fan the flushed note locally too — otherwise a close-without-explicit-
+        // save persists server-side but the AppRail mirror (and the next menu
+        // reopen's seed) stays stale until a refresh. Optimistic: the PATCH is
+        // fire-and-forget here because the component is unmounting.
+        dispatchLocalSocketEvent("user:availability:updated", {
+          teamId: currentUser.teamId,
+          userId: currentUser.id,
+          status: statusRef.current,
+          message: latest === "" ? null : latest,
+        });
         void apiFetch("/api/users/me/availability", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
@@ -110,7 +130,9 @@ export function AvailabilityPicker({
         }).catch(() => {});
       }
     };
-  }, []);
+    // currentUser.id / .teamId are stable for the session, so this effectively
+    // runs the flush only on unmount; listing them keeps exhaustive-deps honest.
+  }, [currentUser.id, currentUser.teamId]);
 
   async function commitStatus(next: UserAvailabilityStatus): Promise<void> {
     if (disabled || next === status) return;

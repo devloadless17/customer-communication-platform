@@ -25,6 +25,7 @@ import type {
 } from "@ccp/shared/types";
 import {
   buildOptimisticStageChange,
+  isOptimisticActivityId,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { useConversationEvents } from "@/features/inbox/hooks/use-conversation-events";
@@ -779,8 +780,21 @@ function MessageThreadImpl({
       hasMoreOlder && oldestMessageTs
         ? calls.filter((c) => c.ringingAt >= oldestMessageTs)
         : calls;
-    const isPending = (e: TimelineEntry) =>
-      e.kind === "message" && e.data.pending === true;
+    // Entries pinned to the very bottom regardless of their timestamp:
+    //   - pending own-sends (sortKey ∞ — "the message I'm sending right now")
+    //   - OPTIMISTIC activity stubs. Their `at` is CLIENT time (new Date() in
+    //     optimistic-activity.ts), but every message carries SERVER time. If the
+    //     server clock runs even slightly ahead of the browser, a recent
+    //     message's timestamp exceeds the stub's `at`, so a naive timestamp sort
+    //     drops the pill ABOVE that message ("appears between the last logs"),
+    //     then the authoritative server-timed row arrives and it jumps to the
+    //     bottom — the visible vibration. Pinning the stub to the bottom makes it
+    //     land cleanly at the end on the first paint; the authoritative row that
+    //     replaces it (real server `at`, the newest server event) is naturally
+    //     last too, so there's zero movement on reconcile.
+    const pinsToBottom = (e: TimelineEntry) =>
+      (e.kind === "message" && e.data.pending === true) ||
+      (e.kind === "activity" && isOptimisticActivityId(e.data.id));
     return [
       ...messages.map((m): TimelineEntry => ({ kind: "message", data: m })),
       ...visibleNotes.map((n): TimelineEntry => ({ kind: "note", data: n })),
@@ -802,8 +816,8 @@ function MessageThreadImpl({
         }),
       ),
     ].sort((a, b) => {
-      const ap = isPending(a);
-      const bp = isPending(b);
+      const ap = pinsToBottom(a);
+      const bp = pinsToBottom(b);
       if (ap !== bp) return ap ? 1 : -1;
       return (
         new Date(a.data.timestamp).getTime() -

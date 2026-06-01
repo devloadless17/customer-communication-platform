@@ -38,7 +38,7 @@ import {
   resolveAvailabilityStatus,
 } from "@ccp/shared/presence";
 import { cn, initials } from "@ccp/shared/utils";
-import type { Team, User } from "@ccp/shared/types";
+import type { Team, User, UserAvailabilityStatus } from "@ccp/shared/types";
 import { AvailabilityPicker } from "./availability-picker";
 
 const STORAGE_KEY = "app-rail-collapsed";
@@ -299,6 +299,8 @@ export function AppRail({
           currentUser={currentUser}
           collapsed={collapsed}
           canManageAvailability={canManageAvailability}
+          liveStatus={liveAvailability.status}
+          liveMessage={liveAvailability.message}
         >
           <button
             type="button"
@@ -426,11 +428,15 @@ function UserMenu({
   currentUser,
   collapsed,
   canManageAvailability,
+  liveStatus,
+  liveMessage,
   children,
 }: {
   currentUser: User;
   collapsed: boolean;
   canManageAvailability: boolean;
+  liveStatus: UserAvailabilityStatus;
+  liveMessage: string | null;
   children: React.ReactNode;
 }) {
   const { trigger: signOut, overlay } = useSignOutOverlay();
@@ -463,6 +469,8 @@ function UserMenu({
           <AvailabilityPicker
             currentUser={currentUser}
             disabled={!canManageAvailability}
+            seedStatus={liveStatus}
+            seedMessage={liveMessage}
           />
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild>

@@ -299,13 +299,14 @@ export function InboxSubSidebar({
                         : "Online")
                     : "Offline";
                 const note = availability?.message ?? null;
+                const trimmedNote = note?.trim() || null;
                 return (
                   <div
                     key={u.id}
-                    className="flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] text-muted-foreground"
-                    title={note ? `${dotLabel} — ${note}` : dotLabel}
+                    className="flex min-h-8 items-center gap-2.5 rounded-md px-2.5 py-1 text-[13px] text-muted-foreground"
+                    title={dotLabel}
                   >
-                    <div className="relative">
+                    <div className="relative shrink-0">
                       <Avatar className="size-5">
                         <AvatarFallback seed={u.id} className="text-[9px]">
                           {initials(u.name)}
@@ -321,12 +322,26 @@ export function InboxSubSidebar({
                         />
                       )}
                     </div>
-                    <span className="flex-1 truncate">{u.name}</span>
-                    {u.id === currentUser.id && (
-                      <Badge variant="muted" className="ml-auto px-1.5 py-0 text-[10px]">
-                        you
-                      </Badge>
-                    )}
+                    <div className="flex min-w-0 flex-1 flex-col">
+                      <div className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate">{u.name}</span>
+                        {u.id === currentUser.id && (
+                          <Badge variant="muted" className="shrink-0 px-1.5 py-0 text-[10px]">
+                            you
+                          </Badge>
+                        )}
+                      </div>
+                      {/* Availability note — surfaced inline (was a hover-only
+                          `title` tooltip nobody could find). */}
+                      {trimmedNote && (
+                        <span
+                          className="truncate text-[11px] leading-tight text-muted-foreground/70"
+                          title={trimmedNote}
+                        >
+                          {trimmedNote}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 );
               })}
