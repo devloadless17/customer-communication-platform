@@ -88,10 +88,23 @@ export const triggerWorkflowStepHandler: StepHandler<TriggerWorkflowStepConfig> 
     const parentDepth = envelope.workflowDepth ?? 0;
     const nextDepth = parentDepth + 1;
     if (nextDepth > TRIGGER_DEPTH_MAX) {
+      // Log loud + with full provenance (originating workflow, run, target,
+      // team) before advancing with the audit-shaped error. The runner's
+      // stepLog already captures the failure with status=409, but that's
+      // per-run — a structured log line lets us grep across a chain to find
+      // the originating workflow id when a customer reports "my flows
+      // stopped firing." Counting alone isn't enough; we want the WHO.
+      console.warn(
+        `[workflows] trigger_depth_exceeded ` +
+          `(team=${ctx.teamId} originatingWorkflow=${ctx.workflowId} ` +
+          `originatingRun=${ctx.runId} step=${ctx.stepId} ` +
+          `targetWorkflow=${target.id} depth=${nextDepth} max=${TRIGGER_DEPTH_MAX}) — ` +
+          `refusing to dispatch a deeper hop; likely a workflow chain loop.`,
+      );
       return advanceWithError(
         409,
         "trigger_depth_exceeded",
-        `chain depth ${nextDepth} exceeds the max of ${TRIGGER_DEPTH_MAX} — likely a workflow loop`,
+        `chain depth ${nextDepth} exceeds the max of ${TRIGGER_DEPTH_MAX} — likely a workflow loop (originating workflow ${ctx.workflowId})`,
       );
     }
 

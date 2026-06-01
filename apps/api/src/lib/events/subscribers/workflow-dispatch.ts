@@ -12,9 +12,22 @@
  * Order in the subscriber chain: WORKFLOW_DISPATCH tier (after analytics).
  * By the time this runs, socket-fanout has lit up live clients, audit has
  * written the timeline row, and analytics has bumped the conversation
- * counters / firstResponseAt / closedAt. The workflow snapshot reads fresh
- * state from the DB so it sees the analytics-updated row. (outbound-webhooks
- * runs after this one — neither depends on the other.)
+ * counters / firstResponseAt / closedAt. (outbound-webhooks runs after this
+ * one — neither depends on the other.)
+ *
+ * Snapshot source (M1 contract):
+ *   Conversation snapshots come FROM the event payload (`e.conversation`),
+ *   NOT a fresh DB read. The publishers (lib/conversations/mutations.ts,
+ *   lib/providers/ingest{,-call}.ts, messages.service.ts) build a post-CAS
+ *   snapshot with the predicted analytics writes (closedAt / closedByUserId /
+ *   assignmentsCount / firstAssignedAt etc.) applied in-memory and attach it
+ *   verbatim. The dispatcher pins this snapshot onto WorkflowRun.eventPayload
+ *   and the runner reads from it (see dispatcher.ts M1 comment). A fresh DB
+ *   read here would race: between the publisher commit and this subscriber
+ *   running, a concurrent UNRELATED mutation (a teammate's assign happening
+ *   at the same instant as a customer's reopen, say) could land on the row
+ *   and leak into the snapshot the workflow run sees — even though it has
+ *   nothing to do with the event that triggered this run.
  *
  * `dispatch()` already swallows its own errors and applies retry-with-backoff
  * around the Redis enqueue, so this subscriber doesn't need extra guarding.
@@ -33,17 +46,14 @@
 
 import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
 
-import { db } from "@/lib/db";
 import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { dispatch } from "@/lib/workflows/dispatcher";
-import {
-  workflowConversationSnapshot,
-  type WorkflowConversationSnapshot,
-} from "@/lib/workflows/events";
 
 export function registerWorkflowDispatchSubscribers(): () => void {
-  // WORKFLOW_DISPATCH tier — runs after analytics so the snapshot reads the
-  // counters/closedAt analytics just wrote.
+  // WORKFLOW_DISPATCH tier — runs after analytics. Conversation snapshots
+  // come from the EVENT PAYLOAD (publisher-built, post-CAS, with predicted
+  // analytics writes baked in), not a fresh DB read. See the file-level
+  // doc-comment for the race rationale.
   const offs: Array<() => void> = [];
   const subscribe = <K extends DomainEventType>(
     type: K,
@@ -72,10 +82,9 @@ export function registerWorkflowDispatchSubscribers(): () => void {
   subscribe("conversation.assigned", async (e) => {
     if (e.silent) return; // workflow-step driven; skip chain dispatch
     if (e.previousAssignedUserId === e.newAssignedUserId) return;
-    const fresh = await loadFreshConversationSnapshot(e.conversationId, e.teamId);
-    if (!fresh) return;
+    // Snapshot rides on the event payload — see file-level doc-comment.
     await dispatch(e.teamId, "conversation_assigned", {
-      conversation: fresh,
+      conversation: e.conversation,
       contact: e.contact,
       assignedUser: e.assignedUser
         ? { id: e.assignedUser.id, name: e.assignedUser.name, email: e.assignedUser.email }
@@ -88,11 +97,11 @@ export function registerWorkflowDispatchSubscribers(): () => void {
   subscribe("conversation.status_changed", async (e) => {
     if (e.silent) return; // workflow-step driven; skip chain dispatch
     if (e.previousStatus === e.newStatus) return;
-    const fresh = await loadFreshConversationSnapshot(e.conversationId, e.teamId);
-    if (!fresh) return;
+    // Snapshot rides on the event payload — see file-level doc-comment.
+    const snapshot = e.conversation;
 
     await dispatch(e.teamId, "conversation_status_changed", {
-      conversation: fresh,
+      conversation: snapshot,
       contact: e.contact,
       previousStatus: e.previousStatus,
       newStatus: e.newStatus,
@@ -100,19 +109,19 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     });
     if (e.newStatus === "open") {
       await dispatch(e.teamId, "conversation_opened", {
-        conversation: fresh,
+        conversation: snapshot,
         contact: e.contact,
         previousStatus: e.previousStatus,
         openedByUserId: e.changedByUserId,
       });
     } else if (e.newStatus === "closed") {
       await dispatch(e.teamId, "conversation_closed", {
-        conversation: fresh,
+        conversation: snapshot,
         contact: e.contact,
         previousStatus: e.previousStatus,
         closedByUserId: e.changedByUserId,
-        closedCategory: fresh.closedCategory,
-        closedSummary: fresh.closedSummary,
+        closedCategory: snapshot.closedCategory,
+        closedSummary: snapshot.closedSummary,
       });
     }
   });
@@ -194,20 +203,4 @@ export function registerWorkflowDispatchSubscribers(): () => void {
   return () => {
     for (const off of offs) off();
   };
-}
-
-/**
- * Re-read the conversation row after analytics has committed and return a
- * fresh snapshot. Returns null if the row vanished between publish and
- * dispatch (very rare — only on a concurrent delete).
- */
-async function loadFreshConversationSnapshot(
-  conversationId: string,
-  teamId: string,
-): Promise<WorkflowConversationSnapshot | null> {
-  const fresh = await db.conversation.findFirst({
-    where: { id: conversationId, teamId },
-  });
-  if (!fresh) return null;
-  return workflowConversationSnapshot(fresh);
 }

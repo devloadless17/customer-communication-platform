@@ -170,6 +170,16 @@ export interface ConversationAssignedEvent {
   /** Contact attached to the conversation, for workflow snapshot. */
   contact: WorkflowContactSnapshot;
   /**
+   * Post-mutation conversation snapshot captured at publish time, with the
+   * analytics-driven fields (assignmentsCount / lastAssignedAt /
+   * firstAssignedAt(+By)) predicted from the event-derived delta. Workflow
+   * dispatch reads from THIS snapshot rather than a fresh DB read so a
+   * concurrent unrelated mutation landing between publish and dispatch can't
+   * leak into the snapshot the workflow run was supposed to see. See M1
+   * dispatcher contract in lib/workflows/dispatcher.ts.
+   */
+  conversation: WorkflowConversationSnapshot;
+  /**
    * `silent` = "this mutation is internal/cascaded — skip downstream
    * REACTIONS." Two subscribers honor it:
    *   - workflow-dispatch: skips chain-triggering, so a step inside workflow
@@ -196,6 +206,16 @@ export interface ConversationStatusChangedEvent {
   /** Set on /v1 external-API mutations for audit attribution. */
   changedByApiKeyId?: string | null;
   contact: WorkflowContactSnapshot;
+  /**
+   * Post-mutation conversation snapshot captured at publish time, with the
+   * analytics-driven fields (closedAt / closedByUserId / closedCategory /
+   * closedSummary on close; nulled on reopen) predicted from the event-derived
+   * delta. Workflow dispatch reads from THIS snapshot rather than a fresh DB
+   * read so a concurrent unrelated mutation landing between publish and
+   * dispatch can't leak into the snapshot the workflow run was supposed to
+   * see. See M1 dispatcher contract in lib/workflows/dispatcher.ts.
+   */
+  conversation: WorkflowConversationSnapshot;
   /**
    * Step-driven closures (workflow `close_conversation` config) can carry
    * a structured close category + free-text summary. The analytics

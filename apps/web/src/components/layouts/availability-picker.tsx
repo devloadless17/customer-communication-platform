@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
@@ -20,15 +20,19 @@ import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
  * Three concerns:
  *   1. Seed the displayed status + note from the session-provided `currentUser`
  *      so the first paint is correct without a fetch.
- *   2. Mutate via PATCH /api/users/me/availability. Fully optimistic — the UI
- *      flips immediately on click and the local socket dispatch fans the
- *      change to every open surface; the server PATCH is fire-and-forget at
- *      the UI layer (rollback fires another local frame on failure). No
- *      "Saving…" affordance, no disabled buttons mid-flight; that produced
- *      a visible dropdown re-layout / jump on every click.
+ *   2. Mutate via PATCH /api/users/me/availability.
+ *      - Status is optimistic: the UI flips immediately on click and a local
+ *        socket dispatch fans the change to every open surface; the PATCH is
+ *        fire-and-forget (rollback fires another local frame on failure). No
+ *        disabled-mid-flight buttons — that produced a dropdown re-layout jump.
+ *      - The note is EXPLICITLY saved (Save button / Enter / blur), with a
+ *        visible Saving…→Saved cue. The old silent 600ms debounce dropped the
+ *        write whenever the dropdown closed inside the window (it unmounts and
+ *        the timer was cancelled) — i.e. the normal "type then click away"
+ *        flow never saved, with no affordance telling the user how. An explicit
+ *        save fixes both the lost write and the discoverability.
  *   3. Subscribe to `user:availability:updated` for THIS user so a change made
- *      on another device / tab keeps every open client in sync without a
- *      page reload.
+ *      on another device / tab keeps every open client in sync without reload.
  *
  * Capability gating happens at the parent — when `disabled` is true the picker
  * renders read-only (status visible, no controls). The server endpoint also
@@ -42,20 +46,34 @@ export function AvailabilityPicker({
   currentUser: User;
   disabled: boolean;
 }) {
+  const initialMessage = currentUser.availabilityMessage ?? "";
   const [status, setStatus] = useState<UserAvailabilityStatus>(
     resolveAvailabilityStatus(currentUser.availabilityStatus),
   );
-  const [message, setMessage] = useState<string>(currentUser.availabilityMessage ?? "");
+  // `message` is the live input; `committedMessage` is the last server-known
+  // value. `dirty` (their inequality) drives the Save affordance.
+  const [message, setMessage] = useState<string>(initialMessage);
+  const [committedMessage, setCommittedMessage] = useState<string>(initialMessage);
+  const [noteState, setNoteState] = useState<"idle" | "saving" | "saved">("idle");
   const [error, setError] = useState<string | null>(null);
-  // Debounce the message PATCH so a typing burst doesn't fire one POST per
-  // keystroke; the status buttons commit immediately.
-  const messageCommitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Track the last server-known message so we only PATCH when something
-  // actually changed (otherwise tabbing through the input fires a no-op req).
-  const lastCommittedMessageRef = useRef<string>(currentUser.availabilityMessage ?? "");
+
+  const dirty = message !== committedMessage;
+
+  // Refs mirror state for the unmount flush (the cleanup closes over stale
+  // state otherwise) and for synchronous reads inside async handlers.
+  const messageRef = useRef(message);
+  const committedRef = useRef(committedMessage);
+  const disabledRef = useRef(disabled);
+  const savingRef = useRef(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  messageRef.current = message;
+  committedRef.current = committedMessage;
+  disabledRef.current = disabled;
 
   // Cross-device sync: when our own user's availability changes elsewhere,
-  // mirror it here so the picker doesn't drift.
+  // mirror it here so the picker doesn't drift. Never clobber an unsaved local
+  // edit — only adopt the incoming text into the live input when the user
+  // isn't mid-edit; always update the committed baseline so `dirty` is correct.
   useEffect(() => {
     const socket = getClientSocket();
     const handler: Parameters<
@@ -63,12 +81,11 @@ export function AvailabilityPicker({
     >[1] = (payload) => {
       if (payload.userId !== currentUser.id) return;
       setStatus(payload.status);
-      if (payload.message === null) {
-        setMessage("");
-        lastCommittedMessageRef.current = "";
-      } else if (typeof payload.message === "string") {
-        setMessage(payload.message);
-        lastCommittedMessageRef.current = payload.message;
+      if (payload.message === null || typeof payload.message === "string") {
+        const incoming = payload.message ?? "";
+        setMessage((curr) => (curr === committedRef.current ? incoming : curr));
+        setCommittedMessage(incoming);
+        committedRef.current = incoming;
       }
     };
     socket.on("user:availability:updated", handler);
@@ -77,96 +94,123 @@ export function AvailabilityPicker({
     };
   }, [currentUser.id]);
 
-  // Cancel any pending debounced commit on unmount.
+  // Unmount flush — the menu can close before an explicit save (the dropdown
+  // unmounts this component). If the note is still unsaved and no save is
+  // already in flight, persist it fire-and-forget so typing is never lost; the
+  // server fans the change back to every open surface.
   useEffect(() => {
     return () => {
-      if (messageCommitRef.current !== null) {
-        clearTimeout(messageCommitRef.current);
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+      const latest = messageRef.current;
+      if (!disabledRef.current && !savingRef.current && latest !== committedRef.current) {
+        void apiFetch("/api/users/me/availability", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: latest === "" ? null : latest }),
+        }).catch(() => {});
       }
     };
   }, []);
 
-  async function commit(
-    nextStatus: UserAvailabilityStatus | undefined,
-    nextMessage: string | null | undefined,
-  ): Promise<void> {
-    if (disabled) return;
+  async function commitStatus(next: UserAvailabilityStatus): Promise<void> {
+    if (disabled || next === status) return;
     setError(null);
-    const prevStatus = status;
-    const prevMessage = lastCommittedMessageRef.current;
-    // Optimistic local state + dispatch — sidebar, viewer pill, user menu
-    // all flip in the same frame as the click. Server fanout will land
-    // moments later with the same payload; reducers' identity-bail keeps
-    // the second pass invisible.
-    if (nextStatus !== undefined) setStatus(nextStatus);
-    if (nextMessage !== undefined) {
-      const committed = nextMessage === null ? "" : nextMessage;
-      setMessage(committed);
-      lastCommittedMessageRef.current = committed;
-    }
-    if (nextStatus !== undefined || nextMessage !== undefined) {
-      const effectiveStatus = nextStatus ?? prevStatus;
-      const effectiveMessage =
-        nextMessage === undefined ? prevMessage : nextMessage ?? "";
-      dispatchLocalSocketEvent("user:availability:updated", {
-        teamId: currentUser.teamId,
-        userId: currentUser.id,
-        status: effectiveStatus,
-        message: nextMessage === undefined ? undefined : effectiveMessage || null,
-      });
-    }
+    const prev = status;
+    // Optimistic local state + dispatch — sidebar, viewer pill, user menu all
+    // flip in the same frame as the click. Server fanout lands moments later
+    // with the same payload; reducers' identity-bail keeps the echo invisible.
+    setStatus(next);
+    dispatchLocalSocketEvent("user:availability:updated", {
+      teamId: currentUser.teamId,
+      userId: currentUser.id,
+      status: next,
+      message: undefined,
+    });
     try {
-      const body: Record<string, unknown> = {};
-      if (nextStatus !== undefined) body.status = nextStatus;
-      if (nextMessage !== undefined) {
-        body.message = nextMessage === null || nextMessage === "" ? null : nextMessage;
-      }
       const res = await apiFetch("/api/users/me/availability", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ status: next }),
       });
       if (!res.ok) {
         const detail = await res.text().catch(() => "");
         setError(res.status === 403 ? "Not allowed" : detail || "Couldn't update");
-        // Roll back the optimistic state + dispatch.
-        setStatus(prevStatus);
-        setMessage(prevMessage);
-        lastCommittedMessageRef.current = prevMessage;
+        setStatus(prev);
         dispatchLocalSocketEvent("user:availability:updated", {
           teamId: currentUser.teamId,
           userId: currentUser.id,
-          status: prevStatus,
-          message: prevMessage || null,
+          status: prev,
+          message: undefined,
         });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Network error");
-      setStatus(prevStatus);
-      setMessage(prevMessage);
-      lastCommittedMessageRef.current = prevMessage;
+      setStatus(prev);
       dispatchLocalSocketEvent("user:availability:updated", {
         teamId: currentUser.teamId,
         userId: currentUser.id,
-        status: prevStatus,
-        message: prevMessage || null,
+        status: prev,
+        message: undefined,
       });
     }
   }
 
-  function onPickStatus(next: UserAvailabilityStatus): void {
-    if (next === status) return;
-    void commit(next, undefined);
+  async function saveNote(): Promise<void> {
+    // Bail when there's nothing to save or a save is already running — so the
+    // blur backstop + a Save-button click (blur fires first) don't double-PATCH.
+    if (disabled || savingRef.current || messageRef.current === committedRef.current) {
+      return;
+    }
+    const target = messageRef.current;
+    savingRef.current = true;
+    setError(null);
+    setNoteState("saving");
+    try {
+      const res = await apiFetch("/api/users/me/availability", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: target === "" ? null : target }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        setError(res.status === 403 ? "Not allowed" : detail || "Couldn't save");
+        setNoteState("idle");
+        return;
+      }
+      setCommittedMessage(target);
+      committedRef.current = target;
+      dispatchLocalSocketEvent("user:availability:updated", {
+        teamId: currentUser.teamId,
+        userId: currentUser.id,
+        status,
+        message: target === "" ? null : target,
+      });
+      setNoteState("saved");
+      if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => {
+        savedTimerRef.current = null;
+        setNoteState("idle");
+      }, 1600);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error");
+      setNoteState("idle");
+    } finally {
+      savingRef.current = false;
+    }
   }
 
   function onMessageChange(value: string): void {
     setMessage(value);
-    if (messageCommitRef.current !== null) clearTimeout(messageCommitRef.current);
-    messageCommitRef.current = setTimeout(() => {
-      messageCommitRef.current = null;
-      if (value === lastCommittedMessageRef.current) return;
-      void commit(undefined, value || null);
-    }, 600);
+    // Editing after a save should re-reveal the Save button immediately rather
+    // than keep showing the lingering "Saved" tick.
+    if (noteState !== "idle") {
+      if (savedTimerRef.current !== null) {
+        clearTimeout(savedTimerRef.current);
+        savedTimerRef.current = null;
+      }
+      setNoteState("idle");
+    }
+    if (error) setError(null);
   }
 
   return (
@@ -182,7 +226,7 @@ export function AvailabilityPicker({
               key={s}
               type="button"
               disabled={disabled}
-              onClick={() => onPickStatus(s)}
+              onClick={() => void commitStatus(s)}
               className={cn(
                 "group flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] outline-none transition-[background-color,color] duration-150",
                 active
@@ -218,6 +262,22 @@ export function AvailabilityPicker({
           maxLength={100}
           disabled={disabled}
           onChange={(e) => onMessageChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void saveNote();
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              // Revert to the last saved value, then drop focus.
+              setMessage(committedMessage);
+              if (error) setError(null);
+              e.currentTarget.blur();
+            }
+          }}
+          // Backstop: saving on blur means clicking away from the input (or
+          // closing the menu, which blurs first) persists the note. saveNote()
+          // is a no-op when nothing changed.
+          onBlur={() => void saveNote()}
           placeholder="Add a status note (optional)"
           className={cn(
             "h-8 w-full rounded-md border border-border/60 bg-muted/30 px-2.5 text-[12px] outline-none transition-colors",
@@ -225,9 +285,35 @@ export function AvailabilityPicker({
             disabled && "cursor-not-allowed opacity-60",
           )}
         />
-        <div className="mt-1 flex h-3.5 items-center justify-between px-1 text-[10px] text-muted-foreground/60">
-          <span>{message.length > 0 ? `${message.length}/100` : ""}</span>
-          {error ? <span className="text-destructive">{error}</span> : null}
+        {/* Fixed height so toggling between the char count and the Save button
+            never re-lays-out the dropdown. */}
+        <div className="mt-1 flex h-6 items-center justify-between gap-2 px-1">
+          <span className="text-[10px] tabular-nums text-muted-foreground/60">
+            {message.length > 0 ? `${message.length}/100` : ""}
+          </span>
+          <div className="flex items-center text-[10px]">
+            {error ? (
+              <span className="text-destructive">{error}</span>
+            ) : noteState === "saving" ? (
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <Loader2 className="size-3 animate-spin" />
+                Saving…
+              </span>
+            ) : noteState === "saved" ? (
+              <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-500">
+                <Check className="size-3" />
+                Saved
+              </span>
+            ) : dirty && !disabled ? (
+              <button
+                type="button"
+                onClick={() => void saveNote()}
+                className="inline-flex h-6 cursor-pointer items-center rounded-md bg-foreground px-2.5 text-[11px] font-medium text-background outline-none transition-colors hover:bg-foreground/90 focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                Save
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>

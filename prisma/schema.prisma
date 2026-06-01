@@ -544,6 +544,11 @@ model Contact {
   //   shown on every contact, even when blank).
   // - Keys NOT in the team schema are per-contact extras (one-offs added on
   //   a single contact). Both kinds are string-valued for now.
+  // NOTE: a full-text / tsvector search index over customFields VALUES is
+  // intentionally NOT added — only the jsonb_path_ops GIN below for exact-key
+  // lookups. Adding one now bloats every contact write for zero current
+  // benefit; revisit only past ~50k contacts/team when value-substring search
+  // becomes a felt need. Don't add preemptively.
   customFields      Json          @default("{}")
   // Customer-lifecycle stage. Per-team configurable list (managed in
   // /settings/stages). Defaulted to the team's `isDefault` stage at create

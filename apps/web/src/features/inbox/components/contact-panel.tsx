@@ -68,6 +68,24 @@ const STATUS_LABEL: Record<ConversationStatus, string> = {
   closed: "Closed",
 };
 
+/**
+ * Shape of every editable contact field tracked by the panel. Used to type
+ * `editableRef`, `serverSnapshotRef`, and `pendingRemote` so adding a new
+ * editable field fails at the type checker if any one of those sync points is
+ * missed. See the comment over `editableRef` for the full sync-point list.
+ */
+type EditableState = {
+  name: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  location: string;
+  language: string;
+  country: string;
+  customFields: Record<string, string>;
+  tagIds: string[];
+};
+
 /** Shallow string-record equality used to compare customField maps. */
 function shallowJsonEqual(
   a: Record<string, string>,
@@ -325,7 +343,7 @@ function ContactPanelImpl({
   // snapshot is "dirty." On a teammate update we use this to decide between:
   //   - silent live-apply  (no dirty fields → no conflict)
   //   - banner + park       (dirty fields the teammate's update would change)
-  const serverSnapshotRef = useRef({
+  const serverSnapshotRef = useRef<EditableState>({
     name: contact.name,
     firstName: contact.firstName ?? "",
     lastName: contact.lastName ?? "",
@@ -368,7 +386,15 @@ function ContactPanelImpl({
   // 2026-05-26 pre-deploy audit) — wasteful closure allocation per
   // character on a hot path. Refs aren't reactive, so writing one per
   // render is cheap; the listener stays bound from mount to unmount.
-  const editableRef = useRef({
+  //
+  // EditableState explicitly enumerates every editable field so adding a
+  // new one is a type error at the binding sites below — without the
+  // explicit type, a forgotten field silently slips out of the dirty-check
+  // and the conflict-detection effect. Sync points to update together when
+  // extending: this ref, serverSnapshotRef, both dirty checks in the
+  // contact:updated / contacts:bulk_updated handlers, pendingRemote state,
+  // and the re-sync useEffect on contact.id change.
+  const editableRef = useRef<EditableState>({
     name,
     firstName,
     lastName,
@@ -395,17 +421,7 @@ function ContactPanelImpl({
   // socket event would overwrite. Cleared on Reload (apply the teammate's
   // changes) or Dismiss (keep mine — server already has the teammate's
   // values, our save will overwrite them which matches last-write-wins).
-  const [pendingRemote, setPendingRemote] = useState<{
-    name: string;
-    firstName: string;
-    lastName: string;
-    email: string;
-    location: string;
-    language: string;
-    country: string;
-    customFields: Record<string, string>;
-    tagIds: string[];
-  } | null>(null);
+  const [pendingRemote, setPendingRemote] = useState<EditableState | null>(null);
 
   // Stable ref mirror of softRefresh — useSoftRefresh returns a fresh fn each
   // render, listing it as an effect dep would also force a re-bind per render.

@@ -1,6 +1,7 @@
 "use client";
 
-import { memo } from "react";
+import { memo, useRef } from "react";
+import { motion } from "framer-motion";
 import {
   ArrowRightLeft,
   CircleDot,
@@ -134,25 +135,51 @@ function describe(e: ConversationActivityEvent): {
   }
 }
 
+// A pill younger than this when it first renders is treated as "arrived live"
+// and gets the grow+fade entrance; anything older (the batch already present
+// when a thread opens, including the SSR first paint) renders at full height
+// with no tween — so historical pills never flush-animate on mount and never
+// ship a collapsed height:0 in SSR HTML.
+const ACTIVITY_ENTRANCE_WINDOW_MS = 4_000;
+
 function ActivityEntryImpl({ event }: { event: ConversationActivityEvent }) {
+  // Decided once at mount and held stable across re-renders AND the
+  // optimistic→server reconcile — the merge keeps the pill's React key stable,
+  // so this node is updated in place (never remounted) and the entrance plays
+  // exactly once for a genuinely-new pill.
+  const animateIn = useRef(
+    Date.now() - new Date(event.at).getTime() < ACTIVITY_ENTRANCE_WINDOW_MS,
+  ).current;
   const desc = describe(event);
   if (!desc) return null;
   const Icon = desc.icon;
   return (
-    <div className="my-1 flex w-full justify-center px-4">
-      <div className="inline-flex max-w-2xl items-center gap-1 text-[10px] leading-tight text-muted-foreground">
-        <Icon className="size-2.5 shrink-0 opacity-70" />
-        <span className="wrap-break-word [&>b]:font-medium [&>b]:text-foreground/80 [&>i]:not-italic [&>i]:opacity-70">
-          {desc.text}
-        </span>
-        <span className="opacity-50">·</span>
-        <LocalTime
-          iso={event.at}
-          format="messageTime"
-          className="shrink-0 tabular-nums opacity-70"
-        />
+    <motion.div
+      // Grow height 0→auto + fade so the timeline slides up around the new line
+      // instead of snapping: while pinned to the bottom, the chat-scroll
+      // ResizeObserver re-pins each frame, turning the height growth into a
+      // smooth upward slide. A historical pill uses `initial={false}` → natural
+      // height, no tween, no collapsed height:0 in the SSR output.
+      initial={animateIn ? { height: 0, opacity: 0 } : false}
+      animate={{ height: "auto", opacity: 1 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
+      style={{ overflow: "hidden" }}
+    >
+      <div className="my-1 flex w-full justify-center px-4">
+        <div className="inline-flex max-w-2xl items-center gap-1 text-[10px] leading-tight text-muted-foreground">
+          <Icon className="size-2.5 shrink-0 opacity-70" />
+          <span className="wrap-break-word [&>b]:font-medium [&>b]:text-foreground/80 [&>i]:not-italic [&>i]:opacity-70">
+            {desc.text}
+          </span>
+          <span className="opacity-50">·</span>
+          <LocalTime
+            iso={event.at}
+            format="messageTime"
+            className="shrink-0 tabular-nums opacity-70"
+          />
+        </div>
       </div>
-    </div>
+    </motion.div>
   );
 }
 

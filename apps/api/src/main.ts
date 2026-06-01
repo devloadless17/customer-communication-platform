@@ -269,6 +269,14 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   }
 
+  // NOTE: CORS preflight (OPTIONS) responses are emitted by enableCors BEFORE
+  // any guard runs — the SessionGuard / RateLimitGuard / ApiKeyGuard chain is
+  // skipped for OPTIONS by design. Today this is harmless because Caddy makes
+  // web+api same-origin in prod (no preflight ever sent) and dev only allows
+  // localhost:3000. If/when api moves to a separate domain in prod (or a
+  // second trusted Origin is added), revisit: a multi-domain deploy needs
+  // either an explicit OPTIONS handler that runs the rate-limit guard, or
+  // an origin allow-list narrow enough that preflight bypass is moot.
   const productionOrigin = process.env.APP_PUBLIC_URL;
   app.enableCors({
     origin:
@@ -332,12 +340,18 @@ async function bootstrap(): Promise<void> {
   //   5. process.exit(0)            — clean exit before systemd's
   //                                    TimeoutStopSec=120 hard-kills us
   //
-  // `once()` so a repeated SIGTERM (e.g., from impatient ops) doesn't
-  // re-enter the shutdown promise and double-fire app.close().
+  // `process.on` (not `once`) so a repeated SIGTERM (e.g., from impatient
+  // ops) is OBSERVED — the shuttingDown flag still prevents re-entry, but
+  // the second signal gets a log line instead of silent swallow. Without
+  // this, an operator who SIGTERMs twice has no way to tell whether the
+  // first signal landed.
   const shutdownLogger = new Logger("Shutdown");
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      shutdownLogger.warn(`${signal} received again — shutdown already in progress`);
+      return;
+    }
     shuttingDown = true;
     shutdownLogger.log(`${signal} received — starting graceful drain`);
 
@@ -366,8 +380,8 @@ async function bootstrap(): Promise<void> {
     process.exit(0);
   };
 
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
-  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 
   const logger = new Logger("Bootstrap");
   logger.log(`NestJS API listening on http://${host}:${port}`);

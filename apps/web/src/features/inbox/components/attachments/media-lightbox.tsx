@@ -184,6 +184,12 @@ export function MediaLightbox({
               transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
             }}
             draggable={false}
+            // `decoding=async` decodes off the main thread so the lightbox open
+            // animation doesn't stutter on large images; `fetchpriority=high`
+            // jumps the queue past any background gallery thumbnails still
+            // streaming in concurrently. Mirrors the inbox MediaBlock Lightbox.
+            decoding="async"
+            fetchPriority="high"
           />
         )}
         {isVideo && (

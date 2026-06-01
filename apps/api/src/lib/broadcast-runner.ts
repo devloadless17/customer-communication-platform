@@ -28,8 +28,28 @@ import {
   resolveBinding,
   type VariableBindings,
 } from "@ccp/shared/template-bindings";
-import { resolveFieldTokens } from "@ccp/shared/field-tokens";
+import { extractFieldTokens, resolveFieldTokens } from "@ccp/shared/field-tokens";
 import type { Message } from "@ccp/shared/types";
+
+/**
+ * IN-MEMORY PER-BROADCAST STATE — five Maps keyed by broadcastId hold runner
+ * scratch state across recipients. Normal completion (`runBroadcast`'s tail
+ * block + the throttle drain in `processOneRecipient` + `fail()`) deletes
+ * their entries; a process crash leaves them stale. The boot reconciler
+ * (`reconcileOrphanedBroadcasts`) is the resume path; the
+ * `pruneBroadcastInMemoryStateForTerminalRows` helper called from
+ * `BroadcastsService.onModuleInit` then clears stale entries belonging to
+ * already-terminal broadcasts so a reused/resumed id can't inherit them.
+ * If you ADD a new per-broadcast Map, register it here AND in
+ * `pruneBroadcastInMemoryStateForTerminalRows`:
+ *
+ *   - STREAK_429            — 429 streak count (per-broadcast)
+ *   - PAUSE_429             — global pause deadline (per-broadcast)
+ *   - inFlightRuns          — top-level runBroadcast promise
+ *   - broadcastTeamSlots    — per-TEAM concurrent-broadcast gate
+ *   - teamRecipientSlots    — per-TEAM concurrent-RECIPIENT gate (lane-level)
+ *   - progressThrottles     — coalesced progress emit state
+ */
 
 /**
  * Every emit in this file goes through the bus (`publish(...)`). Four event
@@ -214,6 +234,114 @@ function releaseBroadcastTeamSlot(teamId: string): void {
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
   if (entry.active === 0) broadcastTeamSlots.delete(teamId);
+}
+
+/**
+ * Per-team RECIPIENT-LEVEL concurrency cap. Sits on top of the per-broadcast
+ * lane pool (SEND_CONCURRENCY) and the per-team broadcast cap above. Without
+ * this, one team running N broadcasts × SEND_CONCURRENCY lanes can call
+ * processOneRecipient on up to N×5 contacts concurrently — enough, when the
+ * api process is also serving REST + Socket.io for OTHER teams, to dominate
+ * the Prisma pool and Meta call budget. The recipient cap bounds the team's
+ * in-flight recipient count regardless of how many of its broadcasts are
+ * running. The global ceiling (sum of lanes across all running broadcasts in
+ * this process) is still SEND_CONCURRENCY × MAX_RUNNING_BROADCASTS; this
+ * cap only ensures no single team can consume more than its share of it.
+ *
+ * Lanes await slot acquisition before pulling the next recipient (rather than
+ * the moveToDelayed pattern BullMQ workers use — the broadcast runner is not a
+ * BullMQ job, so a queued-defer doesn't apply). Wait queue is FIFO so a
+ * starved lane eventually makes progress; a depth-threshold warn log surfaces
+ * a team that's chronically waiting (slow Meta, undersized cap, etc.).
+ *
+ * Tunable via BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY (default 5; matches the
+ * global SEND_CONCURRENCY so a single team running one broadcast is unaffected,
+ * but a second concurrent broadcast can't double its in-flight count).
+ *
+ * Keyed by teamId. Entry is dropped when the team has zero active + zero
+ * waiters so the Map stays bounded with one entry per actively-sending team.
+ */
+function perTeamRecipientConcurrency(): number {
+  const raw = Number.parseInt(
+    process.env.BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY ?? "5",
+    10,
+  );
+  return Number.isFinite(raw) && raw > 0 && raw <= 50 ? raw : 5;
+}
+
+/** Wait queue depth that triggers a structured warn log ("this team is starving"). */
+const RECIPIENT_QUEUE_DEPTH_WARN = 50;
+/** Throttle the warn log so a chronically-starved team doesn't spam stdout. */
+const RECIPIENT_QUEUE_WARN_INTERVAL_MS = 30_000;
+
+interface TeamRecipientSlotState {
+  /** In-flight processOneRecipient calls for this team. */
+  active: number;
+  /** FIFO of resolvers waiting for a slot. */
+  waiters: Array<() => void>;
+  /** Last time we logged a queue-depth warning for this team. */
+  lastWarnAt: number;
+}
+const teamRecipientSlots = new Map<string, TeamRecipientSlotState>();
+
+function getOrCreateRecipientSlotEntry(teamId: string): TeamRecipientSlotState {
+  let entry = teamRecipientSlots.get(teamId);
+  if (!entry) {
+    entry = { active: 0, waiters: [], lastWarnAt: 0 };
+    teamRecipientSlots.set(teamId, entry);
+  }
+  return entry;
+}
+
+/**
+ * Acquire a per-team recipient slot. Resolves synchronously when a slot is
+ * free, or after the lane ahead releases. Pair with `releaseTeamRecipientSlot`
+ * in a `finally` so a thrown recipient doesn't permanently leak a slot.
+ *
+ * Invariant: `active` is incremented exactly once per acquire — either inline
+ * when a slot is immediately free, or by the releasing caller when it hands
+ * the slot to a waiter (slot ownership transfers without `active` ever
+ * dropping below cap, so a concurrent arrival can't observe a stale "free"
+ * slot).
+ */
+async function acquireTeamRecipientSlot(teamId: string): Promise<void> {
+  const cap = perTeamRecipientConcurrency();
+  const entry = getOrCreateRecipientSlotEntry(teamId);
+  if (entry.active < cap) {
+    entry.active += 1;
+    return;
+  }
+  if (entry.waiters.length >= RECIPIENT_QUEUE_DEPTH_WARN) {
+    const now = Date.now();
+    if (now - entry.lastWarnAt > RECIPIENT_QUEUE_WARN_INTERVAL_MS) {
+      entry.lastWarnAt = now;
+      console.warn(
+        `[broadcast] team ${teamId} starving on recipient slots: ${entry.waiters.length} waiter(s), cap=${cap}`,
+      );
+    }
+  }
+  await new Promise<void>((resolve) => {
+    entry.waiters.push(resolve);
+  });
+  // `active` was already incremented by the releasing caller when it
+  // dequeued us — DO NOT bump again here.
+}
+
+function releaseTeamRecipientSlot(teamId: string): void {
+  const entry = teamRecipientSlots.get(teamId);
+  if (!entry) return;
+  const next = entry.waiters.shift();
+  if (next) {
+    // Hand the slot directly to the next waiter — `active` stays at cap so
+    // a concurrent arrival can't sneak in ahead. The waiter resumes on the
+    // microtask queue with the slot already accounted for.
+    next();
+    return;
+  }
+  entry.active = Math.max(0, entry.active - 1);
+  if (entry.active === 0 && entry.waiters.length === 0) {
+    teamRecipientSlots.delete(teamId);
+  }
 }
 
 export function signalShutdown(): void {
@@ -403,12 +531,61 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const PAGE_SIZE = 100;
   const broadcastId_ = broadcast.id; // capture for the refill closure (TS can't
   // narrow `broadcast` through the closure boundary).
+  // L7: customFields is JSONB and can hold arbitrarily large blobs per
+  // contact; loading it on every recipient page when no template variable
+  // references one is pure waste. Detect at run start whether ANY binding
+  // pulls from custom fields OR any literal embeds a `$var.contact.<key>`
+  // token that isn't a builtin contact field. If not, omit customFields
+  // from the recipient select (decision is one const, not branched per
+  // recipient). The token-token check covers the `resolveFieldTokens` pass
+  // that runs on every literal in `resolvePerRecipientVariables` — agents
+  // can hand-type `$var.contact.<custom>` even when the binding is
+  // `manual`. BUILTIN_CONTACT_KEYS mirrors the resolver's allowlist; any
+  // unrecognized contact-namespace token is treated as a custom-field hint.
+  const BUILTIN_CONTACT_TOKEN_KEYS = new Set([
+    "name",
+    "phone",
+    "phoneNumber",
+    "email",
+    "location",
+    "last_inbound_at",
+    "window_state",
+    "stage_name",
+    "tag_names",
+  ]);
+  const bindingsReferenceCustomField =
+    bindings.body.some((b) => b?.source.kind === "contact_custom_field") ||
+    bindings.header?.source.kind === "contact_custom_field";
+  const literalReferencesCustomField = (() => {
+    const literals: string[] = [...variables.body, ...(variables.header ? [variables.header] : [])];
+    for (const text of literals) {
+      if (!text || typeof text !== "string" || !text.includes("$var.")) continue;
+      for (const tok of extractFieldTokens(text)) {
+        const segs = tok.slice("$var.".length).split(".");
+        // Only $var.contact.<key> matters — other namespaces don't hit
+        // customFields. The trailing `[key]` check rejects builtin keys.
+        if (segs[0] === "contact" && segs.length === 2 && !BUILTIN_CONTACT_TOKEN_KEYS.has(segs[1]!)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  })();
+  const needsCustomFields = bindingsReferenceCustomField || literalReferencesCustomField;
+
   // Select only the recipient + contact fields the send path actually reads.
   // Without this, every page drags every Contact column (incl. customFields
   // JSONB) for every recipient — at 10k recipients this dominates the
   // broadcast's DB cost. Keep in sync with resolvePerRecipientVariables +
   // resolveBinding's ContactLike (name/phoneNumber/email/location/customFields).
-  const RECIPIENT_SELECT = {
+  //
+  // L7: customFields is always declared in the TYPE select (so downstream
+  // signatures stay stable) but the RUNTIME select only includes it when a
+  // binding or literal token actually reads a custom field. When omitted at
+  // runtime, the row arrives without customFields populated and we coerce
+  // to `{}` before handing to processOneRecipient (resolveBinding +
+  // resolveFieldTokens both treat a non-object customFields as empty).
+  const RECIPIENT_SELECT_FULL = {
     id: true,
     contactId: true,
     status: true,
@@ -423,11 +600,27 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       },
     },
   } as const;
+  const RECIPIENT_SELECT: typeof RECIPIENT_SELECT_FULL = needsCustomFields
+    ? RECIPIENT_SELECT_FULL
+    : ({
+        id: true,
+        contactId: true,
+        status: true,
+        contact: {
+          select: {
+            id: true,
+            name: true,
+            phoneNumber: true,
+            email: true,
+            location: true,
+          },
+        },
+      } as unknown as typeof RECIPIENT_SELECT_FULL);
 
   type Recipient = Awaited<
     ReturnType<typeof db.broadcastRecipient.findMany<{
       where: { broadcastId: string; status: "queued" };
-      select: typeof RECIPIENT_SELECT;
+      select: typeof RECIPIENT_SELECT_FULL;
       orderBy: { id: "asc" };
       take: typeof PAGE_SIZE;
     }>>
@@ -436,6 +629,19 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   const queue: Recipient[] = [];
   let cursorId: string | undefined;
   let exhausted = false;
+  // M5: same-contact recipient short-circuit. A broadcast can include the
+  // SAME contactId twice (e.g. duplicated rows from manually-merged audiences
+  // we couldn't dedupe perfectly), and with SEND_CONCURRENCY lanes pulling
+  // independently, each lane re-issues conversation.findFirst for that
+  // contact. Cache the resolved conversation (id + status + unreadCount) per
+  // contactId; cleared automatically when this runBroadcast returns (function
+  // scope, not module-global). Race-safe: if the first hit was `closed` and
+  // we reopened, the cached status flips to `pending` so the SECOND hit
+  // doesn't double-publish `broadcast.conversation_reopened`.
+  const conversationCache = new Map<
+    string,
+    { id: string; status: string; unreadCount: number }
+  >();
 
   async function refill(): Promise<void> {
     if (exhausted) return;
@@ -507,16 +713,36 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         }
         const recipient = queue.shift();
         if (!recipient) return;
-        await processOneRecipient(
-          broadcast,
-          recipient,
-          provider,
-          config,
-          bindings,
-          variables,
-          templateBody,
-          pendingBumps,
-        );
+        // L7: customFields may have been omitted from the runtime select.
+        // Coerce to `{}` so processOneRecipient + the resolvers see a
+        // consistent JsonValue shape. (Has zero effect when the field WAS
+        // selected — Prisma either populated it or it's null/undefined and
+        // the resolvers already treat non-object values as empty.)
+        if (recipient.contact && (recipient.contact as { customFields?: unknown }).customFields === undefined) {
+          (recipient.contact as { customFields: Prisma.JsonValue }).customFields = {};
+        }
+        // Per-team recipient-slot gate. Awaits when another team is already at
+        // its cap so a single team's burst can't dominate every lane in the
+        // process — without this, one team running multiple broadcasts could
+        // pin every Meta call slot while others starve. Slot is released in a
+        // `finally` so a thrown recipient (shouldn't happen — processOneRecipient
+        // swallows its errors — but defensive) doesn't leak the slot.
+        await acquireTeamRecipientSlot(broadcast.teamId);
+        try {
+          await processOneRecipient(
+            broadcast,
+            recipient,
+            provider,
+            config,
+            bindings,
+            variables,
+            templateBody,
+            pendingBumps,
+            conversationCache,
+          );
+        } finally {
+          releaseTeamRecipientSlot(broadcast.teamId);
+        }
         if (SEND_GAP_MS > 0) await sleep(SEND_GAP_MS);
       }
     }),
@@ -625,6 +851,9 @@ async function processOneRecipient(
   variables: BroadcastVariables,
   templateBody: string,
   pendingBumps: Set<Promise<unknown>>,
+  // M5 — per-runBroadcast cache; avoids N+1 conversation.findFirst when
+  // the same contact appears multiple times in a single broadcast.
+  conversationCache: Map<string, { id: string; status: string; unreadCount: number }>,
 ): Promise<void> {
   // Capture the optional method once — providers without a template catalog
   // fail the recipient gracefully (vs throwing) so the rest of the broadcast
@@ -649,11 +878,22 @@ async function processOneRecipient(
       // Strict invariant: one contact = one conversation. Reuse the existing
       // row regardless of status; a closed conversation just reopens
       // (→ pending) when a broadcast lands. Matches the webhook ingest path.
-      const existing = await db.conversation.findFirst({
-        where: { teamId: broadcast.teamId, contactId: recipient.contactId },
-        orderBy: { lastMessageAt: "desc" },
-      });
-      let conversation = existing;
+      //
+      // M5: short-circuit on the per-broadcast cache when this contact was
+      // already resolved by a prior lane / recipient. We only need
+      // id/status/unreadCount downstream; status drives the reopen branch
+      // below and the cache entry is kept in sync after a reopen.
+      const cached = conversationCache.get(recipient.contactId);
+      let conversation: { id: string; status: string; unreadCount: number } | null =
+        cached ?? null;
+      if (!conversation) {
+        const existing = await db.conversation.findFirst({
+          where: { teamId: broadcast.teamId, contactId: recipient.contactId },
+          orderBy: { lastMessageAt: "desc" },
+          select: { id: true, status: true, unreadCount: true },
+        });
+        conversation = existing;
+      }
       if (!conversation) {
         try {
           conversation = await db.conversation.create({
@@ -666,6 +906,7 @@ async function processOneRecipient(
               status: "pending",
               lastMessagePreview: "",
             },
+            select: { id: true, status: true, unreadCount: true },
           });
         } catch (err) {
           // Lost the race for this contact's single conversation (unique
@@ -674,6 +915,7 @@ async function processOneRecipient(
             conversation = await db.conversation.findFirstOrThrow({
               where: { teamId: broadcast.teamId, contactId: recipient.contactId },
               orderBy: { lastMessageAt: "desc" },
+              select: { id: true, status: true, unreadCount: true },
             });
           } else throw err;
         }
@@ -681,6 +923,7 @@ async function processOneRecipient(
         conversation = await db.conversation.update({
           where: { id: conversation.id },
           data: { status: "pending" },
+          select: { id: true, status: true, unreadCount: true },
         });
         await publish({
           type: "broadcast.conversation_reopened",
@@ -691,6 +934,14 @@ async function processOneRecipient(
       }
       conversationId = conversation.id;
       conversationUnreadCount = conversation.unreadCount;
+      // M5 — record / refresh the cache. Cache the POST-reopen state so the
+      // next recipient sharing this contactId doesn't re-fire the
+      // `broadcast.conversation_reopened` publish.
+      conversationCache.set(recipient.contactId, {
+        id: conversation.id,
+        status: conversation.status,
+        unreadCount: conversation.unreadCount,
+      });
     } catch (err) {
       await markRecipientFailed(recipient.id, errorDetail(err));
       bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
@@ -1262,6 +1513,54 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     // setImmediate via its own mechanics. We don't await so onModuleInit
     // returns quickly.
     startBroadcast(row.id);
+  }
+}
+
+/**
+ * Crash-recovery for the in-memory state Maps documented at the top of this
+ * file. A process that crashed mid-broadcast can leave STREAK_429 / PAUSE_429
+ * / inFlightRuns / progressThrottles entries pinned to a broadcastId that is
+ * now in a terminal status — and a reused-or-resumed broadcastId would then
+ * inherit a stale 60s 429 pause, mysterious slowdown, etc. Run this AFTER
+ * `reconcileOrphanedBroadcasts` so the only ids we encounter as terminal are
+ * the ones we expect (running/paused have been demoted/resumed by that point).
+ *
+ * Cross-team scope: every entry's key is a broadcast id, so a single DB scan
+ * per process is sufficient. Pulling only ids minimizes the query cost.
+ */
+export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void> {
+  // Anything NOT in (queued, running, paused, scheduled) is terminal from the
+  // runner's perspective; scheduled is also "no in-memory state yet" so we
+  // can safely include it in the prune set. We instead query the inverse —
+  // terminal statuses — so the index hits a known small set.
+  const terminal = await db.broadcast.findMany({
+    where: { status: { in: ["completed", "failed", "canceled"] } },
+    select: { id: true },
+  });
+  if (terminal.length === 0) return;
+  let cleared = 0;
+  for (const row of terminal) {
+    if (STREAK_429.delete(row.id)) cleared++;
+    if (PAUSE_429.delete(row.id)) cleared++;
+    if (inFlightRuns.delete(row.id)) cleared++;
+    const throttle = progressThrottles.get(row.id);
+    if (throttle) {
+      if (throttle.pendingTimer) clearTimeout(throttle.pendingTimer);
+      progressThrottles.delete(row.id);
+      cleared++;
+    }
+    // broadcastTeamSlots + teamRecipientSlots are keyed by teamId, not
+    // broadcastId — neither is pruned per-row here. A truly stuck entry would
+    // only happen if a runner crashed BETWEEN acquire and the release in
+    // `finally`, leaving `active` artificially high. The boot path
+    // reconstructs lane state from DB rows and re-fires startBroadcast, which
+    // re-acquires slots; old entries from the dead process are not visible to
+    // the new one (Maps live in process memory).
+  }
+  if (cleared > 0) {
+    console.log(
+      `[broadcast-reconciler] pruned ${cleared} stale in-memory state entr${cleared === 1 ? "y" : "ies"} for terminal broadcasts`,
+    );
   }
 }
 

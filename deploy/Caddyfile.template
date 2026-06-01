@@ -12,6 +12,21 @@
 # changes belong in this template, committed to git.
 #
 # -----------------------------------------------------------------------------
+# Section guide (for quick orientation when editing)
+# -----------------------------------------------------------------------------
+#
+#   - Global options block         → ACME contact + explicit HTTP/3 protocols
+#   - Compression (`encode`)       → zstd → br → gzip, scoped OFF for /api/*
+#                                    (small JSON bodies aren't worth the CPU)
+#   - Security headers             → HSTS, nosniff, X-Frame-Options SAMEORIGIN,
+#                                    Referrer-Policy, Permissions-Policy.
+#                                    No CSP yet — would need to thread the
+#                                    SSR thread-bottom-snap nonce through here.
+#   - Static asset caching         → /_next/static/* hashed by Next at build,
+#                                    safe for 1-year immutable Cache-Control.
+#   - Routing rules (LOAD-BEARING) → order matters; first match wins.
+#
+# -----------------------------------------------------------------------------
 # Two-upstream topology (post NestJS migration)
 # -----------------------------------------------------------------------------
 #
@@ -35,21 +50,56 @@
 #   raw bytes verbatim to NestJS. This is insurance for Meta subscriptions
 #   still pointing at the old URL; delete that file (and this handle block)
 #   once every subscription has been re-pointed at /webhooks/meta/{teamId}.
+#
+# -----------------------------------------------------------------------------
+# HTTP/3 (QUIC) — operational note
+# -----------------------------------------------------------------------------
+# The `servers { protocols h3 h2 h1 }` directive below makes HTTP/3 explicit
+# (Caddy 2.x auto-enables it when TLS is configured, but stating intent makes
+# the deployment self-documenting). HTTP/3 runs over UDP, so the FIREWALL must
+# allow inbound UDP/443 in addition to TCP/443. If the VPS provider's firewall
+# (UFW / cloud security group) only opens TCP/443, browsers will silently fall
+# back to HTTP/2 and you'll never know HTTP/3 isn't actually serving. Verify
+# with `curl --http3 -I https://__DOMAIN__/` after rollout or check the
+# `Alt-Svc` response header advertising `h3=":443"` on an HTTP/2 response.
 
 {
 	# ACME contact email. Let's Encrypt mails this address on renewal failure
 	# and ~30 days before expiry. Use a real inbox — these are the warnings
 	# you want before the cert silently expires.
 	email __ADMIN_EMAIL__
+
+	# Explicit protocol list. h3 (HTTP/3 over QUIC/UDP) first so clients that
+	# advertise support via Alt-Svc upgrade on next request; h2/h1 fallback
+	# for older clients. Caddy already does this implicitly when TLS is
+	# configured, but writing it down means a future reader doesn't have to
+	# infer from the absence of a directive.
+	servers {
+		protocols h3 h2 h1
+	}
 }
 
 __DOMAIN__ {
 	# Auto-HTTPS — Caddy provisions and renews via Let's Encrypt with no
 	# config. HTTP requests get a 308 redirect to HTTPS automatically.
 
-	# Compression for HTML / JSON / JS. Static assets are already content-
-	# encoded by Next; this is for API responses + HTML.
-	encode zstd gzip
+	# Compression for HTML / JS / RSC payloads. Order in the directive is
+	# the negotiation preference: Caddy picks the FIRST encoding the client's
+	# `Accept-Encoding` advertises, so zstd > br > gzip. Brotli costs more
+	# CPU than gzip on the encode side but Caddy 2.x's `br` encoder is
+	# stream-based + safe to enable for dynamic responses at default level.
+	#
+	# Scoped OFF for /api/* — the api upstream returns mostly small JSON
+	# bodies (a few hundred bytes typical), where compression CPU + the
+	# extra header bytes outweigh transfer savings. Socket.io frames ride
+	# /api/socket/* and stay uncompressed (permessage-deflate is negotiated
+	# end-to-end between the browser and the Socket.io gateway, not by the
+	# proxy). The default route (RSC pages, /_next/*, HTML, JS chunks) is
+	# where compression actually pays off.
+	@compressible {
+		not path /api/*
+	}
+	encode @compressible zstd br gzip
 
 	# Hardening headers complement the ones next.config.ts sets — Caddy
 	# overrides anything the app emits, so keep these aligned with
@@ -61,7 +111,11 @@ __DOMAIN__ {
 		# subdomains can serve HTTPS.
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
+		# SAMEORIGIN (not DENY) so we retain the option to embed in our
+		# own iframes (admin previews, OAuth popups, etc.) without
+		# touching this config. Modern equivalent is the CSP
+		# frame-ancestors directive — when CSP lands, this can go.
+		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# microphone=(self) — voice notes in the inbox composer need
 		# getUserMedia. Empty allowlist `()` policy-blocks even same-
@@ -70,6 +124,19 @@ __DOMAIN__ {
 		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		-Server
 	}
+
+	# Long-lived cache for hashed Next.js static assets. The build embeds a
+	# content hash in every filename under /_next/static/* (e.g.
+	# /_next/static/chunks/main-abc123.js), so a deploy that changes a chunk
+	# changes the URL — `immutable` is therefore safe: browsers will never
+	# refetch a given URL, and the new URL is fetched on the next page load.
+	# `public` lets shared caches (CDN, ISP) store the response too. This
+	# header is set in addition to whatever Next.js emits because Caddy's
+	# `header` directive overrides on conflict — keep them in sync.
+	@nextStatic {
+		path /_next/static/*
+	}
+	header @nextStatic Cache-Control "public, max-age=31536000, immutable"
 
 	# Access logs to stdout → systemd-journald.
 	log {

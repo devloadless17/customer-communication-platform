@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for the `WorkflowRun` table.
@@ -33,7 +34,8 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes the batched DELETE against other heavy sweepers.
+    await withSweeperMutex("workflow-run-retention", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.workflow-run-retention] ${label} failed`, err);
   } finally {

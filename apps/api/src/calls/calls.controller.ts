@@ -70,6 +70,7 @@ export class CallsController {
   // --- Conversation-scoped ---------------------------------------------------
 
   @Post("api/conversations/:conversationId/call")
+  @HttpCode(200)
   @RequireCapability("calls:make")
   async initiate(
     @CurrentSession() session: ApiSession,
@@ -80,6 +81,7 @@ export class CallsController {
   }
 
   @Post("api/conversations/:conversationId/call-permission")
+  @HttpCode(200)
   @RequireCapability("calls:make")
   async permission(
     @CurrentSession() session: ApiSession,

@@ -50,7 +50,11 @@ import type {
   User,
 } from "@ccp/shared/types";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
-import { workflowContactSnapshot } from "@/lib/workflows/events";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshotAfterAssign,
+  workflowConversationSnapshotAfterStatusChange,
+} from "@/lib/workflows/events";
 
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
@@ -253,13 +257,13 @@ export class MessagesService {
   private autoAssignOnAgentSend(teamId: string, userId: string, conversationId: string): void {
     void (async () => {
       try {
+        // Read the whole row (not a narrow `select`) so we can build a
+        // post-mutation WorkflowConversationSnapshot for the publish without
+        // a second round-trip. The conversation snapshot ships on the event
+        // payload and feeds workflow-dispatch in lieu of a fresh DB read.
         const convo = await this.db.conversation.findFirst({
           where: { id: conversationId, teamId },
-          select: {
-            assignedUserId: true,
-            status: true,
-            contact: { include: { tags: { select: { id: true } } } },
-          },
+          include: { contact: { include: { tags: { select: { id: true } } } } },
         });
         if (!convo) return;
 
@@ -286,6 +290,10 @@ export class MessagesService {
               data: { status: "open" },
             });
             if (result.count === 0) return; // lost the CAS race — someone else changed status/assignee first
+            const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
+              { ...convo, status: "open" },
+              { previousStatus, changedByUserId: userId },
+            );
             await publishInTx(tx, {
               type: "conversation.status_changed",
               teamId,
@@ -294,6 +302,7 @@ export class MessagesService {
               newStatus: "open",
               changedByUserId: userId,
               contact: workflowContactSnapshot(convo.contact),
+              conversation: statusSnapshot,
             });
           });
           return;
@@ -342,6 +351,21 @@ export class MessagesService {
           });
           if (result.count === 0) return; // lost the CAS race — someone else claimed/closed first
 
+          // Snapshots reflect the row state AFTER the CAS update with
+          // predicted analytics writes applied (assignmentsCount++,
+          // lastAssignedAt = now, firstAssignedAt set-once). Workflow-dispatch
+          // reads from these instead of a fresh DB read.
+          const assignedSnapshot = workflowConversationSnapshotAfterAssign(
+            {
+              ...convo,
+              assignedUserId: userId,
+              status: nextStatus,
+              assignedUser: assignee
+                ? { id: assignee.id, name: assignee.name, email: assignee.email }
+                : null,
+            },
+            null,
+          );
           await publishInTx(tx, {
             type: "conversation.assigned",
             teamId,
@@ -351,9 +375,14 @@ export class MessagesService {
             newAssignedUserId: userId,
             changedByUserId: userId,
             contact: workflowContactSnapshot(convo.contact),
+            conversation: assignedSnapshot,
           });
 
           if (statusChanged) {
+            const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
+              { ...convo, status: nextStatus, assignedUserId: userId },
+              { previousStatus, changedByUserId: userId },
+            );
             await publishInTx(tx, {
               type: "conversation.status_changed",
               teamId,
@@ -362,6 +391,7 @@ export class MessagesService {
               newStatus: nextStatus,
               changedByUserId: userId,
               contact: workflowContactSnapshot(convo.contact),
+              conversation: statusSnapshot,
             });
           }
         });
@@ -1646,8 +1676,13 @@ export class MessagesService {
       }
       // Reopen broadcast — see method docstring for the `silent: true`
       // rationale (workflow chain-trigger avoidance; audit + analytics
-      // still fire).
+      // still fire). The snapshot is still required on the event type even
+      // though workflow-dispatch will short-circuit on `silent: true`.
       if (existing?.status === "closed") {
+        const reopenSnapshot = workflowConversationSnapshotAfterStatusChange(
+          { ...conversation, status: "pending" },
+          { previousStatus: "closed", changedByUserId: userId },
+        );
         await this.bus.publish({
           type: "conversation.status_changed",
           teamId,
@@ -1656,6 +1691,7 @@ export class MessagesService {
           newStatus: "pending",
           changedByUserId: userId,
           contact: workflowContactSnapshot(contact),
+          conversation: reopenSnapshot,
           silent: true,
         });
       }

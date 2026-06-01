@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Nightly cleanup of EXPIRED Better Auth rows: `Session` and `Verification`.
@@ -31,7 +32,8 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes auth DELETEs against other heavy sweepers.
+    await withSweeperMutex("auth-cleanup", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.auth-cleanup] ${label} failed`, err);
   } finally {

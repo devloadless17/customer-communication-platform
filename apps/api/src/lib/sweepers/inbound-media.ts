@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Garbage-collect any inbound message row left with `mediaKind` set +
@@ -34,7 +35,10 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes against heavy daily/weekly sweepers. The query here
+    // is small (100-row partial-index scan) so the skip-when-busy semantics
+    // are fine — a missed 60s tick is recovered on the next.
+    await withSweeperMutex("inbound-media", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.inbound-media] ${label} failed`, err);
   } finally {

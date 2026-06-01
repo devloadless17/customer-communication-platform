@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Periodic sweep for the `ApiIdempotencyKey` table.
@@ -36,7 +37,8 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes the batched DELETE against other heavy sweepers.
+    await withSweeperMutex("api-idempotency", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.api-idempotency] ${label} failed`, err);
   } finally {

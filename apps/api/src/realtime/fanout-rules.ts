@@ -136,8 +136,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // SCOPED TO THE CONVERSATION ROOM, not the team room — matches the
+  // `message.status_changed` rule above. Only viewers of THIS thread consume
+  // `message:media:ready` (the live thread hook swaps the shimmer for the
+  // hydrated media bubble); the inbox LIST does not. Team-wide blast would
+  // make every agent receive + parse a frame they immediately discard, and
+  // duplicates the storm pattern fixed for status ticks in audit 2026-05-25 R1.
   "message.media_ready": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "message:media:ready", {
+    emitter.emitToConversation(e.conversationId, "message:media:ready", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,

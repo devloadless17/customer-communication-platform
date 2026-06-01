@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reconciler for the `Contact.lastInboundAt` denormalization.
@@ -34,7 +35,9 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes against other heavy sweepers + tracks last-completion
+    // so the health log can warn if this reconciler hasn't run in >25h.
+    await withSweeperMutex("contact-drift", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.contact-drift] ${label} failed`, err);
   } finally {

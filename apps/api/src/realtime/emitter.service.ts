@@ -121,14 +121,35 @@ export class RealtimeEmitter {
     this.conversationsViewedByUser = fn;
   }
 
+  // Per-user debounce timers for the viewers re-emit. Multiple rapid
+  // availability changes (rapid "available → busy → away" toggling, or a
+  // workflow that bumps status repeatedly) would otherwise fire one
+  // Promise.all-over-N-conversations per change. Collapsing to one re-emit
+  // is safe: the snapshot is built when the timer fires, so the final
+  // emitted state is the by-then current state (idempotent).
+  private viewersDebounceTimers = new Map<string, NodeJS.Timeout>();
+  private static readonly VIEWERS_DEBOUNCE_MS = 120;
+
   /**
    * Re-emit `conversation:viewers` for every conversation room the user is
    * currently a viewer in. Used by `user.availability_changed` fanout so
    * teammates' "also viewing" pills update in the same frame as the badge
    * — going busy/away/offline removes the user from the pill, going
    * available adds them back. No-op when the user isn't viewing anything.
+   *
+   * Debounced per-user: rapid availability changes coalesce into one re-emit.
    */
-  async emitConversationViewersForUser(userId: string): Promise<void> {
+  emitConversationViewersForUser(userId: string): void {
+    const existing = this.viewersDebounceTimers.get(userId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.viewersDebounceTimers.delete(userId);
+      void this.doEmitConversationViewersForUser(userId);
+    }, RealtimeEmitter.VIEWERS_DEBOUNCE_MS);
+    this.viewersDebounceTimers.set(userId, timer);
+  }
+
+  private async doEmitConversationViewersForUser(userId: string): Promise<void> {
     const io = this.server;
     const conversationsFor = this.conversationsViewedByUser;
     const viewersFor = this.conversationViewersSnapshotter;

@@ -159,38 +159,107 @@ function reconcileOptimisticAgainst(
 const OPTIMISTIC_ACTIVITY_TTL_MS = 5_000;
 
 /**
+ * The only fields that distinguish one pill from another in `describe()`
+ * (activity-entry.tsx). Two events with the same signature render an identical
+ * line, so this is how we pair an optimistic stub to its authoritative server
+ * row without an id (the server assigns a fresh uuid the client can't predict).
+ */
+function activitySignature(e: ConversationActivityEvent): string {
+  switch (e.kind) {
+    case "assigned":
+      return `assigned:${e.assignedToName ?? ""}`;
+    case "status_changed":
+      return `status:${String(e.after?.status ?? "")}`;
+    case "stage_changed":
+      return `stage:${String(e.before?.stageName ?? "")}>${String(e.after?.stageName ?? "")}`;
+    case "tag_added":
+      return `tag+:${String(e.after?.tagName ?? "")}`;
+    case "tag_removed":
+      return `tag-:${String(e.before?.tagName ?? "")}`;
+    default:
+      return e.kind;
+  }
+}
+
+/** Cheap dirty-check so a no-op coalesced GET doesn't churn the timeline. */
+function sameIdSequence(
+  a: ConversationActivityEvent[],
+  b: ConversationActivityEvent[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i]!.id !== b[i]!.id) return false;
+  return true;
+}
+
+// A stub and its authoritative row land within a few hundred ms (the
+// leading/trailing GET); a generous window still pairs them while never
+// matching a much-older identical row (e.g. assign→unassign→re-assign).
+const STUB_MATCH_WINDOW_MS = 120_000;
+
+/**
  * Fold an authoritative server activity-log window over the current events,
- * preserving any optimistic stub the server hasn't caught up to yet.
+ * reconciling any optimistic stub the agent already sees.
  *
  * The leading-edge `refreshActivity` GET can fire BEFORE the audit row is
  * written (audit runs at a lower bus priority than the realtime frame), so a
  * naive "replace events with the server response" would wipe the optimistic
- * pill the agent just saw appear, only for the trailing GET to re-add it — a
- * visible flicker. Instead: take the server rows as truth, then re-append any
- * optimistic stub that is BOTH newer than the newest server row (not yet
- * persisted/returned) AND younger than the TTL. The first condition drops the
- * stub the instant its real row lands; the second is the clock-skew backstop so
- * a stub can never linger as a permanent duplicate.
+ * pill the agent just saw, only for the trailing GET to re-add it — a flicker.
+ *
+ * Instead, pair each stub to its server row by SEMANTIC content + time
+ * proximity (not by id — the server's uuid is unknowable client-side), and when
+ * matched, keep the STUB's id on the server-correct row. That keeps the pill's
+ * React key stable across the reconcile, so the node is updated in place rather
+ * than unmount+remounted — no key-swap remount, no entrance re-fire, no twitch
+ * when two pills reconcile together. Pairing by content (not by comparing
+ * timestamps) also makes the old clock-skew duplicate structurally impossible.
+ *
+ * A stub with no matching row yet (the leading GET raced ahead of the audit
+ * write) stays appended until its row lands or the TTL expires, so the pill
+ * never blinks out and back. Returns the prior array reference unchanged when
+ * the id-sequence is identical, so a no-op GET triggers no re-render.
  */
 function mergeAuthoritativeEvents(
   prev: ConversationWithRefs["events"],
   server: ConversationWithRefs["events"],
 ): ConversationActivityEvent[] {
+  const prevEvents = prev ?? [];
   const serverEvents = server ?? [];
-  const stubs = (prev ?? []).filter((e) => isOptimisticActivityId(e.id));
-  if (stubs.length === 0) return serverEvents;
-  // Newest server row's time — anything optimistic after it is unconfirmed.
-  let newestServerAt = "";
-  for (const e of serverEvents) {
-    if (e.at > newestServerAt) newestServerAt = e.at;
+  const stubs = prevEvents.filter((e) => isOptimisticActivityId(e.id));
+  if (stubs.length === 0) {
+    return sameIdSequence(prevEvents, serverEvents) ? prevEvents : serverEvents;
   }
+
+  const consumed = new Set<string>();
+  const relabeled = serverEvents.map((row) => {
+    const rowAt = new Date(row.at).getTime();
+    const rowSig = activitySignature(row);
+    let best: ConversationActivityEvent | null = null;
+    let bestGap = Infinity;
+    for (const s of stubs) {
+      if (consumed.has(s.id)) continue;
+      if (activitySignature(s) !== rowSig) continue;
+      const gap = Math.abs(new Date(s.at).getTime() - rowAt);
+      if (gap < bestGap && gap <= STUB_MATCH_WINDOW_MS) {
+        best = s;
+        bestGap = gap;
+      }
+    }
+    if (best) {
+      consumed.add(best.id);
+      return { ...row, id: best.id };
+    }
+    return row;
+  });
+
   const cutoff = Date.now() - OPTIMISTIC_ACTIVITY_TTL_MS;
-  const unconfirmed = stubs.filter(
-    (s) => s.at > newestServerAt && new Date(s.at).getTime() >= cutoff,
+  const stillPending = stubs.filter(
+    (s) => !consumed.has(s.id) && new Date(s.at).getTime() >= cutoff,
   );
-  return unconfirmed.length === 0
-    ? serverEvents
-    : [...serverEvents, ...unconfirmed];
+
+  const next = stillPending.length
+    ? [...relabeled, ...stillPending]
+    : relabeled;
+  return sameIdSequence(prevEvents, next) ? prevEvents : next;
 }
 
 export interface ConversationEventsState {
@@ -1133,10 +1202,13 @@ export function useConversationEvents(
           if (!body) return;
           // Drop a late response for a thread we've since left.
           if (dataRef.current.conversation.id !== conversationId) return;
-          setData((prev) => ({
-            ...prev,
-            events: mergeAuthoritativeEvents(prev.events, body.events),
-          }));
+          setData((prev) => {
+            const events = mergeAuthoritativeEvents(prev.events, body.events);
+            // mergeAuthoritativeEvents returns the prior reference when nothing
+            // changed — skip the state write entirely so a coalesced no-op GET
+            // doesn't re-render the timeline.
+            return events === prev.events ? prev : { ...prev, events };
+          });
         })
         .catch(() => {
           // Non-fatal: the next thread open / reconnect refetch carries the

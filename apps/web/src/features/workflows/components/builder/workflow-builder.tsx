@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
@@ -19,12 +20,10 @@ import { apiFetch } from "@/lib/api/client-fetch";
 
 import { StepEditorDrawer } from "./step-editor-drawer";
 import { TriggerEditorDrawer } from "./trigger-editor-drawer";
-import {
-  duplicateStep,
-  insertStepAfter,
-  removeStep,
-  WorkflowCanvas,
-} from "./workflow-canvas";
+// Pure graph helpers — import from the standalone module so this shell does
+// not pull in `@xyflow/react` (the canvas's heavy dep) at module-eval time.
+import { duplicateStep, insertStepAfter, removeStep } from "./graph-mutations";
+import type { WorkflowCanvasProps } from "./workflow-canvas";
 import {
   type BuilderCatalogs,
   type ConditionGroup,
@@ -34,6 +33,25 @@ import {
   TRIGGER_OPTIONS,
   toGroup,
 } from "./types";
+
+// Lazy-load the React Flow canvas — it pulls in `@xyflow/react` (~150 KB
+// gzipped including its CSS) and is the heaviest dep on the workflow route.
+// `ssr: false` because React Flow measures the DOM on mount; SSRing it would
+// only produce a flicker placeholder anyway. The lightweight skeleton below
+// renders the moment the page navigates, so the chrome (header / drawers)
+// shows immediately and the canvas streams in after.
+const WorkflowCanvas = dynamic<WorkflowCanvasProps>(
+  () => import("./workflow-canvas").then((mod) => mod.WorkflowCanvas),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full w-full items-center justify-center bg-muted/20 text-xs text-muted-foreground">
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        Loading canvas...
+      </div>
+    ),
+  },
+);
 
 /**
  * Top-level workflow builder. Layout:

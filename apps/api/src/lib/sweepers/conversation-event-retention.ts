@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for the `ConversationEvent` audit-timeline table.
@@ -44,7 +45,8 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes batched DELETE against other heavy sweepers.
+    await withSweeperMutex("conversation-event-retention", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.conversation-event-retention] ${label} failed`, err);
   } finally {

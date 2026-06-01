@@ -16,31 +16,36 @@ import { persistDispatchedRow } from "@/lib/events/outbox";
  * Routes / ingest publish a `DomainEvent`; subscribers (socket fanout, audit
  * log, analytics, workflow dispatcher, outbound webhooks) react to it.
  *
- * Subscribers run SEQUENTIALLY in registration order. Two downstream
- * subscribers depend on this order:
- *   - `workflow-dispatch` re-reads the conversation row for the
- *     `closedCategory`/`closedSummary`/counters that `analytics` just
- *     bumped (workflow-dispatch.ts:62,78). Parallel dispatch made that
- *     read racy in proportion to analytics' write latency.
- *   - `outbound-webhooks.subscriber` ships partner payloads carrying
- *     post-mutation fields (closedAt, firstResponseAt) — same fields the
- *     analytics subscriber sets.
- * Registration order is:
- *     realtime-fanout → audit → analytics → workflow-dispatch →
- *     web-cache-revalidate → outbound-webhooks
- * (see WorkflowSubscribersService + OutboundWebhooksSubscriber).
+ * Two-tier dispatch (see `runCriticalTier` + `runBackgroundTier`):
  *
- * Cost vs the old `Promise.allSettled` parallel shape: total publish
- * latency = sum of per-subscriber latency instead of max. At pilot scale
- * each subscriber is ~5-15ms (analytics + audit write + dispatch enqueue;
- * web-cache-revalidate is now fire-and-forget inside its own subscriber
- * to avoid the cross-process HTTP hop dominating the sum). The earlier
- * "parallel + ordering doesn't matter" claim was contradicted by the
- * downstream subscribers' own doc comments and by the symptoms that
- * showed up at audit time.
+ *   CRITICAL (REALTIME, priority 0)
+ *     Fired fire-and-forget at the head — the socket frame is on the wire
+ *     before any downstream subscriber starts. `publish()` awaits the
+ *     realtime promise just-in-time before persisting the outbox row so
+ *     a realtime throw still lands in `lastError`.
+ *
+ *   BACKGROUND (AUDIT, ANALYTICS, WORKFLOW_DISPATCH, WEB_CACHE_REVALIDATE,
+ *               OUTBOUND_WEBHOOKS, DEFAULT)
+ *     Run SEQUENTIALLY in priority order, DETACHED from `publish()` —
+ *     the HTTP handler that called `await publish(...)` returns as soon
+ *     as the outbox row write resolves; analytics + workflow dispatch +
+ *     partner webhook fanout no longer add latency to the response.
+ *     Sequential ordering inside this tier is load-bearing:
+ *       - `workflow-dispatch` re-reads conversation state (closedCategory /
+ *         counters) that `analytics` writes (workflow-dispatch.ts:62,78).
+ *       - `outbound-webhooks.subscriber` ships partner payloads carrying
+ *         those same post-mutation fields.
+ *     Registration order:
+ *       realtime-fanout → audit → analytics → workflow-dispatch →
+ *       web-cache-revalidate → outbound-webhooks
+ *     Encoded as explicit priorities, not registration timing, so a
+ *     reorder of `AppModule.imports` can't silently break it.
  *
  * Per-subscriber try/catch still isolates failures — a broken handler
  * cannot poison the chain.
+ *
+ * The drainer's path (`dispatchPersistedEvent`) AWAITS ALL TIERS via
+ * `runAllSubscribersAwaited` so it can stamp `lastError` accurately.
  */
 
 type Handler<K extends DomainEventType> = (
@@ -58,7 +63,7 @@ type Handler<K extends DomainEventType> = (
  * Encoding the order as an explicit priority — rather than relying on
  * module import order / `OnModuleInit` registration timing — makes it
  * impossible for a reorder of `AppModule.imports` to silently break it.
- * REALTIME MUST stay 0: `runSubscribers` fires the first record
+ * REALTIME MUST stay 0: `runCriticalTier` fires the first record
  * fire-and-forget so a slow downstream subscriber can't delay the socket
  * emit the inbox UI is waiting on.
  */
@@ -124,49 +129,69 @@ export function subscribe<K extends DomainEventType>(
 /**
  * Publish a domain event.
  *
- * Runs subscribers SEQUENTIALLY in priority order (see `SubscriberPriority`
- * + `runSubscribers`), then writes a single durable audit row to the outbox
- * with the final state (`publishedAt` always set, plus `failedAt`+`lastError`
- * if any subscriber threw). The row is written AFTER dispatch — never before
- * — so the outbox drainer's 100ms poll cannot grab it mid-dispatch and
- * re-fire every subscriber.
+ * Two-tier dispatch:
+ *   - CRITICAL (REALTIME, priority 0) fires fire-and-forget at the head of
+ *     `runSubscribers`. The socket frame goes out without waiting for any
+ *     downstream subscriber.
+ *   - BACKGROUND (AUDIT, ANALYTICS, WORKFLOW_DISPATCH, WEB_CACHE_REVALIDATE,
+ *     OUTBOUND_WEBHOOKS, DEFAULT) used to run in-line and forced the HTTP
+ *     handler that called `await publish(...)` to wait for analytics writes,
+ *     workflow dispatch enqueues, and partner webhook fanout before
+ *     responding. Now they run DETACHED — `publish()` returns as soon as
+ *     critical realtime has been spawned + the outbox row has been written.
  *
- * Each subscriber gets its own try/catch inside `runSubscribers` so a
- * broken one can't cascade.
+ * The outbox row is written with whatever realtime-tier error is known by
+ * the time the row write begins (we briefly await the realtime promise
+ * before persisting — by that point background hasn't been spawned yet so
+ * there's no latency-on-the-critical-path cost beyond realtime's own time).
+ * Background subscriber errors are NOT merged into the row (they run after
+ * the row is committed). This matches the existing "better to lose the
+ * audit row than to lose the realtime emit" posture — the outbox row from
+ * the `publish()` path is best-effort audit; the durable trail for
+ * background failures is each subscriber's own logging + the outbox row
+ * written by `publishInTx` + the drainer for callers that need at-most-once.
+ *
+ * The outbox drainer's path (`dispatchPersistedEvent`) keeps awaiting ALL
+ * tiers so the drainer can stamp `lastError` accurately.
  *
  * Most callers should `await`. The webhook hot path uses `void publish(...)`
  * + `.catch(...)` to avoid blocking Meta's 200.
  *
  * For publishes that must commit atomically with an entity write, use
- * `publishInTx(tx, event)` from `@/lib/events/outbox` instead. That path
- * persists a row with `publishedAt=NULL` inside the tx; the drainer picks
- * it up after commit and dispatches subscribers. Closes the lost-event
- * window between the entity write and bus.publish.
+ * `publishInTx(tx, event)` from `@/lib/events/outbox` instead.
  *
  * Outbox-write failures (Postgres down) are swallowed and logged — the
- * subscribers already ran. The choice is: better to lose the audit row
- * than to lose the realtime emit. Process crash mid-dispatch loses both
- * the audit row AND completes partially, but that's the same posture the
- * surrounding code carries.
+ * subscribers already ran.
  */
 export async function publish<K extends DomainEventType>(
   event: DomainEventOf<K>,
 ): Promise<void> {
-  let dispatchError: unknown = null;
-  try {
-    await runSubscribers(event);
-  } catch (err) {
-    dispatchError = err;
+  // Error sink for the realtime subscriber's late rejection. The realtime
+  // subscriber is fire-and-forget but its failure mode shouldn't be silent
+  // — we await its promise just before persisting the outbox row so a
+  // realtime throw still lands in `lastError`. By the time we get here the
+  // socket frame has long since fired, so this await adds no perceptible
+  // latency to the wire emit.
+  const realtimeErrorSink: { error: string | null } = { error: null };
+  const realtimePromise = runCriticalTier(event, realtimeErrorSink);
+
+  // Spawn background tier DETACHED. The HTTP handler that called us isn't
+  // forced to wait for analytics + workflow dispatch + outbound webhooks
+  // before returning. Background errors are logged inside runBackgroundTier
+  // (per-subscriber try/catch) — they don't propagate.
+  void runBackgroundTier(event);
+
+  // Await realtime so its rejection (if any) makes it into the outbox row.
+  if (realtimePromise) {
+    try {
+      await realtimePromise;
+    } catch {
+      // Already captured into the sink by runCriticalTier's catch wrapper.
+    }
   }
 
-  const errorMessage = dispatchError
-    ? dispatchError instanceof Error
-      ? dispatchError.message
-      : String(dispatchError)
-    : null;
-
   try {
-    await persistDispatchedRow(event, errorMessage);
+    await persistDispatchedRow(event, realtimeErrorSink.error);
   } catch (err) {
     console.error(
       withCorrelation(`[bus] outbox persist for "${event.type}" failed:`),
@@ -194,70 +219,84 @@ export async function dispatchPersistedEvent<K extends DomainEventType>(
   event: DomainEventOf<K>,
 ): Promise<string | null> {
   const errors: string[] = [];
-  await runSubscribers(event, errors);
+  await runAllSubscribersAwaited(event, errors);
   if (errors.length === 0) return null;
-  // Truncate aggregated message — outbox.lastError is bounded text and the
-  // operator only needs the head of the trail.
-  return errors.slice(0, 4).join(" | ").slice(0, 1024);
+  // Bound the persisted message — `lastError` is bounded text and the
+  // operator only needs the head of the trail. When truncating, prepend the
+  // total count so the operator knows the displayed list is partial (silent
+  // slicing previously hid >4-error fan-outs in stdout only).
+  const SHOWN_LIMIT = 4;
+  const total = errors.length;
+  const shown = errors.slice(0, SHOWN_LIMIT).join(" | ");
+  const composed =
+    total > SHOWN_LIMIT
+      ? `${total} total errors, showing first ${SHOWN_LIMIT}: ${shown}`
+      : shown;
+  return composed.slice(0, 1024);
 }
 
-async function runSubscribers<K extends DomainEventType>(
+/**
+ * Critical tier: spawn the REALTIME subscriber fire-and-forget so the socket
+ * frame is on the wire before any downstream subscriber runs. Returns the
+ * realtime handler's promise (or null when there is no realtime subscriber)
+ * so `publish()` can await it just-in-time before persisting the outbox row
+ * — that's the M3 "ref/sink" pattern.
+ */
+function runCriticalTier<K extends DomainEventType>(
   event: DomainEventOf<K>,
-  errorSink?: string[],
+  errorSink: { error: string | null },
+): Promise<void> | null {
+  const list = state.handlers.get(event.type as DomainEventType);
+  if (!list || list.length === 0) return null;
+  const first = list[0]!;
+  if (first.priority !== SubscriberPriority.REALTIME) return null;
+  try {
+    const maybe = first.handler(event as DomainEventOf<DomainEventType>);
+    if (maybe && typeof (maybe as Promise<void>).then === "function") {
+      return (maybe as Promise<void>).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
+          msg,
+        );
+        errorSink.error = `#0(realtime): ${msg}`;
+      });
+    }
+    return null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
+      msg,
+    );
+    errorSink.error = `#0(realtime): ${msg}`;
+    return null;
+  }
+}
+
+/**
+ * Background tier: everything past REALTIME runs sequentially in priority
+ * order. `workflow-dispatch` reads post-mutation state that `analytics`
+ * writes; `outbound-webhooks` ships partner payloads carrying those same
+ * fields. Parallel dispatch made both races inevitable in proportion to
+ * subscriber latency. Each handler gets its own try/catch so a broken
+ * subscriber can't poison the chain. Errors are logged only — this tier
+ * runs DETACHED from `publish()`, so there's no caller awaiting an
+ * aggregated trail; the durable record for at-most-once consumers is the
+ * `publishInTx` + drainer path instead.
+ *
+ * When `list[0]` isn't REALTIME (events with a `null` fanout rule like
+ * `contact.tag_changed`), the first real subscriber lives in this tier and
+ * is awaited like any other.
+ */
+async function runBackgroundTier<K extends DomainEventType>(
+  event: DomainEventOf<K>,
 ): Promise<void> {
   const list = state.handlers.get(event.type as DomainEventType);
   if (!list || list.length === 0) return;
-
-  // The list is kept sorted by `SubscriberPriority` on insert, so `list[0]`
-  // is the lowest tier. When that's the REALTIME tier (0), fire it
-  // SYNCHRONOUSLY + fire-and-forget so a slow downstream subscriber
-  // (workflow-dispatch, outbound-webhooks) can't add latency to the socket
-  // emit the inbox UI is waiting on. The realtime subscriber is itself a
-  // `void emit(...)` to Socket.io and never throws synchronously, so firing
-  // it outside the awaited sequence is safe.
-  //
-  // CRITICAL: this only holds when `list[0]` actually IS the realtime tier.
-  // Events with a `null` fanout rule (`contact.tag_changed` /
-  // `contact.lifecycle_changed`) have NO realtime subscriber — their
-  // lowest-tier handler is a real awaited subscriber (outbound-webhooks).
-  // Firing THAT fire-and-forget would resolve `publish()` before the webhook
-  // delivery rows are written and would hide its errors from the outbox row.
-  // So when list[0] isn't REALTIME, fall through to the awaited loop at
-  // index 0 and treat it like any other subscriber.
-  let startIdx = 0;
-  const first = list[0]!;
-  if (first.priority === SubscriberPriority.REALTIME) {
-    startIdx = 1;
-    try {
-      const maybe = first.handler(event as DomainEventOf<DomainEventType>);
-      if (maybe && typeof (maybe as Promise<void>).then === "function") {
-        void (maybe as Promise<void>).catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
-            msg,
-          );
-          // Note: this branch runs AFTER `runSubscribers` resolved; the
-          // sink isn't read anymore. The error stays in stdout — same
-          // posture as before.
-        });
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        withCorrelation(`[bus] subscriber #0 (realtime) for "${event.type}" threw:`),
-        msg,
-      );
-      errorSink?.push(`#0(realtime): ${msg}`);
-    }
-  }
-
-  // Remaining subscribers (or ALL of them when there's no realtime tier):
-  // sequential dispatch in priority order. workflow-dispatch reads
-  // post-mutation state that analytics writes; outbound-webhooks ships
-  // partner payloads carrying those same fields. Parallel dispatch made both
-  // races inevitable in proportion to subscriber latency. Each handler gets
-  // its own try/catch so a broken subscriber can't poison the chain.
+  // Skip the REALTIME slot — it was already fired by `runCriticalTier`.
+  const startIdx =
+    list[0]!.priority === SubscriberPriority.REALTIME ? 1 : 0;
   for (let i = startIdx; i < list.length; i++) {
     const record = list[i]!;
     try {
@@ -265,10 +304,41 @@ async function runSubscribers<K extends DomainEventType>(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(
-        withCorrelation(`[bus] subscriber #${i} for "${event.type}" threw:`),
+        withCorrelation(`[bus] subscriber #${i} (background) for "${event.type}" threw:`),
         msg,
       );
-      errorSink?.push(`#${i}: ${msg}`);
+    }
+  }
+}
+
+/**
+ * Drainer-side dispatch: awaits ALL tiers (realtime + background) and
+ * collects every subscriber's error into `errorSink`. The drainer stamps
+ * `lastError` from that sink so the operator's forensic query reflects the
+ * actual outcome. Unlike `publish()`, the drainer is not on a hot-response
+ * path — full awaiting is the correct posture.
+ */
+async function runAllSubscribersAwaited<K extends DomainEventType>(
+  event: DomainEventOf<K>,
+  errorSink: string[],
+): Promise<void> {
+  const list = state.handlers.get(event.type as DomainEventType);
+  if (!list || list.length === 0) return;
+  for (let i = 0; i < list.length; i++) {
+    const record = list[i]!;
+    const label =
+      record.priority === SubscriberPriority.REALTIME
+        ? `#${i}(realtime)`
+        : `#${i}`;
+    try {
+      await record.handler(event as DomainEventOf<DomainEventType>);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        withCorrelation(`[bus] subscriber ${label} for "${event.type}" threw:`),
+        msg,
+      );
+      errorSink.push(`${label}: ${msg}`);
     }
   }
 }

@@ -7,11 +7,21 @@ import {
 import { DbService } from "../db/db.service";
 import { getRedisConnection } from "../lib/workflows/queue";
 
+interface PgPoolReport {
+  max: number;
+  total: number;
+  idle: number;
+  waiting: number;
+  /** (total - idle) / max * 100 — checked-out slots as % of configured max. */
+  saturationPercent: number;
+}
+
 interface HealthReport {
   ok: boolean;
   db: boolean;
   redis: boolean;
   uptimeSec: number;
+  pgPool: PgPoolReport;
 }
 
 /**
@@ -38,11 +48,23 @@ export class HealthController {
   @Get()
   async check(): Promise<HealthReport> {
     const [dbOk, redisOk] = await Promise.all([this.pingDb(), this.pingRedis()]);
+    const poolStats = this.db.getPoolStats();
+    const saturationPercent =
+      poolStats.max > 0
+        ? Math.round(((poolStats.total - poolStats.idle) / poolStats.max) * 100)
+        : 0;
     const report: HealthReport = {
       ok: dbOk && redisOk,
       db: dbOk,
       redis: redisOk,
       uptimeSec: Math.floor(process.uptime()),
+      pgPool: {
+        max: poolStats.max,
+        total: poolStats.total,
+        idle: poolStats.idle,
+        waiting: poolStats.waiting,
+        saturationPercent,
+      },
     };
     if (!report.ok) {
       // 503 with the report as the body. ServiceUnavailableException

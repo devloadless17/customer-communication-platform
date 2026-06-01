@@ -1,0 +1,184 @@
+import type {
+  StepType,
+  WorkflowEdge,
+  WorkflowGraph,
+  WorkflowNode,
+} from "./types";
+import { cuidLike, emptyConfigFor } from "./types";
+
+/**
+ * Pure graph mutations — extracted out of `workflow-canvas.tsx` so callers
+ * (the workflow builder shell, future test harnesses) can import them without
+ * dragging `@xyflow/react` + its CSS into their bundle. The canvas re-exports
+ * these from here for backwards compatibility, but new call sites should
+ * import from this file directly.
+ *
+ * No React, no React Flow — just pure WorkflowGraph → WorkflowGraph.
+ */
+
+/** Remove a step + any edges touching it. */
+export function removeStep(graph: WorkflowGraph, nodeId: string): WorkflowGraph {
+  // If the removed node sat between A → removed → B, splice the gap so
+  // execution keeps flowing. Without this, deleting a middle step orphans
+  // every downstream node and the user has to manually rewire.
+  const incoming = graph.edges.find((e) => e.to === nodeId);
+  const outgoing = graph.edges.filter((e) => e.from === nodeId);
+  const splicedEdges: WorkflowEdge[] = [];
+  if (incoming && outgoing.length === 1) {
+    splicedEdges.push({
+      from: incoming.from,
+      to: outgoing[0]!.to,
+      ...(incoming.label ? { label: incoming.label } : {}),
+    });
+  }
+  return {
+    // If we just removed the start, promote the (single) downstream node so
+    // the workflow still has a valid entry point. Common case after
+    // deleting the first step.
+    startNodeId:
+      graph.startNodeId === nodeId
+        ? outgoing[0]?.to ?? ""
+        : graph.startNodeId,
+    nodes: graph.nodes.filter((n) => n.id !== nodeId),
+    edges: [
+      ...graph.edges.filter((e) => e.from !== nodeId && e.to !== nodeId),
+      ...splicedEdges,
+    ],
+  };
+}
+
+/**
+ * Insert a new step immediately downstream of `sourceId` on the specified
+ * source handle. If an outgoing edge already exists on that handle, it gets
+ * rewired through the new node (A → new → B). Otherwise we just append (A →
+ * new). `sourceId === TRIGGER` means "insert at the start of the workflow."
+ *
+ * `positionOverride` lets the caller place the node at a specific canvas
+ * coordinate — used by the drag-from-handle-to-empty-canvas flow (n8n
+ * style) so the new node lands where the user dropped the connection,
+ * not at the autoplaced "below source" slot. When omitted, the helper
+ * computes a sensible default: directly below the source for normal
+ * steps, with a sideways offset for branch outputs (true→left, false→
+ * right) so the two branches fan out visibly instead of stacking on top
+ * of each other.
+ */
+export function insertStepAfter(
+  graph: WorkflowGraph,
+  sourceId: string | null, // null = inserting before the current startNode
+  sourceHandle: string | null,
+  type: StepType,
+  positionOverride?: { x: number; y: number },
+): { graph: WorkflowGraph; newNodeId: string } {
+  const newId = cuidLike();
+  // Anchor the new node below the source (or below the trigger when there's
+  // no source). User can drag afterwards; this is just a sensible default.
+  const sourceNode = sourceId
+    ? graph.nodes.find((n) => n.id === sourceId)
+    : null;
+  const anchorY = sourceNode?.position?.y ?? 0;
+  const anchorX = sourceNode?.position?.x ?? 80;
+  // Branch + ask_question outputs spread horizontally — without this both
+  // children pile on top of each other at sourceX, and the user has to drag
+  // one out before they can even see the second is there. 140 = enough to
+  // clear a w-64 (256px) node's half-width plus the edge label.
+  //
+  // Option-id edges (anything that isn't true/false/answered/timeout) are
+  // also ask_question paths; treat them like "answered" — slot to the left
+  // of the source so a freshly added per-option child doesn't collide with
+  // the timeout child on the right.
+  const branchOffset =
+    sourceHandle === "true" || sourceHandle === "answered"
+      ? -140
+      : sourceHandle === "false" || sourceHandle === "timeout"
+        ? 140
+        : sourceHandle && sourceHandle !== "default"
+          ? -140
+          : 0;
+  const newNode: WorkflowNode = {
+    id: newId,
+    type,
+    config: emptyConfigFor(type),
+    position: positionOverride ?? {
+      x: anchorX + branchOffset,
+      y: anchorY + 140,
+    },
+  };
+
+  // Case 1: empty graph OR inserting before the start node.
+  if (sourceId === null) {
+    return {
+      graph: {
+        startNodeId: newId,
+        nodes: [...graph.nodes, newNode],
+        // Rewire trigger → start by connecting new → old start.
+        edges: graph.startNodeId
+          ? [...graph.edges, { from: newId, to: graph.startNodeId }]
+          : graph.edges,
+      },
+      newNodeId: newId,
+    };
+  }
+
+  // Case 2: inserting on an existing edge from sourceId.
+  const handle = sourceHandle ?? null;
+  const existing = graph.edges.find(
+    (e) => e.from === sourceId && (e.label ?? null) === handle,
+  );
+  if (existing) {
+    const rewired = graph.edges.map((e) =>
+      e === existing ? { ...e, to: newId } : e,
+    );
+    return {
+      graph: {
+        startNodeId: graph.startNodeId || newId,
+        nodes: [...graph.nodes, newNode],
+        edges: [...rewired, { from: newId, to: existing.to }],
+      },
+      newNodeId: newId,
+    };
+  }
+
+  // Case 3: appending — no existing outgoing edge on that handle.
+  const newEdge: WorkflowEdge = {
+    from: sourceId,
+    to: newId,
+    ...(handle ? { label: handle } : {}),
+  };
+  return {
+    graph: {
+      startNodeId: graph.startNodeId || newId,
+      nodes: [...graph.nodes, newNode],
+      edges: [...graph.edges, newEdge],
+    },
+    newNodeId: newId,
+  };
+}
+
+/**
+ * Duplicate a step in place. Copies type + config, places the clone slightly
+ * offset so it's visible, and DOES NOT rewire any edges — the duplicate is
+ * orphaned by default and the user wires it where they want. Mirrors how
+ * Figma / Miro duplicate works.
+ */
+export function duplicateStep(
+  graph: WorkflowGraph,
+  nodeId: string,
+): { graph: WorkflowGraph; newNodeId: string } {
+  const source = graph.nodes.find((n) => n.id === nodeId);
+  if (!source) return { graph, newNodeId: nodeId };
+  const newId = cuidLike();
+  const newNode: WorkflowNode = {
+    id: newId,
+    type: source.type,
+    // Deep-copy config so editing the duplicate doesn't mutate the original.
+    config: JSON.parse(JSON.stringify(source.config)) as Record<string, unknown>,
+    position: {
+      x: (source.position?.x ?? 0) + 40,
+      y: (source.position?.y ?? 0) + 40,
+    },
+  };
+  return {
+    graph: { ...graph, nodes: [...graph.nodes, newNode] },
+    newNodeId: newId,
+  };
+}

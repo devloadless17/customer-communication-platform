@@ -15,6 +15,7 @@ import type {
   WorkflowConversationSnapshot,
   WorkflowMessageSnapshot,
 } from "@/lib/workflows/events";
+import { workflowConversationSnapshotAfterStatusChange } from "@/lib/workflows/events";
 import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound";
 import type {
   NormalizedEvent,
@@ -699,6 +700,18 @@ async function ingestInboundMessage(
       // the customer reopened it by replying). `silent: false` (real event,
       // partners want to know).
       if (reopened) {
+        // Snapshot with new status applied + close fields predicted-nulled
+        // (the analytics subscriber will do the same write). Workflow
+        // dispatch reads from THIS snapshot instead of a fresh DB read.
+        const reopenSnapshot = workflowConversationSnapshotAfterStatusChange(
+          {
+            ...conversation,
+            status: "pending",
+            lastMessageAt: effectiveLastMessageAt,
+            unreadCount: bumped.unreadCount,
+          },
+          { previousStatus: "closed", changedByUserId: null },
+        );
         await publishInTx(tx, {
           type: "conversation.status_changed",
           teamId,
@@ -707,6 +720,7 @@ async function ingestInboundMessage(
           newStatus: "pending",
           changedByUserId: null,
           contact: contactSnapshot,
+          conversation: reopenSnapshot,
         });
       }
 

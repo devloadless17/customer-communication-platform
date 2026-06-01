@@ -3,7 +3,11 @@ import type { PrismaClient } from "@prisma/client";
 
 import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
 import type { User } from "@ccp/shared/types";
-import { workflowContactSnapshot } from "@/lib/workflows/events";
+import {
+  workflowContactSnapshot,
+  workflowConversationSnapshotAfterAssign,
+  workflowConversationSnapshotAfterStatusChange,
+} from "@/lib/workflows/events";
 
 /**
  * Single source of truth for the two conversation mutations whose business
@@ -198,6 +202,14 @@ export async function assignConversation(args: {
   const contact = workflowContactSnapshot(conversation.contact as Contact);
 
   if (assigneeChanged) {
+    // Build the conversation snapshot AT PUBLISH TIME (post-CAS, with the
+    // predicted analytics writes baked in) so workflow-dispatch reads from
+    // the event payload — not a fresh DB read that could include a concurrent
+    // unrelated mutation. See ConversationAssignedEvent.conversation jsdoc.
+    const assignedSnapshot = workflowConversationSnapshotAfterAssign(
+      { ...updated, assignedUser: updated.assignedUser },
+      previousAssignedUserId,
+    );
     await publish({
       type: "conversation.assigned",
       teamId,
@@ -208,12 +220,22 @@ export async function assignConversation(args: {
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
       contact,
+      conversation: assignedSnapshot,
       silent: silent === true,
     });
   }
 
   if (statusChanged) {
     // After assigned → cause-then-effect ordering for consumers watching both.
+    // The status snapshot reflects the row state AFTER the CAS — status
+    // already flipped. The assignment-driven status flip path is
+    // closed→pending or open→pending, never close, so the closeOverrides in
+    // `workflowConversationSnapshotAfterStatusChange` are a no-op here; we
+    // still route through it for one source of truth.
+    const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
+      { ...updated, assignedUser: updated.assignedUser },
+      { previousStatus, changedByUserId },
+    );
     await publish({
       type: "conversation.status_changed",
       teamId,
@@ -223,6 +245,7 @@ export async function assignConversation(args: {
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
       contact,
+      conversation: statusSnapshot,
       silent: silent === true,
     });
   }
@@ -320,6 +343,18 @@ export async function setConversationStatus(args: {
   }
 
   const contact = workflowContactSnapshot(conversation.contact as Contact);
+  // Build the post-CAS conversation snapshot with predicted analytics writes.
+  // `conversation` is the pre-update row; spread the new status (and cleared
+  // assignee on unassign-on-close) on top so the snapshot reflects what the
+  // CAS just committed. See ConversationStatusChangedEvent.conversation jsdoc.
+  const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
+    {
+      ...conversation,
+      status,
+      assignedUserId: unassignOnClose ? null : previousAssignedUserId,
+    },
+    { previousStatus, changedByUserId, closedCategory, closedSummary },
+  );
 
   await publish({
     type: "conversation.status_changed",
@@ -330,6 +365,7 @@ export async function setConversationStatus(args: {
     changedByUserId,
     ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
     contact,
+    conversation: statusSnapshot,
     ...(closedCategory !== undefined ? { closedCategory } : {}),
     ...(closedSummary !== undefined ? { closedSummary } : {}),
     silent: silent === true,
@@ -337,6 +373,17 @@ export async function setConversationStatus(args: {
 
   if (unassignOnClose) {
     // After status_changed: the unassign is a side-effect of the close.
+    // Snapshot mirrors the assignmentSnapshot rules — but the unassign here
+    // doesn't count as a "new assignment" (assignmentsCount not bumped),
+    // since the new value is null.
+    const assignedSnapshot = workflowConversationSnapshotAfterAssign(
+      {
+        ...conversation,
+        status,
+        assignedUserId: null,
+      },
+      previousAssignedUserId,
+    );
     await publish({
       type: "conversation.assigned",
       teamId,
@@ -347,6 +394,7 @@ export async function setConversationStatus(args: {
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
       contact,
+      conversation: assignedSnapshot,
       silent: silent === true,
     });
   }

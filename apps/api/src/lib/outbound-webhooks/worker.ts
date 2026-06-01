@@ -20,6 +20,43 @@ import { safeFetch, SsrfBlockedError, readLimitedBody } from "@/lib/http/safe-fe
 import { signWebhookBody } from "./signing";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+// BullMQ lock the worker holds for an in-flight delivery. Must exceed
+// DEFAULT_TIMEOUT_MS by a safety margin so the fetch can run to its full
+// budget without the lock expiring mid-flight (which would re-deliver to
+// the partner). Matches the workflow worker pattern (step timeout + 10s
+// margin). Bumped previously to 120s out of an abundance of caution about
+// DB-contention tail latency; 30s is sufficient because the per-row update
+// path is single-row and capped — observed tail is well under 5s. The drain
+// cap below must exceed this so an in-flight delivery's lock has expired
+// before the process exits.
+const WEBHOOK_LOCK_DURATION_MS = 30_000;
+const WEBHOOK_LOCK_MARGIN_MS = 10_000;
+// Hard ceiling on `worker.close()` during graceful shutdown. Set above the
+// lock duration (with a small safety margin) so that when close returns,
+// any in-flight job's BullMQ lock has already expired and another worker can
+// re-claim it cleanly after restart — without us shipping a duplicate POST.
+// Must stay well under api's compose `stop_grace_period: 100s` so the rest
+// of onModuleDestroy still runs before SIGKILL.
+const WEBHOOK_CLOSE_TIMEOUT_MS = 45_000;
+
+if (WEBHOOK_LOCK_DURATION_MS <= DEFAULT_TIMEOUT_MS + WEBHOOK_LOCK_MARGIN_MS) {
+  throw new Error(
+    `[webhooks] WEBHOOK_LOCK_DURATION_MS (${WEBHOOK_LOCK_DURATION_MS}) must exceed ` +
+      `DEFAULT_TIMEOUT_MS (${DEFAULT_TIMEOUT_MS}) + ${WEBHOOK_LOCK_MARGIN_MS}ms margin. ` +
+      `A delivery that runs to its fetch timeout would outlive the lock and ` +
+      `get re-delivered, causing a duplicate POST to the partner.`,
+  );
+}
+if (WEBHOOK_CLOSE_TIMEOUT_MS <= WEBHOOK_LOCK_DURATION_MS) {
+  throw new Error(
+    `[webhooks] WEBHOOK_CLOSE_TIMEOUT_MS (${WEBHOOK_CLOSE_TIMEOUT_MS}) must exceed ` +
+      `WEBHOOK_LOCK_DURATION_MS (${WEBHOOK_LOCK_DURATION_MS}) so an in-flight ` +
+      `delivery's lock has expired by the time the worker closes; otherwise ` +
+      `another worker may re-claim the still-locked job after restart.`,
+  );
+}
+
 /**
  * Auto-disable threshold. After this many consecutive **deliveries** fail
  * across ALL their attempts, `enabled` flips to false. Counted per delivery
@@ -63,29 +100,63 @@ function concurrency(): number {
  * cap has its extra jobs deferred (moveToDelayed + DelayedError) so the
  * BullMQ slot frees immediately for other teams.
  *
- * Tunable via WEBHOOK_PER_TEAM_CONCURRENCY (default 4 — a little looser than
+ * Tunable via WEBHOOK_PER_TEAM_CONCURRENCY (default 3 — a little looser than
  * workflows' 2 because deliveries are independent single-fetch jobs, not
- * multi-step runs). Across-PROCESS fairness needs Redis-backed counters
- * (deferred — single-process pilot). Inside one process this is exact.
+ * multi-step runs, but tighter than the global cap so no single team can
+ * monopolize the 10-lane pool). Across-PROCESS fairness needs Redis-backed
+ * counters (deferred — single-process pilot). Inside one process this is exact.
+ *
+ * Starvation signal: each team-at-cap defer increments a per-team counter.
+ * When the counter crosses TEAM_DEFER_BURST_WARN inside the warn window, we
+ * log a structured warning so an operator can see "this team's webhook
+ * receiver is too slow / cap too low" without grepping for moveToDelayed
+ * patterns. The counter decays on every successful acquire so it tracks
+ * pressure, not lifetime defers.
  */
 function perTeamConcurrency(): number {
-  const raw = Number.parseInt(process.env.WEBHOOK_PER_TEAM_CONCURRENCY ?? "4", 10);
-  return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 4;
+  const raw = Number.parseInt(process.env.WEBHOOK_PER_TEAM_CONCURRENCY ?? "3", 10);
+  return Number.isFinite(raw) && raw > 0 && raw <= 100 ? raw : 3;
 }
 
 /** Delay before re-picking up a deferred (team-at-cap) delivery. */
 const TEAM_BUSY_DEFER_MS = 250;
 
-const teamSlots = new Map<string, { active: number }>();
+/** Burst of consecutive defers within the warn window that triggers the log. */
+const TEAM_DEFER_BURST_WARN = 50;
+/** Throttle window for the starvation warn log so it doesn't spam stdout. */
+const TEAM_DEFER_WARN_INTERVAL_MS = 30_000;
+
+interface TeamSlotState {
+  /** In-flight deliveries for this team. */
+  active: number;
+  /** Count of consecutive defers since the last successful acquire. */
+  consecutiveDefers: number;
+  /** Last time we logged a starvation warning for this team. */
+  lastWarnAt: number;
+}
+const teamSlots = new Map<string, TeamSlotState>();
 
 function tryAcquireTeamSlot(teamId: string): boolean {
   const cap = perTeamConcurrency();
   let entry = teamSlots.get(teamId);
   if (!entry) {
-    entry = { active: 0 };
+    entry = { active: 0, consecutiveDefers: 0, lastWarnAt: 0 };
     teamSlots.set(teamId, entry);
   }
-  if (entry.active >= cap) return false;
+  if (entry.active >= cap) {
+    entry.consecutiveDefers += 1;
+    if (entry.consecutiveDefers >= TEAM_DEFER_BURST_WARN) {
+      const now = Date.now();
+      if (now - entry.lastWarnAt > TEAM_DEFER_WARN_INTERVAL_MS) {
+        entry.lastWarnAt = now;
+        console.warn(
+          `[webhooks] team ${teamId} starving on delivery slots: ${entry.consecutiveDefers} consecutive defer(s), cap=${cap}`,
+        );
+      }
+    }
+    return false;
+  }
+  entry.consecutiveDefers = 0;
   entry.active += 1;
   return true;
 }
@@ -94,7 +165,9 @@ function releaseTeamSlot(teamId: string): void {
   const entry = teamSlots.get(teamId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
-  if (entry.active === 0) teamSlots.delete(teamId);
+  if (entry.active === 0 && entry.consecutiveDefers === 0) {
+    teamSlots.delete(teamId);
+  }
 }
 
 export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
@@ -144,14 +217,11 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
     {
       connection,
       concurrency: concurrency(),
-      // Each delivery is a single fetch + a tiny DB update — BUT under DB
-      // contention (100 concurrent failures all queued on the same
-      // OutboundWebhook row lock) tail latency can pass 60s, the BullMQ
-      // lock expires, and the job is re-delivered → duplicate POST to
-      // the partner. Bumped to 120s; lockRenewTime stays at 30s so the
-      // worker still extends while genuinely active.
-      lockDuration: 120_000,
-      lockRenewTime: 30_000,
+      // Lock duration = DEFAULT_TIMEOUT_MS (10s fetch) + 10s margin, asserted
+      // above. lockRenewTime stays at 10s (1/3 of lockDuration, BullMQ's
+      // recommended ratio) so a healthy worker still extends mid-flight.
+      lockDuration: WEBHOOK_LOCK_DURATION_MS,
+      lockRenewTime: 10_000,
       // Explicit stalled-check tuning. See workflows/worker.ts for the
       // full rationale — same posture applied to every BullMQ worker so
       // a transient lock-renewal blip doesn't fail the delivery (and
@@ -204,12 +274,14 @@ export async function stopWebhookDeliverWorker(): Promise<void> {
   // Hard cap on `worker.close()` — same posture as the workflow + send workers
   // (workflows/worker.ts, messages/send-worker.service.ts). onModuleDestroy
   // hooks run SEQUENTIALLY across modules, so each worker's drain is additive
-  // toward systemd's TimeoutStopSec=120s; an uncapped close here (e.g. a
-  // partner endpoint hanging at the socket timeout) could push the total past
-  // 120s and force a SIGKILL mid-drain, which re-runs the in-flight job after
-  // restart (duplicate webhook POST). BullMQ's lockDuration is 90s, so past
-  // 85s the lock is already lost and another worker can pick it up cleanly.
-  const closeTimeoutMs = 85_000;
+  // toward compose's `stop_grace_period: 100s` on the api service; an uncapped
+  // close here (e.g. a partner endpoint hanging) could push the total past
+  // 100s and force a SIGKILL mid-drain, which re-runs the in-flight job after
+  // restart (duplicate webhook POST). BullMQ's lockDuration is
+  // WEBHOOK_LOCK_DURATION_MS (30s), so past WEBHOOK_CLOSE_TIMEOUT_MS (45s) the
+  // lock is already lost and another worker can pick it up cleanly. The
+  // close-cap > lock-duration invariant is asserted at boot.
+  const closeTimeoutMs = WEBHOOK_CLOSE_TIMEOUT_MS;
   await Promise.race([
     state.worker.close(),
     new Promise<void>((_resolve, reject) =>
@@ -466,8 +538,12 @@ async function resolvePendingMediaUrl(
       select: { mediaUrl: true, mediaThumbnailUrl: true, mediaKind: true },
     });
     if (row?.mediaUrl) {
-      media.url = row.mediaUrl;
-      media.thumbnail_url = row.mediaThumbnailUrl ?? media.thumbnail_url ?? null;
+      // Defensive shallow-copy of the media object before mutating: replace the
+      // reference on `message.media` rather than rewriting the existing object
+      // in place. BullMQ retry is already idempotent (we re-read delivery.payload
+      // on each attempt), but if a future caller ever shares the payload
+      // reference, in-place mutation here would leak through unexpectedly.
+      message!.media = { ...media, url: row.mediaUrl, thumbnail_url: row.mediaThumbnailUrl ?? media.thumbnail_url ?? null };
       return;
     }
     // mediaKind cleared → the download failed and the message fell back to

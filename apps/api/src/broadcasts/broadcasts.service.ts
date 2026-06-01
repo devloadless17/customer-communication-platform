@@ -12,6 +12,7 @@ import {
 import {
   MAX_RECIPIENTS_IN_PROCESS,
   getInFlightRunPromises,
+  pruneBroadcastInMemoryStateForTerminalRows,
   reconcileOrphanedBroadcasts,
   signalShutdown,
   startBroadcast,
@@ -52,6 +53,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       await reconcileOrphanedBroadcasts();
     } catch (err) {
       this.logger.error("orphan reconciler failed on boot", err);
+    }
+    // Prune in-memory Map entries pinned to broadcasts that died in a terminal
+    // state in a prior process. Must run AFTER reconcileOrphanedBroadcasts so
+    // `running`/`paused` rows have already been demoted; what remains as
+    // terminal is the safe-to-prune set. See header doc-comment in
+    // broadcast-runner.ts for the list of Maps this touches.
+    try {
+      await pruneBroadcastInMemoryStateForTerminalRows();
+    } catch (err) {
+      this.logger.error("in-memory state prune failed on boot", err);
     }
     // Re-enqueue delayed jobs for any `scheduled` broadcasts. Covers the case
     // where Redis lost the job (flush / non-persistent restart) while the row

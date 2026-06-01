@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for OutboundSendAttempt rows. The model is bookkeeping
@@ -36,7 +37,8 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes the indexed DELETE against other heavy sweepers.
+    await withSweeperMutex("outbound-send-attempt-retention", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.outbound-send-attempt] ${label} failed`, err);
   } finally {

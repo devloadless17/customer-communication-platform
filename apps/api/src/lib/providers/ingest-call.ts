@@ -8,6 +8,7 @@ import {
   toWorkflowContact,
 } from "@/lib/providers/ingest";
 import { ensureDefaultStage } from "@/lib/queries";
+import { workflowConversationSnapshotAfterStatusChange } from "@/lib/workflows/events";
 import type { NormalizedCallEvent } from "@ccp/shared/providers/types";
 import type { Channel } from "@ccp/shared/types";
 import { getCountryFromPhone } from "@ccp/shared/utils";
@@ -190,42 +191,51 @@ export async function ingestCallEvent(
         : false;
       if (existing) {
         // Terminal-state guard. If the row already landed in a terminal
-        // state, a later non-terminal webhook (out-of-order delivery) must
-        // not downgrade it. Idempotent same-status writes are still OK so
-        // a duplicate webhook on a terminal state is a no-op success.
-        if (
-          TERMINAL_STATUSES.has(existing.status) &&
-          !TERMINAL_STATUSES.has(targetStatus) &&
-          existing.status !== targetStatus
-        ) {
-          return;
+        // state, ANY later webhook (terminal or not, out-of-order delivery)
+        // must NOT mutate the row's status/timestamps. Previously the guard
+        // only rejected non-terminal downgrades, leaving a subtle drift: a
+        // duplicate terminal webhook would re-write endedAt + recompute
+        // durationSeconds from a later evt.timestamp, inflating the duration
+        // by however long Meta's redelivery lagged. Now we fully no-op on an
+        // already-terminal row — `alreadyTerminal` separately suppresses the
+        // side-effect publishes below, so this is a complete no-op.
+        if (alreadyTerminal) {
+          callRow = { id: existing.id, status: existing.status };
+        } else {
+          // Compute durationSeconds at the terminal transition. answeredAt
+          // is null on calls that never reached in_progress (missed /
+          // rejected pre-answer), and we leave duration null in that case.
+          const isTerminal = TERMINAL_STATUSES.has(targetStatus);
+          const durationSeconds =
+            isTerminal && existing.answeredAt
+              ? Math.max(
+                  0,
+                  Math.floor(
+                    (evt.timestamp.getTime() - existing.answeredAt.getTime()) /
+                      1000,
+                  ),
+                )
+              : null;
+          callRow = await tx.call.update({
+            where: { id: existing.id },
+            data: {
+              status: targetStatus,
+              // answeredAt is set-once: only on the first in_progress
+              // transition. A later out-of-order in_progress webhook (e.g.
+              // arriving after `completed` was already overlaid by a
+              // subsequent retry) must not re-stamp it. The alreadyTerminal
+              // branch above covers the harder case; this guard covers the
+              // ringing→in_progress→in_progress retry case where the row
+              // hasn't yet terminalized.
+              ...(targetStatus === CallStatus.in_progress && !existing.answeredAt
+                ? { answeredAt: evt.timestamp }
+                : {}),
+              ...(isTerminal ? { endedAt: evt.timestamp, durationSeconds } : {}),
+              rawPayload: evt.rawPayload as Prisma.InputJsonValue,
+            },
+            select: { id: true, status: true },
+          });
         }
-        // Compute durationSeconds at the terminal transition. answeredAt
-        // is null on calls that never reached in_progress (missed /
-        // rejected pre-answer), and we leave duration null in that case.
-        const isTerminal = TERMINAL_STATUSES.has(targetStatus);
-        const durationSeconds =
-          isTerminal && existing.answeredAt
-            ? Math.max(
-                0,
-                Math.floor(
-                  (evt.timestamp.getTime() - existing.answeredAt.getTime()) /
-                    1000,
-                ),
-              )
-            : null;
-        callRow = await tx.call.update({
-          where: { id: existing.id },
-          data: {
-            status: targetStatus,
-            ...(targetStatus === CallStatus.in_progress && !existing.answeredAt
-              ? { answeredAt: evt.timestamp }
-              : {}),
-            ...(isTerminal ? { endedAt: evt.timestamp, durationSeconds } : {}),
-            rawPayload: evt.rawPayload as Prisma.InputJsonValue,
-          },
-          select: { id: true, status: true },
-        });
       } else {
         // INSERT path — first webhook for this call id.
         const direction: CallDirection =
@@ -256,14 +266,25 @@ export async function ingestCallEvent(
       // publish too, so we never emit a phantom closed→pending for a thread
       // that wasn't actually closed at flip time. publishInTx co-commits the
       // event with this UPDATE — a tx2 rollback drops both together.
-      if (needsReopen) {
+      //
+      // Skip the reopen on a duplicate already-terminal webhook: the row
+      // didn't change, so we shouldn't synthesize a status flip from an
+      // at-least-once redelivery. The original (non-terminal) webhook for
+      // this call already drove the reopen.
+      if (needsReopen && !alreadyTerminal) {
         const flip = await tx.conversation.updateMany({
           where: { id: conversation.id, status: "closed" },
           data: { status: "pending" },
         });
         if (flip.count > 0) {
           // Reopen frame goes first so audit/workflow see the status change
-          // before the call event arrives.
+          // before the call event arrives. Snapshot reflects the flipped
+          // status + predicted close-field nulling so workflow-dispatch
+          // doesn't need a fresh DB read.
+          const reopenSnapshot = workflowConversationSnapshotAfterStatusChange(
+            { ...conversation, status: "pending" },
+            { previousStatus: "closed", changedByUserId: null },
+          );
           await publishInTx(tx, {
             type: "conversation.status_changed",
             teamId,
@@ -272,6 +293,7 @@ export async function ingestCallEvent(
             newStatus: "pending",
             changedByUserId: null,
             contact: toWorkflowContact(contact),
+            conversation: reopenSnapshot,
           });
         }
       }

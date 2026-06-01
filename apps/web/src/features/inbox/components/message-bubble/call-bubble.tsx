@@ -6,6 +6,7 @@ import {
   PhoneIncoming,
   PhoneMissed,
   PhoneOff,
+  PhoneOutgoing,
 } from "lucide-react";
 
 import type { CallSnapshot } from "@ccp/shared/types";
@@ -35,7 +36,10 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
       tone = "info";
       break;
     case "missed":
-      Icon = PhoneMissed;
+      // PhoneMissed reads as "inbound missed" visually (the downward arrow).
+      // Outbound no-answer uses PhoneOutgoing to keep the direction signal
+      // consistent with the copy ("Customer didn't answer").
+      Icon = isInbound ? PhoneMissed : PhoneOutgoing;
       label = isInbound ? "Missed call from customer" : "Customer didn't answer";
       tone = "warn";
       break;
@@ -51,7 +55,9 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
       break;
     case "completed":
     default:
-      Icon = isInbound ? PhoneIncoming : Phone;
+      // Direction-aware icon pair for clarity at-a-glance: inbound arrow vs
+      // outbound arrow rather than a neutral handset for one side.
+      Icon = isInbound ? PhoneIncoming : PhoneOutgoing;
       label = isInbound ? "Incoming call" : "Outgoing call";
       tone = "neutral";
       break;

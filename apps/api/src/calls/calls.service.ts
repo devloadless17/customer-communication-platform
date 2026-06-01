@@ -506,9 +506,12 @@ export class CallsService {
       throw new ConflictException({ error: "already_answered" });
     }
 
-    // Now talk to Meta — pre_accept THEN accept. preAcceptCall failure
-    // surfaces as 502; the row is already flipped to in_progress, but
-    // the caller knows the answer never landed.
+    // Now talk to Meta — pre_accept THEN accept. If Meta rejects either
+    // step, the local row already flipped to in_progress; without a
+    // rollback the audit log would lie ("answered at X, never ended")
+    // and the inbox would show a live indicator the customer never sees.
+    // Roll back to `failed` (terminal) so the agent gets a clear UI state
+    // and the row reflects the truth.
     const binding = getProviderBinding(call.channel);
     const preAccept = requireProviderMethod(
       binding.provider,
@@ -538,6 +541,35 @@ export class CallsService {
           err instanceof Error ? err.message : err
         }`,
       );
+      // Rollback the optimistic in_progress flip so the timeline + future
+      // pre-flight gates see the true state. CAS-gated so a concurrent
+      // terminal webhook racing us still wins. Best-effort — a rollback
+      // failure here is logged and swallowed because we're already in an
+      // error path and don't want to mask the original Meta error.
+      try {
+        const endedAt = new Date();
+        await this.db.call.updateMany({
+          where: { id: callId, status: CallStatus.in_progress },
+          data: {
+            status: CallStatus.failed,
+            endedAt,
+            // durationSeconds left null — the call never actually connected.
+          },
+        });
+        await this.bus.publish({
+          type: "call.failed",
+          teamId: session.teamId,
+          conversationId: call.conversationId,
+          callId: call.id,
+          reason: "provider_error",
+        });
+      } catch (rollbackErr) {
+        this.logger.warn(
+          `acceptCall rollback failed for call=${callId}: ${
+            rollbackErr instanceof Error ? rollbackErr.message : rollbackErr
+          }`,
+        );
+      }
       throw new HttpException({ error: "provider_rejected" }, 502);
     }
 

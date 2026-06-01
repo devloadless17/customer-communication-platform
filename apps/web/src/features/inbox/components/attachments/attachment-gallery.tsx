@@ -176,7 +176,14 @@ function ThumbTile({ message, onOpen }: { message: Message; onOpen: () => void }
         src={thumbSrc}
         alt={media.caption ?? ""}
         className="size-full object-cover transition-transform duration-200 group-hover:scale-105"
+        // Off-screen tiles in a scrollable gallery panel: lazy keeps non-visible
+        // thumbnails out of the initial fetch wave on first paint; async decode
+        // keeps the main thread free as visible tiles paginate in. Safe to lazy
+        // here (unlike the inbox bubble) — gallery uses a SkeletonGrid while
+        // loading and has no instant-reveal-on-mount effect that would be
+        // defeated by `complete` being false.
         loading="lazy"
+        decoding="async"
       />
       {isVideo && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/30">

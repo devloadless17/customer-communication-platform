@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Retention sweeper for the `OutboundEvent` (event-bus outbox) table.
@@ -38,7 +39,8 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes batched-DELETE retention against other heavy sweepers.
+    await withSweeperMutex("outbound-event-retention", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.outbound-event-retention] ${label} failed`, err);
   } finally {

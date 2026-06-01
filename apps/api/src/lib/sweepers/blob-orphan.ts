@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { blobStorage } from "@/lib/blob-storage";
+import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 
 /**
  * Reclaim orphan blobs at the provider (UploadThing today).
@@ -54,7 +55,9 @@ async function runTick(label: string): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    await sweepOnce();
+    // Mutex serializes the multi-page provider-list scan against other
+    // heavy sweepers. Health log warns if last completion >8d.
+    await withSweeperMutex("blob-orphan", sweepOnce);
   } catch (err) {
     console.error(`[sweeper.blob-orphan] ${label} failed`, err);
   } finally {

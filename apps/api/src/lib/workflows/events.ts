@@ -247,6 +247,92 @@ export function workflowConversationSnapshot(c: {
   };
 }
 
+/**
+ * Build a {@link WorkflowConversationSnapshot} from a Conversation row whose
+ * status/assignment was just flipped by an `assignConversation` call, with
+ * the analytics writes the `analytics` subscriber will apply on
+ * `conversation.assigned` predicted in-memory so workflow-dispatch sees the
+ * post-everything snapshot without a fresh DB read.
+ *
+ * Predicted fields mirror `trackOnAssigned` in lib/conversations/analytics.ts:
+ *   - `assignmentsCount` incremented when the new assignee differs from the
+ *     previous AND the new assignee is non-null (pure unassign doesn't count).
+ *   - `lastAssignedAt` set to now under the same gate.
+ *   - `firstAssignedAt` / `firstAssignedUserId` set only when previously null.
+ *
+ * `c` is the row as returned by the CAS update — already carries the new
+ * `assignedUserId` and `status`.
+ */
+export function workflowConversationSnapshotAfterAssign(
+  c: Parameters<typeof workflowConversationSnapshot>[0],
+  previousAssignedUserId: string | null,
+): WorkflowConversationSnapshot {
+  const newAssignedUserId = c.assignedUserId;
+  const assigneeChanged = newAssignedUserId !== previousAssignedUserId;
+  const countsAsAssignment = assigneeChanged && newAssignedUserId !== null;
+  const now = new Date();
+  return workflowConversationSnapshot({
+    ...c,
+    ...(countsAsAssignment
+      ? {
+          assignmentsCount: (c.assignmentsCount ?? 0) + 1,
+          lastAssignedAt: now,
+          ...(c.firstAssignedAt == null
+            ? { firstAssignedAt: now, firstAssignedUserId: newAssignedUserId }
+            : {}),
+        }
+      : {}),
+  });
+}
+
+/**
+ * Build a {@link WorkflowConversationSnapshot} for a `conversation.status_changed`
+ * publish, predicting the analytics writes that `trackOnStatusChanged` (in
+ * lib/conversations/analytics.ts) will apply. Workflow-dispatch reads from the
+ * snapshot so the post-everything values are visible without a fresh DB read.
+ *
+ * Predicted fields:
+ *   - newStatus === "closed":  `closedAt` = now, `closedByUserId` = `changedByUserId`,
+ *     and `closedCategory` / `closedSummary` from the event (when supplied).
+ *   - previousStatus === "closed" (reopen): nullify all four close fields.
+ *
+ * `c` is the row state with the NEW status already applied (callers pass the
+ * row from their CAS-update return, OR the pre-flip row with the new status
+ * spread in).
+ */
+export function workflowConversationSnapshotAfterStatusChange(
+  c: Parameters<typeof workflowConversationSnapshot>[0],
+  args: {
+    previousStatus: ConversationStatus;
+    changedByUserId: string | null;
+    closedCategory?: string | null;
+    closedSummary?: string | null;
+  },
+): WorkflowConversationSnapshot {
+  const newStatus = c.status;
+  const now = new Date();
+  let closeOverrides: Partial<Parameters<typeof workflowConversationSnapshot>[0]> = {};
+  if (newStatus === "closed") {
+    closeOverrides = {
+      closedAt: now,
+      closedByUserId: args.changedByUserId,
+      ...(args.closedCategory !== undefined ? { closedCategory: args.closedCategory } : {}),
+      ...(args.closedSummary !== undefined ? { closedSummary: args.closedSummary } : {}),
+    };
+  } else if (args.previousStatus === "closed") {
+    closeOverrides = {
+      closedAt: null,
+      closedByUserId: null,
+      closedCategory: null,
+      closedSummary: null,
+    };
+  }
+  return workflowConversationSnapshot({
+    ...c,
+    ...closeOverrides,
+  });
+}
+
 export function workflowContactSnapshot(c: {
   id: string;
   phoneNumber: string | null;

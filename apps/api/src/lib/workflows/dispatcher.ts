@@ -20,6 +20,17 @@ import { enqueueWorkflowRun } from "@/lib/workflows/queue";
  *   6. If triggerOncePerContact: write the WorkflowContactState row to
  *      mark this contact as having fired (race-safe via unique index)
  *
+ * Snapshot contract (M1):
+ *   `payload` is treated as the IMMUTABLE trigger-time snapshot. It is pinned
+ *   verbatim onto `WorkflowRun.eventPayload`; the runner (runner.ts) builds the
+ *   step envelope from `run.eventPayload`, not from a fresh DB read. Callers
+ *   MUST capture the conversation/contact state at trigger time (typically by
+ *   building the snapshot in the same subscriber that fires this dispatch) and
+ *   pass it in. If the caller does a fresh DB read instead, a concurrent
+ *   mutation landing between the read and the run insert produces an
+ *   inconsistent snapshot — the runner is correctly using the row that was
+ *   committed, but the row was sampled at the wrong moment.
+ *
  * Failures during dispatch are logged but NEVER thrown — workflows are
  * additive infrastructure. A degraded Redis or Postgres degrades workflows
  * only; messages still ingest, replies still send.
@@ -30,6 +41,15 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
   payload: PayloadFor<E>,
 ): Promise<void> {
   try {
+    // M8: load-all + in-memory condition filter. Fine at <500 workflows/team
+    // (the cap of `findMany` here scales linearly with workflow count, not
+    // with traffic). We log a one-line warning when a team crosses
+    // WORKFLOW_LOAD_WARN_THRESHOLD on a single dispatch so a noisy team
+    // surfaces before it becomes a tail-latency problem. The fix when this
+    // trips: push triggerConditions evaluation into the DB (Postgres JSON
+    // operators + an expression index on (teamId, trigger, published)), or
+    // shard the lookup by a coarse condition key. Both are bigger changes
+    // than the current pre-MVP scale warrants.
     const workflows = await retry(
       () =>
         db.workflow.findMany({
@@ -45,6 +65,16 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
       `[workflows] lookup team=${teamId} event=${event}`,
     );
     if (workflows.length === 0) return;
+    if (workflows.length >= WORKFLOW_LOAD_WARN_THRESHOLD) {
+      // Single line, no further dedupe — Postgres slow-query logs + this line
+      // together pinpoint the team in seconds. Don't suppress per team here;
+      // a sudden spike on a single team is the exact signal we want loud.
+      console.warn(
+        `[workflows] dispatch loaded ${workflows.length} workflows ` +
+          `(team=${teamId} event=${event}) — approaching the in-memory filter ` +
+          `threshold; consider pushing triggerConditions into the DB.`,
+      );
+    }
 
     const contactId = (payload as { contact?: { id?: string } })?.contact?.id ?? null;
     const conversationId = (payload as { conversation?: { id?: string } })?.conversation?.id ?? null;
@@ -192,6 +222,11 @@ async function createAndEnqueue(args: CreateAndEnqueueArgs): Promise<void> {
 
 const RULE_LOOKUP_RETRIES = [200] as const;
 const ENQUEUE_RETRIES = [200, 1000, 5000] as const;
+
+// M8 — warn when a single dispatch loads at least this many workflows for
+// in-memory triggerConditions filtering. Pre-MVP capacity is 500 per team
+// across all triggers, so half of that on ONE trigger is the loud threshold.
+const WORKFLOW_LOAD_WARN_THRESHOLD = 250;
 
 async function retry<T>(
   fn: () => Promise<T>,

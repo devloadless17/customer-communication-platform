@@ -68,6 +68,8 @@ export async function wipeTestData(): Promise<void> {
     d.workflow.deleteMany({}),
     d.internalNote.deleteMany({}),
     d.conversationEvent.deleteMany({}),
+    d.call.deleteMany({}),
+    d.callPermissionRequest.deleteMany({}),
     d.message.deleteMany({}),
     d.conversation.deleteMany({}),
     d.contact.deleteMany({}),

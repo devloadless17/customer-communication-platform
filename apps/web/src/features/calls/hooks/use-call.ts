@@ -242,6 +242,32 @@ export function useCall(): {
     };
   }, []);
 
+  // Tab-close mid-call: fire /end via sendBeacon so the customer side
+  // doesn't have to wait for the ~15s ICE timeout. pc.close runs in
+  // tearDown which never fires on a real tab close (no unload event for
+  // a hard close). sendBeacon is fire-and-forget + survives unload by
+  // spec. Only fires when we have a real (non-tmp) callId.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onBeforeUnload = () => {
+      const live = liveCallRef.current;
+      if (!live || live.callId.startsWith("tmp_")) return;
+      try {
+        const url = `/api/calls/${live.callId}/end`;
+        const blob = new Blob([JSON.stringify({})], { type: "application/json" });
+        navigator.sendBeacon?.(url, blob);
+      } catch {
+        // best-effort — nothing we can do at unload time
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onBeforeUnload);
+    };
+  }, []);
+
   /**
    * Build an RTCPeerConnection with mic capture, remote-audio routing,
    * and a connection-state watcher that auto-terminates on disconnect.
@@ -362,7 +388,13 @@ export function useCall(): {
       // The browser doesn't know the real callId until placeCall returns
       // (Meta assigns it). Use a temp id so onicecandidate / state handlers
       // can wire up before the rebind; the panel rebinds on POST success.
-      const tempCallId = `tmp_${Math.random().toString(36).slice(2)}`;
+      // Prefer crypto.randomUUID for a guaranteed-unique id; Math.random
+      // is short-bit and could (very unlikely) collide with a real call id.
+      const tempCallId = `tmp_${
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : Math.random().toString(36).slice(2)
+      }`;
 
       let pc: RTCPeerConnection;
       let sdpOffer: string;
