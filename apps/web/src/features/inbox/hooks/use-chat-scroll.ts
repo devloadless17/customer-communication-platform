@@ -214,13 +214,31 @@ export function useChatScroll({
       return;
     }
     // Activity-log pills (assignment / status / stage / tag / note-delete)
-    // are passive context — they shouldn't trigger the "↓ N new messages"
-    // pill or yank the viewport. If the user is reading history when an
-    // assignment lands, the pill quietly slots into the timeline and the
-    // scroll stays put; if they're already at the bottom, the
-    // ResizeObserver below will pin them as the pill mounts. Either way,
-    // the misleading "1 new message" bubble never appears for a log entry.
-    if (isActivityTail) return;
+    // are passive context — they must never trigger the "↓ N new messages"
+    // pill or yank a reader who's scrolled up. If the user is reading history
+    // when an assignment lands, the pill quietly slots into the timeline and
+    // the scroll stays put.
+    //
+    // BUT when the user is already pinned to the bottom, we must snap HERE —
+    // in the layout effect, BEFORE paint — exactly like a message. Delegating
+    // to the post-paint ResizeObserver (the old behavior) painted the pill one
+    // frame at the stale scroll position and scrolled it into view a frame
+    // later, which the user reads as the pill "jumping in from below / out of
+    // order." A pre-paint snap makes it simply appear at the bottom with zero
+    // travel. We still skip the unread bump unconditionally — a log is never
+    // "1 new message."
+    if (isActivityTail) {
+      if (stickyRef.current) {
+        snapToBottom();
+        requestAnimationFrame(() => {
+          if (stickyRef.current) snapToBottom();
+          requestAnimationFrame(() => {
+            if (stickyRef.current) snapToBottom();
+          });
+        });
+      }
+      return;
+    }
     if (isOwnSend) {
       // Kill any active load-older settle window — its ResizeObserver would
       // otherwise re-pin to the OLD distance-from-bottom and undo this snap.
