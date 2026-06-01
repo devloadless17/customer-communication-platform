@@ -371,7 +371,16 @@ export function ReplyBox({
         el.setSelectionRange(pos, pos);
       });
     },
-    [slashRange, value, contact],
+    [
+      slashRange,
+      value,
+      contact,
+      currentUser,
+      lastInboundAt,
+      windowStatus.state,
+      stageCatalog,
+      tags,
+    ],
   );
 
   const isNote = mode === "note";

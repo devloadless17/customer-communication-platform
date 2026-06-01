@@ -147,7 +147,10 @@ function MessageThreadImpl({
     replaceWithContext,
   } = useConversationEvents(initialData, nextOlderCursor, onMarkRead, onSnapshot);
   const { conversation, contact, assignedUser, messages, notes } = data;
-  const events = data.events ?? [];
+  // Stable reference: `data.events ?? []` would allocate a fresh array on every
+  // render when events is nullish, making the timeline useMemo below recompute
+  // each pass. Memo on `data.events` so it only changes when events actually do.
+  const events = useMemo(() => data.events ?? [], [data.events]);
   const { confirm, alert, confirmDialog } = useConfirm();
 
   const memberById = useMemo(() => {
@@ -295,6 +298,12 @@ function MessageThreadImpl({
   // `forwardIds` is the (frozen) set of message ids handed to the picker.
   // -------------------------------------------------------------------------
   const selection = useMessageSelection();
+  // Pull the identity-stable handlers (`start`/`clear` are useCallback([]) in
+  // the hook) and the `selecting` flag out as locals so the effects/callbacks
+  // below depend on them precisely. Depending on the whole `selection` object
+  // would re-run them on every checkbox toggle — its memo identity changes
+  // with `selectedIds`.
+  const { clear: clearSelection, start: startSelection, selecting: isSelecting } = selection;
   const [forwardOpen, setForwardOpen] = useState(false);
   const [forwardIds, setForwardIds] = useState<string[]>([]);
 
@@ -302,18 +311,18 @@ function MessageThreadImpl({
   // target / selection belongs to the old thread.
   useEffect(() => {
     setReplyTarget(null);
-    selection.clear();
-  }, [conversation.id, selection.clear]);
+    clearSelection();
+  }, [conversation.id, clearSelection]);
 
   // Esc leaves selection mode.
   useEffect(() => {
-    if (!selection.selecting) return;
+    if (!isSelecting) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") selection.clear();
+      if (e.key === "Escape") clearSelection();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selection.selecting, selection.clear]);
+  }, [isSelecting, clearSelection]);
 
   const forwardOne = useCallback((msg: Message) => {
     setForwardIds([msg.id]);
@@ -343,11 +352,11 @@ function MessageThreadImpl({
   }, []);
   const onForwardError = useCallback((summary: string) => {
     void alert(summary);
-  }, []);
+  }, [alert]);
 
   const startSelect = useCallback(
-    (msg: Message) => selection.start(msg.id),
-    [selection.start],
+    (msg: Message) => startSelection(msg.id),
+    [startSelection],
   );
 
   const beginReply = useCallback(
@@ -837,6 +846,12 @@ function MessageThreadImpl({
       prevLabel = label;
     }
     return labels;
+    // `todayKey` is an intentional recompute TRIGGER, not a value the body
+    // reads: `now` is pulled via `nowRef` (so this doesn't recompute on every
+    // 60s tick), but Today/Yesterday labels must refresh when the calendar day
+    // rolls over — `todayKey` changes exactly then. eslint can't model a
+    // dependency that's a trigger rather than a read, so silence it here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timeline, tz, todayKey]);
 
   // ---------------------------------------------------------------------

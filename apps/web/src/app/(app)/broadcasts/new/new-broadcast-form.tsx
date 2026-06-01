@@ -221,7 +221,6 @@ export function NewBroadcastForm({
       // Template no longer exists / not approved — give up on clone, normal form.
       cloneAppliedRef.current = true;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templates, cloneTemplateId]);
 
   // -------------------------------------------------------------------------

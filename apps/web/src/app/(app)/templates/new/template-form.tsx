@@ -340,7 +340,7 @@ export function TemplateForm({
       setSubmitError(err instanceof Error ? err.message : "Submit failed");
       setSubmitting(false);
     }
-  }, [canSubmit, name, language, category, components, bindings, router]);
+  }, [canSubmit, name, language, category, components, bindings, router, softRefresh]);
 
   // -------------------------------------------------------------------------
   // Render

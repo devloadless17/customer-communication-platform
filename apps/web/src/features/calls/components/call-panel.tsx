@@ -35,17 +35,21 @@ export function CallPanel({
   const [now, setNow] = useState(() => Date.now());
 
   // Tick once per second while we're in a call so the duration timer
-  // updates. Pause when there's no call.
+  // updates. Pause when there's no call. Read the primitive fields (not the
+  // whole `liveCall` object, whose identity churns as call state updates) so
+  // the 1s interval only restarts on a real call/status change.
+  const callId = liveCall?.callId;
+  const callStatus = liveCall?.status;
   useEffect(() => {
-    if (!liveCall || liveCall.status === "ending") return;
+    if (!callId || callStatus === "ending") return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [liveCall?.callId, liveCall?.status]);
+  }, [callId, callStatus]);
 
   // Keep the muted UI in sync with the underlying stream state.
   useEffect(() => {
     setMutedState(isMuted());
-  }, [liveCall?.callId, isMuted]);
+  }, [callId, isMuted]);
 
   if (!liveCall) return null;
 

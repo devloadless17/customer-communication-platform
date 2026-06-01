@@ -16,7 +16,7 @@
 # -----------------------------------------------------------------------------
 #
 #   - Global options block         → ACME contact + explicit HTTP/3 protocols
-#   - Compression (`encode`)       → zstd → br → gzip, scoped OFF for /api/*
+#   - Compression (`encode`)       → zstd → gzip, scoped OFF for /api/*
 #                                    (small JSON bodies aren't worth the CPU)
 #   - Security headers             → HSTS, nosniff, X-Frame-Options SAMEORIGIN,
 #                                    Referrer-Policy, Permissions-Policy.
@@ -85,9 +85,11 @@ __DOMAIN__ {
 
 	# Compression for HTML / JS / RSC payloads. Order in the directive is
 	# the negotiation preference: Caddy picks the FIRST encoding the client's
-	# `Accept-Encoding` advertises, so zstd > br > gzip. Brotli costs more
-	# CPU than gzip on the encode side but Caddy 2.x's `br` encoder is
-	# stream-based + safe to enable for dynamic responses at default level.
+	# `Accept-Encoding` advertises, so zstd > gzip. No `br`: the standard
+	# Caddy distribution ships zstd + gzip on-the-fly encoders only — it can
+	# serve precompressed `.br` files but has no `http.encoders.br` module,
+	# so `encode … br …` fails `caddy validate` ("module not registered:
+	# http.encoders.br"). zstd + gzip already cover every real client.
 	#
 	# Scoped OFF for /api/* — the api upstream returns mostly small JSON
 	# bodies (a few hundred bytes typical), where compression CPU + the
@@ -99,7 +101,7 @@ __DOMAIN__ {
 	@compressible {
 		not path /api/*
 	}
-	encode @compressible zstd br gzip
+	encode @compressible zstd gzip
 
 	# Hardening headers complement the ones next.config.ts sets — Caddy
 	# overrides anything the app emits, so keep these aligned with

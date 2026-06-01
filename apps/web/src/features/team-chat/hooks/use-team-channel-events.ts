@@ -535,7 +535,7 @@ export function useTeamChannelEvents(
         document.removeEventListener("visibilitychange", onVisibility);
       }
     };
-  }, [channelId, markRead]);
+  }, [channelId, markRead, currentUserId]);
 
   const addOptimistic = useCallback((m: TeamChannelMessageDto) => {
     setMessages((prev) => [...prev, m]);

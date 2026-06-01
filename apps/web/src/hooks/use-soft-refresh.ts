@@ -1,6 +1,6 @@
 "use client";
 
-import { useTransition } from "react";
+import { useCallback, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 /**
@@ -25,5 +25,8 @@ import { useRouter } from "next/navigation";
 export function useSoftRefresh(): () => void {
   const router = useRouter();
   const [, startTransition] = useTransition();
-  return () => startTransition(() => router.refresh());
+  // Memoized so callers can list `softRefresh` in their own hook dep arrays
+  // without re-creating effects/callbacks every render. `router` and
+  // `startTransition` are both stable, so this is effectively constant.
+  return useCallback(() => startTransition(() => router.refresh()), [router]);
 }

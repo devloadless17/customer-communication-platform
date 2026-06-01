@@ -31,14 +31,12 @@ import {
 import { db, superadminTeam, wipeTestData, pollUntil } from "../_helpers/db";
 
 let teamId: string;
-let userId: string;
 let contactId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
   const su = await superadminTeam();
   teamId = su.teamId;
-  userId = su.userId;
   const contact = await db().contact.create({
     data: {
       teamId,

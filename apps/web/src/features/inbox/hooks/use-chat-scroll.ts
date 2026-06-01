@@ -187,7 +187,7 @@ export function useChatScroll({
         if (stickyRef.current) snapToBottom();
       });
     });
-  }, [conversationId, snapToBottom]);
+  }, [conversationId, snapToBottom, viewportRef]);
 
   // Tail-entry change. Three cases:
   //   - Own send: always snap and force sticky=true. The user's intent
@@ -367,7 +367,7 @@ export function useChatScroll({
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
-  }, [hasMoreOlder, loadOlder, contentRef, topSentinelRef]);
+  }, [hasMoreOlder, loadOlder, contentRef, topSentinelRef, viewportRef]);
 
   const markBenignTailUpdate = useCallback(() => {
     skipNextTailEffectRef.current = true;

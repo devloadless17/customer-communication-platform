@@ -545,10 +545,10 @@ function OrgNameCard({
   // saved, another admin renamed). Only resets while the user isn't actively
   // editing — i.e. draft equals the previous live value.
   useEffect(() => {
+    // The prev-vs-new comparison lives inside the updater, so the effect only
+    // needs `currentName` as a dep — the user's typing (local `draft` state)
+    // must not re-trigger this sync.
     setDraft((prev) => (prev === currentName ? prev : currentName));
-    // intentional: we want the prev-vs-new comparison driven by currentName
-    // changes only, not by the user's typing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentName]);
 
   const trimmed = draft.trim();
