@@ -595,7 +595,13 @@ jobs:
             # changed schedule self-updates. 03:17 UTC nightly; log to a file so
             # a failed dump is discoverable.
             CRON_LINE="17 3 * * * cd /opt/ccp && /opt/ccp/pg-backup.sh >> /opt/ccp/pg-backup.log 2>&1"
-            ( crontab -l 2>/dev/null | grep -Fv "/opt/ccp/pg-backup.sh"; echo "$CRON_LINE" ) | crontab -
+            # `|| true` is load-bearing under `set -euo pipefail`: on a host with
+            # no user crontab, `crontab -l` exits 1 (suppressed) and the piped
+            # `grep -Fv` then gets empty stdin and ALSO exits 1 — which pipefail
+            # propagates and `set -e` turns into a silent deploy abort (exit 1,
+            # no output, ~2s in). Swallowing that non-zero keeps the idempotent
+            # filter-then-append working whether or not a crontab already exists.
+            ( crontab -l 2>/dev/null | grep -Fv "/opt/ccp/pg-backup.sh" || true; echo "$CRON_LINE" ) | crontab -
             echo "✓ nightly pg-backup cron installed"
 
             rm -f /tmp/ccp-deploy.tar.gz
