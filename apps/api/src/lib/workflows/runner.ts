@@ -624,9 +624,20 @@ export async function runWorkflow(input: RunWorkflowInput): Promise<RunWorkflowR
     currentStepId = nextId;
   }
 
-  // Loop guard hit — record + fail the run.
-  if (progressCount(stepLog) >= MAX_STEPS_PER_RUN) {
-    const reason = `step ceiling (${MAX_STEPS_PER_RUN}) exceeded`;
+  // Loop guard hit — record + FAIL the run. We exit the while with
+  // `currentStepId` still set ONLY when a ceiling stopped us (the graph was
+  // not yet terminal); a natural end-of-graph leaves currentStepId null. Two
+  // ceilings can trip: the DISTINCT-step count (progressCount) and the
+  // per-pickup EXECUTION count (executedThisPickup). The latter is what a
+  // tight `jump_to_step` loop hits — it re-runs only a few distinct steps, so
+  // progressCount stays low. The old check tested progressCount alone, so a
+  // runaway jump loop fell through to the "completed" branch below, masking
+  // the runaway AND nulling pending work as if the run finished cleanly.
+  if (currentStepId) {
+    const reason =
+      progressCount(stepLog) >= MAX_STEPS_PER_RUN
+        ? `step ceiling (${MAX_STEPS_PER_RUN}) exceeded`
+        : `execution ceiling (${MAX_STEPS_PER_RUN} steps/pickup) exceeded — likely a jump_to_step loop`;
     await db.workflowRun.update({
       where: { id: run.id },
       data: {

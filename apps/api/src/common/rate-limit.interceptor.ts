@@ -1,28 +1,38 @@
 import {
-  CanActivate,
+  CallHandler,
   ExecutionContext,
   HttpException,
   Injectable,
+  NestInterceptor,
   SetMetadata,
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import type { Request } from "express";
+import type { Observable } from "rxjs";
 
 /**
- * Per-user token-bucket rate limit. Mirrors the API-key bucket in
- * `auth/api-key.guard.ts` — same in-memory pattern, same eviction sweeper.
+ * Per-user / per-api-key token-bucket rate limit. Mirrors the API-key bucket
+ * in `auth/api-key.guard.ts` — same in-memory pattern, same eviction sweeper.
  * Moves to Redis on the same trigger (second app instance).
  *
- * Wired globally via `APP_GUARD` in CommonModule. The guard runs for every
- * request but only consumes a token when `req.session?.userId` is set —
- * unauthenticated routes (login pages, webhooks) and API-key routes
- * (already rate-limited by ApiKeyGuard) pass through without metering.
+ * MUST be an INTERCEPTOR, not a guard. It buckets by `req.session?.userId`
+ * (set by SessionGuard) / `req.apiKey?.apiKeyId` (set by ApiKeyGuard). Those
+ * guards are applied per-controller via `@UseGuards(...)`. In NestJS, a global
+ * `APP_GUARD` runs BEFORE controller-scoped guards — so as a global guard this
+ * code ran before the principal existed, the bucket key was always null, and
+ * EVERY session-authenticated request passed unmetered (the per-route
+ * `@RateLimit({ perMinute: 60 })` send cap was inert). Interceptors run AFTER
+ * all guards, so by the time `intercept` fires the principal is populated.
+ * Registered via `APP_INTERCEPTOR` in CommonModule.
+ *
+ * Still a no-op when neither principal is set (login pages, webhooks — those
+ * have their own IP-level limits), so unauthenticated routes are unaffected.
  *
  * Default ceiling: 300 req/min per user (~5 req/sec sustained, up to 300
  * burst). One agent loading the inbox fires ~10-15 parallel queries on a
- * cold cache — that's well within burst. A runaway browser script can't
- * exceed 5 req/sec sustained, which bounds DoS-yourself risk on the api
- * process and the Postgres connection pool.
+ * cold cache — well within burst. A runaway browser script can't exceed 5
+ * req/sec sustained, which bounds DoS-yourself risk on the api process and
+ * the Postgres connection pool.
  *
  * Tighter or looser limits per route are decorator-driven:
  *
@@ -60,7 +70,7 @@ interface Bucket {
   lastRefill: number;
 }
 
-// Key shape: `${userId}:${perMinute}` — different per-route limits live in
+// Key shape: `${principal}:${perMinute}` — different per-route limits live in
 // separate buckets so a hot read-endpoint can't starve mutation budget.
 const buckets = new Map<string, Bucket>();
 
@@ -93,10 +103,10 @@ function logEviction(): void {
 }
 
 function consume(
-  userId: string,
+  principal: string,
   perMinute: number,
 ): { ok: true } | { ok: false; retryAfter: number } {
-  const key = `${userId}:${perMinute}`;
+  const key = `${principal}:${perMinute}`;
   const now = Date.now();
   const refillPerMs = perMinute / WINDOW_MS;
   const bucket = buckets.get(key);
@@ -125,21 +135,24 @@ function consume(
 }
 
 @Injectable()
-export class RateLimitGuard implements CanActivate {
+export class RateLimitInterceptor implements NestInterceptor {
   constructor(private readonly reflector: Reflector) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    // Skip for non-HTTP contexts (Socket.io gateway etc.).
+    if (context.getType() !== "http") return next.handle();
+
     const req = context.switchToHttp().getRequest<Request>();
 
-    // Skip for non-HTTP contexts (Socket.io gateway etc.).
-    // Buckets by userId (session-auth) OR apiKeyId (Bearer-auth). The
-    // upstream ApiKeyGuard already enforces a 60/min default ceiling; this
-    // decorator-driven path lets specific routes tighten further (e.g. a
-    // bulk-tag endpoint at 20/min/key).
+    // Buckets by userId (session-auth) OR apiKeyId (Bearer-auth) — both set
+    // by their respective guards, which have already run by the time an
+    // interceptor fires. The upstream ApiKeyGuard already enforces a 60/min
+    // default ceiling; this decorator-driven path lets specific routes
+    // tighten further (e.g. a bulk-tag endpoint at 20/min/key).
     const userId = req.session?.userId;
     const apiKeyId = req.apiKey?.apiKeyId;
     const key = userId ? `u:${userId}` : apiKeyId ? `k:${apiKeyId}` : null;
-    if (!key) return true;
+    if (!key) return next.handle();
 
     const opts =
       this.reflector.getAllAndOverride<RateLimitOptions | undefined>(
@@ -158,6 +171,6 @@ export class RateLimitGuard implements CanActivate {
         429,
       );
     }
-    return true;
+    return next.handle();
   }
 }

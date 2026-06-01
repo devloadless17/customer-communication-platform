@@ -651,6 +651,11 @@ model Contact {
   @@index([teamId, lastInboundAt(sort: Desc)], map: "Contact_teamId_lastInboundAt_idx")
   // pg_trgm GIN index for substring ILIKE search on contact name.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_name_trgm_idx")
+  // Same, for the email OR-arm of contact search (global-search.ts does
+  // `email contains` → ILIKE). Without it that arm seq-scanned the team
+  // partition while name/phone rode their trgm indexes. Non-partial: NULL
+  // emails extract no trigrams, so GIN skips them.
+  @@index([email(ops: raw("gin_trgm_ops"))], type: Gin, map: "Contact_email_trgm_idx")
   // NOTE: a PARTIAL pg_trgm GIN index `Contact_phoneNumber_trgm_idx`
   // (USING GIN ("phoneNumber" gin_trgm_ops) WHERE "phoneNumber" IS NOT NULL)
   // is hand-written in the init migration. Phone search is a substring
@@ -1091,8 +1096,9 @@ model Tag {
   // of them.
   audienceGroups AudienceGroup[] @relation("AudienceGroupTags")
 
+  // (teamId, name) unique already serves teamId-prefix lookups, so a standalone
+  // @@index([teamId]) was redundant write overhead. Dropped 2026-06-01.
   @@unique([teamId, name])
-  @@index([teamId])
 }
 
 // Saved audience for broadcasts. Hybrid composition:
@@ -1123,8 +1129,9 @@ model AudienceGroup {
   tags      Tag[]     @relation("AudienceGroupTags")
   contacts  Contact[] @relation("AudienceGroupContacts")
 
+  // (teamId, name) unique already covers teamId-prefix lookups — standalone
+  // @@index([teamId]) was redundant. Dropped 2026-06-01.
   @@unique([teamId, name])
-  @@index([teamId])
 }
 
 // A batch template send to many recipients in one go. Inspired by Front /
@@ -1449,6 +1456,10 @@ model WorkflowContactState {
 
   @@unique([workflowId, contactId])
   @@index([teamId])
+  // The (workflowId, contactId) unique leads with workflowId, so a
+  // contactId-only lookup (reconciling rows after a contact hard-purge)
+  // couldn't use it. Btree on contactId for that scan.
+  @@index([contactId])
 }
 
 // API key for the external (n8n-facing) endpoints under /api/external/v1.

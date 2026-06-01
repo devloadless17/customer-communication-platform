@@ -21,7 +21,11 @@ export async function listAudienceGroups(teamId: string): Promise<AudienceGroupD
     include: {
       createdBy: { select: { name: true } },
       tags: { select: { id: true } },
-      contacts: { select: { id: true } },
+      // Exclude soft-deleted contacts so the DTO's `contactIds` (the chips the
+      // UI renders) stays consistent with `memberCount` (which filters
+      // deletedAt: null) — otherwise a soft-deleted member shows as a phantom
+      // chip with no matching count.
+      contacts: { where: { deletedAt: null }, select: { id: true } },
     },
   });
 
@@ -99,7 +103,11 @@ export async function getAudienceGroup(
     include: {
       createdBy: { select: { name: true } },
       tags: { select: { id: true } },
-      contacts: { select: { id: true } },
+      // Exclude soft-deleted contacts so the DTO's `contactIds` (the chips the
+      // UI renders) stays consistent with `memberCount` (which filters
+      // deletedAt: null) — otherwise a soft-deleted member shows as a phantom
+      // chip with no matching count.
+      contacts: { where: { deletedAt: null }, select: { id: true } },
     },
   });
   if (!g) return null;

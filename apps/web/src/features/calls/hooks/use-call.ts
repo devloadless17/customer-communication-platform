@@ -68,7 +68,6 @@ const DEFAULT_RTC_CONFIG: RTCConfiguration = {
 
 export function useCall(): {
   liveCall: LiveCallState | null;
-  pendingOffers: Map<string, PendingOffer>;
   error: string | null;
   answerIncoming: (
     callId: string,
@@ -97,15 +96,18 @@ export function useCall(): {
   // answerIncoming can consume the offer without waiting on a fresh frame.
   const pendingOffersRef = useRef<Map<string, PendingOffer>>(new Map());
 
-  // Pending ANSWER SDP for an outbound call. The customer's answer arrives as a
-  // `call:sdp_offer` (type:"answer") frame keyed by Meta's REAL callId, fanned
-  // team-room — it can beat the POST /call response that rebinds our optimistic
-  // `tmp_` id to the real one. If it arrives before the PC has a local offer set
-  // (or before we can match it), we stash it here and drain it on rebind, rather
-  // than dropping it (a dropped answer = the call never establishes media, ICE
-  // times out ~15s, panel closes itself — the documented "first outbound flow"
-  // bug). Only one outbound PC exists at a time, so a single slot suffices.
-  const pendingAnswerRef = useRef<{ callId: string; sdp: string } | null>(null);
+  // Pending ANSWER SDPs for outbound calls, keyed by Meta's REAL callId. The
+  // customer's answer arrives as a `call:sdp_offer` (type:"answer") frame fanned
+  // to the WHOLE team room, so it can (a) beat the POST /call response that
+  // rebinds our optimistic `tmp_` id to the real one, AND (b) belong to a
+  // DIFFERENT agent's concurrent outbound call. Keying by callId is what makes
+  // both safe: the matching outbound drain consumes only its OWN answer, while a
+  // foreign-call answer sits inert under its own key (it never equals our call's
+  // id) and is GC'd by that call's own `call:ended` frame. A dropped answer =
+  // the call never establishes media (ICE times out ~15s, the panel closes
+  // itself — the documented "first outbound flow" bug), so we never drop:
+  // apply-or-stash, then drain on rebind.
+  const pendingAnswersRef = useRef<Map<string, string>>(new Map());
 
   // Peer connection + media stream live as refs so swapping doesn't trigger
   // a re-render. Re-renders are driven by liveCall changes only.
@@ -125,36 +127,44 @@ export function useCall(): {
   }, []);
 
   // Apply an outbound call's answer SDP to the live peer connection. Returns
-  // true if applied. Deliberately matches on PC signaling state + direction
-  // ("out"), NOT on callId equality: the answer frame is keyed by Meta's real
-  // callId but our liveCall may still hold the `tmp_` id (the POST rebind hasn't
-  // committed yet). Since only ONE outbound PC exists at a time, a PC in
-  // `have-local-offer` IS the call this answer belongs to. Flips the call to
-  // in_progress so the panel + timeline advance.
-  const applyOutboundAnswer = useCallback(async (sdp: string): Promise<boolean> => {
-    const pc = pcRef.current;
-    const live = liveCallRef.current;
-    if (
-      !pc ||
-      !live ||
-      live.direction !== "out" ||
-      pc.signalingState !== "have-local-offer"
-    ) {
-      return false;
-    }
-    try {
-      await pc.setRemoteDescription({ type: "answer", sdp });
-      setLiveCall((prev) =>
-        prev && prev.direction === "out"
-          ? { ...prev, status: "in_progress", answeredAt: Date.now() }
-          : prev,
-      );
-      return true;
-    } catch (err) {
-      console.warn("[useCall] setRemoteDescription(answer) failed", err);
-      return false;
-    }
-  }, []);
+  // true if applied. Matches STRICTLY on callId (live.callId === callId): the
+  // answer frame is fanned to the whole team room, so EVERY agent's browser
+  // receives it — including agents who themselves have an unrelated outbound
+  // call sitting in `have-local-offer`. The earlier PC-state-only match made
+  // agent B apply agent A's customer's answer to B's peer connection, breaking
+  // B's call. Keying on the real callId fixes it: B's live.callId never equals
+  // A's call. The tmp_→real rebind window (where live.callId is still tmp_ and
+  // can't match the real id) is handled by stashing + draining on rebind, NOT
+  // by relaxing this match. The signalingState guard stays as a secondary
+  // safety (a duplicate answer after we're already `stable` is a no-op).
+  const applyOutboundAnswer = useCallback(
+    async (callId: string, sdp: string): Promise<boolean> => {
+      const pc = pcRef.current;
+      const live = liveCallRef.current;
+      if (
+        !pc ||
+        !live ||
+        live.direction !== "out" ||
+        live.callId !== callId ||
+        pc.signalingState !== "have-local-offer"
+      ) {
+        return false;
+      }
+      try {
+        await pc.setRemoteDescription({ type: "answer", sdp });
+        setLiveCall((prev) =>
+          prev && prev.direction === "out" && prev.callId === callId
+            ? { ...prev, status: "in_progress", answeredAt: Date.now() }
+            : prev,
+        );
+        return true;
+      } catch (err) {
+        console.warn("[useCall] setRemoteDescription(answer) failed", err);
+        return false;
+      }
+    },
+    [],
+  );
 
   const tearDown = useCallback(() => {
     pcRef.current?.getSenders().forEach((s) => {
@@ -169,10 +179,15 @@ export function useCall(): {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     if (remoteAudioElRef.current) {
+      // Explicitly stop playback before detaching the stream. The element is
+      // created once and reused across calls; clearing srcObject alone can
+      // leave the media element in a lingering "playing" internal state, so
+      // pause + rewind first for a clean slate on the next call's stream.
+      remoteAudioElRef.current.pause();
       remoteAudioElRef.current.srcObject = null;
     }
-    // Clear any stashed answer so it can't leak into the next call's PC.
-    pendingAnswerRef.current = null;
+    // Clear any stashed answers so they can't leak into the next call's PC.
+    pendingAnswersRef.current.clear();
     setLiveCall(null);
   }, []);
 
@@ -191,12 +206,13 @@ export function useCall(): {
       // the local-offer set) so initiateOutbound can drain it on rebind. Never
       // drop it — a dropped answer = the call never establishes media.
       if (payload.sdp.type === "answer") {
-        const applied = await applyOutboundAnswer(payload.sdp.sdp);
+        const applied = await applyOutboundAnswer(payload.callId, payload.sdp.sdp);
         if (!applied) {
-          pendingAnswerRef.current = {
-            callId: payload.callId,
-            sdp: payload.sdp.sdp,
-          };
+          // Stash by callId. It may have beaten the tmp_→real rebind (our own
+          // call — drained on rebind), or be a foreign agent's call (never
+          // matches our id — GC'd by its own call:ended). Keying by id keeps
+          // the two cases from colliding on a single slot.
+          pendingAnswersRef.current.set(payload.callId, payload.sdp.sdp);
         }
         return;
       }
@@ -214,9 +230,9 @@ export function useCall(): {
         tearDown();
       }
       pendingOffersRef.current.delete(payload.callId);
-      if (pendingAnswerRef.current?.callId === payload.callId) {
-        pendingAnswerRef.current = null;
-      }
+      // GC any stashed answer for this call — including foreign-call answers
+      // that landed here via the team-room fanout but were never ours to apply.
+      pendingAnswersRef.current.delete(payload.callId);
     };
 
     socket.on("call:sdp_offer", onSdpOffer);
@@ -296,9 +312,18 @@ export function useCall(): {
     // Customer hangs up → connectionState goes disconnected → failed →
     // closed. Tear down immediately AND POST /end so the audit row gets
     // a terminal status. Don't wait on Meta's terminate webhook (lag-prone).
+    //
+    // disconnected → failed → closed each fire this handler, so without a guard
+    // we'd POST /end (and run tearDown) 2-3× per teardown. Server-side endCall
+    // is idempotent so it's not a correctness bug, but the redundant POSTs are
+    // pure waste. One-shot per peer connection (the flag is per-call — setupPeer
+    // builds a fresh PC + closure each call).
+    let teardownFired = false;
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       if (state === "failed" || state === "disconnected" || state === "closed") {
+        if (teardownFired) return;
+        teardownFired = true;
         const live = liveCallRef.current;
         if (live && !live.callId.startsWith("tmp_")) {
           void fetchWithSessionGuard(`/api/calls/${live.callId}/end`, {
@@ -341,16 +366,6 @@ export function useCall(): {
           answeredAt: startedAt,
         });
 
-        // Optimistic local dispatch — dismiss the toast on this browser
-        // before the server's call:answered frame arrives.
-        dispatchLocalSocketEvent("call:answered", {
-          teamId: "",
-          conversationId,
-          callId,
-          answeredByUserId: "",
-          answeredAt: new Date(startedAt).toISOString(),
-        });
-
         const res = await fetchWithSessionGuard(`/api/calls/${callId}/answer`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -363,8 +378,25 @@ export function useCall(): {
               : "Couldn't accept the call. Try again.",
           );
           tearDown();
+          return;
         }
         pendingOffersRef.current.delete(callId);
+
+        // Optimistic local dispatch — dismiss the toast on this browser + flip
+        // the thread's activeCall to in_progress, ahead of the server's
+        // call:answered frame. Fired ONLY after the POST is confirmed (200):
+        // firing it BEFORE meant a lost race (409) had already flipped local
+        // reducer state (activeCall = in_progress in the thread cache) that
+        // tearDown doesn't revert — leaving a stale "live call" indicator on a
+        // call this agent never won. The IncomingCallToast already self-dismisses
+        // its own card on click, so the toast doesn't linger during the POST.
+        dispatchLocalSocketEvent("call:answered", {
+          teamId: "",
+          conversationId,
+          callId,
+          answeredByUserId: "",
+          answeredAt: new Date(startedAt).toISOString(),
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         fail(
@@ -442,25 +474,32 @@ export function useCall(): {
           tearDown();
           return { ok: false, reason: body.reason ?? `http_${res.status}` };
         }
-        // Rebind to Meta's real callId so the `call:ended` frame (which targets
-        // by real id) matches. (The answer frame no longer needs the rebind to
-        // match — applyOutboundAnswer keys on PC state, not callId.)
+        // Rebind to Meta's real callId so both the `call:ended` frame AND the
+        // answer frame (now matched by callId, not PC state) target this call.
         const realCallId = body.callId ?? tempCallId;
+        // Update liveCallRef SYNCHRONOUSLY (not just via setLiveCall, whose
+        // effect won't run until the next tick): the drain below + every
+        // applyOutboundAnswer match read liveCallRef.callId, so it must already
+        // be the real id when we drain, or the strict callId match would reject
+        // our own stashed answer.
+        if (liveCallRef.current && liveCallRef.current.callId === tempCallId) {
+          liveCallRef.current = { ...liveCallRef.current, callId: realCallId };
+        }
         setLiveCall((prev) =>
           prev && prev.callId === tempCallId
             ? { ...prev, callId: realCallId }
             : prev,
         );
-        // Drain any answer SDP that arrived BEFORE this rebind (the team-room
-        // answer frame can beat the POST response). Without this drain, a fast
-        // customer pickup would leave the stashed answer unapplied and the call
-        // would never connect. liveCallRef is already rebound via the setState
-        // above on the next tick, but applyOutboundAnswer matches on PC state so
-        // it doesn't depend on that — apply immediately.
-        const stashed = pendingAnswerRef.current;
+        // Drain an answer SDP that arrived BEFORE this rebind (the team-room
+        // answer frame can beat the POST response). Matched by the REAL callId,
+        // so we apply ONLY our own call's answer — a foreign agent's answer
+        // stashed under a different id is left untouched. Without this drain a
+        // fast customer pickup would strand the stashed answer and the call
+        // would never connect.
+        const stashed = pendingAnswersRef.current.get(realCallId);
         if (stashed) {
-          pendingAnswerRef.current = null;
-          void applyOutboundAnswer(stashed.sdp);
+          pendingAnswersRef.current.delete(realCallId);
+          void applyOutboundAnswer(realCallId, stashed);
         }
         return { ok: true };
       } catch {
@@ -518,7 +557,6 @@ export function useCall(): {
 
   return {
     liveCall,
-    pendingOffers: pendingOffersRef.current,
     error,
     answerIncoming,
     initiateOutbound,

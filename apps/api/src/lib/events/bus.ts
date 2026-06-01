@@ -24,7 +24,7 @@ import { persistDispatchedRow } from "@/lib/events/outbox";
  *     realtime promise just-in-time before persisting the outbox row so
  *     a realtime throw still lands in `lastError`.
  *
- *   BACKGROUND (AUDIT, ANALYTICS, WORKFLOW_DISPATCH, WEB_CACHE_REVALIDATE,
+ *   BACKGROUND (AUDIT, ANALYTICS, WORKFLOW_DISPATCH,
  *               OUTBOUND_WEBHOOKS, DEFAULT)
  *     Run SEQUENTIALLY in priority order, DETACHED from `publish()` —
  *     the HTTP handler that called `await publish(...)` returns as soon
@@ -37,7 +37,7 @@ import { persistDispatchedRow } from "@/lib/events/outbox";
  *         those same post-mutation fields.
  *     Registration order:
  *       realtime-fanout → audit → analytics → workflow-dispatch →
- *       web-cache-revalidate → outbound-webhooks
+ *       outbound-webhooks
  *     Encoded as explicit priorities, not registration timing, so a
  *     reorder of `AppModule.imports` can't silently break it.
  *
@@ -72,7 +72,9 @@ export const SubscriberPriority = {
   AUDIT: 10,
   ANALYTICS: 20,
   WORKFLOW_DISPATCH: 30,
-  WEB_CACHE_REVALIDATE: 40,
+  // (40 was WEB_CACHE_REVALIDATE — removed 2026-06-01: no subscriber ever
+  //  registered there. Cross-process cache revalidation goes through the
+  //  HTTP /api/internal/revalidate bridge, not a prioritized bus tier.)
   OUTBOUND_WEBHOOKS: 50,
   DEFAULT: 100,
 } as const;
@@ -133,7 +135,7 @@ export function subscribe<K extends DomainEventType>(
  *   - CRITICAL (REALTIME, priority 0) fires fire-and-forget at the head of
  *     `runSubscribers`. The socket frame goes out without waiting for any
  *     downstream subscriber.
- *   - BACKGROUND (AUDIT, ANALYTICS, WORKFLOW_DISPATCH, WEB_CACHE_REVALIDATE,
+ *   - BACKGROUND (AUDIT, ANALYTICS, WORKFLOW_DISPATCH,
  *     OUTBOUND_WEBHOOKS, DEFAULT) used to run in-line and forced the HTTP
  *     handler that called `await publish(...)` to wait for analytics writes,
  *     workflow dispatch enqueues, and partner webhook fanout before

@@ -94,14 +94,21 @@ export class RealtimeGateway
     // Handshake rate-limit by remote address. A deploy / WiFi flap
     // wakes 80 sockets at once; without a per-IP cap an authenticated
     // misbehaving page (or hostile client) can also fire unbounded
-    // handshakes. Token bucket: 30 handshakes / 10s per IP — generous
-    // enough for a tab cluster, tight enough to cap a hostile loop.
-    // The bucket Map is bounded LRU so a high-cardinality attacker can't
-    // OOM us.
+    // handshakes. Token bucket: 200 handshakes / 10s per IP. A whole office
+    // shares ONE NAT IP, so on a deploy / Caddy-bounce reconnect storm a team
+    // (CLAUDE.md anticipates ~80 agents, × multiple tabs) bursts well past the
+    // old cap of 30 — and tripping it returned `handshake_throttled` to LEGIT
+    // clients, whose reconnect backoff then cascaded into the exact visible
+    // flakiness CLAUDE.md warns about. The session cookie-cache (15s, see
+    // socket-auth.service) already absorbs the per-handshake DB cost of a
+    // storm, so this bucket only needs to bound a pathological runaway loop
+    // (which fires thousands/sec); 20/sec sustained does that while never
+    // tripping a legit office. The bucket Map is bounded LRU so a
+    // high-cardinality attacker can't OOM us.
     const handshakeBuckets = new Map<string, { tokens: number; ts: number }>();
     const HANDSHAKE_BUCKET_MAX = 10_000;
-    const HANDSHAKE_REFILL_PER_MS = 30 / 10_000; // 30 per 10s
-    const HANDSHAKE_CAP = 30;
+    const HANDSHAKE_REFILL_PER_MS = 200 / 10_000; // 200 per 10s
+    const HANDSHAKE_CAP = 200;
     server.use((socket, next) => {
       const ip =
         (socket.handshake.headers["x-forwarded-for"] as string | undefined)
@@ -180,7 +187,7 @@ export class RealtimeGateway
     // reliably get a chance to send anything in beforeunload).
     client.data.viewingConversations = new Set<string>();
 
-    // Per-socket emit rate limit. The HTTP RateLimitGuard short-circuits on
+    // Per-socket emit rate limit. The HTTP RateLimitInterceptor short-circuits on
     // socket frames (no req.session), so without this a compromised tab can
     // spam typing / reaction / subscribe events unbounded. Token bucket:
     // 240 events / 10s burst (~24/sec sustained) — well above legitimate

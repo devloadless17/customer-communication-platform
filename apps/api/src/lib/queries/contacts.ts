@@ -96,7 +96,13 @@ export async function listContacts(
     LEFT JOIN LATERAL (
       SELECT id, "lastMessageAt"
       FROM "Conversation" co
-      WHERE co."contactId" = c.id
+      -- Match on (teamId, contactId) so the LEFT JOIN LATERAL seeks the
+      -- Conversation_teamId_contactId_key unique index. Filtering on
+      -- contactId alone could not use it (contactId is not the leading column),
+      -- degrading to a scan per contact row on the list. Contacts are
+      -- team-siloed, so co.teamId always equals c.teamId.
+      WHERE co."teamId" = c."teamId"
+        AND co."contactId" = c.id
         AND co.status <> 'closed'
       ORDER BY co."lastMessageAt" DESC, co.id DESC
       LIMIT 1

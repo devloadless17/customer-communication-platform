@@ -556,7 +556,7 @@ export function TemplateForm({
               onChange={(e) => setBody(e.target.value)}
               placeholder="Hi {{1}}, your order {{2}} is on its way."
               maxLength={1500}
-              className="mt-2 min-h-[140px] font-mono text-[13px]"
+              className="mt-2 min-h-35 font-mono text-[13px]"
             />
             {body.length > 0 && !bodyValid && (
               <p className="mt-1 text-[11px] text-destructive">Body is required and must be 1024 chars or fewer.</p>
@@ -638,7 +638,7 @@ export function TemplateForm({
               <span>Live preview</span>
               <span className="h-px flex-1 bg-border" />
             </div>
-            <div className="rounded-lg bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.06),_transparent_60%)] p-3">
+            <div className="rounded-lg bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.06),transparent_60%)] p-3">
               <TemplatePreview
                 components={components}
                 bodyValues={sampleBodyValues}

@@ -69,8 +69,16 @@ COPY packages ./packages
 COPY prisma ./prisma
 COPY tsconfig.json prisma.config.ts ./
 
+# Heap MUST stay under the container's compose `mem_limit: 3g`. A 4096 heap
+# could never be backed on the 8GB KVM2 VPS (postgres 1.5g + redis 0.25g + api
+# 3g + web 2g already commits ~6.75g, so the limits can't be raised) — V8 would
+# grow toward 4g while the cgroup OOM-kills the process at ~3g RSS BEFORE GC
+# engaged, manifesting as `exited (137)`. 2048 (matches the dev cap) leaves ~1g
+# of RSS headroom (heap + native/buffers/Socket.io) under the 3g cap so GC runs
+# first. Do NOT raise past ~2304 without raising mem_limit (which the 8g box
+# can't afford).
 ENV NODE_ENV=production \
-    NODE_OPTIONS="--max-old-space-size=4096 --conditions=react-server" \
+    NODE_OPTIONS="--max-old-space-size=2048 --conditions=react-server" \
     SWC_NODE_PROJECT=/app/apps/api/tsconfig.json
 USER node
 EXPOSE 4000

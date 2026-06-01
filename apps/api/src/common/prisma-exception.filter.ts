@@ -8,6 +8,8 @@ import {
 import { Prisma } from "@prisma/client";
 import type { Request, Response } from "express";
 
+import { withCorrelation } from "./correlation";
+
 /**
  * Global filter for Prisma errors that escape a service's explicit catch
  * block. Most services intercept the codes that matter to their domain
@@ -54,8 +56,11 @@ export class PrismaExceptionFilter implements ExceptionFilter {
 
     // Log the FULL error (including .meta) server-side so debugging has
     // everything. The response body keeps only the safe summary.
+    // withCorrelation prefixes the originating request id so a leaked Prisma
+    // error can be joined back to its HTTP request in log search (the Nest
+    // Logger doesn't carry the ALS correlation id on its own).
     this.logger.error(
-      `${req.method} ${req.url} → ${status} (${errorKey})`,
+      withCorrelation(`${req.method} ${req.url} → ${status} (${errorKey})`),
       err instanceof Prisma.PrismaClientKnownRequestError
         ? `code=${err.code} meta=${JSON.stringify(err.meta ?? {})}`
         : err.message,

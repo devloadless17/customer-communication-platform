@@ -430,8 +430,6 @@ export class MessagesService {
     userId: string,
     input: SendTextInput,
   ): Promise<{ ok: true; clientTempId?: string }> {
-    this.markReadOnAgentSend(teamId, userId, input.conversationId);
-    this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -441,6 +439,13 @@ export class MessagesService {
       },
       async () => {
         const pre = await this.preflightTextSend(teamId, input);
+        // Mark-read + auto-assign are "the agent is engaging this thread" side
+        // effects, so they fire AFTER the preflight passes — a send REJECTED by
+        // the preflight (e.g. outside_24h_window) must not claim/reopen the
+        // thread. Inside the idempotency callback so a deduped double-click
+        // doesn't re-fire them either. Fire-and-forget (void); errors self-log.
+        this.markReadOnAgentSend(teamId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
         await enqueueMessageSend({
           kind: "text",
           teamId,
@@ -743,11 +748,17 @@ export class MessagesService {
                     }
                   : {}),
               };
-              // publish() (not publishInTx) — this is a recovery re-emit
-              // for a client whose first delivery may have been lost. The
-              // audit row may dupe (rare; only when the original publish
-              // had also fired); accepted because the alternative is the
-              // client UI never showing the bubble.
+              // publish() (not publishInTx) — this is a recovery re-emit for a
+              // client whose first delivery may have been lost. It exists ONLY
+              // to re-drive the client bubble, so suppress the side-effecting
+              // subscribers: `silent` skips workflow dispatch (no re-trigger on
+              // a replay) and `skipOutboundWebhook` skips the partner re-POST
+              // (the original send already delivered it). Analytics may still
+              // double-count by +1 in this rare crash-race; that's the benign
+              // residue (a counter, no external side effect) and not worth a
+              // dedicated analytics-suppress path. The audit row may likewise
+              // dupe — accepted, because the alternative is the client UI never
+              // showing the bubble.
               await publish({
                 type: "message.sent",
                 teamId,
@@ -756,6 +767,14 @@ export class MessagesService {
                 message: replayed,
                 preview: existing.body.slice(0, 200),
                 senderUserId: userId,
+                // This message IS the conversation's latest; an agent send is
+                // read (markReadOnAgentSend), so unread is 0. (The pre-existing
+                // code omitted both — the `as` cast hid that the realtime list
+                // row got undefined lastMessageAt/unreadCount on this path.)
+                lastMessageAt: existing.timestamp.toISOString(),
+                unreadCount: 0,
+                silent: true,
+                skipOutboundWebhook: true,
                 ...(clientTempId ? { clientTempId } : {}),
               } as DomainEventOf<"message.sent">);
               return;
@@ -966,8 +985,6 @@ export class MessagesService {
     form: SendMediaFormInput,
     file: Express.Multer.File,
   ): Promise<{ messageId: string | null; warning?: string }> {
-    this.markReadOnAgentSend(teamId, userId, form.conversationId);
-    this.autoAssignOnAgentSend(teamId, userId, form.conversationId);
     return runWithSendIdempotency(
       {
         teamId,
@@ -975,7 +992,15 @@ export class MessagesService {
         conversationId: form.conversationId,
         clientTempId: form.clientTempId,
       },
-      () => this.sendMediaInner(teamId, userId, form, file),
+      async () => {
+        const result = await this.sendMediaInner(teamId, userId, form, file);
+        // After validation+enqueue succeeded — mark-read + auto-assign only on
+        // an accepted send, not on one the inner path rejected (window closed,
+        // missing phone, etc.). See sendText for the full rationale.
+        this.markReadOnAgentSend(teamId, userId, form.conversationId);
+        this.autoAssignOnAgentSend(teamId, userId, form.conversationId);
+        return result;
+      },
     );
   }
 
@@ -2040,25 +2065,6 @@ export class MessagesService {
     userId: string,
     input: SendTemplateInput,
   ): Promise<{ messageId: string }> {
-    this.markReadOnAgentSend(teamId, userId, input.conversationId);
-    this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
-    // Per-thread send ceiling. Mirrors sendText/sendMedia — bounds
-    // partner-driven hot-potato loops at the conversation level (30/min).
-    try {
-      consumeConversationSendBudget(teamId, input.conversationId);
-    } catch (err) {
-      if (err instanceof ConversationSendRateLimitedError) {
-        throw new HttpException(
-          {
-            error: "conversation_rate_limited",
-            detail: err.message,
-            retryAfter: err.retryAfter,
-          },
-          429,
-        );
-      }
-      throw err;
-    }
     return runWithSendIdempotency(
       {
         teamId,
@@ -2066,7 +2072,33 @@ export class MessagesService {
         conversationId: input.conversationId,
         clientTempId: input.clientTempId,
       },
-      () => this.sendTemplateInner(teamId, userId, input),
+      async () => {
+        // Per-thread send ceiling, INSIDE the idempotency lock — bounds
+        // partner-driven hot-potato loops at the conversation level (30/min).
+        // Previously consumed BEFORE the lock, so a deduped double-click / retry
+        // (same clientTempId) double-charged the budget before the cache
+        // short-circuited the actual send.
+        try {
+          consumeConversationSendBudget(teamId, input.conversationId);
+        } catch (err) {
+          if (err instanceof ConversationSendRateLimitedError) {
+            throw new HttpException(
+              {
+                error: "conversation_rate_limited",
+                detail: err.message,
+                retryAfter: err.retryAfter,
+              },
+              429,
+            );
+          }
+          throw err;
+        }
+        const result = await this.sendTemplateInner(teamId, userId, input);
+        // Engagement side effects only after the send is accepted (see sendText).
+        this.markReadOnAgentSend(teamId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+        return result;
+      },
     );
   }
 
@@ -2126,8 +2158,6 @@ export class MessagesService {
     userId: string,
     input: import("./messages.schemas").SendInteractiveInput,
   ): Promise<{ messageId: string }> {
-    this.markReadOnAgentSend(teamId, userId, input.conversationId);
-    this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
     // Pre-Meta idempotency lock (same as sendText/Media/Template). A double-
     // click / network-retry that re-POSTs the same clientTempId returns the
     // first result instead of consuming budget + sending a second interactive
@@ -2139,7 +2169,14 @@ export class MessagesService {
         conversationId: input.conversationId,
         clientTempId: input.clientTempId,
       },
-      () => this.sendInteractiveInner(teamId, userId, input),
+      async () => {
+        const result = await this.sendInteractiveInner(teamId, userId, input);
+        // Mark-read + auto-assign only after the inner path accepted the send
+        // (see sendText) — a rejected interactive send must not claim/reopen.
+        this.markReadOnAgentSend(teamId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
+        return result;
+      },
     );
   }
 

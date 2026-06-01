@@ -55,11 +55,23 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
       break;
     case "completed":
     default:
-      // Direction-aware icon pair for clarity at-a-glance: inbound arrow vs
-      // outbound arrow rather than a neutral handset for one side.
-      Icon = isInbound ? PhoneIncoming : PhoneOutgoing;
-      label = isInbound ? "Incoming call" : "Outgoing call";
-      tone = "neutral";
+      // A "completed" OUTBOUND call that never connected (answeredAt null) reads
+      // as "Customer didn't answer", not a neutral "Outgoing call". This catches
+      // the paths the server can't pre-label as `missed`: Meta's unknown-
+      // terminate-reason fallback maps to `completed`, and a terminal-first
+      // webhook can land `completed` with no answeredAt. (Agent-cancel-before-
+      // pickup is already published as `missed` by endCall.)
+      if (!isInbound && call.answeredAt === null) {
+        Icon = PhoneOutgoing;
+        label = "Customer didn't answer";
+        tone = "warn";
+      } else {
+        // Direction-aware icon pair for clarity at-a-glance: inbound arrow vs
+        // outbound arrow rather than a neutral handset for one side.
+        Icon = isInbound ? PhoneIncoming : PhoneOutgoing;
+        label = isInbound ? "Incoming call" : "Outgoing call";
+        tone = "neutral";
+      }
       break;
   }
 

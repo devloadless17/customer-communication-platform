@@ -20,7 +20,7 @@ import type { Request, Response, NextFunction } from "express";
  *   - `/api/health` — must remain responsive for liveness probes.
  *   - `/api/socket/*` — Socket.io handshakes are throttled in the gateway.
  *
- * Same in-memory shape as `rate-limit.guard.ts`; moves to Redis on the
+ * Same in-memory shape as `rate-limit.interceptor.ts`; moves to Redis on the
  * same trigger (second app instance).
  */
 

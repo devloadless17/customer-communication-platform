@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 
 import { encryptSecret } from "@/lib/crypto/envelope";
+import { assertRegistrableHost, SsrfBlockedError } from "@/lib/http/safe-fetch";
 import { generateWebhookSecret } from "@/lib/outbound-webhooks/signing";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
 import { channelSourceFor } from "@ccp/shared/outbound-webhooks/public-events";
@@ -53,6 +54,7 @@ export class OutboundWebhooksService {
     userId: string,
     input: CreateOutboundWebhookInput,
   ): Promise<OutboundWebhookCreatedDto> {
+    this.assertUrlSafe(input.url);
     const secret = generateWebhookSecret();
     const row = await this.db.outboundWebhook.create({
       data: {
@@ -80,6 +82,8 @@ export class OutboundWebhooksService {
     });
     if (!existing) throw new NotFoundException({ error: "webhook not found" });
 
+    if (input.url !== undefined) this.assertUrlSafe(input.url);
+
     // Re-enabling a previously-tripped breaker — clear the counter AND the
     // disable-audit columns so a fresh start is actually fresh (otherwise
     // it'd auto-disable again after 1 more failure, and the UI would keep
@@ -106,6 +110,30 @@ export class OutboundWebhooksService {
       select: this.dtoSelect(),
     });
     return this.toDto(updated);
+  }
+
+  /**
+   * Reject obvious SSRF / non-public webhook targets at REGISTRATION (private
+   * IP literals + internal hostnames + bad scheme/creds), not just at delivery.
+   * Uses the SYNTACTIC check (no DNS) — registration must still accept a domain
+   * that doesn't resolve yet (not-yet-propagated / transient DNS / a `*.invalid`
+   * test domain). The delivery path (safeFetch → assertPublicHost, with DNS,
+   * re-run per hop) stays the AUTHORITATIVE guard against rebinding. Honors the
+   * INTEGRATIONS_ALLOW_PRIVATE_HOSTS dev escape hatch.
+   */
+  private assertUrlSafe(url: string): void {
+    try {
+      assertRegistrableHost(url);
+    } catch (err) {
+      if (err instanceof SsrfBlockedError) {
+        throw new BadRequestException({
+          error: "url_not_allowed",
+          detail:
+            "Webhook URL must be a public https endpoint, not a private/internal host.",
+        });
+      }
+      throw err;
+    }
   }
 
   /**

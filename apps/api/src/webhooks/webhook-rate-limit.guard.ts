@@ -10,7 +10,7 @@ import { createTokenBucket } from "../common/token-bucket";
 
 /**
  * Per-team rate limit for the unauthenticated Meta webhook surface. The
- * global RateLimitGuard keys on req.session.userId and silently no-ops for
+ * global RateLimitInterceptor keys on req.session.userId and silently no-ops for
  * unauthenticated routes — which leaves the Meta webhook endpoint with
  * zero proxy-side throttle on the stock-Caddy deploy (the rate_limit
  * Caddyfile directive requires the xcaddy plugin we don't compile in).

@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { RateLimit } from "../common/rate-limit.guard";
+import { RateLimit } from "../common/rate-limit.interceptor";
 import { zBody } from "../common/zod-validation.pipe";
 import { MessagesService } from "./messages.service";
 import {

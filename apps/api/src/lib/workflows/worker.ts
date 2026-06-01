@@ -40,6 +40,7 @@ if (WORKFLOW_LOCK_DURATION_MS <= MAX_STEP_TIMEOUT_MS + WORKFLOW_LOCK_MARGIN_MS) 
 interface WorkerGlobals {
   worker?: Worker<WorkflowJobData>;
   connection?: IORedis;
+  shuttingDown?: boolean;
 }
 const g = globalThis as unknown as { __ccpWorkflowWorker?: WorkerGlobals };
 const state: WorkerGlobals = (g.__ccpWorkflowWorker ??= {});
@@ -109,6 +110,7 @@ function releaseTeamSlot(teamId: string): void {
 
 export function startWorkflowWorker(): Worker<WorkflowJobData> {
   if (state.worker) return state.worker;
+  state.shuttingDown = false;
 
   // Dedicated blocking connection (NOT the shared producer) — see
   // createWorkerConnection. Stored so stop / respawn can close it.
@@ -201,26 +203,32 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
   worker.on("error", (err) => {
     console.error("[workflows] worker error", err);
     // Fatal error classes (ECONNRESET that BullMQ doesn't recover from,
-    // auth failure with Redis) can leave the worker in an error state
-    // where jobs stop processing but state.worker stays set, making
-    // startWorkflowWorker() a no-op. Detect the "closed" condition and
-    // null the slot so the next start call (sweeper tick, dispatcher
-    // call) re-spawns. ioredis itself reconnects on the underlying
-    // socket, so the new Worker can pick up jobs immediately.
+    // auth failure with Redis) can leave the worker wedged: jobs stop
+    // processing but state.worker stays set, making startWorkflowWorker() a
+    // no-op. startWorkflowWorker() is called ONLY once at boot (onModuleInit);
+    // no sweeper or dispatcher re-arms it. So we must self-respawn here — like
+    // the send + webhook workers — otherwise one unrecoverable Redis blip
+    // stalls ALL workflow processing until a manual restart. ioredis reconnects
+    // the underlying socket, so the fresh Worker picks up jobs immediately.
     const msg = err instanceof Error ? err.message : String(err);
     const fatal =
       msg.includes("Connection is closed") ||
       msg.includes("WRONGPASS") ||
       msg.includes("NOAUTH");
-    if (fatal) {
+    if (fatal && !state.shuttingDown) {
       console.warn(
-        "[workflows] worker entered unrecoverable state; closing for re-spawn",
+        "[workflows] worker entered unrecoverable state; re-spawning",
       );
       // Best-effort close; ignore errors since the connection is already broken.
       worker.close().catch(() => undefined);
       connection.disconnect();
       state.worker = undefined;
       state.connection = undefined;
+      // Self-respawn on a short delay. Skipped during shutdown so it doesn't
+      // fight stop().
+      setTimeout(() => {
+        if (!state.shuttingDown) startWorkflowWorker();
+      }, 1_000).unref();
     }
   });
 
@@ -230,12 +238,14 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
 }
 
 export async function stopWorkflowWorker(): Promise<void> {
+  state.shuttingDown = true;
   if (!state.worker) return;
   // Hard cap on `worker.close()` so a single hung job (e.g., a step stuck
-  // mid-fetch with no timeout) can't outlast systemd's TimeoutStopSec=120s
-  // and force a SIGKILL — which would defeat the whole graceful-stop point.
-  // BullMQ's own lockDuration=90s means anything past 85s has already lost
-  // its lock; another worker can pick the job up cleanly after restart.
+  // mid-fetch with no timeout) can't outlast compose's stop_grace_period
+  // (100s on the api service) and force a SIGKILL — which would defeat the
+  // whole graceful-stop point. BullMQ's own lockDuration=90s means anything
+  // past 85s has already lost its lock; another worker picks it up cleanly
+  // after restart.
   const closeTimeoutMs = 85_000;
   await Promise.race([
     state.worker.close(),

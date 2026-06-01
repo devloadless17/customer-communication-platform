@@ -102,7 +102,31 @@ export function startBroadcastScheduleWorker(): void {
 
 export async function stopBroadcastScheduleWorker(): Promise<void> {
   if (state.worker) {
-    await state.worker.close();
+    // Hard cap on worker.close() so a scheduled-fire handler stuck behind a
+    // Postgres pool stall can't hang shutdown past compose's stop_grace_period
+    // (100s on api) and force a SIGKILL — same posture as the workflow / send /
+    // webhook workers (this one previously had an UNCAPPED close). The handler
+    // is trivial (CAS + publish + fire-and-forget handoff), so 30s is ample; on
+    // abandon, the row's CAS predicate (status="scheduled") + the boot
+    // reconciler's queued-orphan recovery prevent any lost or double broadcast.
+    const closeTimeoutMs = 30_000;
+    const worker = state.worker;
+    await Promise.race([
+      worker.close(),
+      new Promise<void>((_resolve, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `[broadcast-schedule] worker.close() exceeded ${closeTimeoutMs}ms — abandoning drain so process can exit before SIGKILL`,
+              ),
+            ),
+          closeTimeoutMs,
+        ).unref(),
+      ),
+    ]).catch((err) => {
+      console.error(err instanceof Error ? err.message : err);
+    });
     state.worker = undefined;
   }
   if (state.connection) {

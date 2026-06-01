@@ -83,6 +83,20 @@ function callReasonMessage(reason: string): string {
   }
 }
 
+/**
+ * True when Meta's calling permission for this contact is currently revoked
+ * (revokedUntil is a future timestamp). Mirrors the backend initiateCall gate
+ * so the Phone button is hidden up-front rather than surfacing a
+ * `permission_revoked` 4xx after the click. Tolerant of null/undefined/bad
+ * input — anything unparseable means "not revoked", matching the server's
+ * conservative posture.
+ */
+function isCallPermissionRevoked(revokedUntil: string | null | undefined): boolean {
+  if (!revokedUntil) return false;
+  const t = new Date(revokedUntil).getTime();
+  return Number.isFinite(t) && t > Date.now();
+}
+
 // DevTools is dev-only — it bundles framer-motion + a handful of lucide
 // icons just to render `null` when NODE_ENV === "production". Using
 // `next/dynamic` here so the entire DevTools chunk is never sent to prod
@@ -983,11 +997,17 @@ export function InboxShell({
                   // Per-thread gate: capability + WhatsApp channel + region
                   // (BIC blocklist via contact country) + no fresh revocation.
                   // channel may be absent on legacy wire payloads; treat
-                  // unknown as whatsapp (the only channel today).
+                  // unknown as whatsapp (the only channel today). The revocation
+                  // check mirrors the backend initiateCall gate so the button is
+                  // hidden up-front instead of surfacing a permission_revoked
+                  // 4xx after the agent clicks.
                   canMakeCalls &&
                   (displayedThread.data.conversation.channel ?? "whatsapp") ===
                     "whatsapp" &&
-                  isBicAllowed(displayedThread.data.contact.countryCode ?? null)
+                  isBicAllowed(displayedThread.data.contact.countryCode ?? null) &&
+                  !isCallPermissionRevoked(
+                    displayedThread.data.contact.callPermissionRevokedUntil,
+                  )
                 }
                 onInitiateCall={initiateCallForActiveThread}
                 tags={tags}

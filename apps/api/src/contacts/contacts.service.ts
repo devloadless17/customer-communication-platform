@@ -1,3 +1,4 @@
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 import {
   BadRequestException,
   ConflictException,
@@ -333,18 +334,6 @@ export class ContactsService {
       stageId,
     } = input;
 
-    // Validate stage ownership when set to a concrete id — done here (not in
-    // the schema) because it requires a DB hit against the team scope.
-    if (typeof stageId === "string") {
-      const ok = await this.db.contactStage.findFirst({
-        where: { id: stageId, teamId },
-        select: { id: true },
-      });
-      if (!ok) {
-        throw new BadRequestException({ error: "stage not found" });
-      }
-    }
-
     let result;
     try {
       result = await this.db.$transaction(async (tx) => {
@@ -353,6 +342,22 @@ export class ContactsService {
           include: { tags: { select: { id: true } } },
         });
         if (!existing) return null;
+
+        // Validate stage ownership INSIDE the tx (was outside → TOCTOU with a
+        // concurrent stage delete: the check could pass, the stage be deleted,
+        // then this update set a dangling stageId / hit a raw FK error). Same
+        // tx as the update narrows the window; the FK constraint is the
+        // backstop. Requires a team-scoped DB hit, so it can't live in the
+        // zod schema.
+        if (typeof stageId === "string") {
+          const ok = await tx.contactStage.findFirst({
+            where: { id: stageId, teamId },
+            select: { id: true },
+          });
+          if (!ok) {
+            throw new BadRequestException({ error: "stage not found" });
+          }
+        }
 
         const nextCustom = customFieldsPatch
           ? mergeCustomFields(
@@ -723,6 +728,10 @@ export class ContactsService {
     teamId: string,
     userId: string,
     fileBytes: Buffer,
+    /** Caller has `tags:manage` — only then are unknown tag names auto-created
+     *  on import. Without it, import links to existing tags and skips the rest
+     *  (the tag CRUD endpoints require the same capability). */
+    canManageTags: boolean,
   ): Promise<ImportResult> {
     if (fileBytes.length > MAX_BYTES) {
       throw new BadRequestException({
@@ -1166,6 +1175,7 @@ export class ContactsService {
       const tagIdByNameKey = await this.resolveTagIdsByName(
         teamId,
         [...distinctTagNames.values()],
+        canManageTags,
       );
 
       // Map phone → contact id (createMany returns no ids; revived ids aren't
@@ -1234,6 +1244,10 @@ export class ContactsService {
   private async resolveTagIdsByName(
     teamId: string,
     names: string[],
+    /** Only auto-create unknown tags when the caller has `tags:manage`.
+     *  Otherwise link to existing tags only (unknown names are silently
+     *  skipped — the pair-builder drops names with no resolved id). */
+    canManageTags: boolean,
   ): Promise<Map<string, string>> {
     const byKey = new Map<string, string>();
     if (names.length === 0) return byKey;
@@ -1243,6 +1257,9 @@ export class ContactsService {
       select: { id: true, name: true },
     });
     for (const t of existing) byKey.set(t.name.toLowerCase(), t.id);
+
+    // Without `tags:manage`, link only to existing tags — never create.
+    if (!canManageTags) return byKey;
 
     const toCreate = names.filter((n) => !byKey.has(n.toLowerCase()));
     let createdAny = false;
@@ -1623,11 +1640,3 @@ function mergeCustomFields(
   return merged;
 }
 
-function normalizeStringMap(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}

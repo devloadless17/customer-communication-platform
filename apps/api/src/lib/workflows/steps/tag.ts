@@ -1,3 +1,4 @@
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
@@ -185,11 +186,3 @@ export const removeTagStepHandler: StepHandler<TagConfig> = {
   run: (env, c, ctx) => runTagMutation(env, ctx, c, "remove"),
 };
 
-function normalizeStringMap(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}

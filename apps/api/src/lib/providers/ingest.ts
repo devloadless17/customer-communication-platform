@@ -114,11 +114,20 @@ export async function ingestEvents(
             stack: err instanceof Error ? err.stack : undefined,
           }),
         );
-        // Swallow — Meta retries the whole batch on a non-200, and the
-        // unique-index gate makes successful sibling events safe to re-run.
-        // The detached automation dispatch, however, would fire twice on a
-        // retry. Returning 200 to Meta even when a single event blows up
-        // is the lesser evil.
+        // Transient infra faults (pool timeout, deadlock, DB unreachable)
+        // must NOT be swallowed: re-throw so `ingestEvents` rejects, the
+        // webhook controller returns 503, and Meta RE-DELIVERS the batch.
+        // Every event is deduped on (teamId, channel, externalId) so re-
+        // ingest is safe. The old code swallowed these and returned 200 —
+        // Meta then never retried and the inbound customer message was lost
+        // forever (Meta has no history sync). A retry can re-fire a sibling's
+        // detached automation dispatch; that double-fire is the lesser evil
+        // vs. silently dropping a customer message, and matches the webhook
+        // controller's own transient→503 intent (which was previously
+        // unreachable because this catch ate the error first).
+        if (isTransientDbError(err)) throw err;
+        // Genuine per-event poison (parse drift, invariant violation) stays
+        // swallowed so a permanently-bad payload can't make Meta retry-storm.
       }
   };
   const runners = Array.from({ length: lanes }, async () => {
@@ -129,6 +138,29 @@ export async function ingestEvents(
     }
   });
   await Promise.all(runners);
+}
+
+/**
+ * Transient DB faults that warrant asking Meta to re-deliver the batch
+ * rather than silently dropping the event. Mirrors the codes the webhook
+ * controller maps to 503, plus P2034 (write conflict / deadlock — retryable).
+ * Anything else (parse drift, invariant violations, non-Prisma bugs) is
+ * permanent per-event poison: swallowed so Meta doesn't retry-storm a payload
+ * that will never succeed.
+ */
+export function isTransientDbError(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    return (
+      err.code === "P2024" /* pool timeout */ ||
+      err.code === "P2034" /* write conflict / deadlock */ ||
+      err.code === "P1001" /* server unreachable */ ||
+      err.code === "P1002" /* connection timeout */ ||
+      err.code === "P1008" /* operation timeout */
+    );
+  }
+  // DB unreachable at connect time surfaces as an init error, not a known
+  // request error — also transient.
+  return err instanceof Prisma.PrismaClientInitializationError;
 }
 
 async function ingestStatusUpdate(
@@ -386,7 +418,7 @@ async function ingestInboundMessage(
   // violation from a parallel insert outracing predicate locking) is also
   // retried by the wrapper for the same reason. Two retries is a sensible
   // ceiling — by then the contention is real, not a fluke.
-  const { contact, conversation, isNewContact, isNewConversation, reopened } = await runWithSerializableRetry(
+  const { contact, conversation, isNewContact, wasRevived, isNewConversation, reopened } = await runWithSerializableRetry(
     async (tx) => {
       // Pre-existence check — the signal "did this inbound just create a
       // brand-new contact row?" We need it to publish `contact.created`
@@ -418,9 +450,16 @@ async function ingestInboundMessage(
       // without it.
       const existingContact = await tx.contact.findFirst({
         where: { teamId, phoneNumber: evt.contactPhone },
-        select: { id: true },
+        select: { id: true, deletedAt: true },
       });
       const isNewContact = !existingContact;
+      // A soft-deleted row being revived (deletedAt → null just below) is a
+      // fresh directory appearance to every subscriber, exactly like the
+      // manual + /v1 revive paths (which both republish contact.created).
+      // Capture it so the post-commit publish fires for revives too —
+      // otherwise a returning customer's contact silently never reaches
+      // workflows / audit / partners until their next manual edit.
+      const wasRevived = !!existingContact?.deletedAt;
 
       const { firstName, lastName } = splitContactName(evt.contactName ?? evt.contactPhone);
       let contact;
@@ -497,7 +536,7 @@ async function ingestInboundMessage(
         });
         reopened = true;
       }
-      return { contact, conversation, isNewContact, isNewConversation, reopened };
+      return { contact, conversation, isNewContact, wasRevived, isNewConversation, reopened };
     },
   );
 
@@ -809,7 +848,10 @@ async function ingestInboundMessage(
   // its synchronous publish fires immediately, and the message.received
   // outbox row only dispatches after the drainer's next tick (~100ms).
   // Subscribers (incl. outbound webhook) see contact-then-message order.
-  if (isNewContact) {
+  // Fires for a genuinely-new contact AND for a revived soft-deleted one
+  // (a returning customer is a fresh directory appearance — same as the
+  // manual + /v1 revive paths). The two flags are mutually exclusive.
+  if (isNewContact || wasRevived) {
     try {
       await publish({
         type: "contact.created",

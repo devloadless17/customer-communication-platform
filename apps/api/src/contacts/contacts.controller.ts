@@ -122,7 +122,20 @@ export class ContactsController {
     if (!file) {
       throw new BadRequestException({ error: "missing 'file' field" });
     }
-    return this.contacts.importCsv(session.teamId, session.userId, file.buffer);
+    // CSV import auto-creates unknown tag names — gate that on the same
+    // `tags:manage` capability the tag CRUD endpoints require, so a user who
+    // can import but not manage tags can't create tags via the back door.
+    // Without it, import links only to EXISTING tags (unknown names skipped).
+    const canManageTags = !!resolvePermissions(
+      session.role,
+      session.rolePermissions,
+    )["tags:manage"];
+    return this.contacts.importCsv(
+      session.teamId,
+      session.userId,
+      file.buffer,
+      canManageTags,
+    );
   }
 
   @Get("lookup")

@@ -1,8 +1,28 @@
-import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, HttpException, Param, Post, Req } from "@nestjs/common";
+import type { Request } from "express";
 
+import { createTokenBucket } from "../common/token-bucket";
 import { zBody } from "../common/zod-validation.pipe";
 import { AcceptInviteSchema, type AcceptInviteInput } from "./invites.schemas";
 import { InvitesService } from "./invites.service";
+
+// Per-IP buckets, tighter than the global 600/min/IP cap, because these are
+// UNAUTHENTICATED token surfaces: `lookup` validates an invite token (bound
+// enumeration) and `accept` creates a User + credential Account (a write). The
+// generic IP middleware doesn't gate them tightly enough on its own.
+const lookupBucket = createTokenBucket({ perMin: 30 });
+const acceptBucket = createTokenBucket({ perMin: 10 });
+
+function enforceIpLimit(req: Request, bucket: ReturnType<typeof createTokenBucket>): void {
+  const ip = req.ip ?? "unknown";
+  const r = bucket.consume(ip);
+  if (!r.ok) {
+    throw new HttpException(
+      { error: "rate_limited", detail: "too many invite requests", retryAfter: r.retryAfter },
+      429,
+    );
+  }
+}
 
 /**
  * Public invite endpoints — no SessionGuard, the invite token IS the auth.
@@ -31,12 +51,17 @@ export class InvitesPublicController {
   constructor(private readonly invites: InvitesService) {}
 
   @Get("lookup/:token")
-  async lookup(@Param("token") token: string) {
+  async lookup(@Param("token") token: string, @Req() req: Request) {
+    enforceIpLimit(req, lookupBucket);
     return this.invites.lookup(token);
   }
 
   @Post("accept")
-  async accept(@Body(zBody(AcceptInviteSchema)) body: AcceptInviteInput) {
+  async accept(
+    @Body(zBody(AcceptInviteSchema)) body: AcceptInviteInput,
+    @Req() req: Request,
+  ) {
+    enforceIpLimit(req, acceptBucket);
     const out = await this.invites.accept(body);
     return { ok: true, ...out };
   }

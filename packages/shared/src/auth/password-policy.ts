@@ -19,9 +19,12 @@ export const BCRYPT_COST = 10;
 
 /**
  * Modern guidance (NIST SP 800-63B) favours length over arbitrary complexity
- * rules. Bump back up if compliance ever requires it.
+ * rules and sets 8 as the floor for user-chosen secrets. We don't add a HIBP
+ * breach check or complexity rules (compliance-trigger features), but 6 was
+ * below the accepted minimum. Login never re-validates length, so existing
+ * accounts are unaffected. Raise further if compliance requires it.
  */
-export const MIN_PASSWORD_LENGTH = 6;
+export const MIN_PASSWORD_LENGTH = 8;
 
 /**
  * Upper cap is not a security boundary — bcrypt only uses the first 72 bytes

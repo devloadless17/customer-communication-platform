@@ -93,6 +93,16 @@ export interface Contact {
   language?: string | null;
   /** ISO 3166-1 alpha-2 country code derived from `phoneNumber` via libphonenumber. */
   countryCode?: string | null;
+  /**
+   * When set to a FUTURE timestamp, Meta has revoked our permission to place
+   * business-initiated calls to this contact (4 consecutive unanswered calls,
+   * or an explicit customer opt-out). The inbox hides the Phone button while
+   * this is in the future so the agent isn't handed an enabled button the
+   * backend would 4xx; cleared on the next permission grant. ISO 8601, or
+   * null/undefined when calling is allowed. Surfaced only on the full
+   * per-conversation contact load — the inbox-list mapper omits it.
+   */
+  callPermissionRevokedUntil?: string | null;
   avatarUrl?: string;
   email?: string;
   location?: string;

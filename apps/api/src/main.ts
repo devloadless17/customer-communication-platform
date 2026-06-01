@@ -270,12 +270,12 @@ async function bootstrap(): Promise<void> {
   }
 
   // NOTE: CORS preflight (OPTIONS) responses are emitted by enableCors BEFORE
-  // any guard runs — the SessionGuard / RateLimitGuard / ApiKeyGuard chain is
+  // any guard runs — the SessionGuard / RateLimitInterceptor / ApiKeyGuard chain is
   // skipped for OPTIONS by design. Today this is harmless because Caddy makes
   // web+api same-origin in prod (no preflight ever sent) and dev only allows
   // localhost:3000. If/when api moves to a separate domain in prod (or a
   // second trusted Origin is added), revisit: a multi-domain deploy needs
-  // either an explicit OPTIONS handler that runs the rate-limit guard, or
+  // either an explicit OPTIONS handler that runs the rate-limit interceptor, or
   // an origin allow-list narrow enough that preflight bypass is moot.
   const productionOrigin = process.env.APP_PUBLIC_URL;
   app.enableCors({
@@ -317,9 +317,10 @@ async function bootstrap(): Promise<void> {
   // app.enableShutdownHooks(). NestJS's bundled SIGTERM handler fires
   // OnModuleDestroy hooks (where BullMQ workers drain — up to 90s) BEFORE
   // the HTTP server is closed, so during that 90s window the api still
-  // accepts new requests that get SIGKILL'd when systemd's TimeoutStopSec
-  // expires. Inverting that order lets Caddy mark the upstream unhealthy
-  // immediately while workers finish in-flight jobs in the background.
+  // accepts new requests that get SIGKILL'd when compose's stop_grace_period
+  // (100s on the api service) expires. Inverting that order lets Caddy mark
+  // the upstream unhealthy immediately while workers finish in-flight jobs in
+  // the background.
   //
   // Sequence:
   //   1. server.close()             — stop accepting new TCP connections
@@ -336,9 +337,12 @@ async function bootstrap(): Promise<void> {
   //                                    up to lockDuration=90s),
   //                                    beforeApplicationShutdown, then
   //                                    closes the HTTP server completely,
-  //                                    then onApplicationShutdown
-  //   5. process.exit(0)            — clean exit before systemd's
-  //                                    TimeoutStopSec=120 hard-kills us
+  //                                    then onApplicationShutdown. CAPPED at
+  //                                    APP_CLOSE_BUDGET_MS — the per-worker
+  //                                    close caps run SEQUENTIALLY and sum
+  //                                    past stop_grace_period otherwise.
+  //   5. process.exit(0)            — clean exit before compose's
+  //                                    stop_grace_period (100s) hard-kills us
   //
   // `process.on` (not `once`) so a repeated SIGTERM (e.g., from impatient
   // ops) is OBSERVED — the shuttingDown flag still prevents re-entry, but
@@ -370,8 +374,34 @@ async function bootstrap(): Promise<void> {
       shutdownLogger.error("server.close() failed", err as Error);
     }
 
+    // Bound the TOTAL app.close() drain. OnModuleDestroy hooks run
+    // SEQUENTIALLY in reverse-init order, and each worker's close cap is
+    // individually under the grace window (workflow ~90s lockDuration, send
+    // 85s, webhook 45s, sweepers fast) — but ADDITIVELY they exceed compose's
+    // stop_grace_period (100s on api). If all are simultaneously stuck at
+    // their caps, an unbounded app.close() overruns 100s and Docker SIGKILLs
+    // us mid-drain, which re-executes the in-flight job after restart. We've
+    // already spent up to 3s above, so cap app.close() here and, on overrun,
+    // fall through to a controlled process.exit(0): any worker that didn't
+    // finish draining has its BullMQ lock expire and is re-claimed cleanly on
+    // restart — same outcome as the SIGKILL, but we exit 0 instead of being
+    // killed mid-fsync. OutboundSendAttempt(jobId) still guards that rare
+    // re-execution against a double Meta send.
+    const APP_CLOSE_BUDGET_MS = 90_000;
     try {
-      await app.close();
+      await Promise.race([
+        app.close(),
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            shutdownLogger.warn(
+              `app.close() exceeded ${APP_CLOSE_BUDGET_MS}ms — exiting before ` +
+                `stop_grace_period SIGKILL; any undrained in-flight job is re-` +
+                `claimed via BullMQ lock expiry on restart`,
+            );
+            resolve();
+          }, APP_CLOSE_BUDGET_MS).unref(),
+        ),
+      ]);
     } catch (err) {
       shutdownLogger.error("app.close() failed", err as Error);
     }

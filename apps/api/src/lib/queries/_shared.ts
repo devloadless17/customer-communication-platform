@@ -130,6 +130,10 @@ export function mapContact(c: PrismaContact): Contact {
     lastName: c.lastName,
     language: c.language,
     countryCode: c.countryCode,
+    // Calling permission revocation — drives the inbox Phone-button gate so a
+    // revoked contact doesn't show an enabled button the backend would reject.
+    callPermissionRevokedUntil:
+      c.callPermissionRevokedUntil?.toISOString() ?? null,
     avatarUrl: c.avatarUrl ?? undefined,
     email: c.email ?? undefined,
     location: c.location ?? undefined,

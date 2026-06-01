@@ -508,7 +508,9 @@ jobs:
           target: /tmp/
           overwrite: true
 
-      - uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
+      - name: Ship to VPS
+        id: ship
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
         env:
           # Non-secret config — propagated via SSH env channel so the script
           # can substitute them into the rendered /opt/ccp/.env. Same
@@ -583,6 +585,19 @@ jobs:
             sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.prev 2>/dev/null || true
             sudo mv /tmp/ccp-deploy/Caddyfile    /etc/caddy/Caddyfile
             install -m 0755 /tmp/ccp-deploy/pg-backup.sh /opt/ccp/pg-backup.sh
+
+            # Install the nightly backup cron IDEMPOTENTLY. The script has
+            # shipped for a while, but the only thing running it was a one-time
+            # manual `crontab -e` line — so on any host where nobody added it,
+            # backups silently never ran (first signal = a disaster with no
+            # restore point). grep -Fv removes any prior pg-backup line, then we
+            # append the current one, so re-deploys never stack duplicates and a
+            # changed schedule self-updates. 03:17 UTC nightly; log to a file so
+            # a failed dump is discoverable.
+            CRON_LINE="17 3 * * * cd /opt/ccp && /opt/ccp/pg-backup.sh >> /opt/ccp/pg-backup.log 2>&1"
+            ( crontab -l 2>/dev/null | grep -Fv "/opt/ccp/pg-backup.sh"; echo "$CRON_LINE" ) | crontab -
+            echo "✓ nightly pg-backup cron installed"
+
             rm -f /tmp/ccp-deploy.tar.gz
             rmdir /tmp/ccp-deploy || true
 
@@ -726,13 +741,18 @@ jobs:
             docker exec "$app_id" pnpm run db:seed:superadmin
             echo "✓ superadmin seed complete"
 
-      # Only fires if external health failed (not earlier steps), so we
-      # don't try to rollback when the VPS was never touched. Retags both
-      # :previous-{web,api} → :latest-{web,api} locally on the VPS, then
-      # recreates via docker compose. Site is back on last-good image pair
-      # in ~30s.
-      - name: Auto-rollback on health failure
-        if: always() && steps.health.outcome == 'failure'
+      # Fires when external health failed OR the ship step itself failed. The
+      # ship step swaps the live Caddyfile + runs `docker compose up` BEFORE
+      # the health check; if it aborts mid-way, the health step is SKIPPED
+      # (outcome 'skipped', not 'failure') and gating on health alone would
+      # leave the new (possibly broken) images + swapped Caddyfile live with no
+      # revert. Rolling back on a ship failure that never touched the VPS is
+      # harmless — it just re-asserts the :previous images (== current) and
+      # skips the Caddyfile restore when no .prev snapshot exists. Retags both
+      # :previous-{web,api} → :latest-{web,api} on the VPS, recreates via
+      # docker compose, restores Caddyfile.prev. Back on last-good in ~30s.
+      - name: Auto-rollback on health or ship failure
+        if: always() && (steps.health.outcome == 'failure' || steps.ship.outcome == 'failure')
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}

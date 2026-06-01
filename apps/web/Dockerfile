@@ -202,7 +202,11 @@ ENV NODE_ENV=production \
     # with `Cannot find module …/react/react.react-server.js`. Next.js's
     # own RSC runtime handles the condition internally; we don't need to
     # set it process-wide.
-    NODE_OPTIONS="--max-old-space-size=4096" \
+    # Heap MUST stay under compose `mem_limit: 2g` (web). 4096 could never be
+    # backed on the 8GB KVM2 VPS (limits already commit ~6.75g) — V8 would grow
+    # toward 4g while the cgroup OOM-kills at ~2g RSS BEFORE GC ran. 1536 (75%
+    # of 2g) leaves ~512m of RSS headroom (heap + native) so GC runs first.
+    NODE_OPTIONS="--max-old-space-size=1536" \
     # Prisma 7's `prisma.config.ts` does `import { defineConfig, env } from
     # "prisma/config"`. The Node resolver walks up from /app/prisma.config.ts
     # → /app/node_modules → /node_modules, none of which contain prisma (the

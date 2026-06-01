@@ -164,6 +164,57 @@ export async function assertPublicHost(url: string): Promise<void> {
   }
 }
 
+/**
+ * SYNTACTIC SSRF pre-check for REGISTRATION time (no DNS). Rejects obviously
+ * unsafe webhook/callback URLs up front — wrong scheme, embedded credentials,
+ * private/loopback/metadata IP LITERALS, and conventional internal hostnames
+ * (localhost / *.localhost / *.local / *.internal / *.intranet / *.lan) —
+ * WITHOUT resolving DNS.
+ *
+ * Why no DNS here: `assertPublicHost` (with DNS, re-run on every delivery hop)
+ * stays the AUTHORITATIVE guard — it's the only place that can catch DNS
+ * rebinding. Registration must accept a domain that doesn't resolve yet
+ * (not-yet-propagated, transient DNS, or a deliberately-unresolvable test
+ * domain like `*.invalid`); a stored URL that never resolves simply fails at
+ * delivery and trips the breaker. Resolving DNS at registration was too strict
+ * and rejected those legitimate cases. Honors the INTEGRATIONS_ALLOW_PRIVATE_HOSTS
+ * dev escape hatch.
+ */
+export function assertRegistrableHost(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new SsrfBlockedError(url, "invalid url");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new SsrfBlockedError(url, `scheme ${parsed.protocol} not allowed`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new SsrfBlockedError(url, "url-embedded credentials not allowed");
+  }
+  const hostname = parsed.hostname;
+  if (!hostname) {
+    throw new SsrfBlockedError(url, "missing hostname");
+  }
+  if (allowPrivate()) return;
+  // IP literal → blocked-range check (metadata 169.254.169.254, RFC1918,
+  // loopback, ULA, etc.) with no DNS.
+  if (isIP(hostname)) {
+    if (isBlockedIp(hostname)) {
+      throw new SsrfBlockedError(url, `host ${hostname} is in a blocked range`);
+    }
+    return;
+  }
+  // Name-based internal-host block (no DNS). A public domain that rebinds to a
+  // private IP still passes HERE but is caught at delivery by assertPublicHost.
+  const lower = hostname.toLowerCase().replace(/\.$/, "");
+  const INTERNAL_SUFFIXES = [".localhost", ".local", ".internal", ".intranet", ".lan"];
+  if (lower === "localhost" || INTERNAL_SUFFIXES.some((s) => lower.endsWith(s))) {
+    throw new SsrfBlockedError(url, `host ${hostname} is an internal hostname`);
+  }
+}
+
 export interface SafeFetchOptions extends Omit<RequestInit, "redirect"> {
   /** Per-attempt timeout in ms. Default 10s. */
   timeoutMs?: number;

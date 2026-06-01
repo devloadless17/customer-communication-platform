@@ -13,6 +13,12 @@ import IORedis from "ioredis";
 
 export interface WebhookDeliverJobData {
   deliveryId: string;
+  /** Inbound X-CCP-Depth of the request that caused this delivery (0/absent
+   *  when the event had no HTTP scope). The worker stamps depth+1 on the
+   *  outbound POST so a partner that bounces our webhook back into /v1 carries
+   *  an incrementing counter that trips at MAX_CHAIN_DEPTH — the cross-system
+   *  loop guard. Rides on the job, not the delivery row, so no schema change. */
+  chainDepth?: number;
 }
 
 export const WEBHOOK_DELIVER_QUEUE_NAME = "webhook-deliver";
@@ -96,11 +102,14 @@ export function getWebhookDeliverQueue(): Queue<WebhookDeliverJobData> {
  *
  * Separator is `-`, not `:` — BullMQ 5.x rejects colons in custom job IDs.
  */
-export async function enqueueWebhookDelivery(deliveryId: string): Promise<string> {
+export async function enqueueWebhookDelivery(
+  deliveryId: string,
+  chainDepth?: number,
+): Promise<string> {
   const q = getWebhookDeliverQueue();
   const job = await q.add(
     "deliver",
-    { deliveryId },
+    { deliveryId, ...(chainDepth ? { chainDepth } : {}) },
     { jobId: `deliver-${deliveryId}` },
   );
   return job.id as string;

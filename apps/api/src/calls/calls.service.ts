@@ -173,25 +173,30 @@ export class CallsService {
         }
         return { ok: false, reason: "permission_required" };
       }
-    } else {
-      // 5-per-24h cap. Counts ONLY calls where the customer actually
-      // picked up (answeredAt is non-null) — Meta's "5 connected calls
-      // per 24h per contact" rule is about CONNECTED calls. A failed
-      // handshake that we tear down as "completed" with answeredAt=null
-      // shouldn't burn the cap.
-      const since = new Date(now - 24 * 60 * 60 * 1000);
-      const dailyOutboundConnected = await this.db.call.count({
-        where: {
-          teamId: session.teamId,
-          conversationId,
-          direction: CallDirection.out,
-          answeredAt: { not: null },
-          ringingAt: { gte: since },
-        },
-      });
-      if (dailyOutboundConnected >= 5) {
-        return { ok: false, reason: "daily_cap_reached" };
-      }
+    }
+
+    // 5-per-24h connected-call cap. Runs on BOTH paths — in-window AND
+    // permission-authorized. Meta's per-contact business-initiated call cap is
+    // independent of WHY the call is allowed (the 24h service window vs. an
+    // explicit permission grant), so it must gate both. Previously this lived
+    // inside the in-window `else` branch only, which made a granted permission
+    // an effectively unlimited-calls pass for its 72h validity — the exact
+    // quality-rating risk the cap exists to prevent. Counts ONLY calls the
+    // customer actually picked up (answeredAt non-null) — Meta's rule is about
+    // CONNECTED calls; a failed handshake torn down with answeredAt=null
+    // shouldn't burn the cap.
+    const since = new Date(now - 24 * 60 * 60 * 1000);
+    const dailyOutboundConnected = await this.db.call.count({
+      where: {
+        teamId: session.teamId,
+        conversationId,
+        direction: CallDirection.out,
+        answeredAt: { not: null },
+        ringingAt: { gte: since },
+      },
+    });
+    if (dailyOutboundConnected >= 5) {
+      return { ok: false, reason: "daily_cap_reached" };
     }
 
     // All checks passed. Hit Meta to initiate the call, then INSERT the
@@ -200,11 +205,14 @@ export class CallsService {
     // surfaces a clean error and we haven't written a phantom Call row.
     //
     // EVERYTHING below the gauntlet returns a structured `{ ok: false, reason }`
-    // on failure — no 5xx ever bubbles to the inbox. Two infra failures
-    // we explicitly handle:
-    //   - Channel missing or no provider registered → `provider_unsupported`
+    // on failure — no 5xx ever bubbles to the inbox. The failure mappings:
+    //   - Channel missing / no provider / provider lacks placeCall → caught and
+    //     mapped to `provider_rejected` (the catch's default branch — these
+    //     don't match the credential/config regex)
     //   - Team has no Meta credentials → `provider_not_configured`
     //   - Meta API call itself throws (network / 4xx / 5xx) → `provider_rejected`
+    //   - The local Call-row INSERT fails (non-P2002) AFTER placeCall succeeded
+    //     → terminate the orphaned Meta call + `provider_rejected` (see below)
     // The UI maps every reason to a human one-liner; the alternative (502 → "Bad
     // Gateway" in console) is the failure mode we just hit in prod.
     const channelForCall = conversation.channel ?? "whatsapp";
@@ -281,7 +289,36 @@ export class CallsService {
         created = existing;
         createdHere = false;
       } else {
-        throw err;
+        // The call IS placed and ringing at Meta, but the local Call row failed
+        // to persist for a reason OTHER than the benign P2002 race (e.g. a
+        // transient pool timeout). Without a local row the originating browser
+        // tears down its peer connection on the failure response, so when the
+        // customer answers, the SDP-answer webhook frame has no PC to apply to
+        // and the call dies on the ~15s ICE timeout — a ringing-into-the-void
+        // orphan. Best-effort TERMINATE the Meta call so the customer's phone
+        // stops ringing, then return a structured failure (never a 5xx — honors
+        // this method's no-throw contract). ingest still records whatever
+        // terminal webhook Meta sends, for forensics.
+        this.logger.error(
+          `Call row insert failed after placeCall succeeded for team=${session.teamId} contact=${contact.id} externalCallId=${placed.externalCallId}: ${
+            err instanceof Error ? err.message : err
+          } — terminating the orphaned Meta call`,
+        );
+        try {
+          const binding = getProviderBinding(channelForCall);
+          const end = binding.provider.endCall;
+          if (end) {
+            const cfg = await binding.getSendConfig(session.teamId);
+            await end({ externalCallId: placed.externalCallId }, cfg);
+          }
+        } catch (terminateErr) {
+          this.logger.warn(
+            `failed to terminate orphaned Meta call externalCallId=${placed.externalCallId}: ${
+              terminateErr instanceof Error ? terminateErr.message : terminateErr
+            }`,
+          );
+        }
+        return { ok: false, reason: "provider_rejected" } as InitiateCallFailure;
       }
     }
 
@@ -481,8 +518,10 @@ export class CallsService {
     });
     if (!call) throw new NotFoundException({ error: "call not found" });
 
-    // Capability check — guard already gated, but the second cap
-    // (receive) isn't on the decorator (decorators are single-cap).
+    // Defense-in-depth: the controller's @RequireCapability("calls:receive")
+    // already gated this. Re-checking the SAME capability here (not a second
+    // one — answer needs only calls:receive) keeps the service safe if it's
+    // ever invoked from an ungated path.
     const perms = resolvePermissions(session.role, session.rolePermissions);
     if (!perms["calls:receive" as Capability]) {
       throw new ForbiddenException({ error: "forbidden" });
@@ -562,6 +601,7 @@ export class CallsService {
           conversationId: call.conversationId,
           callId: call.id,
           reason: "provider_error",
+          endedAt: endedAt.toISOString(),
         });
       } catch (rollbackErr) {
         this.logger.warn(
@@ -606,9 +646,10 @@ export class CallsService {
     });
     if (!call) throw new NotFoundException({ error: "call not found" });
 
+    const rejectedAt = new Date();
     const cas = await this.db.call.updateMany({
       where: { id: callId, status: CallStatus.ringing },
-      data: { status: CallStatus.rejected, endedAt: new Date() },
+      data: { status: CallStatus.rejected, endedAt: rejectedAt },
     });
     if (cas.count === 0) {
       // Either already answered (someone won the race) or already
@@ -646,6 +687,7 @@ export class CallsService {
       conversationId: call.conversationId,
       callId: call.id,
       rejectedByUserId: session.userId,
+      endedAt: rejectedAt.toISOString(),
     });
     return { ok: true };
   }
@@ -677,6 +719,7 @@ export class CallsService {
         channel: true,
         direction: true,
         status: true,
+        ringingAt: true,
         answeredAt: true,
       },
     });
@@ -693,6 +736,17 @@ export class CallsService {
     }
 
     const endedAt = new Date();
+    // A call hung up while still RINGING never connected — an agent cancelling
+    // an outbound before the customer picked up, or tearing down an unanswered
+    // inbound. Recording that as `completed` is misleading: the timeline pill
+    // would read "Outgoing call" with no duration instead of "Customer didn't
+    // answer". Map the never-answered case to `missed` so the persisted row,
+    // the live pill, and any history reload all agree. `answeredAt` is the
+    // connected discriminator (set once, on the first in_progress transition).
+    const wasConnected = call.answeredAt !== null;
+    const terminalStatus = wasConnected
+      ? CallStatus.completed
+      : CallStatus.missed;
     const durationSeconds = call.answeredAt
       ? Math.max(
           0,
@@ -706,7 +760,7 @@ export class CallsService {
         status: { in: [CallStatus.ringing, CallStatus.in_progress] },
       },
       data: {
-        status: CallStatus.completed,
+        status: terminalStatus,
         endedAt,
         durationSeconds,
       },
@@ -735,16 +789,30 @@ export class CallsService {
       // Non-fatal — local state already terminal.
     }
 
-    await this.bus.publish({
-      type: "call.ended",
-      teamId: session.teamId,
-      conversationId: call.conversationId,
-      callId: call.id,
-      direction: call.direction === CallDirection.in ? "in" : "out",
-      endedAt: endedAt.toISOString(),
-      durationSeconds,
-      reason: "hangup_by_agent",
-    });
+    // Publish the matching terminal phase so the audit pill + socket fanout
+    // status line stay consistent with the DB row we just wrote:
+    //   - connected hangup → call.ended (carries duration; "Call · 1:23")
+    //   - never-answered cancel → call.missed ("Customer didn't answer")
+    if (wasConnected) {
+      await this.bus.publish({
+        type: "call.ended",
+        teamId: session.teamId,
+        conversationId: call.conversationId,
+        callId: call.id,
+        direction: call.direction === CallDirection.in ? "in" : "out",
+        endedAt: endedAt.toISOString(),
+        durationSeconds,
+        reason: "hangup_by_agent",
+      });
+    } else {
+      await this.bus.publish({
+        type: "call.missed",
+        teamId: session.teamId,
+        conversationId: call.conversationId,
+        callId: call.id,
+        ringingAt: call.ringingAt.toISOString(),
+      });
+    }
 
     return { ok: true, durationSeconds };
   }
@@ -780,11 +848,35 @@ export class CallsService {
     });
     if (!conv) throw new NotFoundException({ error: "conversation not found" });
 
+    // Keyset pagination on (ringingAt DESC, id DESC). A COMPOSITE cursor is
+    // required: ringingAt is not unique — two calls can share a timestamp
+    // (Meta delivers second-granular times; a placeCall + its near-instant
+    // ringing webhook routinely collide on the same ringingAt). The previous
+    // `cursor: { id }` Prisma cursor keyed on id alone, which silently
+    // mis-paginates across a ringingAt tie sitting on a page boundary (drops or
+    // duplicates a row). Manual (ringingAt, id) keyset — the same pattern as
+    // broadcasts.service / team-chat queries — is correct regardless of ties.
+    // Cursor wire form is `<ringingAtMs>_<id>`, opaque to the client.
+    const parsed = parseCallCursor(cursor);
+    const cursorWhere: Prisma.CallWhereInput | undefined = parsed
+      ? {
+          OR: [
+            { ringingAt: { lt: parsed.ringingAt } },
+            { ringingAt: parsed.ringingAt, id: { lt: parsed.id } },
+          ],
+        }
+      : undefined;
+    // teamId is explicit (not just the conversationId FK) to match every other
+    // call query in this service and keep the tenant scope visible at the row
+    // level, not implied by the prior conversation lookup.
+    const baseWhere: Prisma.CallWhereInput = {
+      conversationId,
+      teamId: session.teamId,
+    };
     const rows = await this.db.call.findMany({
-      where: { conversationId },
+      where: cursorWhere ? { AND: [baseWhere, cursorWhere] } : baseWhere,
       orderBy: [{ ringingAt: "desc" }, { id: "desc" }],
       take: take + 1,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       select: {
         id: true,
         conversationId: true,
@@ -800,10 +892,31 @@ export class CallsService {
       },
     });
     const hasMore = rows.length > take;
-    const items = (hasMore ? rows.slice(0, take) : rows).map(serializeCall);
-    const nextCursor = hasMore ? rows[take - 1]!.id : null;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const items = page.map(serializeCall);
+    const last = page.at(-1);
+    const nextCursor =
+      hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
     return { items, cursor: nextCursor };
   }
+}
+
+/**
+ * Decode the `<ringingAtMs>_<id>` keyset cursor `list()` emits. Returns null on
+ * absent/malformed input (caller falls back to the first page). cuid ids carry
+ * no underscore, so splitting on the FIRST `_` cleanly separates the epoch-ms
+ * prefix from the id.
+ */
+function parseCallCursor(
+  raw: string | undefined,
+): { ringingAt: Date; id: string } | null {
+  if (!raw) return null;
+  const i = raw.indexOf("_");
+  if (i <= 0) return null;
+  const ms = Number(raw.slice(0, i));
+  const id = raw.slice(i + 1);
+  if (!Number.isFinite(ms) || !id) return null;
+  return { ringingAt: new Date(ms), id };
 }
 
 export interface SerializedCall {

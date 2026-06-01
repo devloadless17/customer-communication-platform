@@ -276,17 +276,26 @@ export function useContactList(opts?: {
   function loadMore() {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
+    // Capture the current request generation. The filter-change effect above
+    // bumps `reqId` on every filter change; if one lands while this page is in
+    // flight, discard the result so we don't APPEND stale-filter rows onto the
+    // fresh result set the effect just installed (the confirmed bug). loadMore
+    // previously had no such guard, unlike the effect's page-1 fetch.
+    const my = reqId.current;
     void (async () => {
       try {
         const page = await fetchContactsPage(
           { search, fieldFilter, sourceFilter, windowFilter, tagIds, stageFilter },
           nextCursor,
         );
+        if (reqId.current !== my) return; // superseded by a filter change
         setItems((prev) => [...prev, ...page.items]);
         setNextCursor(page.nextCursor);
       } catch {
-        setError("Couldn't load more");
+        if (reqId.current === my) setError("Couldn't load more");
       } finally {
+        // Always clear so the new filter's loadMore isn't wedged behind a
+        // superseded in-flight page.
         setLoadingMore(false);
       }
     })();

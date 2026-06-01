@@ -116,10 +116,17 @@ export async function markFailed(id: string, lastError: string): Promise<void> {
 }
 
 /**
- * Stamp a `lastError` on an already-claimed (publishedAt set) row when a
- * subscriber threw mid-dispatch. The row STAYS marked-published (at-most-
- * once dispatch was completed; we won't re-fire), but the error trail is
- * now durable instead of stdout-only. Forensic query:
+ * Stamp `failedAt` + `lastError` on an already-claimed (publishedAt set) row
+ * when a subscriber threw mid-dispatch. The row STAYS marked-published
+ * (at-most-once dispatch was completed; we won't re-fire — the drainer's claim
+ * filters on `publishedAt IS NULL`, so setting failedAt here can't make it
+ * re-grab the row), but the error trail is now durable instead of stdout-only.
+ *
+ * `failedAt` is set so the row matches the retention sweeper's "failedAt NOT
+ * NULL → KEEP for operator triage" rule (outbound-event-retention.ts). Without
+ * it, the sweeper's `publishedAt NOT NULL AND failedAt IS NULL` delete predicate
+ * reaped these errored rows after 7 days, silently dropping the very triage
+ * signal this function exists to preserve. Forensic query:
  *
  *   SELECT id, type, "lastError" FROM "OutboundEvent"
  *   WHERE "publishedAt" IS NOT NULL AND "lastError" IS NOT NULL
@@ -132,7 +139,7 @@ export async function markPublishedWithError(
   const truncated = lastError.length > 1000 ? lastError.slice(0, 1000) + "…" : lastError;
   await db.outboundEvent.updateMany({
     where: { id, publishedAt: { not: null } },
-    data: { lastError: truncated },
+    data: { lastError: truncated, failedAt: new Date() },
   });
 }
 

@@ -22,7 +22,16 @@ import type { NextFunction, Request, Response } from "express";
  * authorization; use it only for log correlation.
  */
 
-const als = new AsyncLocalStorage<string>();
+interface RequestContext {
+  requestId: string;
+  /** Inbound X-CCP-Depth (0 when absent) — the cross-system loop-guard
+   *  counter. Carried ambiently so the outbound-webhook subscriber can stamp
+   *  depth+1 on deliveries it enqueues for events caused by THIS request,
+   *  without threading it through every publish() call. */
+  chainDepth: number;
+}
+
+const als = new AsyncLocalStorage<RequestContext>();
 
 const REQUEST_ID_HEADER = "x-request-id";
 const REQUEST_ID_MAX_LEN = 64;
@@ -40,7 +49,18 @@ function sanitizeIncomingId(raw: string | string[] | undefined): string | null {
 
 /** Read the current correlation ID, or undefined if outside any request. */
 export function getCorrelationId(): string | undefined {
-  return als.getStore();
+  return als.getStore()?.requestId;
+}
+
+/**
+ * Inbound cross-system chain depth (X-CCP-Depth) for the current request, or
+ * 0 outside any request / when the header is absent. Used by the outbound-
+ * webhook subscriber to stamp depth+1 on deliveries, so a partner that bounces
+ * our webhook back into /v1 carries an incrementing counter that trips at
+ * MAX_CHAIN_DEPTH — breaking a cross-system loop.
+ */
+export function getChainDepth(): number {
+  return als.getStore()?.chainDepth ?? 0;
 }
 
 /**
@@ -50,7 +70,7 @@ export function getCorrelationId(): string | undefined {
  * a request scope so background sweepers and boot-time logs stay clean.
  */
 export function withCorrelation(msg: string): string {
-  const id = als.getStore();
+  const id = als.getStore()?.requestId;
   return id ? `[req=${id}] ${msg}` : msg;
 }
 
@@ -64,7 +84,16 @@ export function correlationMiddleware() {
     const incoming = sanitizeIncomingId(req.headers[REQUEST_ID_HEADER]);
     const id = incoming ?? randomUUID();
     res.setHeader("X-Request-Id", id);
-    als.run(id, () => next());
+    // Seed the inbound cross-system chain depth (X-CCP-Depth) so the outbound-
+    // webhook subscriber can stamp depth+1 on deliveries for events this
+    // request causes. Mirrors parseChainDepth in lib/workflows/events.ts
+    // (inlined so this foundational util keeps zero workflows dependency):
+    // absent / invalid / non-positive → 0.
+    const rawDepth = req.headers["x-ccp-depth"];
+    const depthStr = Array.isArray(rawDepth) ? rawDepth[0] : rawDepth;
+    const parsedDepth = depthStr ? Number.parseInt(depthStr, 10) : NaN;
+    const chainDepth = Number.isFinite(parsedDepth) && parsedDepth > 0 ? parsedDepth : 0;
+    als.run({ requestId: id, chainDepth }, () => next());
   };
 }
 

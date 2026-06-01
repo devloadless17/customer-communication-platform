@@ -34,12 +34,15 @@ interface HealthReport {
  * Probes BOTH Postgres and Redis so a half-down dependency surfaces
  * immediately instead of waiting for a real request to fail.
  *
- * Returns HTTP 200 when healthy, **503 when DB or Redis is down** — the body
- * is identical either way (full report) so the deploy smoke can still read
- * which dependency failed, but the status code lets the Docker/Caddy probes
- * react to a wedged data plane instead of seeing a permanent 200. The
- * healthcheck's `retries: 3` × `interval: 30s` means a transient blip needs
- * ~90s of sustained failure to flip unhealthy, so this can't flap.
+ * Returns HTTP 200 when **Postgres** is up, **503 only when Postgres is down**.
+ * Redis is reported in the body (`redis:false` → `ok:false`) but does NOT 503:
+ * a Redis outage degrades queues / workflows / sends, yet the api still serves
+ * reads, realtime, and Postgres-only WEBHOOK INGEST — so it must stay in
+ * Caddy's rotation. 503ing on a Redis blip would make Caddy stop routing Meta
+ * webhooks that would otherwise succeed, silently dropping inbound messages.
+ * The body keeps the full report so the deploy smoke's `"ok":true` grep still
+ * fails a Redis-down deploy (you don't want to ship with workers dark), while
+ * the continuous Docker/Caddy probe only reacts to a wedged Postgres.
  */
 @Controller("health")
 export class HealthController {
@@ -66,10 +69,15 @@ export class HealthController {
         saturationPercent,
       },
     };
-    if (!report.ok) {
-      // 503 with the report as the body. ServiceUnavailableException
-      // serializes its payload as the JSON response, so `"ok":false` + the
-      // per-dependency flags are still visible to operators + the smoke grep.
+    if (!dbOk) {
+      // 503 ONLY when Postgres — the routing-critical dependency — is down. A
+      // Redis outage still reports ok:false in the body (so the deploy smoke's
+      // `"ok":true` grep fails a Redis-down deploy), but it must NOT 503: the
+      // api still serves reads, realtime, and Postgres-only webhook ingest, so
+      // taking it out of Caddy's rotation would silently drop inbound Meta
+      // messages. Workers queue and resume when Redis returns.
+      // ServiceUnavailableException serializes its payload as the JSON body, so
+      // the per-dependency flags stay visible to operators.
       throw new ServiceUnavailableException(report);
     }
     return report;

@@ -400,8 +400,9 @@ export async function startBroadcast(broadcastId: string): Promise<void> {
   if (!tryAcquireBroadcastTeamSlot(owner.teamId)) {
     // Team at its concurrent-broadcast cap. Leave the row `queued` and
     // re-attempt shortly — the slot frees when one of the team's running
-    // broadcasts finishes. (The scheduled-broadcast worker is a second
-    // safety net for `queued` rows.) unref so this timer can't hold the
+    // broadcasts finishes. (If the process dies while a row is parked here,
+    // the boot reconciler's queued-orphan sweep re-fires it — see step 0 of
+    // reconcileOrphanedBroadcasts.) unref so this timer can't hold the
     // process open during shutdown.
     setTimeout(() => {
       if (!shuttingDown) void startBroadcast(broadcastId);
@@ -1454,6 +1455,21 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
   // resumes here.
   resetShutdownFlag();
 
+  // 0) Snapshot broadcasts already sitting in `queued` at boot. These are
+  // ORPHANS: a row is created `queued` (immediate send) or flipped
+  // `scheduled`→`queued` by its delayed job, then `startBroadcast()` runs
+  // fire-and-forget — if the process dies before the runner's CAS claim flips
+  // it to `running` (e.g. a crash/deploy in the create→claim, team-at-cap
+  // defer, retry, or scheduled-fire window), nothing ever picks it up again.
+  // The running- and paused-recovery below don't touch `queued`, so without
+  // this the row sends NOTHING forever — a billed, customer-facing broadcast
+  // silently lost. Snapshot BEFORE step 2 flips paused→queued so the two sets
+  // are disjoint (paused resumes are re-fired by step 2 itself).
+  const queuedOrphans = await db.broadcast.findMany({
+    where: { status: "queued" },
+    select: { id: true },
+  });
+
   // 1) `running` orphans → flip to `paused` so the resume path below picks
   // them up uniformly with broadcasts that were paused by graceful shutdown.
   const runningOrphans = await db.broadcast.findMany({
@@ -1477,7 +1493,6 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     where: { status: "paused" },
     select: { id: true, teamId: true },
   });
-  if (pausedRows.length === 0) return;
 
   for (const row of pausedRows) {
     const queuedRemaining = await db.broadcastRecipient.count({
@@ -1512,6 +1527,17 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     // Fire-and-forget — startBroadcast schedules the runner inside
     // setImmediate via its own mechanics. We don't await so onModuleInit
     // returns quickly.
+    startBroadcast(row.id);
+  }
+
+  // 3) Re-fire the `queued` orphans snapshotted in step 0. startBroadcast is
+  // idempotent (CAS on status="queued" in runBroadcast.claim), so a row that
+  // some other path already advanced is a no-op. Done LAST so step 2's
+  // paused→queued resumes — which step 2 already fired — aren't double-fired.
+  for (const row of queuedOrphans) {
+    console.warn(
+      `[broadcast-reconciler] resuming orphaned queued broadcast ${row.id}`,
+    );
     startBroadcast(row.id);
   }
 }

@@ -250,9 +250,13 @@ export async function ingestCallEvent(
             direction,
             status: targetStatus,
             ringingAt: evt.timestamp,
-            ...(isTerminalFirstWebhook
-              ? { endedAt: evt.timestamp, durationSeconds: 0 }
-              : {}),
+            // A terminal-on-first-webhook call never reached in_progress (no
+            // answeredAt to subtract from), so durationSeconds stays NULL — not
+            // 0. Leaving it null keeps the row consistent with both the UPDATE
+            // path (which computes null when answeredAt is null) and the
+            // call.ended event published below (which also resolves to null on a
+            // first insert). Writing 0 here drifted the row from its own event.
+            ...(isTerminalFirstWebhook ? { endedAt: evt.timestamp } : {}),
             rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           },
           select: { id: true, status: true },
@@ -296,6 +300,21 @@ export async function ingestCallEvent(
             conversation: reopenSnapshot,
           });
         }
+      }
+
+      // Surface the thread in the inbox list on real call activity by bumping
+      // lastMessageAt. A newly-created conversation already has it set to
+      // evt.timestamp (the `lt` guard below makes this a no-op for it), but an
+      // EXISTING conversation otherwise never moved on a call — so a missed /
+      // incoming call silently stayed buried in the list instead of rising for
+      // triage. Gated on !alreadyTerminal so a duplicate terminal redelivery
+      // doesn't re-bump; the monotonic `lt` guard stops an out-of-order webhook
+      // from moving the timestamp backward past a newer message or call.
+      if (!alreadyTerminal) {
+        await tx.conversation.updateMany({
+          where: { id: conversation.id, lastMessageAt: { lt: evt.timestamp } },
+          data: { lastMessageAt: evt.timestamp },
+        });
       }
 
       // Emit the phase-specific domain event. Inserts always emit the
@@ -384,6 +403,7 @@ export async function ingestCallEvent(
             conversationId: conversation.id,
             callId: callRow.id,
             rejectedByUserId: null,
+            endedAt: evt.timestamp.toISOString(),
           });
         } else if (evt.phase === "failed") {
           await publishInTx(tx, {
@@ -392,6 +412,7 @@ export async function ingestCallEvent(
             conversationId: conversation.id,
             callId: callRow.id,
             reason: "provider_error",
+            endedAt: evt.timestamp.toISOString(),
           });
         }
 

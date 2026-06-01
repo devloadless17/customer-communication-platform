@@ -29,7 +29,8 @@ services:
     # small VPS since shm is allocated on-demand from page cache.
     shm_size: 256mb
     # On an 8GB VPS, Postgres + Redis + web + api can theoretically over-
-    # subscribe RAM (web/api each carry --max-old-space-size=4096). Caps
+    # subscribe RAM. The Node heaps are sized UNDER these caps (api 2048,
+    # web 1536; see each Dockerfile) so V8 GCs before the cgroup kills. Caps
     # turn a runaway process into a contained OOMKilled signal instead of
     # taking the whole VPS down. Numbers reflect the actual budget — bump
     # for any service that hits its cap legitimately in production.
@@ -229,10 +230,11 @@ services:
       # (no TLS, no security headers, no rate limit on a real proxy hop).
       # Postgres and Redis above already follow this pattern.
       - "127.0.0.1:${APP_PORT:-3000}:3000"
-    # Next.js + Prisma. --max-old-space-size=4096 is the heap ceiling;
-    # 2GB mem_limit is conservative because RSS exceeds heap (native
-    # bindings, buffers, V8 metadata). Bump if next start ever OOM-kills
-    # in steady state.
+    # Next.js + Prisma. The web Dockerfile sets --max-old-space-size=1536
+    # (75% of this 2g cap) so V8 GCs before the cgroup OOM-kills — RSS runs
+    # above heap (native bindings, buffers, V8 metadata), so the heap must sit
+    # below mem_limit, not at it. Raise BOTH together if web OOM-kills in
+    # steady state (but the 8g box has no spare RAM to give — see CLAUDE.md).
     mem_limit: 2g
     mem_reservation: 768m
     # Cap web at 1.5 vCPU. RSC renders + bundler compiles can spike CPU;
@@ -397,9 +399,13 @@ services:
     #      double-fire on restart.
     #   3. `prisma migrate deploy` is idempotent (no-op on a current DB)
     #      so a restart loop doesn't churn the schema. A real migration
-    #      failure exits non-zero before exec, the container fails to
-    #      start, and docker's restart-policy + systemd's StartLimitBurst
-    #      catch the loop the same way the old migrate service did.
+    #      failure exits non-zero before exec, the container fails to start,
+    #      and docker's `restart: unless-stopped` retries it. At DEPLOY time the
+    #      GHA "Wait for health" step never goes green, so auto-rollback fires
+    #      (see deploy.yml). At RUNTIME a transient DB outage self-heals once
+    #      Postgres is reachable. (No systemd StartLimitBurst any more — the
+    #      `ccp` unit was removed 2026-05-26 — and no external crash-loop
+    #      alerting yet; deferred per CLAUDE.md "skip until forced to revisit".)
     command:
       - sh
       - -c
@@ -425,8 +431,10 @@ services:
       start_period: 120s
     # Higher than `app` because the api carries the workflow runner,
     # BullMQ worker, Socket.io fanout, and audit/analytics subscribers
-    # on top of REST. 3GB tracks --max-old-space-size=4096 with margin
-    # for native bindings + socket buffers under fan-out load.
+    # on top of REST. The api Dockerfile sets --max-old-space-size=2048 so the
+    # heap sits under this 3g cap with ~1g of RSS headroom for native bindings
+    # + socket buffers under fan-out load (RSS exceeds heap), letting V8 GC
+    # before the cgroup OOM-kills instead of dying at the limit (exited 137).
     mem_limit: 3g
     mem_reservation: 1g
     # Highest CPU cap — api owns websocket fanout, workflow runner, BullMQ

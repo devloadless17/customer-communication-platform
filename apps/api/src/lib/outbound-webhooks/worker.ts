@@ -209,7 +209,12 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
         // job.opts.attempts comes from the queue default (currently 4).
         const attempt = job.attemptsMade + 1;
         const maxAttempts = job.opts.attempts ?? 1;
-        await deliverOnce(job.data.deliveryId, attempt, maxAttempts);
+        await deliverOnce(
+          job.data.deliveryId,
+          attempt,
+          maxAttempts,
+          job.data.chainDepth ?? 0,
+        );
       } finally {
         releaseTeamSlot(teamId);
       }
@@ -324,6 +329,7 @@ async function deliverOnce(
   deliveryId: string,
   attempt: number,
   maxAttempts: number,
+  chainDepth: number,
 ): Promise<void> {
   const delivery = await db.outboundWebhookDelivery.findUnique({
     where: { id: deliveryId },
@@ -396,6 +402,13 @@ async function deliverOnce(
         "X-CCP-Event": delivery.eventType,
         "X-CCP-Delivery": delivery.id,
         "X-CCP-Signature": signature,
+        // Cross-system loop guard. This delivery is one hop beyond the request
+        // that caused it (chainDepth), so stamp depth+1. A partner that bounces
+        // our webhook back into /v1 is expected to forward this header; the /v1
+        // controller rejects at MAX_CHAIN_DEPTH (8), breaking the loop after a
+        // bounded number of round-trips even if the partner ignores the
+        // X-CCP-Origin-Key hint below.
+        "X-CCP-Depth": String(chainDepth + 1),
         ...(originApiKeyId ? { "X-CCP-Origin-Key": originApiKeyId } : {}),
         // Correlation id of the request that caused this delivery, so a partner
         // can echo it back / log it and we can join their failure to our

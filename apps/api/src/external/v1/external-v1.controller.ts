@@ -18,7 +18,7 @@ import { CurrentApiKey } from "../../auth/current-session.decorator";
 import type { ApiKeyContext } from "../../auth/api-key.guard";
 import { RequireScope } from "../../auth/scope.decorator";
 import { ScopeGuard } from "../../auth/scope.guard";
-import { RateLimit } from "../../common/rate-limit.guard";
+import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../../common/zod-validation.pipe";
 import { MAX_CHAIN_DEPTH, parseChainDepth } from "@/lib/workflows/events";
 import { ExternalV1Service } from "./external-v1.service";

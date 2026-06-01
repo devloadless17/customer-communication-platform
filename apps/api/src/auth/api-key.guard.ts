@@ -58,6 +58,15 @@ const apiKeyBucket = createTokenBucket({ perMin: 60, maxKeys: 10_000 });
 // metered as anonymous probing.
 const unauthIpBucket = createTokenBucket({ perMin: 30, maxKeys: 10_000 });
 
+// Debounce `lastUsedAt` writes per key. Without this a high-frequency partner
+// hot-writes the SAME TeamApiKey row on every request (write amplification +
+// row-lock contention on one row). We persist at most once per window per key;
+// `lastUsedAt` is a coarse "last seen" display, so window-grained accuracy is
+// fine. In-memory only (single-process pilot — bounded by key count); a restart
+// just re-stamps on the next request.
+const LAST_USED_DEBOUNCE_MS = 60_000;
+const lastUsedStampedAt = new Map<string, number>();
+
 /**
  * Refund a token on the API-key bucket. Used by handlers that detected an
  * idempotency-cache HIT: the request did no real work, so the upstream
@@ -177,12 +186,16 @@ export class ApiKeyGuard implements CanActivate {
 
     req.apiKey = { teamId: row.teamId, apiKeyId: row.id, scopes: row.scopes };
 
-    // Stamp lastUsedAt async — failing this should NOT fail the request.
-    // BullMQ / Prisma update under load occasionally throws on connection
-    // pool exhaustion; the API call itself doesn't need to wait or care.
-    this.db.teamApiKey
-      .update({ where: { id: row.id }, data: { lastUsedAt: new Date() } })
-      .catch(() => {});
+    // Stamp lastUsedAt async + DEBOUNCED — failing this should NOT fail the
+    // request, and a hot partner shouldn't hot-write the same row on every
+    // call. Skip the write when this key was stamped within the window.
+    const now = Date.now();
+    if (now - (lastUsedStampedAt.get(row.id) ?? 0) >= LAST_USED_DEBOUNCE_MS) {
+      lastUsedStampedAt.set(row.id, now);
+      this.db.teamApiKey
+        .update({ where: { id: row.id }, data: { lastUsedAt: new Date() } })
+        .catch(() => {});
+    }
 
     return true;
   }

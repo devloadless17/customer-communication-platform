@@ -129,7 +129,9 @@ export class AudienceGroupsService {
   private async ownedContactIds(teamId: string, ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
     const rows = await this.db.contact.findMany({
-      where: { teamId, id: { in: ids } },
+      // deletedAt: null — don't connect a soft-deleted contact to a group (it
+      // would render as a phantom chip the member count excludes).
+      where: { teamId, deletedAt: null, id: { in: ids } },
       select: { id: true },
     });
     return rows.map((r) => r.id);

@@ -3,7 +3,7 @@ import { Body, Controller, Delete, Get, Param, Post } from "@nestjs/common";
 import { CurrentSession } from "../../auth/current-session.decorator";
 import { RequireRole } from "../../auth/role.guard";
 import type { ApiSession } from "../../auth/session.guard";
-import { RateLimit } from "../../common/rate-limit.guard";
+import { RateLimit } from "../../common/rate-limit.interceptor";
 import { zBody } from "../../common/zod-validation.pipe";
 import { ApiKeysService } from "./api-keys.service";
 import { CreateApiKeySchema, type CreateApiKeyInput } from "./api-keys.schemas";

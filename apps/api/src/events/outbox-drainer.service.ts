@@ -36,10 +36,12 @@ import { EventBus } from "./event-bus.service";
  *   - If `claimBatch` itself returns more rows than the batch limit allows,
  *     the loop keeps pulling until the table is drained for that tick.
  *
- * Pace: polls every `POLL_INTERVAL_MS`. With `BATCH_SIZE` rows per poll
- * the steady-state ceiling is `BATCH_SIZE * 1000 / POLL_INTERVAL_MS`
- * events/second from tx-context publishes; non-tx `publish()` calls
- * dispatch synchronously and are not bounded by this.
+ * Pace: polls every `POLL_INTERVAL_MS`. Under burst a single tick keeps
+ * draining up to `MAX_DRAINS_PER_TICK` batches before yielding, so the true
+ * ceiling is `BATCH_SIZE * MAX_DRAINS_PER_TICK * 1000 / POLL_INTERVAL_MS`
+ * events/second (~20k/s at the defaults) — NOT the single-batch
+ * `BATCH_SIZE * 1000 / POLL_INTERVAL_MS` (~2k/s) an earlier comment implied.
+ * Non-tx `publish()` calls dispatch synchronously and aren't bounded by this.
  *
  * Lifecycle: started on module init, stopped on shutdown via
  * `OnModuleDestroy` (main.ts's manual SIGTERM/SIGINT handler calls
@@ -182,12 +184,15 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         // either make the write predicate-gated or batch this back to
         // sequential dispatch per event.
         // claimBatch's outer `UPDATE … RETURNING` has no ORDER BY — Postgres
-        // returns rows in physical-update order, which doesn't match the
-        // inner CTE's createdAt sort. For two `message.sent` events queued
-        // on the SAME conversation in the same drain batch, the realtime
-        // emits would race in arbitrary order → list-row preview can show
-        // the older message's text until the next mutation. Sort by
-        // createdAt before Promise.all to preserve FIFO per stream.
+        // returns rows in physical-update order, not the inner CTE's createdAt
+        // sort. Sorting by createdAt before dispatch makes the lanes START in
+        // arrival order — BEST-EFFORT FIFO, NOT a guarantee: the 8 parallel
+        // lanes still COMPLETE in arbitrary order, so two `message.sent` on the
+        // SAME conversation in one batch can still emit out of order. Bounded
+        // impact — the list-row preview self-corrects on the next mutation, and
+        // two same-conversation events inside one 100ms batch is rare. A true
+        // per-stream FIFO (partition by conversationId → sequential within a
+        // partition, parallel across) is deferred until that race is observed.
         rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
         await runWithConcurrency(
           rows,

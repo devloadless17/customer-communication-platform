@@ -28,11 +28,20 @@ import type { ZodTypeAny, z } from "zod";
 export class ZodValidationPipe<T extends ZodTypeAny> implements PipeTransform {
   constructor(private readonly schema: T) {}
 
-  transform(value: unknown, _metadata: ArgumentMetadata): z.infer<T> {
+  transform(value: unknown, metadata: ArgumentMetadata): z.infer<T> {
     const result = this.schema.safeParse(value);
     if (!result.success) {
+      // Error key reflects WHICH argument failed (body / query / params) rather
+      // than always "invalid_body" — a query-string failure reported as
+      // "invalid_body" misleads an API consumer debugging a 400.
+      const error =
+        metadata.type === "query"
+          ? "invalid_query"
+          : metadata.type === "param"
+            ? "invalid_params"
+            : "invalid_body";
       throw new BadRequestException({
-        error: "invalid_body",
+        error,
         issues: result.error.issues,
       });
     }

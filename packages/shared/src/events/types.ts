@@ -783,8 +783,13 @@ export interface TeamRenamedEvent {
 // (instead of one `call.lifecycle_changed` carrying a `phase` field) mirrors
 // the locked `availability:*` split decision — separate event types let
 // subscribers attach to just the phase they care about (audit only writes
-// pills on terminal states; outbound webhooks only route ended/missed/
-// rejected; the fanout-rules map auto-checks exhaustiveness per type).
+// pills on terminal states; the fanout-rules map auto-checks exhaustiveness
+// per type). NOTE: call.* events are realtime + audit only today — they are
+// deliberately NOT in the outbound-webhook public allowlist (see
+// packages/shared/src/outbound-webhooks/public-events.ts), so partner
+// integrations don't receive them. Routing terminal call phases to partners
+// is a clean, pattern-matching future addition (a new PUBLIC_EVENT_TYPES
+// entry + a toPublicEnvelopes case + contact enrichment in the subscriber).
 //
 // SDP + ICE events carry signaling-only data. They never write to the DB,
 // just relay between Meta and the answering agent's browser via Socket.io.
@@ -850,6 +855,9 @@ export interface CallRejectedEvent {
   conversationId: string;
   callId: string;
   rejectedByUserId: string | null;
+  /** Actual decline time (the row's endedAt). Carried so the fanout + audit
+   *  pill use the real moment, not a re-synthesized `new Date()` at fanout. */
+  endedAt: string;
 }
 
 /** Signaling / media error. */
@@ -858,6 +866,9 @@ export interface CallFailedEvent {
   conversationId: string;
   callId: string;
   reason: string;
+  /** Actual failure time (the row's endedAt). Same rationale as
+   *  CallRejectedEvent.endedAt — keeps timeline timing honest. */
+  endedAt: string;
 }
 
 /**

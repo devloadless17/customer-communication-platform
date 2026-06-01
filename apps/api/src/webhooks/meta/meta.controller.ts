@@ -7,6 +7,7 @@ import {
   HttpCode,
   HttpException,
   Logger,
+  OnModuleDestroy,
   Param,
   Post,
   Query,
@@ -25,7 +26,7 @@ import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
 import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
-import { ingestEvents } from "@/lib/providers/ingest";
+import { ingestEvents, isTransientDbError } from "@/lib/providers/ingest";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
 
 /**
@@ -66,10 +67,35 @@ import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
  */
 @Controller("webhooks/meta")
 @UseGuards(WebhookRateLimitGuard)
-export class MetaWebhookController {
+export class MetaWebhookController implements OnModuleDestroy {
   private readonly logger = new Logger(MetaWebhookController.name);
+  // In-flight inbound-media completions. Tracked so a SIGTERM mid-download
+  // doesn't abandon the row patch — an abandoned row stays media-pending and
+  // the inbound-media sweeper later CLEARS it to text-only (the binary is lost;
+  // Meta media URLs expire). Drained, bounded, in onModuleDestroy.
+  private readonly inFlightMedia = new Set<Promise<void>>();
 
   constructor(private readonly db: DbService) {}
+
+  /**
+   * Drain in-flight inbound-media completions on shutdown so the in-flight
+   * ones finish their Meta download + blob upload + row patch instead of being
+   * abandoned (→ sweeper clears them → media lost). Bounded so a single stuck
+   * download can't blow the shutdown budget; on timeout the sweeper is the
+   * backstop (same as today, but we tried). Part of the sequential
+   * OnModuleDestroy chain capped by main.ts's app.close() budget.
+   */
+  async onModuleDestroy(): Promise<void> {
+    if (this.inFlightMedia.size === 0) return;
+    const DRAIN_TIMEOUT_MS = 15_000;
+    this.logger.log(
+      `draining ${this.inFlightMedia.size} in-flight inbound-media completion(s)`,
+    );
+    await Promise.race([
+      Promise.allSettled([...this.inFlightMedia]),
+      new Promise<void>((resolve) => setTimeout(resolve, DRAIN_TIMEOUT_MS).unref()),
+    ]);
+  }
 
   @Get(":teamId")
   async verify(
@@ -192,14 +218,9 @@ export class MetaWebhookController {
       //     drains both our and their resources; logging + swallowing here
       //     leaves the row dropped, recoverable by replaying the raw payload
       //     manually if it matters.
-      const code =
-        err instanceof Prisma.PrismaClientKnownRequestError ? err.code : null;
-      const transient =
-        code === "P2024" /* pool timeout */ ||
-        code === "P1001" /* server unreachable */ ||
-        code === "P1002" /* connection timeout */ ||
-        code === "P1008" /* operation timeout */;
-      if (transient) {
+      if (isTransientDbError(err)) {
+        const code =
+          err instanceof Prisma.PrismaClientKnownRequestError ? err.code : "init";
         this.logger.warn(
           `[${teamId}] transient ingest failure (${code}); asking Meta to retry`,
         );
@@ -214,8 +235,9 @@ export class MetaWebhookController {
 
     // Background-only: every media-bearing event waits for downloadPromise
     // then patches + emits. No-op when the batch has no media (the helper
-    // filters internally).
-    void this.completePendingMedia(
+    // filters internally). Tracked in `inFlightMedia` so onModuleDestroy can
+    // drain it on shutdown rather than letting a SIGTERM abandon the patch.
+    const completion = this.completePendingMedia(
       teamId,
       events,
       downloadPromise,
@@ -223,6 +245,8 @@ export class MetaWebhookController {
     ).catch((err) =>
       this.logger.error(`[${teamId}] background media completion failed`, err),
     );
+    this.inFlightMedia.add(completion);
+    void completion.finally(() => this.inFlightMedia.delete(completion));
 
     return { ok: true, ingested: events.length };
   }

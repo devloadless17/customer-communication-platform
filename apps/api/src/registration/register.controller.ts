@@ -12,7 +12,11 @@ import type { Request } from "express";
 import { z } from "zod";
 
 import { hashPassword } from "@/auth/password";
-import { validatePasswordStructure } from "@ccp/shared/auth/password-policy";
+import {
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  validatePasswordStructure,
+} from "@ccp/shared/auth/password-policy";
 
 import { createTokenBucket } from "../common/token-bucket";
 import { zBody } from "../common/zod-validation.pipe";
@@ -45,7 +49,7 @@ const RegisterSchema = z.object({
   orgName: z.string().trim().min(1).max(200),
   name: z.string().trim().min(1).max(200),
   email: z.string().trim().toLowerCase().email(),
-  password: z.string().min(6).max(200),
+  password: z.string().min(MIN_PASSWORD_LENGTH).max(MAX_PASSWORD_LENGTH),
 });
 type RegisterInput = z.infer<typeof RegisterSchema>;
 

@@ -600,7 +600,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
       conversationId: e.conversationId,
       callId: e.callId,
       durationSeconds: null,
-      endedAt: new Date().toISOString(),
+      // Real decline time off the event, not a fanout-synthesized `new Date()`.
+      endedAt: e.endedAt,
       status: "rejected",
     });
   },
@@ -617,7 +618,8 @@ export const FANOUT_RULES: FanoutRuleMap = {
       conversationId: e.conversationId,
       callId: e.callId,
       durationSeconds: null,
-      endedAt: new Date().toISOString(),
+      // Real failure time off the event, not a fanout-synthesized `new Date()`.
+      endedAt: e.endedAt,
       status: "failed",
     });
   },

@@ -242,12 +242,27 @@ function categorizeSendError(err: unknown): CategorizedError {
   if (typeof err === "object" && err !== null && "getResponse" in err) {
     const response = (err as { getResponse: () => unknown }).getResponse();
     if (typeof response === "object" && response !== null) {
-      const r = response as { error?: string; detail?: string };
+      const r = response as { error?: string; detail?: string; status?: number };
       if (r.error) {
+        // executeTextSendJob re-wraps Meta failures as Http exceptions
+        // (UnprocessableEntity carrying Meta's httpStatus; BadGateway with
+        // "send_failed" for network/unknown). This branch USED to mark every
+        // such exception non-recoverable, which silently killed BullMQ's retry
+        // policy for transient Meta 5xx / rate-limit / network blips — the
+        // first Meta hiccup turned into a permanent red bubble. Re-derive
+        // recoverability with the SAME rule as the MetaSendError branch below:
+        //   - rate_limited / Meta 5xx / network fallback ("send_failed") → retry
+        //   - everything else (executor guards: conversation-not-found,
+        //     whatsapp_not_connected, send_in_progress_or_lost @ 409; and Meta
+        //     business 4xx) → terminal (status absent or < 500).
+        const recoverable =
+          r.error === "rate_limited" ||
+          r.error === "send_failed" ||
+          (typeof r.status === "number" && r.status >= 500);
         return {
           reason: r.error,
           ...(r.detail ? { detail: r.detail } : {}),
-          recoverable: false,
+          recoverable,
         };
       }
     }

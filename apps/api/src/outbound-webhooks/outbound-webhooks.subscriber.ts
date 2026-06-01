@@ -19,7 +19,7 @@ import {
 
 import { DbService } from "../db/db.service";
 import { runWithConcurrency } from "../common/concurrency";
-import { getCorrelationId } from "../common/correlation";
+import { getChainDepth, getCorrelationId } from "../common/correlation";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
 import {
   EXTERNAL_CONVERSATION_INCLUDE,
@@ -159,6 +159,12 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // outside an HTTP request (sweepers, boot reconciler). F6 in
     // docs/architecture-review-2026-05-25.md.
     const correlationId = getCorrelationId() ?? null;
+    // Capture the inbound chain depth in the SAME synchronous ALS scope as the
+    // correlation id (the BullMQ worker runs later, outside this scope). The
+    // worker stamps depth+1 on the outbound POST so a partner that bounces our
+    // webhook back into /v1 carries an incrementing counter that trips at
+    // MAX_CHAIN_DEPTH. 0 for events with no HTTP origin (sweepers, ingest).
+    const chainDepth = getChainDepth();
 
     const envelopes = toPublicEnvelopes(event as Parameters<typeof toPublicEnvelopes>[0]);
     if (envelopes.length === 0) return;
@@ -287,7 +293,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
             return;
           }
           try {
-            await enqueueWebhookDelivery(deliveryId);
+            await enqueueWebhookDelivery(deliveryId, chainDepth);
           } catch (err) {
             this.logger.error(
               `enqueue failed for delivery ${deliveryId}: ${err instanceof Error ? err.message : err}`,

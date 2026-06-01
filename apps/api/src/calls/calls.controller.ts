@@ -14,7 +14,7 @@ import { RequireRole } from "../auth/role.guard";
 import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
-import { RateLimit } from "../common/rate-limit.guard";
+import { RateLimit } from "../common/rate-limit.interceptor";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import { CallsService } from "./calls.service";
 import {

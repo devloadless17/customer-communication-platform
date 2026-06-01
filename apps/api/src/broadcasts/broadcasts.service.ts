@@ -478,11 +478,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       include: {
         createdBy: { select: { id: true, name: true } },
         recipients: {
-          // failed → queued → sent groups the most actionable rows first.
-          // BroadcastRecipientStatus enum sorts alphabetically (canceled,
-          // failed, queued, sending, sent) so status-asc puts failures
-          // near the top, which is what the operator wants to see first.
-          orderBy: [{ status: "asc" }, { id: "asc" }],
+          // Failures must sort FIRST so they're never truncated out of the
+          // RECIPIENTS_INLINE_CAP (the operator triages failures first). NOTE:
+          // BroadcastRecipientStatus is a Postgres ENUM (queued, sent, failed —
+          // in DECLARATION order), so `ORDER BY status` uses that order, NOT
+          // alphabetical (an earlier comment wrongly claimed alphabetical and
+          // listed canceled/sending values that don't exist). `status: "asc"`
+          // would therefore put failed LAST and truncate it away on a
+          // many-recipient broadcast; DESC yields failed → sent → queued,
+          // keeping the actionable rows at the top.
+          orderBy: [{ status: "desc" }, { id: "asc" }],
           take: RECIPIENTS_INLINE_CAP + 1,
           include: {
             contact: { select: { id: true, name: true, phoneNumber: true } },
@@ -725,10 +730,18 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       select: { id: true, status: true },
     });
     if (!row) throw new NotFoundException({ error: "not found" });
-    if (row.status === "running" || row.status === "queued") {
+    // `paused` is in-progress too — it's the state graceful shutdown / reboot
+    // leaves a running broadcast in for the boot reconciler to resume. Deleting
+    // it races that resume and orphans the recipient send-progress, so refuse
+    // it alongside running/queued. The user should CANCEL (clean stop) instead.
+    if (
+      row.status === "running" ||
+      row.status === "queued" ||
+      row.status === "paused"
+    ) {
       throw new ConflictException({
         error: "broadcast in progress",
-        detail: "Wait for the broadcast to finish before deleting it.",
+        detail: "Cancel the broadcast (or wait for it to finish) before deleting it.",
       });
     }
     await this.db.broadcast.delete({ where: { id } });

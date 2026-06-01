@@ -1,5 +1,7 @@
+import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { Prisma, type WorkflowTriggerEvent } from "@prisma/client";
 
+import { runWithConcurrency } from "@/common/concurrency";
 import { db } from "@/lib/db";
 import { evaluateConditions } from "@/lib/workflows/conditions";
 import type { EventPayload, PayloadFor } from "@/lib/workflows/events";
@@ -107,11 +109,17 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
       }
     }
 
-    // Create the runs in parallel. Each enqueue is independent — Promise.allSettled
-    // keeps one workflow's permanent failure from shadowing siblings.
-    const results = await Promise.allSettled(
-      toRun.map((w) =>
-        createAndEnqueue({
+    // Create the runs with BOUNDED parallelism. A team can match many
+    // workflows on one event (up to the ~250 warn threshold above); an
+    // unbounded Promise.all would fire that many parallel run-create
+    // transactions + Redis enqueues at once, exhausting the Prisma pool and
+    // surfacing as P2024 across unrelated traffic. 8 lanes bounds the burst.
+    // Each lane swallows + logs its own failure (preserving the old
+    // Promise.allSettled contract: one workflow's permanent failure can't
+    // shadow siblings), so dispatch() stays best-effort / never-throw.
+    await runWithConcurrency(toRun, 8, async (w) => {
+      try {
+        await createAndEnqueue({
           workflowId: w.id,
           teamId,
           trigger: event,
@@ -120,18 +128,14 @@ export async function dispatch<E extends WorkflowTriggerEvent>(
           payload,
           graph: w.graph as Prisma.InputJsonValue,
           oncePerContact: w.triggerOncePerContact,
-        }),
-      ),
-    );
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i]!;
-      if (r.status === "rejected") {
+        });
+      } catch (err) {
         console.error(
-          `[workflows] enqueue PERMANENTLY FAILED for workflow=${toRun[i]!.id} team=${teamId} event=${event} — run will NOT execute:`,
-          r.reason instanceof Error ? r.reason.message : r.reason,
+          `[workflows] enqueue PERMANENTLY FAILED for workflow=${w.id} team=${teamId} event=${event} — run will NOT execute:`,
+          err instanceof Error ? err.message : err,
         );
       }
-    }
+    });
   } catch (err) {
     console.error(
       `[workflows] dispatch failed for team=${teamId} event=${event}:`,
@@ -459,11 +463,3 @@ export async function dispatchManualTrigger(args: {
   return run.id;
 }
 
-function normalizeStringMap(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "string") out[k] = v;
-  }
-  return out;
-}

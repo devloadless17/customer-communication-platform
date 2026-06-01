@@ -148,8 +148,6 @@ test.describe("Workflow chain-depth (across all parent trigger events)", () => {
             stepLog: true,
           },
         });
-        // Wait until the chain has stopped progressing — proxy: at least
-        // TRIGGER_DEPTH_MAX (8) runs OR a depth-exceeded entry anywhere.
         const depthExceededAnywhere = runs.some((r) => {
           if ((r.errorMessage ?? "").includes("depth")) return true;
           const steps = (r.stepLog ?? []) as Array<{
@@ -162,7 +160,16 @@ test.describe("Workflow chain-depth (across all parent trigger events)", () => {
               s.responseStatus === 409,
           );
         });
-        if (depthExceededAnywhere || runs.length >= 8) {
+        // Primary exit: the depth-refusal SIGNAL is present (what we assert).
+        // The run-count exit is only a RUNAWAY guard at 2× the cap — NOT at
+        // exactly the cap. The old `>= 8` (= TRIGGER_DEPTH_MAX) raced the
+        // signal: the chain can reach 8 runs a beat BEFORE the 9th
+        // trigger_workflow step records its 409/`depth` refusal, so the poll
+        // returned `depthExceeded=false` ~17% of the time (flaky). Waiting for
+        // the signal (or a genuinely-runaway ≥16) removes the race while still
+        // failing fast if the cap is actually broken (`toBeLessThanOrEqual(20)`
+        // below is the hard ceiling).
+        if (depthExceededAnywhere || runs.length >= 16) {
           return { runs, depthExceededAnywhere };
         }
         return null;
