@@ -15,6 +15,7 @@ import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
+import { RateLimit } from "../common/rate-limit.interceptor";
 import { ConversationsService } from "./conversations.service";
 import {
   AssignConversationSchema,
@@ -48,6 +49,14 @@ import {
  */
 @Controller("api/conversations")
 @UseGuards(SessionGuard)
+// Read-tier rate limit (1200/min ≈ 20/s) on its OWN token bucket — the bucket
+// key includes perMinute, so this never shares budget with the 300/min default
+// or the 60/min `messages.send`. A cold inbox open fires ~10-15 parallel reads
+// and `markRead` fires on EVERY visible thread mount, so a power-navigating
+// agent must not drain a shared default and 429 their own reads / starve their
+// assign-status-note budget. Every route here is cheap, team-scoped, and
+// (deletes) capability-gated, so the generous ceiling carries no abuse vector.
+@RateLimit({ perMinute: 1200 })
 export class ConversationsController {
   constructor(private readonly conversations: ConversationsService) {}
 
@@ -78,6 +87,17 @@ export class ConversationsController {
   @Get("counts")
   async counts(@CurrentSession() session: ApiSession) {
     return this.conversations.counts(session.teamId, session.userId);
+  }
+
+  /**
+   * Team-wide unread-message total for the AppRail Inbox badge. Declared
+   * BEFORE the `:id` routes (same reason as `/counts`) so a bare GET can't
+   * swallow `unread-count` as an id. Cheap single aggregate; the rail polls it
+   * once on mount then debounce-refetches on count-changing socket events.
+   */
+  @Get("unread-count")
+  async unreadCount(@CurrentSession() session: ApiSession) {
+    return this.conversations.unreadTotal(session.teamId);
   }
 
   /**

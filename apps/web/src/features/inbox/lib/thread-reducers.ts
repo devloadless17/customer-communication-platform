@@ -254,6 +254,11 @@ export function applyCallEnded(
       channel: prev.conversation.channel ?? "whatsapp",
       direction: prev.activeCall.direction,
       status: payload.status,
+      // Live `call:ended` frame doesn't carry attribution; the authoritative
+      // initiator/answerer arrives with the next thread snapshot (open /
+      // reconnect refetch), which IS attributed. So this live-built bubble is
+      // un-named for one beat, then resolves on refetch — no wrong name shown.
+      initiatedByUserId: null,
       answeredByUserId: null,
       ringingAt: prev.activeCall.startedAt,
       answeredAt: prev.activeCall.answeredAt,

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getClientSocket } from "@/lib/socket-client";
+import { apiFetch } from "@/lib/api/client-fetch";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -40,9 +41,51 @@ import {
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User, UserAvailabilityStatus } from "@ccp/shared/types";
 import { AvailabilityPicker } from "./availability-picker";
-import { NotificationSoundPicker } from "./notification-sound-picker";
 
 const STORAGE_KEY = "app-rail-collapsed";
+
+/**
+ * Team-wide UNREAD total for the Inbox nav badge. Seeds with one cheap fetch on
+ * mount, then debounce-refetches on the socket events that change unread
+ * (message:new bumps it, conversation:read clears a thread, status close drops
+ * a thread out of the non-closed sum). Authoritative server count — no
+ * client-side delta accounting — so it can't drift. Best-effort: a failed fetch
+ * just leaves the badge as-is (it's informational chrome, never blocks).
+ */
+function useInboxUnread(): number {
+  const [unread, setUnread] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refetch = async () => {
+      try {
+        const res = await apiFetch("/api/conversations/unread-count");
+        if (!res.ok) return;
+        const json = (await res.json()) as { unread?: unknown };
+        if (alive && typeof json.unread === "number") setUnread(json.unread);
+      } catch {
+        // nav badge is best-effort — ignore transient fetch failures
+      }
+    };
+    const debounced = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void refetch(), 400);
+    };
+    void refetch();
+    const socket = getClientSocket();
+    socket.on("message:new", debounced);
+    socket.on("conversation:read", debounced);
+    socket.on("conversation:status", debounced);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      socket.off("message:new", debounced);
+      socket.off("conversation:read", debounced);
+      socket.off("conversation:status", debounced);
+    };
+  }, []);
+  return unread;
+}
 
 const EXPANDED_WIDTH = 232;
 const COLLAPSED_WIDTH = 64;
@@ -100,6 +143,7 @@ export function AppRail({
   initialCollapsed: boolean;
 }) {
   const pathname = usePathname() ?? "";
+  const inboxUnread = useInboxUnread();
   const isOnline = onlineUserIds?.has(currentUser.id) ?? false;
   const hasPresence = onlineUserIds !== undefined;
   // Live mirror of THIS user's availability. Seeded from the session payload
@@ -251,6 +295,7 @@ export function AppRail({
             pathname={pathname}
             collapsed={collapsed}
             showLabels={showLabels}
+            badge={item.href === "/inbox" ? inboxUnread : 0}
           />
         ))}
       </nav>
@@ -362,11 +407,14 @@ function RailLink({
   pathname,
   collapsed,
   showLabels,
+  badge = 0,
 }: {
   item: RailItem;
   pathname: string;
   collapsed: boolean;
   showLabels: boolean;
+  /** Unread count to surface as a small pill (Inbox only today). 0 = hidden. */
+  badge?: number;
 }) {
   const { href, label, icon: Icon, match } = item;
   const matchAll = useMemo(() => [href, ...(match ?? [])], [href, match]);
@@ -374,6 +422,8 @@ function RailLink({
     (p) => pathname === p || pathname.startsWith(p + "/"),
   );
   const isAdmin = href === "/admin";
+  const hasBadge = badge > 0;
+  const badgeText = badge > 99 ? "99+" : String(badge);
 
   const link = (
     <Link
@@ -395,15 +445,31 @@ function RailLink({
             ),
       )}
       aria-current={active ? "page" : undefined}
-      aria-label={label}
+      aria-label={hasBadge ? `${label} (${badge} unread)` : label}
     >
-      <Icon className="size-4.5 shrink-0" />
+      <span className="relative shrink-0">
+        <Icon className="size-4.5" />
+        {/* Collapsed: a tiny count pill anchored to the icon's top-right so it
+            reads as "unread on Inbox" even with no label. ring-sidebar lifts it
+            off the icon. */}
+        {hasBadge && collapsed && (
+          <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground ring-2 ring-sidebar">
+            {badgeText}
+          </span>
+        )}
+      </span>
       {showLabels && (
         <span
           className="truncate text-[13px] whitespace-nowrap"
           style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
         >
           {label}
+        </span>
+      )}
+      {/* Expanded: the count sits at the row's right edge, past the label. */}
+      {hasBadge && showLabels && (
+        <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-semibold leading-none text-primary-foreground">
+          {badgeText}
         </span>
       )}
       {/* Active indicator — lives at the inner left edge of the rail */}
@@ -474,10 +540,9 @@ function UserMenu({
             seedMessage={liveMessage}
           />
           <DropdownMenuSeparator />
-          {/* Per-device notification-sound toggles (new messages / calls).
-              No capability gate — a personal, device-local preference. */}
-          <NotificationSoundPicker />
-          <DropdownMenuSeparator />
+          {/* Notification-sound toggles moved to Settings → Notifications
+              (sits with the other workspace settings; this menu is just
+              identity + availability + nav now). */}
           <DropdownMenuItem asChild>
             <Link href="/settings/workspace">
               <UserCircle2 className="size-4 text-muted-foreground" />

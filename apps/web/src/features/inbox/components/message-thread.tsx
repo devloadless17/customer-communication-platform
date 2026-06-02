@@ -7,7 +7,6 @@ import { ArrowDown, Loader2, X } from "lucide-react";
 import { dispatchLocalSocketEvent, dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
 import { calendarDayKey, formatDaySeparator } from "@ccp/shared/utils";
@@ -63,19 +62,198 @@ import { readError, unknownAuthor } from "./message-thread/utils";
 type TimelineEntry =
   | { kind: "message"; data: Message }
   | { kind: "note"; data: InternalNote }
-  // Activity events carry their time on `at`; we surface a `timestamp` alias on
-  // the entry so the shared sort + day-separator logic (which reads
-  // `entry.data.timestamp`) treats all three kinds uniformly.
-  | {
-      kind: "activity";
-      data: ConversationActivityEvent & { timestamp: string };
-    }
-  // Voice call rows. Aliased the same way as activity entries — `ringingAt`
-  // becomes `timestamp` so the sort + day-separator code stays uniform.
-  | {
-      kind: "call";
-      data: CallSnapshot & { timestamp: string };
-    };
+  | { kind: "activity"; data: ConversationActivityEvent }
+  | { kind: "call"; data: CallSnapshot };
+
+// Sort/label timestamp per entry kind. Messages + notes carry `.timestamp`,
+// activity events carry `.at`, calls carry `.ringingAt` (when the call was the
+// user-visible event). Reading the kind-specific field here — instead of
+// spreading every event into a fresh `{ ...e, timestamp }` wrapper on every
+// timeline rebuild — keeps `entry.data` REFERENTIALLY STABLE. That matters
+// because the timeline useMemo rebuilds on any message change (e.g. a
+// sent→delivered→read status burst), and a fresh `data` object would defeat the
+// `memo` on every ActivityEntry / CallBubble and re-render the whole log stack
+// for a change that didn't touch a single pill. With raw `data`, identity only
+// changes when the row's own source object does (GET reconcile / new pill) —
+// exactly when a re-render is actually warranted.
+function entryTimestamp(entry: TimelineEntry): string {
+  switch (entry.kind) {
+    case "activity":
+      return entry.data.at;
+    case "call":
+      return entry.data.ringingAt;
+    default:
+      return entry.data.timestamp;
+  }
+}
+
+/**
+ * The rendered timeline rows, extracted into a `memo`'d child so the ~500-entry
+ * `.map()` (element creation + per-row `memo` comparisons) does NOT re-run when
+ * MessageThreadImpl re-renders for reasons that don't touch the list: a teammate
+ * `typing` frame, the 60s `now` tick (the parent subscribes to `useTzNow` only
+ * for the midnight day-rollover), reply-target / stage / composer-prefill state,
+ * etc. Every prop here is referentially stable across those (useMemo arrays,
+ * useCallback handlers, primitives), so this child bails. It still re-renders on
+ * the warranted changes — `timeline`/`dayLabels` (new content), search
+ * query/matches (in-place highlight), and selection (checkbox mode). The content
+ * div + scroll refs + sentinel stay in the parent so useChatScroll is untouched.
+ * (Inbox audit, 2026-06-02 — kills the avoidable full-list reconcile walk.)
+ */
+const TimelineRows = memo(function TimelineRows({
+  timeline,
+  dayLabels,
+  memberById,
+  contactName,
+  contactSeed,
+  threadLive,
+  searchOpen,
+  matchedIds,
+  searchQuery,
+  activeMatchId,
+  selecting,
+  isSelected,
+  onToggleSelect,
+  onReply,
+  onJumpToOriginal,
+  onForward,
+  onStartSelect,
+  onDismissFailed,
+  onRetryFailed,
+  onDeleteNote,
+}: {
+  timeline: TimelineEntry[];
+  dayLabels: Array<string | null>;
+  memberById: Map<string, User>;
+  contactName: string;
+  contactSeed: string;
+  threadLive: boolean;
+  searchOpen: boolean;
+  matchedIds: Set<string>;
+  searchQuery: string;
+  activeMatchId: string | null;
+  selecting: boolean;
+  isSelected: (id: string) => boolean;
+  onToggleSelect: (id: string) => void;
+  onReply: (msg: Message) => void;
+  onJumpToOriginal: (originalId: string) => void;
+  onForward: (msg: Message) => void;
+  onStartSelect: (msg: Message) => void;
+  onDismissFailed: (msg: Message) => void;
+  onRetryFailed: (msg: Message) => void;
+  onDeleteNote: (noteId: string) => void;
+}) {
+  return (
+    <>
+      {timeline.map((entry, idx) => {
+        const dayLabel = dayLabels[idx];
+        const showDay = dayLabel !== null;
+        // For outbound messages we key on clientTempId when present so the React
+        // node survives the optimistic→confirmed swap (server assigns a fresh id,
+        // but the bubble is conceptually the same — no unmount, no re-animation).
+        const entryKey =
+          entry.kind === "message" && entry.data.clientTempId
+            ? `message_t_${entry.data.clientTempId}`
+            : `${entry.kind}_${entry.data.id}`;
+
+        return (
+          <div key={entryKey} className="contents">
+            {showDay && (
+              <div className="my-3 flex items-center gap-3">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                  {dayLabel}
+                </span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+            )}
+            <div
+              data-message-id={entry.kind === "message" ? entry.data.id : undefined}
+              // Test/observability hooks on the shared per-entry wrapper: every
+              // timeline entry carries its kind, id, sort timestamp, and live pin
+              // state in DOM order — so an e2e spec can read the exact rendered
+              // ordering and watch an optimistic log SETTLE (data-pending 1→absent).
+              data-entry-kind={entry.kind}
+              data-entry-id={entry.data.id}
+              data-entry-ts={entryTimestamp(entry)}
+              data-pending={
+                (entry.kind === "message" && entry.data.pending) ||
+                (entry.kind === "activity" && entry.data.optimisticPending)
+                  ? "1"
+                  : undefined
+              }
+              className="rounded-2xl transition-shadow"
+            >
+              {/* Local ErrorBoundary per row — a single malformed payload (or a
+                  bug in a sub-component) renders a placeholder for that one row
+                  instead of unmounting the entire inbox via inbox/error.tsx. */}
+              <ErrorBoundary label="message">
+                {entry.kind === "message" ? (
+                  <MessageBubble
+                    message={entry.data}
+                    senderName={
+                      entry.data.senderUserId
+                        ? memberById.get(entry.data.senderUserId)?.name ?? null
+                        : null
+                    }
+                    senderAvatarUrl={
+                      entry.data.senderUserId
+                        ? memberById.get(entry.data.senderUserId)?.avatarUrl ?? null
+                        : null
+                    }
+                    contactName={contactName}
+                    contactSeed={contactSeed}
+                    onReply={onReply}
+                    onJumpToOriginal={onJumpToOriginal}
+                    onForward={onForward}
+                    onStartSelect={onStartSelect}
+                    onDismissFailed={onDismissFailed}
+                    onRetryFailed={onRetryFailed}
+                    selecting={selecting}
+                    selected={isSelected(entry.data.id)}
+                    onToggleSelect={onToggleSelect}
+                    searchQuery={
+                      searchOpen && matchedIds.has(entry.data.id)
+                        ? searchQuery
+                        : undefined
+                    }
+                    isActiveSearchMatch={searchOpen && entry.data.id === activeMatchId}
+                  />
+                ) : entry.kind === "note" ? (
+                  <InternalNoteCard
+                    note={entry.data}
+                    author={
+                      (entry.data.authorUserId
+                        ? memberById.get(entry.data.authorUserId)
+                        : undefined) ?? unknownAuthor(entry.data.authorUserId)
+                    }
+                    onDelete={onDeleteNote}
+                  />
+                ) : entry.kind === "call" ? (
+                  <CallBubble
+                    call={entry.data}
+                    initiatedByName={
+                      entry.data.initiatedByUserId
+                        ? memberById.get(entry.data.initiatedByUserId)?.name ?? null
+                        : null
+                    }
+                    answeredByName={
+                      entry.data.answeredByUserId
+                        ? memberById.get(entry.data.answeredByUserId)?.name ?? null
+                        : null
+                    }
+                  />
+                ) : (
+                  <ActivityEntry event={entry.data} threadLive={threadLive} />
+                )}
+              </ErrorBoundary>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+});
 
 function MessageThreadImpl({
   data: initialData,
@@ -815,30 +993,21 @@ function MessageThreadImpl({
     return [
       ...messages.map((m): TimelineEntry => ({ kind: "message", data: m })),
       ...visibleNotes.map((n): TimelineEntry => ({ kind: "note", data: n })),
-      // Alias `at` → `timestamp` so the sort + day-separator code (which reads
-      // entry.data.timestamp) treats activity entries like any other.
-      ...visibleEvents.map(
-        (e): TimelineEntry => ({
-          kind: "activity",
-          data: { ...e, timestamp: e.at },
-        }),
-      ),
-      // Calls sort by ringingAt — that's when the user-visible event
-      // happened (the row keeps endedAt for the audit trail). Aliased to
-      // `timestamp` like activity entries for the shared sort.
-      ...visibleCalls.map(
-        (c): TimelineEntry => ({
-          kind: "call",
-          data: { ...c, timestamp: c.ringingAt },
-        }),
-      ),
+      // Raw event/call objects — NO `{ ...e, timestamp }` spread — so each
+      // `entry.data` keeps the stable identity of the row in `data.events` /
+      // `data.calls`. The shared sort + day-separator read the time via
+      // `entryTimestamp()` instead (see its doc-comment for why this kills a
+      // whole class of needless pill re-renders). Calls sort by ringingAt —
+      // when the user-visible event happened (the row keeps endedAt for audit).
+      ...visibleEvents.map((e): TimelineEntry => ({ kind: "activity", data: e })),
+      ...visibleCalls.map((c): TimelineEntry => ({ kind: "call", data: c })),
     ].sort((a, b) => {
       const ap = pinsToBottom(a);
       const bp = pinsToBottom(b);
       if (ap !== bp) return ap ? 1 : -1;
       return (
-        new Date(a.data.timestamp).getTime() -
-        new Date(b.data.timestamp).getTime()
+        new Date(entryTimestamp(a)).getTime() -
+        new Date(entryTimestamp(b)).getTime()
       );
     });
   }, [messages, notes, events, hasMoreOlder, data.calls]);
@@ -872,7 +1041,7 @@ function MessageThreadImpl({
     let prevLabel: string | null = null;
     for (let i = 0; i < timeline.length; i++) {
       const entry = timeline[i]!;
-      const label = formatDaySeparator(entry.data.timestamp, tz, nowRef.current);
+      const label = formatDaySeparator(entryTimestamp(entry), tz, nowRef.current);
       labels[i] = label !== prevLabel ? label : null;
       prevLabel = label;
     }
@@ -988,21 +1157,27 @@ function MessageThreadImpl({
         </div>
       )}
 
-      <ScrollArea
-        viewportRef={setViewportRef}
-        className="flex-1"
-        // Marker for the SSR bottom-snap script in InboxShell. Lets the
-        // script find this thread's viewport unambiguously — the script
-        // runs as a later sibling so by then the workspace's full flex row
-        // (this thread + ContactPanel) has been parsed and laid out.
-        data-thread-scroll-root
+      {/* The scroll container IS a column-reverse viewport. A column-reverse
+          overflow box anchors at the BOTTOM (newest) on first layout, so the
+          SSR'd thread paints at the latest message with ZERO JS — no snap script,
+          no mount-snap, no hydration jump. Its single child is the content in
+          normal chronological order; scrollTop:0 = bottom (newest), negative =
+          scrolled up toward older (see useChatScroll). Replaced the Radix
+          ScrollArea here because its viewport wraps children in a non-flex box,
+          so it can't be the column-reverse container; native scrollbar is fine
+          for a chat thread. */}
+      <div
+        ref={setViewportRef}
+        className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto"
       >
         <div
           ref={contentRef}
           // overflow-anchor:none — useChatScroll manages scroll position
-          // explicitly; the browser's own anchoring would fight it.
+          // explicitly; the browser's own anchoring would fight it. shrink-0
+          // keeps the content at its natural height in the flex column (so the
+          // viewport scrolls) instead of being squeezed to fit the viewport.
           style={{ overflowAnchor: "none" }}
-          className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-6 py-6"
+          className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-2 px-6 py-6"
         >
           {/* Top sentinel — IntersectionObserver target for "load older".
               The loading indicator is rendered OUTSIDE the scroll content (a
@@ -1021,110 +1196,30 @@ function MessageThreadImpl({
               specific older message.
             </div>
           )}
-          {timeline.map((entry, idx) => {
-            const dayLabel = dayLabels[idx];
-            const showDay = dayLabel !== null;
-            // For outbound messages we key on clientTempId when present so
-            // the React node survives the optimistic→confirmed swap (server
-            // assigns a fresh id, but the bubble is conceptually the same
-            // bubble — no unmount, no re-animation flash).
-            const entryKey =
-              entry.kind === "message" && entry.data.clientTempId
-                ? `message_t_${entry.data.clientTempId}`
-                : `${entry.kind}_${entry.data.id}`;
-
-            return (
-              <div key={entryKey} className="contents">
-                {showDay && (
-                  <div className="my-3 flex items-center gap-3">
-                    <div className="h-px flex-1 bg-border" />
-                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      {dayLabel}
-                    </span>
-                    <div className="h-px flex-1 bg-border" />
-                  </div>
-                )}
-                <div
-                  data-message-id={entry.kind === "message" ? entry.data.id : undefined}
-                  // Test/observability hooks on the shared per-entry wrapper:
-                  // every timeline entry (message/note/activity/call) carries
-                  // its kind, id, sort timestamp, and live pin state in DOM
-                  // order — so an e2e spec can read the exact rendered ordering
-                  // and watch an optimistic log SETTLE (data-pending 1→absent)
-                  // without coupling to per-component internals.
-                  data-entry-kind={entry.kind}
-                  data-entry-id={entry.data.id}
-                  data-entry-ts={entry.data.timestamp}
-                  data-pending={
-                    (entry.kind === "message" && entry.data.pending) ||
-                    (entry.kind === "activity" && entry.data.optimisticPending)
-                      ? "1"
-                      : undefined
-                  }
-                  className="rounded-2xl transition-shadow"
-                >
-                  {/* Local ErrorBoundary per row — without this, a single
-                      malformed message payload (or a bug in a sub-component
-                      like LocalTime) would unmount the entire inbox via
-                      Next.js's inbox/error.tsx. With this, the agent sees
-                      a "couldn't render" placeholder for that one row and
-                      keeps working with the rest of the thread. */}
-                  <ErrorBoundary label="message">
-                    {entry.kind === "message" ? (
-                      <MessageBubble
-                        message={entry.data}
-                        senderName={
-                          entry.data.senderUserId
-                            ? memberById.get(entry.data.senderUserId)?.name ?? null
-                            : null
-                        }
-                        senderAvatarUrl={
-                          entry.data.senderUserId
-                            ? memberById.get(entry.data.senderUserId)?.avatarUrl ?? null
-                            : null
-                        }
-                        contactName={contact.name}
-                        contactSeed={contact.id}
-                        onReply={beginReply}
-                        onJumpToOriginal={jumpToOriginal}
-                        onForward={forwardOne}
-                        onStartSelect={startSelect}
-                        onDismissFailed={dismissFailed}
-                        onRetryFailed={retryFailed}
-                        selecting={selection.selecting}
-                        selected={selection.isSelected(entry.data.id)}
-                        onToggleSelect={selection.toggle}
-                        searchQuery={
-                          searchOpen && matchedIds.has(entry.data.id)
-                            ? searchQuery
-                            : undefined
-                        }
-                        isActiveSearchMatch={
-                          searchOpen && entry.data.id === activeMatchId
-                        }
-                      />
-                    ) : entry.kind === "note" ? (
-                      <InternalNoteCard
-                        note={entry.data}
-                        author={
-                          (entry.data.authorUserId
-                            ? memberById.get(entry.data.authorUserId)
-                            : undefined) ?? unknownAuthor(entry.data.authorUserId)
-                        }
-                        onDelete={deleteNote}
-                      />
-                    ) : entry.kind === "call" ? (
-                      <CallBubble call={entry.data} />
-                    ) : (
-                      <ActivityEntry event={entry.data} threadLive={threadLive} />
-                    )}
-                  </ErrorBoundary>
-                </div>
-              </div>
-            );
-          })}
+          <TimelineRows
+            timeline={timeline}
+            dayLabels={dayLabels}
+            memberById={memberById}
+            contactName={contact.name}
+            contactSeed={contact.id}
+            threadLive={threadLive}
+            searchOpen={searchOpen}
+            matchedIds={matchedIds}
+            searchQuery={searchQuery}
+            activeMatchId={activeMatchId}
+            selecting={selection.selecting}
+            isSelected={selection.isSelected}
+            onToggleSelect={selection.toggle}
+            onReply={beginReply}
+            onJumpToOriginal={jumpToOriginal}
+            onForward={forwardOne}
+            onStartSelect={startSelect}
+            onDismissFailed={dismissFailed}
+            onRetryFailed={retryFailed}
+            onDeleteNote={deleteNote}
+          />
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Older-messages spinner — floats over the top of the thread, never in
           the scroll flow, so loading a page doesn't nudge the view at all. */}

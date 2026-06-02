@@ -104,7 +104,11 @@ export function useChatScroll({
   const isAtBottom = useCallback((slack = 80) => {
     const el = viewportRef.current;
     if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
+    // column-reverse: scrollTop 0 = the bottom (newest); scrolling up toward
+    // older goes NEGATIVE (down to -(scrollHeight-clientHeight)). "At bottom"
+    // is therefore within `slack` px of 0. (Measured: positive scrollTop is
+    // clamped to 0 in a column-reverse box.)
+    return el.scrollTop >= -slack;
   }, [viewportRef]);
 
   // Timestamp of the most recent programmatic snap. Setting scrollTop in JS
@@ -127,7 +131,8 @@ export function useChatScroll({
     const el = viewportRef.current;
     if (!el) return;
     lastProgrammaticSnapAtRef.current = Date.now();
-    el.scrollTop = el.scrollHeight;
+    // column-reverse: the bottom (newest) is scrollTop 0, NOT scrollHeight.
+    el.scrollTop = 0;
   }, [viewportRef]);
 
   // Scroll listener — the single arbiter of `stickyRef`. Every other piece
@@ -176,10 +181,10 @@ export function useChatScroll({
     settleStopRef.current?.();
     setUnreadBelow(0);
     stickyRef.current = true;
-    // Tell the SSR parse-time bottom-snap script (see SsrThreadBottomSnap) that
-    // the client hook has taken over scroll, so it stops its rAF correction
-    // loop. Harmless on chat-switch (no SSR script there) and on the client.
-    viewportRef.current?.setAttribute("data-chat-scroll-ready", "1");
+    // column-reverse anchors at the bottom natively on first layout, so a hard
+    // refresh needs no JS snap. This snap still matters on a CLIENT chat-switch:
+    // the viewport is reused, so its scrollTop carries over from the previous
+    // thread and must be reset to 0 (bottom) for the newly-displayed thread.
     snapToBottom();
     requestAnimationFrame(() => {
       if (stickyRef.current) snapToBottom();
@@ -341,10 +346,16 @@ export function useChatScroll({
         inFlightRef.current = true;
 
         void loadOlder((run) => {
-          const distanceFromBottom = root.scrollHeight - root.scrollTop;
+          // column-reverse: distance from the bottom (newest) is simply
+          // -scrollTop (0 at bottom, growing negative as you scroll up). Older
+          // pages are appended at the DOM END (visual top), which a column-
+          // reverse box keeps from shifting the current view — so this pin is
+          // effectively a no-op, kept only to re-assert position if a late
+          // reflow (image decode of the just-loaded older media) nudges it.
+          const distanceFromBottom = -root.scrollTop;
           flushSync(run);
           const pin = () => {
-            root.scrollTop = root.scrollHeight - distanceFromBottom;
+            root.scrollTop = -distanceFromBottom;
           };
           pin();
 

@@ -394,6 +394,8 @@ model User {
   channelReadReceipts     TeamChannelReadReceipt[]
   channelMemberships      TeamChannelMember[]       @relation("ChannelMemberships")
   addedChannelMembers     TeamChannelMember[]       @relation("AddedChannelMembers")
+  // Outbound voice calls this user placed.
+  initiatedCalls          Call[]                    @relation("InitiatedCalls")
   // Voice calls this user answered (CAS-won the "who answered first" race).
   // SetNull on user delete so call audit history survives deactivation, same
   // discipline as authoredMsgs / authoredNotes.
@@ -2034,6 +2036,12 @@ model Call {
   direction        CallDirection
   status           CallStatus    @default(ringing)
 
+  // Agent who PLACED an outbound call. Set at create time from the session.
+  // Null for inbound calls (the customer initiated) and for the rare webhook-
+  // races-the-create path (the webhook has no user context — backfilled on the
+  // place-call P2002 retry). Surfaces "who called the customer" in the thread.
+  initiatedByUserId String?
+
   // CAS-set when an agent successfully answers. Null until then (also null
   // for missed / rejected with no answer). One call = at most one answering
   // agent (Meta enforces this at the call-object level).
@@ -2055,11 +2063,15 @@ model Call {
 
   team             Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
   conversation     Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  initiatedBy      User?         @relation("InitiatedCalls", fields: [initiatedByUserId], references: [id], onDelete: SetNull)
   answeredBy       User?         @relation("AnsweredCalls", fields: [answeredByUserId], references: [id], onDelete: SetNull)
 
   @@unique([teamId, channel, externalCallId])
   // Thread-timeline read path: GET /api/conversations/:id/calls.
   @@index([conversationId, ringingAt(sort: Desc)])
+  // FK index for the initiatedBy relation's onDelete: SetNull (mirrors the
+  // Message.senderUserId index rationale — avoids a seq-scan on user delete).
+  @@index([initiatedByUserId])
   // "Currently ringing" + "calls today" queues: filter by (teamId, status)
   // ordered by recency. Also serves the 5-calls-per-24h pre-flight gauntlet.
   @@index([teamId, status, ringingAt(sort: Desc)])

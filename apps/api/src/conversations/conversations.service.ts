@@ -157,6 +157,22 @@ export class ConversationsService {
   }
 
   /**
+   * Team-wide total of UNREAD messages across non-closed conversations — the
+   * single number behind the AppRail Inbox badge. Sums the per-conversation
+   * `unreadCount` (unread is team-wide; see CLAUDE.md "unread is team-wide").
+   * Closed threads are excluded: a handled conversation shouldn't keep the nav
+   * badge lit. One indexed aggregate; refetched client-side (debounced) on
+   * message:new / conversation:read / conversation:status.
+   */
+  async unreadTotal(teamId: string): Promise<{ unread: number }> {
+    const agg = await this.db.conversation.aggregate({
+      _sum: { unreadCount: true },
+      where: { teamId, status: { not: "closed" } },
+    });
+    return { unread: agg._sum.unreadCount ?? 0 };
+  }
+
+  /**
    * Hydrate one conversation for the workspace cache-miss path
    * (/api/inbox/conversation/:id). Returns the same `ConversationWithRefs`
    * shape the SSR page uses, so the client can drop the response straight

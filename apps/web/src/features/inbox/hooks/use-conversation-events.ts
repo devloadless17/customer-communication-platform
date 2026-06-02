@@ -479,7 +479,25 @@ export function useConversationEvents(
       // cache's prior tail snapshot is the correct fallback (backfill reconciles
       // anything newer), matching pre-snapshot behavior for that rare path.
       if (!tailAnchoredRef.current) return;
-      onSnapshotRef.current?.(dataRef.current, cursorRef.current);
+      // Strip UN-reconciled optimistic activity stubs before persisting to the
+      // LRU. If the agent changed status/stage/assign/tag and switched threads
+      // BEFORE the trailing `refreshActivity` GET reconciled the stub, the
+      // snapshot would otherwise carry a client-clocked `optimisticPending` pill
+      // that re-surfaces pinned-to-bottom + OUT OF ORDER on switch-back — and no
+      // /events GET runs on a cached remount to clear it, so on a quiet thread it
+      // lingers. The authoritative row re-arrives on the next live frame /
+      // reconnect; a briefly-absent recent pill is far better than a wrong-order
+      // lingering one. (Steady state the GET wins the race, so there's nothing to
+      // strip and this is a no-op that returns the same reference.)
+      const snap = dataRef.current;
+      const events = snap.events ?? [];
+      const clean = events.filter(
+        (e) => !isOptimisticActivityId(e.id) && e.optimisticPending !== true,
+      );
+      onSnapshotRef.current?.(
+        clean.length === events.length ? snap : { ...snap, events: clean },
+        cursorRef.current,
+      );
     };
   }, []);
 

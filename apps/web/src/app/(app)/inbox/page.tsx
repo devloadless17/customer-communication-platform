@@ -1,4 +1,4 @@
-import { cookies, headers } from "next/headers";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { getSession } from "@/lib/auth/current-user";
@@ -13,7 +13,6 @@ import {
   listTeamMembers,
 } from "@/lib/api/queries";
 import { InboxShell } from "@/features/inbox/components/inbox-shell";
-import { SsrThreadBottomSnap } from "@/features/inbox/components/ssr-thread-bottom-snap";
 
 /** Right contact-panel collapse cookie — read server-side so SSR renders the
  *  persisted state (no expand→collapse flash, same approach as the left
@@ -100,17 +99,11 @@ export default async function InboxPage({
 
   const initialActiveConversationId = initialThread ? requestedConversationId ?? null : null;
 
-  // The bottom-snap <script> is a PARSE-TIME hack for a real document load
-  // (hard refresh / deep link): it runs as the browser parses the HTML, before
-  // first paint, to land the SSR'd thread at the bottom. On a client RSC
-  // navigation/refresh (`router.refresh()` after a mutation — now common since
-  // selection is mirrored as `?c=<id>`) there's no fresh document parse: React
-  // re-renders this server component on the CLIENT, where a <script> is never
-  // executed and React 19 warns ("Encountered a <script> tag while rendering").
-  // The DOM already exists and useChatScroll already owns the viewport there,
-  // so the snap is pointless anyway. Gate it to genuine document requests — an
-  // RSC fetch carries the `RSC: 1` header; a full page load does not.
-  const isRscRequest = (await headers()).get("rsc") === "1";
+  // No bottom-snap script: the thread viewport is `flex-direction: column-reverse`
+  // (see message-thread.tsx), which the browser anchors at the bottom (newest)
+  // on first layout — so the SSR'd thread paints at the latest message with zero
+  // JS, on both a hard refresh and a client RSC navigation. The old parse-time
+  // inline <script> (+ its CSP nonce + Radix querySelector) is gone.
 
   return (
     <>
@@ -133,14 +126,6 @@ export default async function InboxPage({
         initialThread={initialThread}
         initialContactPanelCollapsed={contactPanelCollapsed}
       />
-      {/* SSR-only: when a thread was SSR'd on a real DOCUMENT load (hard refresh
-          / deep link), snap its viewport to the bottom during HTML parse so the
-          first paint shows the latest message — no top-then-scroll jump.
-          Rendered AFTER the shell so the viewport DOM exists when the inline
-          script runs. Skipped on an RSC navigation/refresh (no document parse →
-          script wouldn't run + React warns). Server component; never hydrated.
-          See the component for the full rationale. */}
-      {initialThread && !isRscRequest ? <SsrThreadBottomSnap /> : null}
     </>
   );
 }

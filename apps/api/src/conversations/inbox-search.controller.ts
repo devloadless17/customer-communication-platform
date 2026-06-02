@@ -4,6 +4,7 @@ import { CurrentSession } from "../auth/current-session.decorator";
 import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zQuery } from "../common/zod-validation.pipe";
+import { RateLimit } from "../common/rate-limit.interceptor";
 import { ConversationsService } from "./conversations.service";
 import {
   GlobalSearchQuerySchema,
@@ -27,6 +28,10 @@ import {
  */
 @Controller("api/inbox/search")
 @UseGuards(SessionGuard)
+// Read-tier limit on its own bucket (see ConversationsController) — the client
+// fires this on every keystroke of the global search bar, so the 300/min
+// default would 429 an agent typing a query. Cheap, team-scoped, read-only.
+@RateLimit({ perMinute: 1200 })
 export class InboxSearchController {
   constructor(private readonly conversations: ConversationsService) {}
 

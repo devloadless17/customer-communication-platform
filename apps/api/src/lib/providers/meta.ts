@@ -547,6 +547,15 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             continue;
           }
 
+          // Inbound emoji reactions (m.type === "reaction", payload
+          // `m.reaction = { message_id, emoji }`) are a DEFERRED feature.
+          // Skip them EXPLICITLY here — otherwise they fall through to the
+          // media branch below, fail the META_MEDIA_TYPES check, and get
+          // silently dropped with no marker (indistinguishable from a parser
+          // bug). When reaction support is built, parse it into a dedicated
+          // normalized event instead of this early-continue.
+          if (m.type === "reaction") continue;
+
           // Media: image / video / audio / document / sticker. Each has its
           // own subobject with id, mime_type, optional caption + filename.
           const mediaKind = m.type as MediaKind | undefined;

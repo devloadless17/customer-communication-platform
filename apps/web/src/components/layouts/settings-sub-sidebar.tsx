@@ -2,6 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import {
+  Bell,
   Layers,
   ListChecks,
   MessageSquare,
@@ -122,6 +123,15 @@ export function SettingsSubSidebar({
             active={isActive("/settings/contact-fields")}
           />
         )}
+        {/* Notification sounds — personal + per-device, so NO capability gate
+            (everyone manages their own). Moved here from the AppRail user
+            menu. */}
+        <SubSidebarItem
+          href="/settings/notifications"
+          label="Notifications"
+          leading={<Bell className="size-4" />}
+          active={isActive("/settings/notifications")}
+        />
       </SubSidebarSection>
     </SubSidebar>
   );

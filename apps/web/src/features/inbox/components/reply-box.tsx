@@ -785,7 +785,10 @@ export function ReplyBox({
           }
         } else if (trimmed) {
           const url = isNote ? "/api/notes" : "/api/messages";
-          const res = await fetch(url, {
+          // apiFetch (not bare fetch) so the two highest-frequency sends route
+          // through fetchWithSessionGuard like every sibling call — a 401 mid-
+          // session cleanly re-auths instead of surfacing a generic send error.
+          const res = await apiFetch(url, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(

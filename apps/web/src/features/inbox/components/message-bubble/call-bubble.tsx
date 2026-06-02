@@ -20,9 +20,27 @@ import type { CallSnapshot } from "@ccp/shared/types";
  * customer" while a no-answer outbound reads "Customer didn't answer." A
  * completed call shows just direction + duration ("Call · 1:23"); ringing
  * shows nothing terminal (it's still ongoing).
+ *
+ * Attribution (like a message shows its sender): an OUTBOUND call names the
+ * agent who placed it; an answered INBOUND call names the agent who picked up.
+ * Names are resolved by the thread (from its team-member map) and passed in.
  */
-export function CallBubble({ call }: { call: CallSnapshot }) {
+export function CallBubble({
+  call,
+  initiatedByName,
+  answeredByName,
+}: {
+  call: CallSnapshot;
+  /** Agent who placed an outbound call (resolved from initiatedByUserId). */
+  initiatedByName?: string | null;
+  /** Agent who answered an inbound call (resolved from answeredByUserId). */
+  answeredByName?: string | null;
+}) {
   const isInbound = call.direction === "in";
+  // A real two-way connection actually happened (see the `completed` case).
+  const connected =
+    call.answeredAt !== null ||
+    (call.durationSeconds !== null && call.durationSeconds > 0);
 
   let Icon = Phone;
   let label: string;
@@ -62,9 +80,6 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
       // duration but not answeredAt. A terminal "completed" with NEITHER means
       // nobody picked up — Meta reports unanswered business-initiated calls as
       // status:COMPLETED, so a completed row is NOT proof of a connection.
-      const connected =
-        call.answeredAt !== null ||
-        (call.durationSeconds !== null && call.durationSeconds > 0);
       if (!connected) {
         Icon = isInbound ? PhoneMissed : PhoneOutgoing;
         label = isInbound ? "Missed call from customer" : "Customer didn't answer";
@@ -91,15 +106,25 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
       "border-destructive/40 bg-destructive/10 text-destructive",
   } as const;
 
+  // Outbound → the agent who placed it ("who called"). Inbound → only once
+  // connected, the agent who picked up. An unanswered inbound has no agent.
+  const actor = isInbound ? (connected ? answeredByName : null) : initiatedByName;
+
   return (
     <div className="flex items-center justify-center py-1.5">
       <div
         className={
-          "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] " +
+          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] " +
           tones[tone]
         }
       >
-        <Icon className="size-3.5" />
+        <Icon className="size-3.5 shrink-0" />
+        {actor && (
+          <>
+            <span className="font-semibold">{actor}</span>
+            <span className="opacity-50">·</span>
+          </>
+        )}
         <span className="font-medium">{label}</span>
         {call.durationSeconds !== null && call.durationSeconds > 0 && (
           <span className="opacity-70">· {formatDuration(call.durationSeconds)}</span>

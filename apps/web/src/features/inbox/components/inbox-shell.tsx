@@ -1138,16 +1138,11 @@ function ThreadWorkspace({
         initialCollapsed={initialContactPanelCollapsed}
         onGoToMessage={onGoToMessage}
       />
-      {/* The SSR parse-time bottom-snap is NOT here anymore — it can't be, this
-          is a Client Component (React 19 warns about <script> in one, and it'd
-          only fire on the SSR pass). It now lives as a SERVER component,
-          `SsrThreadBottomSnap`, rendered by inbox/page.tsx as a sibling AFTER
-          InboxShell. That was the right re-fix: useChatScroll's first
-          useLayoutEffect snaps to bottom too, but only AFTER hydration — on a
-          cold hard-refresh that's hundreds of ms (seconds in dev) late, so the
-          user saw the oldest message then a visible jump down (confirmed ~1.7s
-          via Playwright). The server script runs during HTML parse, pre-paint,
-          and hands off to the hook via the `data-chat-scroll-ready` marker. */}
+      {/* No SSR bottom-snap script anymore: the thread viewport is
+          `flex-direction: column-reverse` (message-thread.tsx), so the browser
+          anchors at the bottom (newest) on first layout — the SSR'd thread paints
+          at the latest message with zero JS, no hydration jump, no inline script,
+          no CSP nonce. */}
     </>
   );
 }

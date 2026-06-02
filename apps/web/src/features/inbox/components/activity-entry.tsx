@@ -159,15 +159,21 @@ function ActivityEntryImpl({
   const Icon = desc.icon;
   return (
     <motion.div
-      // Grow height 0→auto + fade so the timeline slides up around the new line
-      // instead of snapping: while pinned to the bottom, the chat-scroll
-      // ResizeObserver re-pins each frame, turning the height growth into a
-      // smooth upward slide. A historical pill uses `initial={false}` → natural
-      // height, no tween, no collapsed height:0 in the SSR output.
-      initial={animateIn ? { height: 0, opacity: 0 } : false}
-      animate={{ height: "auto", opacity: 1 }}
+      // Transform/opacity-ONLY entrance — deliberately NOT `height: 0→auto`.
+      // A height tween grows the pill over ~11 frames, and because the
+      // chat-scroll ResizeObserver re-pins scrollTop every one of those frames
+      // (and `overflow-anchor:none` disables the browser's own bottom-pin), the
+      // ENTIRE log stack above slides for the whole animation. With several
+      // pills landing together (assign+status, start-chat, rapid changes) those
+      // slides overlap into ~400ms of the whole list moving — the "vibration /
+      // lag" users reported. opacity+y are GPU-composited and change NO layout:
+      // the pill takes its final height immediately, so column-reverse adds it
+      // (and any siblings) in ONE reflow step, then it just fades+rises into
+      // place. Matches how WhatsApp Web / Slack drop in micro event-lines.
+      // A historical pill uses `initial={false}` → no tween, paints in place.
+      initial={animateIn ? { opacity: 0, y: 4 } : false}
+      animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, ease: "easeOut" }}
-      style={{ overflow: "hidden" }}
     >
       <div className="my-1 flex w-full justify-center px-4">
         <div className="inline-flex max-w-2xl items-center gap-1 text-[10px] leading-tight text-muted-foreground">

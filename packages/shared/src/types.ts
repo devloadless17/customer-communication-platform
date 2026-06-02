@@ -564,6 +564,8 @@ export interface CallSnapshot {
   channel: string;
   direction: "in" | "out";
   status: "ringing" | "in_progress" | "completed" | "missed" | "rejected" | "failed";
+  /** Agent who PLACED an outbound call (null for inbound / unknown). */
+  initiatedByUserId: string | null;
   answeredByUserId: string | null;
   ringingAt: string;
   answeredAt: string | null;

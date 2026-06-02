@@ -274,6 +274,8 @@ export class CallsService {
             direction: CallDirection.out,
             status: CallStatus.ringing,
             ringingAt,
+            // The agent placing the call — surfaces "who called" in the thread.
+            initiatedByUserId: session.userId,
             // Verbatim provider response for forensics.
             rawPayload: { placedAt: ringingAt.toISOString() } as Prisma.InputJsonValue,
           },
@@ -305,6 +307,17 @@ export class CallsService {
         if (!existing) throw err; // shouldn't happen — re-throw if the row vanished
         created = existing;
         createdHere = false;
+        // The webhook beat us to the insert, so its row has no initiator (the
+        // webhook has no user context). Backfill it so "who called" still shows.
+        // Best-effort + last-writer-wins is fine — only this agent placed it.
+        void this.db.call
+          .update({
+            where: { id: existing.id },
+            data: { initiatedByUserId: session.userId },
+          })
+          .catch(() => {
+            // non-critical: attribution just stays null on this rare race
+          });
       } else {
         // The call IS placed and ringing at Meta, but the local Call row failed
         // to persist for a reason OTHER than the benign P2002 race (e.g. a
