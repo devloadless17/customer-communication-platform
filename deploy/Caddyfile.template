@@ -150,8 +150,9 @@ __DOMAIN__ {
 	# Caddy build doesn't ship the `rate_limit` directive — it requires
 	# the github.com/mholt/caddy-ratelimit plugin compiled in via xcaddy.
 	# Today the app handles per-user (300/min) and per-API-key (60/min)
-	# throttling in-process (apps/api/src/common/rate-limit.guard.ts,
-	# apps/api/src/auth/api-key.guard.ts) which covers correctness for the
+	# throttling in-process (apps/api/src/common/rate-limit.interceptor.ts
+	# — an APP_INTERCEPTOR — plus ip-rate-limit.middleware.ts for IP-based
+	# limits and the API-key guard) which covers correctness for the
 	# pilot scale.
 	#
 	# Add a proxy-layer cap when one of these triggers:
@@ -202,14 +203,14 @@ __DOMAIN__ {
 	}
 
 	# (5a) /api/internal/* — REFUSED at the edge. These routes are designed
-	#      for loopback-only callers (Next.js → NestJS via
-	#      INTERNAL_API_URL=http://127.0.0.1:4000); exposing them publicly
-	#      means a leaked INTERNAL_BUS_SECRET becomes a remote
+	#      for internal-only callers (Next.js → NestJS over the private
+	#      docker network, INTERNAL_API_URL=http://api:4000); exposing them
+	#      publicly means a leaked INTERNAL_BUS_SECRET becomes a remote
 	#      forced-logout / session-revoke primitive. The defense in code
 	#      (secret check) is fine, but blocking at the edge means the
 	#      attack surface is invisible to the internet entirely. The
-	#      legitimate web→api call is loopback-direct so it never traverses
-	#      Caddy and stays unaffected.
+	#      legitimate web→api call goes container-to-container on the docker
+	#      network so it never traverses Caddy and stays unaffected.
 	handle /api/internal/* {
 		respond 404
 	}

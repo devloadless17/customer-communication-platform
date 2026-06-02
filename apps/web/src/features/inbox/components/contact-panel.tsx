@@ -206,6 +206,14 @@ function ContactPanelImpl({
   const [liveNoteCount, setLiveNoteCount] = useState<number>(
     data.noteCount ?? notes.length,
   );
+  // Dedupe live tally bumps by id. message:new / note:* frames REPLAY on
+  // Socket.io connection-state-recovery (and any transient duplicate), and an
+  // un-guarded `n + 1` would over-count the panel's "Messages"/"Notes" totals
+  // until the next thread switch. Seen-sets make each frame idempotent; reset
+  // on conversation switch (below) so they don't grow across threads.
+  const seenMsgRef = useRef<Set<string>>(new Set());
+  const seenNoteAddRef = useRef<Set<string>>(new Set());
+  const seenNoteDelRef = useRef<Set<string>>(new Set());
 
   // Reset whenever the user switches to a different conversation OR the
   // server snapshot changes (router.refresh after a mutation). Without
@@ -215,6 +223,9 @@ function ContactPanelImpl({
     setLiveStatus(conversation.status);
     setLiveMessageCount(data.messageCount ?? messages.length);
     setLiveNoteCount(data.noteCount ?? notes.length);
+    seenMsgRef.current = new Set();
+    seenNoteAddRef.current = new Set();
+    seenNoteDelRef.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversation.id, conversation.status, data.messageCount, data.noteCount]);
 
@@ -232,16 +243,23 @@ function ContactPanelImpl({
       payload,
     ) => {
       if (payload.conversationId !== conversationId) return;
+      const id = payload.message.externalId || payload.message.id;
+      if (seenMsgRef.current.has(id)) return; // replayed frame — already counted
+      seenMsgRef.current.add(id);
       setLiveMessageCount((n) => n + 1);
     };
     const onNoteNew: Parameters<typeof socket.on<"note:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
+      if (seenNoteAddRef.current.has(payload.note.id)) return;
+      seenNoteAddRef.current.add(payload.note.id);
       setLiveNoteCount((n) => n + 1);
     };
     const onNoteDeleted: Parameters<typeof socket.on<"note:deleted">>[1] = (
       payload,
     ) => {
       if (payload.conversationId !== conversationId) return;
+      if (seenNoteDelRef.current.has(payload.noteId)) return;
+      seenNoteDelRef.current.add(payload.noteId);
       setLiveNoteCount((n) => Math.max(0, n - 1));
     };
     const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (

@@ -142,6 +142,59 @@ export function useCall(): {
     }
   }, []);
 
+  // Outbound calls the agent cancelled while we were still in the tmp_ id window
+  // (before placeCall returned Meta's real id). /end can't target a call that
+  // doesn't exist yet, so we record the tmp id here and initiateOutbound
+  // terminates the REAL call the instant the id lands — otherwise the customer
+  // keeps ringing after the agent already bailed (the "started by mistake, ended
+  // it, customer still called" bug).
+  const cancelledTmpIdsRef = useRef<Set<string>>(new Set());
+
+  // Release ALL call hardware (mic + peer connection + remote audio) WITHOUT
+  // touching liveCall state. Idempotent. Called on teardown AND at the start of
+  // every setupPeer, so a rapid re-dial can never leave a prior getUserMedia
+  // stream live — that leak is what keeps Chrome's mic indicator lit after a
+  // call ends when calls overlap.
+  const releaseMedia = useCallback(() => {
+    clearPickupWatch();
+    const pc = pcRef.current;
+    if (pc) {
+      // Detach handlers BEFORE closing. close() fires `connectionstatechange`
+      // ASYNCHRONOUSLY; if releaseMedia ran from setupPeer (a re-dial), that late
+      // event would otherwise run tearDown against the NEWER call setupPeer just
+      // installed — the classic stale-close-kills-the-new-call race.
+      pc.onconnectionstatechange = null;
+      pc.ontrack = null;
+      pc.getSenders().forEach((s) => {
+        try {
+          s.track?.stop();
+        } catch {
+          // ignore
+        }
+      });
+      try {
+        pc.close();
+      } catch {
+        // ignore
+      }
+    }
+    pcRef.current = null;
+    localStreamRef.current?.getTracks().forEach((t) => {
+      try {
+        t.stop();
+      } catch {
+        // ignore
+      }
+    });
+    localStreamRef.current = null;
+    if (remoteAudioElRef.current) {
+      // Stop playback before detaching: the element is reused across calls and
+      // clearing srcObject alone can leave it in a lingering "playing" state.
+      remoteAudioElRef.current.pause();
+      remoteAudioElRef.current.srcObject = null;
+    }
+  }, [clearPickupWatch]);
+
   // Customer answered (real inbound audio observed). Flip to in_progress + start
   // the timer locally, flip the thread's activeCall pill for every viewer via a
   // local call:answered dispatch, and tell the server (POST /connected) so a
@@ -271,30 +324,11 @@ export function useCall(): {
   );
 
   const tearDown = useCallback(() => {
-    clearPickupWatch();
-    pcRef.current?.getSenders().forEach((s) => {
-      try {
-        s.track?.stop();
-      } catch {
-        // ignore
-      }
-    });
-    pcRef.current?.close();
-    pcRef.current = null;
-    localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    localStreamRef.current = null;
-    if (remoteAudioElRef.current) {
-      // Explicitly stop playback before detaching the stream. The element is
-      // created once and reused across calls; clearing srcObject alone can
-      // leave the media element in a lingering "playing" internal state, so
-      // pause + rewind first for a clean slate on the next call's stream.
-      remoteAudioElRef.current.pause();
-      remoteAudioElRef.current.srcObject = null;
-    }
+    releaseMedia();
     // Clear any stashed answers so they can't leak into the next call's PC.
     pendingAnswersRef.current.clear();
     setLiveCall(null);
-  }, [clearPickupWatch]);
+  }, [releaseMedia]);
 
   // Socket subscribers. Bound once on mount; read liveCallRef inside
   // handlers so a callId change doesn't force a re-subscribe.
@@ -455,6 +489,11 @@ export function useCall(): {
    * and a connection-state watcher that auto-terminates on disconnect.
    */
   const setupPeer = useCallback(async (): Promise<RTCPeerConnection> => {
+    // Release any prior call's hardware FIRST. A rapid re-dial (or any path that
+    // builds a fresh PC without a clean teardown in between) would otherwise
+    // overwrite localStreamRef/pcRef and orphan the previous getUserMedia
+    // stream, leaving the mic live (Chrome's recording dot stays lit).
+    releaseMedia();
     const pc = new RTCPeerConnection(DEFAULT_RTC_CONFIG);
 
     // Local mic → outbound audio track.
@@ -504,7 +543,7 @@ export function useCall(): {
 
     pcRef.current = pc;
     return pc;
-  }, [tearDown]);
+  }, [tearDown, releaseMedia]);
 
   const answerIncoming = useCallback(
     async (callId: string, contactName: string, conversationId: string) => {
@@ -643,6 +682,19 @@ export function useCall(): {
         // Rebind to Meta's real callId so both the `call:ended` frame AND the
         // answer frame (now matched by callId, not PC state) target this call.
         const realCallId = body.callId ?? tempCallId;
+        // Agent already hit End during the tmp window → terminate the real Meta
+        // call now so the customer stops ringing. Our UI is already torn down;
+        // just fire /end and bail (don't rebind/drain a call we're killing).
+        if (cancelledTmpIdsRef.current.has(tempCallId)) {
+          cancelledTmpIdsRef.current.delete(tempCallId);
+          void fetchWithSessionGuard(`/api/calls/${realCallId}/end`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }).catch(() => undefined);
+          tearDown();
+          return { ok: false, reason: "cancelled" };
+        }
         // Update liveCallRef SYNCHRONOUSLY (not just via setLiveCall, whose
         // effect won't run until the next tick): the drain below + every
         // applyOutboundAnswer match read liveCallRef.callId, so it must already
@@ -692,6 +744,15 @@ export function useCall(): {
   const hangup = useCallback(async () => {
     const current = liveCallRef.current;
     if (!current) return;
+    // Cancelled before placeCall returned the real id: /end can't target a call
+    // that doesn't exist yet. Record the tmp id so initiateOutbound terminates
+    // the REAL Meta call the moment it lands, then tear down our side now. Without
+    // this the customer keeps ringing even though the agent already hung up.
+    if (current.callId.startsWith("tmp_")) {
+      cancelledTmpIdsRef.current.add(current.callId);
+      tearDown();
+      return;
+    }
     setLiveCall((prev) => (prev ? { ...prev, status: "ending" } : prev));
     try {
       await fetchWithSessionGuard(`/api/calls/${current.callId}/end`, {

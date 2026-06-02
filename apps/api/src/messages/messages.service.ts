@@ -427,13 +427,6 @@ export class MessagesService {
       },
       async () => {
         const pre = await this.preflightTextSend(teamId, input);
-        // Mark-read + auto-assign are "the agent is engaging this thread" side
-        // effects, so they fire AFTER the preflight passes — a send REJECTED by
-        // the preflight (e.g. outside_24h_window) must not claim/reopen the
-        // thread. Inside the idempotency callback so a deduped double-click
-        // doesn't re-fire them either. Fire-and-forget (void); errors self-log.
-        this.markReadOnAgentSend(teamId, userId, input.conversationId);
-        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
         await enqueueMessageSend({
           kind: "text",
           teamId,
@@ -447,6 +440,15 @@ export class MessagesService {
           clientTempId: input.clientTempId,
           receivedAt: new Date().toISOString(),
         });
+        // Mark-read + auto-assign are "the agent is engaging this thread" side
+        // effects. They fire AFTER the preflight passes (a send REJECTED for
+        // e.g. outside_24h_window must not claim/reopen the thread) AND AFTER
+        // the enqueue succeeds (if the queue is down and the send can't even be
+        // accepted, don't mark-read/assign a message that won't go out). Inside
+        // the idempotency callback so a deduped double-click doesn't re-fire
+        // them. Fire-and-forget (void); errors self-log.
+        this.markReadOnAgentSend(teamId, userId, input.conversationId);
+        this.autoAssignOnAgentSend(teamId, userId, input.conversationId);
         return {
           ok: true as const,
           ...(input.clientTempId ? { clientTempId: input.clientTempId } : {}),

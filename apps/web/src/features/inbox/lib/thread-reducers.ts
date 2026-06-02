@@ -187,7 +187,7 @@ export function applyCallIncoming(
 
 export function applyCallRinging(
   prev: ConversationWithRefs,
-  payload: { callId: string },
+  payload: { callId: string; ringingAt: string },
 ): ConversationWithRefs {
   if (prev.activeCall?.callId === payload.callId) return prev;
   const next: ActiveCallState = {
@@ -195,7 +195,11 @@ export function applyCallRinging(
     externalCallId: payload.callId,
     direction: "out",
     status: "ringing",
-    startedAt: new Date().toISOString(),
+    // SERVER ringing time — NOT new Date(). This becomes the call snapshot's
+    // ringingAt (its timeline sort key), so it must share the same clock as
+    // messages/notes/events. Client time mis-ordered a call placed after a
+    // message to ABOVE that message whenever the client clock lagged the server.
+    startedAt: payload.ringingAt,
     answeredAt: null,
   };
   return { ...prev, activeCall: next };

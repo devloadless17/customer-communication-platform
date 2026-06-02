@@ -59,9 +59,3 @@ export function hasScope(granted: readonly string[], required: ApiKeyScope): boo
   if (granted.includes("*")) return true;
   return granted.includes(required);
 }
-
-/** Strip unknown entries (defense against legacy/typo data in the DB). */
-export function normalizeScopes(raw: readonly string[]): ApiKeyScope[] {
-  const valid = new Set(API_KEY_SCOPES as readonly string[]);
-  return raw.filter((s): s is ApiKeyScope => valid.has(s));
-}

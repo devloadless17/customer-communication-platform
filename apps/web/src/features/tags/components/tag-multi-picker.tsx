@@ -226,15 +226,6 @@ export function TagMultiPicker({
 }
 
 /**
- * Convenience hook: derive the Tag objects from the catalog given a set of
- * ids. Returns them in catalog order (alphabetical) so chip rows stay stable.
- */
-export function pickTags(tags: Tag[], ids: string[]): Tag[] {
-  const set = new Set(ids);
-  return tags.filter((t) => set.has(t.id));
-}
-
-/**
  * Re-export TagIcon so call sites can use a consistent icon set without
  * pulling from lucide directly.
  */

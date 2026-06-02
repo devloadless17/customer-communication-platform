@@ -135,21 +135,25 @@ function describe(e: ConversationActivityEvent): {
   }
 }
 
-// A pill younger than this when it first renders is treated as "arrived live"
-// and gets the grow+fade entrance; anything older (the batch already present
-// when a thread opens, including the SSR first paint) renders at full height
-// with no tween — so historical pills never flush-animate on mount and never
-// ship a collapsed height:0 in SSR HTML.
-const ACTIVITY_ENTRANCE_WINDOW_MS = 4_000;
-
-function ActivityEntryImpl({ event }: { event: ConversationActivityEvent }) {
+function ActivityEntryImpl({
+  event,
+  threadLive,
+}: {
+  event: ConversationActivityEvent;
+  /** False through SSR + first paint + chat-switch; true once the thread view
+   *  has settled. A pill only animates if it FIRST renders while this is true —
+   *  i.e. it genuinely arrived live, not as part of the already-present batch.
+   *  This replaces an age-based (`Date.now() - event.at < 4s`) gate that
+   *  flush-animated recent-but-pre-existing pills on every refresh and risked an
+   *  SSR/client hydration mismatch from calling Date.now() during render. */
+  threadLive: boolean;
+}) {
   // Decided once at mount and held stable across re-renders AND the
   // optimistic→server reconcile — the merge keeps the pill's React key stable,
   // so this node is updated in place (never remounted) and the entrance plays
-  // exactly once for a genuinely-new pill.
-  const animateIn = useRef(
-    Date.now() - new Date(event.at).getTime() < ACTIVITY_ENTRANCE_WINDOW_MS,
-  ).current;
+  // exactly once for a genuinely-new pill. Captured via useRef so a later
+  // threadLive flip can't retro-animate pills that were already on screen.
+  const animateIn = useRef(threadLive).current;
   const desc = describe(event);
   if (!desc) return null;
   const Icon = desc.icon;

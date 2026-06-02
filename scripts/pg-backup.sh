@@ -8,8 +8,17 @@ set -euo pipefail
 
 cd /opt/ccp
 
-# .env on the VPS holds POSTGRES_USER / POSTGRES_DB. Defaults match compose.
-if [ -f .env ]; then set -a; . ./.env; set +a; fi
+# .env on the VPS holds POSTGRES_USER / POSTGRES_DB. Parse ONLY those two keys
+# with grep|cut — do NOT `. ./.env`. Sourcing the compose .env under
+# `set -euo pipefail` is a footgun deploy.yml deliberately avoids: any unrelated
+# secret value containing a shell metacharacter would abort the backup (silent
+# backup loss) or execute as code. We only assign to variables here (never eval
+# them), so even a hostile value can't run. `|| true` keeps a missing key from
+# tripping `set -e`; the `:=` defaults then match compose.
+if [ -f .env ]; then
+  POSTGRES_USER="$(grep -E '^POSTGRES_USER=' .env | tail -n1 | cut -d= -f2-)" || true
+  POSTGRES_DB="$(grep -E '^POSTGRES_DB=' .env | tail -n1 | cut -d= -f2-)" || true
+fi
 : "${POSTGRES_USER:=app}"
 : "${POSTGRES_DB:=ccp}"
 

@@ -627,6 +627,11 @@ export interface ServerToClientEvents {
     conversationId: string;
     callId: string;
     initiatedByUserId: string;
+    /** SERVER ringing time (ISO). Carried so the optimistic call entry sorts in
+     *  the timeline by server time — same clock as messages/notes/events — not
+     *  the client's `Date.now()` (which mis-orders a call vs a message when the
+     *  client clock lags the server). */
+    ringingAt: string;
   }) => void;
 
   /** First agent's CAS succeeded. Team room — dismisses every OTHER toast. */

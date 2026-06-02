@@ -681,23 +681,41 @@ async function ingestInboundMessage(
         replySnapshot,
         mediaPending,
       });
-      const newConversation: ConversationWithRefs | undefined = isNewConversation
-        ? {
-            conversation: toDomainConversation({
-              ...conversation,
-              lastMessageAt: evt.timestamp,
-              lastMessagePreview: preview,
-              unreadCount: 1,
-            }),
-            contact: toContactWire(contact),
-            assignedUser: null,
-            messages: [],
-            notes: [],
-            // The webhook event we're processing IS an inbound, so the 24h
-            // window opens right now.
-            lastInboundAt: evt.timestamp.toISOString(),
-          }
-        : undefined;
+      // Carry a full splice-in row for the inbox LIST in BOTH cases where a
+      // row needs to (re)enter a teammate's loaded slice live:
+      //   - a brand-new conversation (first contact / first inbound), and
+      //   - a REOPEN (customer reply flips a closed thread back to pending).
+      // Without the reopen row the team-wide `conversation:status` frame can't
+      // splice into a list that doesn't already hold the row (it carries no
+      // row payload), and `onMessageNew` bails at idx===-1 — so a reopened
+      // thread stayed invisible in a teammate's default Active view until a
+      // reconnect/refocus/nav. Brand-new threads appeared instantly; reopens
+      // didn't. Closing clears the assignee server-side (see lib/conversations
+      // mutations close path), so `assignedUser: null` matches the post-reopen
+      // DB state; `messages: []` is fine — the list row needs no thread body.
+      const newConversation: ConversationWithRefs | undefined =
+        isNewConversation || reopened
+          ? {
+              conversation: toDomainConversation({
+                ...conversation,
+                // A reopen flips closed→pending and (per the close path) the
+                // assignee was cleared; reflect both so the spliced row matches
+                // the Active filter and renders unassigned, regardless of
+                // whether `conversation` here predates the in-tx status update.
+                ...(reopened ? { status: "pending", assignedUserId: null } : {}),
+                lastMessageAt: evt.timestamp,
+                lastMessagePreview: preview,
+                unreadCount: reopened ? bumped.unreadCount : 1,
+              }),
+              contact: toContactWire(contact),
+              assignedUser: null,
+              messages: [],
+              notes: [],
+              // The webhook event we're processing IS an inbound, so the 24h
+              // window opens right now.
+              lastInboundAt: evt.timestamp.toISOString(),
+            }
+          : undefined;
       const conversationSnapshot = toWorkflowConversation({
         ...conversation,
         lastMessageAt: effectiveLastMessageAt,

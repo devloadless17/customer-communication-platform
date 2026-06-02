@@ -17,8 +17,6 @@ import type { Role } from "../types";
  * directory. Only `canManageUsers` controls who can edit it.
  */
 
-const SUPER_ADMIN: Role = "superAdmin";
-
 /** Invite a new user, change roles, and deactivate. */
 export function canManageUsers(role: Role): boolean {
   return role === "superAdmin" || role === "admin";
@@ -43,11 +41,6 @@ export function canManageContactFields(role: Role): boolean {
  */
 export function canManageStages(role: Role): boolean {
   return DEFAULT_CAPABILITIES[role]["stages:manage"];
-}
-
-/** Only superAdmins can grant or revoke the superAdmin role. */
-export function canGrantSuperAdmin(role: Role): boolean {
-  return role === SUPER_ADMIN;
 }
 
 /**
@@ -85,8 +78,6 @@ export function roleLabel(role: Role): string {
       return "Agent";
   }
 }
-
-export const ALL_ROLES: Role[] = ["superAdmin", "admin", "manager", "agent"];
 
 /* ------------------------------------------------------------------------- *
  * Admin-configurable per-role capabilities
@@ -233,14 +224,6 @@ export function resolvePermissions(
     if (typeof value === "boolean") resolved[cap] = value;
   }
   return resolved;
-}
-
-/** Convenience: does the resolved map grant `cap`? */
-export function hasCapability(
-  perms: Record<Capability, boolean>,
-  cap: Capability,
-): boolean {
-  return perms[cap] === true;
 }
 
 /** Pull a single role's override sub-map out of raw JSON, defensively. */

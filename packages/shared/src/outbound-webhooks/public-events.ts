@@ -70,10 +70,6 @@ export const PUBLIC_EVENT_TYPES = [
 ] as const;
 export type PublicEventType = (typeof PUBLIC_EVENT_TYPES)[number];
 
-export function isPublicEventType(s: string): s is PublicEventType {
-  return (PUBLIC_EVENT_TYPES as readonly string[]).includes(s);
-}
-
 /**
  * Compact JSON example used by the docs page + create-webhook UI to show
  * receivers what they'll need to parse. Real envelopes carry the wrapper

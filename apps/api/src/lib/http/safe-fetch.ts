@@ -22,11 +22,19 @@
 // MUST NOT set this — the comment in `outbound-webhooks.schemas.ts` calling
 // out the worker-side SSRF defense exists because of this helper.
 
+import http from "node:http";
+import https from "node:https";
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
 
 const MAX_REDIRECTS = 3;
 const DEFAULT_TIMEOUT_MS = 10_000;
+// Cap the buffered response body. The pinned request below reads the body
+// eagerly to build a Response; without a ceiling a hostile receiver could
+// stream unbounded bytes into memory. 16 MB is far above any webhook ack or
+// automation API response we expect; exceeding it aborts the hop (the caller
+// sees a network-style error, same as a timeout).
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 export class SsrfBlockedError extends Error {
   readonly code = "SSRF_BLOCKED" as const;
@@ -40,8 +48,123 @@ export class SsrfBlockedError extends Error {
   }
 }
 
+type ResolvedAddr = { address: string; family: number };
+
 function allowPrivate(): boolean {
   return process.env.INTEGRATIONS_ALLOW_PRIVATE_HOSTS === "1";
+}
+
+/** Normalize fetch-style headers to a Node outgoing-headers object. */
+function toNodeHeaders(
+  h: NonNullable<RequestInit["headers"]> | undefined,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  if (!h) return out;
+  if (h instanceof Headers) {
+    h.forEach((v, k) => {
+      out[k] = v;
+    });
+    return out;
+  }
+  if (Array.isArray(h)) {
+    for (const [k, v] of h) out[k] = v;
+    return out;
+  }
+  for (const [k, v] of Object.entries(h)) out[k] = v as string;
+  return out;
+}
+
+/**
+ * Issue ONE request to a host whose IP was already validated, PINNING the
+ * socket to exactly those addresses via a custom `lookup` — so undici/the OS
+ * can't independently re-resolve the hostname to a now-private IP between the
+ * check and the connect (the DNS-rebinding TOCTOU). SNI/cert validation still
+ * use the original hostname (`servername`), so HTTPS is unaffected. Returns a
+ * real `Response`; redirects are NOT followed here (Node returns the 3xx) — the
+ * caller's loop handles them, re-validating + re-pinning each hop.
+ */
+async function pinnedFetch(
+  url: string,
+  addrs: ResolvedAddr[],
+  opts: {
+    method: string;
+    headers: NonNullable<RequestInit["headers"]> | undefined;
+    body: RequestInit["body"];
+    signal: AbortSignal;
+  },
+): Promise<Response> {
+  const u = new URL(url);
+  const isHttps = u.protocol === "https:";
+  const mod = isHttps ? https : http;
+  const lookup = (
+    _hostname: string,
+    options: { all?: boolean } | number,
+    cb: (err: NodeJS.ErrnoException | null, address?: unknown, family?: number) => void,
+  ): void => {
+    // Connect ONLY to the addresses we already validated for this exact host.
+    if (addrs.length === 0) {
+      cb(new SsrfBlockedError(url, "no validated address to connect"));
+      return;
+    }
+    const all = typeof options === "object" && options.all;
+    if (all) cb(null, addrs.map((a) => ({ address: a.address, family: a.family })));
+    else cb(null, addrs[0]!.address, addrs[0]!.family);
+  };
+  return await new Promise<Response>((resolve, reject) => {
+    const req = mod.request(
+      url,
+      {
+        method: opts.method,
+        headers: toNodeHeaders(opts.headers),
+        lookup: lookup as never,
+        ...(isHttps && !isIP(u.hostname) ? { servername: u.hostname } : {}),
+        signal: opts.signal,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size > MAX_RESPONSE_BYTES) {
+            req.destroy(new Error("response body exceeded cap"));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on("end", () => {
+          const headers = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (v == null) continue;
+            if (Array.isArray(v)) for (const vv of v) headers.append(k, vv);
+            else headers.set(k, String(v));
+          }
+          const status = res.statusCode ?? 502;
+          const nullBody =
+            status === 204 || status === 205 || status === 304 || size === 0;
+          resolve(
+            new Response(nullBody ? null : Buffer.concat(chunks), {
+              status,
+              statusText: res.statusMessage ?? "",
+              headers,
+            }),
+          );
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    const body = opts.body;
+    if (body != null) {
+      if (typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array) {
+        req.write(body);
+      } else {
+        req.destroy();
+        reject(new TypeError("safeFetch: unsupported body type for pinned request"));
+        return;
+      }
+    }
+    req.end();
+  });
 }
 
 /**
@@ -118,7 +241,9 @@ function isBlockedIpv6(ip: string): boolean {
  * Throws `SsrfBlockedError` on rejection. Returns the original URL string
  * (possibly normalized) on success.
  */
-export async function assertPublicHost(url: string): Promise<void> {
+export async function assertPublicHost(
+  url: string,
+): Promise<ResolvedAddr[] | null> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -136,17 +261,19 @@ export async function assertPublicHost(url: string): Promise<void> {
     throw new SsrfBlockedError(url, "missing hostname");
   }
 
-  // If the hostname is already an IP literal, check it directly.
+  // If the hostname is already an IP literal, check it directly. No DNS, so
+  // there's no resolve-twice gap — the connection targets exactly this literal.
+  // Return null: nothing to pin.
   if (isIP(hostname)) {
     if (isBlockedIp(hostname) && !allowPrivate()) {
       throw new SsrfBlockedError(url, `host ${hostname} is in a blocked range`);
     }
-    return;
+    return null;
   }
 
   // Resolve via DNS — get every A/AAAA so a multi-record answer can't sneak
   // a private address through.
-  let addrs: { address: string; family: number }[];
+  let addrs: ResolvedAddr[];
   try {
     addrs = await dns.lookup(hostname, { all: true, verbatim: true });
   } catch (err) {
@@ -155,13 +282,17 @@ export async function assertPublicHost(url: string): Promise<void> {
   if (addrs.length === 0) {
     throw new SsrfBlockedError(url, "dns returned no addresses");
   }
-  if (!allowPrivate()) {
-    for (const a of addrs) {
-      if (isBlockedIp(a.address)) {
-        throw new SsrfBlockedError(url, `host ${hostname} resolved to blocked ${a.address}`);
-      }
+  if (allowPrivate()) return null; // dev escape hatch — don't pin, don't block
+  for (const a of addrs) {
+    if (isBlockedIp(a.address)) {
+      throw new SsrfBlockedError(url, `host ${hostname} resolved to blocked ${a.address}`);
     }
   }
+  // Return the VALIDATED addresses so the caller can PIN the socket to exactly
+  // these IPs — closing the same-request DNS-rebinding gap where the OS would
+  // otherwise re-resolve `hostname` independently between this check and the
+  // actual connect (a low-TTL attacker domain answering public-then-private).
+  return addrs;
 }
 
 /**
@@ -244,7 +375,7 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
   let currentHeaders: NonNullable<RequestInit["headers"]> | undefined = opts.headers;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    await assertPublicHost(currentUrl);
+    const validatedAddrs = await assertPublicHost(currentUrl);
 
     const controller = new AbortController();
     const onAbort = () => controller.abort();
@@ -256,14 +387,27 @@ export async function safeFetch(url: string, opts: SafeFetchOptions = {}): Promi
 
     let res: Response;
     try {
-      res = await fetch(currentUrl, {
-        ...opts,
-        headers: currentHeaders,
-        method: currentMethod,
-        body: currentBody,
-        redirect: "manual",
-        signal: controller.signal,
-      });
+      if (validatedAddrs) {
+        // DNS host in the enforced path → connect ONLY to the validated IPs so
+        // the hostname can't re-resolve to a private address (rebinding TOCTOU).
+        res = await pinnedFetch(currentUrl, validatedAddrs, {
+          method: currentMethod,
+          headers: currentHeaders,
+          body: currentBody,
+          signal: controller.signal,
+        });
+      } else {
+        // IP-literal target (no re-resolution gap) or dev allow-private hatch —
+        // plain fetch is safe; nothing to pin.
+        res = await fetch(currentUrl, {
+          ...opts,
+          headers: currentHeaders,
+          method: currentMethod,
+          body: currentBody,
+          redirect: "manual",
+          signal: controller.signal,
+        });
+      }
     } finally {
       clearTimeout(timer);
       if (opts.signal) opts.signal.removeEventListener("abort", onAbort);

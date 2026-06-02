@@ -85,6 +85,30 @@ export function calendarDayKey(now: number | Date, tz?: string): string {
   return fmt.format(typeof now === "number" ? new Date(now) : now);
 }
 
+/**
+ * Cached `en-US` formatter, keyed by `format-id + tz`. `Date.prototype.to-
+ * Locale*` constructs a fresh `Intl.DateTimeFormat` on EVERY call — the exact
+ * cost the calendarDay caches above avoid. The per-message-bubble + per-list-
+ * row formatters below render once per visible row (hundreds on a cold thread
+ * open), so they MUST reuse a formatter, not allocate one per row. Same
+ * try/catch-on-bad-tz posture as calendarDayKey. One formatter per (format, tz)
+ * — a handful per process.
+ */
+const dtfCache = new Map<string, Intl.DateTimeFormat>();
+function dtf(id: string, tz: string | undefined, opts: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = `${id}|${tz ?? ""}`;
+  let f = dtfCache.get(key);
+  if (!f) {
+    try {
+      f = new Intl.DateTimeFormat("en-US", { ...opts, timeZone: tz });
+    } catch {
+      f = new Intl.DateTimeFormat("en-US", opts);
+    }
+    dtfCache.set(key, f);
+  }
+  return f;
+}
+
 /** Compact relative time used in the conversation list ("now", "12m", "3h", "Mon", "Mar 4"). */
 export function formatListTime(iso: string, tz?: string, now?: number): string {
   const then = new Date(iso);
@@ -96,18 +120,14 @@ export function formatListTime(iso: string, tz?: string, now?: number): string {
   if (abs < 3600) return `${Math.round(abs / 60)}m`;
   if (abs < 86400) return `${Math.round(abs / 3600)}h`;
   if (abs < 86400 * 7) {
-    return then.toLocaleDateString("en-US", { weekday: "short", timeZone: tz });
+    return dtf("wd", tz, { weekday: "short" }).format(then);
   }
-  return then.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: tz });
+  return dtf("md", tz, { month: "short", day: "numeric" }).format(then);
 }
 
 /** Time stamp inside the message thread. */
 export function formatMessageTime(iso: string, tz?: string): string {
-  return new Date(iso).toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: tz,
-  });
+  return dtf("t", tz, { hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 }
 
 /** Locale-formatted "YYYY-MM-DD, HH:MM:SS AM/PM" for log/admin views. */
@@ -122,12 +142,7 @@ export function formatLocaleDate(iso: string, tz?: string): string {
 
 /** Long-form short date with year, e.g. "Mar 4, 2026". Used by the contact panel. */
 export function formatShortDate(iso: string, tz?: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: tz,
-  });
+  return dtf("sd", tz, { month: "short", day: "numeric", year: "numeric" }).format(new Date(iso));
 }
 
 /** Day separator label used between message clusters. */

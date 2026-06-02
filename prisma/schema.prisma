@@ -911,6 +911,11 @@ model Message {
   @@index([conversationId, timestamp])
   @@index([teamId])
   @@index([replyToMessageId])
+  // FK index for the `sender` relation's `onDelete: SetNull`. Without it,
+  // hard-deleting a teammate seq-scans the (largest) Message table to null
+  // their authored rows. Cheap btree; the hottest write path gains one small
+  // index update per insert in exchange for a non-locking admin user-delete.
+  @@index([senderUserId])
   // Keyset for thread loads + "load older": WHERE conversationId = $1
   // ORDER BY timestamp DESC, id DESC. The ascending index above still
   // serves chronological/range scans; this one is purpose-built for the

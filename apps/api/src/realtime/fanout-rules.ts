@@ -473,14 +473,11 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "user.profile_updated": (e, emitter) => {
-    emitter.emitToTeam(e.teamId, "user:profile:updated", {
-      teamId: e.teamId,
-      userId: e.userId,
-      ...(e.name !== undefined ? { name: e.name } : {}),
-      ...(e.avatarUrl !== undefined ? { avatarUrl: e.avatarUrl } : {}),
-    });
-    // Members list (assignment dropdown, contact-panel "assigned to", etc.)
-    // refetches against this scope.
+    // The dedicated `user:profile:updated` frame was dropped — it broadcast to
+    // every team member on every profile edit with ZERO client subscribers.
+    // The members list (assignment dropdown, contact-panel "assigned to", etc.)
+    // already refreshes off this `team:catalog:changed { scope: members }`
+    // frame, which IS consumed — so a name/avatar change still propagates.
     emitter.emitToTeam(e.teamId, "team:catalog:changed", {
       teamId: e.teamId,
       scope: "members",
@@ -558,6 +555,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
       conversationId: e.conversationId,
       callId: e.callId,
       initiatedByUserId: e.initiatedByUserId,
+      ringingAt: e.ringingAt,
     });
   },
 
