@@ -114,23 +114,50 @@ export interface NormalizedCallEvent {
   contactPhone: string;
   contactName: string | null;
   direction: "in" | "out";
+  /**
+   * Channel-AGNOSTIC lifecycle phase. Each provider's parser maps its own
+   * wire vocabulary onto this set — downstream (ingest / service / UI) never
+   * sees provider specifics. A new channel with calling implements its
+   * `MessagingProvider` calling methods + maps its webhooks to these phases;
+   * nothing below the parser changes.
+   */
   phase:
     | "incoming"      // inbound call ringing
     | "ringing_out"   // outbound call we just placed
-    | "answered"      // customer picked up our outbound (carries SDP answer)
-    | "completed"     // ended cleanly
-    | "missed"        // no answer
-    | "rejected"      // explicitly declined
+    | "connecting"    // outbound media leg established with the provider's
+                      // media server (e.g. WhatsApp Cloud-API SDP answer).
+                      // This is NOT customer pickup — it carries the SDP so
+                      // the browser can negotiate media, but the call stays
+                      // `ringing` until a real answer is observed.
+    | "completed"     // call connected then ended (carries connectedAt+duration)
+    | "missed"        // never answered (declined / no-answer / timeout)
+    | "rejected"      // explicitly declined (providers that distinguish it)
     | "failed"        // signaling/media error
     | "permission_granted"
     | "permission_revoked";
   /**
-   * WebRTC SDP. For inbound calls: customer's `offer`. For outbound:
-   * customer's `answer` after they pick up. Meta sometimes sends answers
-   * with `a=setup:actpass` which RTCPeerConnection rejects on the
-   * offerer side; the Meta provider rewrites those to `setup:active`.
+   * WebRTC SDP. For inbound calls: customer's `offer`. For outbound: the
+   * provider's media-server `answer` (delivered at `connecting`, BEFORE the
+   * human picks up). Meta sometimes sends answers with `a=setup:actpass`
+   * which RTCPeerConnection rejects on the offerer side; the Meta provider
+   * rewrites those to `setup:active`.
    */
   sdp?: { type: "offer" | "answer"; sdp: string };
+  /**
+   * Real customer pickup time, set ONLY on a terminal event for a call that
+   * actually connected. Channel-agnostic "this call was answered" signal —
+   * each provider derives it however it can (Meta: the `terminate` payload's
+   * `start_time`, which is present only for answered calls). Absent ⇒ the
+   * call was never answered, so ingest records it as `missed`, not connected.
+   */
+  connectedAt?: Date;
+  /**
+   * Real talk-time in seconds, from the provider's authoritative end-of-call
+   * duration (Meta: `terminate.duration`). Present only when the call
+   * connected. Preferred over `endedAt - connectedAt` so the persisted record
+   * matches the provider's own billing/duration exactly.
+   */
+  durationSeconds?: number;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }

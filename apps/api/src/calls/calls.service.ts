@@ -114,9 +114,26 @@ export class CallsService {
       }
     }
 
+    // Testing escape hatch: skip our permission / 24h-window / daily-cap
+    // pre-flight so QA can place repeat calls without tripping Meta's permission
+    // dance or our own 5/24h cap. Gated to non-production AND an explicit flag,
+    // so it can never silently weaken prod. NOTE: Meta still enforces its OWN
+    // window / permission rules at placeCall — this only removes OUR friction,
+    // so an out-of-window customer with no granted permission will still get a
+    // provider_rejected from Meta. Region/sanctions gate above is NEVER skipped.
+    const skipPreflight =
+      process.env.NODE_ENV !== "production" &&
+      process.env.CALLS_SKIP_PREFLIGHT === "1";
+    if (skipPreflight) {
+      this.logger.warn(
+        `CALLS_SKIP_PREFLIGHT active — bypassing permission/window/cap for team=${session.teamId} contact=${contact.id}`,
+      );
+    }
+
     // Permission revocation gate. Meta strips calling permission after 4
     // consecutive unanswered outbound calls; this column mirrors that.
     if (
+      !skipPreflight &&
       contact.callPermissionRevokedUntil &&
       contact.callPermissionRevokedUntil.getTime() > Date.now()
     ) {
@@ -130,7 +147,7 @@ export class CallsService {
       contact.lastInboundAt &&
         now - contact.lastInboundAt.getTime() < 24 * 60 * 60 * 1000,
     );
-    if (!insideWindow) {
+    if (!skipPreflight && !insideWindow) {
       const livePerm = await this.db.callPermissionRequest.findFirst({
         where: { teamId: session.teamId, contactId: contact.id },
         orderBy: { requestedAt: "desc" },
@@ -195,7 +212,7 @@ export class CallsService {
         ringingAt: { gte: since },
       },
     });
-    if (dailyOutboundConnected >= 5) {
+    if (!skipPreflight && dailyOutboundConnected >= 5) {
       return { ok: false, reason: "daily_cap_reached" };
     }
 
@@ -689,6 +706,62 @@ export class CallsService {
       rejectedByUserId: session.userId,
       endedAt: rejectedAt.toISOString(),
     });
+    return { ok: true };
+  }
+
+  /**
+   * Mark an OUTBOUND call connected (customer picked up), reported by the
+   * originating agent's browser the instant it detects real inbound audio.
+   *
+   * Business-initiated calls give NO live pickup signal: Meta's `connect`
+   * webhook is just media setup (fires ~1s after dialing, BEFORE pickup) and
+   * the authoritative `start_time`/`duration` only arrive at terminate. So the
+   * browser's audio-flow detection is the live "they answered" moment. Stamping
+   * answeredAt here (set-once, CAS on a ringing row) makes a later agent hangup
+   * resolve to a real `completed` call instead of `missed`, and keeps the
+   * connected-call/daily-cap accounting honest. Mirrors inbound answerCall,
+   * minus the Meta pre_accept/accept (the media leg is already up from connect).
+   * Idempotent: count 0 (already connected/terminal/not-found) → success.
+   */
+  async markConnected(
+    session: ApiSession,
+    callId: string,
+  ): Promise<{ ok: true }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (!perms["calls:make" as Capability]) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    const answeredAt = new Date();
+    const cas = await this.db.call.updateMany({
+      where: {
+        id: callId,
+        teamId: session.teamId,
+        direction: CallDirection.out,
+        status: CallStatus.ringing,
+        answeredAt: null,
+      },
+      data: { status: CallStatus.in_progress, answeredAt },
+    });
+    if (cas.count === 0) return { ok: true };
+
+    const call = await this.db.call.findFirst({
+      where: { id: callId, teamId: session.teamId },
+      select: { conversationId: true },
+    });
+    if (call) {
+      // Reuse call.answered_by_agent → call:answered so every viewer's thread
+      // flips the activeCall pill to in_progress. The toast-dismiss it also
+      // triggers is a no-op outbound (there's no incoming toast). answeredByUserId
+      // = the agent on the call.
+      await this.bus.publish({
+        type: "call.answered_by_agent",
+        teamId: session.teamId,
+        conversationId: call.conversationId,
+        callId,
+        answeredByUserId: session.userId,
+        answeredAt: answeredAt.toISOString(),
+      });
+    }
     return { ok: true };
   }
 

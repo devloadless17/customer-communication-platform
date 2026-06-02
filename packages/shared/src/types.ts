@@ -446,6 +446,19 @@ export interface ConversationActivityEvent {
   /** ISO timestamp — named `at` to match the message/note `timestamp` only at
    *  the timeline-merge boundary (the merge maps it). */
   at: string;
+  /**
+   * CLIENT-ONLY, never serialized by the server. True while this is an
+   * un-reconciled optimistic stub (the agent's own just-made change, before the
+   * authoritative GET confirms it). The timeline pins ONLY these to the bottom;
+   * the instant the server row reconciles, the stub is rebuilt from server data
+   * (which lacks this flag) so it settles and sorts by real server time — just
+   * like a message does when its `pending` clears. Keeping a reconciled row
+   * pinned (the old behavior, keyed off the surviving `optimistic-…` id) was the
+   * source of two ordering bugs: a later message sorting ABOVE a stuck-pinned
+   * log, and rapid changes jumping mid-list→bottom as server-clocked reconciled
+   * rows tie-broke against client-clocked fresh stubs.
+   */
+  optimisticPending?: boolean;
 }
 
 export interface Conversation {

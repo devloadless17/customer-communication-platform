@@ -126,6 +126,109 @@ export function useCall(): {
     toast.error(msg);
   }, []);
 
+  // Outbound pickup detection. The SDP answer (call:sdp_offer) only means the
+  // media leg negotiated with Meta's server — it lands ~1s after dialing, BEFORE
+  // the human picks up. Meta gives NO live "answered" signal for business-
+  // initiated calls, so we infer pickup from the customer's audio actually
+  // flowing and only THEN start the timer + flip to in_progress. This is the fix
+  // for "the timer starts before the customer answers." Interval id; cleared on
+  // teardown so it can't leak into the next call.
+  const pickupWatchRef = useRef<number | null>(null);
+
+  const clearPickupWatch = useCallback(() => {
+    if (pickupWatchRef.current !== null) {
+      window.clearInterval(pickupWatchRef.current);
+      pickupWatchRef.current = null;
+    }
+  }, []);
+
+  // Customer answered (real inbound audio observed). Flip to in_progress + start
+  // the timer locally, flip the thread's activeCall pill for every viewer via a
+  // local call:answered dispatch, and tell the server (POST /connected) so a
+  // later agent-hangup is filed as a real connected call rather than "missed"
+  // (the server has no live pickup signal otherwise). Guarded to the still-
+  // ringing originating outbound call so a late/foreign frame can't misfire it.
+  const onOutboundPickup = useCallback((callId: string) => {
+    const live = liveCallRef.current;
+    if (
+      !live ||
+      live.callId !== callId ||
+      live.direction !== "out" ||
+      live.status !== "ringing"
+    ) {
+      return;
+    }
+    const answeredAt = Date.now();
+    setLiveCall((prev) =>
+      prev && prev.callId === callId && prev.status === "ringing"
+        ? { ...prev, status: "in_progress", answeredAt }
+        : prev,
+    );
+    dispatchLocalSocketEvent("call:answered", {
+      teamId: "",
+      conversationId: live.conversationId,
+      callId,
+      answeredByUserId: "",
+      answeredAt: new Date(answeredAt).toISOString(),
+    });
+    void fetchWithSessionGuard(`/api/calls/${callId}/connected`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }).catch(() => undefined);
+  }, []);
+
+  // Poll inbound-rtp audio after the media leg is up; declare pickup once packet
+  // counts grow across consecutive polls (a stray setup packet won't trip it).
+  // Re-armed per outbound call; self-stops on connect, teardown, status change,
+  // or a safety ceiling (the 60s ring timeout below handles a true no-answer).
+  const startOutboundPickupWatch = useCallback(
+    (callId: string) => {
+      clearPickupWatch();
+      let lastPackets = -1;
+      let growthHits = 0;
+      const startedAtMs = Date.now();
+      const id = window.setInterval(() => {
+        const live = liveCallRef.current;
+        const pc = pcRef.current;
+        if (!pc || !live || live.callId !== callId || live.status !== "ringing") {
+          clearPickupWatch();
+          return;
+        }
+        if (Date.now() - startedAtMs > 70_000) {
+          clearPickupWatch();
+          return;
+        }
+        void pc
+          .getStats()
+          .then((stats) => {
+            let packets = 0;
+            stats.forEach((report) => {
+              if (report.type === "inbound-rtp") {
+                const r = report as RTCInboundRtpStreamStats;
+                if (r.kind === "audio") {
+                  packets = Math.max(packets, r.packetsReceived ?? 0);
+                }
+              }
+            });
+            if (lastPackets >= 0 && packets > lastPackets && packets > 5) {
+              growthHits += 1;
+            } else if (packets <= lastPackets) {
+              growthHits = 0;
+            }
+            lastPackets = packets;
+            if (growthHits >= 2) {
+              clearPickupWatch();
+              onOutboundPickup(callId);
+            }
+          })
+          .catch(() => undefined);
+      }, 700);
+      pickupWatchRef.current = id;
+    },
+    [clearPickupWatch, onOutboundPickup],
+  );
+
   // Apply an outbound call's answer SDP to the live peer connection. Returns
   // true if applied. Matches STRICTLY on callId (live.callId === callId): the
   // answer frame is fanned to the whole team room, so EVERY agent's browser
@@ -152,21 +255,23 @@ export function useCall(): {
       }
       try {
         await pc.setRemoteDescription({ type: "answer", sdp });
-        setLiveCall((prev) =>
-          prev && prev.direction === "out" && prev.callId === callId
-            ? { ...prev, status: "in_progress", answeredAt: Date.now() }
-            : prev,
-        );
+        // Media is now negotiated with Meta — but this answer is from Meta's
+        // media server and arrives BEFORE the human picks up. Stay "ringing"
+        // ("Calling…", no timer); the pickup watcher flips us to in_progress
+        // when the customer's audio actually flows. (Previously we flipped to
+        // in_progress here, which started the timer during ringing.)
+        startOutboundPickupWatch(callId);
         return true;
       } catch (err) {
         console.warn("[useCall] setRemoteDescription(answer) failed", err);
         return false;
       }
     },
-    [],
+    [startOutboundPickupWatch],
   );
 
   const tearDown = useCallback(() => {
+    clearPickupWatch();
     pcRef.current?.getSenders().forEach((s) => {
       try {
         s.track?.stop();
@@ -189,7 +294,7 @@ export function useCall(): {
     // Clear any stashed answers so they can't leak into the next call's PC.
     pendingAnswersRef.current.clear();
     setLiveCall(null);
-  }, []);
+  }, [clearPickupWatch]);
 
   // Socket subscribers. Bound once on mount; read liveCallRef inside
   // handlers so a callId change doesn't force a re-subscribe.

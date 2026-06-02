@@ -56,6 +56,12 @@ function base(
     before: null,
     after: null,
     at: new Date().toISOString(),
+    // Pins this stub to the bottom of the timeline until the authoritative GET
+    // reconciles it. The server never sets this; `mergeAuthoritativeEvents`
+    // rebuilds the row from server data on reconcile, dropping the flag, so the
+    // confirmed log settles and sorts by real server time (see the field's doc
+    // on ConversationActivityEvent).
+    optimisticPending: true,
   };
 }
 

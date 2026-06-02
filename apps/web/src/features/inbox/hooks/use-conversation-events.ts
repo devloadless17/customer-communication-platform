@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 
 import { getClientSocket } from "@/lib/socket-client";
+import { notificationSound } from "@/lib/notifications/notification-sound";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useCoalescedAsync } from "@/features/inbox/lib/coalesce";
@@ -189,13 +190,29 @@ function activitySignature(e: ConversationActivityEvent): string {
   }
 }
 
-/** Cheap dirty-check so a no-op coalesced GET doesn't churn the timeline. */
-function sameIdSequence(
+/**
+ * Cheap dirty-check so a no-op coalesced GET doesn't churn the timeline.
+ *
+ * Compares id AND `at` AND `optimisticPending` — NOT id alone. Reconcile keeps
+ * the stub's id on the server-correct row (for React-key stability), so an
+ * id-only check would see "same sequence" and return the stale optimistic array
+ * — the row would stay client-timed and `optimisticPending`-pinned FOREVER,
+ * defeating the settle-on-reconcile that fixes the ordering bugs. The `at` +
+ * flag compare detects exactly the reconcile transition (client→server time,
+ * pending→confirmed) while still short-circuiting a genuine no-op GET.
+ */
+function sameEventSequence(
   a: ConversationActivityEvent[],
   b: ConversationActivityEvent[],
 ): boolean {
   if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i]!.id !== b[i]!.id) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.id !== y.id || x.at !== y.at || !!x.optimisticPending !== !!y.optimisticPending) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -223,8 +240,12 @@ const STUB_MATCH_WINDOW_MS = 120_000;
  *
  * A stub with no matching row yet (the leading GET raced ahead of the audit
  * write) stays appended until its row lands or the TTL expires, so the pill
- * never blinks out and back. Returns the prior array reference unchanged when
- * the id-sequence is identical, so a no-op GET triggers no re-render.
+ * never blinks out and back. When matched, the row adopts the server `at` and
+ * sheds `optimisticPending`, so it SETTLES into real-time order instead of
+ * staying pinned to the bottom (see `sameEventSequence` for why the dirty-check
+ * must notice that transition). Returns the prior array reference unchanged when
+ * id + `at` + pending-flag are all identical, so a no-op GET triggers no
+ * re-render.
  */
 function mergeAuthoritativeEvents(
   prev: ConversationWithRefs["events"],
@@ -234,7 +255,7 @@ function mergeAuthoritativeEvents(
   const serverEvents = server ?? [];
   const stubs = prevEvents.filter((e) => isOptimisticActivityId(e.id));
   if (stubs.length === 0) {
-    return sameIdSequence(prevEvents, serverEvents) ? prevEvents : serverEvents;
+    return sameEventSequence(prevEvents, serverEvents) ? prevEvents : serverEvents;
   }
 
   const consumed = new Set<string>();
@@ -267,7 +288,7 @@ function mergeAuthoritativeEvents(
   const next = stillPending.length
     ? [...relabeled, ...stillPending]
     : relabeled;
-  return sameIdSequence(prevEvents, next) ? prevEvents : next;
+  return sameEventSequence(prevEvents, next) ? prevEvents : next;
 }
 
 export interface ConversationEventsState {
@@ -420,6 +441,14 @@ export function useConversationEvents(
   }
 
   const conversationId = initial.conversation.id;
+
+  // Tell the notification-sound engine which thread is on screen so the
+  // app-wide new-message ding stays silent for the conversation you're actively
+  // viewing in a focused tab. Re-runs on thread switch; cleared on unmount.
+  useEffect(() => {
+    notificationSound.setActiveThread(conversationId);
+    return () => notificationSound.setActiveThread(null);
+  }, [conversationId]);
 
   // Keep latest cursor in a ref so loadOlder can stay reference-stable.
   const cursorRef = useRef(olderCursor);

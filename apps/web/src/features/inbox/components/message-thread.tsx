@@ -25,7 +25,6 @@ import type {
 } from "@ccp/shared/types";
 import {
   buildOptimisticStageChange,
-  isOptimisticActivityId,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { useConversationEvents } from "@/features/inbox/hooks/use-conversation-events";
@@ -780,21 +779,25 @@ function MessageThreadImpl({
       hasMoreOlder && oldestMessageTs
         ? calls.filter((c) => c.ringingAt >= oldestMessageTs)
         : calls;
-    // Entries pinned to the very bottom regardless of their timestamp:
-    //   - pending own-sends (sortKey ∞ — "the message I'm sending right now")
-    //   - OPTIMISTIC activity stubs. Their `at` is CLIENT time (new Date() in
-    //     optimistic-activity.ts), but every message carries SERVER time. If the
-    //     server clock runs even slightly ahead of the browser, a recent
-    //     message's timestamp exceeds the stub's `at`, so a naive timestamp sort
-    //     drops the pill ABOVE that message ("appears between the last logs"),
-    //     then the authoritative server-timed row arrives and it jumps to the
-    //     bottom — the visible vibration. Pinning the stub to the bottom makes it
-    //     land cleanly at the end on the first paint; the authoritative row that
-    //     replaces it (real server `at`, the newest server event) is naturally
-    //     last too, so there's zero movement on reconcile.
+    // Entries pinned to the very bottom regardless of their timestamp — ONLY
+    // genuinely in-flight items the agent just created, whose timestamps come
+    // from the CLIENT clock and can't be trusted against SERVER-clocked rows:
+    //   - pending own-sends (the message I'm sending right now)
+    //   - UN-reconciled optimistic activity stubs (`optimisticPending`)
+    // Both carry client time; pinning them sidesteps server-clock skew so they
+    // land cleanly at the end on first paint. The moment the authoritative GET
+    // reconciles a stub, `mergeAuthoritativeEvents` rebuilds it from server data
+    // — the flag drops, the row SETTLES, and it sorts by real server time like
+    // any confirmed event. That's the fix for two bugs that came from keeping a
+    // reconciled row pinned (keyed off the surviving `optimistic-…` id): a later
+    // message sorting ABOVE a stuck-pinned log, and rapid changes jumping
+    // mid-list→bottom as server-clocked reconciled rows tie-broke against
+    // client-clocked fresh stubs. Settled rows are all server-clocked (mutually
+    // consistent); pinned rows are all client-clocked (mutually consistent);
+    // the boundary between the two groups is clean.
     const pinsToBottom = (e: TimelineEntry) =>
       (e.kind === "message" && e.data.pending === true) ||
-      (e.kind === "activity" && isOptimisticActivityId(e.data.id));
+      (e.kind === "activity" && e.data.optimisticPending === true);
     return [
       ...messages.map((m): TimelineEntry => ({ kind: "message", data: m })),
       ...visibleNotes.map((n): TimelineEntry => ({ kind: "note", data: n })),
@@ -1029,6 +1032,21 @@ function MessageThreadImpl({
                 )}
                 <div
                   data-message-id={entry.kind === "message" ? entry.data.id : undefined}
+                  // Test/observability hooks on the shared per-entry wrapper:
+                  // every timeline entry (message/note/activity/call) carries
+                  // its kind, id, sort timestamp, and live pin state in DOM
+                  // order — so an e2e spec can read the exact rendered ordering
+                  // and watch an optimistic log SETTLE (data-pending 1→absent)
+                  // without coupling to per-component internals.
+                  data-entry-kind={entry.kind}
+                  data-entry-id={entry.data.id}
+                  data-entry-ts={entry.data.timestamp}
+                  data-pending={
+                    (entry.kind === "message" && entry.data.pending) ||
+                    (entry.kind === "activity" && entry.data.optimisticPending)
+                      ? "1"
+                      : undefined
+                  }
                   className="rounded-2xl transition-shadow"
                 >
                   {/* Local ErrorBoundary per row — without this, a single

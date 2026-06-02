@@ -40,6 +40,7 @@ import {
 import { cn, initials } from "@ccp/shared/utils";
 import type { Team, User, UserAvailabilityStatus } from "@ccp/shared/types";
 import { AvailabilityPicker } from "./availability-picker";
+import { NotificationSoundPicker } from "./notification-sound-picker";
 
 const STORAGE_KEY = "app-rail-collapsed";
 
@@ -472,6 +473,10 @@ function UserMenu({
             seedStatus={liveStatus}
             seedMessage={liveMessage}
           />
+          <DropdownMenuSeparator />
+          {/* Per-device notification-sound toggles (new messages / calls).
+              No capability gate — a personal, device-local preference. */}
+          <NotificationSoundPicker />
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild>
             <Link href="/settings/workspace">

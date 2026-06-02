@@ -43,9 +43,12 @@ function phaseToStatus(phase: NormalizedCallEvent["phase"]): CallStatus | null {
   switch (phase) {
     case "incoming":
     case "ringing_out":
+    case "connecting":
+      // `connecting` = the outbound media leg came up (provider's SDP answer),
+      // NOT the human picking up. The row stays `ringing`; the SDP is forwarded
+      // to the browser regardless of status (see the sdp block below). answeredAt
+      // is stamped later, from the terminate's real pickup time.
       return CallStatus.ringing;
-    case "answered":
-      return CallStatus.in_progress;
     case "completed":
       return CallStatus.completed;
     case "missed":
@@ -189,48 +192,65 @@ export async function ingestCallEvent(
       const alreadyTerminal = existing
         ? TERMINAL_STATUSES.has(existing.status)
         : false;
-      if (existing) {
-        // Terminal-state guard. If the row already landed in a terminal
-        // state, ANY later webhook (terminal or not, out-of-order delivery)
-        // must NOT mutate the row's status/timestamps. Previously the guard
-        // only rejected non-terminal downgrades, leaving a subtle drift: a
-        // duplicate terminal webhook would re-write endedAt + recompute
-        // durationSeconds from a later evt.timestamp, inflating the duration
-        // by however long Meta's redelivery lagged. Now we fully no-op on an
-        // already-terminal row — `alreadyTerminal` separately suppresses the
-        // side-effect publishes below, so this is a complete no-op.
-        if (alreadyTerminal) {
-          callRow = { id: existing.id, status: existing.status };
-        } else {
-          // Compute durationSeconds at the terminal transition. answeredAt
-          // is null on calls that never reached in_progress (missed /
-          // rejected pre-answer), and we leave duration null in that case.
-          const isTerminal = TERMINAL_STATUSES.has(targetStatus);
-          const durationSeconds =
-            isTerminal && existing.answeredAt
+
+      // ── Resolve the REAL answer state (channel-agnostic) ──────────────────
+      // answeredAt comes from the provider's connected signal — for Meta that's
+      // the terminate's `start_time` (evt.connectedAt), the actual pickup. We no
+      // longer fabricate it from the media-setup `connect`, which fired ~1s after
+      // dialing (before the human answered) and made every declined call look
+      // connected. Inbound calls already carry answeredAt from the agent's
+      // answerCall, so either source means the call genuinely connected.
+      const priorAnsweredAt = existing?.answeredAt ?? null;
+      const answeredAt = priorAnsweredAt ?? evt.connectedAt ?? null;
+      const isTerminalPhase = TERMINAL_STATUSES.has(targetStatus);
+      // The parser classifies a terminate as completed/missed from the connected
+      // signal; correct the inbound case where the agent answered but the
+      // provider omitted a duration (answeredAt is set ⇒ it completed). Never the
+      // reverse — a parser "completed" already required real evidence.
+      const effectiveStatus =
+        targetStatus === CallStatus.missed && answeredAt
+          ? CallStatus.completed
+          : targetStatus;
+      // Authoritative talk-time for a connected call: prefer the provider's own
+      // end-of-call duration (Meta `terminate.duration`), else derive from the
+      // real pickup. Non-connected terminals carry null.
+      const terminalDurationSeconds =
+        isTerminalPhase && effectiveStatus === CallStatus.completed
+          ? evt.durationSeconds ??
+            (answeredAt
               ? Math.max(
                   0,
                   Math.floor(
-                    (evt.timestamp.getTime() - existing.answeredAt.getTime()) /
-                      1000,
+                    (evt.timestamp.getTime() - answeredAt.getTime()) / 1000,
                   ),
                 )
-              : null;
+              : null)
+          : null;
+
+      if (existing) {
+        // Terminal-state guard. If the row already landed in a terminal
+        // state, ANY later webhook (terminal or not, out-of-order delivery)
+        // must NOT mutate the row's status/timestamps — `alreadyTerminal` also
+        // suppresses the side-effect publishes below, so this is a complete
+        // no-op against Meta's at-least-once redelivery.
+        if (alreadyTerminal) {
+          callRow = { id: existing.id, status: existing.status };
+        } else {
           callRow = await tx.call.update({
             where: { id: existing.id },
             data: {
-              status: targetStatus,
-              // answeredAt is set-once: only on the first in_progress
-              // transition. A later out-of-order in_progress webhook (e.g.
-              // arriving after `completed` was already overlaid by a
-              // subsequent retry) must not re-stamp it. The alreadyTerminal
-              // branch above covers the harder case; this guard covers the
-              // ringing→in_progress→in_progress retry case where the row
-              // hasn't yet terminalized.
-              ...(targetStatus === CallStatus.in_progress && !existing.answeredAt
-                ? { answeredAt: evt.timestamp }
+              status: effectiveStatus,
+              // answeredAt is set-once, stamped from the provider's REAL pickup
+              // time (evt.connectedAt). Never from the media-setup connect.
+              ...(!existing.answeredAt && evt.connectedAt
+                ? { answeredAt: evt.connectedAt }
                 : {}),
-              ...(isTerminal ? { endedAt: evt.timestamp, durationSeconds } : {}),
+              ...(isTerminalPhase
+                ? {
+                    endedAt: evt.timestamp,
+                    durationSeconds: terminalDurationSeconds,
+                  }
+                : {}),
               rawPayload: evt.rawPayload as Prisma.InputJsonValue,
             },
             select: { id: true, status: true },
@@ -240,7 +260,6 @@ export async function ingestCallEvent(
         // INSERT path — first webhook for this call id.
         const direction: CallDirection =
           evt.direction === "in" ? CallDirection.in : CallDirection.out;
-        const isTerminalFirstWebhook = TERMINAL_STATUSES.has(targetStatus);
         callRow = await tx.call.create({
           data: {
             teamId,
@@ -248,15 +267,15 @@ export async function ingestCallEvent(
             externalCallId: evt.externalCallId,
             channel,
             direction,
-            status: targetStatus,
+            status: effectiveStatus,
             ringingAt: evt.timestamp,
-            // A terminal-on-first-webhook call never reached in_progress (no
-            // answeredAt to subtract from), so durationSeconds stays NULL — not
-            // 0. Leaving it null keeps the row consistent with both the UPDATE
-            // path (which computes null when answeredAt is null) and the
-            // call.ended event published below (which also resolves to null on a
-            // first insert). Writing 0 here drifted the row from its own event.
-            ...(isTerminalFirstWebhook ? { endedAt: evt.timestamp } : {}),
+            // A terminal-on-first-webhook call (we missed the ringing/connect
+            // legs): stamp answeredAt + duration from the provider's connected
+            // signal when present, else leave null (never answered).
+            ...(evt.connectedAt ? { answeredAt: evt.connectedAt } : {}),
+            ...(isTerminalPhase
+              ? { endedAt: evt.timestamp, durationSeconds: terminalDurationSeconds }
+              : {}),
             rawPayload: evt.rawPayload as Prisma.InputJsonValue,
           },
           select: { id: true, status: true },
@@ -356,8 +375,13 @@ export async function ingestCallEvent(
       // no-op for side effects (the row UPDATE above is idempotent). Inserts
       // (isFirstInsert) are never alreadyTerminal, so a terminal-on-first-
       // webhook call still fires its event exactly once.
-      if (!alreadyTerminal) {
-        if (evt.phase === "completed") {
+      // Key the terminal events off the CORRECTED status (effectiveStatus), not
+      // the raw parser phase — an outbound no-answer now resolves to `missed`
+      // (so the counter fires) and an answered call to `completed` (carrying the
+      // provider's authoritative duration). Only fires on a real non-terminal→
+      // terminal transition (alreadyTerminal already excluded above).
+      if (!alreadyTerminal && isTerminalPhase) {
+        if (effectiveStatus === CallStatus.completed) {
           await publishInTx(tx, {
             type: "call.ended",
             teamId,
@@ -365,23 +389,20 @@ export async function ingestCallEvent(
             callId: callRow.id,
             direction: evt.direction,
             endedAt: evt.timestamp.toISOString(),
-            // Carry the duration computed on the row UPDATE above (endedAt -
-            // answeredAt) instead of null, so a customer-hangup call shows its
-            // real length in the timeline/partner payload. Null only when the
-            // call never reached in_progress (no answeredAt to subtract from).
-            durationSeconds:
-              existing?.answeredAt
-                ? Math.max(
-                    0,
-                    Math.floor(
-                      (evt.timestamp.getTime() - existing.answeredAt.getTime()) /
-                        1000,
-                    ),
-                  )
-                : null,
+            // The authoritative talk-time computed above (provider duration, or
+            // endedAt − real pickup). Drives the "Call · 1:23" timeline pill.
+            durationSeconds: terminalDurationSeconds,
             reason: "hangup_by_customer",
           });
-        } else if (evt.phase === "missed") {
+          // A connected call resets the consecutive-unanswered counter (the
+          // mirror of Meta's auto-revocation after 4 unanswered outbound calls).
+          if (evt.direction === "out") {
+            await tx.contact.update({
+              where: { id: contact.id },
+              data: { consecutiveUnansweredOutCalls: 0 },
+            });
+          }
+        } else if (effectiveStatus === CallStatus.missed) {
           await publishInTx(tx, {
             type: "call.missed",
             teamId,
@@ -389,14 +410,16 @@ export async function ingestCallEvent(
             callId: callRow.id,
             ringingAt: evt.timestamp.toISOString(),
           });
-          // Unanswered outbound — mirror Meta's auto-revocation counter.
+          // Unanswered outbound — increment Meta's auto-revocation mirror. This
+          // now actually fires: Meta reports unanswered business-initiated calls
+          // as terminate/COMPLETED-without-duration, which we map to `missed`.
           if (evt.direction === "out") {
             await tx.contact.update({
               where: { id: contact.id },
               data: { consecutiveUnansweredOutCalls: { increment: 1 } },
             });
           }
-        } else if (evt.phase === "rejected") {
+        } else if (effectiveStatus === CallStatus.rejected) {
           await publishInTx(tx, {
             type: "call.rejected",
             teamId,
@@ -405,7 +428,7 @@ export async function ingestCallEvent(
             rejectedByUserId: null,
             endedAt: evt.timestamp.toISOString(),
           });
-        } else if (evt.phase === "failed") {
+        } else if (effectiveStatus === CallStatus.failed) {
           await publishInTx(tx, {
             type: "call.failed",
             teamId,
@@ -413,15 +436,6 @@ export async function ingestCallEvent(
             callId: callRow.id,
             reason: "provider_error",
             endedAt: evt.timestamp.toISOString(),
-          });
-        }
-
-        // Reset the unanswered counter on any successful completion. The
-        // counter is "consecutive" — a single answered call resets it.
-        if (evt.phase === "completed" && evt.direction === "out") {
-          await tx.contact.update({
-            where: { id: contact.id },
-            data: { consecutiveUnansweredOutCalls: 0 },
           });
         }
       }

@@ -187,6 +187,18 @@ interface MetaCall {
   status?: string;
   /** SDP payload for setup. */
   session?: { sdp_type?: string; sdp?: string };
+  /**
+   * Terminal-only timing. Meta includes these on the `terminate` webhook ONLY
+   * when the call actually connected (verified live 2026-06-02):
+   *   start_time — epoch seconds of REAL customer pickup
+   *   end_time   — epoch seconds the call ended
+   *   duration   — connected talk-time in seconds
+   * Their PRESENCE is the reliable "was this answered?" signal — a declined /
+   * no-answer call terminates as status:COMPLETED with NONE of these set.
+   */
+  duration?: number;
+  start_time?: string | number;
+  end_time?: string | number;
 }
 
 interface MetaStatus {
@@ -291,22 +303,23 @@ function mapMetaCallPhase(
   event: string | undefined,
   direction: "in" | "out",
   status: string | undefined,
+  /** True when the terminate webhook carried start_time/duration → the call
+   *  actually connected. The ONLY reliable "was answered" evidence Meta gives
+   *  for business-initiated calls (status is COMPLETED for declines too). */
+  hasConnectedSignal: boolean,
 ): NormalizedCallEvent["phase"] | null {
   switch (event) {
     case "connect":
-      // Inbound: customer ringing us. Outbound: customer picked up.
-      return direction === "in" ? "incoming" : "answered";
+      // Inbound: the customer is ringing us → "incoming".
+      // Outbound: this is the Cloud-API media-server SDP answer establishing
+      // our media leg — it arrives ~1s after we place the call, BEFORE the
+      // human picks up (verified live 2026-06-02). So it's "connecting", NOT
+      // answered: the browser uses the SDP to negotiate media, but the call
+      // stays ringing until a real pickup is observed at terminate.
+      return direction === "in" ? "incoming" : "connecting";
     case "terminate":
       // Top-level `status` carries the reason (UPPERCASE in live payloads).
       switch (status?.toUpperCase()) {
-        case "COMPLETED":
-        case "ACCEPTED":
-          return "completed";
-        case "MISSED":
-        case "NO_ANSWER":
-        case "TIMEOUT":
-        case "EXPIRED":
-          return "missed";
         case "REJECTED":
         case "DECLINED":
         case "BUSY":
@@ -315,11 +328,15 @@ function mapMetaCallPhase(
         case "ERROR":
           return "failed";
         default:
-          // An unknown terminate reason — log + treat as completed rather
-          // than failed. Most "unknown" terminates we've seen are normal
-          // hangups Meta hasn't documented a string for, and marking them
-          // as `failed` is worse UX than marking them `completed`.
-          return "completed";
+          // COMPLETED / MISSED / ACCEPTED / unknown all collapse here: Meta
+          // reports unanswered business-initiated calls as status:COMPLETED,
+          // so the status string can't tell answered from not. The presence of
+          // a real call duration (start_time/duration) is the discriminator —
+          // present ⇒ connected ⇒ "completed"; absent ⇒ never answered ⇒
+          // "missed". Ingest further corrects via the row's own answeredAt
+          // (e.g. an inbound the agent accepted), so a missing-duration edge on
+          // an answered call still resolves correctly there.
+          return hasConnectedSignal ? "completed" : "missed";
       }
     case "permission_granted":
       return "permission_granted";
@@ -357,7 +374,23 @@ function parseMetaCall(
   const phone = rawPhone ? rawPhone.replace(/\D/g, "") : undefined;
   if (!phone) return null;
 
-  const phase = mapMetaCallPhase(c.event, direction, c.status);
+  // Connected-call evidence. Meta puts `start_time` (epoch s, REAL pickup) +
+  // `duration` (talk seconds) on the terminate webhook ONLY for calls that
+  // actually connected — they're absent on a decline / no-answer. This is the
+  // channel-agnostic "was answered" signal carried through as connectedAt /
+  // durationSeconds. (Both `start_time` and `end_time` arrive as numeric
+  // strings; `duration` as a number.)
+  const startSecs = c.start_time != null ? Number(c.start_time) : NaN;
+  const connectedAt = Number.isFinite(startSecs)
+    ? new Date(startSecs * 1000)
+    : undefined;
+  const durationSeconds =
+    typeof c.duration === "number" && Number.isFinite(c.duration)
+      ? c.duration
+      : undefined;
+  const hasConnectedSignal = connectedAt !== undefined || durationSeconds !== undefined;
+
+  const phase = mapMetaCallPhase(c.event, direction, c.status, hasConnectedSignal);
   if (!phase) return null;
 
   const tsSecs = c.timestamp ? Number(c.timestamp) : NaN;
@@ -387,6 +420,8 @@ function parseMetaCall(
     direction,
     phase,
     ...(sdp ? { sdp } : {}),
+    ...(connectedAt !== undefined ? { connectedAt } : {}),
+    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
     timestamp: ts,
     rawPayload,
   };

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { initials } from "@ccp/shared/utils";
 import { getClientSocket } from "@/lib/socket-client";
+import { notificationSound } from "@/lib/notifications/notification-sound";
 
 /**
  * Team-wide incoming-call toast. Subscribes to `call:incoming` (team-room)
@@ -47,6 +48,7 @@ export function IncomingCallToast({
     const timers = expiryTimers.current;
 
     const drop = (callId: string) => {
+      notificationSound.stopCallRing(callId);
       setCalls((prev) => prev.filter((c) => c.callId !== callId));
       const t = timers.get(callId);
       if (t) {
@@ -79,6 +81,10 @@ export function IncomingCallToast({
           setTimeout(() => drop(payload.callId), RING_EXPIRY_MS),
         );
       }
+      // Audible ring (if call sounds are on). Ref-counted by callId in the
+      // engine — simultaneous calls share one ring; stopped in drop() (which
+      // covers answered / ended / 60s-expiry) and in the effect cleanup.
+      notificationSound.startCallRing(payload.callId);
     };
 
     const onAnswered = (payload: { callId: string }) => drop(payload.callId);
@@ -93,6 +99,7 @@ export function IncomingCallToast({
       socket.off("call:ended", onEnded);
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
+      notificationSound.stopAllCallRings();
     };
   }, []);
 

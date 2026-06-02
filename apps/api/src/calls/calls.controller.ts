@@ -153,6 +153,26 @@ export class CallsController {
     return this.calls.rejectCall(session, callId, body.reason);
   }
 
+  /**
+   * Mark an OUTBOUND call connected — the originating agent's browser calls
+   * this the instant it detects real two-way audio (the customer picked up).
+   * It's the ONLY live pickup signal for business-initiated calls: Meta's
+   * `connect` webhook is just media setup (pre-pickup) and the authoritative
+   * start_time/duration arrive only at terminate. Stamps answeredAt + flips to
+   * in_progress so a later agent hangup is recorded as a real (completed) call
+   * and the connected-call accounting is correct. `calls:make` — outbound agent.
+   */
+  @Post("api/calls/:callId/connected")
+  @HttpCode(200)
+  @RequireCapability("calls:make")
+  async connected(
+    @CurrentSession() session: ApiSession,
+    @Param("callId") callId: string,
+    @Body(zBody(EndCallSchema)) _body: EndCallInput,
+  ) {
+    return this.calls.markConnected(session, callId);
+  }
+
   @Post("api/calls/:callId/end")
   @HttpCode(200)
   async end(

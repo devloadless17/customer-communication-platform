@@ -65,7 +65,7 @@ function callReasonMessage(reason: string): string {
     case "permission_revoked":
       return "Calling permission was revoked. Wait for the customer to message you first.";
     case "rate_limited":
-      return "WhatsApp is rate-limiting calls to this customer. Try again in a few minutes.";
+      return "WhatsApp limits how often you can request call permission from this customer (roughly once a day). Wait for them to accept the request or message you first.";
     case "daily_cap_reached":
       return "Daily limit reached: 5 connected calls per customer per 24 hours.";
     case "provider_not_configured":

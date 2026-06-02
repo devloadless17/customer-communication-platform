@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { AppRail } from "@/components/layouts/app-rail";
 import { ChunkErrorReload } from "@/components/chunk-error-reload";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
+import { NotificationSoundProvider } from "@/providers/notification-sound-provider";
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
 
@@ -64,15 +65,20 @@ export default async function AppShellLayout({
           below them. Inbox/team-chat already self-bound with their own h-svh
           islands, so they're unaffected. Popovers/toasts portal to body, so
           overflow-hidden here doesn't clip overlays. */}
-      <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
-        <AppRail
-          currentUser={user}
-          team={{ id: team.id, name: team.name }}
-          canManageAvailability={permissions["availability:manage"]}
-          initialCollapsed={railCollapsed}
-        />
-        <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
-      </div>
+      {/* App-wide notification sounds (new-message ding + the engine that the
+          inbox call toast rings through). Wraps AppRail so the user-menu sound
+          toggles can read its context. */}
+      <NotificationSoundProvider>
+        <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
+          <AppRail
+            currentUser={user}
+            team={{ id: team.id, name: team.name }}
+            canManageAvailability={permissions["availability:manage"]}
+            initialCollapsed={railCollapsed}
+          />
+          <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
+        </div>
+      </NotificationSoundProvider>
     </CatalogSyncBoundary>
   );
 }

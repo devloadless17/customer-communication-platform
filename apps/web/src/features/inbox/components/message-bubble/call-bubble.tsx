@@ -54,16 +54,20 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
       tone = "danger";
       break;
     case "completed":
-    default:
-      // A "completed" OUTBOUND call that never connected (answeredAt null) reads
-      // as "Customer didn't answer", not a neutral "Outgoing call". This catches
-      // the paths the server can't pre-label as `missed`: Meta's unknown-
-      // terminate-reason fallback maps to `completed`, and a terminal-first
-      // webhook can land `completed` with no answeredAt. (Agent-cancel-before-
-      // pickup is already published as `missed` by endCall.)
-      if (!isInbound && call.answeredAt === null) {
-        Icon = PhoneOutgoing;
-        label = "Customer didn't answer";
+    default: {
+      // "Connected" = a real two-way call actually happened. answeredAt is the
+      // primary signal (the server stamps it from the provider's real pickup
+      // time — Meta's terminate `start_time`). durationSeconds>0 is the backstop
+      // for the live socket path, where the `call:ended` frame carries the real
+      // duration but not answeredAt. A terminal "completed" with NEITHER means
+      // nobody picked up — Meta reports unanswered business-initiated calls as
+      // status:COMPLETED, so a completed row is NOT proof of a connection.
+      const connected =
+        call.answeredAt !== null ||
+        (call.durationSeconds !== null && call.durationSeconds > 0);
+      if (!connected) {
+        Icon = isInbound ? PhoneMissed : PhoneOutgoing;
+        label = isInbound ? "Missed call from customer" : "Customer didn't answer";
         tone = "warn";
       } else {
         // Direction-aware icon pair for clarity at-a-glance: inbound arrow vs
@@ -73,6 +77,7 @@ export function CallBubble({ call }: { call: CallSnapshot }) {
         tone = "neutral";
       }
       break;
+    }
   }
 
   const tones = {
