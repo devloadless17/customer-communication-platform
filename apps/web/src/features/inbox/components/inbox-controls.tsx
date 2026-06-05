@@ -14,4 +14,7 @@ export type PresetFilterId = "active" | "all" | "mine" | "unassigned" | "closed"
  */
 export type Filter =
   | { kind: "preset"; id: PresetFilterId }
-  | { kind: "stage"; stageId: string };
+  | { kind: "stage"; stageId: string }
+  // The "Calls" view — a team-wide call-history list rendered inside the inbox
+  // content area (not a separate route), so it behaves like the other filters.
+  | { kind: "calls" };

@@ -41,6 +41,7 @@ import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
+import { CallsHistory } from "@/app/(app)/calls/calls-history";
 import { useCallApi } from "@/features/calls/call-provider";
 import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
 import { toast } from "@/lib/toast";
@@ -209,7 +210,7 @@ export function InboxShell({
   // Filter lives in the layout-level InboxFilterProvider so it's shared with
   // the sub-sidebar (which now renders in /inbox/layout.tsx and owns the
   // setter). Read-only here — the conversation list + live hook consume it.
-  const { filter } = useInboxFilter();
+  const { filter, setFilter } = useInboxFilter();
   const [search, setSearch] = useState("");
 
   // -----------------------------------------------------------------
@@ -432,6 +433,39 @@ export function InboxShell({
     },
     [cache, fetchThread],
   );
+
+  // ── Calls view ⇄ thread reconciliation ────────────────────────────────
+  // The calls filter replaces the list + thread with the calls history. Two
+  // edges so a thread is never hijacked by (or stranded behind) it:
+  //   1. Opening a conversation (deep-link ?c= / "Open chat" from a call row)
+  //      while the persisted filter is calls → switch to the default list
+  //      filter so the thread shows. Keyed on the requested id (re-fires on a
+  //      soft-nav to a new ?c=); reads `filter` via ref so clicking the Calls
+  //      filter afterwards doesn't bounce straight back out.
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
+  useEffect(() => {
+    if (initialActiveConversationId && filterRef.current.kind === "calls") {
+      setFilter({ kind: "preset", id: "active" });
+    }
+  }, [initialActiveConversationId, setFilter]);
+  //   2. Switching TO the calls filter at runtime clears any open thread + its
+  //      ?c= so the view is clean and a refresh stays on Calls (not bounced
+  //      back into the thread by (1)). Skips the first effect run (mount) —
+  //      that case is owned by (1).
+  const callsStripArmedRef = useRef(false);
+  useEffect(() => {
+    if (!callsStripArmedRef.current) {
+      callsStripArmedRef.current = true;
+      return;
+    }
+    if (filter.kind !== "calls") return;
+    setActiveId(null);
+    setDisplayedId(null);
+    if (typeof window !== "undefined" && window.location.search) {
+      window.history.replaceState(null, "", "/inbox");
+    }
+  }, [filter.kind]);
 
   // ---------------------------------------------------------------
   // Global-search result handlers.
@@ -934,6 +968,18 @@ export function InboxShell({
       <div className="relative flex h-svh w-full overflow-hidden bg-background text-foreground">
         <ConnectionBanner />
         <div className="flex min-w-0 flex-1 overflow-hidden">
+          {filter.kind === "calls" ? (
+            // Calls view — team-wide call history rendered INSIDE the inbox
+            // ("Calls must stay in the inbox like others"). Replaces the
+            // list + thread panes; the sub-sidebar stays so switching back to
+            // Active/etc. is one click. Same component the /calls route uses.
+            <div className="min-w-0 flex-1 overflow-y-auto bg-background">
+              <div className="mx-auto max-w-3xl px-6 py-6">
+                <CallsHistory canCall={canMakeCalls} />
+              </div>
+            </div>
+          ) : (
+            <>
           {/* Mobile: ConversationList takes full width when no thread is
               active; hidden when a thread is open. Desktop: always visible
               as a fixed-width column. */}
@@ -1028,6 +1074,8 @@ export function InboxShell({
               <EmptyInboxState />
             )}
           </main>
+            </>
+          )}
         </div>
         <DevTools conversations={live.conversations} currentUser={currentUser} />
         {/* The incoming-call toast + active-call panel are now app-wide (see

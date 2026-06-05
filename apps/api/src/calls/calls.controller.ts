@@ -120,6 +120,16 @@ export class CallsController {
     });
   }
 
+  /**
+   * Live-calls count for the inbox "Calls" badge — how many calls are ringing
+   * or in progress team-wide right now. Fixed sub-path of /api/calls (declared
+   * before the `:callId` routes so it isn't matched as an id).
+   */
+  @Get("api/calls/live-count")
+  async liveCount(@CurrentSession() session: ApiSession) {
+    return this.calls.liveCount(session);
+  }
+
   // --- Admin -----------------------------------------------------------------
 
   /**

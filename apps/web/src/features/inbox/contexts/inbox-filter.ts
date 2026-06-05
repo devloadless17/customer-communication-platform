@@ -35,7 +35,8 @@ const VALID_PRESETS: ReadonlySet<PresetFilterId> = new Set([
  */
 export function serializeInboxFilter(filter: Filter): string {
   if (filter.kind === "preset") return `p:${filter.id}`;
-  return `s:${filter.stageId}`;
+  if (filter.kind === "stage") return `s:${filter.stageId}`;
+  return "c"; // calls view
 }
 
 /**
@@ -46,6 +47,7 @@ export function serializeInboxFilter(filter: Filter): string {
  */
 export function parseInboxFilter(raw: string | undefined): Filter | null {
   if (!raw) return null;
+  if (raw === "c") return { kind: "calls" };
   if (raw.startsWith("p:")) {
     const id = raw.slice(2);
     if (VALID_PRESETS.has(id as PresetFilterId)) {

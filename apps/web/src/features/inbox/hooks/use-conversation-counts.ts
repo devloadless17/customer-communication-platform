@@ -49,6 +49,15 @@ export interface ConversationCounts {
   unassigned: number;
   closed: number;
   byStage: Record<string, number>;
+  /** Per-bucket count of conversations with unread messages (unreadCount>0) —
+   *  drives the green unread pills on the sub-sidebar filters. */
+  unread: {
+    active: number;
+    all: number;
+    mine: number;
+    unassigned: number;
+    closed: number;
+  };
 }
 
 export function useConversationCounts(): ConversationCounts | null {
@@ -143,10 +152,13 @@ export function useConversationCounts(): ConversationCounts | null {
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (
       payload,
     ) => {
-      // Only refetch when a brand-new conversation lands — otherwise the
-      // bucket sizes don't change, and refetching on every inbound would
-      // be wasteful on a busy team.
-      if (payload.newConversation) void refresh();
+      // Refetch on a brand-new conversation (changes bucket sizes) OR an
+      // INBOUND message (bumps a conversation's unreadCount → moves the green
+      // unread pill). Outbound changes neither. Coalesced, so an inbound burst
+      // still fires few GETs.
+      if (payload.newConversation || payload.message.direction === "in") {
+        void refresh();
+      }
     };
 
     // Bulk contact mutation. Only stage (and the mixed bucket that may
@@ -209,6 +221,8 @@ export function useConversationCounts(): ConversationCounts | null {
     socket.on("conversation:assigned", triggerSkipOptimistic);
     socket.on("conversation:status", triggerSkipOptimistic);
     socket.on("conversation:deleted", trigger);
+    // A thread marked read clears its unreadCount → recompute the unread pills.
+    socket.on("conversation:read", trigger);
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onBulkUpdated);
     socket.on("message:new", onMessageNew);
@@ -220,6 +234,7 @@ export function useConversationCounts(): ConversationCounts | null {
       socket.off("conversation:assigned", triggerSkipOptimistic);
       socket.off("conversation:status", triggerSkipOptimistic);
       socket.off("conversation:deleted", trigger);
+      socket.off("conversation:read", trigger);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onBulkUpdated);
       socket.off("message:new", onMessageNew);

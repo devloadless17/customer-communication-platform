@@ -617,6 +617,40 @@ function MessageThreadImpl({
     }, 1500);
   }, []);
 
+  // Jump-to-note from the contact panel's Notes tab. Notes ride the timeline
+  // with data-entry-kind="note" + data-entry-id=<noteId>. Scroll + flash if
+  // rendered; if the note predates the loaded window, pull older pages (bounded)
+  // until it appears, then scroll. Fires via a window CustomEvent because the
+  // panel + thread are siblings (mirrors the `ccp:contact-stage-delta` pattern).
+  useEffect(() => {
+    const onJumpNote = (e: Event) => {
+      const detail = (e as CustomEvent<{ conversationId: string; noteId: string }>)
+        .detail;
+      if (!detail || detail.conversationId !== conversation.id) return;
+      const tryScroll = (depth: number) => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-entry-kind="note"][data-entry-id="${detail.noteId}"]`,
+        );
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
+          window.setTimeout(
+            () => el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2"),
+            1500,
+          );
+          return;
+        }
+        if (depth >= 8) return; // give up — note is very deep in history
+        void loadOlder().then((added) => {
+          if (added > 0) window.setTimeout(() => tryScroll(depth + 1), 140);
+        });
+      };
+      tryScroll(0);
+    };
+    window.addEventListener("ccp:jump-to-note", onJumpNote);
+    return () => window.removeEventListener("ccp:jump-to-note", onJumpNote);
+  }, [conversation.id, loadOlder]);
+
   // Scroll refs (also consumed by useChatScroll further down). Declared up
   // here so the search-jump helper below can install its settle-window
   // ResizeObserver + media-load listeners against the same content + viewport

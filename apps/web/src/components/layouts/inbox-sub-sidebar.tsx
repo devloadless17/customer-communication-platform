@@ -1,8 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import {
   AtSign,
   CheckCircle2,
@@ -29,6 +27,7 @@ import type {
   PresetFilterId,
 } from "@/features/inbox/components/inbox-controls";
 import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
+import { useLiveCalls } from "@/features/calls/hooks/use-live-calls";
 
 import { SubSidebar, SubSidebarSection } from "./sub-sidebar";
 
@@ -81,8 +80,6 @@ export function InboxSubSidebar({
 }) {
   const [stagesOpen, setStagesOpen] = useState(filter.kind === "stage");
   const [teammatesOpen, setTeammatesOpen] = useState(true);
-  const pathname = usePathname() ?? "";
-  const onCallsPage = pathname.startsWith("/calls");
 
   // Self first, then the rest alphabetically — matches the old app-sidebar
   // ordering so it's obvious which row is "you".
@@ -100,28 +97,30 @@ export function InboxSubSidebar({
   // paginated inbox list has currently loaded. Null on first paint —
   // we fall back to the loaded-slice count below until the GET lands.
   const serverCounts = useConversationCounts();
+  const liveCalls = useLiveCalls();
 
-  const presetCounts = useMemo(() => {
-    if (serverCounts) {
-      return {
-        active: serverCounts.active,
-        all: serverCounts.all,
-        mine: serverCounts.mine,
-        unassigned: serverCounts.unassigned,
-        closed: serverCounts.closed,
-      } satisfies Record<PresetFilterId, number>;
-    }
-    // First-paint fallback: derive from the loaded slice. Visually correct
-    // (numbers appear immediately) and converges to truth on the first
-    // useConversationCounts response.
+  // Per-bucket UNREAD counts (conversations with unread messages). Server truth
+  // when loaded, else derived from the loaded slice for first paint. These drive
+  // the filter badges now — a green unread pill styled like the conversation-row
+  // badge (request: surface unread on the filters), no separate total count.
+  const unreadCounts = useMemo<Record<PresetFilterId, number>>(() => {
+    // `?.unread` (not just `serverCounts`): a counts response from before this
+    // field shipped (cached, or a version-skewed server mid-deploy) has no
+    // `unread` — fall back to the loaded-slice derivation instead of crashing.
+    if (serverCounts?.unread) return serverCounts.unread;
     const c = conversations.map((x) => x.conversation);
+    const u = (x: (typeof c)[number]) => x.unreadCount > 0;
     return {
-      active: c.filter((x) => x.status !== "closed").length,
-      all: c.length,
-      mine: c.filter((x) => x.assignedUserId === currentUser.id && x.status !== "closed").length,
-      unassigned: c.filter((x) => x.assignedUserId === null && x.status !== "closed").length,
-      closed: c.filter((x) => x.status === "closed").length,
-    } satisfies Record<PresetFilterId, number>;
+      active: c.filter((x) => x.status !== "closed" && u(x)).length,
+      all: c.filter(u).length,
+      mine: c.filter(
+        (x) => x.status !== "closed" && x.assignedUserId === currentUser.id && u(x),
+      ).length,
+      unassigned: c.filter(
+        (x) => x.status !== "closed" && x.assignedUserId === null && u(x),
+      ).length,
+      closed: c.filter((x) => x.status === "closed" && u(x)).length,
+    };
   }, [serverCounts, conversations, currentUser.id]);
 
   const stageCounts = useMemo(() => {
@@ -145,7 +144,7 @@ export function InboxSubSidebar({
       <SubSidebarSection>
         {PRESETS.map(({ id, label, icon: Icon }) => {
           const active = filter.kind === "preset" && filter.id === id;
-          const count = presetCounts[id];
+          const unread = unreadCounts[id];
           return (
             <button
               key={id}
@@ -166,27 +165,27 @@ export function InboxSubSidebar({
                 )}
               />
               <span className="flex-1 text-left">{label}</span>
-              {count > 0 && (
+              {unread > 0 && (
                 <span
-                  className={cn(
-                    "tabular-nums text-[10px]",
-                    active ? "text-foreground" : "text-muted-foreground",
-                  )}
+                  className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold tabular-nums text-primary-foreground"
+                  title={`${unread} unread`}
                 >
-                  {count}
+                  {unread > 99 ? "99+" : unread}
                 </span>
               )}
             </button>
           );
         })}
-        {/* Calls history — a separate page (not a list filter), so it's a Link
-            rather than an onFilterChange button. Sits right under Closed. */}
-        <Link
-          href="/calls"
+        {/* Calls — team-wide call history rendered INSIDE the inbox content
+            area (not a route), so it behaves like the other filters. Sits
+            right under Closed. The live-calls count badge rides on the right. */}
+        <button
+          type="button"
+          onClick={() => onFilterChange({ kind: "calls" })}
           className={cn(
             "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
             "hover:bg-accent hover:text-accent-foreground",
-            onCallsPage
+            filter.kind === "calls"
               ? "bg-accent text-accent-foreground font-medium"
               : "text-muted-foreground",
           )}
@@ -194,13 +193,21 @@ export function InboxSubSidebar({
           <Phone
             className={cn(
               "size-4 shrink-0",
-              onCallsPage
+              filter.kind === "calls"
                 ? "text-primary"
                 : "text-muted-foreground group-hover:text-foreground",
             )}
           />
           <span className="flex-1 text-left">Calls</span>
-        </Link>
+          {liveCalls > 0 && (
+            <span
+              className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold tabular-nums text-white"
+              title={`${liveCalls} call${liveCalls === 1 ? "" : "s"} in progress`}
+            >
+              {liveCalls > 99 ? "99+" : liveCalls}
+            </span>
+          )}
+        </button>
       </SubSidebarSection>
 
       <div className="mt-3">

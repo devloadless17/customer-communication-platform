@@ -1011,6 +1011,8 @@ function ContactPanelImpl({
           <AttachmentGallery
             conversationId={conversation.id}
             onGoToMessage={onGoToMessage}
+            notes={notes}
+            teamMembers={teamMembers}
           />
         </ScrollArea>
       ) : (

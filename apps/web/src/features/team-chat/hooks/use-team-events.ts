@@ -25,9 +25,10 @@ function filterParams(filter: Filter | undefined): URLSearchParams {
   if (!filter) return p;
   if (filter.kind === "preset") {
     p.set("filter", filter.id);
-  } else {
+  } else if (filter.kind === "stage") {
     p.set("stageId", filter.stageId);
   }
+  // calls view: no conversation-list filter params (the list is hidden).
   return p;
 }
 
@@ -52,6 +53,8 @@ export function rowMatchesFilterFor(
     // Stage is contact-lifecycle, orthogonal to chat status (closed included).
     return row.contact.stageId === filter.stageId;
   }
+  // Calls view replaces the conversation list — no conversation belongs to it.
+  if (filter.kind === "calls") return false;
   if (filter.id === "all") return true; // truly everything, closed included
   if (filter.id === "closed") return row.conversation.status === "closed";
   if (row.conversation.status === "closed") return false;
@@ -253,7 +256,9 @@ export function useTeamEvents(
   const filterKey = filter
     ? filter.kind === "preset"
       ? `p:${filter.id}`
-      : `s:${filter.stageId}`
+      : filter.kind === "stage"
+        ? `s:${filter.stageId}`
+        : "calls"
     : "p:all";
   const lastFilterKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -575,7 +580,9 @@ export function useTeamEvents(
               ? true
               : f.kind === "stage"
                 ? newConversation.contact.stageId === f.stageId
-                : f.id === "all"
+                : f.kind === "calls"
+                  ? false
+                  : f.id === "all"
                   ? true
                   : f.id === "closed"
                     ? newConversation.conversation.status === "closed"
@@ -691,7 +698,7 @@ export function useTeamEvents(
         // matches the filter.
         const f = filterRef.current;
         const stillMatches =
-          !f || f.kind === "stage"
+          !f || f.kind === "stage" || f.kind === "calls"
             ? true
             : f.id === "mine"
               ? nextAssignedUserId === currentUserId
@@ -765,7 +772,7 @@ export function useTeamEvents(
         const stillMatches =
           !f
             ? true
-            : f.kind === "stage"
+            : f.kind === "stage" || f.kind === "calls"
               ? true
               : f.id === "all"
                 ? true

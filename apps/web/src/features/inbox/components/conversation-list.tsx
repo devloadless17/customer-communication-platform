@@ -103,7 +103,11 @@ function ConversationListImpl({
   // The reducer key is the filter's discriminated shape; stage filter id
   // and preset id both feed the comparison.
   const filterKey =
-    filter.kind === "preset" ? `p:${filter.id}` : `s:${filter.stageId}`;
+    filter.kind === "preset"
+      ? `p:${filter.id}`
+      : filter.kind === "stage"
+        ? `s:${filter.stageId}`
+        : "calls";
   useEffect(() => {
     setSelectedIds(new Set());
   }, [filterKey]);
@@ -180,6 +184,9 @@ function ConversationListImpl({
     if (filter.kind === "preset") {
       return PRESET_LABELS[filter.id];
     }
+    // The list isn't rendered for the calls view (the shell swaps in the
+    // calls history), but keep the union exhaustive for the type checker.
+    if (filter.kind === "calls") return "Calls";
     const stage = stages.find((s) => s.id === filter.stageId);
     return stage ? `Stage · ${stage.name}` : "Stage";
   }, [filter, stages]);

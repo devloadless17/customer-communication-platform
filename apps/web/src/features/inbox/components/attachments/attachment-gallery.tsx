@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { FileText, Film, Loader2, Music, Paperclip } from "lucide-react";
+import { FileText, Film, Loader2, Music, Paperclip, StickyNote } from "lucide-react";
 
 import {
   type AttachmentKind,
@@ -10,16 +10,18 @@ import {
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { openAttachment } from "@/features/inbox/lib/open-attachment";
 import { cn } from "@ccp/shared/utils";
-import type { Message } from "@ccp/shared/types";
+import { LocalTime } from "@/components/local-time";
+import type { InternalNote, Message, User } from "@ccp/shared/types";
 
 import { MediaLightbox } from "./media-lightbox";
 
-const KIND_CHIPS: Array<{ id: AttachmentKind | "all"; label: string }> = [
+const KIND_CHIPS: Array<{ id: AttachmentKind | "all" | "notes"; label: string }> = [
   { id: "all", label: "All" },
   { id: "image", label: "Photos" },
   { id: "video", label: "Videos" },
   { id: "audio", label: "Audio" },
   { id: "document", label: "Files" },
+  { id: "notes", label: "Notes" },
 ];
 
 /**
@@ -34,15 +36,22 @@ const KIND_CHIPS: Array<{ id: AttachmentKind | "all"; label: string }> = [
 export function AttachmentGallery({
   conversationId,
   onGoToMessage,
+  notes,
+  teamMembers,
 }: {
   conversationId: string;
   onGoToMessage: (messageId: string) => void;
+  notes: InternalNote[];
+  teamMembers: User[];
 }) {
-  const [filter, setFilter] = useState<AttachmentKind | "all">("all");
+  const [filter, setFilter] = useState<AttachmentKind | "all" | "notes">("all");
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   const { items, loading, loadingMore, error, hasMore, loadMore } =
-    useConversationAttachments(conversationId, filter === "all" ? null : filter);
+    useConversationAttachments(
+      conversationId,
+      filter === "all" || filter === "notes" ? null : filter,
+    );
 
   // Subset of items that the lightbox can render — images + stickers + videos.
   // Lightbox prev/next walks THIS list so an audio/doc row doesn't slip in.
@@ -90,6 +99,14 @@ export function AttachmentGallery({
 
       {/* Body */}
       <div className="flex-1 px-5 py-4">
+        {filter === "notes" ? (
+          <NotesPanel
+            notes={notes}
+            teamMembers={teamMembers}
+            conversationId={conversationId}
+          />
+        ) : (
+          <>
         {loading && items.length === 0 && <SkeletonGrid />}
         {!loading && error && (
           <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -140,6 +157,8 @@ export function AttachmentGallery({
             <div ref={sentinelRef} className="mt-4 flex items-center justify-center py-3">
               {loadingMore && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
             </div>
+          </>
+        )}
           </>
         )}
       </div>
@@ -267,6 +286,79 @@ function EmptyState({ filter }: { filter: AttachmentKind | "all" }) {
       <Paperclip className="size-6 opacity-40" />
       <div>No {label} in this conversation yet.</div>
     </div>
+  );
+}
+
+/**
+ * "Notes" tab — a newest-first index of every internal note in the thread, each
+ * with a Jump that scrolls + flashes it in the chat. Jump fires a window
+ * CustomEvent (`ccp:jump-to-note`) the message-thread listens for — the panel
+ * and the thread are siblings, so this avoids threading a callback through four
+ * layers (same pattern the inbox uses for `ccp:contact-stage-delta`).
+ */
+function NotesPanel({
+  notes,
+  teamMembers,
+  conversationId,
+}: {
+  notes: InternalNote[];
+  teamMembers: User[];
+  conversationId: string;
+}) {
+  const memberById = useMemo(
+    () => new Map(teamMembers.map((u) => [u.id, u])),
+    [teamMembers],
+  );
+  const sorted = useMemo(
+    () => [...notes].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
+    [notes],
+  );
+  if (sorted.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-2 py-12 text-center text-sm text-muted-foreground">
+        <StickyNote className="size-6 opacity-40" />
+        <div>No internal notes in this conversation yet.</div>
+      </div>
+    );
+  }
+  return (
+    <ul className="flex flex-col gap-2">
+      {sorted.map((n) => {
+        const author = n.authorUserId ? memberById.get(n.authorUserId) : null;
+        return (
+          <li
+            key={n.id}
+            className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3"
+          >
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="truncate text-xs font-medium text-foreground/80">
+                {author?.name ?? "Removed user"}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent("ccp:jump-to-note", {
+                      detail: { conversationId, noteId: n.id },
+                    }),
+                  )
+                }
+                className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary/10"
+                title="Jump to this note in the chat"
+              >
+                Jump
+              </button>
+            </div>
+            <p className="whitespace-pre-wrap wrap-break-word text-sm text-foreground/90">
+              {n.body}
+            </p>
+            <div className="mt-1.5 text-[11px] text-muted-foreground">
+              <LocalTime iso={n.timestamp} format="listTime" />
+            </div>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

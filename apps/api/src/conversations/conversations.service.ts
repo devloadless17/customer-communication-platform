@@ -114,8 +114,32 @@ export class ConversationsService {
     unassigned: number;
     closed: number;
     byStage: Record<string, number>;
+    unread: {
+      active: number;
+      all: number;
+      mine: number;
+      unassigned: number;
+      closed: number;
+    };
   }> {
-    const [active, all, mine, unassigned, closed, stageGroups] = await Promise.all([
+    // Per-bucket UNREAD = conversations with unreadCount>0 in that bucket. Same
+    // bucket predicates as the totals, AND unreadCount>0. Drives the green
+    // unread pills on the sub-sidebar filters. Coalesced client-side so the
+    // extra counts don't fire on every inbound; indexed on (teamId,status).
+    const unreadWhere: Prisma.ConversationWhereInput = { unreadCount: { gt: 0 } };
+    const [
+      active,
+      all,
+      mine,
+      unassigned,
+      closed,
+      stageGroups,
+      uActive,
+      uAll,
+      uMine,
+      uUnassigned,
+      uClosed,
+    ] = await Promise.all([
       this.db.conversation.count({
         where: { teamId, status: { not: "closed" } },
       }),
@@ -146,6 +170,31 @@ export class ConversationsService {
         },
         _count: true,
       }),
+      this.db.conversation.count({
+        where: { teamId, status: { not: "closed" }, ...unreadWhere },
+      }),
+      this.db.conversation.count({
+        where: { teamId, ...unreadWhere },
+      }),
+      this.db.conversation.count({
+        where: {
+          teamId,
+          status: { not: "closed" },
+          assignedUserId: viewerUserId,
+          ...unreadWhere,
+        },
+      }),
+      this.db.conversation.count({
+        where: {
+          teamId,
+          status: { not: "closed" },
+          assignedUserId: null,
+          ...unreadWhere,
+        },
+      }),
+      this.db.conversation.count({
+        where: { teamId, status: "closed", ...unreadWhere },
+      }),
     ]);
 
     const byStage: Record<string, number> = {};
@@ -153,7 +202,21 @@ export class ConversationsService {
       if (g.stageId) byStage[g.stageId] = g._count;
     }
 
-    return { active, all, mine, unassigned, closed, byStage };
+    return {
+      active,
+      all,
+      mine,
+      unassigned,
+      closed,
+      byStage,
+      unread: {
+        active: uActive,
+        all: uAll,
+        mine: uMine,
+        unassigned: uUnassigned,
+        closed: uClosed,
+      },
+    };
   }
 
   /**

@@ -134,46 +134,71 @@ export function AvailabilityPicker({
     // runs the flush only on unmount; listing them keeps exhaustive-deps honest.
   }, [currentUser.id, currentUser.teamId]);
 
+  // Set the live input + committed baseline + their refs together. Used by the
+  // "going available clears the note" path so the displayed value, the dirty
+  // check, AND the unmount-flush refs all move in lockstep.
+  function setNoteValue(value: string): void {
+    setMessage(value);
+    setCommittedMessage(value);
+    messageRef.current = value;
+    committedRef.current = value;
+  }
+
   async function commitStatus(next: UserAvailabilityStatus): Promise<void> {
     if (disabled || next === status) return;
     setError(null);
     const prev = status;
+    // A status note is context for being unavailable; coming back to "available"
+    // drops it ("I was eating, now I'm back"). Clear it locally too so (a) the
+    // input empties instantly, and (b) the unmount-flush can't re-save the old
+    // note when the menu closes. `prevNote` restores it if the PATCH fails.
+    const clearsNote = next === "available";
+    const prevNote = committedRef.current;
+    if (clearsNote && savedTimerRef.current !== null) {
+      clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = null;
+    }
     // Optimistic local state + dispatch — sidebar, viewer pill, user menu all
     // flip in the same frame as the click. Server fanout lands moments later
     // with the same payload; reducers' identity-bail keeps the echo invisible.
     setStatus(next);
+    if (clearsNote) {
+      setNoteState("idle");
+      setNoteValue("");
+    }
     dispatchLocalSocketEvent("user:availability:updated", {
       teamId: currentUser.teamId,
       userId: currentUser.id,
       status: next,
-      message: undefined,
+      // null = "cleared" (drop the note everywhere); undefined = "unchanged".
+      message: clearsNote ? null : undefined,
     });
-    try {
-      const res = await apiFetch("/api/users/me/availability", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status: next }),
-      });
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        setError(res.status === 403 ? "Not allowed" : detail || "Couldn't update");
-        setStatus(prev);
-        dispatchLocalSocketEvent("user:availability:updated", {
-          teamId: currentUser.teamId,
-          userId: currentUser.id,
-          status: prev,
-          message: undefined,
-        });
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Network error");
+    const rollback = () => {
       setStatus(prev);
+      if (clearsNote) setNoteValue(prevNote);
       dispatchLocalSocketEvent("user:availability:updated", {
         teamId: currentUser.teamId,
         userId: currentUser.id,
         status: prev,
-        message: undefined,
+        message: clearsNote ? (prevNote === "" ? null : prevNote) : undefined,
       });
+    };
+    try {
+      const res = await apiFetch("/api/users/me/availability", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        // Send message:null on the available switch so the server clears it even
+        // if its own rule ever changes — belt and suspenders, single intent.
+        body: JSON.stringify(clearsNote ? { status: next, message: null } : { status: next }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        setError(res.status === 403 ? "Not allowed" : detail || "Couldn't update");
+        rollback();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error");
+      rollback();
     }
   }
 

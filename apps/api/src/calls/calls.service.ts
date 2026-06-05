@@ -1087,6 +1087,29 @@ export class CallsService {
       hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
     return { items, cursor: nextCursor };
   }
+
+  /**
+   * Count of calls currently LIVE (ringing or in progress) for the team — the
+   * number behind the inbox "Calls" badge. Capability-gated like the list; the
+   * client hook debounce-refetches it on the call:* socket frames so it stays
+   * current without any client-side delta accounting (can't drift).
+   */
+  async liveCount(session: ApiSession): Promise<{ count: number }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (
+      !perms["calls:make" as Capability] &&
+      !perms["calls:receive" as Capability]
+    ) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+    const count = await this.db.call.count({
+      where: {
+        teamId: session.teamId,
+        status: { in: [CallStatus.ringing, CallStatus.in_progress] },
+      },
+    });
+    return { count };
+  }
 }
 
 /** Wire row for the team-wide Calls page. */

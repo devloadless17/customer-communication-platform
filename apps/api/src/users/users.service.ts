@@ -111,6 +111,11 @@ export class UsersService {
     const data: { availabilityStatus?: string; availabilityMessage?: string | null } = {};
     if (typeof input.status === "string") data.availabilityStatus = input.status;
     if (input.message !== undefined) data.availabilityMessage = input.message;
+    // A status note is context for being UNavailable ("eating", "back at 3pm").
+    // Coming back to "available" means it no longer applies, so clear it — a
+    // stale note sitting next to a green dot is exactly the confusion users
+    // hit. "available" wins over any `message` sent in the same PATCH.
+    if (input.status === "available") data.availabilityMessage = null;
 
     const updated = await this.db.user.update({
       where: { id: userId },
@@ -121,12 +126,17 @@ export class UsersService {
     // session-cache wait — matches the profile-update pattern.
     this.sessionInvalidator.bustCache(userId);
 
+    // Broadcast `message` whenever it changed — sent explicitly in the PATCH, OR
+    // cleared implicitly by going available — so every client drops the note in
+    // the same frame. `updated.availabilityMessage` is the authoritative value.
+    const messageChanged =
+      input.message !== undefined || input.status === "available";
     await this.bus.publish({
       type: "user.availability_changed",
       teamId,
       userId,
       status: (updated.availabilityStatus ?? "available") as UserAvailabilityStatus,
-      ...(input.message !== undefined ? { message: input.message } : {}),
+      ...(messageChanged ? { message: updated.availabilityMessage } : {}),
     });
 
     return mapUser(updated);
