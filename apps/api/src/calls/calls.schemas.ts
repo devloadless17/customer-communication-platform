@@ -57,3 +57,23 @@ export const ListCallsQuerySchema = z
   })
   .strict();
 export type ListCallsQuery = z.infer<typeof ListCallsQuerySchema>;
+
+/**
+ * Team-wide Calls-page listing — keyset cursor PLUS optional filters:
+ *   q    — substring match on the contact's name OR phone number
+ *   from — only calls with ringingAt >= this instant (ISO; the client sends the
+ *          start of the selected local day so the date range respects the
+ *          agent's timezone)
+ *   to   — only calls with ringingAt <= this instant (ISO; end of local day)
+ * Filters compose with the cursor (AND), so pagination walks the filtered set.
+ */
+export const ListTeamCallsQuerySchema = z
+  .object({
+    take: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().optional(),
+    q: z.string().trim().max(100).optional(),
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+  })
+  .strict();
+export type ListTeamCallsQuery = z.infer<typeof ListTeamCallsQuerySchema>;

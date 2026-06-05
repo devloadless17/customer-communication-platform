@@ -43,22 +43,51 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [callingId, setCallingId] = useState<string | null>(null);
-  const startedRef = useRef(false);
+  // Filters: free-text (contact name OR phone) + a ringingAt date range. `q` is
+  // the live input; `appliedQ` is debounced so we don't refetch on every key.
+  const [q, setQ] = useState("");
+  const [appliedQ, setAppliedQ] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const reqIdRef = useRef(0);
   const call = useCallApi();
 
-  const fetchPage = useCallback(async (c?: string): Promise<void> => {
-    const res = await apiFetch(
-      `/api/calls?take=${PAGE}${c ? `&cursor=${encodeURIComponent(c)}` : ""}`,
-    );
-    if (!res.ok) return;
-    const json = (await res.json()) as { items: CallRow[]; cursor: string | null };
-    setRows((prev) => (c ? [...prev, ...json.items] : json.items));
-    setCursor(json.cursor);
-  }, []);
-
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
+    const t = setTimeout(() => setAppliedQ(q.trim()), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const hasFilters = appliedQ !== "" || from !== "" || to !== "";
+
+  const fetchPage = useCallback(
+    async (c?: string): Promise<void> => {
+      // First-page fetches (initial load / filter change) take a request token
+      // so a slow earlier response can't overwrite newer filter results. A
+      // `loadMore` (cursor set) rides the current token and is dropped if a
+      // filter changed mid-flight (its page belongs to the old result set).
+      const isFirst = !c;
+      const reqId = isFirst ? ++reqIdRef.current : reqIdRef.current;
+      const p = new URLSearchParams({ take: String(PAGE) });
+      if (c) p.set("cursor", c);
+      if (appliedQ) p.set("q", appliedQ);
+      // Date inputs are local calendar days; widen to the full local day and
+      // send ISO so the server filters ringingAt in the agent's timezone.
+      if (from) p.set("from", new Date(`${from}T00:00:00`).toISOString());
+      if (to) p.set("to", new Date(`${to}T23:59:59.999`).toISOString());
+      const res = await apiFetch(`/api/calls?${p.toString()}`);
+      if (!res.ok) return;
+      const json = (await res.json()) as { items: CallRow[]; cursor: string | null };
+      if (reqId !== reqIdRef.current) return; // superseded by a newer filter fetch
+      setRows((prev) => (c ? [...prev, ...json.items] : json.items));
+      setCursor(json.cursor);
+    },
+    [appliedQ, from, to],
+  );
+
+  // (Re)load page 1 on mount and whenever a filter changes — `fetchPage`'s
+  // identity changes with [appliedQ, from, to], so this effect re-runs then.
+  useEffect(() => {
+    setLoading(true);
     void fetchPage().finally(() => setLoading(false));
   }, [fetchPage]);
 
@@ -100,6 +129,62 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
         </p>
       </header>
 
+      {/* Filters: search by name/phone + a ringing-date range. Changing any one
+          debounced-refetches page 1 (keyset pagination then walks the filtered
+          set). */}
+      <div className="mb-4 flex flex-wrap items-end gap-2">
+        <div className="flex min-w-55 flex-1 flex-col gap-1">
+          <label htmlFor="calls-q" className="text-[11px] font-medium text-muted-foreground">
+            Search
+          </label>
+          <input
+            id="calls-q"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Name or phone number"
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="calls-from" className="text-[11px] font-medium text-muted-foreground">
+            From
+          </label>
+          <input
+            id="calls-from"
+            type="date"
+            value={from}
+            max={to || undefined}
+            onChange={(e) => setFrom(e.target.value)}
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="calls-to" className="text-[11px] font-medium text-muted-foreground">
+            To
+          </label>
+          <input
+            id="calls-to"
+            type="date"
+            value={to}
+            min={from || undefined}
+            onChange={(e) => setTo(e.target.value)}
+            className="h-9 rounded-md border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          />
+        </div>
+        {(q !== "" || from !== "" || to !== "") && (
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setQ("");
+              setFrom("");
+              setTo("");
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
+
       {loading ? (
         <div className="flex justify-center py-16 text-muted-foreground">
           <Loader2 className="size-5 animate-spin" />
@@ -107,7 +192,9 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
       ) : rows.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border py-16 text-center text-sm text-muted-foreground">
           <Phone className="mx-auto mb-2 size-6 opacity-40" />
-          No calls yet. Inbound and outbound WhatsApp calls will show up here.
+          {hasFilters
+            ? "No calls match your filters."
+            : "No calls yet. Inbound and outbound WhatsApp calls will show up here."}
         </div>
       ) : (
         <ul className="overflow-hidden rounded-lg border border-border">
@@ -214,6 +301,7 @@ function CallRowItem({
 
   return (
     <li
+      data-call-row=""
       className={cn(
         "flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40",
         !first && "border-t border-border",

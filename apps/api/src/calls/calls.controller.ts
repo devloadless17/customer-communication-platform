@@ -22,12 +22,14 @@ import {
   EndCallSchema,
   InitiateCallSchema,
   ListCallsQuerySchema,
+  ListTeamCallsQuerySchema,
   RejectCallSchema,
   RequestCallPermissionSchema,
   type AnswerCallInput,
   type EndCallInput,
   type InitiateCallInput,
   type ListCallsQuery,
+  type ListTeamCallsQuery,
   type RejectCallInput,
   type RequestCallPermissionInput,
 } from "./calls.schemas";
@@ -109,9 +111,13 @@ export class CallsController {
   @Get("api/calls")
   async listTeam(
     @CurrentSession() session: ApiSession,
-    @Query(zQuery(ListCallsQuerySchema)) query: ListCallsQuery,
+    @Query(zQuery(ListTeamCallsQuerySchema)) query: ListTeamCallsQuery,
   ) {
-    return this.calls.listTeamCalls(session, query.take, query.cursor);
+    return this.calls.listTeamCalls(session, query.take, query.cursor, {
+      q: query.q,
+      from: query.from,
+      to: query.to,
+    });
   }
 
   // --- Admin -----------------------------------------------------------------

@@ -317,6 +317,44 @@
   }
 }
 
+/* ─── Inbox thread reveal gate ─────────────────────────────────────────────────
+   Hard refresh of /inbox?c=<id> SSRs the full thread. Left ungated, the user
+   watches it settle: the column-reverse viewport positions to the bottom, the
+   web font swaps in (FOUT → the whole thread re-lays-out), and images decode —
+   a visible "flicker then land". This gate hides the thread until it's solid and
+   reveals it in one fade, with a clean loader meanwhile (a "loading" on slow
+   networks; invisible-fast on cached ones).
+
+   The reveal toggle is `data-ready` on the gate, set IMPERATIVELY — by the
+   parse-time SsrThreadBottomSnap script pre-paint (positions to bottom, then
+   reveals once `document.fonts.ready`), or by a React effect fallback. It is
+   NEVER rendered by React (the gate carries suppressHydrationWarning), so React
+   can't clobber it on hydration or re-render → no reveal→hide→reveal flash.
+   Opacity (not display/visibility) so layout — and thus the scroll positioning —
+   happens while hidden, and the reveal is a smooth cross-fade. */
+[data-thread-gate] [data-thread-body] {
+  opacity: 0;
+}
+[data-thread-gate][data-ready] [data-thread-body] {
+  opacity: 1;
+  transition: opacity 200ms ease-out;
+}
+[data-thread-gate] [data-thread-loader] {
+  opacity: 1;
+  transition: opacity 200ms ease-out;
+}
+[data-thread-gate][data-ready] [data-thread-loader] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-thread-gate][data-ready] [data-thread-body],
+  [data-thread-gate] [data-thread-loader] {
+    transition: none;
+  }
+}
+
 /* ─── Keyframes ────────────────────────────────────────────────────────────── */
 
 @keyframes shimmer {

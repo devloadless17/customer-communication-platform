@@ -629,6 +629,25 @@ function MessageThreadImpl({
   }, []);
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
+  // Reveal gate (see globals.css [data-thread-gate] + SsrThreadBottomSnap). The
+  // parse-time script normally reveals pre-paint; this is the hydration-side
+  // safety net for when that script didn't run (CSP block / error) — it reveals
+  // after the web font settles so a fallback reveal still skips the FOUT reflow,
+  // with a hard cap so a stalled font never leaves the thread hidden.
+  const gateRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const gate = gateRef.current;
+    if (!gate || gate.hasAttribute("data-ready")) return;
+    let done = false;
+    const reveal = () => {
+      if (done) return;
+      done = true;
+      gate.setAttribute("data-ready", "");
+    };
+    const cap = window.setTimeout(reveal, 800);
+    void document.fonts?.ready.then(() => requestAnimationFrame(reveal));
+    return () => window.clearTimeout(cap);
+  }, []);
 
   // -------------------------------------------------------------------------
   // In-thread search — WhatsApp-style. The slim search bar lives just below
@@ -1142,72 +1161,96 @@ function MessageThreadImpl({
         </div>
       )}
 
-      {/* The scroll container IS a column-reverse viewport. A column-reverse
-          overflow box anchors at the BOTTOM (newest) on first layout, so the
-          SSR'd thread paints at the latest message with ZERO JS — no snap script,
-          no mount-snap, no hydration jump. Its single child is the content in
-          normal chronological order; scrollTop:0 = bottom (newest), negative =
-          scrolled up toward older (see useChatScroll). Replaced the Radix
-          ScrollArea here because its viewport wraps children in a non-flex box,
-          so it can't be the column-reverse container; native scrollbar is fine
-          for a chat thread. */}
+      {/* The scroll container IS a column-reverse viewport: scrollTop:0 = bottom
+          (newest), negative = scrolled up toward older (see useChatScroll). Its
+          single child is the content in normal chronological order. Native
+          scrollbar (replaced the Radix ScrollArea, whose viewport wraps children
+          in a non-flex box and so can't be the column-reverse container).
+          NOTE: column-reverse does NOT reliably anchor at the bottom on a cold
+          document load (Chromium quirk), so the bottom landing is owned by the
+          parse-time script + reveal gate below, NOT native anchoring. */}
+      {/* Reveal gate — keeps the SSR'd thread hidden behind a loader until the
+          parse-time script (SsrThreadBottomSnap) pins it to the bottom and the
+          web font settles, then fades it in (CSS in globals.css keyed on
+          [data-thread-gate][data-ready]). suppressHydrationWarning: data-ready
+          is set imperatively (script + the effect below), never by React's
+          render, so hydration can't strip it and flash. */}
       <div
-        ref={setViewportRef}
-        // Stable hook for the parse-time bottom-snap (SsrThreadBottomSnap):
-        // column-reverse doesn't reliably anchor at the bottom on a cold
-        // document load, so an inline pre-paint script pins scrollTop=0 here
-        // before first paint. useChatScroll flips data-chat-scroll-ready=1 on
-        // mount to hand scroll ownership back.
-        data-thread-scroll-root
-        className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto"
+        ref={gateRef}
+        data-thread-gate
+        suppressHydrationWarning
+        className="relative flex min-h-0 flex-1 flex-col"
       >
         <div
-          ref={contentRef}
-          // overflow-anchor:none — useChatScroll manages scroll position
-          // explicitly; the browser's own anchoring would fight it. shrink-0
-          // keeps the content at its natural height in the flex column (so the
-          // viewport scrolls) instead of being squeezed to fit the viewport.
-          style={{ overflowAnchor: "none" }}
-          className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-2 px-6 py-6"
+          ref={setViewportRef}
+          // Stable hook for the parse-time position-and-reveal (SsrThreadBottomSnap):
+          // column-reverse doesn't reliably anchor at the bottom on a cold
+          // document load, so the inline pre-paint script pins scrollTop=0 here
+          // before first paint. useChatScroll flips data-chat-scroll-ready=1 on
+          // mount to hand scroll ownership back. data-thread-body is the gate's
+          // fade target.
+          data-thread-scroll-root
+          data-thread-body
+          className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto"
         >
-          {/* Top sentinel — IntersectionObserver target for "load older".
-              The loading indicator is rendered OUTSIDE the scroll content (a
-              floating pill below) so triggering a load never changes layout. */}
-          <div ref={topSentinelRef} className="h-px" />
-          {reachedSliceCap && (
-            // The slice cap is the in-memory cap (MAX_THREAD_SLICE = 500 in
-            // use-conversation-events.ts), not a "no more messages" signal —
-            // older messages exist on the server, we stopped paging for
-            // scroll perf. Surfacing the hint here means an agent who clicks
-            // "Load older" 10 times and stops getting more knows what to do
-            // next, instead of assuming the conversation just started.
-            <div className="mx-auto my-3 max-w-md rounded-md border border-dashed border-muted-foreground/30 bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground">
-              Older messages exist beyond this point.{" "}
-              <span className="font-medium">Use search</span> to jump to a
-              specific older message.
-            </div>
-          )}
-          <TimelineRows
-            timeline={timeline}
-            dayLabels={dayLabels}
-            memberById={memberById}
-            contactName={contact.name}
-            contactSeed={contact.id}
-            searchOpen={searchOpen}
-            matchedIds={matchedIds}
-            searchQuery={searchQuery}
-            activeMatchId={activeMatchId}
-            selecting={selection.selecting}
-            isSelected={selection.isSelected}
-            onToggleSelect={selection.toggle}
-            onReply={beginReply}
-            onJumpToOriginal={jumpToOriginal}
-            onForward={forwardOne}
-            onStartSelect={startSelect}
-            onDismissFailed={dismissFailed}
-            onRetryFailed={retryFailed}
-            onDeleteNote={deleteNote}
-          />
+          <div
+            ref={contentRef}
+            // overflow-anchor:none — useChatScroll manages scroll position
+            // explicitly; the browser's own anchoring would fight it. shrink-0
+            // keeps the content at its natural height in the flex column (so the
+            // viewport scrolls) instead of being squeezed to fit the viewport.
+            style={{ overflowAnchor: "none" }}
+            className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-2 px-6 py-6"
+          >
+            {/* Top sentinel — IntersectionObserver target for "load older".
+                The loading indicator is rendered OUTSIDE the scroll content (a
+                floating pill below) so triggering a load never changes layout. */}
+            <div ref={topSentinelRef} className="h-px" />
+            {reachedSliceCap && (
+              // The slice cap is the in-memory cap (MAX_THREAD_SLICE = 500 in
+              // use-conversation-events.ts), not a "no more messages" signal —
+              // older messages exist on the server, we stopped paging for
+              // scroll perf. Surfacing the hint here means an agent who clicks
+              // "Load older" 10 times and stops getting more knows what to do
+              // next, instead of assuming the conversation just started.
+              <div className="mx-auto my-3 max-w-md rounded-md border border-dashed border-muted-foreground/30 bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground">
+                Older messages exist beyond this point.{" "}
+                <span className="font-medium">Use search</span> to jump to a
+                specific older message.
+              </div>
+            )}
+            <TimelineRows
+              timeline={timeline}
+              dayLabels={dayLabels}
+              memberById={memberById}
+              contactName={contact.name}
+              contactSeed={contact.id}
+              searchOpen={searchOpen}
+              matchedIds={matchedIds}
+              searchQuery={searchQuery}
+              activeMatchId={activeMatchId}
+              selecting={selection.selecting}
+              isSelected={selection.isSelected}
+              onToggleSelect={selection.toggle}
+              onReply={beginReply}
+              onJumpToOriginal={jumpToOriginal}
+              onForward={forwardOne}
+              onStartSelect={startSelect}
+              onDismissFailed={dismissFailed}
+              onRetryFailed={retryFailed}
+              onDeleteNote={deleteNote}
+            />
+          </div>
+        </div>
+        {/* Loader shown until the gate reveals (fades out via CSS on data-ready).
+            aria-hidden — the thread content is in the SSR DOM for AT already;
+            this is purely the visual "landing" cover. */}
+        <div
+          data-thread-loader
+          aria-hidden
+          className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background"
+        >
+          <Loader2 className="size-5 animate-spin text-muted-foreground/40" />
         </div>
       </div>
 

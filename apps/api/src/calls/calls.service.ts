@@ -996,6 +996,7 @@ export class CallsService {
     session: ApiSession,
     take: number,
     cursor: string | undefined,
+    filters: { q?: string; from?: string; to?: string } = {},
   ): Promise<{ items: TeamCallRow[]; cursor: string | null }> {
     const perms = resolvePermissions(session.role, session.rolePermissions);
     if (
@@ -1015,6 +1016,35 @@ export class CallsService {
         }
       : undefined;
     const baseWhere: Prisma.CallWhereInput = { teamId: session.teamId };
+
+    // Free-text filter: substring on the contact's NAME or PHONE, reached
+    // through the conversation→contact relation (the same join the select uses).
+    // name is case-insensitive; phone is a raw substring (digits + leading +).
+    const q = filters.q?.trim();
+    if (q) {
+      baseWhere.conversation = {
+        contact: {
+          OR: [
+            { name: { contains: q, mode: "insensitive" } },
+            { phoneNumber: { contains: q } },
+          ],
+        },
+      };
+    }
+
+    // Date range on ringingAt (the user-visible "when the call happened" time).
+    // `from`/`to` are ISO instants the client already widened to the local-day
+    // boundaries, so we just clamp; invalid strings are ignored (never throw).
+    const ringingAt: Prisma.DateTimeFilter = {};
+    if (filters.from) {
+      const d = new Date(filters.from);
+      if (!Number.isNaN(d.getTime())) ringingAt.gte = d;
+    }
+    if (filters.to) {
+      const d = new Date(filters.to);
+      if (!Number.isNaN(d.getTime())) ringingAt.lte = d;
+    }
+    if (ringingAt.gte || ringingAt.lte) baseWhere.ringingAt = ringingAt;
     const rows = await this.db.call.findMany({
       where: cursorWhere ? { AND: [baseWhere, cursorWhere] } : baseWhere,
       orderBy: [{ ringingAt: "desc" }, { id: "desc" }],

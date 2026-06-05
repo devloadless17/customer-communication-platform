@@ -1,39 +1,41 @@
 /**
- * SSR-only bottom-snap for the message thread.
+ * SSR-only position-and-reveal for the message thread.
  *
  * THE PROBLEM IT SOLVES: on a HARD refresh of /inbox?c=<id>, page.tsx SSRs the
- * full thread. The viewport is `flex-direction: column-reverse`, which is
- * SUPPOSED to anchor at the bottom (newest) on first layout with zero JS — but
- * Chromium does NOT reliably initialize a column-reverse box's scroll offset to
- * the bottom on a document load: when the content height is still settling at
- * first layout (web-font swap, avatar/image reservations), the initial offset
- * is computed against the not-yet-final height and the box paints scrolled to
- * the TOP (oldest). `useChatScroll`'s `useLayoutEffect` only corrects it AFTER
- * React hydrates — hundreds of ms after first paint on a cold prod load. The
- * user sees the oldest message + the layout settling, then a visible jump down
- * to the latest. (This is the same flicker the pre-`column-reverse` layout had;
- * the migration to column-reverse removed this script on the assumption native
- * anchoring was enough. It isn't.)
+ * full thread. Left to paint as-is, the user watches it SETTLE over the first
+ * few hundred ms:
+ *   1. The `column-reverse` viewport doesn't reliably anchor at the bottom on a
+ *      cold document load (Chromium computes the initial offset against a
+ *      not-yet-final height) — it paints scrolled to the TOP (oldest).
+ *   2. The web font (`Plus_Jakarta_Sans`, display:swap) swaps in a beat after
+ *      first paint, re-laying-out EVERY row (FOUT) — the big visible reflow.
+ *   3. Images decode in.
+ * `useChatScroll` only corrects the scroll AFTER React hydrates (hundreds of ms
+ * on a cold prod load), so the net effect is a flicker-then-jump. That's the
+ * bug being killed here.
  *
- * THE FIX: a plain inline <script> rendered by THIS SERVER COMPONENT as a
- * sibling AFTER the shell. Browsers execute inline scripts synchronously the
- * moment the parser reaches them — so this runs DURING HTML parse, BEFORE the
- * first paint, with the thread viewport already in the DOM (it was parsed just
- * above). It sets `scrollTop = 0`, which in a column-reverse box IS the bottom
- * (newest); scrolling up toward older goes negative. So the very first frame the
- * user sees is already at the bottom. Zero hydration dependency, zero flicker.
+ * THE FIX: the thread is rendered HIDDEN (the reveal gate — see globals.css
+ * `[data-thread-gate]`). This inline <script>, emitted by THIS SERVER COMPONENT
+ * as a sibling AFTER the shell, runs DURING HTML parse — before first paint,
+ * with the viewport already in the DOM. It:
+ *   - pins `scrollTop = 0` (column-reverse bottom = newest), re-asserting it
+ *     across the first frames while layout settles, and
+ *   - reveals the thread (`data-ready` on the gate) only once `document.fonts.
+ *     ready` resolves — i.e. AFTER the FOUT reflow, so the swap happens while
+ *     hidden — with a hard timeout cap so a slow/failed font never holds it.
+ * So the first frame the user actually sees is the thread already at the bottom,
+ * in the final font, solid. Zero hydration dependency: fast/cached loads reveal
+ * in a few ms; slow loads show the loader until fonts land.
  *
- * Why a SERVER component and not an inline <script> inside a Client Component:
+ * Why a SERVER component and not an inline <script> in a Client Component:
  * React 19 warns about <script> rendered inside a Client Component (it only runs
- * on the SSR pass, never on client re-renders — exactly our intent, but the
- * warning is noisy and the pattern is fragile). Rendering it from a server
- * component is the blessed way to emit a one-shot parse-time script. It is NOT
- * hydrated and never re-runs on the client.
+ * on the SSR pass). Rendering it from a server component is the blessed way to
+ * emit a one-shot parse-time script. It is NOT hydrated and never re-runs.
  *
- * Idempotent + self-correcting: re-snaps across a handful of frames so the
- * font-swap / image reflow that nudges the layout can't drift the view, and
- * bails the instant `useChatScroll` marks the viewport ready (`data-chat-scroll-
- * ready="1"`) — from then on the hook owns scroll.
+ * `data-ready` is set IMPERATIVELY (here + a React effect fallback in
+ * message-thread.tsx), never via React's render — the gate carries
+ * suppressHydrationWarning — so hydration/re-render can't strip it and cause a
+ * reveal→hide→reveal flash.
  */
 import { headers } from "next/headers";
 
@@ -42,29 +44,46 @@ export async function SsrThreadBottomSnap() {
   // 'unsafe-inline' (src/proxy.ts). An inline <script> WITHOUT the per-request
   // nonce is silently blocked in prod — works in dev, dead on deploy. Stamp the
   // nonce that proxy.ts put on the request header, same as app/layout.tsx does.
+  // (If the script is ever blocked, message-thread.tsx's effect still reveals.)
   const nonce = (await headers()).get("x-nonce") ?? undefined;
   // No template literals with interpolation — this string is static, so there's
-  // no XSS surface. It only ever reads/writes the thread viewport's scrollTop.
+  // no XSS surface. It only reads/writes the thread viewport's scrollTop and the
+  // gate's data-ready attribute.
   const js = `(function(){
-    var tries = 0;
-    function snap(){
-      tries++;
-      var vp = document.querySelector('[data-thread-scroll-root]');
-      if (vp) {
-        // column-reverse: scrollTop 0 IS the bottom (newest); older is negative.
-        // Direct assignment (not scrollTo) so it's instant and pre-paint — no
-        // smooth-scroll animation. Once the hook has mounted it owns scroll, so
-        // we stop correcting.
-        if (vp.getAttribute('data-chat-scroll-ready') === '1') return;
-        vp.scrollTop = 0;
-      }
-      // Keep correcting for a handful of frames: the web-font swap and image/
-      // avatar reservations settle over the first few frames, each nudging the
-      // layout. ~20 frames (~330ms) is a hard cap so we never fight a user who
-      // starts scrolling up immediately.
-      if (tries < 20) requestAnimationFrame(snap);
+    var gate = document.querySelector('[data-thread-gate]');
+    var vp = document.querySelector('[data-thread-scroll-root]');
+    if (!gate || !vp) return;
+    var done = false;
+    function position(){
+      // Once useChatScroll has mounted it owns scroll — stop fighting it.
+      if (vp.getAttribute('data-chat-scroll-ready') === '1') return;
+      // column-reverse: scrollTop 0 IS the bottom (newest); older is negative.
+      vp.scrollTop = 0;
     }
-    snap();
+    function reveal(){
+      if (done) return;
+      done = true;
+      position();
+      gate.setAttribute('data-ready', '');
+    }
+    position();
+    // Re-assert the bottom across the first frames while bubble heights / image
+    // reservations settle (cheap; column-reverse already keeps us pinned).
+    var n = 0;
+    (function frame(){ if (done) return; position(); if (++n < 30) requestAnimationFrame(frame); })();
+    // Reveal once the web font has loaded (kills the FOUT reflow — it happens
+    // while hidden). Two rAFs after so the post-swap layout + scroll settle.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function(){
+        requestAnimationFrame(function(){ requestAnimationFrame(reveal); });
+      });
+    } else {
+      requestAnimationFrame(reveal);
+    }
+    // Hard cap: never keep the thread hidden longer than this, even if a font
+    // load stalls or fails. ~600ms is below the threshold where a blank wait
+    // reads as "broken" while still covering a normal font fetch.
+    setTimeout(reveal, 600);
   })();`;
 
   // suppressHydrationWarning: the server emits this <script>; the client never
