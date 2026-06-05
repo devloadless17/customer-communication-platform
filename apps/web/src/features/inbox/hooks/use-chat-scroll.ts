@@ -181,10 +181,13 @@ export function useChatScroll({
     settleStopRef.current?.();
     setUnreadBelow(0);
     stickyRef.current = true;
-    // column-reverse anchors at the bottom natively on first layout, so a hard
-    // refresh needs no JS snap. This snap still matters on a CLIENT chat-switch:
-    // the viewport is reused, so its scrollTop carries over from the previous
-    // thread and must be reset to 0 (bottom) for the newly-displayed thread.
+    // Tell the parse-time bottom-snap script (SsrThreadBottomSnap) that the hook
+    // has mounted and now owns scroll, so it stops re-snapping. On a hard refresh
+    // the inline script already pinned the column-reverse viewport to the bottom
+    // pre-paint (native anchoring is unreliable on a cold document load); this
+    // mount snap then matters mainly on a CLIENT chat-switch, where the viewport
+    // is reused and its scrollTop carries over from the previous thread.
+    viewportRef.current?.setAttribute("data-chat-scroll-ready", "1");
     snapToBottom();
     requestAnimationFrame(() => {
       if (stickyRef.current) snapToBottom();

@@ -1153,6 +1153,12 @@ function MessageThreadImpl({
           for a chat thread. */}
       <div
         ref={setViewportRef}
+        // Stable hook for the parse-time bottom-snap (SsrThreadBottomSnap):
+        // column-reverse doesn't reliably anchor at the bottom on a cold
+        // document load, so an inline pre-paint script pins scrollTop=0 here
+        // before first paint. useChatScroll flips data-chat-scroll-ready=1 on
+        // mount to hand scroll ownership back.
+        data-thread-scroll-root
         className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto"
       >
         <div
