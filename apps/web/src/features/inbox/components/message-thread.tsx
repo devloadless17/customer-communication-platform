@@ -106,7 +106,6 @@ const TimelineRows = memo(function TimelineRows({
   memberById,
   contactName,
   contactSeed,
-  threadLive,
   searchOpen,
   matchedIds,
   searchQuery,
@@ -127,7 +126,6 @@ const TimelineRows = memo(function TimelineRows({
   memberById: Map<string, User>;
   contactName: string;
   contactSeed: string;
-  threadLive: boolean;
   searchOpen: boolean;
   matchedIds: Set<string>;
   searchQuery: string;
@@ -244,7 +242,7 @@ const TimelineRows = memo(function TimelineRows({
                     }
                   />
                 ) : (
-                  <ActivityEntry event={entry.data} threadLive={threadLive} />
+                  <ActivityEntry event={entry.data} />
                 )}
               </ErrorBoundary>
             </div>
@@ -326,19 +324,6 @@ function MessageThreadImpl({
   } = useConversationEvents(initialData, nextOlderCursor, onMarkRead, onSnapshot);
   const { conversation, contact, assignedUser, messages, notes } = data;
 
-  // Activity-pill entrance gate. A pill's grow+fade should play ONLY when it
-  // arrives live AFTER this thread view has settled on screen — never on initial
-  // load, hard refresh, or chat-switch, where the "recent" pills are pre-existing
-  // (not new) and would otherwise all flush-animate into place ("the whole log
-  // lands"). `threadLive` is false through SSR + first paint (everything renders
-  // at its final position instantly) and arms one frame later; it resets on every
-  // conversation switch so a freshly opened thread's recent pills don't animate.
-  const [threadLive, setThreadLive] = useState(false);
-  useEffect(() => {
-    setThreadLive(false);
-    const raf = requestAnimationFrame(() => setThreadLive(true));
-    return () => cancelAnimationFrame(raf);
-  }, [conversation.id]);
   // Stable reference: `data.events ?? []` would allocate a fresh array on every
   // render when events is nullish, making the timeline useMemo below recompute
   // each pass. Memo on `data.events` so it only changes when events actually do.
@@ -1202,7 +1187,6 @@ function MessageThreadImpl({
             memberById={memberById}
             contactName={contact.name}
             contactSeed={contact.id}
-            threadLive={threadLive}
             searchOpen={searchOpen}
             matchedIds={matchedIds}
             searchQuery={searchQuery}

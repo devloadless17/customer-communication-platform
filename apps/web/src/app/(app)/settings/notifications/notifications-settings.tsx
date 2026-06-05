@@ -35,19 +35,21 @@ const ROWS: {
 ];
 
 export function NotificationsSettings() {
-  const { prefs, setPref, preview } = useNotificationSounds();
+  const { prefs, setPref, preview, receiveCalls, setReceiveCalls } =
+    useNotificationSounds();
 
   return (
     <div>
       <header className="mb-6">
         <h1 className="text-2xl font-semibold">Notifications</h1>
         <p className="mt-1 max-w-xl text-sm text-muted-foreground">
-          Sounds for this device. These are saved per browser — each teammate
-          sets their own, and they don&apos;t affect anyone else on the team.
+          Settings for this device, saved per browser — each teammate sets their
+          own, and they don&apos;t affect anyone else on the team.
         </p>
       </header>
 
-      <div className="max-w-xl divide-y divide-border overflow-hidden rounded-lg border border-border">
+      <SectionLabel>Sounds</SectionLabel>
+      <div className="mb-7 max-w-xl divide-y divide-border overflow-hidden rounded-lg border border-border">
         {ROWS.map(({ key, label, description, icon: Icon }) => {
           const enabled = prefs[key];
           return (
@@ -57,25 +59,75 @@ export function NotificationsSettings() {
                 <div className="text-sm font-medium">{label}</div>
                 <div className="text-xs text-muted-foreground">{description}</div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={enabled}
-                aria-label={`${label} sound`}
-                onClick={() => {
-                  const next = !enabled;
+              <Toggle
+                on={enabled}
+                ariaLabel={`${label} sound`}
+                onChange={(next) => {
                   setPref(key, next);
                   if (next) preview(key);
                 }}
-                className="shrink-0 cursor-pointer rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              >
-                <ToggleTrack on={enabled} />
-              </button>
+              />
             </div>
           );
         })}
       </div>
+
+      <SectionLabel>Incoming calls</SectionLabel>
+      <div className="max-w-xl overflow-hidden rounded-lg border border-border">
+        <div className="flex items-center gap-3 px-4 py-3.5">
+          <Phone className="size-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Receive calls on this device</div>
+            <div className="text-xs text-muted-foreground">
+              When off, incoming WhatsApp calls won&apos;t pop up or ring here at
+              all — your teammates still get them. Turn it off on a machine where
+              you don&apos;t take calls.
+            </div>
+          </div>
+          <Toggle
+            on={receiveCalls}
+            ariaLabel="Receive calls on this device"
+            onChange={setReceiveCalls}
+          />
+        </div>
+      </div>
+      {!receiveCalls && (
+        <p className="mt-2 max-w-xl text-xs text-amber-600 dark:text-amber-400">
+          You won&apos;t be notified of incoming calls on this device.
+        </p>
+      )}
     </div>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-2 px-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+      {children}
+    </div>
+  );
+}
+
+function Toggle({
+  on,
+  ariaLabel,
+  onChange,
+}: {
+  on: boolean;
+  ariaLabel: string;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={ariaLabel}
+      onClick={() => onChange(!on)}
+      className="shrink-0 cursor-pointer rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+    >
+      <ToggleTrack on={on} />
+    </button>
   );
 }
 
@@ -84,14 +136,14 @@ function ToggleTrack({ on }: { on: boolean }) {
     <span
       aria-hidden
       className={cn(
-        "relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors duration-200",
+        "relative inline-flex h-5.5 w-9.5 shrink-0 items-center rounded-full transition-colors duration-200",
         on ? "bg-emerald-600" : "bg-muted-foreground/30",
       )}
     >
       <span
         className={cn(
-          "inline-block size-[18px] rounded-full bg-white shadow-sm transition-transform duration-200",
-          on ? "translate-x-[18px]" : "translate-x-[2px]",
+          "inline-block size-4.5 rounded-full bg-white shadow-sm transition-transform duration-200",
+          on ? "translate-x-4.5" : "translate-x-0.5",
         )}
       />
     </span>

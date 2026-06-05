@@ -1,19 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileText, FileAudio, Film, ImageOff, Loader2, X } from "lucide-react";
+import { Download, FileText, FileAudio, Film, ImageOff, Loader2 } from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
-import { useBodyScrollLock } from "@/hooks/use-modal-overlay";
 import { openAttachment } from "@/features/inbox/lib/open-attachment";
-import type { MediaAttachment, MediaKind } from "@ccp/shared/types";
+import { MediaLightbox } from "@/features/inbox/components/attachments/media-lightbox";
+import type { MediaAttachment, MediaKind, Message } from "@ccp/shared/types";
 
 export function MediaBlock({
   media,
+  message,
   isOut,
   pending,
 }: {
   media: MediaAttachment;
+  /** The owning message — the image lightbox reads its timestamp + caption. */
+  message: Message;
   isOut: boolean;
   /**
    * Inbound only: the binary is still being downloaded in the background.
@@ -27,7 +30,7 @@ export function MediaBlock({
   }
   switch (media.kind) {
     case "image":
-      return <ImageBlock media={media} />;
+      return <ImageBlock media={media} message={message} />;
     case "video":
       return <VideoBlock media={media} />;
     case "audio":
@@ -133,7 +136,7 @@ function pendingPresentation(kind: "audio" | "document" | "sticker"): {
   }
 }
 
-function ImageBlock({ media }: { media: MediaAttachment }) {
+function ImageBlock({ media, message }: { media: MediaAttachment; message: Message }) {
   const [open, setOpen] = useState(false);
   const [errored, setErrored] = useState(false);
   // `loaded` drives the fade-in + shimmer. Without it the slot is a bare dark
@@ -255,7 +258,18 @@ function ImageBlock({ media }: { media: MediaAttachment }) {
           </>
         )}
       </button>
-      {open && <Lightbox url={media.url} onClose={() => setOpen(false)} />}
+      {open && (
+        // Same full-screen viewer as the contact-panel gallery, so an image
+        // opened from a chat bubble gets the identical header chrome (filename,
+        // size, date, zoom, download, close). Single-item: no "X of N", no
+        // chevrons, and no "Go to message" (you're already on it).
+        <MediaLightbox
+          items={[message]}
+          index={0}
+          onClose={() => setOpen(false)}
+          onNavigate={() => {}}
+        />
+      )}
     </>
   );
 }
@@ -405,88 +419,6 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
       </div>
       <Download className={cn("size-4 shrink-0 opacity-70")} />
     </button>
-  );
-}
-
-function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
-  const lastFocusedRef = useRef<HTMLElement | null>(null);
-  const imgRef = useRef<HTMLImageElement>(null);
-  const [errored, setErrored] = useState(false);
-
-  // Lock body scroll while the lightbox is open. No focus trap needed — the
-  // overlay has exactly one tabbable target (the close button), so wrap-on-
-  // Tab would behave identically to no-trap.
-  useBodyScrollLock(true);
-
-  useEffect(() => {
-    lastFocusedRef.current = document.activeElement as HTMLElement | null;
-    closeBtnRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      lastFocusedRef.current?.focus?.();
-    };
-  }, [onClose]);
-
-  // Catch failures that completed before onError could be wired. Same
-  // pattern as ImageBlock — the Lightbox is client-only (mounts on click)
-  // so the SSR window doesn't apply here, but a runtime load failure of
-  // a cached 404 has the same race.
-  useEffect(() => {
-    const img = imgRef.current;
-    if (!img || errored) return;
-    if (img.complete && img.naturalWidth === 0) setErrored(true);
-  }, [errored, url]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image preview"
-    >
-      {errored ? (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="flex flex-col items-center gap-2 rounded-xl bg-black/60 px-6 py-8 text-white/70"
-        >
-          <ImageOff className="size-7" />
-          <span className="text-xs">Image unavailable</span>
-        </div>
-      ) : (
-        /* eslint-disable-next-line @next/next/no-img-element */
-        <img
-          ref={imgRef}
-          src={url}
-          alt="full size"
-          // `decoding=async` lets the browser decode off the main thread so
-          // the lightbox open animation doesn't stutter on large images;
-          // `fetchPriority=high` jumps the queue past background bubble
-          // thumbnails that may be loading concurrently — rapid lightbox
-          // clicks otherwise serialize behind 10+ thumbnail loads on a
-          // media-heavy thread.
-          decoding="async"
-          fetchPriority="high"
-          onError={() => setErrored(true)}
-          className="max-h-[90vh] max-w-[90vw] object-contain"
-          onClick={(e) => e.stopPropagation()}
-        />
-      )}
-      <button
-        ref={closeBtnRef}
-        type="button"
-        onClick={onClose}
-        className="absolute right-4 top-4 flex size-9 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"
-        aria-label="Close"
-      >
-        <X className="size-4" />
-      </button>
-    </div>
   );
 }
 

@@ -207,10 +207,13 @@ function ConversationListImpl({
     setScrollEl(node);
   }, []);
 
-  // Row height: each ConversationListItem is ~76px (avatar + 3 stacked lines
-  // with some padding). `measureElement` adapts if a row turns out taller
-  // (long names wrap, etc.); the estimate just bootstraps the layout.
-  const ROW_HEIGHT = 76;
+  // Row height: ConversationListItem is now a FIXED 80px (h-20 — see that
+  // file). Keeping this estimate EXACTLY equal to the rendered height means
+  // the SSR/first-paint fallback positions (index * ROW_HEIGHT) already match
+  // what `measureElement` measures, so nothing repositions on hydration — kills
+  // the "rows bounce/settle on hard refresh" jank. If you change the row's
+  // height, change BOTH numbers together.
+  const ROW_HEIGHT = 80;
   const rowVirtualizer = useVirtualizer({
     count: visible.length,
     getScrollElement: () => scrollEl,

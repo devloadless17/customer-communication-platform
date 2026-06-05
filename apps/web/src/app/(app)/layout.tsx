@@ -4,6 +4,7 @@ import { AppRail } from "@/components/layouts/app-rail";
 import { ChunkErrorReload } from "@/components/chunk-error-reload";
 import { CatalogSyncBoundary } from "@/providers/catalog-sync-boundary";
 import { NotificationSoundProvider } from "@/providers/notification-sound-provider";
+import { CallProvider } from "@/features/calls/call-provider";
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
 
@@ -69,15 +70,20 @@ export default async function AppShellLayout({
           inbox call toast rings through). Wraps AppRail so the user-menu sound
           toggles can read its context. */}
       <NotificationSoundProvider>
-        <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
-          <AppRail
-            currentUser={user}
-            team={{ id: team.id, name: team.name }}
-            canManageAvailability={permissions["availability:manage"]}
-            initialCollapsed={railCollapsed}
-          />
-          <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
-        </div>
+        {/* App-wide voice-call layer: the single useCall instance + the
+            incoming-call toast / active-call panel, so a call ringing in is
+            visible on every page (not just the inbox). */}
+        <CallProvider>
+          <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
+            <AppRail
+              currentUser={user}
+              team={{ id: team.id, name: team.name }}
+              canManageAvailability={permissions["availability:manage"]}
+              initialCollapsed={railCollapsed}
+            />
+            <div className="flex min-w-0 flex-1 flex-col md:flex-row">{children}</div>
+          </div>
+        </CallProvider>
       </NotificationSoundProvider>
     </CatalogSyncBoundary>
   );

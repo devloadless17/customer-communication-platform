@@ -18,6 +18,13 @@ import type { Message } from "@ccp/shared/types";
  *
  * Backdrop click closes; clicking the image itself toggles 1× / 2× zoom
  * (preserves the click point as the zoom origin so it feels native).
+ *
+ * Two callers share this one viewer so the chrome is identical in both:
+ *  - the contact-panel attachment gallery passes the full image/video set and
+ *    an `onGoToMessage` jump (multi-item, "X of N" + chevrons + jump button).
+ *  - an in-chat image bubble passes a single-item array and NO `onGoToMessage`
+ *    (you're already on the message). The counter, chevrons, and jump button
+ *    self-hide for that case — same look, no irrelevant controls.
  */
 export function MediaLightbox({
   items,
@@ -30,7 +37,8 @@ export function MediaLightbox({
   index: number;
   onClose: () => void;
   onNavigate: (nextIndex: number) => void;
-  onGoToMessage: (messageId: string) => void;
+  /** Omit when the viewer is opened from within the thread itself. */
+  onGoToMessage?: (messageId: string) => void;
 }) {
   const current = items[index];
   const [zoomed, setZoomed] = useState(false);
@@ -114,9 +122,8 @@ export function MediaLightbox({
             {current.media.filename ?? captionFallback(current)}
           </div>
           <div className="text-[11px] text-white/60">
-            {index + 1} of {items.length}
-            {current.media.sizeBytes > 0 && ` · ${formatBytes(current.media.sizeBytes)}`}
-            {" · "}
+            {items.length > 1 && `${index + 1} of ${items.length} · `}
+            {current.media.sizeBytes > 0 && `${formatBytes(current.media.sizeBytes)} · `}
             {new Date(current.timestamp).toLocaleString()}
           </div>
         </div>
@@ -143,15 +150,17 @@ export function MediaLightbox({
               <span className="ml-1.5 hidden sm:inline">Download</span>
             </a>
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-white hover:bg-white/10 hover:text-white"
-            onClick={() => onGoToMessage(current.id)}
-          >
-            <MessageSquare className="size-4" />
-            <span className="ml-1.5 hidden sm:inline">Go to message</span>
-          </Button>
+          {onGoToMessage && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-white hover:bg-white/10 hover:text-white"
+              onClick={() => onGoToMessage(current.id)}
+            >
+              <MessageSquare className="size-4" />
+              <span className="ml-1.5 hidden sm:inline">Go to message</span>
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

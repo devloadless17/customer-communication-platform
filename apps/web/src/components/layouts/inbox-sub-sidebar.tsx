@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   AtSign,
   CheckCircle2,
@@ -9,6 +11,7 @@ import {
   Inbox as InboxIcon,
   Layers,
   type LucideIcon,
+  Phone,
   UserPlus,
 } from "lucide-react";
 
@@ -78,6 +81,8 @@ export function InboxSubSidebar({
 }) {
   const [stagesOpen, setStagesOpen] = useState(filter.kind === "stage");
   const [teammatesOpen, setTeammatesOpen] = useState(true);
+  const pathname = usePathname() ?? "";
+  const onCallsPage = pathname.startsWith("/calls");
 
   // Self first, then the rest alphabetically — matches the old app-sidebar
   // ordering so it's obvious which row is "you".
@@ -174,6 +179,28 @@ export function InboxSubSidebar({
             </button>
           );
         })}
+        {/* Calls history — a separate page (not a list filter), so it's a Link
+            rather than an onFilterChange button. Sits right under Closed. */}
+        <Link
+          href="/calls"
+          className={cn(
+            "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
+            "hover:bg-accent hover:text-accent-foreground",
+            onCallsPage
+              ? "bg-accent text-accent-foreground font-medium"
+              : "text-muted-foreground",
+          )}
+        >
+          <Phone
+            className={cn(
+              "size-4 shrink-0",
+              onCallsPage
+                ? "text-primary"
+                : "text-muted-foreground group-hover:text-foreground",
+            )}
+          />
+          <span className="flex-1 text-left">Calls</span>
+        </Link>
       </SubSidebarSection>
 
       <div className="mt-3">
@@ -285,20 +312,25 @@ export function InboxSubSidebar({
                 // catalog; an offline-marked teammate falls into the
                 // "not online" branch because the server filtered them out of
                 // onlineUserIds, so the offline color naturally applies.
-                const availability = availabilityByUserId?.[u.id];
+                // SEED status + note from the SSR user (`u`) so they render on
+                // the FIRST paint. The live presence map (`availabilityByUserId`)
+                // is empty until the `user:availability:snapshot` socket frame
+                // lands a beat after connect; without the seed the note pops in
+                // then — growing the row a line — which is the "teammates
+                // vibrate on refresh" jank. Live data takes over the instant it
+                // arrives (a present entry is authoritative, even if its note is
+                // null = the user cleared it).
+                const live = availabilityByUserId?.[u.id];
+                const status = live ? live.status : (u.availabilityStatus ?? "available");
+                const note = live ? live.message ?? null : (u.availabilityMessage ?? null);
                 const dotClass = online
-                  ? (availability
-                      ? AVAILABILITY_DOT_CLASSES[availability.status]
-                      : AVAILABILITY_DOT_CLASSES.available)
+                  ? AVAILABILITY_DOT_CLASSES[status]
                   : AVAILABILITY_DOT_CLASSES.offline;
                 const dotLabel = !hasPresence
                   ? ""
                   : online
-                    ? (availability
-                        ? AVAILABILITY_LABELS[availability.status]
-                        : "Online")
+                    ? AVAILABILITY_LABELS[status]
                     : "Offline";
-                const note = availability?.message ?? null;
                 const trimmedNote = note?.trim() || null;
                 return (
                   <div

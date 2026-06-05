@@ -9,6 +9,7 @@ import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { initials } from "@ccp/shared/utils";
 import { getClientSocket } from "@/lib/socket-client";
 import { notificationSound } from "@/lib/notifications/notification-sound";
+import { useNotificationSounds } from "@/providers/notification-sound-provider";
 
 /**
  * Team-wide incoming-call toast. Subscribes to `call:incoming` (team-room)
@@ -43,6 +44,13 @@ export function IncomingCallToast({
   const expiryTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const RING_EXPIRY_MS = 60_000;
 
+  // Device opt-out: when this PC has "receive calls" off, ignore incoming calls
+  // entirely (no card, no ring). Read via a ref so toggling doesn't churn the
+  // socket subscription below; the team still rings on everyone else's devices.
+  const { receiveCalls } = useNotificationSounds();
+  const receiveCallsRef = useRef(receiveCalls);
+  receiveCallsRef.current = receiveCalls;
+
   useEffect(() => {
     const socket = getClientSocket();
     const timers = expiryTimers.current;
@@ -63,6 +71,9 @@ export function IncomingCallToast({
       contactName: string;
       ringingAt: string;
     }) => {
+      // This device opted out of receiving calls — drop it silently. Teammates
+      // who keep it on still get the popup + ring.
+      if (!receiveCallsRef.current) return;
       setCalls((prev) => {
         if (prev.some((c) => c.callId === payload.callId)) return prev;
         return [

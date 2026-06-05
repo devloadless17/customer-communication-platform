@@ -985,6 +985,96 @@ export class CallsService {
       hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
     return { items, cursor: nextCursor };
   }
+
+  /**
+   * TEAM-WIDE call history for the Calls page — every call across every
+   * conversation, newest-first, with the contact + who-placed/answered names
+   * resolved in the same query. Same capability gate + keyset cursor as the
+   * per-conversation `list()`; same `<ringingAtMs>_<id>` cursor wire form.
+   */
+  async listTeamCalls(
+    session: ApiSession,
+    take: number,
+    cursor: string | undefined,
+  ): Promise<{ items: TeamCallRow[]; cursor: string | null }> {
+    const perms = resolvePermissions(session.role, session.rolePermissions);
+    if (
+      !perms["calls:make" as Capability] &&
+      !perms["calls:receive" as Capability]
+    ) {
+      throw new ForbiddenException({ error: "forbidden" });
+    }
+
+    const parsed = parseCallCursor(cursor);
+    const cursorWhere: Prisma.CallWhereInput | undefined = parsed
+      ? {
+          OR: [
+            { ringingAt: { lt: parsed.ringingAt } },
+            { ringingAt: parsed.ringingAt, id: { lt: parsed.id } },
+          ],
+        }
+      : undefined;
+    const baseWhere: Prisma.CallWhereInput = { teamId: session.teamId };
+    const rows = await this.db.call.findMany({
+      where: cursorWhere ? { AND: [baseWhere, cursorWhere] } : baseWhere,
+      orderBy: [{ ringingAt: "desc" }, { id: "desc" }],
+      take: take + 1,
+      select: {
+        id: true,
+        conversationId: true,
+        direction: true,
+        status: true,
+        ringingAt: true,
+        answeredAt: true,
+        durationSeconds: true,
+        initiatedBy: { select: { id: true, name: true } },
+        answeredBy: { select: { id: true, name: true } },
+        conversation: {
+          select: { contact: { select: { id: true, name: true, phoneNumber: true } } },
+        },
+      },
+    });
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const items: TeamCallRow[] = page.map((c) => ({
+      id: c.id,
+      conversationId: c.conversationId,
+      contactId: c.conversation.contact?.id ?? null,
+      contactName: c.conversation.contact?.name ?? null,
+      contactPhone: c.conversation.contact?.phoneNumber ?? null,
+      direction: c.direction === "in" ? ("in" as const) : ("out" as const),
+      status: c.status,
+      initiatedByName: c.initiatedBy?.name ?? null,
+      answeredByName: c.answeredBy?.name ?? null,
+      ringingAt: c.ringingAt.toISOString(),
+      durationSeconds: c.durationSeconds,
+      connected:
+        c.answeredAt !== null ||
+        (c.durationSeconds !== null && c.durationSeconds > 0),
+    }));
+    const last = page.at(-1);
+    const nextCursor =
+      hasMore && last ? `${last.ringingAt.getTime()}_${last.id}` : null;
+    return { items, cursor: nextCursor };
+  }
+}
+
+/** Wire row for the team-wide Calls page. */
+export interface TeamCallRow {
+  id: string;
+  conversationId: string;
+  contactId: string | null;
+  contactName: string | null;
+  contactPhone: string | null;
+  direction: "in" | "out";
+  status: SerializedCall["status"];
+  /** Agent who placed an outbound call (null for inbound). */
+  initiatedByName: string | null;
+  /** Agent who answered an inbound call (null if unanswered). */
+  answeredByName: string | null;
+  ringingAt: string;
+  durationSeconds: number | null;
+  connected: boolean;
 }
 
 /**

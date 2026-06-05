@@ -244,6 +244,7 @@ function BubbleContent({
           {media && (
             <MediaBlock
               media={media}
+              message={message}
               isOut={isOut}
               pending={message.mediaPending}
             />

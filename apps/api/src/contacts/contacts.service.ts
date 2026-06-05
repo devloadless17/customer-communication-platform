@@ -742,8 +742,9 @@ export class ContactsService {
       if (h === "country" || h === "country_code" || h === "country code") {
         return { kind: "country" };
       }
-      // Tags: one column, semicolon-separated tag NAMES (e.g. "VIP;Lead").
-      // Unknown names are auto-created on import (same as the UI tag picker).
+      // Tags: one column, comma-separated tag NAMES (e.g. "VIP, Lead"); the
+      // legacy ";" separator is still accepted. Unknown names are auto-created
+      // on import (same as the UI tag picker).
       if (h === "tags" || h === "tag") return { kind: "tags" };
       // Stage: one column, the stage NAME (e.g. "Stage 2"). Blank or unknown
       // → team default stage. Stages are never auto-created (curated pipeline).
@@ -876,12 +877,13 @@ export class ContactsService {
       const countryValid =
         countryNormalized.length === 2 && /^[A-Z]{2}$/.test(countryNormalized);
 
-      // Tags: split on ";", trim, drop blanks, de-dupe (case-insensitive on
-      // the key but keep first-seen casing for create), cap at 25/row so a
-      // pathological cell can't blow up the tag catalog.
+      // Tags: split on "," (the export separator) OR ";" (legacy exports +
+      // anyone who still types semicolons), trim, drop blanks, de-dupe
+      // (case-insensitive on the key but keep first-seen casing for create),
+      // cap at 25/row so a pathological cell can't blow up the tag catalog.
       const seenTagKeys = new Set<string>();
       const tagNames: string[] = [];
-      for (const raw of tagsRaw.split(";")) {
+      for (const raw of tagsRaw.split(/[;,]/)) {
         const t = raw.trim().slice(0, MAX_TEXT);
         if (!t) continue;
         const key = t.toLowerCase();
@@ -1402,8 +1404,11 @@ export class ContactsService {
         location: c.location ?? "",
         language: c.language ?? "",
         country: c.countryCode ?? "",
-        // Semicolon-separated tag names — round-trips with the import parser.
-        tags: c.tags.map((t) => t.name).join(";"),
+        // Comma-separated tag names. The cell contains commas, so serializeCsv
+        // wraps it in quotes ("VIP, Lead") per RFC 4180 — papaparse unquotes it
+        // back to a single cell on import. Round-trips with the import parser,
+        // which splits on comma (and still accepts the legacy ";" too).
+        tags: c.tags.map((t) => t.name).join(", "),
         stage: (c.stageId && stageNameById.get(c.stageId)) || "",
         source: c.source,
       };
@@ -1439,7 +1444,7 @@ export class ContactsService {
 
   /**
    * Import template — header row + ONE clearly-fake example row that documents
-   * the expected formats inline (phone WITH country code, tags semicolon-
+   * the expected formats inline (phone WITH country code, tags comma-
    * separated, stage by name). Built from the same recognized headers as the
    * importer plus the team's custom-field labels, so a fresh download always
    * matches the current schema.
@@ -1474,7 +1479,8 @@ export class ContactsService {
 
     // One example row. phone_number is full international WITH country code and
     // NO "+" (a "+" works too — the importer strips it — but showing it without
-    // is the safe Excel-friendly form). Tags are ";"-separated; stage is a name.
+    // is the safe Excel-friendly form). Tags are ","-separated (the cell gets
+    // quoted by `esc` below since it contains a comma); stage is a name.
     const example: Record<string, string> = {
       phone_number: "15551234567",
       name: "John Example",
@@ -1484,7 +1490,7 @@ export class ContactsService {
       location: "New York",
       language: "en",
       country: "US",
-      tags: "VIP;Lead",
+      tags: "VIP, Lead",
       stage: "Stage 1",
     };
     const exampleRow = columns.map((c) => example[c] ?? "");

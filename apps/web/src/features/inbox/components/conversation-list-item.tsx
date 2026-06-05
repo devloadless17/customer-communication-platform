@@ -52,7 +52,14 @@ function ConversationListItemImpl({
   return (
     <div
       className={cn(
-        "group relative flex cursor-pointer gap-3 rounded-lg px-2.5 py-2.5 transition-colors",
+        // FIXED height (h-20 = 80px) — must equal ROW_HEIGHT in
+        // conversation-list.tsx. The list is virtualized; if the row's real
+        // height differs from the virtualizer's estimate, every row repositions
+        // on hydration (the visible "bounce/settle" on hard refresh). The three
+        // stacked rows all single-line-truncate, so 80px fits them with a couple
+        // px to spare and the height never varies → estimate === measured →
+        // zero reposition. overflow-hidden guards a future taller variant.
+        "group relative flex h-20 cursor-pointer gap-3 overflow-hidden rounded-lg px-2.5 py-2.5 transition-colors",
         active
           ? "bg-primary/10"
           : pending

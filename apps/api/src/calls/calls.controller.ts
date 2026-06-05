@@ -100,6 +100,20 @@ export class CallsController {
     return this.calls.list(session, conversationId, query.take, query.cursor);
   }
 
+  /**
+   * TEAM-WIDE call history for the Calls page (every call across all
+   * conversations, newest-first). Capability-gated in the service
+   * (calls:make OR calls:receive), same keyset cursor as the per-conversation
+   * list. No `:id` collision — this is a fixed sub-path of /api/calls.
+   */
+  @Get("api/calls")
+  async listTeam(
+    @CurrentSession() session: ApiSession,
+    @Query(zQuery(ListCallsQuerySchema)) query: ListCallsQuery,
+  ) {
+    return this.calls.listTeamCalls(session, query.take, query.cursor);
+  }
+
   // --- Admin -----------------------------------------------------------------
 
   /**

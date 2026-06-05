@@ -38,6 +38,27 @@ interface NotificationSoundContextValue {
   setPref: (category: SoundCategory, enabled: boolean) => void;
   /** Play a one-shot sample (used by the picker when a category is enabled). */
   preview: (category: SoundCategory) => void;
+  /**
+   * Device-local opt-out for receiving calls AT ALL on this PC. Default true.
+   * When false the IncomingCallToast ignores `call:incoming` entirely — no
+   * popup, no ring — so an agent who doesn't take calls on this machine isn't
+   * interrupted, while teammates who keep it on still get the call. Distinct
+   * from the call SOUND toggle (which only silences the ring).
+   */
+  receiveCalls: boolean;
+  setReceiveCalls: (enabled: boolean) => void;
+}
+
+const RECEIVE_CALLS_KEY = "ccp.receiveCalls";
+
+/** Read the device receive-calls opt-out. Absent/anything-but-"0" = ON. */
+function loadReceiveCalls(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    return window.localStorage.getItem(RECEIVE_CALLS_KEY) !== "0";
+  } catch {
+    return true;
+  }
 }
 
 const NotificationSoundContext = createContext<NotificationSoundContextValue | null>(null);
@@ -55,6 +76,9 @@ const DEDUP_CAP = 200;
 
 export function NotificationSoundProvider({ children }: { children: React.ReactNode }) {
   const [prefs, setPrefs] = useState<SoundPrefs>(() => notificationSound.getPrefs());
+  // SSR-safe default (ON); seeded from localStorage on mount below. The toast
+  // renders nothing until a call arrives, so the brief default can't flash.
+  const [receiveCalls, setReceiveCallsState] = useState(true);
 
   // Bounded FIFO set so Socket.io connection-state-recovery replays of a
   // `message:new` don't re-ding the same message.
@@ -66,6 +90,7 @@ export function NotificationSoundProvider({ children }: { children: React.ReactN
   // Seed from localStorage on mount (client-only value).
   useEffect(() => {
     setPrefs(notificationSound.loadPrefs());
+    setReceiveCallsState(loadReceiveCalls());
   }, []);
 
   // Unlock audio on the first user gesture anywhere in the app. `once` removes
@@ -120,9 +145,14 @@ export function NotificationSoundProvider({ children }: { children: React.ReactN
   // Cross-tab pref sync: a toggle in another tab fires a `storage` event here.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      // key === null on storage.clear(); otherwise only react to our key.
-      if (e.key !== null && e.key !== "ccp.sound.prefs") return;
-      setPrefs(notificationSound.reloadPrefs());
+      // key === null on storage.clear(); otherwise only react to our keys.
+      if (e.key === null) {
+        setPrefs(notificationSound.reloadPrefs());
+        setReceiveCallsState(loadReceiveCalls());
+        return;
+      }
+      if (e.key === "ccp.sound.prefs") setPrefs(notificationSound.reloadPrefs());
+      if (e.key === RECEIVE_CALLS_KEY) setReceiveCallsState(loadReceiveCalls());
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
@@ -145,8 +175,21 @@ export function NotificationSoundProvider({ children }: { children: React.ReactN
     else notificationSound.playCallSample();
   }, []);
 
+  const setReceiveCalls = useCallback((enabled: boolean) => {
+    setReceiveCallsState(enabled);
+    try {
+      window.localStorage.setItem(RECEIVE_CALLS_KEY, enabled ? "1" : "0");
+    } catch {
+      // private mode / storage disabled — the choice still holds this session
+    }
+    // Turning calls off should silence anything currently ringing on this tab.
+    if (!enabled) notificationSound.stopAllCallRings();
+  }, []);
+
   return (
-    <NotificationSoundContext.Provider value={{ prefs, setPref, preview }}>
+    <NotificationSoundContext.Provider
+      value={{ prefs, setPref, preview, receiveCalls, setReceiveCalls }}
+    >
       {children}
     </NotificationSoundContext.Provider>
   );

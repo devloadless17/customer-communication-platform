@@ -146,8 +146,8 @@ export function ImportContactsDialog({
               <div>
                 <span className="font-medium text-foreground">Tags:</span>{" "}
                 one <code className="rounded bg-muted px-1">tags</code> column,
-                separate multiple with a semicolon —{" "}
-                <code className="rounded bg-muted px-1">VIP;Lead</code>. New tag names
+                separate multiple with a comma —{" "}
+                <code className="rounded bg-muted px-1">VIP, Lead</code>. New tag names
                 are created automatically. Leave blank for none.
               </div>
               <div>

@@ -1,7 +1,6 @@
 "use client";
 
-import { memo, useRef } from "react";
-import { motion } from "framer-motion";
+import { memo } from "react";
 import {
   ArrowRightLeft,
   CircleDot,
@@ -137,59 +136,34 @@ function describe(e: ConversationActivityEvent): {
 
 function ActivityEntryImpl({
   event,
-  threadLive,
 }: {
   event: ConversationActivityEvent;
-  /** False through SSR + first paint + chat-switch; true once the thread view
-   *  has settled. A pill only animates if it FIRST renders while this is true —
-   *  i.e. it genuinely arrived live, not as part of the already-present batch.
-   *  This replaces an age-based (`Date.now() - event.at < 4s`) gate that
-   *  flush-animated recent-but-pre-existing pills on every refresh and risked an
-   *  SSR/client hydration mismatch from calling Date.now() during render. */
-  threadLive: boolean;
 }) {
-  // Decided once at mount and held stable across re-renders AND the
-  // optimistic→server reconcile — the merge keeps the pill's React key stable,
-  // so this node is updated in place (never remounted) and the entrance plays
-  // exactly once for a genuinely-new pill. Captured via useRef so a later
-  // threadLive flip can't retro-animate pills that were already on screen.
-  const animateIn = useRef(threadLive).current;
+  // No entrance animation: an audit pill must appear INSTANTLY and solid in its
+  // final spot, like a WhatsApp Web / Slack micro event-line. ANY tween — even
+  // opacity/transform — reads as a "bounce / lag before it settles" on the
+  // newest pill. Adding the row shifts the older content up by its height in ONE
+  // column-reverse reflow step (already clean); the pill itself just paints in
+  // place. (History: a height tween slid the whole stack; a 4px opacity/y rise
+  // then bounced the single new pill — both removed for a dead-solid result.)
   const desc = describe(event);
   if (!desc) return null;
   const Icon = desc.icon;
   return (
-    <motion.div
-      // Transform/opacity-ONLY entrance — deliberately NOT `height: 0→auto`.
-      // A height tween grows the pill over ~11 frames, and because the
-      // chat-scroll ResizeObserver re-pins scrollTop every one of those frames
-      // (and `overflow-anchor:none` disables the browser's own bottom-pin), the
-      // ENTIRE log stack above slides for the whole animation. With several
-      // pills landing together (assign+status, start-chat, rapid changes) those
-      // slides overlap into ~400ms of the whole list moving — the "vibration /
-      // lag" users reported. opacity+y are GPU-composited and change NO layout:
-      // the pill takes its final height immediately, so column-reverse adds it
-      // (and any siblings) in ONE reflow step, then it just fades+rises into
-      // place. Matches how WhatsApp Web / Slack drop in micro event-lines.
-      // A historical pill uses `initial={false}` → no tween, paints in place.
-      initial={animateIn ? { opacity: 0, y: 4 } : false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
-    >
-      <div className="my-1 flex w-full justify-center px-4">
-        <div className="inline-flex max-w-2xl items-center gap-1 text-[10px] leading-tight text-muted-foreground">
-          <Icon className="size-2.5 shrink-0 opacity-70" />
-          <span className="wrap-break-word [&>b]:font-medium [&>b]:text-foreground/80 [&>i]:not-italic [&>i]:opacity-70">
-            {desc.text}
-          </span>
-          <span className="opacity-50">·</span>
-          <LocalTime
-            iso={event.at}
-            format="messageTime"
-            className="shrink-0 tabular-nums opacity-70"
-          />
-        </div>
+    <div className="my-1 flex w-full justify-center px-4">
+      <div className="inline-flex max-w-2xl items-center gap-1 text-[10px] leading-tight text-muted-foreground">
+        <Icon className="size-2.5 shrink-0 opacity-70" />
+        <span className="wrap-break-word [&>b]:font-medium [&>b]:text-foreground/80 [&>i]:not-italic [&>i]:opacity-70">
+          {desc.text}
+        </span>
+        <span className="opacity-50">·</span>
+        <LocalTime
+          iso={event.at}
+          format="messageTime"
+          className="shrink-0 tabular-nums opacity-70"
+        />
       </div>
-    </motion.div>
+    </div>
   );
 }
 

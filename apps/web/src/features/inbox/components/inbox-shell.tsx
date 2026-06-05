@@ -41,9 +41,7 @@ import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
-import { CallPanel } from "@/features/calls/components/call-panel";
-import { IncomingCallToast } from "@/features/calls/components/incoming-call-toast";
-import { useCall } from "@/features/calls/hooks/use-call";
+import { useCallApi } from "@/features/calls/call-provider";
 import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
 import { toast } from "@/lib/toast";
 
@@ -255,15 +253,11 @@ export function InboxShell({
   displayedIdRef.current = displayedId;
 
   // ---- WhatsApp voice calling ----
-  // useCall owns the RTCPeerConnection lifecycle + subscribes to
-  // call:sdp_offer / call:ended (call:sdp_offer carries BOTH the inbound offer
-  // and the customer's answer SDP — trickle-ICE was removed since Meta uses
-  // ICE-LITE, so there's no separate call:ice event). Mounted at the shell level so
-  // a call survives thread switches. Side-effect (the IncomingCallToast +
-  // CallPanel below) is rendered as a portal-like overlay; the inbox
-  // layout doesn't shift when a call is in progress.
-  const callApi = useCall();
-  const [callError, setCallError] = useState<string | null>(null);
+  // The call API (single useCall instance) now lives in the app-wide
+  // CallProvider, so the incoming-call toast + active-call panel render on
+  // EVERY page (not just the inbox). The inbox only needs the API to PLACE an
+  // outbound call from the thread header; failures surface via toast.
+  const callApi = useCallApi();
 
   const fetchControllersRef = useRef<Map<string, AbortController>>(new Map());
 
@@ -904,17 +898,13 @@ export function InboxShell({
   const initiateCallForActiveThread = useCallback(async () => {
     const targetId = displayedIdRef.current;
     if (!targetId) return;
-    setCallError(null);
     const snapshot = cache.get(targetId);
     const contactName = snapshot?.data.contact.name ?? "Customer";
     const result = await callApi.initiateOutbound(targetId, contactName);
     if (!result.ok) {
-      const msg = callReasonMessage(result.reason);
-      setCallError(msg);
-      // Toast too — the pre-flight rejection already tore down `liveCall`, so
-      // CallPanel (the only consumer of callError) is unmounted and wouldn't
-      // show it. The toast guarantees the agent sees why the call didn't start.
-      toast.error(msg);
+      // A pre-flight rejection tore down `liveCall`, so the global CallPanel
+      // won't show it — a toast guarantees the agent sees why it didn't start.
+      toast.error(callReasonMessage(result.reason));
     }
   }, [cache, callApi]);
 
@@ -975,10 +965,20 @@ export function InboxShell({
               Desktop: always visible. */}
           <main
             className={cn(
-              "min-w-0 flex-1 border-border bg-background md:flex md:border-l",
+              "relative min-w-0 flex-1 border-border bg-background md:flex md:border-l",
               activeId ? "flex" : "hidden md:flex",
             )}
           >
+            {/* Delay-gated loading bar for the conversation pane only. A thread
+                FETCH (cache miss / reconnect refetch) that runs longer than
+                ~180ms reveals a thin top bar; a fast fetch (cache-warm / good
+                network) resolves first, so the bar never shows and the switch
+                stays visually instant. This is the `?c=` chat-switch equivalent
+                of NavProgress, which deliberately fires only on a real
+                route/pathname change. */}
+            <ThreadLoadingBar
+              pending={pendingId !== null && pendingId === activeId}
+            />
             {errorId && errorId === activeId ? (
               <ThreadError onRetry={retryActive} />
             ) : displayedId && displayedThread ? (
@@ -1030,26 +1030,9 @@ export function InboxShell({
           </main>
         </div>
         <DevTools conversations={live.conversations} currentUser={currentUser} />
-
-        {/* WhatsApp voice calling overlays — fixed-position, render
-            independent of the thread that's open. The toast stack lives
-            bottom-left, the in-call panel bottom-right; they never overlap
-            with the inbox layout (no shift on mount). */}
-        <IncomingCallToast
-          onAnswer={(callId, contactName, conversationId) => {
-            void callApi.answerIncoming(callId, contactName, conversationId);
-          }}
-          onReject={(callId) => {
-            void callApi.reject(callId);
-          }}
-        />
-        <CallPanel
-          liveCall={callApi.liveCall}
-          error={callError ?? callApi.error}
-          onHangup={() => void callApi.hangup()}
-          onSetMuted={callApi.setMuted}
-          isMuted={callApi.isMuted}
-        />
+        {/* The incoming-call toast + active-call panel are now app-wide (see
+            CallProvider in the (app) layout) so a call rings through on every
+            page, not just here. */}
       </div>
     </SnippetsProvider>
   );
@@ -1061,6 +1044,63 @@ export function InboxShell({
  * switch — that's the boundary at which MessageThread's local state
  * (composer-local UI, scroll offset, selection) is intentionally reset.
  */
+/**
+ * Delay-gated loading bar for the conversation pane. Driven by the thread-fetch
+ * pending flag: when a cache-miss / reconnect refetch is in flight, a ~180ms
+ * timer arms; only if the fetch is STILL pending when it fires does the thin top
+ * bar reveal (easing toward 90% to imply progress). A fast fetch resolves before
+ * the timer, so the bar never appears — the chat-switch stays visually instant,
+ * which is the whole point. On resolve, a bar that DID show snaps to 100% and
+ * fades; one that never showed is a no-op. Scoped to the pane (absolute,
+ * pointer-events-none) so it can never block interaction; mirrors NavProgress's
+ * width/opacity-only technique with no new CSS. Holds the previously-displayed
+ * thread (or the chat-shaped skeleton) underneath — no teardown/skeleton flash.
+ */
+function ThreadLoadingBar({ pending }: { pending: boolean }) {
+  const [visible, setVisible] = useState(false);
+  const [width, setWidth] = useState(0);
+  const timersRef = useRef<number[]>([]);
+  const shownRef = useRef(false);
+  useEffect(() => {
+    const clear = () => {
+      for (const t of timersRef.current) window.clearTimeout(t);
+      timersRef.current = [];
+    };
+    clear();
+    if (pending) {
+      // Reveal only after the slow-threshold so fast fetches stay invisible.
+      timersRef.current.push(
+        window.setTimeout(() => {
+          shownRef.current = true;
+          setVisible(true);
+          setWidth(8);
+          timersRef.current.push(window.setTimeout(() => setWidth(90), 90));
+        }, 180),
+      );
+    } else if (shownRef.current) {
+      // Was visible (slow fetch) and now resolved → complete + fade out.
+      shownRef.current = false;
+      setWidth(100);
+      timersRef.current.push(window.setTimeout(() => setVisible(false), 160));
+      timersRef.current.push(window.setTimeout(() => setWidth(0), 340));
+    }
+    return clear;
+  }, [pending]);
+  return (
+    <div
+      aria-hidden
+      data-thread-loading-bar=""
+      className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5"
+      style={{ opacity: visible ? 1 : 0, transition: "opacity 160ms ease" }}
+    >
+      <div
+        className="h-full bg-primary"
+        style={{ width: `${width}%`, transition: "width 300ms ease" }}
+      />
+    </div>
+  );
+}
+
 function ThreadWorkspace({
   thread,
   teamMembers,

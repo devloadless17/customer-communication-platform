@@ -511,9 +511,10 @@ jobs:
       - name: Wait for VPS SSH to be reachable
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
-          host="$VPS_HOST"; port="${VPS_PORT:-22}"
+          # Port 22 — the scp/ssh-action steps below don't set a custom `port:`,
+          # so they use SSH's default. Probe the same port the real steps use.
+          host="$VPS_HOST"; port=22
           for i in $(seq 1 10); do
             if timeout 8 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
               echo "✓ $host:$port reachable (attempt $i/10)"
