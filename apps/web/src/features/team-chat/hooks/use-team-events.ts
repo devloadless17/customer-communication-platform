@@ -642,7 +642,19 @@ export function useTeamEvents(
                           newConversation.conversation.assignedUserId === null
                         : newConversation.conversation.status !== "closed"; // "active"
           if (!matches) return prev;
-          return [newConversation, ...prev];
+          // Suppress the unread badge for a thread the agent is actively viewing
+          // (e.g. a closed thread that reopens via inbound while it's open) —
+          // markRead clears it a beat later anyway, so without this the row
+          // splices in with a badge that flashes for ~200ms. Mirrors the
+          // `isActive` suppression on the existing-row path below.
+          const spliced =
+            newConversation.conversation.id === activeIdRef.current
+              ? {
+                  ...newConversation,
+                  conversation: { ...newConversation.conversation, unreadCount: 0 },
+                }
+              : newConversation;
+          return [spliced, ...prev];
         }
         const existing = prev[idx]!;
         // If the user is currently viewing this thread, suppress the bump —

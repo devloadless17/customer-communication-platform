@@ -75,6 +75,9 @@ export function MessageSearch({
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Server-reported total match count (independent of how many we loaded). The
+  // display shows this so the count is accurate even past the load cap.
+  const [totalMatched, setTotalMatched] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const reqId = useRef(0);
 
@@ -99,6 +102,7 @@ export function MessageSearch({
     const trimmed = query.trim();
     if (trimmed.length === 0) {
       onMatchesChange([]);
+      setTotalMatched(0);
       setLoading(false);
       setError(null);
       return;
@@ -108,18 +112,35 @@ export function MessageSearch({
     setError(null);
     const t = window.setTimeout(async () => {
       try {
-        const res = await apiFetch(
-          `/api/conversations/${conversationId}/messages/search?q=${encodeURIComponent(trimmed)}&take=100`,
-        );
+        // Load ALL matches by following the cursor (up to a cap) so ↑/↓ can
+        // reach every match and the count is accurate. The old single take=100
+        // capped BOTH navigation and the displayed total at 100 — a common word
+        // in a long thread showed "1 of 100" and couldn't reach older matches.
+        const MAX_MATCHES = 300;
+        const all: SearchHit[] = [];
+        let cursor: string | null = null;
+        let total = 0;
+        do {
+          const res = await apiFetch(
+            `/api/conversations/${conversationId}/messages/search?q=${encodeURIComponent(
+              trimmed,
+            )}&take=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+          );
+          if (reqId.current !== my) return;
+          if (!res.ok) {
+            setError("Search failed");
+            onMatchesChange([]);
+            return;
+          }
+          const data = (await res.json()) as SearchPage;
+          if (reqId.current !== my) return;
+          all.push(...data.items);
+          total = data.totalMatched;
+          cursor = data.nextCursor;
+        } while (cursor && all.length < MAX_MATCHES);
         if (reqId.current !== my) return;
-        if (!res.ok) {
-          setError("Search failed");
-          onMatchesChange([]);
-          return;
-        }
-        const data = (await res.json()) as SearchPage;
-        if (reqId.current !== my) return;
-        onMatchesChange(data.items);
+        setTotalMatched(total);
+        onMatchesChange(all);
       } catch {
         if (reqId.current === my) {
           setError("Network error");
@@ -140,6 +161,9 @@ export function MessageSearch({
   // 1-based for display ("3 / 17"); 0-based internally.
   const human = totalMatches > 0 ? activeIndex + 1 : 0;
   const canNav = totalMatches > 1;
+  // Show the server's true total (loaded matches === total below the cap; above
+  // it the count still reads accurately while nav covers the loaded set).
+  const displayTotal = totalMatched || totalMatches;
 
   function nav(direction: -1 | 1) {
     if (!canNav) return;
@@ -203,7 +227,7 @@ export function MessageSearch({
           >
             {totalMatches === 0
               ? "No matches"
-              : `${human} of ${totalMatches}`}
+              : `${human} of ${displayTotal}`}
           </span>
         ) : null}
       </div>

@@ -132,15 +132,42 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       }
     });
     this.worker.on("failed", (job, err) => {
-      // BullMQ logs the final failure after retries are exhausted. Per-attempt
-      // failure publishing happens inside `handle()` below so the user gets
-      // feedback at the first attempt, not after the third retry.
+      // Fires when a job is moved to the failed state — i.e. retries are
+      // exhausted (or it threw UnrecoverableError). This is where the ACTIONABLE
+      // "Failed · Retry" bubble is published for a RECOVERABLE error, NOT
+      // per-attempt in handle(): publishing it while BullMQ is still going to
+      // auto-retry let the agent click Retry during the backoff and double-send
+      // to the customer. Non-recoverable errors already published (and showed an
+      // actionable bubble) from handle() before throwing UnrecoverableError, so
+      // skip those here to avoid a duplicate frame.
       const tempId =
         job?.data && "clientTempId" in job.data ? job.data.clientTempId : "<none>";
       this.logger.warn(
         `send job exhausted retries (clientTempId=${tempId}): ${
           err instanceof Error ? err.message : err
         }`,
+      );
+      if (!job || err instanceof UnrecoverableError) return;
+      // Guard against per-attempt 'failed' firing (BullMQ version-dependent):
+      // only publish once no more retries are coming. `< attempts` skips
+      // intermediate attempts; if a runtime ever 0-indexes attemptsMade and this
+      // skips the true-final attempt too, the reply-box's 30s watchdog is the
+      // backstop that surfaces the failure — never a double-send.
+      const attempts = job.opts?.attempts ?? 1;
+      if (job.attemptsMade < attempts) return;
+      const { reason, detail } = categorizeSendError(err);
+      void publish({
+        type: "message.send_failed",
+        teamId: job.data.teamId,
+        conversationId: job.data.conversationId,
+        senderUserId: job.data.userId,
+        ...(job.data.clientTempId ? { clientTempId: job.data.clientTempId } : {}),
+        reason,
+        ...(detail ? { detail } : {}),
+      }).catch((pubErr) =>
+        this.logger.error(
+          `failed to publish exhausted send_failed event: ${pubErr instanceof Error ? pubErr.message : pubErr}`,
+        ),
       );
     });
   }
@@ -201,27 +228,34 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
       await this.messages.executeTextSendJob(data, jobId);
     } catch (err) {
       const { reason, detail, recoverable } = categorizeSendError(err);
-      // Publish first so the originating client sees the failed bubble
-      // immediately, even if BullMQ later retries successfully (a retry
-      // success will publish `message.sent` which the frontend reconciles
-      // on top of the failed marker).
-      await publish({
-        type: "message.send_failed",
-        teamId: data.teamId,
-        conversationId: data.conversationId,
-        senderUserId: data.userId,
-        ...(data.clientTempId ? { clientTempId: data.clientTempId } : {}),
-        reason,
-        ...(detail ? { detail } : {}),
-      }).catch((pubErr) =>
-        this.logger.error(
-          `failed to publish send_failed event: ${pubErr instanceof Error ? pubErr.message : pubErr}`,
-        ),
-      );
 
       if (!recoverable) {
+        // Permanent failure — no retry is coming, so publish the actionable
+        // "Failed · Retry" bubble now and stop. (worker.on("failed") skips
+        // republishing for UnrecoverableError, so there's no duplicate frame.)
+        await publish({
+          type: "message.send_failed",
+          teamId: data.teamId,
+          conversationId: data.conversationId,
+          senderUserId: data.userId,
+          ...(data.clientTempId ? { clientTempId: data.clientTempId } : {}),
+          reason,
+          ...(detail ? { detail } : {}),
+        }).catch((pubErr) =>
+          this.logger.error(
+            `failed to publish send_failed event: ${pubErr instanceof Error ? pubErr.message : pubErr}`,
+          ),
+        );
         throw new UnrecoverableError(reason);
       }
+
+      // Recoverable (transient 5xx / network / rate-limit): let BullMQ retry.
+      // Deliberately DON'T publish a failed bubble here. A premature
+      // "Failed · Retry" while a retry is still pending let the agent click
+      // Retry during the backoff and send the message to the customer twice.
+      // The optimistic bubble stays "sending" through the retries; if they all
+      // fail, worker.on("failed") publishes the actionable failure on
+      // exhaustion; if a retry succeeds, `message.sent` reconciles the bubble.
       throw err;
     }
   }

@@ -128,12 +128,18 @@ export function InteractivePopover({
     if (!canSend) return;
     setBusy(true);
     setError(null);
+    // Idempotency key — the server's SendInteractiveSchema + runWithSendIdempotency
+    // dedupe on this, so a network-retry or fast double-submit can't deliver the
+    // interactive message to the customer twice. text/media/template already send
+    // one; interactive was the gap (the busy flag alone doesn't cover a retry).
+    const clientTempId = crypto.randomUUID();
     try {
       const res = await apiFetch("/api/messages/interactive", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           conversationId,
+          clientTempId,
           body: body.trim(),
           kind: "buttons",
           options: options.map((o) => ({ id: o.id.trim(), title: o.title.trim() })),

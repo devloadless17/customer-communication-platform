@@ -1004,6 +1004,20 @@ export function ReplyBox({
                 !e.nativeEvent.isComposing
               ) {
                 e.preventDefault();
+                // A fast typist can hit Enter within the 50ms slash-detect
+                // debounce — before `slashRange` is set — which would otherwise
+                // send the literal "/snippet" text. Detect synchronously here:
+                // if the caret sits on a /query, open the picker instead of
+                // sending.
+                const el = e.currentTarget;
+                const pendingSlash = detectSlashQuery(
+                  el.value,
+                  el.selectionStart ?? el.value.length,
+                );
+                if (pendingSlash) {
+                  setSlashRange(pendingSlash);
+                  return;
+                }
                 submit();
               }
             }}

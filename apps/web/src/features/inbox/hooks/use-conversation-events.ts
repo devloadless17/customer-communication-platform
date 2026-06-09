@@ -103,10 +103,15 @@ function reconcileOptimisticAgainst(
 ): Message[] {
   // (1) Text confirmation: a pending OUT bubble whose body matches a fresh OUT
   // row is the same send. Empty bodies are skipped here (media-only) and
-  // handled by (2).
-  const confirmedBodies = new Set(
-    fresh.filter((m) => m.direction === "out" && m.body).map((m) => m.body),
-  );
+  // handled by (2). COUNT, not a Set: two pending OUT bubbles with the SAME body
+  // must drop only when there are TWO confirmed server rows. A membership Set
+  // dropped BOTH pending bubbles when only ONE confirmation had landed (partial
+  // confirmation inside a reconnect window), briefly vanishing the second send.
+  const freshBodyCounts = new Map<string, number>();
+  for (const m of fresh) {
+    if (m.direction !== "out" || !m.body) continue;
+    freshBodyCounts.set(m.body, (freshBodyCounts.get(m.body) ?? 0) + 1);
+  }
 
   // (2) Media confirmation: a caption-less media send (voice / image / video /
   // doc) has an EMPTY body, so (1) can't match it — and the server row never
@@ -127,7 +132,7 @@ function reconcileOptimisticAgainst(
     freshMediaByKind.set(kind, (freshMediaByKind.get(kind) ?? 0) + 1);
   }
 
-  if (confirmedBodies.size === 0 && freshMediaByKind.size === 0) return existing;
+  if (freshBodyCounts.size === 0 && freshMediaByKind.size === 0) return existing;
 
   return existing.filter((m) => {
     // Match pending OR failed OUT bubbles. The live `onMessageNew` path already
@@ -139,8 +144,15 @@ function reconcileOptimisticAgainst(
     // button (a double-send trap). A genuinely-failed send has no server row, so
     // its body/media won't be in the confirmed sets below and it stays put.
     if (!((m.pending || m.failed) && m.direction === "out")) return true;
-    // Text optimistic confirmed by body.
-    if (m.body && confirmedBodies.has(m.body)) return false;
+    // Text optimistic confirmed by body — consume one per match so N pending
+    // bubbles drop only when N confirmed rows exist (mirrors the media branch).
+    if (m.body) {
+      const remaining = freshBodyCounts.get(m.body) ?? 0;
+      if (remaining > 0) {
+        freshBodyCounts.set(m.body, remaining - 1);
+        return false;
+      }
+    }
     // Media optimistic (local blob) confirmed by a same-kind server row.
     const localKind = m.media?.url?.startsWith("blob:") ? m.media.kind : undefined;
     if (!m.body && localKind) {
@@ -407,6 +419,14 @@ export function useConversationEvents(
   // visit — the `?after=` backfill then pops them in 0–1.5s later (the flash
   // the user sees, most noticeable on a short emoji-only bubble).
   onSnapshot?: (data: ConversationWithRefs, nextOlderCursor: string | null) => void,
+  // True when `initial` came from a possibly-stale LRU snapshot (a cache-HIT
+  // switch-back). While the thread sat backgrounded it wasn't subscribed to its
+  // conversation room, so message:status (delivered/read) ticks for messages it
+  // already holds never arrived, and the `?after=` delta can't carry them. When
+  // set, first-connect runs the FULL refetch (which reconciles statuses) instead
+  // of the lightweight delta, so stale checkmarks resolve on open. SSR-fresh /
+  // cache-MISS opens pass false (their data is already current).
+  initialMayBeStale = false,
 ): ConversationEventsState {
   const router = useRouter();
   const [data, setData] = useState<ConversationWithRefs>(initial);
@@ -523,6 +543,9 @@ export function useConversationEvents(
   // deferred (hidden → visible) recovery path.
   const hasConnectedOnceRef = useRef(false);
   const reconnectRecoveryRef = useRef(false);
+  // Constant per mount (the thread remounts on conversation switch), read in the
+  // socket effect's onConnect without making it an effect dep.
+  const initialMayBeStaleRef = useRef(initialMayBeStale);
 
   const inFlightOlder = useRef(false);
   const loadOlder = useCallback(
@@ -686,8 +709,16 @@ export function useConversationEvents(
       // Random jitter (0–1500ms) breaks the synchronized reconnect storm
       // after a deploy. Without it, every open tab in the team fires its
       // recovery GET at the same instant, dog-piling Postgres.
-      const recover = isReconnect ? runFullRefetch : runBackfill;
-      const delay = Math.floor(Math.random() * 1500);
+      // First connect from a possibly-stale cache snapshot → full refetch so
+      // message statuses (delivered/read ticks missed while backgrounded)
+      // reconcile, not just the newer-messages delta.
+      const recover =
+        isReconnect || initialMayBeStaleRef.current ? runFullRefetch : runBackfill;
+      // Jitter only matters for the reconnect STORM (every tab firing recovery
+      // at once after a deploy/Caddy bounce). A first-connect open is a single
+      // foreground thread the agent is watching — run it immediately so
+      // status/new-message convergence isn't delayed up to 1.5s.
+      const delay = isReconnect ? Math.floor(Math.random() * 1500) : 0;
       window.setTimeout(() => recover(), delay);
     };
 
@@ -776,6 +807,13 @@ export function useConversationEvents(
             return {
               ...next,
               messages: sortByTimestamp([...reconciled, ...fresh]),
+              // Keep the contact-panel "Messages" tally in sync. onMessageNew
+              // (+1) and runFullRefetch (adopts server count) both maintain it;
+              // the delta backfill must too, or the tally drifts low by N after
+              // an SSR/reconnect gap swallowed N inbound/outbound frames.
+              ...(next.messageCount !== undefined
+                ? { messageCount: next.messageCount + fresh.length }
+                : {}),
             };
           });
 
@@ -961,25 +999,28 @@ export function useConversationEvents(
 
     const onMessageNew: Parameters<typeof socket.on<"message:new">>[1] = (payload) => {
       if (payload.conversationId !== conversationId) return;
+      // Reconcile against any optimistic bubble we put up for this send.
+      // Match by clientTempId when present; otherwise just append.
+      const tempId = payload.clientTempId;
+      // Notify the reply-box's stuck-watchdog that the confirming frame arrived
+      // (else it flips the bubble to "failed" after 30s despite a confirmed
+      // send). Fired in the handler body — NOT inside the setData updater below —
+      // so the updater stays a pure reducer (CLAUDE.md flags side effects in
+      // setState updaters). The watchdog listener is once:true, so a duplicate
+      // webhook frame re-firing this is a harmless no-op.
+      if (tempId && typeof window !== "undefined") {
+        try {
+          window.dispatchEvent(new Event(`ccp:optimistic-confirmed:${tempId}`));
+        } catch {
+          // Synthetic events can't fail under normal conditions; ignore.
+        }
+      }
       setData((prev) => {
         // Dedupe by externalId — webhook retries can fire the same wamid twice.
         if (prev.messages.some((m) => m.externalId === payload.message.externalId)) {
           return prev;
         }
 
-        // Reconcile against any optimistic bubble we put up for this send.
-        // Match by clientTempId when present; otherwise just append.
-        const tempId = payload.clientTempId;
-        // Notify the reply-box's stuck-watchdog that the confirming frame
-        // arrived. Without this, the watchdog would mark the bubble as
-        // failed after 30s even though the server CONFIRMED the send.
-        if (tempId && typeof window !== "undefined") {
-          try {
-            window.dispatchEvent(new Event(`ccp:optimistic-confirmed:${tempId}`));
-          } catch {
-            // Synthetic events can't fail under normal conditions; ignore.
-          }
-        }
         const messages = tempId
           ? prev.messages.map((m) => {
               // Match pending OR failed optimistic rows. The background send

@@ -1,7 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { Check } from "lucide-react";
+import { Check, Paperclip } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
@@ -259,6 +259,20 @@ function BubbleContent({
               {searchQuery && searchQuery.trim().length > 0
                 ? highlightQuery(message.body, searchQuery)
                 : message.body}
+            </p>
+          )}
+          {/* Failed inbound media. A photo/voice/doc whose download from Meta
+              failed after retries has its media columns stripped and (when there
+              was no caption) an EMPTY body — which rendered as a blank bubble.
+              The Meta parser never creates an empty-body, no-media INBOUND any
+              other way (text/interactive/reaction without content are skipped),
+              so this is unambiguously "an attachment we couldn't download".
+              Client-only + derived, so it's consistent live AND on reload with
+              no schema/event change. */}
+          {!isOut && !media && !message.mediaPending && !message.body && (
+            <p className="flex items-center gap-1.5 px-2.5 py-1.5 text-[13px] italic text-muted-foreground">
+              <Paperclip className="size-3.5 shrink-0" />
+              Attachment unavailable
             </p>
           )}
         </div>

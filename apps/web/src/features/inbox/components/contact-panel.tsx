@@ -661,10 +661,35 @@ function ContactPanelImpl({
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       setError(body.error ?? "Couldn't save");
-      // Roll back the optimistic dispatch.
+      // Roll back to the state the app believed BEFORE this patch: keep the
+      // current local mirrors (which carry any prior committed-but-not-yet-
+      // refreshed edits — the same base the optimistic build above uses) and
+      // revert ONLY this patch's fields to the server-canonical `contact`.
+      // Dispatching the raw `contact` (the old behavior) also reverted those
+      // earlier successful edits in the sidebar list + cached snapshots until
+      // the next refresh, so the list briefly disagreed with the panel.
+      const rollback = {
+        ...contact,
+        name: "name" in patch ? contact.name : name,
+        firstName:
+          "firstName" in patch ? contact.firstName ?? null : firstName || null,
+        lastName:
+          "lastName" in patch ? contact.lastName ?? null : lastName || null,
+        email: "email" in patch ? contact.email ?? undefined : email || undefined,
+        location:
+          "location" in patch
+            ? contact.location ?? undefined
+            : location || undefined,
+        language: "language" in patch ? contact.language ?? null : language || null,
+        countryCode:
+          "countryCode" in patch ? contact.countryCode ?? null : country || null,
+        customFields:
+          "customFields" in patch ? contact.customFields : nextCustomFields,
+        tagIds,
+      };
       dispatchLocalSocketEvent("contact:updated", {
         teamId: contact.teamId,
-        contact,
+        contact: rollback,
       });
       return false;
     }
@@ -1189,7 +1214,13 @@ function ContactPanelImpl({
               icon={Clock}
               label="First contacted"
               value={
-                messages[0] ? (
+                // Authoritative: the contact row is created on first inbound, so
+                // its createdAt IS "first contacted" — independent of how much of
+                // the thread is paged in. messages[0] is only the oldest LOADED
+                // message, which on a long thread is mid-history (wrong date).
+                contact.createdAt ? (
+                  <LocalTime iso={contact.createdAt} format="shortDate" />
+                ) : messages[0] ? (
                   <LocalTime iso={messages[0].timestamp} format="shortDate" />
                 ) : (
                   "—"

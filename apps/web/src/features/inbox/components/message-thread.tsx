@@ -87,6 +87,18 @@ function entryTimestamp(entry: TimelineEntry): string {
   }
 }
 
+// Scroll behavior for jump-to-message (reply quote, search match, note, Files
+// "Jump"). Honor `prefers-reduced-motion`: a long smooth scroll across the
+// thread is exactly the vestibular trigger those users opt out of. The CSS
+// `scroll-behavior` rule doesn't cover this — an explicit `behavior` option
+// passed to scrollIntoView overrides the CSS property, so we must branch here.
+function jumpScrollBehavior(): ScrollBehavior {
+  return typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
+}
+
 /**
  * The rendered timeline rows, extracted into a `memo`'d child so the ~500-entry
  * `.map()` (element creation + per-row `memo` comparisons) does NOT re-run when
@@ -255,6 +267,7 @@ const TimelineRows = memo(function TimelineRows({
 
 function MessageThreadImpl({
   data: initialData,
+  initialMayBeStale = false,
   teamMembers,
   currentUser,
   nextOlderCursor,
@@ -269,8 +282,13 @@ function MessageThreadImpl({
   onSnapshot,
   onMobileBack,
   jumpToMessageId,
+  jumpNonce,
 }: {
   data: ConversationWithRefs;
+  /** True when `data` is a possibly-stale LRU snapshot (cache-hit switch-back):
+   *  while backgrounded it missed conversation-room-scoped message:status ticks.
+   *  Forwarded to useConversationEvents so it reconciles statuses on open. */
+  initialMayBeStale?: boolean;
   teamMembers: User[];
   currentUser: User;
   nextOlderCursor: string | null;
@@ -310,6 +328,10 @@ function MessageThreadImpl({
    *  reusing the same machinery the in-thread search uses. Null/undefined on
    *  every normal open. */
   jumpToMessageId?: string | null;
+  /** Bumped by the shell on every jump REQUEST (see jumpTarget). Lets a repeat
+   *  jump to the SAME message id re-fire — without it the handled-guard below
+   *  would treat the unchanged id as already-done and the click is a no-op. */
+  jumpNonce?: number;
 }) {
   const {
     data,
@@ -321,7 +343,13 @@ function MessageThreadImpl({
     markOptimisticFailed,
     removeOptimistic,
     replaceWithContext,
-  } = useConversationEvents(initialData, nextOlderCursor, onMarkRead, onSnapshot);
+  } = useConversationEvents(
+    initialData,
+    nextOlderCursor,
+    onMarkRead,
+    onSnapshot,
+    initialMayBeStale,
+  );
   const { conversation, contact, assignedUser, messages, notes } = data;
 
   // Stable reference: `data.events ?? []` would allocate a fresh array on every
@@ -597,25 +625,43 @@ function MessageThreadImpl({
       }
     };
   }, []);
-  const jumpToOriginal = useCallback((originalId: string) => {
-    const el = document.querySelector<HTMLElement>(
-      `[data-message-id="${originalId}"]`,
-    );
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    // Subtle blue flash for reply-jumps. Search-match jumps use a
-    // PERSISTENT amber ring on the bubble itself (see MessageBubble's
-    // `isActiveSearchMatch`), since the user is actively navigating
-    // through matches and the ring needs to stay until they move on.
-    if (replyJumpTimerRef.current !== null) {
-      window.clearTimeout(replyJumpTimerRef.current);
-    }
-    el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
-    replyJumpTimerRef.current = window.setTimeout(() => {
-      el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2");
-      replyJumpTimerRef.current = null;
-    }, 1500);
-  }, []);
+  const jumpToOriginal = useCallback(
+    (originalId: string) => {
+      const flash = (el: HTMLElement) => {
+        el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
+        // Subtle blue flash for reply-jumps. Search-match jumps use a
+        // PERSISTENT amber ring on the bubble itself (see MessageBubble's
+        // `isActiveSearchMatch`), since the user is actively navigating
+        // through matches and the ring needs to stay until they move on.
+        if (replyJumpTimerRef.current !== null) {
+          window.clearTimeout(replyJumpTimerRef.current);
+        }
+        el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
+        replyJumpTimerRef.current = window.setTimeout(() => {
+          el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2");
+          replyJumpTimerRef.current = null;
+        }, 1500);
+      };
+      // If the quoted original is older than the loaded slice, page older
+      // (bounded) until it renders, then scroll+flash — otherwise the click was
+      // a dead no-op. Mirrors the Notes-tab jump-to-note strategy below.
+      const tryScroll = (depth: number) => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-message-id="${originalId}"]`,
+        );
+        if (el) {
+          flash(el);
+          return;
+        }
+        if (depth >= 8) return; // give up — the original is very deep in history
+        void loadOlder().then((added) => {
+          if (added > 0) window.setTimeout(() => tryScroll(depth + 1), 140);
+        });
+      };
+      tryScroll(0);
+    },
+    [loadOlder],
+  );
 
   // Jump-to-note from the contact panel's Notes tab. Notes ride the timeline
   // with data-entry-kind="note" + data-entry-id=<noteId>. Scroll + flash if
@@ -632,7 +678,7 @@ function MessageThreadImpl({
           `[data-entry-kind="note"][data-entry-id="${detail.noteId}"]`,
         );
         if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
           el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
           window.setTimeout(
             () => el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2"),
@@ -663,24 +709,97 @@ function MessageThreadImpl({
   }, []);
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
-  // Reveal gate (see globals.css [data-thread-gate] + SsrThreadBottomSnap). The
-  // parse-time script normally reveals pre-paint; this is the hydration-side
-  // safety net for when that script didn't run (CSP block / error) — it reveals
-  // after the web font settles so a fallback reveal still skips the FOUT reflow,
-  // with a hard cap so a stalled font never leaves the thread hidden.
+  // Reveal gate (see globals.css [data-thread-gate] + SsrThreadBottomSnap).
+  //
+  // The SSR pre-paint script pins the column-reverse viewport to the bottom and
+  // reveals only once it has SETTLED there — but it runs ONLY on a hard SSR load
+  // (inbox/page.tsx renders it behind `initialThread && !isRscRequest`). On a
+  // CLIENT chat-switch it never runs, so this effect IS the landing logic, and it
+  // must do the same settle-then-reveal — not just reveal on fonts.ready.
+  //
+  // Why it matters (the "land up, then drop to the bottom" bug): a NORMAL switch
+  // is a cache HIT — `setDisplayedId` runs synchronously in the click handler, so
+  // layout is final when useChatScroll's snap fires and it lands at the bottom.
+  // But when new inbound arrives for a backgrounded thread, inbox-shell EVICTS
+  // its snapshot, so switching back is a cache MISS: the thread mounts from an
+  // ASYNC fetch `.then()`, and at that moment Chromium computes the
+  // column-reverse offset against a not-yet-final height and paints scrolled to
+  // the TOP. Revealing on fonts.ready (instant when cached) then exposes that
+  // wrong position for a few frames before the snap drops it to the bottom.
+  // Fix: re-assert scrollTop:0 each frame while the content height is still
+  // changing, and reveal only once it's stable — i.e. scrollTop:0 is the TRUE
+  // bottom on the first painted frame. Identical idea to the SSR script's
+  // position-loop-then-reveal.
   const gateRef = useRef<HTMLDivElement>(null);
+  // Latest jump intent, read without making it an effect dep. A search-jump open
+  // owns its own scroll target, so the settle loop must NOT force the bottom.
+  const jumpPendingRef = useRef(jumpToMessageId != null);
+  jumpPendingRef.current = jumpToMessageId != null;
   useEffect(() => {
     const gate = gateRef.current;
     if (!gate || gate.hasAttribute("data-ready")) return;
     let done = false;
+    let raf = 0;
     const reveal = () => {
       if (done) return;
       done = true;
       gate.setAttribute("data-ready", "");
     };
+    const startSettle = () => {
+      if (done) return;
+      // Search-jump open: the pendingJump effect scrolls to the match; don't
+      // fight it by forcing the bottom — just reveal.
+      if (jumpPendingRef.current) {
+        reveal();
+        return;
+      }
+      const vp = gate.querySelector<HTMLElement>("[data-thread-scroll-root]");
+      if (!vp) {
+        reveal();
+        return;
+      }
+      // Seed the height synchronously, then re-pin scrollTop:0 each frame and
+      // reveal the FIRST frame the height stops changing.
+      //   - Cache-HIT switch (layout already final): next frame's height == the
+      //     seed → reveal in ONE frame, so an instant switch stays instant (no
+      //     extra loader blink — matches the pre-settle behavior).
+      //   - Cache-MISS async mount (Chromium still finalizing the column-reverse
+      //     height, which is what paints it scrolled to the top): the height
+      //     keeps changing frame-to-frame, so we keep re-pinning and only reveal
+      //     once it settles — i.e. scrollTop:0 is the true bottom.
+      // column-reverse: scrollTop 0 IS the bottom (newest).
+      vp.scrollTop = 0;
+      let lastH = vp.scrollHeight;
+      let frames = 0;
+      const settle = () => {
+        if (done) return;
+        vp.scrollTop = 0;
+        const h = vp.scrollHeight;
+        if (h === lastH) {
+          reveal();
+          return;
+        }
+        lastH = h;
+        // ~30-frame ceiling so a thread whose media never stops reflowing still
+        // reveals; useChatScroll's ResizeObserver keeps pinning afterwards.
+        if (++frames < 30) raf = requestAnimationFrame(settle);
+        else reveal();
+      };
+      raf = requestAnimationFrame(settle);
+    };
+    // Reveal only after the web font is in (a not-yet-cached font's FOUT reflow
+    // then happens while hidden), then run the settle loop.
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      void document.fonts.ready.then(startSettle);
+    } else {
+      startSettle();
+    }
+    // Hard cap so a stalled font / throttled rAF never leaves the thread hidden.
     const cap = window.setTimeout(reveal, 800);
-    void document.fonts?.ready.then(() => requestAnimationFrame(reveal));
-    return () => window.clearTimeout(cap);
+    return () => {
+      window.clearTimeout(cap);
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, []);
 
   // -------------------------------------------------------------------------
@@ -819,7 +938,7 @@ function MessageThreadImpl({
           `[data-message-id="${messageId}"]`,
         );
         if (!el) return;
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
 
         const content = contentRef.current;
         const viewport = viewportRef.current;
@@ -882,7 +1001,17 @@ function MessageThreadImpl({
   // bubble would scroll to the bottom, then bounce back to the searched
   // match on the next render).
   const handledMatchIdRef = useRef<string | null>(null);
+  const lastJumpNonceRef = useRef<number | undefined>(jumpNonce);
   useEffect(() => {
+    // A repeat jump to the SAME message id (re-click "Go to message" / Files
+    // "Jump" / the same search hit) arrives with a NEW nonce from the shell.
+    // Clear the handled-guard so we re-scroll instead of bailing on the
+    // unchanged id. A messagesById rebuild keeps the nonce, so the guard still
+    // holds there — which is exactly the search-bounce it's meant to prevent.
+    if (jumpNonce !== lastJumpNonceRef.current) {
+      lastJumpNonceRef.current = jumpNonce;
+      handledMatchIdRef.current = null;
+    }
     if (!jumpTargetId) {
       handledMatchIdRef.current = null;
       return;
@@ -931,7 +1060,7 @@ function MessageThreadImpl({
     return () => {
       cancelled = true;
     };
-  }, [jumpTargetId, messagesById, conversation.id, replaceWithContext, scrollMatchIntoView]);
+  }, [jumpTargetId, jumpNonce, messagesById, conversation.id, replaceWithContext, scrollMatchIntoView]);
 
   // Once the context window has rendered, scroll to the message we were
   // waiting on. Routed through the shared helper so the same settle window
@@ -1028,7 +1157,14 @@ function MessageThreadImpl({
     const pinsToBottom = (e: TimelineEntry) =>
       (e.kind === "message" && e.data.pending === true) ||
       (e.kind === "activity" && e.data.optimisticPending === true);
-    return [
+    // Decorate-sort: parse each entry's timestamp ONCE here, not twice per
+    // comparison. This memo rebuilds on EVERY message mutation — including a
+    // status-only sent→delivered→read burst that changes no ordering — and a
+    // parse inside the comparator was ~O(n log n) Date parses (~9k on a 500-row
+    // thread); precomputing makes it ~n (500). Same ordering as before:
+    // pinned-to-bottom group last, then ascending by time; stable sort keeps
+    // same-timestamp (id-tiebroken) messages in input order.
+    const decorated = [
       ...messages.map((m): TimelineEntry => ({ kind: "message", data: m })),
       ...visibleNotes.map((n): TimelineEntry => ({ kind: "note", data: n })),
       // Raw event/call objects — NO `{ ...e, timestamp }` spread — so each
@@ -1039,15 +1175,16 @@ function MessageThreadImpl({
       // when the user-visible event happened (the row keeps endedAt for audit).
       ...visibleEvents.map((e): TimelineEntry => ({ kind: "activity", data: e })),
       ...visibleCalls.map((c): TimelineEntry => ({ kind: "call", data: c })),
-    ].sort((a, b) => {
-      const ap = pinsToBottom(a);
-      const bp = pinsToBottom(b);
-      if (ap !== bp) return ap ? 1 : -1;
-      return (
-        new Date(entryTimestamp(a)).getTime() -
-        new Date(entryTimestamp(b)).getTime()
-      );
+    ].map((entry) => ({
+      entry,
+      pin: pinsToBottom(entry),
+      t: new Date(entryTimestamp(entry)).getTime(),
+    }));
+    decorated.sort((a, b) => {
+      if (a.pin !== b.pin) return a.pin ? 1 : -1;
+      return a.t - b.t;
     });
+    return decorated.map((d) => d.entry);
   }, [messages, notes, events, hasMoreOlder, data.calls]);
 
   // Day-separator labels keyed by timeline index. Pre-computed alongside the

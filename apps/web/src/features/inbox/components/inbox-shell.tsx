@@ -32,6 +32,7 @@ import {
 } from "@/features/inbox/lib/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
 
 import dynamic from "next/dynamic";
 
@@ -230,6 +231,13 @@ export function InboxShell({
   // -----------------------------------------------------------------
   const [activeId, setActiveId] = useState<string | null>(initialActiveConversationId);
   const [displayedId, setDisplayedId] = useState<string | null>(initialActiveConversationId);
+  // True when the displayed thread was served from a pre-existing LRU snapshot
+  // (a cache HIT), which can be stale: while it sat backgrounded, conversation-
+  // room-scoped events it wasn't subscribed to (message:status — delivered/read
+  // ticks) never reached it. SSR seeds and cache-MISS fetches are fresh → false.
+  // useConversationEvents reads this to run a full status reconcile on open
+  // instead of the lightweight delta. (Initial SSR thread is fresh.)
+  const [displayedFromCache, setDisplayedFromCache] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [errorId, setErrorId] = useState<string | null>(null);
   const [cacheTick, setCacheTick] = useState(0);
@@ -241,7 +249,14 @@ export function InboxShell({
   const [jumpTarget, setJumpTarget] = useState<{
     conversationId: string;
     messageId: string;
+    // Bumped on every jump request so re-jumping to the SAME message (re-click
+    // "Go to message" / Files "Jump" / the same search hit) still re-triggers
+    // the thread scroll. The messageId alone is unchanged on a repeat, so
+    // without this the thread's handled-guard treats it as already-done and the
+    // click is a dead no-op.
+    nonce: number;
   } | null>(null);
+  const jumpSeqRef = useRef(0);
 
   // Refs for stable callback identity — see T1.5/T2.6/T2.7 in the plan.
   // openConversation and the popstate listener used to read these via
@@ -300,6 +315,8 @@ export function InboxShell({
     setLastSyncedInitialId(initialActiveConversationId);
     setActiveId(initialActiveConversationId);
     setDisplayedId(initialActiveConversationId);
+    // SSR re-rendered this thread fresh → no stale-status reconcile needed.
+    setDisplayedFromCache(false);
     setPendingId(null);
     setErrorId(null);
     if (initialThread && initialActiveConversationId) {
@@ -363,6 +380,8 @@ export function InboxShell({
         // fetch will resolve next and win.
         if (activeIdRef.current === conversationId) {
           setDisplayedId(conversationId);
+          // Just fetched from the server → fresh, no stale-status reconcile needed.
+          setDisplayedFromCache(false);
           setErrorId(null);
           setCacheTick((t) => t + 1);
         } else {
@@ -410,7 +429,10 @@ export function InboxShell({
       // Cache hit: swap the rendered thread synchronously so there's no
       // one-frame flash of the previous thread. Cache miss: leave
       // displayedId alone — fetchThread will update it when the data lands.
-      if (cached) setDisplayedId(conversationId);
+      if (cached) {
+        setDisplayedId(conversationId);
+        setDisplayedFromCache(true);
+      }
 
       // Mirror the selection into the URL with replaceState so a HARD refresh
       // re-SSRs this thread (page.tsx reads `?c=<id>`) and the agent stays on
@@ -482,7 +504,11 @@ export function InboxShell({
       openConversation(target.conversationId);
       setJumpTarget(
         target.messageId
-          ? { conversationId: target.conversationId, messageId: target.messageId }
+          ? {
+              conversationId: target.conversationId,
+              messageId: target.messageId,
+              nonce: (jumpSeqRef.current += 1),
+            }
           : null,
       );
     },
@@ -497,7 +523,11 @@ export function InboxShell({
     (messageId: string) => {
       const convId = displayedIdRef.current;
       if (!convId) return;
-      setJumpTarget({ conversationId: convId, messageId });
+      setJumpTarget({
+        conversationId: convId,
+        messageId,
+        nonce: (jumpSeqRef.current += 1),
+      });
     },
     [],
   );
@@ -544,7 +574,10 @@ export function InboxShell({
       setActiveId(next);
       setErrorId(null);
       const cached = cache.has(next);
-      if (cached) setDisplayedId(next);
+      if (cached) {
+        setDisplayedId(next);
+        setDisplayedFromCache(true);
+      }
       setPendingId(cached ? null : next);
       if (!cached) void fetchThread(next);
     }
@@ -904,7 +937,9 @@ export function InboxShell({
     };
   }, []);
 
-  const totalUnread = useMemo(() => {
+  // Filtered-slice sum — used only as the first-paint fallback until the
+  // authoritative team-wide count lands (and if it ever fails to load).
+  const totalUnreadFallback = useMemo(() => {
     return live.conversations.reduce(
       (acc, c) =>
         acc +
@@ -912,6 +947,13 @@ export function InboxShell({
       0,
     );
   }, [live.conversations]);
+  // Authoritative team-wide non-closed unread (server-computed over ALL
+  // conversations — same source the AppRail badge uses), so the tab title is
+  // correct under EVERY filter. The filtered slice undercounts on
+  // Mine/Unassigned/stage views. `unread.active` = open+pending (non-closed),
+  // matching the closed-excluded fallback.
+  const conversationCounts = useConversationCounts();
+  const totalUnread = conversationCounts?.unread.active ?? totalUnreadFallback;
 
   const liveTeamName = useLiveTeamName(team.name);
   useEffect(() => {
@@ -1031,6 +1073,7 @@ export function InboxShell({
               <ThreadWorkspace
                 key={displayedId}
                 thread={displayedThread}
+                initialMayBeStale={displayedFromCache}
                 teamMembers={teamMembers}
                 currentUser={currentUser}
                 stageCatalog={stages}
@@ -1066,6 +1109,11 @@ export function InboxShell({
                   jumpTarget?.conversationId === displayedId
                     ? jumpTarget.messageId
                     : null
+                }
+                jumpNonce={
+                  jumpTarget?.conversationId === displayedId
+                    ? jumpTarget.nonce
+                    : 0
                 }
               />
             ) : activeId && skeletonContact ? (
@@ -1151,6 +1199,7 @@ function ThreadLoadingBar({ pending }: { pending: boolean }) {
 
 function ThreadWorkspace({
   thread,
+  initialMayBeStale,
   teamMembers,
   currentUser,
   stageCatalog,
@@ -1168,8 +1217,12 @@ function ThreadWorkspace({
   onMobileBack,
   onGoToMessage,
   jumpToMessageId,
+  jumpNonce,
 }: {
   thread: CachedThread;
+  /** True when `thread` came from a possibly-stale LRU snapshot (cache hit), so
+   *  the thread should reconcile message statuses on open. See inbox-shell. */
+  initialMayBeStale: boolean;
   teamMembers: User[];
   currentUser: User;
   stageCatalog: ContactStage[];
@@ -1195,11 +1248,15 @@ function ThreadWorkspace({
   /** Deep-link target from a global-search "Messages" hit; forwarded to
    *  MessageThread to scroll to that message. Null on a normal open. */
   jumpToMessageId: string | null;
+  /** Bumped on every jump request so re-jumping to the same message re-fires
+   *  (see the jumpTarget state). 0 when no jump is targeted at this thread. */
+  jumpNonce: number;
 }) {
   return (
     <>
       <MessageThread
         data={thread.data}
+        initialMayBeStale={initialMayBeStale}
         teamMembers={teamMembers}
         currentUser={currentUser}
         nextOlderCursor={thread.nextOlderCursor}
@@ -1214,6 +1271,7 @@ function ThreadWorkspace({
         onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}
         jumpToMessageId={jumpToMessageId}
+        jumpNonce={jumpNonce}
       />
       <ContactPanel
         data={thread.data}

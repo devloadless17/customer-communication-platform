@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ArrowDownToLine, ArrowLeft, ArrowRight, MessageSquare, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowDownToLine, ArrowLeft, ArrowRight, ImageOff, MessageSquare, X, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@ccp/shared/utils";
@@ -43,10 +43,16 @@ export function MediaLightbox({
   const current = items[index];
   const [zoomed, setZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState<{ x: number; y: number }>({ x: 50, y: 50 });
+  // Per-item load-failure flag so a broken/expired media URL shows a graceful
+  // fallback instead of the browser's raw broken-image glyph.
+  const [errored, setErrored] = useState(false);
 
-  // Reset zoom whenever the visible item changes so a zoomed-in state from
-  // one image doesn't visually pop on the next slide.
-  useEffect(() => setZoomed(false), [index]);
+  // Reset zoom + error whenever the visible item changes so state from one
+  // slide doesn't carry to the next.
+  useEffect(() => {
+    setZoomed(false);
+    setErrored(false);
+  }, [index]);
 
   // Keyboard nav. `useCallback` so the handler reference is stable across
   // re-renders — but we re-register it whenever `items.length` / `index`
@@ -145,7 +151,16 @@ export function MediaLightbox({
             size="sm"
             className="text-white hover:bg-white/10 hover:text-white"
           >
-            <a href={current.media.url} download={current.media.filename ?? undefined}>
+            {/* `/api/media/<id>` 302-redirects to a cross-origin CDN, where the
+                `download` attribute is ignored. Without target=_blank the click
+                navigated the whole tab to the file, kicking the agent out of the
+                inbox. Open in a new tab instead so the inbox stays put. */}
+            <a
+              href={current.media.url}
+              download={current.media.filename ?? undefined}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               <ArrowDownToLine className="size-4" />
               <span className="ml-1.5 hidden sm:inline">Download</span>
             </a>
@@ -178,12 +193,21 @@ export function MediaLightbox({
         className="flex flex-1 items-center justify-center overflow-hidden px-2 pb-4"
         onClick={(e) => e.stopPropagation()}
       >
-        {isImage && (
+        {errored && (
+          // Graceful fallback for a broken / expired / unreachable media URL,
+          // instead of the browser's raw broken-image glyph.
+          <div className="flex flex-col items-center gap-2 text-white/70">
+            <ImageOff className="size-10" />
+            <span className="text-sm">This attachment couldn&apos;t be loaded</span>
+          </div>
+        )}
+        {!errored && isImage && (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={current.media.url}
             alt={captionFallback(current)}
             onClick={toggleZoom}
+            onError={() => setErrored(true)}
             className={cn(
               "max-h-full max-w-full cursor-zoom-in select-none object-contain transition-transform duration-200",
               zoomed && "cursor-zoom-out",
@@ -201,15 +225,16 @@ export function MediaLightbox({
             fetchPriority="high"
           />
         )}
-        {isVideo && (
+        {!errored && isVideo && (
           <video
             src={current.media.url}
             controls
             autoPlay
+            onError={() => setErrored(true)}
             className="max-h-full max-w-full"
           />
         )}
-        {!isImage && !isVideo && (
+        {!errored && !isImage && !isVideo && (
           // Audio / unknown kinds — render a centered audio player or a
           // simple "open" prompt. Lightbox is image/video first; this is
           // a graceful fallback if a caller passes through anyway.
