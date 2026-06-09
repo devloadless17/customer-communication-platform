@@ -182,20 +182,11 @@ const nextConfig: NextConfig = {
   // api-client.ts and the webhook proxy route, both of which already default
   // to 127.0.0.1:4000. Defaulting to "http://api:4000" here broke host dev
   // with EAI_AGAIN since `api` only resolves inside the compose network.
-  // Webpack 5's GlobalRuntimeModule emits `new Function('return this')` as a
-  // fallback for global-object detection when `globalThis` is unavailable.
-  // Even though modern browsers never execute that branch (they short-circuit
-  // on `typeof globalThis === 'object'`), the code exists in the bundle and
-  // causes a CSP `script-src` violation report. Setting globalObject to 'self'
-  // (always valid in browser + worker contexts) makes webpack skip the dynamic
-  // detection entirely — no `new Function` in the emitted runtime.
-  // Only applies to client bundles; server/edge targets still use 'this'.
-  webpack(config, { isServer }) {
-    if (!isServer) {
-      config.output.globalObject = "self";
-    }
-    return config;
-  },
+  // Turbopack is Next.js 16's default bundler for both dev and production.
+  // An empty config here satisfies the "webpack config present but no turbopack
+  // config" error that Next.js 16 raises when it detects a `webpack` key without
+  // a `turbopack` counterpart. We have no custom Turbopack settings yet.
+  turbopack: {},
   async rewrites() {
     const apiUpstream = process.env.INTERNAL_API_URL ?? "http://127.0.0.1:4000";
     return {
