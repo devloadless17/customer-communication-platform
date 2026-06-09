@@ -267,6 +267,39 @@ export function useChatScroll({
     });
   }, [lastEntryKey, isOwnSend, isActivityTail, snapToBottom]);
 
+  // Tab-return re-pin. Two things drift the bottom while a tab is BACKGROUNDED:
+  //   1. A column-reverse viewport doesn't reliably hold scrollTop:0 across a
+  //      hidden→visible transition (the same Chromium quirk the SSR landing
+  //      script works around on a cold load).
+  //   2. If the tab was hidden past Socket.io's 30s recovery window the socket
+  //      drops; on return useConversationEvents recovers via an ASYNC refetch
+  //      that appends the messages that arrived while away. Nothing snaps in the
+  //      gap between "tab visible" and "refetch resolved", so the view shows the
+  //      pre-background tail and then visibly jumps to the newest the instant the
+  //      refetch lands — the "lands on the old last message, then jumps to the
+  //      bottom" report.
+  // Snapping the moment the tab becomes visible re-pins scrollTop:0 BEFORE that
+  // refetch lands, so the caught-up messages simply extend the bottom instead of
+  // yanking the scroll. Gated on stickyRef (which can't change while hidden — no
+  // scroll events fire) so an agent who left scrolled-up reading history is left
+  // exactly where they were. Double-rAF absorbs the post-refetch reflow.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!stickyRef.current) return;
+      snapToBottom();
+      requestAnimationFrame(() => {
+        if (stickyRef.current) snapToBottom();
+        requestAnimationFrame(() => {
+          if (stickyRef.current) snapToBottom();
+        });
+      });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [snapToBottom]);
+
   // Action exposed to the pill: clicking it jumps to bottom and clears
   // the unread count. Forces sticky=true so subsequent inbound messages
   // resume keeping the view pinned.

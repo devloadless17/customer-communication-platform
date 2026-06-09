@@ -64,6 +64,17 @@ export function rowMatchesFilterFor(
 }
 
 /**
+ * Bounded FIFO of `message:new` ids the list has already absorbed, so a
+ * Socket.io connection-state-recovery REPLAY (or a late/out-of-order
+ * re-delivery) of the same frame is a no-op instead of re-unshifting the row /
+ * re-applying a stale absolute unreadCount. Mirrors the same dedupe the
+ * notification-sound provider keeps. 400 ≫ the few seconds of frames the
+ * recovery buffer can hold, so a genuine message is never evicted before its
+ * own replay could arrive.
+ */
+const MESSAGE_DEDUP_CAP = 400;
+
+/**
  * Holds the list of conversations and folds in incremental Socket.io events
  * so the inbox updates without a refetch.
  *
@@ -166,6 +177,15 @@ export function useTeamEvents(
   // so the latest write here reflects the latest commit. Grow-only within a
   // session; one small entry per contact the agent touches — negligible.
   const latestContactRef = useRef<Map<string, Contact>>(new Map());
+
+  // Replay-dedupe for `message:new` (see MESSAGE_DEDUP_CAP). Keyed by the stable
+  // message id — NOT by lastMessageAt, which is second-granular for WhatsApp and
+  // therefore identical across two messages sent in the same second. Lives in a
+  // ref so it survives re-renders and any re-run of the socket effect.
+  const seenMessageIdsRef = useRef<{ set: Set<string>; queue: string[] }>({
+    set: new Set(),
+    queue: [],
+  });
 
   // Re-seed when the server hands us a MEANINGFULLY different initial list.
   // Gating on raw array identity blew away every realtime update on any
@@ -560,6 +580,34 @@ export function useTeamEvents(
       message,
       newConversation,
     }) => {
+      // Replay guard by message id — NOT by timestamp. Socket.io
+      // connection-state-recovery REPLAYS buffered `message:new` frames on
+      // reconnect, and a late/out-of-order delivery can re-arrive after the row
+      // already absorbed that exact message. Dropping the re-delivery here is
+      // what stops a replay from re-unshifting the row or re-applying a stale
+      // ABSOLUTE unreadCount over a count the agent has since cleared — the
+      // "unread reappears after I read it / row jumps to top" bug (fixed
+      // 2026-05-23, originally with a strict `>` on lastMessageAt).
+      //
+      // The strict-`>` proxy was WRONG: WhatsApp timestamps are SECOND-granular
+      // (meta.ts parses `ts*1000`, so the ms part is always .000), so two
+      // genuinely-distinct messages sent in the SAME second carry an identical
+      // lastMessageAt. `>` treated the 2nd/3rd of a same-second burst as a replay
+      // and silently dropped the preview update, unread bump, sort-to-top AND the
+      // new-message ding for the last message. An id is the only thing that tells
+      // a real replay (same id) from a same-second new message (different id).
+      const dedupeKey = message.id;
+      if (dedupeKey) {
+        const seen = seenMessageIdsRef.current;
+        if (seen.set.has(dedupeKey)) return;
+        seen.set.add(dedupeKey);
+        seen.queue.push(dedupeKey);
+        if (seen.queue.length > MESSAGE_DEDUP_CAP) {
+          const evicted = seen.queue.shift();
+          if (evicted !== undefined) seen.set.delete(evicted);
+        }
+      }
+
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) {
@@ -605,23 +653,22 @@ export function useTeamEvents(
         // dropped event or out-of-order delivery can't drift the local
         // mirror — each frame replaces the value rather than adding to it.
         const isActive = activeIdRef.current === conversationId;
-        // Recency guard — only advance the preview / lastMessageAt / sort
-        // position / unread when this frame is STRICTLY newer than what the row
-        // already shows. The server sends the effective-newest summary, but
-        // Socket.io connection-state-recovery can REPLAY buffered frames on
-        // reconnect, and a late/out-of-order delivery can re-arrive after the
-        // row already absorbed that exact message. Must be `>` not `>=`: a
-        // replay of the SAME message carries `lastMessageAt === row.lastMessageAt`
-        // (the row was set from that very frame the first time), so `>=` would
-        // treat the replay as "new" — re-unshifting the row to the top AND
-        // re-applying the frame's stale ABSOLUTE unreadCount (e.g. 1) on top of
-        // a count the agent has since cleared to 0. That's the "unread reappears
-        // after I already read it / row jumps to top" bug. `>` makes a replay a
-        // no-op for position + unread; the count below stays at the row's value.
-        const advances = lastMessageAt > existing.conversation.lastMessageAt;
-        // The frame carries the ABSOLUTE team-wide unread count. Apply it only
-        // for a strictly-newer inbound frame the agent isn't viewing — gating on
-        // `advances` is what stops a replay from regressing a cleared count.
+        // Recency guard — advance the preview / lastMessageAt / sort position /
+        // unread when this frame is at least as recent as the row already shows.
+        // `>=` (NOT `>`) is required for same-second messages: WhatsApp's
+        // second-granular timestamps make the 2nd/3rd message of a burst share
+        // lastMessageAt with the previous one, and they MUST still advance.
+        // `>=` is only safe because the id-based replay guard at the top of this
+        // handler already returned early for any re-delivered frame — so the only
+        // way to reach here with `lastMessageAt === existing` is a genuinely NEW
+        // same-second message (different id). An out-of-order OLDER inbound
+        // carries an older lastMessageAt and is correctly left in place by `>=`.
+        const advances = lastMessageAt >= existing.conversation.lastMessageAt;
+        // The frame carries the ABSOLUTE team-wide unread count. Apply it for an
+        // inbound frame the agent isn't viewing. Replays can't reach here (id
+        // guard above), so this no longer needs `advances` to protect a cleared
+        // count; still gated on `advances` so an out-of-order OLDER inbound
+        // doesn't overwrite the count that a newer one already established.
         const nextUnread =
           message.direction === "in" && !isActive && advances
             ? unreadCount
