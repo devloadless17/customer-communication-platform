@@ -92,7 +92,7 @@ COPY tsconfig.json prisma.config.ts ./
 # full cold compile every time. With it only the changed routes/modules
 # recompile.
 RUN --mount=type=cache,target=/app/apps/web/.next/cache,sharing=locked \
-    pnpm --filter @ccp/web build
+    NODE_OPTIONS="--max-old-space-size=3072" pnpm --filter @ccp/web build
 
 # -----------------------------------------------------------------------------
 # cli-tools — fresh npm install of just the prisma CLI + tsx. These are
