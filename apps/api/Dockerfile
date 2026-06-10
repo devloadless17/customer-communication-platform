@@ -59,7 +59,15 @@ FROM deps AS runtime
 # under /usr/local/lib/node_modules/npm is dead weight that ships its
 # OWN bundled picomatch / cross-spawn / etc. — every npm release brings
 # transitive CVEs the project doesn't actually use.
-RUN apt-get update \
+# APT_CACHE_BUST: CI passes github.run_id so this layer re-runs on EVERY
+# deploy (always-current debian security patches). Without it the GHA
+# weekly cache scope (+ prev-week fallback) froze this layer for up to two
+# weeks while Trivy's CVE feed moves daily — a mid-week debian openssl fix
+# then failed every deploy until the cache rotated (CVE-2026-45447,
+# 2026-06-10). Local builds keep the default → layer stays cached.
+ARG APT_CACHE_BUST=local
+RUN echo "apt cache bust: ${APT_CACHE_BUST}" \
+ && apt-get update \
  && apt-get -y --no-install-recommends upgrade \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
  && rm -rf /var/lib/apt/lists/*

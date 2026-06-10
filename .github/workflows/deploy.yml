@@ -239,6 +239,13 @@ jobs:
           file: apps/web/Dockerfile
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-web
+          # Bust ONLY the runtime apt-upgrade layer every deploy so debian
+          # security fixes land immediately instead of waiting out the weekly
+          # cache scope (+ prev-week fallback) — a mid-week fix (openssl
+          # CVE-2026-45447) otherwise fails the Trivy gate on every deploy
+          # until rotation. ~30s/build; expensive build stages stay cached.
+          build-args: |
+            APT_CACHE_BUST=${{ github.run_id }}
           cache-from: |
             type=gha,scope=${{ needs.changes.outputs.scope }}-web
             type=gha,scope=${{ needs.changes.outputs.prev }}-web
@@ -280,6 +287,9 @@ jobs:
           file: apps/api/Dockerfile
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}:latest-api
+          # Same apt-layer bust as build-web — see the comment there.
+          build-args: |
+            APT_CACHE_BUST=${{ github.run_id }}
           cache-from: |
             type=gha,scope=${{ needs.changes.outputs.scope }}-api
             type=gha,scope=${{ needs.changes.outputs.prev }}-api

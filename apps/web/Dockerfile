@@ -154,7 +154,16 @@ WORKDIR /app
 # rebuilt periodically but lags debian security updates by days, and
 # the docker-build-push GHA cache can re-use a still-older base layer.
 # Pins us to the current debian security feed at the moment of build.
-RUN apt-get update \
+#
+# APT_CACHE_BUST: CI passes github.run_id so this layer re-runs on EVERY
+# deploy. Without it the GHA weekly cache scope (+ prev-week fallback)
+# froze this layer for up to two weeks while Trivy's CVE feed moves daily
+# — a mid-week debian openssl fix then failed every deploy until the
+# cache rotated (CVE-2026-45447, 2026-06-10). Local builds keep the
+# default, so the layer stays cached for dev rebuilds.
+ARG APT_CACHE_BUST=local
+RUN echo "apt cache bust: ${APT_CACHE_BUST}" \
+ && apt-get update \
  && apt-get -y --no-install-recommends upgrade \
  && apt-get install -y --no-install-recommends openssl ca-certificates wget \
  && rm -rf /var/lib/apt/lists/*
