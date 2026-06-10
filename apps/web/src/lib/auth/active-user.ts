@@ -34,7 +34,10 @@ export const loadActiveUser = cache(async (userId: string) => {
       deactivatedAt: true,
       availabilityStatus: true,
       availabilityMessage: true,
-      team: { select: { rolePermissions: true } },
+      // `status` powers the org-approval gate in (app)/layout.tsx. Loaded here
+      // (alongside rolePermissions) so the gate never has to call the now
+      // org-gated /api/team endpoint for a pending/suspended org.
+      team: { select: { rolePermissions: true, status: true } },
     },
   });
   if (!user || user.deactivatedAt) return null;

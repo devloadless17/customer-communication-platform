@@ -1,34 +1,28 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import {
-  ArrowLeft,
-  CheckCircle2,
-  ShieldX,
-  Users,
-  X,
-} from "lucide-react";
+import { ArrowLeft, CheckCircle2, ShieldX, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
+import { TeamStatusBadge } from "@/components/platform/team-status-badge";
+import { TeamStatusControls } from "@/components/platform/team-status-actions";
 import { getSession } from "@/lib/auth/current-user";
 import { getTeamDetailForSuperAdmin } from "@/lib/api/queries";
 import { roleLabel } from "@ccp/shared/auth/permissions";
-import { formatPhone, initials } from "@ccp/shared/utils";
-import { cn } from "@ccp/shared/utils";
+import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
 import { DeleteTeamButton } from "./delete-team-button";
 
-export const metadata = { title: "Organization · Admin" };
+export const metadata = { title: "Organization · Platform" };
 export const dynamic = "force-dynamic";
 
 /**
- * Read-only team detail for the platform admin. Shows the full member
- * roster + last 20 conversations + headline counts. We intentionally
- * DON'T expose the inbox itself from here — superAdmin browsing isn't a
- * support-impersonation tool, just a visibility layer. If you need that,
- * it's a separate audit-logged feature.
+ * Org detail for the super-admin. Member roster + headline counts +
+ * approval controls (approve / suspend / reactivate). We intentionally DON'T
+ * expose the inbox itself — this is a visibility + management layer, not a
+ * support-impersonation tool.
  */
-export default async function AdminTeamDetailPage({
+export default async function PlatformOrganizationDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>;
@@ -41,6 +35,7 @@ export default async function AdminTeamDetailPage({
   if (!detail) notFound();
 
   const { team, members } = detail;
+  const isOwnTeam = team.id === session.teamId;
   const activeMembers = members.filter((m) => !m.deactivatedAt);
   const deactivatedMembers = members.filter((m) => m.deactivatedAt);
 
@@ -48,7 +43,7 @@ export default async function AdminTeamDetailPage({
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:px-8 md:py-8">
       <div className="flex items-center justify-between">
         <Link
-          href="/admin"
+          href="/platform/organizations"
           className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="size-3.5" />
@@ -57,16 +52,21 @@ export default async function AdminTeamDetailPage({
         <DeleteTeamButton
           teamId={team.id}
           teamName={team.name}
-          isOwnTeam={team.id === session.teamId}
+          isOwnTeam={isOwnTeam}
         />
       </div>
 
       <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">{team.name}</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight">{team.name}</h1>
+          <TeamStatusBadge status={team.status} />
+        </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted-foreground">
           <span className="font-mono">{team.id}</span>
           <span>·</span>
-          <span>Created <LocalTime iso={team.createdAt} format="listTime" /></span>
+          <span>
+            Created <LocalTime iso={team.createdAt} format="listTime" />
+          </span>
           <span>·</span>
           {team.whatsappConnected ? (
             <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
@@ -83,6 +83,37 @@ export default async function AdminTeamDetailPage({
           )}
         </div>
       </header>
+
+      {/* Approval / access controls. */}
+      <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="text-sm font-semibold">Access</div>
+          <p className="text-[12px] text-muted-foreground">
+            {team.status === "pending" &&
+              "This organization is waiting for approval — its members can't use the app yet."}
+            {team.status === "active" &&
+              "This organization is approved and has full access to the app."}
+            {team.status === "suspended" &&
+              "This organization is suspended — its members are locked out until reactivated."}
+          </p>
+          {team.statusReason && (
+            <p className="mt-1 text-[12px] text-muted-foreground">
+              <span className="font-medium text-foreground">Reason:</span>{" "}
+              {team.statusReason}
+            </p>
+          )}
+          {team.statusUpdatedAt && (
+            <p className="text-[11px] text-muted-foreground/80">
+              Last changed <LocalTime iso={team.statusUpdatedAt} format="listTime" />
+            </p>
+          )}
+        </div>
+        <TeamStatusControls
+          teamId={team.id}
+          status={team.status}
+          isOwnTeam={isOwnTeam}
+        />
+      </section>
 
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Stat label="Members" value={team.userCount} />
@@ -150,8 +181,8 @@ export default async function AdminTeamDetailPage({
       <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
         <Users className="size-3.5 shrink-0" />
         <span>
-          Platform-admin view. Members and aggregate counts only —
-          conversations and message bodies stay private to each team.
+          Platform-admin view. Members and aggregate counts only — conversations
+          and message bodies stay private to each team.
         </span>
       </div>
     </div>

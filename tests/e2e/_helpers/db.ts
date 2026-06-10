@@ -13,6 +13,7 @@
 import { existsSync } from "node:fs";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcrypt";
 
 // `tsx`/Playwright don't auto-load .env. Match the seed-superadmin.ts
 // posture so the same DATABASE_URL is used by both.
@@ -45,6 +46,82 @@ export async function superadminTeam(): Promise<{ teamId: string; userId: string
   });
   if (!user) {
     throw new Error("no superAdmin row — run pnpm db:seed:superadmin first");
+  }
+  return { teamId: user.teamId, userId: user.id };
+}
+
+// Regular-admin test user. Lives in the SAME team as the superadmin (the
+// seeded, active Loadless team) so fixtures keyed by `superadminTeam().teamId`
+// are visible to it. Exists because the superAdmin can no longer browse the
+// customer app — they're redirected to the platform shell (org-approval gate,
+// 2026-06-10). Customer-app specs drive the app as THIS admin; the superadmin
+// storageState is reserved for the platform specs.
+export const APP_ADMIN_EMAIL = "e2e-app-admin@loadless.test";
+export const APP_ADMIN_PASSWORD = "loadless";
+
+/**
+ * Upsert the e2e app-admin into the superadmin's (active) team + ensure it can
+ * post in the default channel. Idempotent — safe to call every setup run.
+ * Returns the creds the auth setup logs in with.
+ */
+export async function ensureAppAdmin(): Promise<{
+  teamId: string;
+  userId: string;
+  email: string;
+  password: string;
+}> {
+  const { teamId } = await superadminTeam();
+  const passwordHash = await bcrypt.hash(APP_ADMIN_PASSWORD, 10);
+  const user = await db().user.upsert({
+    where: { email: APP_ADMIN_EMAIL },
+    create: { teamId, role: "admin", name: "E2E Admin", email: APP_ADMIN_EMAIL },
+    update: { teamId, role: "admin", deactivatedAt: null },
+  });
+  await db().account.upsert({
+    where: {
+      providerId_accountId: { providerId: "credential", accountId: APP_ADMIN_EMAIL },
+    },
+    create: {
+      userId: user.id,
+      providerId: "credential",
+      accountId: APP_ADMIN_EMAIL,
+      password: passwordHash,
+    },
+    update: { password: passwordHash, userId: user.id },
+  });
+  // Default-channel membership so /team doesn't dead-end on the "no channels"
+  // path (mirrors registration + the superadmin seed).
+  const channel = await db().teamChannel.findFirst({
+    where: { teamId, isDefault: true },
+    select: { id: true },
+  });
+  if (channel) {
+    await db().teamChannelMember.upsert({
+      where: { channelId_userId: { channelId: channel.id, userId: user.id } },
+      create: { channelId: channel.id, userId: user.id, addedById: user.id },
+      update: {},
+    });
+  }
+  return { teamId, userId: user.id, email: APP_ADMIN_EMAIL, password: APP_ADMIN_PASSWORD };
+}
+
+/**
+ * The e2e app-admin's identity (the user the customer-app specs browse +
+ * make API calls AS). Use this — not `superadminTeam()` — wherever a spec
+ * asserts on the ACTOR (message author, channel member, call answerer,
+ * assignee): the request context authenticates as this admin, so the actor id
+ * is this user's, not the super-admin's. The team is the same either way.
+ */
+export async function appAdmin(): Promise<{ teamId: string; userId: string }> {
+  const user = await db().user.findFirst({
+    where: { email: APP_ADMIN_EMAIL },
+    select: { id: true, teamId: true },
+  });
+  if (!user) {
+    throw new Error(
+      "no e2e app-admin row — the app-admin auth setup must run first " +
+        "(it calls ensureAppAdmin()).",
+    );
   }
   return { teamId: user.teamId, userId: user.id };
 }

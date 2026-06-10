@@ -15,7 +15,6 @@ import {
   Megaphone,
   MessageSquareText,
   Settings as SettingsIcon,
-  ShieldCheck,
   UserCircle2,
   Workflow,
 } from "lucide-react";
@@ -223,11 +222,10 @@ export function AppRail({
       icon: SettingsIcon,
       match: ["/settings", "/settings/workspace"],
     });
-    if (currentUser.role === "superAdmin") {
-      out.push({ href: "/admin", label: "Platform admin", icon: ShieldCheck });
-    }
+    // No platform-admin entry here: super-admins are redirected out of the
+    // (app) shell entirely (→ /platform), so they never render this rail.
     return out;
-  }, [currentUser.role]);
+  }, []);
 
   const railStyle: React.CSSProperties = {
     width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,

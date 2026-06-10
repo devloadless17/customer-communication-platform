@@ -26,10 +26,15 @@ export {
 export type { ListContactsOpts } from "./contacts";
 
 export {
+  getPlatformAnalytics,
   getTeamDetailForSuperAdmin,
   listAllTeamsForSuperAdmin,
 } from "./super-admin";
-export type { SuperAdminTeamDetail, SuperAdminTeamRow } from "./super-admin";
+export type {
+  PlatformAnalytics,
+  SuperAdminTeamDetail,
+  SuperAdminTeamRow,
+} from "./super-admin";
 
 export {
   countAudienceContacts,

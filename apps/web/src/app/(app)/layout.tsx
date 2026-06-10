@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 import { AppRail } from "@/components/layouts/app-rail";
 import { ChunkErrorReload } from "@/components/chunk-error-reload";
@@ -42,15 +43,25 @@ export default async function AppShellLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // Parallel — both are independent HTTP/DB reads. Sequential awaits here
-  // serialized two RTTs on the gating layout for every authenticated page
-  // render. Both are React.cached so child layouts re-calling them are
-  // free cache hits.
-  const [{ user, permissions }, team, cookieStore] = await Promise.all([
-    getSession(),
-    getCurrentTeam(),
-    cookies(),
-  ]);
+  // getSession() first (React.cached → child layouts reuse it for free) so we
+  // can apply the two access gates BEFORE fetching any team-scoped data.
+  const { user, permissions, teamStatus } = await getSession();
+
+  // Super-admins live in the (platform) shell — a separate, management-only
+  // surface with no inbox / contacts / workflows. Bounce them out of the
+  // customer app entirely.
+  if (user.role === "superAdmin") redirect("/platform");
+
+  // Org-approval gate. A `pending` org (awaiting super-admin review) or a
+  // `suspended` org (access revoked) can't use the app — route to the status
+  // screen, which lives OUTSIDE this (app) group so there's no redirect loop.
+  // Reading status off the session (not /api/team, which is now org-gated)
+  // is what keeps this redirect working for a locked-out org.
+  if (teamStatus !== "active") redirect("/pending");
+
+  // Now safe to fetch team-scoped chrome. Parallel — independent reads, both
+  // React.cached so child layouts re-calling them are free cache hits.
+  const [team, cookieStore] = await Promise.all([getCurrentTeam(), cookies()]);
   const railCollapsed = cookieStore.get(RAIL_COLLAPSED_COOKIE)?.value !== "false";
 
   return (

@@ -15,6 +15,7 @@ import type {
   MediaKind,
   MessageDirection,
   Role,
+  TeamStatus,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,13 @@ export interface SuperAdminTeamRow {
   id: string;
   name: string;
   createdAt: string;
+  /** Org-approval lifecycle — drives the approve/suspend controls + the
+   *  pending-review queue on the platform Organizations page. */
+  status: TeamStatus;
+  /** Operator note attached on suspension (or rejection). Null while active. */
+  statusReason: string | null;
+  /** When the status was last changed by a super-admin. Null if never. */
+  statusUpdatedAt: string | null;
   whatsappConnected: boolean;
   whatsappDisplayNumber: string | null;
   userCount: number;
@@ -65,6 +73,30 @@ export interface SuperAdminTeamDetail {
     deactivatedAt: string | null;
     createdAt: string;
   }>;
+}
+
+// ---------------------------------------------------------------------------
+// Platform analytics — super-admin overview. Cross-team aggregates only.
+// ---------------------------------------------------------------------------
+
+export interface PlatformAnalytics {
+  orgs: {
+    total: number;
+    pending: number;
+    active: number;
+    suspended: number;
+  };
+  totals: {
+    users: number;
+    contacts: number;
+    conversations: number;
+    messages: number;
+    broadcasts: number;
+  };
+  /** Orgs created in the trailing 30 days (signup momentum). */
+  newOrgsLast30d: number;
+  /** The current approval queue — newest first, capped for the overview card. */
+  pendingOrgs: Array<{ id: string; name: string; createdAt: string }>;
 }
 
 // ---------------------------------------------------------------------------

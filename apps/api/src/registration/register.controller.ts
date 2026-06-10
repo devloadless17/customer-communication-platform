@@ -83,7 +83,12 @@ export class RegisterController {
 
     try {
       const result = await this.db.$transaction(async (tx) => {
-        const team = await tx.team.create({ data: { name: body.orgName } });
+        // `status: pending` (explicit, though it's the column default too) — the
+        // org is created but locked out of the app until a superAdmin approves
+        // it. The web action redirects the new admin to /pending afterward.
+        const team = await tx.team.create({
+          data: { name: body.orgName, status: "pending" },
+        });
         const user = await tx.user.create({
           data: {
             teamId: team.id,

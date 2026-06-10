@@ -46,7 +46,7 @@ export function DeleteTeamButton({
       setError(data.error ?? "Failed to delete organization");
       return;
     }
-    router.replace("/admin");
+    router.replace("/platform/organizations");
   }
 
   return (

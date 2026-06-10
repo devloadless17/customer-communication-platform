@@ -2,7 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { Socket } from "socket.io";
 
 import { auth } from "@/auth/better-auth";
-import type { Role } from "@ccp/shared/types";
+import type { Role, TeamStatus } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
 import {
@@ -120,7 +120,7 @@ export class SocketAuthService {
           email: true,
           avatarUrl: true,
           deactivatedAt: true,
-          team: { select: { rolePermissions: true } },
+          team: { select: { rolePermissions: true, status: true } },
         },
       });
     } catch (err) {
@@ -131,6 +131,15 @@ export class SocketAuthService {
     }
     if (!dbUser) return { kind: "unauthenticated" };
     if (dbUser.deactivatedAt) return { kind: "unauthenticated" };
+    // Org-approval gate (mirrors the HTTP SessionGuard). A pending/suspended
+    // org's socket is treated as unauthenticated so the client cuts over; the
+    // RSC layer has already bounced the tab to /pending. Checked in the slow
+    // path only, same as the deactivation check above — a fast-path cache hit
+    // means the user passed this check within the 15s window. superAdmins exempt.
+    const teamStatus = (dbUser.team?.status ?? "active") as TeamStatus;
+    if (dbUser.role !== "superAdmin" && teamStatus !== "active") {
+      return { kind: "unauthenticated" };
+    }
     sessionCacheSet(userId, {
       sessionId,
       userId: dbUser.id,
@@ -139,6 +148,7 @@ export class SocketAuthService {
       name: dbUser.name,
       email: dbUser.email,
       avatarUrl: dbUser.avatarUrl ?? null,
+      teamStatus,
       rolePermissions: dbUser.team?.rolePermissions ?? {},
     });
     sessionCacheSetByCookie(cookieHeader, dbUser.id, sessionId);

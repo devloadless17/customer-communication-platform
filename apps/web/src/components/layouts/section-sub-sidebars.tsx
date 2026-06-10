@@ -4,7 +4,6 @@ import { usePathname } from "next/navigation";
 import {
   FileText,
   Megaphone,
-  ShieldCheck,
   Users2,
   Workflow as WorkflowIcon,
 } from "lucide-react";
@@ -68,22 +67,6 @@ export function WorkflowsSubSidebar() {
           label="All workflows"
           leading={<WorkflowIcon className="size-4" />}
           active
-        />
-      </SubSidebarSection>
-    </SubSidebar>
-  );
-}
-
-export function AdminSubSidebar() {
-  const pathname = usePathname() ?? "";
-  return (
-    <SubSidebar title="Platform admin" subtitle="Super-admin only">
-      <SubSidebarSection>
-        <SubSidebarItem
-          href="/admin"
-          label="Organizations"
-          leading={<ShieldCheck className="size-4" />}
-          active={pathname === "/admin" || pathname.startsWith("/admin/teams/")}
         />
       </SubSidebarSection>
     </SubSidebar>

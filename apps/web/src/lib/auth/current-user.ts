@@ -7,7 +7,7 @@ import { loadActiveUser } from "@/lib/auth/active-user";
 import { getCurrentSession } from "@/lib/auth";
 import { resolvePermissions } from "@ccp/shared/auth/permissions";
 import type { Capability } from "@ccp/shared/auth/permissions";
-import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
+import type { TeamStatus, User, UserAvailabilityStatus } from "@ccp/shared/types";
 
 /**
  * Server-component helper. Resolves the current authenticated user, or
@@ -31,6 +31,13 @@ import type { User, UserAvailabilityStatus } from "@ccp/shared/types";
 export interface Session {
   user: User;
   teamId: string;
+  /**
+   * Org-approval status of the user's team. The (app) layout reads this to
+   * gate pending/suspended orgs to /pending. Carried on the session (loaded in
+   * the same `loadActiveUser` query) so the gate never depends on the org-gated
+   * /api/team call. superAdmins are exempt from the gate regardless.
+   */
+  teamStatus: TeamStatus;
   /**
    * Effective per-capability map for this user's role, with the team admin's
    * overrides already applied. Pass the relevant boolean down to client
@@ -77,6 +84,7 @@ export const getSession = cache(async (): Promise<Session> => {
         : {}),
     },
     teamId: row.teamId,
+    teamStatus: (row.team?.status ?? "active") as TeamStatus,
     permissions: resolvePermissions(row.role, row.team?.rolePermissions ?? {}),
   };
 });

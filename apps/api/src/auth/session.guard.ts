@@ -1,6 +1,7 @@
 import {
   CanActivate,
   ExecutionContext,
+  ForbiddenException,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -8,7 +9,7 @@ import {
 import type { Request } from "express";
 
 import { auth } from "@/auth/better-auth";
-import type { Role } from "@ccp/shared/types";
+import type { Role, TeamStatus } from "@ccp/shared/types";
 
 import { DbService } from "../db/db.service";
 
@@ -32,6 +33,11 @@ export interface ApiSession {
   /** Same row the guard already loaded — exposing it lets handlers build
    *  message DTOs inline without a follow-up user lookup. */
   avatarUrl: string | null;
+  /** Org-approval status of this user's team. SessionGuard rejects any
+   *  non-`active` org (pending review / suspended) before the request reaches
+   *  a controller — superAdmins exempt. Bounded by the same 15s session cache
+   *  as the deactivation check, so a suspend lands within ~15s on the API. */
+  teamStatus: TeamStatus;
   /** The team's raw `rolePermissions` JSON (admin-configured per-role
    *  capability overrides). Carried on the session so CapabilityGuard +
    *  handler-level checks resolve permissions with ZERO extra DB read; the
@@ -78,6 +84,14 @@ export class SessionGuard implements CanActivate {
       throw err;
     }
     if (!session) throw new UnauthorizedException({ error: "unauthorized" });
+    // Org-approval gate. A pending (awaiting review) or suspended (revoked) org
+    // has no API access. superAdmins are exempt — their team is just an anchor
+    // row and they manage the platform from the (platform) shell. Checked on
+    // both the cache-hit and cache-miss paths because `teamStatus` rides on the
+    // cached ApiSession; a status flip propagates within the 15s cache TTL.
+    if (session.role !== "superAdmin" && session.teamStatus !== "active") {
+      throw new ForbiddenException({ error: "org_not_active" });
+    }
     req.session = session;
     return true;
   }
@@ -302,7 +316,7 @@ export async function resolveSession(
       email: true,
       avatarUrl: true,
       deactivatedAt: true,
-      team: { select: { rolePermissions: true } },
+      team: { select: { rolePermissions: true, status: true } },
     },
   });
   if (!user || user.deactivatedAt) return null;
@@ -315,6 +329,7 @@ export async function resolveSession(
     name: user.name,
     email: user.email,
     avatarUrl: user.avatarUrl ?? null,
+    teamStatus: (user.team?.status ?? "active") as TeamStatus,
     rolePermissions: user.team?.rolePermissions ?? {},
   };
   cacheSet(user.id, session);

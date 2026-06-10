@@ -58,20 +58,24 @@ export default defineConfig({
     navigationTimeout: 15_000,
   },
   projects: [
-    // One-time auth: drives the real login flow and writes
-    // tests/e2e/.auth/superadmin.json. Every other spec depends on it
-    // and reuses the saved storageState — login form code still
-    // exercises (we test it explicitly in the auth specs in
-    // predeploy.spec.ts) but we don't pound it 18+ times per run.
+    // One-time auth: drives the real login flow ONCE per role and writes the
+    // storageState files. Two roles since the org-approval gate split the
+    // surfaces (2026-06-10):
+    //   - app-admin.json  → a regular admin in the seeded team (customer app)
+    //   - superadmin.json → the platform super-admin (platform shell only)
+    // Every other spec depends on these and reuses the saved state.
     {
       name: "setup",
-      testMatch: /auth\.setup\.ts/,
+      testMatch: /(auth|app-admin)\.setup\.ts/,
     },
     {
       name: "chromium",
       use: {
         ...devices["Desktop Chrome"],
-        storageState: "tests/e2e/.auth/superadmin.json",
+        // Default to the regular admin — the bulk of specs drive the customer
+        // app. Platform specs override with the superadmin storageState via
+        // `test.use({ storageState: "tests/e2e/.auth/superadmin.json" })`.
+        storageState: "tests/e2e/.auth/app-admin.json",
       },
       dependencies: ["setup"],
     },

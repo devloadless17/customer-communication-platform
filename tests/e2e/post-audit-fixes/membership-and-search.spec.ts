@@ -28,7 +28,7 @@
  * gates on the row's presence in TeamChannelMember.
  */
 import { test, expect } from "@playwright/test";
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { db, appAdmin, wipeTestData } from "../_helpers/db";
 
 let teamId: string;
 let userId: string;
@@ -38,7 +38,9 @@ let defaultChannelId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
-  const su = await superadminTeam();
+  // Browsing/request identity is the e2e app-admin — channel-search membership
+  // is evaluated for THIS viewer, so "viewer is a member" must add this user.
+  const su = await appAdmin();
   teamId = su.teamId;
   userId = su.userId;
 
@@ -222,8 +224,8 @@ test.describe("Workspace-wide channel search membership filter", () => {
     request,
   }) => {
     // The seeded message body is "Q3 salary planning numbers attached" —
-    // it lives in `private-leadership`, and the superadmin is NOT a
-    // member of that channel. Workspace search must NOT surface it.
+    // it lives in `private-leadership`, and the viewer (the e2e app-admin) is
+    // NOT a member of that channel. Workspace search must NOT surface it.
     const resp = await request.get(
       `/api/team/channels/search?q=salary`,
     );
@@ -239,7 +241,7 @@ test.describe("Workspace-wide channel search membership filter", () => {
   });
 
   test("search returns hits when viewer is a member", async ({ request }) => {
-    // Add the superadmin to the private channel, run the same search,
+    // Add the viewer (app-admin) to the private channel, run the same search,
     // confirm the hit now surfaces. Then remove them to restore state.
     await db().teamChannelMember.create({
       data: {

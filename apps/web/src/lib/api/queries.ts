@@ -8,6 +8,7 @@ import { api } from "../api-client";
 import type {
   AudienceGroupDto,
   ListContactsOpts,
+  PlatformAnalytics,
   SuperAdminTeamDetail,
   SuperAdminTeamRow,
   WhatsappConfigView,
@@ -112,6 +113,10 @@ export async function getTeamDetailForSuperAdmin(
     if (isApiNotFound(err)) return null;
     throw err;
   }
+}
+
+export async function getPlatformAnalytics(): Promise<PlatformAnalytics> {
+  return api<PlatformAnalytics>("/api/admin/analytics");
 }
 
 // ---------------------------------------------------------------------------

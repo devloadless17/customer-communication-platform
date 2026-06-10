@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 import { db } from "../_helpers/db";
 
-const AUTH = "tests/e2e/.auth/superadmin.json";
+const AUTH = "tests/e2e/.auth/app-admin.json";
 
 /**
  * Verifies the team-chat channel-feed reconnect convergence fix

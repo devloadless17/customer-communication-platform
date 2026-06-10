@@ -20,7 +20,7 @@
  *   F. Call history listing                         — descending ringingAt
  */
 import { test, expect } from "@playwright/test";
-import { db, superadminTeam, wipeTestData, pollUntil } from "../_helpers/db";
+import { db, appAdmin, wipeTestData, pollUntil } from "../_helpers/db";
 
 // ─── Fixture: team + base contact reused as the parent for siloed
 // per-spec contacts. Each spec creates its own Contact + Conversation so
@@ -30,7 +30,9 @@ let userId: string;
 
 test.beforeAll(async () => {
   await wipeTestData();
-  const su = await superadminTeam();
+  // The browsing/request identity is the e2e app-admin (the super-admin can't
+  // use the customer app). answerCall is attributed to THIS user.
+  const su = await appAdmin();
   teamId = su.teamId;
   userId = su.userId;
 });

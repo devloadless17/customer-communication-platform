@@ -1,5 +1,7 @@
 import { test, expect, type Page, type ConsoleMessage } from "@playwright/test";
 
+import { APP_ADMIN_EMAIL, APP_ADMIN_PASSWORD } from "./_helpers/db";
+
 /**
  * Pre-deploy e2e gate. Runs against the prod-imitate stack at
  * `http://localhost:8080` (Caddy → web :3000 + api :4000). Drives the
@@ -7,19 +9,23 @@ import { test, expect, type Page, type ConsoleMessage } from "@playwright/test";
  * build optimizations all real. Catches the failure modes `pnpm dev`
  * silently papers over.
  *
- * Storage state: every spec inherits `tests/e2e/.auth/superadmin.json`
- * from the `setup` project (see playwright.config.ts), so the login form
- * is exercised ONCE per run. The few specs that explicitly test the
- * login form / logout flow are marked `test.use({ storageState: undefined })`
- * so they start from an empty session.
+ * Storage state: every spec here inherits `tests/e2e/.auth/app-admin.json`
+ * (a regular admin in the seeded team) from the `setup` project — the
+ * super-admin can no longer browse the customer app (org-approval gate), so
+ * the customer-app surface is driven by the admin. The few specs that test the
+ * login / logout flow start from an empty session via `test.use({ storageState })`.
+ * The platform surface is covered separately in platform/platform.spec.ts.
  *
- * No fixture seeding — the suite assumes a fresh-deploy DB (just
- * `0_init` migration + the superadmin row). After this passes, you
- * can deploy without surprise.
+ * No fixture seeding — the suite assumes a fresh-deploy DB (just the
+ * migrations + the superadmin row + the e2e app-admin). After this passes,
+ * you can deploy without surprise.
  */
 
-const SUPERADMIN_EMAIL = "ali@loadless.ai";
-const SUPERADMIN_PASSWORD = "loadless";
+// Customer-app login uses the REGULAR admin — super-admins are redirected out
+// of the customer app to the platform shell (the super-admin login + platform
+// surface are covered in tests/e2e/platform/platform.spec.ts).
+const LOGIN_EMAIL = APP_ADMIN_EMAIL;
+const LOGIN_PASSWORD = APP_ADMIN_PASSWORD;
 
 // Console / pageerror noise we explicitly tolerate. Anything else fails the spec.
 const KNOWN_NOISE = [
@@ -104,13 +110,13 @@ test.describe("auth", () => {
   test("login → redirected to /inbox with session cookie", async ({ page, context }) => {
     const health = trackHealth(page);
     await page.goto("/login");
-    await page.fill('input[name="email"]', SUPERADMIN_EMAIL);
-    await page.fill('input[name="password"]', SUPERADMIN_PASSWORD);
+    await page.fill('input[name="email"]', LOGIN_EMAIL);
+    await page.fill('input[name="password"]', LOGIN_PASSWORD);
     await Promise.all([
-      page.waitForURL(/\/(inbox|admin)/, { timeout: 20_000 }),
+      page.waitForURL(/\/inbox/, { timeout: 20_000 }),
       page.click('button[type="submit"]'),
     ]);
-    expect(page.url()).toMatch(/\/inbox|\/admin/);
+    expect(page.url()).toMatch(/\/inbox/);
     const cookies = await context.cookies();
     const session = cookies.find((c) => c.name.toLowerCase().includes("session"));
     expect(session?.value, "session cookie set after login").toBeTruthy();
@@ -208,10 +214,10 @@ test.describe("logout flow", () => {
 
   async function login(page: Page) {
     await page.goto("/login");
-    await page.fill('input[name="email"]', SUPERADMIN_EMAIL);
-    await page.fill('input[name="password"]', SUPERADMIN_PASSWORD);
+    await page.fill('input[name="email"]', LOGIN_EMAIL);
+    await page.fill('input[name="password"]', LOGIN_PASSWORD);
     await Promise.all([
-      page.waitForURL(/\/(inbox|admin)/, { timeout: 20_000 }),
+      page.waitForURL(/\/inbox/, { timeout: 20_000 }),
       page.click('button[type="submit"]'),
     ]);
   }

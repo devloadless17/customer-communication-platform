@@ -50,6 +50,18 @@ enum Plan {
   enterprise
 }
 
+// Org lifecycle gate. A self-signed-up org lands as `pending` and CANNOT use
+// the app until a superAdmin approves it (→ `active`). A superAdmin can revoke
+// access at any time (→ `suspended`). superAdmins themselves bypass this gate
+// (their team is just an anchor row). Default `pending` = secure-by-default:
+// a brand-new org is locked until reviewed. The init migration backfills every
+// PRE-EXISTING team to `active` so current customers aren't locked out.
+enum TeamStatus {
+  pending
+  active
+  suspended
+}
+
 enum ConversationStatus {
   open
   pending
@@ -268,6 +280,20 @@ model Team {
   // Subscription tier. Default `starter` for every team — feature gating
   // is not wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
   plan      Plan     @default(starter)
+
+  // Org-approval gate (see `TeamStatus`). A new self-signup is `pending` until
+  // a superAdmin approves it; `suspended` when access is revoked. Enforced at
+  // BOTH chokepoints — the NestJS SessionGuard (every API request) and the
+  // Next.js (app) layout (every page). superAdmins are exempt.
+  status            TeamStatus @default(pending)
+  // Optional operator note surfaced on the gate screen — a rejection/suspension
+  // reason ("payment overdue", "flagged for review"). Null while `active`.
+  statusReason      String?
+  // When + which superAdmin last changed `status`. `statusUpdatedById` is a
+  // plain User id (no relation) so deleting the acting superAdmin never cascades
+  // into / nulls a customer org's audit trail. Reads are display-only.
+  statusUpdatedAt   DateTime?
+  statusUpdatedById String?
 
   // Per-team channel credentials live in `ChannelConnection`, one row per
   // channel keyed by (teamId, channel). Adding a channel = insert a row, not

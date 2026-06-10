@@ -10,6 +10,10 @@
 
 export type Role = "superAdmin" | "admin" | "manager" | "agent";
 export type Plan = "free" | "starter" | "advanced" | "enterprise";
+// Org-approval lifecycle. `pending` = created, awaiting super-admin approval
+// (no app access); `active` = approved; `suspended` = access revoked by a
+// super-admin. Mirrors the Prisma `TeamStatus` enum.
+export type TeamStatus = "pending" | "active" | "suspended";
 export type ConversationStatus = "open" | "pending" | "closed";
 export type MessageDirection = "in" | "out";
 export type MessageStatus = "sent" | "delivered" | "read" | "failed";

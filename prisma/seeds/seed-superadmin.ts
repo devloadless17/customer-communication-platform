@@ -55,10 +55,14 @@ async function main() {
     return;
   }
 
+  // `status: active` so the super-admin's own anchor team is never caught by
+  // the org-approval gate. superAdmins bypass the gate anyway (it's role-keyed),
+  // but keeping the row `active` avoids a confusing "pending" badge on the
+  // operator's own org in the platform list.
   const team = await db.team.upsert({
     where: { id: PILOT_TEAM_ID },
-    create: { id: PILOT_TEAM_ID, name: "Loadless" },
-    update: {},
+    create: { id: PILOT_TEAM_ID, name: "Loadless", status: "active" },
+    update: { status: "active" },
   });
 
   const passwordHash = await bcrypt.hash(password, 10);

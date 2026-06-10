@@ -9,9 +9,10 @@ import { validatePasswordStructure } from "@/lib/auth/password";
 /**
  * Org self-signup. Delegates the Team + User + credential Account + stage
  * seed transaction to POST /api/register (NestJS), then signs the user in
- * via Better Auth on the web side to commit the session cookie. The team
- * starts with zero WhatsApp config; the admin is dropped into
- * /settings/whatsapp to connect.
+ * via Better Auth on the web side to commit the session cookie. The team is
+ * created `pending` (org-approval gate), so the new admin is dropped on
+ * /pending — they wait there until a superAdmin approves the org, then land
+ * on /settings/whatsapp to connect WhatsApp.
  *
  * Why the transaction lives in NestJS: a dangling Team with no users would
  * orphan the org — worse, an admin User without a Team would 500 on every
@@ -82,10 +83,11 @@ export async function registerAction(
     return { error: "Account created — please sign in." };
   }
 
-  // Server-side redirect — single hop, no chain through `/` or anything
-  // else. Better Auth's nextCookies plugin already committed the session
-  // cookie to the action response above; redirect() throws NEXT_REDIRECT
-  // AFTER that commit so the browser receives cookie + navigation in one
-  // round-trip. No intermediate client-side spinner card.
-  redirect("/settings/whatsapp");
+  // Server-side redirect — single hop. Better Auth's nextCookies plugin
+  // already committed the session cookie to the action response above;
+  // redirect() throws NEXT_REDIRECT AFTER that commit so the browser receives
+  // cookie + navigation in one round-trip. Lands on /pending: the org is
+  // `pending` until a superAdmin approves it. /pending self-heals to
+  // /settings/whatsapp the moment the org flips to `active`.
+  redirect("/pending");
 }

@@ -283,10 +283,10 @@ test.describe("C. Realtime two-tab sync", () => {
   test("internal note added on tab A appears on tab B without refresh", async ({ browser }) => {
     // Both tabs share the same storageState — pre-authed.
     const ctxA = await browser.newContext({
-      storageState: "tests/e2e/.auth/superadmin.json",
+      storageState: "tests/e2e/.auth/app-admin.json",
     });
     const ctxB = await browser.newContext({
-      storageState: "tests/e2e/.auth/superadmin.json",
+      storageState: "tests/e2e/.auth/app-admin.json",
     });
     try {
       const pageB = await ctxB.newPage();
@@ -324,10 +324,10 @@ test.describe("C. Realtime two-tab sync", () => {
     });
 
     const ctxA = await browser.newContext({
-      storageState: "tests/e2e/.auth/superadmin.json",
+      storageState: "tests/e2e/.auth/app-admin.json",
     });
     const ctxB = await browser.newContext({
-      storageState: "tests/e2e/.auth/superadmin.json",
+      storageState: "tests/e2e/.auth/app-admin.json",
     });
     try {
       const pageB = await ctxB.newPage();

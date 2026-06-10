@@ -1,11 +1,12 @@
 import { test as setup, expect } from "@playwright/test";
 
 /**
- * One-shot login that all specs reuse. Saves cookies + localStorage to a
- * file that `playwright.config.ts` references via `storageState`. Replaces
- * the previous "every spec logs in" pattern which was hitting login 18+
- * times per run and racing the Better Auth + IP-rate-limit + lockout
- * gates under burst.
+ * One-shot superadmin login reused by the PLATFORM specs. Saves storageState
+ * to `tests/e2e/.auth/superadmin.json`.
+ *
+ * The super-admin lands on /platform (the platform shell), NOT /inbox — the
+ * org-approval gate redirects super-admins out of the customer app entirely
+ * (2026-06-10). Customer-app specs use the separate app-admin storageState.
  */
 
 const SUPERADMIN_EMAIL = "ali@loadless.ai";
@@ -18,7 +19,7 @@ setup("authenticate as superadmin", async ({ page }) => {
   await page.fill('input[name="email"]', SUPERADMIN_EMAIL);
   await page.fill('input[name="password"]', SUPERADMIN_PASSWORD);
   await Promise.all([
-    page.waitForURL(/\/(inbox|admin)/, { timeout: 30_000 }),
+    page.waitForURL(/\/platform/, { timeout: 30_000 }),
     page.click('button[type="submit"]'),
   ]);
   // Sanity-check the session cookie was set before we persist storage.
