@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+} from "@ccp/shared/auth/password-policy";
+
 export const UpdateUserSchema = z
   .object({
     role: z.string().optional(),
@@ -7,6 +12,22 @@ export const UpdateUserSchema = z
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no changes" });
 export type UpdateUserInput = z.infer<typeof UpdateUserSchema>;
+
+/**
+ * Admin-initiated password reset for a teammate. No `currentPassword` — the
+ * admin is acting *on behalf of* a locked-out user, not changing their own
+ * credentials, so the self-service `change-password` gate (which proves
+ * knowledge of the old password) doesn't apply. Authorization is the
+ * `canModifyUser` role gate in the service instead.
+ *
+ * Length is policy-validated here so the structural check matches the
+ * self-service path; deeper structural rules live in `validatePasswordStructure`
+ * (called in the service to stay in lockstep with change-password).
+ */
+export const ResetUserPasswordSchema = z.object({
+  newPassword: z.string().min(MIN_PASSWORD_LENGTH).max(MAX_PASSWORD_LENGTH),
+});
+export type ResetUserPasswordInput = z.infer<typeof ResetUserPasswordSchema>;
 
 /**
  * Self-edit schema for `PATCH /api/users/me`. Deliberately narrow — name +

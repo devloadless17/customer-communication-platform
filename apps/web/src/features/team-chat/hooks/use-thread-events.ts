@@ -36,6 +36,12 @@ export interface ThreadEventsState {
 export function useThreadEvents(
   channelId: string,
   rootMessageId: string,
+  // Fired when the thread ROOT itself is deleted (by its author or an admin,
+  // possibly in another tab/by another user). The server emits
+  // `team:channel:message:deleted` with `threadRootId: null` for a top-level
+  // delete and the DB cascades every reply — the panel must close rather than
+  // sit on a dead root (replies into it would 404).
+  onRootDeleted?: () => void,
 ): ThreadEventsState {
   const [replies, setReplies] = useState<TeamChannelMessageDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,6 +51,13 @@ export function useThreadEvents(
   const inFlightRef = useRef(false);
   // Per-(message,emoji) last applied version stamp — see `onReaction`.
   const lastReactionVersionsRef = useRef(new Map<string, number>());
+  // Keep the root-deleted callback on a ref so the socket effect (which only
+  // re-binds on [channelId, rootMessageId]) reads the latest closure without
+  // re-subscribing on every parent render.
+  const onRootDeletedRef = useRef(onRootDeleted);
+  useEffect(() => {
+    onRootDeletedRef.current = onRootDeleted;
+  });
 
   // Hydrate when the root changes (user clicked a different message's
   // thread). Fresh fetch — replies aren't kept across roots.
@@ -109,9 +122,10 @@ export function useThreadEvents(
   useEffect(() => {
     const socket = getClientSocket();
 
-    // Thread events ride the channel's team-room frames and are filtered
-    // here by `threadRootId === rootMessageId`. The dedicated thread room
-    // was removed — nothing on the server targeted it.
+    // Thread events ride the CHANNEL room's frames (membership-gated at
+    // subscribe:channel, so non-members never receive thread content) and are
+    // filtered here by `threadRootId === rootMessageId`. There is no dedicated
+    // thread room — nothing on the server targets one.
 
     // Reconnect convergence. A drop longer than the 30s recovery window —
     // during which a teammate posted/edited/deleted a reply in THIS thread —
@@ -199,6 +213,16 @@ export function useThreadEvents(
     const onDeleted: Parameters<typeof socket.on<"team:channel:message:deleted">>[1] = (
       payload,
     ) => {
+      if (payload.channelId !== channelId) return;
+      // The ROOT of this thread was deleted (top-level delete → threadRootId
+      // null, messageId === our root). The DB cascades all replies; the panel
+      // can't stay open on a dead root (replies would 404). Tell the parent
+      // to close it. Checked BEFORE the reply-delete branch because a root
+      // delete carries `threadRootId: null`, which the reply branch ignores.
+      if (payload.threadRootId === null && payload.messageId === rootMessageId) {
+        onRootDeletedRef.current?.();
+        return;
+      }
       if (payload.threadRootId !== rootMessageId) return;
       setReplies((prev) => {
         const idx = prev.findIndex((m) => m.id === payload.messageId);

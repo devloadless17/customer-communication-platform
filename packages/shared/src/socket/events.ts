@@ -479,6 +479,35 @@ export interface ServerToClientEvents {
     clientTempId?: string;
   }) => void;
 
+  /**
+   * CONTENT-LEAN companion to `team:channel:message`, fanned to the TEAM room
+   * so the SIDEBAR channel list can live-update its unread dot + mention badge
+   * for channels the viewer is NOT currently subscribed to (the channel-room
+   * `team:channel:message` frame only reaches the one channel a tab has open).
+   *
+   * Deliberately carries NO message body / preview — a team-room frame reaches
+   * non-members of private channels, so leaking the body here would defeat the
+   * channel-room confidentiality boundary. Only id-shaped fields cross:
+   *   - `authorUserId` — so the author's own send doesn't badge their sidebar.
+   *   - `mentionedUserIds` — so the recipient knows whether to bump the mention
+   *     counter.
+   *   - `lastMessageAt` — reorders the row (null for thread replies).
+   *   - `isReply` — replies bump only the mention counter, never the unread dot.
+   * The list ignores any `channelId` not already in its (membership-scoped)
+   * state, so non-members drop the frame. The preview text converges via the
+   * channel-room frame (when the channel is active) or the next list refetch.
+   */
+  "team:channel:activity": (payload: {
+    teamId: string;
+    channelId: string;
+    authorUserId: string | null;
+    mentionedUserIds: string[];
+    /** Updated channel.lastMessageAt — null for thread replies. */
+    lastMessageAt: string | null;
+    /** True when this was a thread reply (mention-only, no unread-dot bump). */
+    isReply: boolean;
+  }) => void;
+
   /** Reply landed in a thread. Fired in addition to `team:channel:message`.
    *  Also fired (with a possibly-null `lastReplyAt`) on reply DELETE so the
    *  parent's "X replies" pill keeps the count + timestamp in sync. */
@@ -621,7 +650,11 @@ export interface ServerToClientEvents {
     ringingAt: string;
   }) => void;
 
-  /** Outbound call placed; only the originating thread's room. */
+  /** Outbound call placed. TEAM room (not the conversation room): the inbox
+   *  thread reducer still filters by `conversationId` so only the agent
+   *  viewing the originating thread paints the ring banner, but the team-wide
+   *  Calls badge (which counts ringing rows) must see the outbound ring phase
+   *  for non-viewers too. See fanout-rules.ts `call.ringing_out`. */
   "call:ringing": (payload: {
     teamId: string;
     conversationId: string;
@@ -769,6 +802,10 @@ export interface SocketData {
   /** Threads (team chat) this socket is currently flagged as typing in.
    *  Keyed by `threadRootId`; the channel is recoverable from socket rooms. */
   typingInThread?: Set<string>;
+  /** `${channelId}::${threadRootId}` composites whose thread root has been
+   *  verified to belong to the supplied channel. Caches the per-socket
+   *  thread-typing ownership check so re-toggles skip the DB lookup. */
+  validatedThreads?: Set<string>;
   /**
    * Conversations this socket has joined as a viewer. Tracked so disconnect
    * can release viewer slots without depending on the client managing to

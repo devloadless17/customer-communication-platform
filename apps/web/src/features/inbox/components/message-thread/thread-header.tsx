@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, Phone, Search as SearchIcon } from "lucide-react";
+import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -83,6 +83,7 @@ export function ThreadHeader({
   canMakeCalls,
   onInitiateCall,
   onMobileBack,
+  onOpenContactDetails,
 }: {
   teamId: string;
   conversationId: string;
@@ -123,6 +124,9 @@ export function ThreadHeader({
   onInitiateCall: () => void | Promise<void>;
   /** Mobile back-to-list affordance. Only rendered when set + below md. */
   onMobileBack?: () => void;
+  /** Opens the contact details Sheet. Only rendered when set + below lg (the
+   *  desktop contact rail is hidden there, so this is the only way in). */
+  onOpenContactDetails?: () => void;
 }) {
   return (
     <header className="flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
@@ -209,6 +213,21 @@ export function ThreadHeader({
             conversationId={conversationId}
             contactName={contactName}
           />
+        )}
+        {/* Contact details — below lg the desktop right rail is hidden, so this
+            is the only way to reach tags / stage / custom fields / files on a
+            phone or tablet. Opens the panel in a Sheet (shell-owned). */}
+        {onOpenContactDetails && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onOpenContactDetails}
+            aria-label="Contact details"
+            title="Contact details"
+            className="size-8 text-muted-foreground hover:text-foreground lg:hidden"
+          >
+            <Info className="size-4" />
+          </Button>
         )}
       </div>
     </header>

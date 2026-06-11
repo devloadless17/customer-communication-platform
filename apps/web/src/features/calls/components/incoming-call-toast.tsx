@@ -28,9 +28,14 @@ interface IncomingCall {
 }
 
 export function IncomingCallToast({
+  canReceiveCalls,
   onAnswer,
   onReject,
 }: {
+  /** Resolved `calls:receive` capability. When false the toast never renders
+   *  and never rings — a role scoped OUT of calling shouldn't be interrupted
+   *  by inbound calls it can't answer (the API already 403s answer/reject). */
+  canReceiveCalls: boolean;
   /** Called when the user clicks Answer — wires up the peer connection. */
   onAnswer: (callId: string, contactName: string, conversationId: string) => void;
   /** Called when the user clicks Decline. */
@@ -50,6 +55,12 @@ export function IncomingCallToast({
   const { receiveCalls } = useNotificationSounds();
   const receiveCallsRef = useRef(receiveCalls);
   receiveCallsRef.current = receiveCalls;
+
+  // Capability gate (admin-configured role permission), kept in a ref for the
+  // same reason as the device opt-out: toggling shouldn't churn the socket
+  // subscription. A role without `calls:receive` gets no card and no ring.
+  const canReceiveCallsRef = useRef(canReceiveCalls);
+  canReceiveCallsRef.current = canReceiveCalls;
 
   useEffect(() => {
     const socket = getClientSocket();
@@ -71,6 +82,10 @@ export function IncomingCallToast({
       contactName: string;
       ringingAt: string;
     }) => {
+      // Role isn't allowed to receive calls (admin scoped it out) — drop
+      // silently. answer/reject are API-gated anyway; this stops the
+      // misleading ring + "is calling you" card for a call they can't take.
+      if (!canReceiveCallsRef.current) return;
       // This device opted out of receiving calls — drop it silently. Teammates
       // who keep it on still get the popup + ring.
       if (!receiveCallsRef.current) return;

@@ -17,6 +17,7 @@ import type {
   ConversationActivityEvent,
   ConversationWithRefs,
   InternalNote,
+  MediaKind,
   Message,
   ReplySnapshot,
   Tag,
@@ -43,7 +44,10 @@ import { ActivityEntry } from "./activity-entry";
 import { ReplyBox } from "./reply-box";
 // Forward dialog + in-thread search — both rarely opened, so defer them
 // out of the critical thread bundle. SSR-disabled because they're
-// interaction-only (no SEO/render-without-JS concern).
+// interaction-only (no SEO/render-without-JS concern). BOTH are gated on
+// their open flag at the render site (`{forwardOpen && …}` / `{searchOpen &&
+// …}`) so next/dynamic only fetches the chunk on first open — rendering a
+// lazy component AT ALL triggers its chunk request, even with open={false}.
 const ForwardDialog = dynamic(
   () => import("./forward-dialog").then((m) => m.ForwardDialog),
   { ssr: false },
@@ -281,6 +285,7 @@ function MessageThreadImpl({
   onMarkRead,
   onSnapshot,
   onMobileBack,
+  onOpenContactDetails,
   jumpToMessageId,
   jumpNonce,
 }: {
@@ -321,6 +326,10 @@ function MessageThreadImpl({
   /** Below md the inbox single-panes between conversation list and thread.
    *  When set, ThreadHeader renders a back-arrow that returns to the list. */
   onMobileBack?: () => void;
+  /** Below lg the desktop contact rail is hidden; when set, ThreadHeader shows
+   *  an Info button that opens the contact details in a Sheet (the shell owns
+   *  the Sheet + ContactPanel). */
+  onOpenContactDetails?: () => void;
   /** One-shot deep-link target from the GLOBAL inbox search: when an agent
    *  clicks a "Messages" hit in another conversation, the shell opens this
    *  thread and passes the matched message id here. The thread loads a
@@ -523,6 +532,10 @@ function MessageThreadImpl({
   useEffect(() => {
     if (!isSelecting) return;
     function onKey(e: KeyboardEvent) {
+      // A deeper modal layer (e.g. a MediaLightbox opened while in selection
+      // mode) owns the Escape and marks it handled — don't also collapse the
+      // selection out from under the agent.
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") clearSelection();
     }
     window.addEventListener("keydown", onKey);
@@ -595,6 +608,11 @@ function MessageThreadImpl({
     body: string;
     nonce: string;
     clientTempId?: string;
+    /** Set when the failed message carried an attachment, so the composer can
+     *  warn (instead of silently sending caption-only text) if the original
+     *  File is no longer in its in-memory cache — e.g. retry after a thread
+     *  switch remounted the ReplyBox and dropped `pendingFilesRef`. */
+    mediaKind?: MediaKind;
   } | null>(null);
   const dismissFailed = useCallback(
     (msg: Message) => {
@@ -610,6 +628,7 @@ function MessageThreadImpl({
         body: msg.body,
         nonce: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         ...(msg.clientTempId ? { clientTempId: msg.clientTempId } : {}),
+        ...(msg.media ? { mediaKind: msg.media.kind } : {}),
       });
     },
     [removeOptimistic],
@@ -1303,6 +1322,7 @@ function MessageThreadImpl({
         canMakeCalls={canMakeCalls}
         onInitiateCall={onInitiateCall}
         onMobileBack={onMobileBack}
+        onOpenContactDetails={onOpenContactDetails}
       />
 
       {searchOpen && (
@@ -1499,12 +1519,19 @@ function MessageThreadImpl({
         </div>
       )}
 
-      <ForwardDialog
-        open={forwardOpen}
-        messageIds={forwardIds}
-        onClose={closeForward}
-        onError={onForwardError}
-      />
+      {/* Gated render (like MessageSearch below) so next/dynamic only fetches
+          the chunk when forward is actually opened — rendering it
+          unconditionally with open={false} triggered the chunk request on
+          every thread mount. `forwardIds` is frozen before `forwardOpen`
+          flips, so no state is lost. */}
+      {forwardOpen && (
+        <ForwardDialog
+          open
+          messageIds={forwardIds}
+          onClose={closeForward}
+          onError={onForwardError}
+        />
+      )}
       {confirmDialog}
     </section>
   );

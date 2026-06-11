@@ -145,6 +145,51 @@ export async function enqueueWorkflowResume(
 }
 
 /**
+ * Remove a job hash that is sitting in a RETAINED-but-terminal state
+ * (`failed` — kept 7 days / 5000 count via removeOnFail; or `completed` —
+ * kept 24h / 1000 count) so a subsequent `add` with the SAME custom jobId is
+ * no longer swallowed as a duplicate.
+ *
+ * Why this exists: BullMQ's add-with-custom-jobId is a no-op while ANY job
+ * hash with that id still exists, INCLUDING one in the failed/completed set
+ * (addDelayedJob/addStandardJob `if EXISTS jobIdKey then handleDuplicatedJob`).
+ * The waiting-runs sweeper recovers a stranded run by re-enqueueing the SAME
+ * deterministic id (`run-${runId}` / `resume-${runId}-${waitSeq}`). If the
+ * run's prior job FAILED its full retry budget (e.g. a DB outage spanning the
+ * 3 exponential-backoff attempts) the failed hash lingers for 7 days — the
+ * sweeper's blind re-add would silently no-op the whole time, reporting
+ * success while the run stays stranded. Clearing the terminal hash first makes
+ * the re-add actually re-create the job.
+ *
+ * Returns true when it removed a terminal job (caller may want to log the
+ * recovery). Only removes terminal states — a live job (waiting / delayed /
+ * active) is left untouched so we never yank a job out from under the worker
+ * or steal a still-pending delayed resume. Best-effort: a Redis blip here is
+ * swallowed; the next sweeper tick retries.
+ */
+export async function clearTerminalJob(jobId: string): Promise<boolean> {
+  const q = getWorkflowQueue();
+  try {
+    const job = await q.getJob(jobId);
+    if (!job) return false;
+    const stateRaw = await job.getState();
+    if (stateRaw === "failed" || stateRaw === "completed") {
+      // remove() refuses a locked (active) job, but we've already gated on a
+      // terminal state, so this is safe.
+      await job.remove();
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn(
+      `[workflows] clearTerminalJob(${jobId}) failed:`,
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+}
+
+/**
  * Resume an `ask_question` step early because the contact replied. The
  * inbound-ingest hook drops the answer onto `WorkflowRun.pendingAnswer`
  * and then calls this to wake the worker immediately. `tag` is the inbound

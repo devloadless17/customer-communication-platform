@@ -1442,7 +1442,10 @@ export function HttpRequestEditor({
           placeholder={tokenSet ? "•••••••• (saved)" : ""}
         />
       </Field>
-      <Field label="Custom headers (optional)" hint="One per line: Header-Name: value">
+      <Field
+        label="Custom headers (optional)"
+        hint="One per line: Header-Name: value. Saved values are encrypted; a header shown as “•••••••• (saved)” keeps its stored value unless you overwrite it."
+      >
         <Textarea
           value={headersToText(config.customHeaders)}
           onChange={(e) => {

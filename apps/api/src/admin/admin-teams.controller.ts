@@ -4,9 +4,11 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   NotFoundException,
   Param,
   Patch,
+  Post,
 } from "@nestjs/common";
 import { z } from "zod";
 
@@ -17,10 +19,14 @@ import {
 
 import { CurrentSession } from "../auth/current-session.decorator";
 import { RequireRole } from "../auth/role.guard";
-import { invalidateSessionCache, type ApiSession } from "../auth/session.guard";
+import { type ApiSession } from "../auth/session.guard";
+import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { zBody } from "../common/zod-validation.pipe";
 import { DbService } from "../db/db.service";
 import { TeamRootService } from "../team/team-root.service";
+import { ResetUserPasswordSchema } from "../users/users.schemas";
+import type { ResetUserPasswordInput } from "../users/users.schemas";
+import { UsersService } from "../users/users.service";
 
 // Approve (→ active), reactivate (→ active), or suspend (→ suspended). `reason`
 // is an operator note surfaced on the suspended org's gate screen; ignored for
@@ -49,6 +55,8 @@ export class AdminTeamsController {
   constructor(
     private readonly db: DbService,
     private readonly teamRoot: TeamRootService,
+    private readonly users: UsersService,
+    private readonly sessionInvalidator: SessionInvalidationService,
   ) {}
 
   @Get()
@@ -95,16 +103,62 @@ export class AdminTeamsController {
       },
     });
 
-    // Bust the 15s session cache for every member of the target org so the
-    // change lands immediately — a suspend cuts API + socket access on the very
-    // next request instead of waiting out the TTL; an approval lets them in at
-    // once. Their team, not the operator's, so the operator's session is intact.
+    // Land the change immediately for every member of the target org (their
+    // team, not the operator's, so the operator's own session is untouched).
     const members = await this.db.user.findMany({
       where: { teamId },
       select: { id: true },
     });
-    for (const m of members) invalidateSessionCache(m.id);
 
+    if (body.status === "suspended") {
+      // A suspend is a hard access-cut (non-payment / abuse / TOS), so it must
+      // also drop LIVE connections — busting the 15s cache alone only gates the
+      // next HTTP request and leaves any already-open Socket.io tab streaming
+      // the org's inbound WhatsApp + realtime team data until it reconnects.
+      // `revoke` busts the cache AND kicks every socket; deleting the Session
+      // rows first means a kicked tab can't simply re-handshake with its still
+      // -valid Better Auth session (the socket-auth + SessionGuard team-status
+      // gate would refuse it, but a full sign-out is the cleaner contract and
+      // mirrors user deactivation exactly). superAdmin members are exempt from
+      // the gate, but revoking them here is harmless — they re-auth normally.
+      await this.db.session.deleteMany({
+        where: { userId: { in: members.map((m) => m.id) } },
+      });
+      for (const m of members) this.sessionInvalidator.revoke(m.id, "suspension");
+    } else {
+      // Approve / reactivate: only bust the cache so a re-approved member is let
+      // in on their next request without waiting out the TTL — don't needlessly
+      // kick their live sockets or force a re-login.
+      for (const m of members) this.sessionInvalidator.bustCache(m.id);
+    }
+
+    return { ok: true };
+  }
+
+  /**
+   * Reset a member's password from the platform org-detail view. The
+   * cross-team analog of `POST /api/users/:id/reset-password` (which is
+   * scoped to the caller's own org). The superAdmin sets a new password and
+   * hands it to the locked-out user out-of-band — same recovery story, just
+   * reachable for any org the operator manages. The service scopes the lookup
+   * to `teamId`, so a userId from another org 404s rather than leaking.
+   */
+  @Post(":id/members/:userId/reset-password")
+  @HttpCode(200)
+  async resetMemberPassword(
+    @CurrentSession() session: ApiSession,
+    @Param("id") teamId: string,
+    @Param("userId") userId: string,
+    @Body(zBody(ResetUserPasswordSchema)) body: ResetUserPasswordInput,
+  ) {
+    // Resetting your own credentials would sign you out mid-request — the
+    // superAdmin uses change-password for their own account.
+    if (userId === session.userId) {
+      throw new BadRequestException({
+        error: "Use change password to update your own account",
+      });
+    }
+    await this.users.resetPassword(teamId, session.role, userId, body.newPassword);
     return { ok: true };
   }
 

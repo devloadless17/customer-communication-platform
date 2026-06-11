@@ -33,15 +33,23 @@ import { EventBus } from "./event-bus.service";
  *     `publishedAt IS NOT NULL` even though subscribers never fired. The
  *     row stays in the table as a forensic record.
  *   - Subscriber throws are logged. Per-row failures don't poison the batch.
- *   - If `claimBatch` itself returns more rows than the batch limit allows,
- *     the loop keeps pulling until the table is drained for that tick.
+ *   - The tick keeps pulling claims until `claimBatch` returns ZERO rows (the
+ *     table is drained for this tick) or `MAX_DRAINS_PER_TICK` is hit. It does
+ *     NOT stop on a short (`< BATCH_SIZE`) claim — the per-team fairness cap
+ *     makes a single hot tenant's claim legitimately short while a backlog
+ *     remains (see the `drains += 1` site for the full rationale).
  *
  * Pace: polls every `POLL_INTERVAL_MS`. Under burst a single tick keeps
- * draining up to `MAX_DRAINS_PER_TICK` batches before yielding, so the true
- * ceiling is `BATCH_SIZE * MAX_DRAINS_PER_TICK * 1000 / POLL_INTERVAL_MS`
- * events/second (~20k/s at the defaults) — NOT the single-batch
- * `BATCH_SIZE * 1000 / POLL_INTERVAL_MS` (~2k/s) an earlier comment implied.
- * Non-tx `publish()` calls dispatch synchronously and aren't bounded by this.
+ * draining up to `MAX_DRAINS_PER_TICK` claims before yielding. The per-CLAIM
+ * size is gated BOTH by `BATCH_SIZE` AND by `PER_TEAM_BATCH_CAP` rows per team
+ * (outbox.ts) — so a SINGLE tenant's ceiling is
+ * `PER_TEAM_BATCH_CAP * MAX_DRAINS_PER_TICK * 1000 / POLL_INTERVAL_MS`
+ * events/s (~10k/s at the current 100 × 10 × 10), and the aggregate across many
+ * tenants is bounded by `BATCH_SIZE * MAX_DRAINS_PER_TICK * 1000 /
+ * POLL_INTERVAL_MS` (~20k/s). Before the cap was raised + the short-claim break
+ * removed, a lone tenant was throttled to `PER_TEAM_BATCH_CAP=4` rows per
+ * single-claim tick = ~40 events/s. Non-tx `publish()` calls dispatch
+ * synchronously and aren't bounded by this.
  *
  * Lifecycle: started on module init, stopped on shutdown via
  * `OnModuleDestroy` (main.ts's manual SIGTERM/SIGINT handler calls
@@ -206,7 +214,16 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
             }),
         );
         drains += 1;
-        if (rows.length < OutboxDrainerService.BATCH_SIZE) break;
+        // Keep draining within this tick while ANY rows came back — do NOT
+        // break on `rows.length < BATCH_SIZE`. The per-team fairness cap
+        // (PER_TEAM_BATCH_CAP, outbox.ts) means a single hot tenant's claim
+        // legitimately returns FEWER than BATCH_SIZE rows while a large backlog
+        // still waits, so the old `< BATCH_SIZE` break stopped after one claim
+        // and throttled that tenant to PER_TEAM_BATCH_CAP rows per 100ms tick.
+        // The `rows.length === 0` break at the top of the loop is the real
+        // "table drained" signal; MAX_DRAINS_PER_TICK still bounds the tick so
+        // the loop can't monopolize the event loop. The only cost is at most
+        // one extra empty (SKIP LOCKED) claim per tick at low volume.
       }
     } catch (err) {
       this.logger.error(

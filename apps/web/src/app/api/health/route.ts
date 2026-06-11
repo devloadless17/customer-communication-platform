@@ -47,6 +47,26 @@ async function probeApi(): Promise<{ ok: boolean; err?: string }> {
       "api",
     );
     if (!res.ok) return { ok: false, err: `HTTP ${res.status}` };
+    // Status-code alone is NOT enough: the api's /health deliberately returns
+    // 200 with `ok:false` when Redis is down (it 503s only on Postgres, to
+    // keep Postgres-only webhook ingest in Caddy's rotation). A 200 there hides
+    // a wedged Redis — sends, workflows, broadcasts, and webhook delivery are
+    // all dark while every container still shows healthy. Parse the body and
+    // propagate `ok:false` so THIS endpoint 503s, flipping the web container
+    // healthcheck red and giving `docker ps` a true data-plane signal — which
+    // is exactly what this file's header comment promises.
+    const body = (await res.json().catch(() => null)) as
+      | { ok?: boolean; redis?: boolean; db?: boolean }
+      | null;
+    if (body && body.ok === false) {
+      const down: string[] = [];
+      if (body.db === false) down.push("db");
+      if (body.redis === false) down.push("redis");
+      return {
+        ok: false,
+        err: `api reports ok:false${down.length ? ` (${down.join(", ")} down)` : ""}`,
+      };
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, err: err instanceof Error ? err.message : String(err) };

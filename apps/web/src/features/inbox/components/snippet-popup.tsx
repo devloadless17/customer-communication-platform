@@ -72,7 +72,10 @@ export function SnippetPopup({
     el?.scrollIntoView({ block: "nearest" });
   }, [activeIdx]);
 
-  // Global keydown — Arrow/Enter/Tab/Esc. Mounted only while open.
+  // Global keydown — Arrow/Enter/Tab/Esc. Mounted only while open. Registered
+  // in CAPTURE phase so Escape closes only THIS popup, not also the layer
+  // beneath it (e.g. message-selection mode) — `stopImmediatePropagation`
+  // keeps the single keystroke from cascading through every Escape handler.
   useEffect(() => {
     if (query === null) return;
     function onKey(e: KeyboardEvent) {
@@ -89,11 +92,12 @@ export function SnippetPopup({
         if (m) onSelect(m);
       } else if (e.key === "Escape") {
         e.preventDefault();
+        e.stopImmediatePropagation();
         onClose();
       }
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [query, matches, activeIdx, onSelect, onClose]);
 
   if (query === null) return null;

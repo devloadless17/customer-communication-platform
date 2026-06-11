@@ -5,14 +5,15 @@
 
 generator client {
   provider        = "prisma-client-js"
-  // `postgresqlExtensions` lets us declare the pg_trgm GIN indexes + the
-  // JSONB jsonb_path_ops index that the search-heavy contact / conversation /
-  // team-chat queries depend on. Without these declarations `prisma migrate
-  // dev` treats the hand-written indexes as drift and silently generates a
-  // migration that DROPS them. The partial trgm indexes on Contact.email /
-  // Contact.phoneNumber and the expression index on Contact.customFields
-  // stay hand-written — Prisma's DSL can't model partial or expression
-  // indexes — but those don't trigger the drift detector.
+  // `postgresqlExtensions` lets us declare the pg_trgm GIN indexes that the
+  // search-heavy contact / conversation / team-chat queries depend on. Without
+  // these declarations `prisma migrate dev` treats the hand-written indexes as
+  // drift and silently generates a migration that DROPS them. The partial trgm
+  // indexes on Contact.email / Contact.phoneNumber stay hand-written — Prisma's
+  // DSL can't model partial indexes — but those don't trigger the drift
+  // detector. (The old jsonb_path_ops GIN on Contact.customFields was dropped
+  // in 20260611130200 — no query could use it; that also retired the
+  // long-standing "single-permanent-diff" drift workaround.)
   previewFeatures = ["postgresqlExtensions"]
 }
 
@@ -167,10 +168,14 @@ enum ConversationEventKind {
   stage_changed
   note_added
   note_deleted
-  // Voice-call lifecycle pills. Written by the audit subscriber on every
-  // terminal call state — the timeline renders inline pills the same way as
-  // status/assignment changes. Carries { callId, direction, durationSeconds }
-  // in `after` so the pill renders without re-joining the Call row.
+  // Voice-call lifecycle audit rows. Written by the audit subscriber on every
+  // terminal call state for the DB-only audit trail — they are NOT rendered as
+  // timeline pills (activity-entry.tsx has no call_* case; the visible inline
+  // element is the CallBubble built from the Call row itself). Kept distinct
+  // from status/assignment pills for that reason. The thread-hydration events
+  // window (conversations.ts) excludes these kinds so they don't consume the
+  // ACTIVITY_WINDOW budget. Carries { callId, direction, durationSeconds } in
+  // `after` for any future audit-feed reader.
   call_completed
   call_missed
   call_rejected
@@ -197,6 +202,19 @@ enum CallStatus {
 enum CallDirection {
   in
   out
+}
+
+// Lifecycle of a CallPermissionRequest row. `pending` is the state right
+// after we SEND the request to Meta (the customer hasn't acted yet);
+// `granted`/`denied` are stamped when Meta's permission_granted/_revoked
+// webhook lands. The placeCall pre-flight only treats a `granted` row (still
+// inside its 72h window) as live — a merely-`pending` request is NOT a pass,
+// so an agent gets a clear "permission requested, waiting on the customer"
+// state instead of a confusing provider_rejected.
+enum CallPermissionStatus {
+  pending
+  granted
+  denied
 }
 
 // Domain events workflows can subscribe to. Adding a new value is half the
@@ -305,9 +323,12 @@ model Team {
   // hideable — it's the WhatsApp identity and always renders. Custom fields
   // have their own per-row `isVisible` on ContactFieldDefinition.
   //
-  // Supported keys: "email" | "location" | "firstContacted". Adding more
-  // built-ins later (firstName / lastName / language / countryCode) just
-  // means adding the key and rendering — no schema bump.
+  // Supported keys (canonical shape: packages/shared/src/types.ts
+  // `ContactPanelBuiltins`): "firstName" | "lastName" | "email" | "location" |
+  // "language" | "country" | "firstContacted". NOTE the key for the ISO
+  // alpha-2 column is "country" (NOT "countryCode") — the short key keeps the
+  // settings UI readable. Adding more built-ins later just means extending
+  // that interface + rendering — no schema bump (missing key = visible).
   contactPanelBuiltins   Json    @default("{}")
 
   // Per-role capability overrides, set by a team admin. Sparse JSON of the
@@ -572,11 +593,13 @@ model Contact {
   //   shown on every contact, even when blank).
   // - Keys NOT in the team schema are per-contact extras (one-offs added on
   //   a single contact). Both kinds are string-valued for now.
-  // NOTE: a full-text / tsvector search index over customFields VALUES is
-  // intentionally NOT added — only the jsonb_path_ops GIN below for exact-key
-  // lookups. Adding one now bloats every contact write for zero current
-  // benefit; revisit only past ~50k contacts/team when value-substring search
-  // becomes a felt need. Don't add preemptively.
+  // NOTE: customFields has NO search index. Quick-search hits it via
+  // `customFields::text ILIKE` and field-filter via `->> key ILIKE` — neither
+  // can use a JSONB GIN, so the old jsonb_path_ops GIN was dead write overhead
+  // and was dropped (20260611130200). A full-text/tsvector index over the
+  // VALUES is the right fix IF value-substring search ever shows up hot in
+  // EXPLAIN (trigger: ~50k contacts/team); it bloats every contact write, so
+  // don't add it preemptively.
   customFields      Json          @default("{}")
   // Customer-lifecycle stage. Per-team configurable list (managed in
   // /settings/stages). Defaulted to the team's `isDefault` stage at create
@@ -656,9 +679,9 @@ model Contact {
   // so re-contact resurrection still works: the tombstoned row holds the
   // WhatsApp phone slot, the lookup lands on it, ingest clears `deletedAt`.
   // The schema-level `@@index` below is the lookup index; Prisma can't model
-  // partial uniques, so the constraint lives in raw SQL (same pattern as the
-  // customFields GIN index — drift-detected, strip the spurious DROP from
-  // any generated migration).
+  // partial uniques, so the constraint lives in raw SQL. (The customFields GIN
+  // that once shared this hand-managed/drift-detected status was dropped in
+  // 20260611130200 — no query could use it.)
   //
   // Ingest path is findFirst+create/update (NOT upsert) because no Prisma
   // unique key exists for `(teamId, phoneNumber)` after this change. The
@@ -669,7 +692,9 @@ model Contact {
   // are set — Postgres treats NULL as distinct in unique constraints, so
   // WhatsApp-only contacts (both nulls) coexist freely.
   @@unique([teamId, identityChannel, externalContactId])
-  @@index([teamId])
+  // No bare @@index([teamId]) — every teamId-only lookup is already covered by
+  // a teamId-leading composite ([teamId, deletedAt], [teamId, source], etc.).
+  // Dropped as write overhead — migration 20260611130000.
   @@index([teamId, source])
   @@index([teamId, stageId])
   // Directory reads filter `deletedAt IS NULL`; index it so the common
@@ -692,13 +717,11 @@ model Contact {
   // phoneNumber)` above CAN'T serve a leading-wildcard match, so without the
   // trgm index those scans were full seq-scans of Contact. It's NOT declared
   // here because Prisma can't express the `WHERE phoneNumber IS NOT NULL`
-  // partial predicate — same hand-managed reason as the customFields GIN below.
-  // NOTE: the JSONB GIN index `Contact_customFields_gin_idx` (USING GIN
-  // ("customFields" jsonb_path_ops)) is hand-written in the init migration's
-  // raw-SQL section. It's NOT declared here because Prisma's
-  // `raw("jsonb_path_ops")` emitter appends a redundant `ASC` that its own
-  // diff tool then flags as drift on every `migrate dev`, producing a no-op
-  // DROP+CREATE migration every time. Hand-managed sidesteps that.
+  // partial predicate — Prisma can't model the `WHERE phoneNumber IS NOT NULL`.
+  // (A JSONB GIN `Contact_customFields_gin_idx` once lived here too; it was
+  // dropped in 20260611130200 because no query shape could use a jsonb_path_ops
+  // GIN — all customFields reads are `::text ILIKE` / `->> key ILIKE`. That
+  // also removed the drift workaround its hand-written status existed for.)
 }
 
 // Customer-lifecycle stage. A team configures an ordered list ("New",
@@ -837,6 +860,12 @@ model Conversation {
 
   @@index([teamId, status, lastMessageAt(sort: Desc)])
   @@index([teamId, assignedUserId])
+  // FK index for the `assignedUser` relation's onDelete: SetNull. The
+  // (teamId, assignedUserId) composite above leads with teamId, so a bare
+  // `WHERE assignedUserId = $1` FK-trigger scan on user-delete can't use it.
+  // Without this, hard-deleting a teammate seq-scans the hot Conversation
+  // table to null their assignments. Migration 20260611130100.
+  @@index([assignedUserId])
   // Keyset-paginated inbox listing: WHERE teamId = $1 ORDER BY lastMessageAt
   // DESC, id DESC. The status-leading index above stays for filtered views
   // (open / pending / closed) but doesn't help the unfiltered list — the
@@ -851,8 +880,16 @@ model Conversation {
   // inbox structurally impossible. Doubles as the index the broadcast runner's
   // per-recipient `findFirst({ teamId, contactId })` + contact-detail pages use.
   @@unique([teamId, contactId])
-  // pg_trgm GIN for the inbox-list search bar's ILIKE on lastMessagePreview.
-  @@index([lastMessagePreview(ops: raw("gin_trgm_ops"))], type: Gin, map: "Conversation_lastMessagePreview_trgm_idx")
+  // NO trgm GIN on lastMessagePreview. The inbox-list search ORs a
+  // `lastMessagePreview contains` arm with two Contact RELATION filters
+  // (contact.name / contact.phoneNumber) — Prisma renders relations as a
+  // join/EXISTS and Postgres can't BitmapOr across tables, so no plan could
+  // ever use such a GIN for that query; it walked the team partition anyway.
+  // The dropped index (Conversation_lastMessagePreview_trgm_idx, migration
+  // 20260611130300) was pure write amplification on the hottest UPDATE in the
+  // system (the summary bump, once per message). If list search ever goes hot,
+  // split it into a contact-id prefilter + a preview-only query (unioned) and
+  // index THOSE — don't re-add a cross-table-OR'd GIN.
 }
 
 model Message {
@@ -883,6 +920,18 @@ model Message {
   // threads (no messages yet) have no channel.
   channel        Channel
   status         MessageStatus    @default(sent)
+  // Delivery-failure diagnostics from Meta's async `status: "failed"` webhook.
+  // Meta surfaces post-acceptance failures (131047 outside-window on an
+  // API-accepted send, 131049 per-user marketing frequency caps, 131026
+  // undeliverable, quality blocks) here as errors[0].code + title +
+  // error_data.details. Persisted (not just console.errored) so the failed
+  // bubble can show WHY instead of a bare red icon, and so broadcasts can
+  // report per-recipient reasons. All null on every non-failed status.
+  // statusErrorTitle is Meta's short human label; statusErrorDetail is
+  // error_data.details (the actionable text).
+  statusErrorCode   Int?
+  statusErrorTitle  String?
+  statusErrorDetail String?
   // Original webhook payload kept verbatim for debugging.
   rawPayload     Json
   timestamp      DateTime         @default(now())
@@ -936,8 +985,14 @@ model Message {
   // rows.
 
   @@unique([teamId, channel, externalId])
-  @@index([conversationId, timestamp])
-  @@index([teamId])
+  // No bare @@index([teamId]) — it's a leftmost prefix of the dedupe unique
+  // ([teamId, channel, externalId]) AND Message_teamId_timestamp_id_idx below,
+  // so a teamId-only lookup already has coverage. No bare
+  // @@index([conversationId, timestamp]) — fully covered by the
+  // (conversationId, timestamp DESC, id DESC) keyset index below (Postgres
+  // walks a btree in either direction, so DESC,DESC serves equality-on-
+  // conversationId + an ASC/range timestamp scan too). Both dropped as pure
+  // write overhead on the hottest-write table — migration 20260611130000.
   @@index([replyToMessageId])
   // FK index for the `sender` relation's `onDelete: SetNull`. Without it,
   // hard-deleting a teammate seq-scans the (largest) Message table to null
@@ -945,19 +1000,24 @@ model Message {
   // index update per insert in exchange for a non-locking admin user-delete.
   @@index([senderUserId])
   // Keyset for thread loads + "load older": WHERE conversationId = $1
-  // ORDER BY timestamp DESC, id DESC. The ascending index above still
-  // serves chronological/range scans; this one is purpose-built for the
-  // backward keyset cursor with id as the same-millisecond tiebreaker.
+  // ORDER BY timestamp DESC, id DESC. The SOLE (conversationId, timestamp)
+  // index now — a btree scans in both directions, so this also serves
+  // chronological/range scans + the conversationId-equality lookups that the
+  // dropped ascending (conversationId, timestamp) index used to. id is the
+  // same-millisecond tiebreaker for the backward keyset cursor.
   @@index([conversationId, timestamp(sort: Desc), id(sort: Desc)])
   // pg_trgm GIN for the GLOBAL inbox-search "Messages" tab — an ILIKE on
   // body across EVERY conversation in the team (the in-thread message search
   // is scoped by conversationId and rides the keyset index above; this one
   // is for the team-wide search where there's no conversation predicate to
-  // narrow the scan). Caption-bearing rows store the caption in `body` too?
-  // No — captions live in mediaCaption, so the query ORs both columns; we
-  // only trgm-index body because caption-only matches are rare and the body
-  // index already covers the common case. Add a mediaCaption trgm index if
-  // caption search shows up hot in EXPLAIN.
+  // narrow the scan). The team-wide search matches `body` ONLY (no OR over
+  // mediaCaption): the caption is copied into `body` at every write site
+  // (inbound ingest, outbound media send, forward), so a caption-only match
+  // can't exist — and ORing an un-indexed mediaCaption arm would force a
+  // BitmapOr that defeats this GIN (an OR needs an index on every arm),
+  // degrading to a team-wide seq-scan. So no mediaCaption trgm index is
+  // needed — its data is already inside `body`. See global-search.ts
+  // searchAllMessages.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "Message_body_trgm_idx")
   // Team-wide search SORT support. The trgm index above serves the ILIKE
   // filter, but the global "Messages" search then ORDER BY (timestamp DESC,
@@ -1239,7 +1299,10 @@ model BroadcastRecipient {
   broadcastId    String
   contactId      String
   // Set after the runner picks/creates a conversation for this recipient so
-  // the message lands in the existing thread (matches the inbox rules).
+  // the message lands in the existing thread (matches the inbox rules). Soft
+  // reference (plain string, no FK) — survives conversation hard-delete by
+  // design: the broadcast's audit trail must outlive a thread an agent later
+  // deletes. The detail UI tolerates a 404 when following a dangled id.
   conversationId String?
   status         BroadcastRecipientStatus @default(queued)
   // Meta wamid of the sent message — links back to the Message row.
@@ -1279,7 +1342,13 @@ model InternalNote {
   author       User?        @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, timestamp])
-  @@index([teamId])
+  // No bare @@index([teamId]) — covered by InternalNote_teamId_timestamp_id_idx
+  // below (teamId-leading), which serves teamId-prefix lookups too. Dropped as
+  // write overhead — migration 20260611130000.
+  // FK index for the `author` relation's onDelete: SetNull — without it,
+  // hard-deleting a teammate seq-scans InternalNote to null their authored
+  // rows (same rationale as Message_senderUserId_idx). Migration 20260611130100.
+  @@index([authorUserId])
   // pg_trgm GIN for the GLOBAL inbox-search "Comments" tab — an ILIKE on a
   // note's body across every conversation in the team. Same rationale as
   // Message_body_trgm_idx: no conversation predicate to narrow the team-wide
@@ -1377,6 +1446,9 @@ model WorkflowRun {
   //   - once-per-contact dedupe (combined with workflowId in WorkflowContactState)
   //   - Ask a Question step resume routing (Round 2c)
   contactId      String?
+  // Soft reference (plain string, no FK) — survives conversation hard-delete
+  // by design: a workflow run's audit trail must outlive a thread an agent
+  // later deletes. The runs UI tolerates a 404 when following a dangled id.
   conversationId String?
 
   // Snapshot of the event payload at dispatch time. Used by branch/condition
@@ -1709,6 +1781,10 @@ model ConversationEvent {
   // See lib/sweepers/conversation-event-retention.ts (N2,
   // docs/architecture-review-2026-05-25-pass2.md).
   @@index([at])
+  // FK index for the `user` relation's onDelete: SetNull — without it,
+  // hard-deleting a teammate seq-scans this (large, append-only) audit table
+  // to null their attribution. Migration 20260611130100.
+  @@index([userId])
 }
 
 // ---------------------------------------------------------------------------
@@ -1863,6 +1939,10 @@ model TeamChannelMessage {
   @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([threadRootId, createdAt])
   @@index([teamId])
+  // FK index for the `author` relation's onDelete: SetNull — without it,
+  // hard-deleting a teammate seq-scans this (growing) chat table to null their
+  // authored rows. Migration 20260611130100.
+  @@index([authorUserId])
   // pg_trgm GIN for substring ILIKE on channel-message body.
   @@index([body(ops: raw("gin_trgm_ops"))], type: Gin, map: "TeamChannelMessage_body_trgm_idx")
 }
@@ -1899,6 +1979,10 @@ model TeamChannelReaction {
 
   @@unique([messageId, userId, emoji])
   @@index([messageId])
+  // FK index for the `user` relation's onDelete: Cascade — a CASCADE still
+  // scans this child table on parent (user) delete, so it benefits from the
+  // index just like a SetNull does. Migration 20260611130100.
+  @@index([userId])
 }
 
 // Pinned message bar. Separate table (not a boolean on the message) so we
@@ -2045,9 +2129,11 @@ model OutboundEvent {
 //   - Channel column even though there's only one calling channel today —
 //     consistency invariant with Message, and the multi-channel seam already
 //     anticipates non-WhatsApp call events.
-//   - Calls do NOT touch `Conversation.lastMessageAt` / lastMessagePreview.
-//     They don't reorder the inbox list (different surface — a future
-//     "Recent calls" sub-tab would read from `Call` directly).
+//   - Calls bump `Conversation.lastMessageAt` (monotonic `lt` guard) on real
+//     call activity so a missed/incoming call SURFACES the thread for triage —
+//     they DO reorder the inbox list (see ingest-call.ts). They do NOT touch
+//     `lastMessagePreview`, so the list row still shows the last real message
+//     text, not a synthetic "call" line.
 //   - `missed` vs `rejected` is intentional. Workflow trigger differentiation.
 model Call {
   id               String        @id @default(cuid())
@@ -2098,6 +2184,10 @@ model Call {
   // FK index for the initiatedBy relation's onDelete: SetNull (mirrors the
   // Message.senderUserId index rationale — avoids a seq-scan on user delete).
   @@index([initiatedByUserId])
+  // Same for the answeredBy relation (onDelete: SetNull). The 20260602130000
+  // migration that added initiatedBy cited "mirrors answeredByUserId" but only
+  // indexed initiatedBy — this closes the gap. Migration 20260611130100.
+  @@index([answeredByUserId])
   // "Currently ringing" + "calls today" queues: filter by (teamId, status)
   // ordered by recency. Also serves the 5-calls-per-24h pre-flight gauntlet.
   @@index([teamId, status, ringingAt(sort: Desc)])
@@ -2112,16 +2202,27 @@ model Call {
 //   - rateLimitedUntil mirrors a Meta 4xx so we don't keep banging on the
 //     endpoint
 model CallPermissionRequest {
-  id                String    @id @default(cuid())
+  id                String               @id @default(cuid())
   teamId            String
   contactId         String
   // Meta's permission-request id when the request succeeded; null when we
   // still have an in-flight error / rate-limit on file.
   externalRequestId String?
-  requestedAt       DateTime  @default(now())
+  // Grant lifecycle. `pending` the instant we send the request; flips to
+  // `granted`/`denied` when Meta's permission webhook lands. The placeCall
+  // pre-flight only treats a `granted` (+ unexpired) row as live — sending a
+  // request is NOT itself a grant. A rate-limited error row is left `pending`
+  // (it never reached the customer); rateLimitedUntil is the discriminator.
+  status            CallPermissionStatus @default(pending)
+  requestedAt       DateTime             @default(now())
   // requestedAt + 72h. Pre-computed so the placeCall pre-flight is one
-  // indexed read, not a date-arithmetic SELECT.
+  // indexed read, not a date-arithmetic SELECT. Until the grant webhook lands
+  // this is only the request's own validity window, NOT proof of a grant —
+  // the `status` field is what gates calling.
   expiresAt         DateTime
+  // Stamped when Meta's permission_granted webhook lands (the real grant time).
+  // Null until then. The 72h validity clock for calling runs from here.
+  grantedAt         DateTime?
   // Set when Meta returned 1/24h or 2/7d; cleared on next successful request.
   rateLimitedUntil  DateTime?
 

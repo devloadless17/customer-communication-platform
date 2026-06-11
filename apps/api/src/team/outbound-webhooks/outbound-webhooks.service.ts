@@ -6,7 +6,13 @@ import { encryptSecret } from "@/lib/crypto/envelope";
 import { assertRegistrableHost, SsrfBlockedError } from "@/lib/http/safe-fetch";
 import { generateWebhookSecret } from "@/lib/outbound-webhooks/signing";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
-import { channelSourceFor } from "@ccp/shared/outbound-webhooks/public-events";
+import {
+  channelSourceFor,
+  samplePayloadFor,
+  toWirePayload,
+  type PublicEventType,
+  type WireChannelBase,
+} from "@ccp/shared/outbound-webhooks/public-events";
 
 import { DbService } from "../../db/db.service";
 import type {
@@ -122,6 +128,21 @@ export class OutboundWebhooksService {
    * INTEGRATIONS_ALLOW_PRIVATE_HOSTS dev escape hatch.
    */
   private assertUrlSafe(url: string): void {
+    // Plain http leaks customer PII + message bodies in cleartext on every
+    // delivery. The schema accepts http so a dev can point at a local receiver,
+    // but that's only sound behind the same dev escape hatch safe-fetch uses
+    // (INTEGRATIONS_ALLOW_PRIVATE_HOSTS=1). In production, reject http here so
+    // the enforced rule actually matches the "must be a public https endpoint"
+    // message below — previously the message claimed https but http went
+    // through unchecked.
+    const allowHttp = process.env.INTEGRATIONS_ALLOW_PRIVATE_HOSTS === "1";
+    if (!allowHttp && url.trim().toLowerCase().startsWith("http://")) {
+      throw new BadRequestException({
+        error: "url_not_allowed",
+        detail:
+          "Webhook URL must be a public https endpoint — plain http is not allowed in production.",
+      });
+    }
     try {
       assertRegistrableHost(url);
     } catch (err) {
@@ -209,10 +230,12 @@ export class OutboundWebhooksService {
   }
 
   /**
-   * Synthetic test fire. Posts a hand-crafted `webhook.test` envelope so
-   * the partner can verify their receiver before relying on real events.
-   * Reuses the same delivery + worker pipeline so the test exercises the
-   * exact production path (signing, retries, log row).
+   * Synthetic test fire. Builds the body in the REAL wire shape of the
+   * webhook's first subscribed event type (via the documented sample payload →
+   * `toWirePayload`), marked `test: true`, so the partner validates their
+   * parser against the exact shape production will send — not a fixed
+   * message-shaped stub. Reuses the same delivery + worker pipeline so the test
+   * exercises the production path (signing, retries, log row).
    */
   async test(teamId: string, id: string): Promise<{ deliveryId: string }> {
     const wh = await this.db.outboundWebhook.findFirst({
@@ -220,58 +243,45 @@ export class OutboundWebhooksService {
       select: { id: true, eventTypes: true },
     });
     if (!wh) throw new NotFoundException({ error: "webhook not found" });
-    const eventType = wh.eventTypes[0] ?? "message.received";
+    // Use the FIRST subscribed event type and build the body in THAT type's
+    // real shape — a webhook subscribed only to e.g. `contact.tag_changed`
+    // would otherwise get a message-shaped test body it can't parse against.
+    // The column is `string[]` but every entry was validated against
+    // PublicEventEnum on write, so the cast is sound.
+    const eventType = (wh.eventTypes[0] ?? "message.received") as PublicEventType;
 
-    // Build the channel block in the SAME flat wire shape as real deliveries
-    // (name = medium, source = "<medium>_business") so a receiver wiring its
-    // parser against the test event sees the production shape, not a partial one.
+    // Resolve the team's channel into the same `WireChannelBase` the real
+    // subscriber passes to `toWirePayload`, so the channel block on the test
+    // matches production (name = medium, source = "<medium>_business").
     const conn = await this.db.channelConnection.findUnique({
       where: { teamId_channel: { teamId, channel: "whatsapp" } },
       select: { id: true, channel: true, createdAt: true },
     });
-    const channel = conn
+    const channelBase: WireChannelBase | null = conn
       ? {
           id: conn.id,
           name: conn.channel,
           source: channelSourceFor(conn.channel),
-          meta: null,
-          waId: null,
-          profileName: null,
           created_at: Math.floor(conn.createdAt.getTime() / 1000),
         }
       : null;
 
     const deliveryId = randomUUID();
+    // team_id stamped first + `test: true` marker, then the type's real wire
+    // shape — exactly what the production fanout produces (subscriber.ts:245).
+    const payload = {
+      team_id: teamId,
+      test: true,
+      ...toWirePayload(eventType, samplePayloadFor(eventType), { channelBase }),
+    };
     const created = await this.db.outboundWebhookDelivery.create({
       data: {
         id: deliveryId,
         webhookId: id,
         eventType,
-        // Flat wire shape (matches real deliveries) + a `test: true` marker so
-        // receivers can route/ignore synthetic events.
-        payload: {
-          event_type: eventType,
-          test: true,
-          assignee: null,
-          message: {
-            messageId: deliveryId,
-            channelMessageId: null,
-            contactId: null,
-            channelId: channel?.id ?? null,
-            traffic: "incoming",
-            timestamp: Date.now(),
-            message: { type: "text", text: "This is a test delivery from your CCP webhook." },
-            media: null,
-          },
-          channel,
-          sender: {
-            source: "contact",
-            userId: null,
-            teamId: null,
-            workflowId: null,
-            broadcastHistoryId: null,
-          },
-        },
+        payload: payload as unknown as Parameters<
+          typeof this.db.outboundWebhookDelivery.create
+        >[0]["data"]["payload"],
       },
       select: { id: true },
     });

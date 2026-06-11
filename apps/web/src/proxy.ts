@@ -139,6 +139,29 @@ function generateNonce(): string {
   return btoa(bin);
 }
 
+/**
+ * Request-correlation id for the whole edge→web→api request tree. We mint one
+ * here (or adopt a plausible inbound one) and stamp it on BOTH the request
+ * headers — so RSC code can read it via `headers().get("x-request-id")` and
+ * forward it on its NestJS fan-out fetches — and the response. NestJS's
+ * correlation middleware then ADOPTS this id instead of generating a fresh one
+ * per fetch, so all ~8 parallel RSC calls behind a single page load share one
+ * correlation id, traceable back to the originating browser request.
+ *
+ * The accepted shape must match NestJS's `REQUEST_ID_PATTERN`
+ * (`/^[A-Za-z0-9_-]{8,64}$/`, see apps/api/src/common/correlation.ts) — a UUID
+ * qualifies, and a non-conforming inbound value is dropped in favour of a fresh
+ * UUID so a malformed client header can't poison the trace id.
+ */
+const REQUEST_ID_HEADER = "x-request-id";
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+
+function resolveRequestId(req: NextRequest): string {
+  const inbound = req.headers.get(REQUEST_ID_HEADER);
+  if (inbound && REQUEST_ID_PATTERN.test(inbound)) return inbound;
+  return crypto.randomUUID();
+}
+
 function clientIp(req: NextRequest): string {
   if (TRUSTED_PROXY_HOPS > 0) {
     const fwd = req.headers.get("x-forwarded-for");
@@ -171,6 +194,7 @@ function clientIp(req: NextRequest): string {
  *   - /register              — the sign-up page itself
  *   - /invite/[token]        — invite acceptance
  *   - /logout                — cookie-clearing route handler
+ *   - /docs/*                — public API reference (no privileged data)
  *   - /api/auth/*            — Better Auth's own endpoints
  *   - /api/webhooks/*        — Meta posts here unauthenticated; verified by HMAC
  *   - /api/socket            — Socket.io handshake (separately authenticated)
@@ -195,21 +219,40 @@ export default function proxy(req: NextRequest): NextResponse {
   //   - the response Content-Security-Policy (the enforcing header)
   const nonce = isMachinePath ? null : generateNonce();
   const csp = nonce ? buildCsp(nonce) : null;
-  const stampCsp = (res: NextResponse): NextResponse => {
+
+  // One correlation id for the whole request tree. Stamped on the response of
+  // EVERY branch (browser-visible) and, for page passthroughs, on the REQUEST
+  // headers so RSC code (api-client.ts) can forward it on its NestJS fan-out.
+  const requestId = resolveRequestId(req);
+  const stampResponse = (res: NextResponse): NextResponse => {
     if (csp) res.headers.set("Content-Security-Policy", csp);
+    res.headers.set(REQUEST_ID_HEADER, requestId);
     return res;
   };
   const passthroughPage = (): NextResponse => {
-    if (!nonce || !csp) return NextResponse.next();
     const reqHeaders = new Headers(req.headers);
-    reqHeaders.set("x-nonce", nonce);
-    // Next.js looks for `Content-Security-Policy` on the REQUEST headers; when
-    // present, it auto-applies the nonce to its hydration / chunk-loader
-    // inline scripts. Without this the framework's own scripts would be
-    // blocked by `script-src 'nonce-X' 'strict-dynamic'`.
-    reqHeaders.set("Content-Security-Policy", csp);
+    reqHeaders.set(REQUEST_ID_HEADER, requestId);
+    if (nonce && csp) {
+      reqHeaders.set("x-nonce", nonce);
+      // Next.js looks for `Content-Security-Policy` on the REQUEST headers; when
+      // present, it auto-applies the nonce to its hydration / chunk-loader
+      // inline scripts. Without this the framework's own scripts would be
+      // blocked by `script-src 'nonce-X' 'strict-dynamic'`.
+      reqHeaders.set("Content-Security-Policy", csp);
+    }
     const res = NextResponse.next({ request: { headers: reqHeaders } });
-    res.headers.set("Content-Security-Policy", csp);
+    if (csp) res.headers.set("Content-Security-Policy", csp);
+    res.headers.set(REQUEST_ID_HEADER, requestId);
+    return res;
+  };
+  // Machine paths (API / webhook) skip the CSP nonce but still carry the
+  // correlation id on the forwarded request (read by the legacy Meta webhook
+  // proxy + the web-side API routes) and the response.
+  const passthroughMachine = (): NextResponse => {
+    const reqHeaders = new Headers(req.headers);
+    reqHeaders.set(REQUEST_ID_HEADER, requestId);
+    const res = NextResponse.next({ request: { headers: reqHeaders } });
+    res.headers.set(REQUEST_ID_HEADER, requestId);
     return res;
   };
 
@@ -293,7 +336,12 @@ export default function proxy(req: NextRequest): NextResponse {
     pathname === "/login" ||
     pathname === "/register" ||
     pathname === "/logout" ||
-    pathname.startsWith("/invite/");
+    pathname.startsWith("/invite/") ||
+    // API reference is deliberately public — it renders only static reference
+    // content (no getSession, no privileged data) so prospective partners can
+    // read it before signing up. Without this the cookie gate 307s them to
+    // /login, contradicting the page's stated intent.
+    pathname.startsWith("/docs");
   const isPublicApi =
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/webhooks") ||
@@ -302,9 +350,6 @@ export default function proxy(req: NextRequest): NextResponse {
     // so in prod this branch is unreachable; in no-Caddy dev (ngrok →
     // :3000) the middleware would otherwise 307 Meta's POST to /login.
     pathname.startsWith("/webhooks/") ||
-    // Internal-only cache-bust endpoint called by NestJS via shared
-    // secret. The route handler does its own timing-safe check.
-    pathname.startsWith("/api/internal/") ||
     pathname.startsWith("/api/socket") ||
     // Liveness probes — `startsWith`, NOT `=== "/api/health"`. The SHALLOW
     // web probe `/api/health/web` (what Caddy's web-upstream `health_uri`
@@ -346,21 +391,23 @@ export default function proxy(req: NextRequest): NextResponse {
     // Bonus: if a signed-in user hits /login or /register, bounce them home.
     // The DB recheck on /inbox will catch the stale-cookie case if any.
     if (hasCookie && (pathname === "/login" || pathname === "/register")) {
-      return stampCsp(NextResponse.redirect(new URL("/inbox", redirectBase)));
+      return stampResponse(NextResponse.redirect(new URL("/inbox", redirectBase)));
     }
-    return isMachinePath ? NextResponse.next() : passthroughPage();
+    return isMachinePath ? passthroughMachine() : passthroughPage();
   }
 
   if (!hasCookie) {
     if (isApiPath) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      return stampResponse(
+        NextResponse.json({ error: "unauthorized" }, { status: 401 }),
+      );
     }
     const url = new URL("/login", redirectBase);
     url.searchParams.set("next", pathname + search);
-    return stampCsp(NextResponse.redirect(url));
+    return stampResponse(NextResponse.redirect(url));
   }
 
-  return isMachinePath ? NextResponse.next() : passthroughPage();
+  return isMachinePath ? passthroughMachine() : passthroughPage();
 }
 
 export const config = {

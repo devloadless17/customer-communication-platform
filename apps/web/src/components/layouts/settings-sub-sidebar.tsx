@@ -49,17 +49,20 @@ export function SettingsSubSidebar({
     pathname === href || pathname.startsWith(href + "/");
 
   return (
-    <SubSidebar title="Workspace settings">
+    // One noun per page: each sidebar label matches the destination page's own
+    // h1 so "open Team" / "open Stages" resolve unambiguously. The sidebar
+    // title is the generic section name, not a page name.
+    <SubSidebar title="Settings">
       <SubSidebarSection label="User role settings">
         <SubSidebarItem
           href="/settings/workspace"
-          label="User settings"
+          label="Account"
           leading={<UserCircle2 className="size-4" />}
           active={isActive("/settings/workspace") || isActive("/settings/account")}
         />
         <SubSidebarItem
           href="/settings/team"
-          label="Team settings"
+          label="Team"
           leading={<Users className="size-4" />}
           active={isActive("/settings/team")}
         />
@@ -77,7 +80,7 @@ export function SettingsSubSidebar({
         <SubSidebarSection label="Apps">
           <SubSidebarItem
             href="/settings/whatsapp"
-            label="Channels"
+            label="WhatsApp"
             leading={<MessageSquare className="size-4" />}
             active={isActive("/settings/whatsapp")}
           />
@@ -94,7 +97,7 @@ export function SettingsSubSidebar({
         {canStages && (
           <SubSidebarItem
             href="/settings/stages"
-            label="Lifecycle"
+            label="Stages"
             leading={<Layers className="size-4" />}
             active={isActive("/settings/stages")}
           />

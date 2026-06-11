@@ -146,6 +146,14 @@ export function useTeamChannelEvents(
 
   const backfillNeededRef = useRef(false);
 
+  // Set when a team:channel:message frame (from someone else) lands while the
+  // tab is hidden/backgrounded. markRead is DEFERRED until the tab is next
+  // visible (fired by onVisibility) — a background tab parked on a channel
+  // must NOT stamp the read receipt for messages nobody actually saw, or it
+  // silently swallows the user's own unread dot + mention badges. Mirrors the
+  // inbox's `sawInboundWhileHiddenRef` (use-conversation-events.ts).
+  const sawInboundWhileHiddenRef = useRef(false);
+
   // Holds the pending onConnect backfill/recover timer so the socket effect's
   // cleanup can cancel it. Without this, a channel switch (A→B→C faster than the
   // 0–1500ms jitter) leaves channel A's delayed timer alive; it fires while B/C
@@ -180,10 +188,23 @@ export function useTeamChannelEvents(
   // after the leave stamp) stay unread, which is correct. The cleanup
   // closes over the OLD channel's `markRead` (deps include channelId), so a
   // B→C switch marks B read, not C.
+  //
+  // BOTH calls are gated on `visibilityState === "visible"`: a tab opened in
+  // the background (e.g. cmd-click, or restored after sleep) must NOT mark a
+  // channel read before the user has actually looked at it — that would
+  // swallow their unread dot + mentions. When hidden on mount we set
+  // `sawInboundWhileHiddenRef` so `onVisibility` fires the deferred markRead
+  // on return.
   useEffect(() => {
-    void markRead();
-    return () => {
+    if (typeof document === "undefined" || document.visibilityState === "visible") {
       void markRead();
+    } else {
+      sawInboundWhileHiddenRef.current = true;
+    }
+    return () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") {
+        void markRead();
+      }
     };
   }, [markRead]);
 
@@ -429,17 +450,23 @@ export function useTeamChannelEvents(
     };
 
     const onVisibility = () => {
-      if (
-        typeof document !== "undefined" &&
-        document.visibilityState === "visible" &&
-        socket.connected
-      ) {
-        // A reconnect that landed while hidden needs the full converge; a plain
-        // deferred backfill (tab hidden across a live message) just needs delta.
-        if (reconnectNeededRef.current) {
-          void recoverOnReconnect();
-        } else if (backfillNeededRef.current) {
-          runBackfill();
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        if (socket.connected) {
+          // A reconnect that landed while hidden needs the full converge; a plain
+          // deferred backfill (tab hidden across a live message) just needs delta.
+          if (reconnectNeededRef.current) {
+            void recoverOnReconnect();
+          } else if (backfillNeededRef.current) {
+            runBackfill();
+          }
+        }
+        // The user is now actually looking at this channel — flush the
+        // markRead we deferred while hidden (mount-while-hidden or an inbound
+        // message that landed in the background). Clears their unread dot +
+        // mentions now that they've genuinely seen the content.
+        if (sawInboundWhileHiddenRef.current) {
+          sawInboundWhileHiddenRef.current = false;
+          void markRead();
         }
       }
     };
@@ -483,9 +510,19 @@ export function useTeamChannelEvents(
       // fires N /read POSTs from their own tab — a small storm that
       // pegs the api log under any chatty session.
       if (payload.message.authorUserId !== currentUserId) {
-        // The user is looking at this channel — mark it read so other
-        // tabs + the sidebar badge stay in lockstep.
-        void markRead();
+        if (
+          typeof document === "undefined" ||
+          document.visibilityState === "visible"
+        ) {
+          // The user is looking at this channel — mark it read so other
+          // tabs + the sidebar badge stay in lockstep.
+          void markRead();
+        } else {
+          // Backgrounded tab parked on this channel: DON'T mark read for a
+          // message the user never saw — that silently clears their own
+          // unread dot + mention badges. Defer to the visibility handler.
+          sawInboundWhileHiddenRef.current = true;
+        }
       }
     };
 

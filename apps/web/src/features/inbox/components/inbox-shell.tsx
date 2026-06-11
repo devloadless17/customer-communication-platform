@@ -32,7 +32,6 @@ import {
 } from "@/features/inbox/lib/thread-reducers";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { apiFetch } from "@/lib/api/client-fetch";
-import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
 
 import dynamic from "next/dynamic";
 
@@ -42,6 +41,7 @@ import { ConversationList } from "./conversation-list";
 import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
+import { Sheet } from "@/components/ui/sheet";
 import { CallsHistory } from "@/app/(app)/calls/calls-history";
 import { useCallApi } from "@/features/calls/call-provider";
 import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
@@ -60,6 +60,8 @@ function callReasonMessage(reason: string): string {
   switch (reason) {
     case "permission_required":
       return "Permission request sent to the customer. Try again once they accept.";
+    case "permission_pending":
+      return "Waiting on the customer to accept your call-permission request. Try again once they do.";
     case "bic_blocked_region":
       return "Outbound WhatsApp calls aren't supported in this customer's country.";
     case "permission_revoked":
@@ -311,6 +313,17 @@ export function InboxShell({
   // useConversationEvents on deletion, an external navigation / direct link to
   // /inbox with a new ?c=) actually changes the SSR'd value.
   const [lastSyncedInitialId, setLastSyncedInitialId] = useState(initialActiveConversationId);
+  // One-shot guard for the SSR seed. The seed must run EXACTLY once per SSR
+  // value — not "whenever the entry is missing". `initialThread` /
+  // `initialActiveConversationId` are constant for the whole client session
+  // (page.tsx doesn't re-run on client-side chat switches), so an
+  // entry-missing condition re-fires on every render after the shell's own
+  // freshness machinery (evictIfBackground / clearExcept) drops that snapshot —
+  // resurrecting the SSR-era thread (potentially hours stale) until the
+  // initialMayBeStale full refetch converges. Gating on the ref makes the seed
+  // truly first-render-only; the lastSyncedInitialId block below resets it when
+  // a GENUINELY new SSR value arrives (direct-link / deletion redirect).
+  const seededInitialRef = useRef(false);
   if (lastSyncedInitialId !== initialActiveConversationId) {
     setLastSyncedInitialId(initialActiveConversationId);
     setActiveId(initialActiveConversationId);
@@ -321,10 +334,23 @@ export function InboxShell({
     setErrorId(null);
     if (initialThread && initialActiveConversationId) {
       cache.set(initialActiveConversationId, initialThread);
+      seededInitialRef.current = true;
+    } else {
+      // New SSR value with no thread payload (e.g. redirect to bare /inbox) —
+      // allow a future genuine seed for the next SSR'd thread.
+      seededInitialRef.current = false;
     }
-  } else if (initialThread && initialActiveConversationId && !cache.has(initialActiveConversationId)) {
-    // First-render cache seed for the SSR'd thread.
+  } else if (
+    !seededInitialRef.current &&
+    initialThread &&
+    initialActiveConversationId &&
+    !cache.has(initialActiveConversationId)
+  ) {
+    // First-render cache seed for the SSR'd thread — runs ONCE. After an
+    // eviction we must NOT re-seed the stale SSR snapshot; the next open
+    // re-fetches it fresh (cache miss) instead.
     cache.set(initialActiveConversationId, initialThread);
+    seededInitialRef.current = true;
   }
 
   const displayedThread = displayedId ? cache.get(displayedId) ?? null : null;
@@ -404,6 +430,40 @@ export function InboxShell({
           fetchControllersRef.current.delete(conversationId);
         }
         setPendingId((curr) => (curr === conversationId ? null : curr));
+      }
+    },
+    [cache],
+  );
+
+  // Refresh the DISPLAYED thread's cached snapshot in place (overwrite, not
+  // evict) and bump cacheTick so its render-from-cache consumers (notably the
+  // sibling ContactPanel) re-render with fresh data WITHOUT remounting. Used
+  // by the coalesced `contacts:bulk_updated` path when the open contact is in
+  // the batch — the bulk frame carries no contact body, so a refetch is the
+  // only way to pull the canonical contact for the panel. No AbortController /
+  // pending UI: this is a silent background reconcile of an already-rendered
+  // thread, not a chat-switch fetch. A 404 (deleted mid-flight) is left to the
+  // conversation:deleted path; any other failure self-heals on next open.
+  const refreshDisplayedSnapshot = useCallback(
+    async (conversationId: string) => {
+      try {
+        const res = await fetchWithSessionGuard(
+          `/api/inbox/conversation/${conversationId}`,
+          { credentials: "same-origin" },
+        );
+        if (!res.ok) return;
+        const payload = (await res.json()) as CachedThread;
+        // Only write if it's STILL the displayed thread (the agent may have
+        // switched chats during the round-trip) and still cached (not evicted).
+        if (
+          displayedIdRef.current === conversationId &&
+          cache.has(conversationId)
+        ) {
+          cache.set(conversationId, payload);
+          setCacheTick((t) => t + 1);
+        }
+      } catch {
+        // Silent — stale contact panel recovers on next chat-switch-and-back.
       }
     },
     [cache],
@@ -670,15 +730,35 @@ export function InboxShell({
     // Per-contact `contact:updated` frames go through the reducer table
     // below (target: "all"). The bulk frame doesn't carry contact bodies,
     // so we still evict + force a refetch on next click.
+    //
+    // The DISPLAYED thread is special: it can't just be evicted (that would
+    // blank the rendered thread). Its cached snapshot feeds the sibling
+    // ContactPanel (ThreadWorkspace renders ContactPanel from `thread.data`,
+    // not from MessageThread's live hook), so a bulk op touching the OPEN
+    // contact would otherwise leave the contact panel / its custom-field rows
+    // stale until a chat-switch-and-back. (MessageThread's own internals —
+    // header stage stepper, snippet token resolution — converge separately via
+    // useConversationEvents' contacts:bulk_updated refetch.) Re-fetch the
+    // displayed thread's snapshot in place + bump cacheTick so ContactPanel
+    // re-renders fresh without remounting (key={displayedId} stays stable).
     const onContactsBulkUpdated = (payload: { contactIds: string[] }) => {
       if (!payload?.contactIds?.length) return;
       const affected = new Set(payload.contactIds);
+      const displayed = displayedIdRef.current;
       for (const c of conversationsByIdRef.current.values()) {
         const id = c.conversation.id;
-        if (id === displayedIdRef.current) continue;
+        if (id === displayed) continue;
         const cached = cache.peek(id);
         if (cached && affected.has(cached.data.contact.id)) {
           cache.delete(id);
+        }
+      }
+      // Displayed thread: refresh its cache snapshot in place if its contact
+      // was in the batch, so the contact panel converges live.
+      if (displayed) {
+        const cached = cache.peek(displayed);
+        if (cached && affected.has(cached.data.contact.id)) {
+          void refreshDisplayedSnapshot(displayed);
         }
       }
     };
@@ -802,11 +882,11 @@ export function InboxShell({
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       socket.off("conversation:deleted", onConversationDeleted);
       for (const { event, handler } of reducerHandlers) {
-         
+
         socket.off(event as any, handler as any);
       }
     };
-  }, [cache, currentUser.id]);
+  }, [cache, currentUser.id, refreshDisplayedSnapshot]);
 
   // ---------------------------------------------------------------
   // Mark-read local convergence — T2.1.
@@ -952,8 +1032,31 @@ export function InboxShell({
   // correct under EVERY filter. The filtered slice undercounts on
   // Mine/Unassigned/stage views. `unread.active` = open+pending (non-closed),
   // matching the closed-excluded fallback.
-  const conversationCounts = useConversationCounts();
-  const totalUnread = conversationCounts?.unread.active ?? totalUnreadFallback;
+  //
+  // We DON'T mount our own useConversationCounts here — InboxSubSidebar (always
+  // mounted on /inbox via the layout) already owns one, and a second mount
+  // doubles every `GET /api/conversations/counts` + its full socket-listener set
+  // per tab. Instead the sub-sidebar bridges its team-wide non-closed unread
+  // across the layout/island boundary via the `ccp:inbox-unread-total`
+  // CustomEvent (same window-event bridge as `ccp:contact-stage-delta`); we
+  // listen and fall back to the loaded-slice sum until the first value lands.
+  const [serverUnreadActive, setServerUnreadActive] = useState<number | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onUnreadTotal = (e: Event) => {
+      const detail = (e as CustomEvent<{ active?: number }>).detail;
+      if (detail && typeof detail.active === "number") {
+        setServerUnreadActive(detail.active);
+      }
+    };
+    window.addEventListener("ccp:inbox-unread-total", onUnreadTotal);
+    // Ask the sub-sidebar to re-emit its latest value in case it fired its
+    // initial emit before this listener was installed (mount-order race across
+    // the two component trees). The sub-sidebar answers by re-dispatching.
+    window.dispatchEvent(new Event("ccp:inbox-unread-request"));
+    return () => window.removeEventListener("ccp:inbox-unread-total", onUnreadTotal);
+  }, []);
+  const totalUnread = serverUnreadActive ?? totalUnreadFallback;
 
   const liveTeamName = useLiveTeamName(team.name);
   useEffect(() => {
@@ -1252,6 +1355,9 @@ function ThreadWorkspace({
    *  (see the jumpTarget state). 0 when no jump is targeted at this thread. */
   jumpNonce: number;
 }) {
+  // Mobile/tablet contact-details Sheet (below lg the desktop right rail is
+  // hidden). Opened by the Info button in ThreadHeader.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   return (
     <>
       <MessageThread
@@ -1270,9 +1376,12 @@ function ThreadWorkspace({
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}
         onMobileBack={onMobileBack}
+        onOpenContactDetails={() => setDetailsOpen(true)}
         jumpToMessageId={jumpToMessageId}
         jumpNonce={jumpNonce}
       />
+      {/* Desktop right rail (lg+). Self-hidden below lg via its own
+          `hidden lg:flex`. */}
       <ContactPanel
         data={thread.data}
         fieldDefinitions={fieldDefinitions}
@@ -1284,6 +1393,37 @@ function ThreadWorkspace({
         initialCollapsed={initialContactPanelCollapsed}
         onGoToMessage={onGoToMessage}
       />
+      {/* Mobile/tablet (below lg): same panel content in a right-side Sheet.
+          Only mounted while open so it doesn't double-run the panel's live
+          listeners. "Go to message" closes the sheet so the agent sees the
+          thread scroll/flash. */}
+      {detailsOpen && (
+        <Sheet
+          open={detailsOpen}
+          onOpenChange={setDetailsOpen}
+          side="right"
+          // Hide the whole overlay at lg+ too (in case the viewport grows while
+          // open) — at lg the desktop rail takes over.
+          className="lg:hidden"
+          contentClassName="w-[320px] max-w-[88vw] bg-sidebar text-sidebar-foreground"
+        >
+          <ContactPanel
+            data={thread.data}
+            fieldDefinitions={fieldDefinitions}
+            builtins={contactPanelBuiltins}
+            canManageFields={canManageContactFields}
+            tagCatalog={tags}
+            teamMembers={teamMembers}
+            currentUserName={currentUser.name}
+            initialCollapsed={false}
+            onGoToMessage={(id) => {
+              setDetailsOpen(false);
+              onGoToMessage(id);
+            }}
+            variant="sheet"
+          />
+        </Sheet>
+      )}
       {/* No SSR bottom-snap script anymore: the thread viewport is
           `flex-direction: column-reverse` (message-thread.tsx), so the browser
           anchors at the bottom (newest) on first layout — the SSR'd thread paints

@@ -156,8 +156,9 @@ export interface GlobalMessageHit {
   /** Contact name on the conversation, for the row header. */
   contactName: string;
   contactAvatarUrl?: string;
-  /** Body or caption — whichever matched (caption preferred when it's the
-   *  one that contains the query). Already trimmed for display. */
+  /** The matched message `body`, trimmed for display. Media captions are
+   *  copied into `body` at every write site, so a single `body` snippet
+   *  always carries the matched text (see global-search.ts searchAllMessages). */
   snippet: string;
   direction: MessageDirection;
   timestamp: string;

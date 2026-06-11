@@ -2,11 +2,15 @@
  * Fail-fast environment validation, shared between the api and web processes.
  *
  * Categories of env var:
- *   - required:     missing → exit(1). The process physically can't function.
- *   - apiRequired:  required only in the api process (e.g. REDIS_URL — the web
- *                   process never connects to Redis). Missing in api → exit(1).
- *   - prodRequired: missing in production → exit(1); warn in development.
- *   - recommended:  missing → warn in production. Boots but features degrade.
+ *   - required:        missing → exit(1). The process physically can't function.
+ *   - apiRequired:     required only in the api process (e.g. REDIS_URL — the
+ *                      web process never connects to Redis; ENCRYPTION_KEY — only
+ *                      the api decrypts). Missing in api → exit(1).
+ *   - prodRequired:    missing in production → exit(1) in BOTH processes; warn
+ *                      in development.
+ *   - webProdRequired: missing in production → exit(1), web process ONLY (e.g.
+ *                      INTERNAL_API_URL — only the web process fetches the api).
+ *   - recommended:     missing → warn in production. Boots but features degrade.
  *
  * Rationale: it's cheaper to crash at boot with a clear message than to start
  * up "successfully" and 500 on the first request that hits an unconfigured
@@ -41,22 +45,28 @@ const required: Check[] = [
     hint:
       "Better Auth signing secret. Generate with: openssl rand -base64 32.",
   },
-  {
-    name: "ENCRYPTION_KEY",
-    hint:
-      "AES-256-GCM key for envelope encryption of per-team Meta secrets " +
-      "(accessToken, appSecret). Must be base64 of 32 random bytes. " +
-      "Generate with: openssl rand -base64 32. Rotating this without " +
-      "re-encrypting Team rows breaks every team's WhatsApp integration.",
-  },
 ];
 
-// Required only in the api process — the web process never connects to Redis
-// (it serves RSC reads + Better Auth pages; BullMQ + Socket.io live in api).
+// Required only in the api process — the web process never connects to these.
+// REDIS_URL: web serves RSC reads + Better Auth pages; BullMQ + Socket.io live
+// in api. ENCRYPTION_KEY: every encryptSecret/decryptSecret call site lives in
+// apps/api (per-team Meta credentials, API-key + webhook secrets). The web
+// container never imports the envelope module, so injecting the master key
+// there only widened the blast radius of a render-surface compromise — it now
+// lives only where it's used.
 const apiRequired: Check[] = [
   {
     name: "REDIS_URL",
     hint: "BullMQ broker (workflow + webhook queues). See docker-compose.yml.",
+  },
+  {
+    name: "ENCRYPTION_KEY",
+    hint:
+      "AES-256-GCM key for envelope encryption of per-team Meta credentials " +
+      "(ChannelConnection.secrets) + outbound-webhook + workflow secrets. Must " +
+      "be base64 of 32 random bytes. Generate with: openssl rand -base64 32. " +
+      "Rotating this without re-encrypting stored secrets breaks every team's " +
+      "WhatsApp integration. api-only — the web process never decrypts.",
   },
 ];
 
@@ -74,9 +84,9 @@ const prodRequired: Check[] = [
   {
     name: "INTERNAL_BUS_SECRET",
     hint:
-      "Shared secret for cross-process internal RPCs between NestJS and " +
-      "Next.js. Today used by /api/internal/session-invalidated (NestJS → " +
-      "Next.js, on signout/deactivation to drop NestJS's session caches + " +
+      "Shared secret for cross-process internal RPCs between Next.js and " +
+      "NestJS. Today used by /api/internal/session-invalidated (Next.js → " +
+      "NestJS, on signout/deactivation to drop NestJS's session caches + " +
       "force-disconnect sockets). Same value MUST be set in both processes. " +
       "Generate with: openssl rand -base64 32.",
   },
@@ -96,6 +106,22 @@ const prodRequired: Check[] = [
       "swallowed (the webhook records a text-only bubble with no image — the " +
       "agent never sees the customer's attachment). Promoted to prodRequired " +
       "after that exact failure mode shipped on a prior misconfiguration.",
+  },
+];
+
+// Required in production, but ONLY in the web process (the api process never
+// reads these). Mirrors apiRequired but gated on PROD like prodRequired.
+const webProdRequired: Check[] = [
+  {
+    name: "INTERNAL_API_URL",
+    hint:
+      "Server-side target for the web process's RSC fetches + server actions " +
+      "(apps/web → apps/api). The entire RSC/server-action data layer + the " +
+      "legacy webhook proxy + the web health probe target it. Unset, it " +
+      "silently falls back to a loopback that, inside the compose network, " +
+      "points at the web container ITSELF → ECONNREFUSED on every page fetch. " +
+      "Set to http://api:4000 in the standard compose topology. (api-side has " +
+      "no use for it — this is web-only.)",
   },
 ];
 
@@ -123,12 +149,15 @@ export function validateEnv(label: "api" | "web" = "api"): void {
   const missingApiRequired =
     label === "api" ? apiRequired.filter((c) => !present(c)) : [];
   const missingProdRequired = prodRequired.filter((c) => !present(c));
+  const missingWebProdRequired =
+    label === "web" ? webProdRequired.filter((c) => !present(c)) : [];
   const missingRecommended = recommended.filter((c) => !present(c));
 
   const fatals = [
     ...missingRequired,
     ...missingApiRequired,
     ...(PROD ? missingProdRequired : []),
+    ...(PROD ? missingWebProdRequired : []),
   ];
 
   if (fatals.length > 0) {
@@ -138,8 +167,8 @@ export function validateEnv(label: "api" | "web" = "api"): void {
     process.exit(1);
   }
 
-  if (!PROD && missingProdRequired.length > 0) {
-    for (const c of missingProdRequired) {
+  if (!PROD) {
+    for (const c of [...missingProdRequired, ...missingWebProdRequired]) {
       console.warn(`${tag} dev warning: ${describe(c)} (required in production)`);
     }
   }
@@ -178,6 +207,25 @@ export function validateEnv(label: "api" | "web" = "api"): void {
       console.error(
         `${tag} fatal: TRUSTED_PROXY_HOPS must be an integer between 0 and 10, ` +
           `got ${JSON.stringify(raw)}. Set to '1' for the default single-Caddy topology.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  // ENCRYPTION_KEY shape check (api only). Presence is enforced above
+  // (apiRequired), but the base64/32-byte shape is otherwise validated LAZILY
+  // — loadKey() in envelope-core.ts only runs on the first encrypt/decrypt,
+  // which is hours after boot and AFTER a green deploy. A truncated/typo'd key
+  // therefore ships through CI smoke (which only polls health) and surfaces as
+  // silently-403'd Meta webhooks / undecryptable credentials at first use.
+  // Decode it here so a bad key crash-loops the api in smoke instead. Mirrors
+  // KEY_BYTES=32 in envelope-core.ts.
+  if (label === "api" && process.env.ENCRYPTION_KEY) {
+    const decoded = Buffer.from(process.env.ENCRYPTION_KEY, "base64");
+    if (decoded.length !== 32) {
+      console.error(
+        `${tag} fatal: ENCRYPTION_KEY must base64-decode to exactly 32 bytes ` +
+          `(got ${decoded.length}). Regenerate with: openssl rand -base64 32.`,
       );
       process.exit(1);
     }

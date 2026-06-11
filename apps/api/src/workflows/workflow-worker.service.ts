@@ -18,6 +18,10 @@ import {
 } from "@/lib/broadcasts/schedule-worker";
 import { closeBroadcastScheduleQueue } from "@/lib/broadcasts/schedule-queue";
 import {
+  startBroadcastScheduleDriftSweeper,
+  stopBroadcastScheduleDriftSweeper,
+} from "@/lib/sweepers/broadcast-schedule-drift";
+import {
   startContactDriftSweeper,
   stopContactDriftSweeper,
 } from "@/lib/sweepers/contact-last-inbound-drift";
@@ -33,6 +37,10 @@ import {
   startInboundMediaSweeper,
   stopInboundMediaSweeper,
 } from "@/lib/sweepers/inbound-media";
+import {
+  startStaleCallsSweeper,
+  stopStaleCallsSweeper,
+} from "@/lib/sweepers/stale-calls";
 import {
   startWorkflowWaitingSweeper,
   stopWorkflowWaitingSweeper,
@@ -90,6 +98,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkflowWorkerService.name);
   private started = false;
   private mediaSweeperStarted = false;
+  private staleCallsSweeperStarted = false;
   private waitingSweeperStarted = false;
   private awaitingReplySweeperStarted = false;
   private contactDriftSweeperStarted = false;
@@ -103,6 +112,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private workflowRunRetentionStarted = false;
   private conversationEventRetentionStarted = false;
   private broadcastScheduleWorkerStarted = false;
+  private broadcastScheduleDriftSweeperStarted = false;
 
   onModuleInit(): void {
     const inline = process.env.RUN_WORKER_INLINE !== "0";
@@ -123,6 +133,17 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Inbound media sweeper started");
     } catch (err) {
       this.logger.error("Failed to start inbound-media sweeper", err);
+    }
+    try {
+      // Backstop that terminalizes Call rows stuck `ringing`/`in_progress`
+      // (a permanently-dropped terminate webhook or an unanswered inbound ring
+      // with no browser /end). Without it the team "Calls" badge sticks at ≥1
+      // forever — the unread-counter stuck-badge bug class.
+      startStaleCallsSweeper();
+      this.staleCallsSweeperStarted = true;
+      this.logger.log("Stale-calls sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start stale-calls sweeper", err);
     }
     try {
       // Recovers `waiting` workflow runs whose BullMQ resume job is missing
@@ -258,9 +279,28 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error("Failed to start broadcast-schedule worker", err);
     }
+    try {
+      // Runtime backstop for scheduled/queued broadcasts that strand between
+      // deploys (fire-job retry exhaustion, partial scheduled-fire, Redis job
+      // loss). Without it the only recovery is the next process restart — days,
+      // for a pilot. Re-enqueues/re-fires idempotently every 60s.
+      startBroadcastScheduleDriftSweeper();
+      this.broadcastScheduleDriftSweeperStarted = true;
+      this.logger.log("Broadcast schedule-drift sweeper started");
+    } catch (err) {
+      this.logger.error("Failed to start broadcast-schedule-drift sweeper", err);
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
+    try {
+      if (this.broadcastScheduleDriftSweeperStarted)
+        stopBroadcastScheduleDriftSweeper();
+    } catch (err) {
+      this.logger.warn(
+        `stopBroadcastScheduleDriftSweeper threw: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     try {
       if (this.conversationEventRetentionStarted)
         stopConversationEventRetentionSweeper();
@@ -335,6 +375,11 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       if (this.waitingSweeperStarted) stopWorkflowWaitingSweeper();
     } catch (err) {
       this.logger.warn(`stopWorkflowWaitingSweeper threw: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      if (this.staleCallsSweeperStarted) stopStaleCallsSweeper();
+    } catch (err) {
+      this.logger.warn(`stopStaleCallsSweeper threw: ${err instanceof Error ? err.message : err}`);
     }
     try {
       if (this.mediaSweeperStarted) stopInboundMediaSweeper();

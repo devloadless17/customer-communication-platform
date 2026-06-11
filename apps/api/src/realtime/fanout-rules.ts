@@ -340,6 +340,23 @@ export const FANOUT_RULES: FanoutRuleMap = {
       lastMessageAt: e.lastMessageAt,
       ...(e.clientTempId ? { clientTempId: e.clientTempId } : {}),
     });
+    // Content-lean TEAM-room companion so the SIDEBAR list badges (unread dot +
+    // mention counter) update live for channels the viewer isn't currently
+    // subscribed to. The channel-room frame above only reaches the one channel
+    // a tab has open, so without this a teammate posting in another channel
+    // produced zero sidebar dot until reconnect/reload — the core "new activity
+    // elsewhere" awareness the sidebar exists for. Carries NO body/preview (a
+    // team frame reaches non-members of private channels); the list drops any
+    // channelId not in its membership-scoped state, and the preview text
+    // converges via the channel frame or the next list refetch.
+    emitter.emitToTeam(e.teamId, "team:channel:activity", {
+      teamId: e.teamId,
+      channelId: e.channelId,
+      authorUserId: e.message.authorUserId,
+      mentionedUserIds: e.message.mentionedUserIds,
+      lastMessageAt: e.lastMessageAt,
+      isReply: threadRootId !== null,
+    });
     if (threadRootId) {
       emitter.emitToChannel(e.channelId, "team:channel:thread:reply", {
         teamId: e.teamId,
@@ -526,7 +543,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // split decision — each phase rides its own frame for narrowest payload).
   //
   //   call.incoming           → TEAM room. Any agent might pick up; toast all.
-  //   call.ringing_out        → CONVERSATION room. Only the originating thread.
+  //   call.ringing_out        → TEAM room. The thread banner only paints for the
+  //                              agent viewing that thread (the inbox reducer
+  //                              filters `call:ringing` by conversationId), but
+  //                              the team-wide "Calls" badge counts ringing rows
+  //                              (calls.service.liveCount) and refetches off this
+  //                              frame, so a conversation-scoped emit left every
+  //                              non-viewer's badge blind to the whole outbound
+  //                              ring phase until call:answered/ended ticked.
   //   call.answered_by_agent  → TEAM room. Dismisses incoming toast on every
   //                              OTHER browser. The winning agent's local
   //                              optimistic dispatch already flipped its UI.
@@ -550,7 +574,15 @@ export const FANOUT_RULES: FanoutRuleMap = {
   },
 
   "call.ringing_out": (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "call:ringing", {
+    // TEAM room, not conversation room (audit 2026-06-11): the inbox thread
+    // reducer filters `call:ringing` by `conversationId` so only the agent
+    // viewing the originating thread paints the ring banner — identical to the
+    // old conversation-scoped behavior — but the team-wide Calls badge counts
+    // ringing rows and refetches off this frame, so non-viewers must receive it
+    // or their badge undercounts every outbound call's ring phase (≤60s) until
+    // call:answered / call:ended fires. Payload is tiny; the team-wide fan is
+    // a single frame per call, not a per-recipient storm.
+    emitter.emitToTeam(e.teamId, "call:ringing", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       callId: e.callId,

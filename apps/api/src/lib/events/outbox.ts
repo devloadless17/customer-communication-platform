@@ -156,19 +156,25 @@ export async function markPublishedWithError(
  * manually decide whether to re-publish.
  */
 /**
- * Per-team fairness: how many rows the drainer is willing to pull from a
- * single team per tick. Without this, a 5k-row bulk import from one team
- * publishes a contiguous block; the strict `ORDER BY createdAt` claim
- * meant every other team's realtime events waited behind it until the
- * block drained. With per-team windowing, each team contributes up to
- * `PER_TEAM_BATCH_CAP` rows per tick — slow-but-fair on a hot tenant.
+ * Per-team fairness: how many rows the drainer pulls from a SINGLE team per
+ * `claimBatch` call. Without this, a 5k-row bulk import from one team publishes
+ * a contiguous block; the strict `ORDER BY createdAt` claim meant every other
+ * team's realtime events waited behind it until the block drained. With per-team
+ * windowing, each team contributes up to `PER_TEAM_BATCH_CAP` rows per claim —
+ * slow-but-fair on a hot tenant.
  *
- * Net effect at the modeled 100 tenants × 10 msg/sec target: no single
- * tenant's burst can starve realtime fanout for another tenant beyond
- * the per-tick budget. The total batch ceiling is still bounded by
- * `limit`; the window function just reorders WITHIN that budget.
+ * Sizing: this was `4`, which — combined with the drainer's per-CLAIM trickle —
+ * throttled a SINGLE tenant (the actual pilot deployment) to ~40 events/s and
+ * left every other tenant waiting behind a backlog. `4` is far too low: it must
+ * be high enough that one tenant drains at a healthy rate, yet low enough that a
+ * bursty tenant can't monopolize a `BATCH_SIZE`-bounded claim when OTHER tenants
+ * also have pending rows. At `100` against `BATCH_SIZE=200`, a lone tenant gets
+ * 100 rows/claim (and the drainer now keeps claiming within the tick — see
+ * OutboxDrainerService.tick — so its real ceiling is 100 × MAX_DRAINS_PER_TICK
+ * per 100ms tick), while two simultaneously-hot tenants split a claim 100/100.
+ * The window function still just reorders WITHIN the `limit` budget.
  */
-const PER_TEAM_BATCH_CAP = 4;
+const PER_TEAM_BATCH_CAP = 100;
 
 export async function claimBatch(limit: number): Promise<OutboxRow[]> {
   // Raw SQL because Prisma can't express UPDATE…WHERE…ORDER BY…LIMIT…

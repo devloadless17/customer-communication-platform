@@ -119,19 +119,21 @@ export async function listContacts(
               c.name ILIKE ${"%" + search + "%"}
               OR c."phoneNumber" ILIKE ${"%" + search + "%"}
               OR COALESCE(c.email, '') ILIKE ${"%" + search + "%"}
-              -- KNOWN INDEX-MISS (acceptable at pilot scale): the
-              -- jsonb::text ILIKE can't use the customFields jsonb_path_ops
-              -- GIN index (that index serves containment ops @>/?/, not
-              -- substring match), so this branch seq-scans. It runs ONLY over
-              -- this team's LIVE rows (the teamId + deletedAt IS NULL predicates
-              -- above narrow first via Contact_teamId_active_idx), so it's
-              -- bounded by one tenant's contact count. Dropping it would lose
-              -- "find a contact by any custom-field value" from quick-search —
-              -- a real UX regression — so we keep it. TRIGGER to revisit: a
-              -- team crosses ~50k contacts AND EXPLAIN shows this as the hot
-              -- cost. Fix then: a generated tsvector/trgm column over the
-              -- flattened customFields values, or push custom-field search to
-              -- the explicit fieldKey+fieldValue filter only.
+              -- KNOWN INDEX-MISS (acceptable at pilot scale): a
+              -- 'customFields::text ILIKE' substring match has NO index that
+              -- can serve it — no JSONB GIN serves substring (a jsonb_path_ops
+              -- GIN only serves @>/@?/@@ containment, which is why the old
+              -- Contact_customFields_gin_idx was dropped as dead write
+              -- overhead, migration 20260611130200). This branch seq-scans, but
+              -- ONLY over this team's LIVE rows (the teamId + deletedAt IS NULL
+              -- predicates above narrow first via Contact_teamId_active_idx), so
+              -- it's bounded by one tenant's contact count. Dropping the arm
+              -- would lose "find a contact by any custom-field value" from
+              -- quick-search — a real UX regression — so we keep it. TRIGGER to
+              -- revisit: a team crosses ~50k contacts AND EXPLAIN shows this as
+              -- the hot cost. Fix then: a generated tsvector/trgm column over
+              -- the flattened customFields values, or push custom-field search
+              -- to the explicit fieldKey+fieldValue filter only.
               OR c."customFields"::text ILIKE ${"%" + search + "%"}
             )`
           : Prisma.empty
@@ -178,6 +180,21 @@ export async function listContacts(
             )`
           : Prisma.empty
       }
+    -- KNOWN INDEX-MISS on the SORT (acceptable at pilot scale; same ~50k
+    -- trigger as the customFields quick-search miss above): the sort key
+    -- COALESCE(conv."lastMessageAt", c."createdAt") is an expression spanning
+    -- the LEFT JOIN LATERAL, so NO index can serve this ORDER BY — and the
+    -- keyset cursor predicate above references the same expression. So EVERY
+    -- page (incl. scroll pages 2,3,…) re-runs the lateral probe (one
+    -- Conversation_teamId_contactId_key seek per contact passing teamId +
+    -- deletedAt IS NULL), materializes N sort keys, top-N sorts, then LIMIT.
+    -- Bounded by one tenant's live-contact count — single-digit ms at a few
+    -- thousand. WHEN it trips (50k contacts AND EXPLAIN shows this hot):
+    -- denormalize the sort key onto Contact (e.g. lastActivityAt, bumped by the
+    -- same ingest/send paths that maintain lastInboundAt + the conversation
+    -- summary), add @@index([teamId, lastActivityAt DESC, id DESC]), and key
+    -- BOTH this ORDER BY and the cursor off that column — turning every page
+    -- into a pure keyset index walk.
     ORDER BY COALESCE(conv."lastMessageAt", c."createdAt") DESC, c.id DESC
     LIMIT ${take + 1}
   `;

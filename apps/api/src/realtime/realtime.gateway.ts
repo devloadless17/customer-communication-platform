@@ -181,6 +181,12 @@ export class RealtimeGateway
     client.data.typingIn = new Set<string>();
     client.data.typingInChannel = new Set<string>();
     client.data.typingInThread = new Set<string>();
+    // Per-socket cache of `${channelId}::${threadRootId}` composites that have
+    // passed the "this thread root actually belongs to this channel" check.
+    // The first thread-typing toggle for a composite verifies it server-side
+    // (mirrors subscribe:channel's first-join membership check); validated
+    // composites skip the DB lookup on every later re-toggle.
+    client.data.validatedThreads = new Set<string>();
     // Per-socket set of conversations this socket has joined as a viewer.
     // Used by disconnect to release the viewer slot without forcing the
     // client to send unsubscribe:conversation on tab close (browsers don't
@@ -205,12 +211,28 @@ export class RealtimeGateway
       socketBucketTs = now;
       if (socketBucketTokens < 1) {
         // Reject the event silently — emitting an error frame would let a
-        // hostile script trigger reply-amplification. Pure drop is the
-        // right behavior for a runaway client.
+        // hostile script trigger reply-amplification. The `client.on("error")`
+        // listener below converts this into a quiet drop: socket.io routes a
+        // middleware rejection through `_onerror` → the socket's reserved
+        // `error` event, and without a listener Node's EventEmitter promotes an
+        // un-handled `error` to an uncaughtException + full-stack console.error
+        // per dropped frame — turning the "pure drop" into log spam + sync
+        // stdout writes during exactly the abuse storm this bucket exists to
+        // absorb.
         return next(new Error("rate_limited"));
       }
       socketBucketTokens -= 1;
       next();
+    });
+
+    // Absorb socket-level `error` events so a rejected middleware frame (the
+    // rate-limit drop above, or any malformed-frame error socket.io surfaces)
+    // doesn't reach Node's EventEmitter `error`-promotion path. No listener =>
+    // every drop becomes an uncaughtException; one no-op listener => a quiet
+    // drop, as the bucket intends. Logged at debug (sampled by the runtime's
+    // log level) so a genuine flood is still observable without spamming prod.
+    client.on("error", (err) => {
+      this.logger.debug(`socket ${client.id} error frame dropped: ${err}`);
     });
 
     // Auto-join the team room on connect. No explicit subscribe:team
@@ -241,7 +263,9 @@ export class RealtimeGateway
     // status. Reuses the same DB read that built the presence snapshot
     // shape-wise — kept as separate frames so consumers can subscribe to
     // either independently (presence and availability are orthogonal).
-    void this.emitAvailabilitySnapshot(identity.teamId, client);
+    void this.emitAvailabilitySnapshot(identity.teamId, client).catch((err) =>
+      this.logger.error(`emitAvailabilitySnapshot (connect) failed: ${err}`),
+    );
     // Broadcast a fresh snapshot to the rest of the team ONLY when this
     // connect transitioned the user from 0→1 sockets. Without the gate
     // every additional tab / Caddy bounce reconnect spammed a team-wide
@@ -264,14 +288,25 @@ export class RealtimeGateway
   private async buildVisibleOnlineSnapshot(teamId: string): Promise<string[]> {
     const connected = this.presence.snapshot(teamId);
     if (connected.length === 0) return [];
-    const rows = await this.db.user.findMany({
-      where: { teamId, id: { in: connected } },
-      select: { id: true, availabilityStatus: true },
-    });
-    const offline = new Set(
-      rows.filter((r) => r.availabilityStatus === "offline").map((r) => r.id),
-    );
-    return connected.filter((id) => !offline.has(id));
+    try {
+      const rows = await this.db.user.findMany({
+        where: { teamId, id: { in: connected } },
+        select: { id: true, availabilityStatus: true },
+      });
+      const offline = new Set(
+        rows.filter((r) => r.availabilityStatus === "offline").map((r) => r.id),
+      );
+      return connected.filter((id) => !offline.has(id));
+    } catch (err) {
+      // Same fail-soft posture as buildVisibleViewers: under transient Postgres
+      // flapping (e.g. a reconnect storm during a deploy) fall back to the raw
+      // connected set rather than rejecting. Over-showing a teammate who picked
+      // "Appear offline" for one tick beats going blank or — worse, on the
+      // connect/disconnect paths that don't await this — leaking an unhandled
+      // rejection and dropping the presence:update entirely.
+      this.logger.error(`buildVisibleOnlineSnapshot lookup failed: ${err}`);
+      return connected;
+    }
   }
 
   /**
@@ -338,10 +373,25 @@ export class RealtimeGateway
     teamId: string,
     client: Socket,
   ): Promise<void> {
-    const rows = await this.db.user.findMany({
-      where: { teamId, deactivatedAt: null },
-      select: { id: true, availabilityStatus: true, availabilityMessage: true },
-    });
+    let rows: {
+      id: string;
+      availabilityStatus: string | null;
+      availabilityMessage: string | null;
+    }[];
+    try {
+      rows = await this.db.user.findMany({
+        where: { teamId, deactivatedAt: null },
+        select: { id: true, availabilityStatus: true, availabilityMessage: true },
+      });
+    } catch (err) {
+      // Fail-soft like the presence snapshot: a transient Postgres flap on
+      // connect must not leak an unhandled rejection (this is invoked via
+      // `void` on the connect path). Skip the seed frame — the client treats a
+      // missing snapshot as "everyone available, no note", and the next status
+      // flip or presence:request reseeds it.
+      this.logger.error(`emitAvailabilitySnapshot lookup failed: ${err}`);
+      return;
+    }
     const byUserId: Record<
       string,
       { status: "available" | "busy" | "away" | "offline"; message?: string | null }
@@ -447,12 +497,20 @@ export class RealtimeGateway
       // Async fire-and-forget — the DB read inside the snapshot helper isn't
       // worth blocking teardown on. A late frame on disconnect lands at most
       // a handful of ms behind, which is invisible to the team.
-      void this.buildVisibleOnlineSnapshot(teamId).then((onlineUserIds) => {
-        this.server.to(teamRoom(teamId)).emit("presence:update", {
-          teamId,
-          onlineUserIds,
-        });
-      });
+      void this.buildVisibleOnlineSnapshot(teamId)
+        .then((onlineUserIds) => {
+          this.server.to(teamRoom(teamId)).emit("presence:update", {
+            teamId,
+            onlineUserIds,
+          });
+        })
+        .catch((err) =>
+          // The helper itself is now fail-soft (falls back to the raw connected
+          // set), so this only catches a truly unexpected throw — but a missing
+          // .catch on a disconnect-path `void` is an unhandledRejection AND a
+          // dropped went-offline frame, so keep the guard explicit.
+          this.logger.error(`presence:update on disconnect failed: ${err}`),
+        );
     }
   }
 
@@ -733,10 +791,13 @@ export class RealtimeGateway
   }
 
   // (No subscribe:channel-thread handler — thread replies, edits, deletes,
-  // and reactions are all delivered through the team room and filtered
-  // client-side by `payload.threadRootId === rootMessageId`. The thread
-  // room would be dead weight: every event source already targets the
-  // team room, and the gateway-level DB lookup was paid for nothing.)
+  // and reactions are all delivered through the CHANNEL room (membership-gated
+  // at subscribe:channel) and filtered client-side by
+  // `payload.threadRootId === rootMessageId`. A dedicated thread room would be
+  // dead weight: every thread event source already targets the channel room
+  // — which is also the privacy boundary keeping non-members from seeing the
+  // content — so the gateway-level DB lookup a thread room would need buys
+  // nothing.)
 
   @SubscribeMessage("typing:channel:start")
   onChannelTypingStart(
@@ -792,21 +853,51 @@ export class RealtimeGateway
    * render the indicator (client-side filter on `threadRootId`).
    *
    * Membership check: the socket must already be in the channel room.
-   * The thread root's parent channel is the only thing we trust the
-   * client about; everything else is rederived server-side.
+   *
+   * Ownership check: the CLIENT supplies BOTH `channelId` and `threadRootId`,
+   * and channel-room membership only proves the former. Without verifying the
+   * thread root belongs to that channel, a member of channel A could inject
+   * their userId into the typing indicator of a thread in private channel B
+   * (which they aren't a member of) — same-team integrity spoofing. So the
+   * FIRST toggle of a `(channelId, threadRootId)` composite confirms the root
+   * message exists in that channel + team (mirrors subscribe:channel's
+   * first-join pattern, charged against the same subscribe budget); validated
+   * composites are cached on the socket so re-toggles skip the lookup.
    */
   @SubscribeMessage("typing:thread:start")
-  onThreadTypingStart(
+  async onThreadTypingStart(
     @ConnectedSocket() client: Socket,
     @MessageBody() body: { channelId: string; threadRootId: string },
-  ): void {
+  ): Promise<void> {
     if (!isValidBody(body, "channelId") || !isValidBody(body, "threadRootId")) return;
     if (!checkTypingBudget(client)) return;
     const userId = client.data.userId as string | undefined;
+    const teamId = client.data.teamId as string | undefined;
     const typingInThread = client.data.typingInThread as Set<string> | undefined;
-    if (!userId || !typingInThread) return;
+    const validatedThreads = client.data.validatedThreads as
+      | Set<string>
+      | undefined;
+    if (!userId || !teamId || !typingInThread || !validatedThreads) return;
     if (!client.rooms.has(channelRoom(body.channelId))) return;
     const composite = `${body.channelId}::${body.threadRootId}`;
+    // First registration of this composite → verify the thread root belongs
+    // to the supplied channel before trusting it. Charged against the
+    // subscribe budget (a DB roundtrip, same as subscribe:channel's first
+    // join); a runaway client can't multiply Postgres load past that cap.
+    if (!validatedThreads.has(composite)) {
+      if (!checkSubscribeBudget(client, "typing:thread:start")) return;
+      try {
+        const root = await this.db.teamChannelMessage.findFirst({
+          where: { id: body.threadRootId, channelId: body.channelId, teamId },
+          select: { id: true },
+        });
+        if (!root) return; // silently drop — don't leak that the thread exists
+      } catch (err) {
+        this.logger.error(`typing:thread:start lookup failed: ${err}`);
+        return;
+      }
+      validatedThreads.add(composite);
+    }
     const wasTyping = typingInThread.has(composite);
     typingInThread.add(composite);
     this.typing.addThread(body.threadRootId, userId, client.id);

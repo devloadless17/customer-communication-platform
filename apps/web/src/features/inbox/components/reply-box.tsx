@@ -76,15 +76,19 @@ const MEDIA_SIZE_LIMITS = {
   image: { bytes: 4_800_000, label: "Image" }, // Meta: 5 MB
   video: { bytes: 15_000_000, label: "Video" }, // Meta: 16 MB
   audio: { bytes: 15_000_000, label: "Audio" }, // Meta: 16 MB
+  sticker: { bytes: 500_000, label: "Sticker" }, // Meta: 500 KB
   document: { bytes: 95_000_000, label: "Document" }, // Meta: 100 MB
 } as const;
 
+// Mirror the SERVER's kind mapping (kindFromMime / kindFromMimeClient) so the
+// client guard checks against the SAME cap the server will enforce. The key
+// case is `image/webp`, which both sides classify as a STICKER (500KB cap) —
+// not the 4.8MB image cap. Checking webp against the image cap let a 3MB webp
+// pass the client guard, burn the whole upload, then 413 with a confusing
+// "too large for sticker". Now an oversized webp is rejected up-front with the
+// correct Sticker label.
 function pickSizeLimit(file: File): { bytes: number; label: string } {
-  const mime = file.type;
-  if (mime.startsWith("image/")) return MEDIA_SIZE_LIMITS.image;
-  if (mime.startsWith("video/")) return MEDIA_SIZE_LIMITS.video;
-  if (mime.startsWith("audio/")) return MEDIA_SIZE_LIMITS.audio;
-  return MEDIA_SIZE_LIMITS.document;
+  return MEDIA_SIZE_LIMITS[kindFromMimeClient(file.type)];
 }
 
 function formatMb(bytes: number): string {
@@ -162,8 +166,18 @@ export function ReplyBox({
    * send. When set, we also pop any cached File from `pendingFilesRef`,
    * restoring the attachment preview so the agent can resend a media
    * message without re-picking the file.
+   *
+   * `mediaKind` is set when the failed message carried an attachment. If the
+   * cached File is gone (retry after a thread switch remounted the ReplyBox and
+   * dropped `pendingFilesRef`), we warn instead of silently resending
+   * caption-only text.
    */
-  prefill?: { body: string; nonce: string; clientTempId?: string } | null;
+  prefill?: {
+    body: string;
+    nonce: string;
+    clientTempId?: string;
+    mediaKind?: MediaKind;
+  } | null;
 }) {
   // Shared 60s tick across the inbox so we don't run N parallel intervals
   // (one in WindowBadge, one here, …). Initialized to the server's clock on
@@ -584,13 +598,25 @@ export function ReplyBox({
     setMode("reply");
     setError(null);
     let restoredCaption: string | null = null;
+    let fileRestored = false;
     if (prefill.clientTempId) {
       const entry = pendingFilesRef.current.get(prefill.clientTempId);
       if (entry) {
         setAttachment(entry.file);
         restoredCaption = entry.caption;
+        fileRestored = true;
         pendingFilesRef.current.delete(prefill.clientTempId);
       }
+    }
+    // The failed message had an attachment but its File is no longer cached
+    // (retry after a thread switch remounted this ReplyBox, dropping
+    // `pendingFilesRef`). Warn + prompt a re-attach instead of silently
+    // resending caption-only text — the customer would otherwise get the
+    // caption with no file and no indication anything was lost.
+    if (prefill.mediaKind && !fileRestored) {
+      toast.error("Original file is no longer available", {
+        description: "Please re-attach it before resending.",
+      });
     }
     setValue(restoredCaption ?? prefill.body);
     ref.current?.focus();
@@ -948,6 +974,10 @@ export function ReplyBox({
           )}
           <Textarea
             ref={ref}
+            // dir="auto" so an agent typing Arabic/Hebrew sees the composer
+            // right-align with correct base direction, matching the bubble it
+            // produces. Latin input stays LTR.
+            dir="auto"
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
@@ -1028,6 +1058,21 @@ export function ReplyBox({
               levels={voice.levels}
               onCancel={() => voice.cancel()}
               onSend={() => {
+                // Guard BEFORE collecting — `stopAndCollect()` finalizes and
+                // tears down the recording, so if `submit` then no-ops (a prior
+                // media upload still in flight, or the 24h window flipped closed
+                // mid-recording) the captured audio would vanish silently.
+                // Keep the recording running + surface why instead.
+                if (sendInFlightRef.current) {
+                  toast.info("Hold on — a previous message is still sending.");
+                  return;
+                }
+                if (!isNote && windowClosed) {
+                  toast.error("Can't send: the 24-hour window has closed.", {
+                    description: "Send a template to re-open the conversation.",
+                  });
+                  return;
+                }
                 void (async () => {
                   const file = await voice.stopAndCollect();
                   if (!file) {

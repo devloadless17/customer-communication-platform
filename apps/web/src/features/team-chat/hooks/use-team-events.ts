@@ -149,6 +149,16 @@ export function useTeamEvents(
   const filterRef = useRef<Filter | undefined>(filter);
   filterRef.current = filter;
 
+  // Stable ref mirror of the current conversation list. Read by socket
+  // handlers that must decide a side effect (e.g. "is this conversation in the
+  // loaded slice?" for off-slice recovery) BEFORE entering the pure
+  // setConversations updater — the handler closure is bound on [teamId,
+  // currentUserId] and would otherwise read a stale `conversations` snapshot.
+  // Synced during render (not useEffect) so a synchronous local dispatch sees
+  // the latest list, same reasoning as activeThreadRef below.
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+
   // Stable ref for the displayed thread's full row. Read by the splice-IN
   // branches in the socket handlers below.
   //
@@ -201,12 +211,58 @@ export function useTeamEvents(
     const key = `${teamId}|${initialConversations.map((c) => c.conversation.id).join(",")}|${initialNextCursor ?? ""}`;
     if (key === lastSeedKeyRef.current) return;
     lastSeedKeyRef.current = key;
-    setConversations(
-      initialConversations.filter((row) =>
-        rowMatchesFilterFor(filterRef.current, currentUserId, row),
-      ),
-    );
-    setNextCursor(initialNextCursor);
+
+    const f = filterRef.current;
+    // `initialConversations` is ALWAYS the UNFILTERED team-recency head
+    // (page.tsx calls listConversations() with no filter). For the default
+    // views (no filter / "active" / "all") that head IS the authoritative
+    // slice, so adopt it wholesale (pruned through the active predicate).
+    //
+    // For a NON-default filter (Mine / Unassigned / Closed / stage), the
+    // current list was loaded server-side-FILTERED (the full team's matching
+    // threads, possibly deeper than the unfiltered top-25). Replacing it with
+    // `filter(unfiltered head)` would TRUNCATE it to just the matching rows
+    // that happen to sit in the team-wide top-25 — visibly shrinking the list
+    // on any router.refresh() (e.g. a contact-panel field save). Instead MERGE:
+    // keep every row we already hold and overlay the fresher seed copy for any
+    // matching id, so a refresh can't demote filtered rows behind Load-more.
+    const isDefaultView =
+      !f || (f.kind === "preset" && (f.id === "active" || f.id === "all"));
+    if (isDefaultView) {
+      setConversations(
+        initialConversations.filter((row) =>
+          rowMatchesFilterFor(f, currentUserId, row),
+        ),
+      );
+      setNextCursor(initialNextCursor);
+      return;
+    }
+    // Non-default: merge the matching seed rows over the existing list without
+    // dropping rows the seed doesn't cover. Cursor is left untouched — the
+    // filtered list owns its own keyset cursor; the unfiltered seed cursor
+    // doesn't apply to it.
+    setConversations((prev) => {
+      const seedMatching = initialConversations.filter((row) =>
+        rowMatchesFilterFor(f, currentUserId, row),
+      );
+      if (seedMatching.length === 0) return prev;
+      const seedById = new Map(seedMatching.map((c) => [c.conversation.id, c]));
+      // Overlay fresher seed copies onto existing rows...
+      const merged = prev.map((c) => seedById.get(c.conversation.id) ?? c);
+      // ...then append any seed rows not already present, recency-sorted.
+      const haveIds = new Set(prev.map((c) => c.conversation.id));
+      for (const row of seedMatching) {
+        if (!haveIds.has(row.conversation.id)) merged.push(row);
+      }
+      merged.sort((a, b) =>
+        a.conversation.lastMessageAt < b.conversation.lastMessageAt
+          ? 1
+          : a.conversation.lastMessageAt > b.conversation.lastMessageAt
+            ? -1
+            : 0,
+      );
+      return merged;
+    });
   }, [teamId, initialConversations, initialNextCursor, currentUserId]);
 
   // Optimistic LIST bump for the sender's OWN send. Every send site (reply
@@ -264,6 +320,11 @@ export function useTeamEvents(
           return [...prev, ...fresh];
         });
         setNextCursor(page.nextCursor);
+      })
+      .catch(() => {
+        // Network failure paging the next page — silently degrade (the button
+        // just does nothing) instead of throwing an unhandled rejection. The
+        // cursor is untouched, so the next Load-more click retries cleanly.
       })
       .finally(() => setLoadingMore(false));
   }, []);
@@ -337,6 +398,15 @@ export function useTeamEvents(
           });
         });
         setNextCursor(page.nextCursor);
+      })
+      .catch(() => {
+        // Network-level rejection during a filter switch. The instant
+        // client-side re-derive above already pruned the list to a (possibly
+        // partial) local slice; we silently degrade and let the next
+        // reconnect/visibility resync reconcile the full filtered page — same
+        // convention every sibling recovery path follows. Swallowing also
+        // prevents an unhandled-promise-rejection that would pollute error
+        // triage.
       });
     return () => {
       cancelled = true;
@@ -378,7 +448,7 @@ export function useTeamEvents(
     let lastResyncCompletedAt = 0;
     const RESYNC_SKIP_WINDOW_MS = 5000;
 
-    async function resyncOnce(): Promise<boolean> {
+    async function resyncOnce(dropStaleTail = false): Promise<boolean> {
       try {
         // Filter-aware resync: a reconnect under filter=Mine must come back
         // with only my threads, not the whole team. Tail-merge with the
@@ -436,16 +506,44 @@ export function useTeamEvents(
             const latest = overlay.get(row.contact.id);
             return latest ? { ...row, contact: latest } : row;
           });
-          // Tail = local rows the page didn't return (newer realtime arrivals
-          // mid-fetch). Overlay their contact too, then prune below.
+          // Tail = local rows the page didn't return.
+          //
+          // Two kinds live here: (a) NEWER realtime arrivals that landed
+          // mid-fetch (their lastMessageAt is at/above the fresh head), and
+          // (b) OLDER rows the agent paged into via loadMore BEFORE the offline
+          // gap. The contact overlay corrects each row's embedded contact, but
+          // status / assignedUserId / unreadCount / preview on (b) stay frozen
+          // at whatever they showed before the drop — a teammate's
+          // assign/close/read during the gap never reached us, so a deep-paged
+          // row can show a stale assignee or status until something touches it.
+          //
+          // On a RECONNECT (dropStaleTail), drop the (b) rows — those older than
+          // the fresh page's oldest row — and re-anchor the cursor to the fresh
+          // page so loadMore re-pages them with CURRENT data. (a) rows (newer
+          // than the page's tail) are kept: they're fresh socket arrivals, not
+          // stale. On the cheap 50ms coalesced/visibility resync we DON'T drop
+          // (no offline gap to recover from, and shrinking-then-repaging would
+          // jank the list on every teammate edit).
+          const oldestFresh =
+            page.items.length > 0
+              ? page.items[page.items.length - 1]!.conversation.lastMessageAt
+              : null;
           const tail = prev
             .filter((c) => !freshIds.has(c.conversation.id))
+            .filter((c) =>
+              dropStaleTail && oldestFresh !== null
+                ? c.conversation.lastMessageAt >= oldestFresh
+                : true,
+            )
             .map((c) => {
               const latest = overlay.get(c.contact.id);
               return latest ? { ...c, contact: latest } : c;
             });
           return [...reconciledPage, ...tail].filter(rowMatchesFilter);
         });
+        // On a reconnect drop-tail, re-anchor pagination to the fresh head so
+        // the dropped older rows re-page with current status/assignment.
+        if (dropStaleTail) setNextCursor(page.nextCursor);
         lastResyncCompletedAt = Date.now();
         return true;
       } catch {
@@ -456,7 +554,9 @@ export function useTeamEvents(
       const delays = [0, 500, 1500, 4000]; // ~6s total
       for (const ms of delays) {
         if (ms > 0) await new Promise((r) => window.setTimeout(r, ms));
-        if (await resyncOnce()) return;
+        // Reconnect path → drop stale tail rows so deep-paged rows recover
+        // their status/assignment, not just their contact.
+        if (await resyncOnce(true)) return;
       }
       // Bounded — if all retries fail the list is stale until the user
       // triggers another reconnect or navigates. A nuclear `router.refresh()`
@@ -561,6 +661,75 @@ export function useTeamEvents(
       return [...list.slice(0, idx), row, ...list.slice(idx)];
     }
 
+    // Single-conversation recovery. A `message:new` (or call frame) can target
+    // a conversation NOT in the loaded slice when the frame carries no full row
+    // — e.g. an inbound to an existing OPEN conversation that fell below the
+    // 25-row head page (the server only attaches `newConversation` for
+    // brand-new threads + reopens). Without recovery the row never surfaces in
+    // the list while the tab stays foregrounded (`connect`-resync only fires on
+    // a real reconnect), so a live customer message effectively disappears even
+    // though the ding + sidebar unread count bumped. Fetch the one row and
+    // splice it in at its recency slot if it matches the active filter. Bounded:
+    // recoveringRef dedupes concurrent fetches for the same id so a burst of
+    // frames for an off-slice conversation triggers one GET, not N.
+    const recoveringIds = new Set<string>();
+    function recoverConversation(conversationId: string): void {
+      if (recoveringIds.has(conversationId)) return;
+      recoveringIds.add(conversationId);
+      void fetchWithSessionGuard(`/api/inbox/conversation/${conversationId}`)
+        .then((r) =>
+          r.ok
+            ? (r.json() as Promise<{ data: ConversationWithRefs }>)
+            : null,
+        )
+        .then((res) => {
+          if (!res?.data) return;
+          const row = res.data;
+          // Apply the latest-known contact overlay so a stage/name change that
+          // landed via socket between request + response isn't clobbered by the
+          // fetched copy (same authority rule resyncOnce uses).
+          const latest = latestContactRef.current.get(row.contact.id);
+          const reconciled = latest ? { ...row, contact: latest } : row;
+          // Suppress the unread badge for the thread the agent is viewing — the
+          // server markRead clears it a beat later, so without this it flashes.
+          const next =
+            reconciled.conversation.id === activeIdRef.current
+              ? {
+                  ...reconciled,
+                  conversation: { ...reconciled.conversation, unreadCount: 0 },
+                }
+              : reconciled;
+          setConversations((prev) => {
+            if (!rowMatchesFilter(next)) {
+              // No longer matches (filter changed mid-fetch, or the call left
+              // it closed under an open-only preset) — drop a stale copy if one
+              // somehow lingers, else no-op.
+              const idx = prev.findIndex((c) => c.conversation.id === next.conversation.id);
+              if (idx === -1) return prev;
+              const out = prev.slice();
+              out.splice(idx, 1);
+              return out;
+            }
+            // Replace-or-insert at the recency slot. A call frame bumps
+            // lastMessageAt server-side, so an ALREADY-loaded row must re-sort
+            // to the top — insertByRecency alone bails on a dup, so drop the
+            // existing copy first.
+            const existingIdx = prev.findIndex(
+              (c) => c.conversation.id === next.conversation.id,
+            );
+            const base = existingIdx === -1 ? prev : prev.filter((_, i) => i !== existingIdx);
+            return insertByRecency(base, next);
+          });
+        })
+        .catch(() => {
+          // Silent — the row resurfaces on the next reconnect/visibility resync
+          // or when lastMessageAt next advances into a loaded page.
+        })
+        .finally(() => {
+          recoveringIds.delete(conversationId);
+        });
+    }
+
     const onConnect = () => {
       // Server auto-joins the team room on connect; no explicit subscribe needed.
       if (firstConnectRef.value) {
@@ -606,6 +775,19 @@ export function useTeamEvents(
           const evicted = seen.queue.shift();
           if (evicted !== undefined) seen.set.delete(evicted);
         }
+      }
+
+      // Off-slice recovery: this message targets a conversation NOT in the
+      // loaded slice AND the server attached no full row (an inbound to an
+      // existing OPEN conversation that sits below the head page). Trigger a
+      // single-row recovery fetch so it surfaces — otherwise it's invisible in
+      // every list view until the next reconnect/visibility resync. Decided in
+      // the handler body (not the pure updater) and deduped by recoverConversation.
+      if (
+        !newConversation &&
+        !conversationsRef.current.some((c) => c.conversation.id === conversationId)
+      ) {
+        recoverConversation(conversationId);
       }
 
       setConversations((prev) => {
@@ -992,6 +1174,31 @@ export function useTeamEvents(
         });
     };
 
+    // Calls surface + reorder the inbox list. ingest-call.ts bumps
+    // Conversation.lastMessageAt on call activity (so a missed/incoming call
+    // rises for triage) and CREATES a brand-new conversation when a never-seen
+    // number calls — but the thread-level reducers (call:incoming/ringing/
+    // answered/ended) only patch the OPEN thread snapshot, never the LIST. So a
+    // missed call from a new contact left NO visible trace in the list (no row
+    // appears / reorders) until a manual refetch, and the list silently fell out
+    // of server sort order. Route both lifecycle endpoints through
+    // recoverConversation: it fetches the fresh row (correct lastMessageAt +
+    // "📞 …" preview + status) and replace-or-inserts it at the recency slot,
+    // surfacing a new call-conversation and re-sorting an existing one. Deduped
+    // per id, so call:incoming followed by call:ended fires at most one in-flight
+    // GET. (call:ringing/answered are mid-call transients that don't change the
+    // list's sort key — skip them.)
+    const onCallIncoming: Parameters<typeof socket.on<"call:incoming">>[1] = ({
+      conversationId,
+    }) => {
+      if (conversationId) recoverConversation(conversationId);
+    };
+    const onCallEnded: Parameters<typeof socket.on<"call:ended">>[1] = ({
+      conversationId,
+    }) => {
+      if (conversationId) recoverConversation(conversationId);
+    };
+
     socket.on("message:new", onMessageNew);
     socket.on("conversation:assigned", onAssigned);
     socket.on("conversation:status", onStatus);
@@ -999,6 +1206,8 @@ export function useTeamEvents(
     socket.on("conversation:deleted", onConversationDeleted);
     socket.on("contact:updated", onContactUpdated);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
+    socket.on("call:incoming", onCallIncoming);
+    socket.on("call:ended", onCallEnded);
 
     // Foreground resync. A backgrounded / throttled tab can miss live frames
     // (most importantly a teammate reading a thread → `conversation:read`)
@@ -1035,6 +1244,8 @@ export function useTeamEvents(
       socket.off("conversation:deleted", onConversationDeleted);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);
+      socket.off("call:incoming", onCallIncoming);
+      socket.off("call:ended", onCallEnded);
     };
   }, [teamId, currentUserId]);
 

@@ -597,6 +597,14 @@ export function useConversationEvents(
           if (cappedOut) setReachedSliceCap(true);
         });
         return added;
+      } catch {
+        // Network-level rejection paging older messages (flaky connection /
+        // aborted fetch). Return 0 — the scroll-restore wrapper treats it as
+        // "nothing prepended" and leaves the view put; the cursor is untouched
+        // so the next scroll-to-top retries. Matches the silent-degrade
+        // convention the sibling recovery paths follow, and stops an unhandled
+        // rejection from bubbling out of the async callback.
+        return 0;
       } finally {
         inFlightOlder.current = false;
         setLoadingOlder(false);
@@ -652,6 +660,16 @@ export function useConversationEvents(
 
   useEffect(() => {
     const socket = getClientSocket();
+
+    // Pending jittered-recovery timers scheduled by onConnect (a reconnect adds
+    // a 0–1500ms jitter before firing runFullRefetch/runBackfill). MUST be
+    // cleared on unmount: if the agent switches threads inside the jitter
+    // window, the old hook unmounts but a leaked timer would still fire
+    // runFullRefetch for the OLD conversationId — its setData is a harmless
+    // no-op on the unmounted hook, but its markRead side-effect would clear
+    // team-wide unread for a thread nobody is viewing (the project's
+    // most-guarded invariant: never drop a customer message from triage).
+    const recoveryTimers = new Set<number>();
 
     // Re-(sub)subscribe on every connect — the first one covers the initial
     // subscription, every subsequent one covers a reconnect after a drop
@@ -719,7 +737,11 @@ export function useConversationEvents(
       // foreground thread the agent is watching — run it immediately so
       // status/new-message convergence isn't delayed up to 1.5s.
       const delay = isReconnect ? Math.floor(Math.random() * 1500) : 0;
-      window.setTimeout(() => recover(), delay);
+      const timerId = window.setTimeout(() => {
+        recoveryTimers.delete(timerId);
+        recover();
+      }, delay);
+      recoveryTimers.add(timerId);
     };
 
     // Pulled out so the visibility-change listener below can re-fire it
@@ -1246,6 +1268,27 @@ export function useConversationEvents(
       });
     };
 
+    // Coalesced bulk contact fanout. A teammate's bulk tag / stage / field
+    // operation that includes THIS thread's contact fires one
+    // `contacts:bulk_updated` frame (ids only, no contact bodies — so the
+    // per-contact `contact:updated` reducer can't carry it). Without a handler
+    // here the displayed thread's contact panel, header stage stepper and
+    // snippet token resolution stayed stale until the agent switched chats and
+    // back (the cache-hit full refetch finally reconciled) or reconnected.
+    // Converge by full-refetching the thread when the bulk frame touches our
+    // contact — runFullRefetch pulls the fresh full ConversationWithRefs (the
+    // /api/contacts/lookup endpoint only returns id/name/phone, too thin to
+    // patch stage/tags/customFields). The fetch is gated to the matching id so
+    // an unrelated team-wide bulk op doesn't refetch every open thread.
+    const onContactsBulkUpdated: Parameters<
+      typeof socket.on<"contacts:bulk_updated">
+    >[1] = (payload) => {
+      const ids = payload?.contactIds;
+      if (!ids?.length) return;
+      if (!ids.includes(dataRef.current.contact.id)) return;
+      runFullRefetch();
+    };
+
     // Dev-only invariant: every event we subscribe to here must be
     // accounted for in thread-reducers.ts (either in THREAD_REDUCER_EVENTS
     // for auto-wiring, or in REDUCER_EXCLUSIONS with a load-bearing reason).
@@ -1259,6 +1302,7 @@ export function useConversationEvents(
       "note:new",
       "conversation:activity",
       "conversation:deleted",
+      "contacts:bulk_updated",
       "connect",
     ];
     assertReducerCoverage([
@@ -1277,6 +1321,7 @@ export function useConversationEvents(
     socket.on("note:new", onNoteNew);
     socket.on("conversation:activity", onActivity);
     socket.on("conversation:deleted", onConversationDeleted);
+    socket.on("contacts:bulk_updated", onContactsBulkUpdated);
 
     // Activity-log live refresh. The audit row for a status / assign / stage /
     // tag / note-delete change is written server-side AFTER the realtime frame
@@ -1416,6 +1461,11 @@ export function useConversationEvents(
     });
 
     return () => {
+      // Cancel any in-flight jittered-recovery timer. Without this a leaked
+      // runFullRefetch could fire after the agent left this thread and markRead
+      // it — silently clearing team-wide unread for a message nobody saw.
+      for (const t of recoveryTimers) window.clearTimeout(t);
+      recoveryTimers.clear();
       // Drop any pending coalesced status flush — the next mount will
       // backfill anything we missed via the `?after=...` GET.
       if (statusFlushRaf !== null) {
@@ -1435,6 +1485,7 @@ export function useConversationEvents(
       socket.off("note:new", onNoteNew);
       socket.off("conversation:activity", onActivity);
       socket.off("conversation:deleted", onConversationDeleted);
+      socket.off("contacts:bulk_updated", onContactsBulkUpdated);
       for (const { event, handler } of reducerHandlers) {
          
         socket.off(event as any, handler as any);
@@ -1494,6 +1545,23 @@ export function useConversationEvents(
 
   const removeOptimistic = useCallback((clientTempId: string) => {
     setData((prev) => {
+      // GUARD on pending/failed — NOT clientTempId alone. When a send is
+      // reconciled by `message:new`, the server-confirmed row KEEPS its
+      // clientTempId for React-key stability (see onMessageNew). So a confirmed,
+      // already-delivered message still matches this clientTempId. If the HTTP
+      // POST then rejects (timeout / 502) AFTER the socket confirm already
+      // landed, reply-box's catch path calls onOptimisticRetry (= this) — and a
+      // clientTempId-only filter would DELETE the confirmed bubble + restore its
+      // text into the composer, inviting a double-send (a fresh clientTempId on
+      // resend defeats server idempotency, so the customer gets it twice). Only
+      // drop rows that are still pending OR failed (the legit dismiss/retry
+      // targets); a confirmed twin is left untouched. Mirrors the same
+      // `m.pending || m.failed` guard markOptimisticFailed and
+      // reconcileOptimisticAgainst already use.
+      const toDrop = prev.messages.find(
+        (m) => m.clientTempId === clientTempId && (m.pending || m.failed),
+      );
+      if (!toDrop) return prev;
       // Free any blob: URL attached to the optimistic media before dropping
       // the row. createObjectURL'd URLs persist until revokeObjectURL is
       // called or the document is unloaded — without this revoke, dismissing
@@ -1501,8 +1569,7 @@ export function useConversationEvents(
       // bytes for the lifetime of the tab. Net change is zero when the row
       // had no media or wasn't a blob: URL (e.g. an already-reconciled real
       // /api/media path).
-      const toDrop = prev.messages.find((m) => m.clientTempId === clientTempId);
-      const mediaUrl = toDrop?.media?.url;
+      const mediaUrl = toDrop.media?.url;
       if (mediaUrl && mediaUrl.startsWith("blob:")) {
         try {
           URL.revokeObjectURL(mediaUrl);
@@ -1512,7 +1579,9 @@ export function useConversationEvents(
       }
       return {
         ...prev,
-        messages: prev.messages.filter((m) => m.clientTempId !== clientTempId),
+        messages: prev.messages.filter(
+          (m) => !(m.clientTempId === clientTempId && (m.pending || m.failed)),
+        ),
       };
     });
   }, []);

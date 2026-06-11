@@ -98,8 +98,12 @@ export default function ApiDocsPage() {
           immutable.
         </Endpoint>
         <Endpoint method="DELETE" path="/api/external/v1/contacts/:id">
-          Hard-delete and cascade conversations + notes + tags + broadcast
-          recipient rows.
+          Removes the contact from the directory (soft delete). Conversation
+          history, messages, and media are preserved, and a returning contact is
+          revived on the next inbound message or create-by-phone. The{" "}
+          <code>contact.deleted</code> webhook carries an empty{" "}
+          <code>conversation_ids</code> for this reason. For erasure / GDPR
+          requests, contact us for a hard purge.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/contacts/:id/channels">
           List a contact's channels (today: one WhatsApp row per contact).
@@ -283,25 +287,31 @@ export default function ApiDocsPage() {
           >
             Integrations → Webhooks
           </Link>
-          . Every event posts the same envelope shape; only{" "}
-          <code className="rounded bg-muted px-1 text-xs">data</code> differs.
+          . Every delivery is a flat JSON body — <code className="rounded bg-muted px-1 text-xs">team_id</code>,{" "}
+          <code className="rounded bg-muted px-1 text-xs">event_type</code>, and
+          the event-specific blocks shown in the samples below. There is no{" "}
+          <code className="rounded bg-muted px-1 text-xs">data</code> wrapper.
         </p>
       </header>
 
       <div className="mb-6 rounded-md border border-border bg-card p-3 text-xs">
-        <p className="mb-2 font-semibold text-foreground">Envelope (wraps every delivery)</p>
+        <p className="mb-2 font-semibold text-foreground">Body shape (every delivery)</p>
         <pre className="overflow-x-auto rounded bg-muted/40 p-2 font-mono leading-relaxed">{`{
-  "event_id": "cmpevt_…",          // stable id; also in X-CCP-Delivery
+  "team_id": "cmpteam_…",          // present on every event so a multi-tenant
+                                   //   receiver can route by team from the body
   "event_type": "message.received",
-  "occurred_at": "2026-05-20T11:00:00.000Z",
-  "team_id": "cmpteam_…",
-  "channel": {                      // null until you've connected WhatsApp
-    "source": "whatsapp",
-    "phone_number_id": "…",
-    "display_phone_number": "+1…"
-  },
-  "data": { /* event-specific — see samples below */ }
+  // …event-specific top-level blocks — see the per-event samples below.
+  // For message events: contact, assignee, message, channel, sender.
 }`}</pre>
+        <p className="mt-2 text-muted-foreground">
+          De-dup on the{" "}
+          <code className="rounded bg-muted px-1">X-CCP-Delivery</code> request
+          header (a stable per-delivery id) — it is the only delivery
+          identifier, and it is not repeated in the body. The{" "}
+          <code className="rounded bg-muted px-1">channel</code> block is{" "}
+          <code className="rounded bg-muted px-1">null</code> until you connect
+          WhatsApp.
+        </p>
       </div>
 
       <div className="mb-6 rounded-md border border-border bg-card p-3 text-xs">

@@ -47,7 +47,13 @@ type DownloadOutcome =
       thumbnailStorageKey?: string;
       thumbnailStorageUrl?: string;
     }
-  | { ok: false };
+  // `retriable` tells `completePendingMedia` whether to clear the row to
+  // text-only NOW (permanent failure — re-downloading can't help) or PARK it
+  // in the media-pending state so the inbound-media sweeper re-attempts the
+  // download over a longer horizon (transient failure — a Meta-CDN / blob blip
+  // that the bytes, retained by Meta for ~30 days, would survive). Without this
+  // split, a single transient blip stripped media permanently.
+  | { ok: false; retriable: boolean };
 
 import { DbService } from "../../db/db.service";
 import { WebhookRateLimitGuard } from "../webhook-rate-limit.guard";
@@ -341,13 +347,21 @@ export class MetaWebhookController implements OnModuleDestroy {
               : {}),
           },
         });
+      } else if (outcome && !outcome.ok && outcome.retriable) {
+        // Transient download failure — PARK the row in its media-pending state
+        // (mediaKind set, mediaUrl null) instead of clearing. The inbound-media
+        // sweeper re-attempts the download from the Meta media id in rawPayload
+        // over its 24h horizon before any final text-only downgrade. Leaving
+        // the bubble as a shimmer is the correct signal: the media is still
+        // being fetched, not lost.
+        continue;
       } else if (
-        (outcome && !outcome.ok) ||
+        (outcome && !outcome.ok && !outcome.retriable) ||
         (!outcome && row.mediaKind && !row.mediaUrl)
       ) {
-        // Download failed (outcome.ok === false) OR no outcome ever arrived
-        // and the row is stuck in media-pending state. Strip the media
-        // columns + emit empty `message:media:ready` so the shimmer
+        // Permanent download failure (over cap / no send config) OR no outcome
+        // ever arrived and the row is stuck in media-pending state. Strip the
+        // media columns + emit empty `message:media:ready` so the shimmer
         // collapses to a text-only bubble (caption preserved). CAS on
         // `mediaKind: { not: null }` so a duplicate completion path
         // (concurrent Meta retry that also failed) becomes a no-op instead
@@ -476,8 +490,10 @@ export class MetaWebhookController implements OnModuleDestroy {
     } catch (err) {
       this.logger.warn(`[${teamId}] cannot download media — send config missing`, err);
       // No way to fetch any of them — record failure so each row is created
-      // as text-only with the caption preserved.
-      for (const evt of todo) outcomes.set(evt.externalId, { ok: false });
+      // as text-only with the caption preserved. Non-retriable: a missing send
+      // config is a structural/config issue, not a transient blip — parking
+      // these would just leave a shimmer the sweeper can never resolve either.
+      for (const evt of todo) outcomes.set(evt.externalId, { ok: false, retriable: false });
       return;
     }
 
@@ -509,7 +525,8 @@ export class MetaWebhookController implements OnModuleDestroy {
           this.logger.warn(
             `[${teamId}] dropping ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
           );
-          outcomes.set(evt.externalId, { ok: false });
+          // Deterministic: re-downloading yields the same over-cap bytes.
+          outcomes.set(evt.externalId, { ok: false, retriable: false });
           return;
         }
         const saved = await retry(
@@ -592,7 +609,11 @@ export class MetaWebhookController implements OnModuleDestroy {
           `[${teamId}] media download failed for ${evt.externalId} after retries`,
           err,
         );
-        outcomes.set(evt.externalId, { ok: false });
+        // Transient (Meta-CDN / blob blip survived the in-request retry) —
+        // park the row so the inbound-media sweeper re-attempts over its
+        // longer horizon instead of losing the media permanently. Meta retains
+        // the binary ~30 days, so the media id in rawPayload stays fetchable.
+        outcomes.set(evt.externalId, { ok: false, retriable: true });
       }
     });
   }

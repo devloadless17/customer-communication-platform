@@ -105,8 +105,14 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       subscribe(
         "team.catalog_changed",
         (event) => {
-          if (this.channelCache.has(event.teamId)) {
-            this.channelCache.delete(event.teamId);
+          // Cache keys are `${teamId}:${channel|_primary}` (resolveChannel),
+          // NOT the bare team id — so we must drop every key PREFIXED with this
+          // team's id, not look up `event.teamId` directly (which never hits).
+          // Otherwise a team that disconnects/reconnects WhatsApp keeps stamping
+          // the stale ChannelConnection id until the process restarts.
+          const prefix = `${event.teamId}:`;
+          for (const key of this.channelCache.keys()) {
+            if (key.startsWith(prefix)) this.channelCache.delete(key);
           }
         },
         SubscriberPriority.OUTBOUND_WEBHOOKS,

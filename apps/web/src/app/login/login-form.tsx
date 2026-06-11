@@ -67,9 +67,17 @@ export function LoginForm({ next }: { next: string }) {
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="password" className="text-xs font-medium text-foreground">
-          Password
-        </label>
+        <div className="flex items-baseline justify-between gap-2">
+          <label htmlFor="password" className="text-xs font-medium text-foreground">
+            Password
+          </label>
+          {/* No self-serve reset (no email provider by design) — recovery is
+              admin-initiated. Point users at the right person instead of a
+              dead "Forgot password?" link. */}
+          <span className="text-[11px] text-muted-foreground">
+            Forgot it? Ask your admin to reset it.
+          </span>
+        </div>
         <Input
           id="password"
           name="password"

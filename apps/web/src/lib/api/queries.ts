@@ -422,6 +422,23 @@ export async function getBroadcast(id: string): Promise<BroadcastDetail | null> 
   }
 }
 
+/**
+ * All recipient contact ids for a broadcast — used by "Duplicate" to rebuild a
+ * hand-picked (`selected`/`custom`) audience that only lives on recipient rows.
+ * Returns [] on a missing/foreign id so a stale `?from=` degrades gracefully.
+ */
+export async function getBroadcastRecipientContactIds(id: string): Promise<string[]> {
+  try {
+    const { contactIds } = await api<{ contactIds: string[] }>(
+      `/api/broadcasts/${id}/recipient-ids`,
+    );
+    return contactIds;
+  } catch (err) {
+    if (isApiNotFound(err)) return [];
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // API keys
 // ---------------------------------------------------------------------------

@@ -16,13 +16,38 @@ WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates wget ffmpeg \
  && rm -rf /var/lib/apt/lists/*
-RUN corepack enable && corepack prepare pnpm@10.33.3 --activate
+# COREPACK_HOME points the pnpm shim's cache at a SHARED, world-readable path
+# instead of root's private ~/.cache/node/corepack (mode 700). The runtime
+# stage switches to `USER node` and the compose CMD runs `pnpm prisma migrate
+# deploy` on every freshly-created container's first boot — with root's private
+# cache, that pnpm shim found an empty cache under /home/node and re-downloaded
+# pnpm@10.33.3 from registry.npmjs.org BEFORE the migration could run, putting
+# an external network dependency (npmjs/DNS availability) in the boot path of
+# an otherwise self-contained image. A world-readable cache means the
+# build-time `corepack prepare` download is reused by the node user at runtime
+# — zero network fetch on boot.
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack enable \
+ && mkdir -p /opt/corepack \
+ && corepack prepare pnpm@10.33.3 --activate \
+ && chmod -R a+rX /opt/corepack
 
 # -----------------------------------------------------------------------------
-# deps — identical to apps/web/Dockerfile's deps stage. pnpm needs every
-# workspace member's package.json present to resolve `workspace:*` before
-# fetching from the registry; that includes apps/web's, even though
-# apps/web source never lands in this image.
+# deps — every workspace member's package.json must be present so pnpm can
+# resolve `workspace:*` against the frozen lockfile (that includes apps/web's,
+# even though apps/web source never lands in this image).
+#
+# The install is SCOPED to @ccp/api's dependency closure (`--filter @ccp/api...`)
+# plus the root project (`--filter .`, which runs the root `postinstall` =
+# `prisma generate`). Without the filter, an unscoped `pnpm install` materializes
+# apps/web's ENTIRE dependency tree (next, react, framer-motion, the tailwind
+# toolchain, …) into apps/web/node_modules and that ships in this runtime image
+# (runtime is `FROM deps`) — pure dead weight the NestJS process never loads,
+# and a wider Trivy CVE surface where a web-only dependency CVE can block an api
+# deploy. The `@swc-node/register` TS runtime + its toolchain ARE in @ccp/api's
+# closure, so devDeps stay (the image boots TS source via swc at runtime).
+# `--frozen-lockfile` still validates against the FULL lockfile; only the
+# materialized node_modules subtree shrinks.
 # -----------------------------------------------------------------------------
 FROM base AS deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
@@ -33,7 +58,7 @@ COPY packages/config/package.json ./packages/config/
 COPY packages/tsconfig/package.json ./packages/tsconfig/
 COPY prisma ./prisma
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile --filter @ccp/api... --filter .
 
 # -----------------------------------------------------------------------------
 # runtime — api source + every workspace package + prisma config. apps/web
@@ -75,6 +100,10 @@ RUN echo "apt cache bust: ${APT_CACHE_BUST}" \
 COPY apps/api ./apps/api
 COPY packages ./packages
 COPY prisma ./prisma
+# Operational scripts run inside the api container (envelope-secret
+# re-encryption / key rotation — see scripts/encrypt-secrets.ts + .env.example).
+# Tiny; ships so the documented remediation actually exists on the VPS.
+COPY scripts ./scripts
 COPY tsconfig.json prisma.config.ts ./
 
 # Heap MUST stay under the container's compose `mem_limit: 3g`. A 4096 heap
@@ -89,6 +118,11 @@ ENV NODE_ENV=production \
     NODE_OPTIONS="--max-old-space-size=2048 --conditions=react-server" \
     SWC_NODE_PROJECT=/app/apps/api/tsconfig.json
 USER node
+# Verify the runtime (node) user resolves pnpm from the shared COREPACK_HOME
+# WITHOUT a network fetch — if this fails the build, the boot-path corepack
+# download regression (see base stage) has returned. Build-time, so it never
+# costs a runtime fetch.
+RUN pnpm --version
 EXPOSE 4000
 # wget is already installed at the base layer for compose's probes; reusing
 # it here avoids spinning a fresh Node process every 10s (which would burn

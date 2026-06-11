@@ -6,9 +6,10 @@ const URL_MAX = 2048;
 const NAME_MAX = 80;
 
 /**
- * URL accepted on create/update. Must be absolute https in production;
- * we ALSO accept http for dev so an integration developer can point the
- * webhook at a local receiver. Receiver-side IP / SSRF guarding lives in
+ * URL accepted on create/update. The schema allows http OR https syntactically;
+ * the SERVICE then rejects plain http in production (only allowed behind the
+ * INTEGRATIONS_ALLOW_PRIVATE_HOSTS=1 dev escape hatch, so a developer can point
+ * the webhook at a local receiver). Receiver-side IP / SSRF guarding lives in
  * the worker (private-IP blocklist, host header sanity).
  */
 const WebhookUrlSchema = z

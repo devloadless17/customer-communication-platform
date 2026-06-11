@@ -29,6 +29,16 @@ import { buildTokenContext } from "./token-context";
 // `lockDuration` will fail the boot assertion — by design.
 export const MAX_STEP_TIMEOUT_MS = 60_000;
 
+// Sentinel a redacted custom-header VALUE is replaced with before the config
+// is sent to the UI (header NAMES stay visible so the admin sees which headers
+// are configured). On a subsequent PATCH the secret-merge in workflows.service
+// treats an incoming value equal to this sentinel as "unchanged — restore the
+// stored encrypted value." Same preserve-when-omitted contract the bearerToken
+// already uses, just per header key. Exported so the merge AND the canvas
+// editor (which shows it as the saved-placeholder) stay in lockstep. Chosen to
+// round-trip cleanly through the editor's `Name: value` textarea.
+export const REDACTED_HEADER_VALUE = "•••••••• (saved)";
+
 export interface HttpRequestStepConfig {
   url: string;
   bearerToken?: string;
@@ -71,7 +81,15 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
   redactConfig(config) {
     const out: Record<string, unknown> = { url: config.url };
     if (config.bearerToken) out.bearerTokenSet = true;
-    if (config.customHeaders) out.customHeaders = config.customHeaders;
+    if (config.customHeaders) {
+      // Header VALUES are secrets (X-API-Key, custom Authorization, …) — same
+      // class as bearerToken — so never echo them back. Keep the NAMES so the
+      // admin sees which headers exist, and replace each value with a sentinel
+      // the PATCH secret-merge restores from the stored ciphertext.
+      out.customHeaders = Object.fromEntries(
+        Object.keys(config.customHeaders).map((k) => [k, REDACTED_HEADER_VALUE]),
+      );
+    }
     if (config.timeoutMs) out.timeoutMs = config.timeoutMs;
     return out;
   },
@@ -116,11 +134,26 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
     const resolvedToken = plaintextToken
       ? resolveFieldTokens(plaintextToken, contact, extras)
       : undefined;
-    const resolvedHeaders = config.customHeaders
-      ? Object.fromEntries(
-          Object.entries(config.customHeaders).map(([k, v]) => [k, resolveFieldTokens(v, contact, extras)]),
-        )
-      : undefined;
+    // Custom-header VALUES are envelope-encrypted at rest (same as bearerToken;
+    // see encryptGraphStepSecrets). Decrypt each — decryptSecret() is a no-op
+    // for plaintext so legacy graphs written before this rollout keep working —
+    // THEN resolve `$var.*` tokens, matching the bearerToken order above.
+    let resolvedHeaders: Record<string, string> | undefined;
+    if (config.customHeaders) {
+      resolvedHeaders = {};
+      for (const [k, v] of Object.entries(config.customHeaders)) {
+        let plaintextValue: string;
+        try {
+          plaintextValue = decryptSecret(v);
+        } catch {
+          return advanceWithError(
+            500,
+            `http_request custom header "${k}" could not be decrypted (key rotated?)`,
+          );
+        }
+        resolvedHeaders[k] = resolveFieldTokens(plaintextValue, contact, extras);
+      }
+    }
 
     // Cross-system loop guard: stamp the incremented chain depth so that if
     // this call lands on a system that bounces back into our own

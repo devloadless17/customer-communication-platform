@@ -12,6 +12,7 @@ import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
 import { DeleteTeamButton } from "./delete-team-button";
+import { MemberResetPasswordButton } from "./member-reset-password-button";
 
 export const metadata = { title: "Organization · Platform" };
 export const dynamic = "force-dynamic";
@@ -169,8 +170,17 @@ export default async function PlatformOrganizationDetailPage({
                     {m.email}
                   </div>
                 </div>
-                <div className="text-[11px] text-muted-foreground">
-                  Joined <LocalTime iso={m.createdAt} format="listTime" />
+                <div className="flex items-center gap-3">
+                  <span className="hidden text-[11px] text-muted-foreground sm:inline">
+                    Joined <LocalTime iso={m.createdAt} format="listTime" />
+                  </span>
+                  {m.id !== session.user.id && (
+                    <MemberResetPasswordButton
+                      teamId={team.id}
+                      userId={m.id}
+                      name={m.name}
+                    />
+                  )}
                 </div>
               </li>
             ))}

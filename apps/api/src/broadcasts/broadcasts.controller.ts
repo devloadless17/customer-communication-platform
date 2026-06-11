@@ -95,6 +95,18 @@ export class BroadcastsController {
     });
   }
 
+  /**
+   * All recipient contact ids for a broadcast — used by the "Duplicate" flow to
+   * reconstruct a hand-picked audience (which only exists on recipient rows).
+   */
+  @Get(":id/recipient-ids")
+  async listRecipientContactIds(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+  ) {
+    return this.broadcasts.listRecipientContactIds(session.teamId, id);
+  }
+
   @Post(":id/cancel")
   @RequireCapability("broadcasts:manage")
   async cancel(

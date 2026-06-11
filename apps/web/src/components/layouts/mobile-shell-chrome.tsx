@@ -12,7 +12,6 @@ import {
   MessageSquareText,
   Menu,
   Settings as SettingsIcon,
-  ShieldCheck,
   UserCircle2,
   Workflow,
 } from "lucide-react";
@@ -86,7 +85,6 @@ function sectionTitle(pathname: string): string {
   if (pathname.startsWith("/templates")) return "Templates";
   if (pathname.startsWith("/workflows")) return "Workflows";
   if (pathname.startsWith("/settings")) return "Settings";
-  if (pathname.startsWith("/admin")) return "Platform admin";
   return "";
 }
 
@@ -167,11 +165,11 @@ export function MobileShellChrome({
       icon: SettingsIcon,
       match: ["/settings", "/settings/workspace"],
     });
-    if (currentUser.role === "superAdmin") {
-      out.push({ href: "/admin", label: "Platform admin", icon: ShieldCheck });
-    }
+    // No platform-admin entry: super-admins are redirected out of the (app)
+    // shell entirely (→ /platform in the (app) layout), so they never render
+    // this chrome. The old `/admin` push here was dead + unreachable.
     return out;
-  }, [currentUser.role]);
+  }, []);
 
   const resolvedTitle = title ?? sectionTitle(pathname);
 

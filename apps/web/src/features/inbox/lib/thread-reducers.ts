@@ -160,7 +160,10 @@ export function applyNoteDeleted(
 //
 // Set `activeCall` on incoming/ringing, flip to in_progress on answered,
 // clear + append to `calls` history on terminal. The fanout splits incoming
-// (team room toast) from ringing (conversation room) — the live hook
+// (inbound) from ringing (outbound) — both ride the TEAM room (so the
+// team-wide Calls badge sees every phase), and the per-thread filter
+// (`payload.conversationId === conversationId`, the default reducer target)
+// narrows the banner to the agent actually viewing that thread. The live hook
 // dispatches both into the same `activeCall` slot since either represents
 // the same "there is a call happening here" state.
 // ---------------------------------------------------------------------------

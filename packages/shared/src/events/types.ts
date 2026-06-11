@@ -118,6 +118,25 @@ export interface MessageStatusChangedEvent {
   contactId: string;
   messageId: string;
   status: MessageStatus;
+  /**
+   * Delivery-failure diagnostics — present ONLY on a `status: "failed"`
+   * transition that carried a provider reason (Meta `errors[0]`). Carries WHY a
+   * message failed (frequency cap, undeliverable, quality block) on the domain
+   * event so an outbound-webhook subscriber can forward it without a DB read.
+   * Absent on every non-failed transition.
+   *
+   * NOTE (wiring status): these are PERSISTED on the Message row
+   * (statusErrorCode/Title/Detail) and carried on this in-process domain event,
+   * but they are NOT yet forwarded on the `message:status` SOCKET frame (see
+   * fanout-rules.ts / socket/events.ts) and no thread-hydration query selects
+   * the columns — so the inbox failed-bubble can't surface the reason yet. To
+   * complete the end-to-end path: add the fields to the `message:status` socket
+   * payload + fanout rule, select the columns in the thread query, extend the
+   * Message type + applyMessageStatus reducer, and render in the bubble.
+   */
+  errorCode?: number;
+  errorTitle?: string;
+  errorDetail?: string;
   /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
   silent?: boolean;
 }
@@ -562,9 +581,9 @@ export interface ConversationReadEvent {
 
 /**
  * Top-level message OR thread reply landed in a channel. Discriminated by
- * `threadRootId`. Fanout is CHANNEL-room scoped (membership-gated via
- * `emitToChannel(channelId, …)`), NOT team-wide — non-members never see channel
- * traffic (see fanout-rules.ts `team_channel.message_created`):
+ * `threadRootId`. Message CONTENT fanout is CHANNEL-room scoped (membership-
+ * gated via `emitToChannel(channelId, …)`), NOT team-wide — non-members never
+ * see channel traffic (see fanout-rules.ts `team_channel.message_created`):
  *   - null → top-level. Socket fanout emits `team:channel:message` to the
  *            channel room with preview + lastMessageAt populated.
  *   - set  → reply. Socket fanout emits:
@@ -573,9 +592,13 @@ export interface ConversationReadEvent {
  *            (b) `team:channel:thread:reply` to the channel room with replyCount,
  *            (c) `team:channel:message` again so any open side panel gets the
  *                new reply.
+ * In ADDITION, a content-lean `team:channel:activity` frame fans to the TEAM
+ * room (id-shaped fields only, no body) so the sidebar channel list can badge
+ * channels the viewer isn't currently subscribed to — see the socket-events
+ * doc for the confidentiality rationale.
  *
  * `threadReplyCount` is only meaningful when threadRootId is set — it's the
- * post-increment count carried so the team-room `team:channel:thread:reply`
+ * post-increment count carried so the channel-room `team:channel:thread:reply`
  * payload can include it. Top-level emits leave it at 0.
  */
 export interface TeamChannelMessageCreatedEvent {
@@ -807,9 +830,11 @@ export interface CallIncomingEvent {
   ringingAt: string;
 }
 
-/** Outbound call placed; Meta acknowledged. Only the originating thread's
- *  room cares (single-user awareness — the agent's own browser shows the
- *  ringing-out indicator). */
+/** Outbound call placed; Meta acknowledged. Fanned to the TEAM room (see
+ *  fanout-rules.ts `call.ringing_out`): the inbox thread reducer filters
+ *  `call:ringing` by `conversationId` so only the originating agent's thread
+ *  paints the ringing-out indicator, but the team-wide Calls badge must also
+ *  see the outbound ring phase, so the frame can't be conversation-scoped. */
 export interface CallRingingOutEvent {
   teamId: string;
   conversationId: string;

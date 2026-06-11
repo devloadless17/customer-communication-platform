@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, HelpCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useModalOverlay } from "@/hooks/use-modal-overlay";
 
 /**
@@ -34,6 +35,16 @@ export interface ConfirmOptions {
   destructive?: boolean;
   /** "alert" = single button, no cancel (a drop-in for window.alert). */
   mode?: "confirm" | "alert";
+  /**
+   * Type-to-confirm guard for high-blast-radius destructive actions (whole-org
+   * delete, large bulk delete). When set, the confirm button stays disabled
+   * until the user types this exact string (case-sensitive), e.g. the org name
+   * or the literal word "DELETE". Proportional friction without a new dialog
+   * pattern.
+   */
+  requireText?: string;
+  /** Label above the type-to-confirm input. Defaults to a generic prompt. */
+  requireTextLabel?: React.ReactNode;
 }
 
 export function ConfirmDialog({
@@ -47,7 +58,15 @@ export function ConfirmDialog({
 }) {
   const titleId = useId();
   const descId = useId();
+  const inputId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Type-to-confirm text (cleared whenever a new dialog opens). Lives at the
+  // top level so the hooks order stays stable across renders.
+  const [typed, setTyped] = useState("");
+  useEffect(() => {
+    if (open) setTyped("");
+  }, [open, options]);
 
   // Shared modal overlay primitives — body-scroll-lock + focus-trap +
   // Escape-to-close + focus return. Same hook used by every other
@@ -68,7 +87,14 @@ export function ConfirmDialog({
     cancelLabel = "Cancel",
     destructive = false,
     mode = "confirm",
+    requireText,
+    requireTextLabel,
   } = options;
+
+  // Confirm stays disabled until the typed text matches exactly (when a
+  // type-to-confirm guard is set). Trim only trailing/leading whitespace so a
+  // stray space doesn't block a correct entry.
+  const confirmBlocked = Boolean(requireText) && typed.trim() !== requireText;
 
   // Portal to <body> so the fixed overlay isn't trapped inside a
   // transformed ancestor (virtualized lists in team chat / inbox use
@@ -106,6 +132,33 @@ export function ConfirmDialog({
                 {description}
               </p>
             )}
+            {requireText && (
+              <div className="mt-3">
+                <label htmlFor={inputId} className="text-xs text-muted-foreground">
+                  {requireTextLabel ?? (
+                    <>
+                      Type{" "}
+                      <span className="font-semibold text-foreground">{requireText}</span>{" "}
+                      to confirm
+                    </>
+                  )}
+                </label>
+                <Input
+                  id={inputId}
+                  value={typed}
+                  onChange={(e) => setTyped(e.target.value)}
+                  // Focus the input (not the confirm button) so the user can
+                  // type immediately; Enter submits only when the text matches.
+                  autoFocus
+                  autoComplete="off"
+                  spellCheck={false}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !confirmBlocked) onResolve(true);
+                  }}
+                  className="mt-1 h-9"
+                />
+              </div>
+            )}
           </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-5 py-3">
@@ -117,7 +170,10 @@ export function ConfirmDialog({
           <Button
             size="sm"
             variant={destructive ? "destructive" : "default"}
-            autoFocus
+            // Don't steal focus to the confirm button when a type-to-confirm
+            // input is present — the input is autofocused instead.
+            autoFocus={!requireText}
+            disabled={confirmBlocked}
             onClick={() => onResolve(true)}
           >
             {confirmLabel}

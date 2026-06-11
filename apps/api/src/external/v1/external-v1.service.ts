@@ -230,10 +230,14 @@ export class ExternalV1Service {
 
   async getContact(teamId: string, id: string) {
     const row = await this.db.contact.findFirst({
-      where: { id, teamId },
+      // deletedAt:null — a tombstoned contact is gone from the directory; the
+      // list path + every mutation already filter it out, so a direct GET must
+      // 404 too (a partner holding a cached id would otherwise see it as live
+      // here but get a 404 on the next PATCH — an inconsistent surface).
+      where: { id, teamId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
-    if (!row) throw new NotFoundException({ error: "contact not found" });
+    if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
     return contactRowToExternal(row);
   }
 
@@ -331,7 +335,8 @@ export class ExternalV1Service {
     const phone = normalizePhoneE164(input.phoneNumber);
     if (!phone) {
       throw new BadRequestException({
-        error:
+        error: "invalid_phone",
+        detail:
           "phoneNumber must be a valid international number (e.g. +1 555 555 0100)",
       });
     }
@@ -363,7 +368,7 @@ export class ExternalV1Service {
         where: { id: input.stageId, teamId },
         select: { id: true },
       });
-      if (!stage) throw new BadRequestException({ error: "stage not found" });
+      if (!stage) throw new BadRequestException({ error: "stage_not_found", detail: "stage not found" });
       stageId = stage.id;
     } else {
       stageId = await ensureDefaultStage(teamId);
@@ -435,7 +440,8 @@ export class ExternalV1Service {
         );
         if (revived) return revived;
         throw new ConflictException({
-          error: "a contact with this phone number already exists",
+          error: "duplicate_phone",
+          detail: "a contact with this phone number already exists",
         });
       }
       throw err;
@@ -628,7 +634,7 @@ export class ExternalV1Service {
         where: { id: stageId, teamId },
         select: { id: true },
       });
-      if (!ok) throw new BadRequestException({ error: "stage not found" });
+      if (!ok) throw new BadRequestException({ error: "stage_not_found", detail: "stage not found" });
     }
 
     let result;
@@ -686,13 +692,14 @@ export class ExternalV1Service {
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
         throw new ConflictException({
-          error: "contact was modified by another writer, retry",
+          error: "write_conflict",
+          detail: "contact was modified by another writer, retry",
         });
       }
       throw err;
     }
 
-    if (!result) throw new NotFoundException({ error: "contact not found" });
+    if (!result) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
     const { existing, updated } = result;
 
     const tagIds = updated.tags.map((t) => t.id);
@@ -778,7 +785,8 @@ export class ExternalV1Service {
     const phone = normalizePhoneE164(input.phoneNumber);
     if (!phone) {
       throw new BadRequestException({
-        error:
+        error: "invalid_phone",
+        detail:
           "phoneNumber must be a valid international number (e.g. +1 555 555 0100)",
       });
     }
@@ -796,13 +804,33 @@ export class ExternalV1Service {
     }
     // Call the internal (un-wrapped) update — upsert's own idempotency is the
     // caller's concern at the /v1/contacts/upsert route, not a nested claim.
+    // Forward EVERY directory field the update path supports (firstName /
+    // lastName / language / countryCode included — they were silently dropped
+    // before, so a CRM re-sync never refreshed them after the first create).
     const contact = await this.updateContactInternal(teamId, apiKeyId, existing.id, {
       ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
+      ...(input.lastName !== undefined ? { lastName: input.lastName } : {}),
+      ...(input.language !== undefined ? { language: input.language } : {}),
+      ...(input.countryCode !== undefined ? { countryCode: input.countryCode } : {}),
       ...(input.email !== undefined ? { email: input.email } : {}),
       ...(input.location !== undefined ? { location: input.location } : {}),
       ...(input.customFields !== undefined ? { customFields: input.customFields } : {}),
       ...(input.stageId !== undefined ? { stageId: input.stageId } : {}),
     });
+    // tagIds is create-only on the upsert path: on the update branch we apply
+    // it additively (matching the single-contact "add tags" semantics) so a
+    // re-sync that carries tags keeps assigning them instead of dropping them
+    // silently. We do NOT remove tags the payload omits — upsert is a merge,
+    // not a full replace; use DELETE /contacts/:id/tags/:tagId to unassign.
+    if (input.tagIds && input.tagIds.length > 0) {
+      return {
+        contact: await this.addContactTagsInternal(teamId, apiKeyId, existing.id, {
+          tagIds: input.tagIds,
+        }),
+        created: false,
+      };
+    }
     return { contact, created: false };
   }
 
@@ -822,7 +850,7 @@ export class ExternalV1Service {
       where: { id: contactId, teamId, deletedAt: null },
       select: { id: true },
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
 
     await this.db.contact.update({
       where: { id: contactId },
@@ -851,10 +879,11 @@ export class ExternalV1Service {
    */
   async getContactChannels(teamId: string, contactId: string) {
     const c = await this.db.contact.findFirst({
-      where: { id: contactId, teamId },
+      // deletedAt:null — consistent with getContact + every list/mutation path.
+      where: { id: contactId, teamId, deletedAt: null },
       select: { id: true, phoneNumber: true, identityChannel: true, externalContactId: true },
     });
-    if (!c) throw new NotFoundException({ error: "contact not found" });
+    if (!c) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
     if (!c.phoneNumber) return { items: [] };
     return {
       items: [
@@ -903,7 +932,7 @@ export class ExternalV1Service {
       where: { id: contactId, teamId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
 
     const tags = await this.db.tag.findMany({
       where: { teamId, id: { in: input.tagIds } },
@@ -930,7 +959,8 @@ export class ExternalV1Service {
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
         throw new ConflictException({
-          error: "contact was modified by another writer, retry",
+          error: "write_conflict",
+          detail: "contact was modified by another writer, retry",
         });
       }
       throw err;
@@ -985,7 +1015,7 @@ export class ExternalV1Service {
       where: { id: contactId, teamId, deletedAt: null },
       include: EXTERNAL_CONTACT_INCLUDE,
     });
-    if (!contact) throw new NotFoundException({ error: "contact not found" });
+    if (!contact) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
 
     const existingIds = new Set(contact.tags.map((t) => t.id));
     const toRemove = tagIds.filter((id) => existingIds.has(id));
@@ -1006,7 +1036,8 @@ export class ExternalV1Service {
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
         throw new ConflictException({
-          error: "contact was modified by another writer, retry",
+          error: "write_conflict",
+          detail: "contact was modified by another writer, retry",
         });
       }
       throw err;
@@ -1103,7 +1134,7 @@ export class ExternalV1Service {
     });
     const ownedIds = ownContacts.map((c) => c.id);
     if (ownedIds.length === 0) {
-      throw new NotFoundException({ error: "no matching contacts in this team" });
+      throw new NotFoundException({ error: "no_matching_contacts", detail: "no matching contacts in this team" });
     }
 
     const validTags = await this.db.tag.findMany({
@@ -1112,7 +1143,25 @@ export class ExternalV1Service {
     });
     const validTagIds = validTags.map((t) => t.id);
     if (validTagIds.length === 0) {
-      throw new NotFoundException({ error: "no matching tags in this team" });
+      throw new NotFoundException({ error: "no_matching_tags", detail: "no matching tags in this team" });
+    }
+
+    // Pre-read existing (contactId, tagId) membership for the affected pairs so
+    // the per-contact fanout below publishes a tag-change ONLY for contacts
+    // whose membership actually shifts — matching the single-contact path's
+    // no-op short-circuit. Without this we recompute `added`/`removed` from the
+    // POST-state, which falsely reports "added" for a contact that already had
+    // the tag (tag-add) and "removed" for one that never had it (tag-remove),
+    // firing spurious workflow + webhook triggers on idempotent re-runs.
+    const priorPairs = await this.db.$queryRaw<{ A: string; B: string }[]>`
+      SELECT "A", "B" FROM "_ContactToTag"
+      WHERE "A" = ANY(${ownedIds}::text[]) AND "B" = ANY(${validTagIds}::text[])
+    `;
+    const priorByContact = new Map<string, Set<string>>();
+    for (const { A, B } of priorPairs) {
+      const set = priorByContact.get(A) ?? new Set<string>();
+      set.add(B);
+      priorByContact.set(A, set);
     }
 
     for (const tagId of validTagIds) {
@@ -1156,11 +1205,17 @@ export class ExternalV1Service {
     await runWithConcurrency(updated, 16, async (c) => {
       const tagIds = c.tags.map((t) => t.id);
       const payload: DomainContact = toContactWire(c, { tagIds });
+      // Real delta vs. the PRE-state membership pre-read above: a tag is only
+      // "added" if this contact didn't already have it, and only "removed" if
+      // it actually did. Recomputing from the post-state (the prior bug) marked
+      // every targeted tag as changed even for no-op contacts.
+      const prior = priorByContact.get(c.id) ?? new Set<string>();
       const added =
-        action === "tag-add" ? validTagIds.filter((t) => tagIds.includes(t)) : [];
+        action === "tag-add" ? validTagIds.filter((t) => !prior.has(t)) : [];
       const removed =
-        action === "tag-remove" ? validTagIds.filter((t) => !tagIds.includes(t)) : [];
-      const tagChanges = { added, removed };
+        action === "tag-remove" ? validTagIds.filter((t) => prior.has(t)) : [];
+      const changed = added.length > 0 || removed.length > 0;
+      const tagChanges = changed ? { added, removed } : undefined;
 
       await this.bus.publish({
         type: "contact.updated",
@@ -1179,15 +1234,14 @@ export class ExternalV1Service {
         silent: input.silent === true,
       });
 
-      if (added.length > 0 || removed.length > 0) {
+      if (changed) {
         await this.bus.publish({
           type: "contact.tag_changed",
           teamId,
           contactId: c.id,
-          // `before` lacks the changes — for the add path the prior set is
-          // tagIds minus what we just added; for remove it's tagIds plus
-          // what we just removed. Compute back from the post-state to
-          // avoid re-reading the row.
+          // `before` is reconstructed from the post-state ± this contact's real
+          // delta: for the add path it's the current set minus what we added;
+          // for remove it's the current set plus what we removed.
           before: {
             tagIds:
               action === "tag-add"
@@ -1238,7 +1292,7 @@ export class ExternalV1Service {
     const row = await this.db.contactFieldDefinition.findFirst({
       where: { teamId, OR: [{ id: idOrKey }, { key: idOrKey }] },
     });
-    if (!row) throw new NotFoundException({ error: "contact field not found" });
+    if (!row) throw new NotFoundException({ error: "contact_field_not_found", detail: "contact field not found" });
     return { id: row.id, key: row.key, label: row.label, order: row.order };
   }
 
@@ -1249,11 +1303,11 @@ export class ExternalV1Service {
       orderBy: { order: "desc" },
     });
     if (existing.length >= 50) {
-      throw new BadRequestException({ error: "at most 50 contact fields per team" });
+      throw new BadRequestException({ error: "too_many_contact_fields", detail: "at most 50 contact fields per team" });
     }
     const baseKey = slugifyKey(input.label);
     if (!baseKey) {
-      throw new BadRequestException({ error: "label must contain letters or digits" });
+      throw new BadRequestException({ error: "invalid_field_label", detail: "label must contain letters or digits" });
     }
     const usedKeys = new Set(existing.map((e) => e.key));
     let key = baseKey;
@@ -1278,7 +1332,7 @@ export class ExternalV1Service {
         "code" in err &&
         (err as { code?: string }).code === "P2002"
       ) {
-        throw new ConflictException({ error: "field with that key already exists" });
+        throw new ConflictException({ error: "field_key_taken", detail: "field with that key already exists" });
       }
       throw err;
     }
@@ -1324,7 +1378,7 @@ export class ExternalV1Service {
         (err as { code?: string }).code === "P2002"
       ) {
         throw new ConflictException({
-          error: "name taken",
+          error: "tag_name_taken",
           detail: `A tag named "${input.name}" already exists.`,
         });
       }
@@ -1334,7 +1388,7 @@ export class ExternalV1Service {
 
   async updateTag(teamId: string, id: string, input: ExternalUpdateTagInput): Promise<Tag> {
     const existing = await this.db.tag.findFirst({ where: { id, teamId } });
-    if (!existing) throw new NotFoundException({ error: "tag not found" });
+    if (!existing) throw new NotFoundException({ error: "tag_not_found", detail: "tag not found" });
     try {
       const updated = await this.db.tag.update({ where: { id }, data: input });
       await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
@@ -1351,7 +1405,7 @@ export class ExternalV1Service {
         "code" in err &&
         (err as { code?: string }).code === "P2002"
       ) {
-        throw new ConflictException({ error: "a tag with that name already exists" });
+        throw new ConflictException({ error: "tag_name_taken", detail: "a tag with that name already exists" });
       }
       throw err;
     }
@@ -1359,7 +1413,7 @@ export class ExternalV1Service {
 
   async deleteTag(teamId: string, id: string): Promise<void> {
     const existing = await this.db.tag.findFirst({ where: { id, teamId } });
-    if (!existing) throw new NotFoundException({ error: "tag not found" });
+    if (!existing) throw new NotFoundException({ error: "tag_not_found", detail: "tag not found" });
     await this.db.tag.delete({ where: { id } });
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "tags" });
   }
@@ -1411,7 +1465,7 @@ export class ExternalV1Service {
     const row = await this.db.user.findFirst({
       where: { teamId, OR: [{ id: idOrEmail }, { email: idOrEmail }] },
     });
-    if (!row) throw new NotFoundException({ error: "user not found" });
+    if (!row) throw new NotFoundException({ error: "user_not_found", detail: "user not found" });
     return {
       user: {
         id: row.id,

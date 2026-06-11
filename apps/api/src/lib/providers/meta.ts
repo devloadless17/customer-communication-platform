@@ -26,6 +26,7 @@ import type {
   NormalizedInboundMessage,
   NormalizedMediaRef,
   NormalizedStatusUpdate,
+  NormalizedTemplateStatusUpdate,
   ProviderTemplate,
   SendInteractiveArgs,
   SendMediaArgs,
@@ -71,24 +72,64 @@ import type { MediaKind, MessageStatus } from "@ccp/shared/types";
 const META_FETCH_TIMEOUT_MS = Number(process.env.META_FETCH_TIMEOUT_MS) || 20_000;
 const META_FETCH_MAX_ATTEMPTS = 2; // 1 retry on transient 5xx
 
-async function metaFetch(input: string | URL, init?: RequestInit): Promise<Response> {
-  // Retry policy: transient 5xx + network errors get one quick retry. We
-  // intentionally do NOT retry 4xx — those are policy errors (24h-window
-  // closed, template missing, bad auth) where retrying just hides the real
-  // problem. Without this, a Meta 503 blip surfaces as a "send failed"
-  // bubble the agent has to manually click Retry on. With a single 500ms
-  // retry, the vast majority of Meta's transient blips never reach the UI.
+/**
+ * Per-call fetch options layered on top of `RequestInit`.
+ *
+ *   retry — opt IN to the transient-5xx/timeout retry. Defaults to FALSE so a
+ *           non-idempotent POST (a /messages send, a /calls initiation) is NEVER
+ *           silently re-sent. Meta's send + call POSTs carry no idempotency key,
+ *           so blindly retrying a 503/timeout blip can deliver the SAME WhatsApp
+ *           message twice (customer-visible duplicate) or ring the customer
+ *           twice — the exact failure class the OutboundSendAttempt /
+ *           BroadcastSendAttempt guards + workflow skipped_after_crash journal
+ *           exist to prevent. Those guards own the retry/refuse decision for
+ *           sends; metaFetch must not pre-empt them. Idempotent / safe-to-repeat
+ *           reads (fetchMedia, markIncomingRead, fetchTemplates, media upload,
+ *           settings GET) pass `retry: true` and keep the one-shot blip recovery.
+ */
+interface MetaFetchOptions extends RequestInit {
+  retry?: boolean;
+}
+
+/**
+ * Strip the query string from a URL/string for error text. The upload-session
+ * call (and any future query-param-bearing endpoint) must never echo a
+ * credential through a thrown error message or a 502 body.
+ */
+function redactUrlForError(input: string | URL): string {
+  try {
+    const u = typeof input === "string" ? new URL(input) : input;
+    return u.origin + u.pathname;
+  } catch {
+    // Not a parseable absolute URL — return as-is (no query to leak).
+    return String(input);
+  }
+}
+
+async function metaFetch(
+  input: string | URL,
+  init?: MetaFetchOptions,
+): Promise<Response> {
+  // Retry policy: transient 5xx + network errors get one quick retry, but ONLY
+  // when the caller opts in via `retry: true`. Default OFF — see MetaFetchOptions
+  // for why non-idempotent send/call POSTs must not be auto-replayed. We never
+  // retry 4xx either way — those are policy errors (24h-window closed, template
+  // missing, bad auth) where retrying just hides the real problem.
+  const retry = init?.retry === true;
+  const maxAttempts = retry ? META_FETCH_MAX_ATTEMPTS : 1;
+  // Don't pass our own `retry` flag through to fetch's RequestInit.
+  const { retry: _retry, ...fetchInit } = init ?? {};
   let lastErr: unknown;
-  for (let attempt = 0; attempt < META_FETCH_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), META_FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(input, { ...init, signal: ac.signal });
+      const res = await fetch(input, { ...fetchInit, signal: ac.signal });
       // 5xx is transient by Meta convention. Retry once with backoff. The
       // request body is whatever the caller passed in `init.body` — fetch
       // re-uses it on retry without re-streaming concerns because all our
       // bodies are buffered (JSON or FormData built from in-memory bytes).
-      if (res.status >= 500 && res.status < 600 && attempt < META_FETCH_MAX_ATTEMPTS - 1) {
+      if (res.status >= 500 && res.status < 600 && attempt < maxAttempts - 1) {
         // Drain so the connection can be reused by the keepalive pool.
         await res.text().catch(() => {});
         await sleep(500 + Math.random() * 250);
@@ -98,14 +139,16 @@ async function metaFetch(input: string | URL, init?: RequestInit): Promise<Respo
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         // Timeouts surface as a typed error after the last attempt; mid-loop
-        // we treat them as retryable network blips.
+        // we treat them as retryable network blips. The URL is redacted so a
+        // query-param credential (e.g. a future signed-URL endpoint) can't leak
+        // into the message that propagates to logs / a 502 error body.
         lastErr = new Error(
-          `meta request timed out after ${META_FETCH_TIMEOUT_MS}ms: ${input}`,
+          `meta request timed out after ${META_FETCH_TIMEOUT_MS}ms: ${redactUrlForError(input)}`,
         );
       } else {
         lastErr = err;
       }
-      if (attempt < META_FETCH_MAX_ATTEMPTS - 1) {
+      if (attempt < maxAttempts - 1) {
         await sleep(500 + Math.random() * 250);
         continue;
       }
@@ -152,6 +195,16 @@ interface MetaChangeValue {
    * status, and (when applicable) sdp + ice candidates.
    */
   calls?: MetaCall[];
+  // `message_template_status_update` webhook fields. Meta sends these under a
+  // distinct `change.field` (not `messages`), keyed differently from messages/
+  // statuses — flat on `value`, not in an array.
+  message_template_id?: string | number;
+  message_template_name?: string;
+  message_template_language?: string;
+  /** UPPERCASE lifecycle: APPROVED | PAUSED | DISABLED | REJECTED | PENDING. */
+  event?: string;
+  /** Human reason Meta attaches on PAUSED/REJECTED (quality, policy, etc.). */
+  reason?: string;
 }
 
 /**
@@ -244,6 +297,18 @@ interface MetaInteractivePayload {
   list_reply?: { id?: string; title?: string; description?: string };
 }
 
+interface MetaLocationPayload {
+  latitude?: number;
+  longitude?: number;
+  name?: string;
+  address?: string;
+}
+
+interface MetaContactsPayload {
+  name?: { formatted_name?: string };
+  phones?: Array<{ phone?: string }>;
+}
+
 interface MetaMessage {
   from?: string;
   id?: string;
@@ -257,12 +322,56 @@ interface MetaMessage {
   sticker?: MetaMediaPayload;
   interactive?: MetaInteractivePayload;
   context?: MetaContextRef;
+  // Non-media customer content with no dedicated bubble yet — ingested as a
+  // typed text placeholder (see placeholderForUnhandledType) so unread / window
+  // / list-preview stay correct instead of the message vanishing silently.
+  location?: MetaLocationPayload;
+  contacts?: MetaContactsPayload[];
 }
 
 const META_MEDIA_TYPES: MediaKind[] = ["image", "video", "audio", "document", "sticker"];
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
+}
+
+/**
+ * Customer message types we don't render with a dedicated bubble yet —
+ * location pins, contact cards (vCard), orders, and Meta's `unsupported`
+ * fallback. Rather than dropping them silently (which loses the message, never
+ * updates unread / the 24h window, and leaves Meta no reason to redeliver), we
+ * ingest them as a plain text row carrying a typed placeholder body. The raw
+ * payload is preserved on the Message row, so proper rendering can be layered
+ * on later without data loss. Returns null only for genuinely empty/unknown
+ * shapes where no useful placeholder exists.
+ */
+function placeholderForUnhandledType(m: MetaMessage): string | null {
+  switch (m.type) {
+    case "location": {
+      const loc = m.location;
+      const place = loc?.name || loc?.address;
+      if (place) return `📍 Location: ${place}`;
+      if (loc && loc.latitude != null && loc.longitude != null) {
+        return `📍 Location shared (${loc.latitude}, ${loc.longitude})`;
+      }
+      return "📍 Location shared";
+    }
+    case "contacts": {
+      const names = (m.contacts ?? [])
+        .map((c) => c.name?.formatted_name?.trim())
+        .filter((n): n is string => Boolean(n));
+      if (names.length > 0) return `👤 Contact card: ${names.join(", ")}`;
+      return "👤 Contact card shared";
+    }
+    case "order":
+      return "🛒 Order shared";
+    case "unsupported":
+      return "⚠️ Unsupported message";
+    default:
+      // Unknown future type Meta might add — surface SOMETHING so it's
+      // visible + counts toward unread, rather than vanishing.
+      return m.type ? `Unsupported message (${m.type})` : null;
+  }
 }
 
 function mapMetaStatus(s: string | undefined): MessageStatus | null {
@@ -427,6 +536,36 @@ function parseMetaCall(
   };
 }
 
+/**
+ * Parse a `message_template_status_update` webhook value into a normalized
+ * template-status event. Returns null when there's no usable identity to match
+ * the local row on (neither an id nor a name). Forward-compatible: an `event`
+ * value that doesn't map to a known TemplateStatus yields `status: null`, which
+ * ingest treats as a no-op flip (it only writes a mapped status).
+ */
+function parseTemplateStatusUpdate(
+  value: MetaChangeValue,
+  rawPayload: Record<string, unknown>,
+): NormalizedTemplateStatusUpdate | null {
+  const externalId =
+    value.message_template_id != null
+      ? String(value.message_template_id)
+      : undefined;
+  const name = value.message_template_name;
+  if (!externalId && !name) return null;
+  return {
+    kind: "template_status",
+    ...(externalId ? { externalId } : {}),
+    ...(name ? { name } : {}),
+    ...(value.message_template_language
+      ? { language: value.message_template_language }
+      : {}),
+    status: mapTemplateStatus(value.event),
+    ...(value.reason ? { reason: value.reason } : {}),
+    rawPayload,
+  };
+}
+
 export const metaProvider: MessagingProvider<MetaSendConfig> = {
   name: "whatsapp",
 
@@ -451,7 +590,23 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     for (const entry of env.entry ?? []) {
       for (const change of entry.changes ?? []) {
-        // Meta uses two relevant `field` values:
+        const value = change.value;
+        if (!value) continue;
+
+        // Template lifecycle: Meta sends `message_template_status_update` when a
+        // template is approved, paused for quality, disabled, or rejected. These
+        // arrive under their own `field` (NOT "messages") with flat value fields.
+        // Ingesting them keeps the local catalog's status fresh automatically —
+        // without this, a Meta-paused marketing template silently mass-fails a
+        // scheduled broadcast and a newly-approved one never becomes sendable
+        // until someone clicks the manual "Sync" button.
+        if (change.field === "message_template_status_update") {
+          const evt = parseTemplateStatusUpdate(value, payload as Record<string, unknown>);
+          if (evt) events.push(evt);
+          continue;
+        }
+
+        // Meta uses two relevant `field` values for content:
         //   "messages" — text / media / interactive / status updates
         //   "calls"    — voice call lifecycle (offer, answer, terminate, ICE,
         //                permission granted/revoked, etc.) — confirmed by
@@ -460,8 +615,6 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         // other type since `value.messages` / `value.calls` / `value.statuses`
         // are independently present.
         if (change.field !== "messages" && change.field !== "calls") continue;
-        const value = change.value;
-        if (!value) continue;
 
         // Build a quick wa_id → name lookup from the contacts array.
         const nameByWaId = new Map<string, string>();
@@ -559,7 +712,26 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // Media: image / video / audio / document / sticker. Each has its
           // own subobject with id, mime_type, optional caption + filename.
           const mediaKind = m.type as MediaKind | undefined;
-          if (!mediaKind || !META_MEDIA_TYPES.includes(mediaKind)) continue;
+          if (!mediaKind || !META_MEDIA_TYPES.includes(mediaKind)) {
+            // Non-media, non-text, non-interactive customer content: location
+            // pins, contact cards, orders, and Meta's `unsupported` fallback.
+            // Ingest as a text placeholder so unread / 24h-window / list preview
+            // stay correct and the raw payload is preserved (the webhook returns
+            // 200, so Meta never redelivers — dropping these loses them forever).
+            const placeholder = placeholderForUnhandledType(m);
+            if (!placeholder) continue;
+            events.push({
+              kind: "message",
+              externalId,
+              contactPhone: phone,
+              contactName: nameByWaId.get(phone) ?? null,
+              body: placeholder,
+              timestamp: ts,
+              rawPayload: payload as Record<string, unknown>,
+              ...(replyToExternalId ? { replyToExternalId } : {}),
+            } satisfies NormalizedInboundMessage);
+            continue;
+          }
           const mediaPayload = m[mediaKind] as MetaMediaPayload | undefined;
           if (!mediaPayload?.id || !mediaPayload.mime_type) continue;
 
@@ -598,6 +770,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           // Surface WHY Meta failed delivery — otherwise a `failed` status is a
           // silent red icon with no reason. These are the (#13xxxx) codes from
           // Meta's status webhook (rate/quality limits, undeliverable, etc.).
+          // First error wins for the persisted reason (Meta sends one per status
+          // in practice); we still log every error for forensics.
+          let errorCode: number | undefined;
+          let errorTitle: string | undefined;
+          let errorDetail: string | undefined;
           if (status === "failed" && s.errors?.length) {
             for (const e of s.errors) {
               console.error(
@@ -606,6 +783,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
                 } — ${e.error_data?.details ?? e.message ?? "no detail"}`,
               );
             }
+            const first = s.errors[0];
+            if (typeof first?.code === "number") errorCode = first.code;
+            if (first?.title) errorTitle = first.title;
+            // Prefer the actionable error_data.details, fall back to message.
+            const detail = first?.error_data?.details ?? first?.message;
+            if (detail) errorDetail = detail;
           }
           if (!status || !s.id) continue;
           const tsSecs = s.timestamp ? Number(s.timestamp) : NaN;
@@ -614,6 +797,9 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             kind: "status",
             externalId: s.id,
             status,
+            ...(errorCode !== undefined ? { errorCode } : {}),
+            ...(errorTitle !== undefined ? { errorTitle } : {}),
+            ...(errorDetail !== undefined ? { errorDetail } : {}),
             timestamp: ts,
             rawPayload: payload as Record<string, unknown>,
           };
@@ -627,6 +813,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
   async sendText(args: SendTextArgs, config: MetaSendConfig): Promise<SendTextResult> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    // No `retry:` — customer-visible /messages sends are NON-idempotent (Meta
+    // assigns the wamid, there's no client idempotency key), so a metaFetch
+    // 5xx/timeout retry could deliver the same message twice. The worker-level
+    // OutboundSendAttempt guard owns the retry/refuse decision (it classifies
+    // rate_limited / 5xx as recoverable). Same for sendInteractive/sendMedia/
+    // sendTemplate below and placeCall.
     const res = await metaFetch(url, {
       method: "POST",
       headers: {
@@ -780,8 +972,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // window (no recent inbound), Meta rejects with policy errors — we
     // swallow them since the agent's local UX shouldn't degrade.
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    // Idempotent best-effort — keep the transient-blip retry.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -808,8 +1002,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // every earlier inbound from that conversation as read on the customer's
     // device, so one call per agent-view is enough.
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+    // Idempotent read-receipt — marking a wamid read twice is a no-op, so the
+    // transient-blip retry stays enabled.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -839,7 +1036,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // Step 1: GET /{media-id} → { url, mime_type, ... }. The signed URL is
     // valid for ~5 minutes — we MUST hit it immediately. Don't store it.
     const metaUrl = `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(externalMediaId)}`;
+    // GET — idempotent; keep the transient-blip retry (this runs on the webhook
+    // hot path where a Meta CDN hiccup shouldn't drop an inbound attachment).
     const metaRes = await metaFetch(metaUrl, {
+      retry: true,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!metaRes.ok) {
@@ -856,8 +1056,9 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     }
 
     // Step 2: download the binary. Meta's CDN ALSO requires the bearer token
-    // — undocumented gotcha, requests without it 401.
+    // — undocumented gotcha, requests without it 401. GET — idempotent, retry on.
     const binRes = await metaFetch(meta.url, {
+      retry: true,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!binRes.ok) {
@@ -899,8 +1100,12 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       args.filename,
     );
 
+    // Staging upload — produces a single-use media id with no customer-visible
+    // effect, so a retried 5xx blip is safe (worst case: one orphaned media id
+    // that Meta expires in ~30 days). Keep the retry.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: { authorization: `Bearer ${config.accessToken}` },
       body: fd,
     });
@@ -1002,7 +1207,9 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     while (next && pages < 5) {
       pages += 1;
+      // GET — idempotent; keep the transient-blip retry.
       const res = await metaFetch(next, {
+        retry: true,
         headers: { authorization: `Bearer ${config.accessToken}` },
       });
       if (!res.ok) {
@@ -1080,8 +1287,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     url.searchParams.set("name", args.name);
     if (args.externalId) url.searchParams.set("hsm_id", args.externalId);
 
+    // DELETE is idempotent (a repeat 404 is treated as success below), so the
+    // transient-blip retry stays on.
     const res = await metaFetch(url, {
       method: "DELETE",
+      retry: true,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     if (!res.ok) {
@@ -1113,9 +1323,17 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     startUrl.searchParams.set("file_length", String(args.bytes.byteLength));
     startUrl.searchParams.set("file_type", args.mimeType);
     startUrl.searchParams.set("file_name", args.filename);
-    startUrl.searchParams.set("access_token", config.accessToken);
-
-    const startRes = await metaFetch(startUrl, { method: "POST" });
+    // Token goes in the Authorization header, NOT the query string. The Graph
+    // /{app-id}/uploads endpoint accepts `Authorization: Bearer`, and putting
+    // the decrypted access token in the URL leaked it into logs + the 502 error
+    // body whenever this call timed out (metaFetch's timeout message echoes the
+    // input URL, and the 502 surfaced to any team member with templates:manage).
+    const startRes = await metaFetch(startUrl, {
+      method: "POST",
+      // Staging upload session — no customer-visible effect, safe to retry.
+      retry: true,
+      headers: { authorization: `Bearer ${config.accessToken}` },
+    });
     if (!startRes.ok) {
       const text = await startRes.text();
       throw new MetaSendError(
@@ -1138,6 +1356,8 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     new Uint8Array(ab).set(args.bytes);
     const uploadRes = await metaFetch(uploadUrl, {
       method: "POST",
+      // Staging upload (resumable from offset 0) — safe to retry on a blip.
+      retry: true,
       headers: {
         authorization: `OAuth ${config.accessToken}`,
         file_offset: "0",
@@ -1325,8 +1545,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // same SDP answer. Without this Meta rejects pre_accept with 400 and
     // the call never connects on the answering side.
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    // Idempotent: a fixed (call_id, action) re-issued is a no-op on Meta's side.
+    // Keep the transient-blip retry (this is NOT the non-idempotent placeCall).
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -1353,8 +1576,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     config: MetaSendConfig,
   ): Promise<void> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    // Idempotent (fixed call_id + action); keep the transient-blip retry.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -1381,8 +1606,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     config: MetaSendConfig,
   ): Promise<void> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    // Idempotent (fixed call_id + action); keep the transient-blip retry.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -1409,8 +1636,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     config: MetaSendConfig,
   ): Promise<void> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/calls`;
+    // Idempotent terminate — a repeat on an already-ended call is treated as
+    // success below, so the transient-blip retry is safe to keep.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -1455,7 +1685,9 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     config: MetaSendConfig,
   ): Promise<{ raw: unknown }> {
     const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/settings`;
+    // GET — idempotent diagnostic read, keep the retry.
     const res = await metaFetch(url, {
+      retry: true,
       headers: { authorization: `Bearer ${config.accessToken}` },
     });
     const text = await safeMetaText(res);
@@ -1496,8 +1728,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
       open_time: "0000",
       close_time: "2359",
     }));
+    // Idempotent settings write — Meta returns success even when already
+    // enabled (see method doc), so a transient-blip retry is safe.
     const res = await metaFetch(url, {
       method: "POST",
+      retry: true,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.accessToken}`,
@@ -1561,7 +1796,7 @@ export class MetaSendError extends Error {
 export type MetaErrorCode =
   | "outside_24h_window"   // 131047 — recipient hasn't messaged in 24h; templates only
   | "invalid_recipient"    // 131026/131051 — number invalid or not on WhatsApp
-  | "rate_limited"         // 4 / 80007 — Meta rate limit hit
+  | "rate_limited"         // 4 / 80007 / 130429 / 131048 / 131056 — Meta rate/throughput/messaging limit hit
   | "auth_expired"         // 190 — access token expired
   | "unsupported_message"  // 131009 — content type not supported on this account
   | "duplicate_button_title" // 131009 + "Duplicate button title" — interactive buttons reuse a title
@@ -1613,7 +1848,25 @@ export function normalizeMetaSendError(err: unknown): NormalizedSendError | null
       httpStatus,
     };
   }
-  if (numericCode === 4 || numericCode === 80007) {
+  // Rate / throughput / messaging-limit family. 4 + 80007 are the legacy
+  // app-level rate codes; the ones a REAL send actually hits under burst are:
+  //   130429 — "Rate limit hit" (per-second message throughput; the most common
+  //            pacing rejection during a broadcast + concurrent inbox sends)
+  //   131048 — "Spam rate limit hit" (quality/messaging-limit restriction on the
+  //            number — lasts hours, not seconds)
+  //   131056 — business↔consumer pair rate limit (too many messages to one number)
+  // All five normalize to `rate_limited` so the existing retry machinery engages
+  // automatically: BullMQ send-worker retry, the broadcast runner's 429 streak
+  // backoff + cross-lane pause, and the forward-loop break. (131048's spam limit
+  // genuinely outlasts the 60s lane pause; the broadcast still paces + retries
+  // rather than mass-failing every recipient on the first rejection.)
+  if (
+    numericCode === 4 ||
+    numericCode === 80007 ||
+    numericCode === 130429 ||
+    numericCode === 131048 ||
+    numericCode === 131056
+  ) {
     return {
       code: "rate_limited",
       message: "WhatsApp is rate-limiting this number — slow down or wait.",

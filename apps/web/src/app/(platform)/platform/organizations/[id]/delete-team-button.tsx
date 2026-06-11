@@ -38,6 +38,17 @@ export function DeleteTeamButton({
         "This permanently removes the organization and EVERYTHING in it — contacts, conversations, messages, broadcasts, automations, every member account, every uploaded file. The WhatsApp connection is dropped. This cannot be undone.",
       confirmLabel: "Delete organization",
       destructive: true,
+      // Blast radius = an entire tenant with no undo. Require typing the org
+      // name so this can't be cleared with the same reflexive click as a tag
+      // delete.
+      requireText: teamName,
+      requireTextLabel: (
+        <>
+          Type the organization name{" "}
+          <span className="font-semibold text-foreground">{teamName}</span> to
+          confirm
+        </>
+      ),
     });
     if (!ok) return;
     const res = await apiFetch(`/api/admin/teams/${teamId}`, { method: "DELETE" });

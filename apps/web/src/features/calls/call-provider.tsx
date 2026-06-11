@@ -31,7 +31,17 @@ export function useCallApi(): CallApi {
   return ctx;
 }
 
-export function CallProvider({ children }: { children: ReactNode }) {
+export function CallProvider({
+  children,
+  canReceiveCalls,
+}: {
+  children: ReactNode;
+  /** Resolved `calls:receive` capability. When false the incoming-call toast
+   *  is suppressed entirely — a role an admin scoped OUT of calling must not
+   *  get ringing popups it can't answer (answer/reject are already API-gated;
+   *  this stops the misleading interruption + the 403-on-click). */
+  canReceiveCalls: boolean;
+}) {
   const callApi = useCall();
 
   return (
@@ -40,6 +50,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       {/* Fixed-position overlays — toast bottom-left, panel bottom-right; they
           float over whatever page is open and never shift the layout. */}
       <IncomingCallToast
+        canReceiveCalls={canReceiveCalls}
         onAnswer={(callId, contactName, conversationId) => {
           void callApi.answerIncoming(callId, contactName, conversationId);
         }}

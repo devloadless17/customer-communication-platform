@@ -8,6 +8,7 @@ import {
 import { assignableRoles, canModifyUser } from "@ccp/shared/auth/permissions";
 import type { Role, User, UserAvailabilityStatus } from "@ccp/shared/types";
 
+import { hashPassword, validatePasswordStructure } from "../auth/password";
 import { SessionInvalidationService } from "../auth/session-invalidation.service";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
@@ -300,6 +301,74 @@ export class UsersService {
 
     await this.bus.publish({ type: "team.catalog_changed", teamId, scope: "members" });
     return updated;
+  }
+
+  /**
+   * Admin-initiated password reset. The recovery path for a locked-out
+   * teammate: there's no self-serve email reset (no mail provider by design),
+   * so an admin/superAdmin sets a new password directly and hands it to the
+   * user out-of-band. Reuses the SAME bcrypt path as register / change-password
+   * (`hashPassword`) and writes the same `Account.password` row Better Auth
+   * verifies against — no separate hash scheme.
+   *
+   * Gates:
+   *   1. canModifyUser(actor, target) — admin can't reset a superAdmin's
+   *      password; superAdmin can reset anyone's.
+   *   2. team scope — `targetId` must belong to `teamId` (a team admin can
+   *      only touch their own org; the superAdmin path passes the org's id).
+   *
+   * On success EVERY session for the target is deleted + revoked, so any
+   * device still holding the old password's session is kicked — the same
+   * "credentials rotated, re-authenticate everywhere" guarantee
+   * change-password gives. (The UI gates self-reset out of both entry points
+   * — an admin rotates their OWN password via /settings/account — so this
+   * always operates on someone else; the unconditional revoke is correct.)
+   */
+  async resetPassword(
+    teamId: string,
+    actorRole: Role,
+    targetId: string,
+    newPassword: string,
+  ): Promise<void> {
+    const policyError = validatePasswordStructure(newPassword);
+    if (policyError) {
+      throw new BadRequestException({ error: policyError });
+    }
+
+    const target = await this.db.user.findFirst({
+      where: { id: targetId, teamId },
+      select: { id: true, role: true },
+    });
+    if (!target) throw new NotFoundException({ error: "user not found" });
+
+    if (!canModifyUser(actorRole, target.role as Role)) {
+      throw new ForbiddenException({ error: "cannot reset this user's password" });
+    }
+
+    const account = await this.db.account.findFirst({
+      where: { userId: targetId, providerId: "credential" },
+      select: { id: true },
+    });
+    // Every account is created with a credential row (invite-accept +
+    // register both insert one). A missing row means the user never set a
+    // password — nothing to reset, surface it rather than silently no-op.
+    if (!account) {
+      throw new BadRequestException({ error: "user has no password to reset" });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await this.db.account.update({
+      where: { id: account.id },
+      data: { password: newHash },
+    });
+
+    // Credentials rotated — invalidate every session for the target so a
+    // device still authenticated with the old password can't keep working
+    // for the 15s cache window. Mirrors change-password's invalidation, but
+    // drops ALL sessions (admin resetting someone else has no "this tab" to
+    // preserve).
+    await this.db.session.deleteMany({ where: { userId: targetId } });
+    this.sessionInvalidator.revoke(targetId, "password-reset");
   }
 
   /**

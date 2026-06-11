@@ -1,5 +1,9 @@
 import { db } from "@/lib/db";
-import { enqueueWorkflowResume, enqueueWorkflowRun } from "@/lib/workflows/queue";
+import {
+  clearTerminalJob,
+  enqueueWorkflowResume,
+  enqueueWorkflowRun,
+} from "@/lib/workflows/queue";
 
 /**
  * Periodic sweeper that recovers stranded workflow runs whose BullMQ job
@@ -22,10 +26,18 @@ import { enqueueWorkflowResume, enqueueWorkflowRun } from "@/lib/workflows/queue
  * Without this sweep, a stranded run sits forever with no visibility.
  * The runs UI shows the row but nothing happens.
  *
- * The sweep is idempotent — re-enqueueing a run whose job already exists
- * is a BullMQ no-op (custom jobId dedupe). The sweeper passes the run's
- * current stepLog.length as `waitSeq` so the computed jobId matches
- * what the runner used.
+ * The sweep is idempotent — re-enqueueing a run whose job is STILL LIVE
+ * (waiting / delayed / active) is a BullMQ no-op (custom jobId dedupe). The
+ * sweeper passes the run's current stepLog.length as `waitSeq` so the computed
+ * jobId matches what the runner used.
+ *
+ * BUT a deterministic jobId also dedupes against a RETAINED-terminal job:
+ * `removeOnFail` keeps a failed job for 7 days (queue.ts), so a run whose job
+ * failed its full retry budget (e.g. a DB outage spanning all 3 backoff
+ * attempts) would have its recovery silently no-op'd for up to 7 days — the
+ * sweeper reporting success while the run stays stranded. So before each
+ * re-enqueue we `clearTerminalJob(jobId)`: it removes a failed/completed hash
+ * (leaving a live job untouched) so the re-add actually re-creates the job.
  *
  * Interval: 60s. Short enough to recover quickly, long enough that the
  * tight (status, waitUntil) index makes the query trivial.
@@ -121,6 +133,15 @@ async function sweepOnce(): Promise<void> {
     // (the runner pushes the "waiting" entry, persists, then enqueues).
     const waitSeq = Array.isArray(run.stepLog) ? run.stepLog.length : 0;
     try {
+      // Clear a retained-terminal (failed/completed) job with this id first,
+      // else the re-add below is a silent dedupe no-op and the run stays
+      // stranded for the 7-day removeOnFail window. Live jobs are untouched.
+      const cleared = await clearTerminalJob(`resume-${run.id}-${waitSeq}`);
+      if (cleared) {
+        console.warn(
+          `[workflow-waiting-sweeper] cleared terminal resume job for run=${run.id} (waitSeq=${waitSeq}) before re-enqueue`,
+        );
+      }
       await enqueueWorkflowResume(run.id, delayMs, waitSeq);
     } catch (err) {
       console.warn(
@@ -132,8 +153,17 @@ async function sweepOnce(): Promise<void> {
 
   for (const run of strandedQueued) {
     // jobId is `run-${runId}` (see queue.ts) — same dedupe as the dispatcher,
-    // so this is a no-op if the dispatcher's late-retry happens to win.
+    // so this is a no-op if the dispatcher's late-retry happens to win. Clear
+    // a retained-terminal job first for the same reason as the waiting loop:
+    // a `run-${runId}` job that failed its retry budget would otherwise block
+    // recovery for the 7-day removeOnFail window.
     try {
+      const cleared = await clearTerminalJob(`run-${run.id}`);
+      if (cleared) {
+        console.warn(
+          `[workflow-waiting-sweeper] cleared terminal run job for run=${run.id} before re-enqueue`,
+        );
+      }
       await enqueueWorkflowRun(run.id);
     } catch (err) {
       console.warn(

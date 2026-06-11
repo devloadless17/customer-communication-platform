@@ -142,6 +142,22 @@ export function useCall(): {
     }
   }, []);
 
+  // Grace timer for a TRANSIENT WebRTC `disconnected`. Per the spec
+  // `disconnected` is frequently temporary (a brief packet-loss blip, a WiFi
+  // hop, a network-interface switch) and routinely returns to `connected` on
+  // its own — only `failed` is terminal. We start this timer on `disconnected`
+  // and only end the call if the state HASN'T recovered when it fires; a return
+  // to `connected`/`connecting` clears it. Cleared in releaseMedia so it can't
+  // outlive the peer connection and kill the next call.
+  const disconnectGraceRef = useRef<number | null>(null);
+
+  const clearDisconnectGrace = useCallback(() => {
+    if (disconnectGraceRef.current !== null) {
+      window.clearTimeout(disconnectGraceRef.current);
+      disconnectGraceRef.current = null;
+    }
+  }, []);
+
   // Outbound calls the agent cancelled while we were still in the tmp_ id window
   // (before placeCall returned Meta's real id). /end can't target a call that
   // doesn't exist yet, so we record the tmp id here and initiateOutbound
@@ -157,6 +173,7 @@ export function useCall(): {
   // call ends when calls overlap.
   const releaseMedia = useCallback(() => {
     clearPickupWatch();
+    clearDisconnectGrace();
     const pc = pcRef.current;
     if (pc) {
       // Detach handlers BEFORE closing. close() fires `connectionstatechange`
@@ -193,7 +210,7 @@ export function useCall(): {
       remoteAudioElRef.current.pause();
       remoteAudioElRef.current.srcObject = null;
     }
-  }, [clearPickupWatch]);
+  }, [clearPickupWatch, clearDisconnectGrace]);
 
   // Customer answered (real inbound audio observed). Flip to in_progress + start
   // the timer locally, flip the thread's activeCall pill for every viewer via a
@@ -514,36 +531,64 @@ export function useCall(): {
       }
     };
 
-    // Customer hangs up → connectionState goes disconnected → failed →
-    // closed. Tear down immediately AND POST /end so the audit row gets
-    // a terminal status. Don't wait on Meta's terminate webhook (lag-prone).
+    // Connection-state lifecycle. `failed`/`closed` are TERMINAL — tear down
+    // immediately AND POST /end so the audit row gets a terminal status (don't
+    // wait on Meta's lag-prone terminate webhook).
     //
-    // disconnected → failed → closed each fire this handler, so without a guard
-    // we'd POST /end (and run tearDown) 2-3× per teardown. Server-side endCall
-    // is idempotent so it's not a correctness bug, but the redundant POSTs are
-    // pure waste. One-shot per peer connection (the flag is per-call — setupPeer
-    // builds a fresh PC + closure each call).
+    // `disconnected`, however, is frequently TRANSIENT per the WebRTC spec — a
+    // brief packet-loss blip, a WiFi hop, an interface switch — and routinely
+    // recovers to `connected` on its own. Ending the call on it would drop live
+    // customer calls on a 1-2s network blip ("calls keep cutting out"). So we
+    // give `disconnected` a grace window: arm a timer and only end if the state
+    // hasn't recovered when it fires. A return to `connected`/`connecting`
+    // clears the timer. (Meta still ends the call its own side if the media leg
+    // is truly gone, and the server-side stale-calls sweeper is the final
+    // backstop — so a grace window can't strand a dead call.)
+    //
+    // teardownFired makes the terminal path one-shot (disconnected → failed →
+    // closed each fire this handler; server-side endCall is idempotent but the
+    // redundant POSTs are waste). Per-call — setupPeer builds a fresh closure.
+    const DISCONNECT_GRACE_MS = 8_000;
     let teardownFired = false;
+    const fireTeardown = () => {
+      if (teardownFired) return;
+      teardownFired = true;
+      const live = liveCallRef.current;
+      if (live && !live.callId.startsWith("tmp_")) {
+        void fetchWithSessionGuard(`/api/calls/${live.callId}/end`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }).catch(() => {});
+      }
+      tearDown();
+    };
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      if (state === "failed" || state === "disconnected" || state === "closed") {
-        if (teardownFired) return;
-        teardownFired = true;
-        const live = liveCallRef.current;
-        if (live && !live.callId.startsWith("tmp_")) {
-          void fetchWithSessionGuard(`/api/calls/${live.callId}/end`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({}),
-          }).catch(() => {});
+      if (state === "failed" || state === "closed") {
+        clearDisconnectGrace();
+        fireTeardown();
+      } else if (state === "disconnected") {
+        // Don't kill the call yet — wait out the grace window. If still not
+        // recovered when it fires, end it. Re-arm guard: only one timer.
+        if (disconnectGraceRef.current === null && !teardownFired) {
+          disconnectGraceRef.current = window.setTimeout(() => {
+            disconnectGraceRef.current = null;
+            // Re-check: a recovery between the timer firing and now would have
+            // moved us off `disconnected`. Only end if we're still degraded.
+            const s = pcRef.current?.connectionState;
+            if (s === "disconnected" || s === "failed") fireTeardown();
+          }, DISCONNECT_GRACE_MS);
         }
-        tearDown();
+      } else if (state === "connected" || state === "connecting") {
+        // Recovered (or progressing) — cancel any pending disconnect teardown.
+        clearDisconnectGrace();
       }
     };
 
     pcRef.current = pc;
     return pc;
-  }, [tearDown, releaseMedia]);
+  }, [tearDown, releaseMedia, clearDisconnectGrace]);
 
   const answerIncoming = useCallback(
     async (callId: string, contactName: string, conversationId: string) => {
@@ -580,7 +625,9 @@ export function useCall(): {
           fail(
             res.status === 409
               ? "Another teammate already picked up this call."
-              : "Couldn't accept the call. Try again.",
+              : res.status === 403
+                ? "You don't have permission to answer calls."
+                : "Couldn't accept the call. Try again.",
           );
           tearDown();
           return;

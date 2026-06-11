@@ -71,7 +71,7 @@ import {
  *   POST   /v1/contacts/upsert                — find-or-create by phone
  *   GET    /v1/contacts/:id                   — fetch one
  *   PATCH  /v1/contacts/:id                   — partial update
- *   DELETE /v1/contacts/:id                   — hard delete
+ *   DELETE /v1/contacts/:id                   — soft delete (removes from directory; conversation history preserved)
  *   GET    /v1/contacts/:id/channels          — list channels (siloed-per-channel → one row)
  *   POST   /v1/contacts/:id/tags              — add tag(s) to one contact
  *   DELETE /v1/contacts/:id/tags/:tagId       — remove a tag from one contact
@@ -146,6 +146,31 @@ export class ExternalV1Controller {
     }
   }
 
+  /**
+   * Normalize the inbound `Idempotency-Key` header for EVERY /v1 mutation:
+   *   - trim; empty/absent → `undefined` (no idempotency, as before)
+   *   - > 255 chars → 400 `idempotency_key_too_long` (Stripe convention: an
+   *     invalid key errors, it does NOT silently degrade — the two send routes
+   *     used to drop an over-long key, leaving the highest-risk operation with
+   *     ZERO duplicate-send protection on a partner's retry-after-timeout flow).
+   * 255 is the same ceiling the send routes already enforced; applying it
+   * uniformly keeps the surface internally consistent (other routes had NO cap).
+   */
+  private idemKey(raw: string | undefined): string | undefined {
+    const trimmed = raw?.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.length > 255) {
+      throw new HttpException(
+        {
+          error: "idempotency_key_too_long",
+          detail: "Idempotency-Key must be at most 255 characters.",
+        },
+        400,
+      );
+    }
+    return trimmed;
+  }
+
   // ---- Contacts: list + find -----------------------------------------
 
   @Get("contacts")
@@ -192,7 +217,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       "tag-add",
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -211,7 +236,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       "tag-remove",
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -243,7 +268,7 @@ export class ExternalV1Controller {
       auth.teamId,
       auth.apiKeyId,
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
   }
 
@@ -265,7 +290,8 @@ export class ExternalV1Controller {
     this.guardChainDepth(xCcpDepth);
     if (rawBody && Object.prototype.hasOwnProperty.call(rawBody, "phoneNumber")) {
       throw new BadRequestException({
-        error:
+        error: "phone_immutable",
+        detail:
           "phoneNumber is not editable — it's the WhatsApp identity for this contact",
       });
     }
@@ -281,7 +307,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       parsed.data,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
     return { contact };
   }
@@ -324,7 +350,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
     return { contact };
   }
@@ -344,7 +370,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       tagId,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
     return { contact };
   }
@@ -371,7 +397,7 @@ export class ExternalV1Controller {
       id,
       body.tagIds,
       body.silent === true,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
     return { contact };
   }
@@ -503,7 +529,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    await this.api.assign(auth.teamId, auth.apiKeyId, id, body, idempotencyKey?.trim() || undefined);
+    await this.api.assign(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
     return { ok: true };
   }
 
@@ -517,7 +543,7 @@ export class ExternalV1Controller {
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
     this.guardChainDepth(xCcpDepth);
-    await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, idempotencyKey?.trim() || undefined);
+    await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
     return { ok: true };
   }
 
@@ -542,7 +568,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
   }
 
@@ -561,7 +587,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
     );
   }
 
@@ -584,12 +610,11 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    const trimmed = idempotencyKey?.trim();
     return this.api.sendTopLevelMessage(
       auth.teamId,
       auth.apiKeyId,
       body,
-      trimmed && trimmed.length > 0 && trimmed.length <= 255 ? trimmed : undefined,
+      this.idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -630,13 +655,12 @@ export class ExternalV1Controller {
     // from a partner that never receives our webhooks parse as depth=0.
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
-    const trimmed = idempotencyKey?.trim();
     const out = await this.api.sendMessage(
       auth.teamId,
       auth.apiKeyId,
       id,
       body,
-      trimmed && trimmed.length > 0 && trimmed.length <= 255 ? trimmed : undefined,
+      this.idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
     return { ok: true, message: out.message };
@@ -658,7 +682,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      idempotencyKey?.trim() || undefined,
+      this.idemKey(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
     return { ok: true, note: out.note };

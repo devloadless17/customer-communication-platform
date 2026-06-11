@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Archive, Check, ChevronDown, CircleCheck, CircleDashed } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +18,7 @@ import {
   buildOptimisticStatusChange,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
+import { STATUS_META } from "@/features/inbox/lib/status-meta";
 import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
@@ -45,15 +46,7 @@ export function StatusDropdown({
 }) {
   const [pending, setPending] = useState(false);
 
-  const map: Record<
-    ConversationStatus,
-    { label: string; icon: typeof CircleCheck; cls: string }
-  > = {
-    open: { label: "Open", icon: CircleDashed, cls: "text-emerald-600 dark:text-emerald-400" },
-    pending: { label: "Pending", icon: CircleDashed, cls: "text-amber-600 dark:text-amber-400" },
-    closed: { label: "Closed", icon: Archive, cls: "text-muted-foreground" },
-  };
-  const Icon = map[current].icon;
+  const Icon = STATUS_META[current].icon;
 
   const setStatus = async (status: ConversationStatus) => {
     if (status === current || pending) return;
@@ -163,18 +156,14 @@ export function StatusDropdown({
     }
   };
 
-  const items: { value: ConversationStatus; icon: typeof CircleCheck; cls: string }[] = [
-    { value: "open", icon: CircleDashed, cls: "text-emerald-600" },
-    { value: "pending", icon: CircleDashed, cls: "text-amber-600" },
-    { value: "closed", icon: CircleCheck, cls: "text-muted-foreground" },
-  ];
+  const items: ConversationStatus[] = ["open", "pending", "closed"];
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" className="h-8 gap-1.5" disabled={pending}>
-          <Icon className={cn("size-3.5", map[current].cls)} />
-          <span className="font-normal">{map[current].label}</span>
+          <Icon className={cn("size-3.5", STATUS_META[current].cls)} />
+          <span className="font-normal">{STATUS_META[current].label}</span>
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
@@ -187,16 +176,19 @@ export function StatusDropdown({
         // boilerplate that doesn't apply here.
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
-        {items.map(({ value, icon: ItemIcon, cls }) => (
-          <DropdownMenuItem key={value} onSelect={() => void setStatus(value)}>
-            {value === current ? (
-              <Check className="size-3.5" />
-            ) : (
-              <ItemIcon className={cn("size-3.5", cls)} />
-            )}
-            {map[value].label}
-          </DropdownMenuItem>
-        ))}
+        {items.map((value) => {
+          const { label, icon: ItemIcon, cls } = STATUS_META[value];
+          return (
+            <DropdownMenuItem key={value} onSelect={() => void setStatus(value)}>
+              {value === current ? (
+                <Check className="size-3.5" />
+              ) : (
+                <ItemIcon className={cn("size-3.5", cls)} />
+              )}
+              {label}
+            </DropdownMenuItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

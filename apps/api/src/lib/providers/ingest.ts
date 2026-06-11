@@ -26,6 +26,7 @@ import type {
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedStatusUpdate,
+  NormalizedTemplateStatusUpdate,
 } from "@ccp/shared/providers/types";
 import type {
   Conversation,
@@ -76,6 +77,8 @@ export async function ingestEvents(
     try {
       if (evt.kind === "message") {
         await ingestInboundMessage(teamId, channel, evt);
+      } else if (evt.kind === "template_status") {
+        await ingestTemplateStatusUpdate(teamId, evt);
       } else if (evt.kind === "call") {
         // Kill-switch: WhatsApp calling is in-flight and reaches browsers via
         // realtime WebRTC signaling. DISABLE_WHATSAPP_CALLING=1 (wired in
@@ -203,30 +206,64 @@ async function ingestStatusUpdate(
     return;
   }
 
-  // `failed` is terminal in BOTH directions:
-  //   - As target: it transitions from ANY non-failed state. Meta can
-  //     deliver a failure async after a `delivered`/`read` and the agent
-  //     must see it (silent drops were the original bug).
-  //   - As source: once a message is `failed`, late `delivered`/`read`
-  //     retries from Meta must NOT overwrite it back to a green status.
-  //     Without this guard, the rank-only check below allowed
-  //     `failed → delivered` because rank(delivered)=1 > rank(failed)=-1.
-  if (existing.status === "failed" && evt.status !== "failed") {
-    return;
-  }
-  // Monotonic rank guard for the non-terminal transitions
-  // (sent → delivered → read).
-  if (
-    evt.status !== "failed" &&
-    statusRank(evt.status) <= statusRank(existing.status as Message["status"])
-  ) {
-    return;
-  }
+  // Decide whether `incoming` should overwrite `current`, applying both guards:
+  //   - `failed` is terminal: as TARGET it wins from any non-failed state
+  //     (Meta can fail a message async after delivered/read and the agent must
+  //     see it); as SOURCE it's sticky (a late delivered/read can't revert a
+  //     failed back to green — rank alone would allow it since rank(failed)=-1).
+  //   - Otherwise the monotonic rank guard (sent < delivered < read) wins.
+  const winsOver = (incoming: Message["status"], current: Message["status"]): boolean => {
+    if (current === "failed") return false; // failed is terminal — nothing overwrites it
+    if (incoming === "failed") return true; // failure overwrites any non-failed
+    return statusRank(incoming) > statusRank(current as Message["status"]);
+  };
 
-  await db.message.update({
-    where: { id: existing.id },
-    data: { status: evt.status },
-  });
+  if (!winsOver(evt.status, existing.status as Message["status"])) return;
+
+  // CAS the write against the status we just read. A single Meta batch (or two
+  // near-simultaneous deliveries) can carry both `delivered` and `read` for the
+  // same wamid; processed on different ingest lanes, both findUnique the row at
+  // `sent`, both pass the guard, and a bare `update` lets whichever commits LAST
+  // win — so a late `delivered` could regress a row already at `read`. Pinning
+  // `status` in the WHERE means only the first writer at that pinned status
+  // lands. The LOSER, however, must NOT silently drop a higher status: if
+  // `delivered` wins the CAS race, the concurrent `read` lane's CAS misses
+  // (row is no longer `sent`) — without a re-check the customer's read receipt
+  // would be lost and the ticks stay grey forever. So on a CAS miss we re-read
+  // the now-current status and re-evaluate: if our status STILL wins we retry
+  // against the new pin; if it lost legitimately (e.g. a `delivered` arriving
+  // after `read` already committed) we return. The loop is bounded by the rank
+  // ladder (sent→delivered→read = at most 3 states), so a small fixed cap can't
+  // spin. Failure diagnostics ride the same write — only set on a `failed`
+  // transition that carried a reason; a later non-failed status can't reach a
+  // failed row (terminal), so they never need clearing back to null.
+  let pinnedStatus: Message["status"] = existing.status as Message["status"];
+  let written = { count: 0 };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    written = await db.message.updateMany({
+      where: { id: existing.id, status: pinnedStatus },
+      data: {
+        status: evt.status,
+        ...(evt.status === "failed"
+          ? {
+              statusErrorCode: evt.errorCode ?? null,
+              statusErrorTitle: evt.errorTitle ?? null,
+              statusErrorDetail: evt.errorDetail ?? null,
+            }
+          : {}),
+      },
+    });
+    if (written.count > 0) break;
+    // CAS miss — a concurrent lane moved the row. Re-read and re-decide.
+    const current = await db.message.findUnique({
+      where: { id: existing.id },
+      select: { status: true },
+    });
+    if (!current) return; // row vanished (hard delete) — nothing to do
+    if (!winsOver(evt.status, current.status as Message["status"])) return; // lost legitimately
+    pinnedStatus = current.status as Message["status"];
+  }
+  if (written.count === 0) return;
 
   await publish({
     type: "message.status_changed",
@@ -235,6 +272,66 @@ async function ingestStatusUpdate(
     contactId: existing.conversation.contactId,
     messageId: existing.id,
     status: evt.status,
+    ...(evt.status === "failed" && evt.errorCode !== undefined
+      ? { errorCode: evt.errorCode }
+      : {}),
+    ...(evt.status === "failed" && evt.errorTitle !== undefined
+      ? { errorTitle: evt.errorTitle }
+      : {}),
+    ...(evt.status === "failed" && evt.errorDetail !== undefined
+      ? { errorDetail: evt.errorDetail }
+      : {}),
+  });
+}
+
+/**
+ * Apply a `message_template_status_update` webhook to the local catalog. Meta
+ * sends these when a template is approved, paused for quality, disabled, or
+ * rejected — keeping the local `MessageTemplate.status` fresh AUTOMATICALLY so a
+ * Meta-paused template can't silently mass-fail a scheduled broadcast and a
+ * newly-approved one becomes sendable without a manual "Sync" click.
+ *
+ * Match priority: Meta's template id (externalId) first, then (name, language)
+ * — a template synced before externalId existed, or a manual-Manager template
+ * we haven't fetched yet, still matches on the natural key. We only WRITE when
+ * the event mapped to a known status (`status !== null`); an unmappable future
+ * `event` value is a no-op (the next manual/automatic sync reconciles it).
+ *
+ * We update in place rather than upsert — a status-update for a template we've
+ * never synced has no body/components/category to create a complete row from,
+ * so we let the catalog sync own row creation and only flip status here.
+ */
+async function ingestTemplateStatusUpdate(
+  teamId: string,
+  evt: NormalizedTemplateStatusUpdate,
+): Promise<void> {
+  if (!evt.status) return; // unmappable event value — nothing to write
+
+  // Prefer matching on Meta's template id (externalId); fall back to the
+  // natural (name, language) key. Build the narrowest WHERE we can.
+  const where: Prisma.MessageTemplateWhereInput = { teamId };
+  if (evt.externalId) {
+    where.externalId = evt.externalId;
+  } else if (evt.name) {
+    where.name = evt.name;
+    if (evt.language) where.language = evt.language;
+  } else {
+    return; // no identity to match on (parser already guards, belt-and-braces)
+  }
+
+  const result = await db.messageTemplate.updateMany({
+    where,
+    data: { status: evt.status },
+  });
+  if (result.count === 0) return; // template not in our catalog yet — sync owns creation
+
+  // Refresh every open /settings/whatsapp + broadcast-form tab so the new
+  // status (e.g. a now-paused template) surfaces without a manual reload. Reuses
+  // the same catalog-changed event syncTemplates publishes.
+  await publish({
+    type: "team.catalog_changed",
+    teamId,
+    scope: "whatsapp-templates",
   });
 }
 

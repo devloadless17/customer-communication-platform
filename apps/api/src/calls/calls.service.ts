@@ -7,9 +7,15 @@ import {
   NotFoundException,
   Logger,
 } from "@nestjs/common";
-import { CallDirection, CallStatus, Prisma } from "@prisma/client";
+import {
+  CallDirection,
+  CallPermissionStatus,
+  CallStatus,
+  Prisma,
+} from "@prisma/client";
 
 import { getProviderBinding, requireProviderMethod } from "@/lib/providers";
+import { normalizeMetaSendError } from "@/lib/providers/meta";
 import {
   BIC_BLOCKED_COUNTRY_CODES,
   SANCTIONED_COUNTRY_CODES,
@@ -41,6 +47,7 @@ import type { ApiSession } from "../auth/session.guard";
 
 export type InitiateCallFailure =
   | { ok: false; reason: "permission_required" }
+  | { ok: false; reason: "permission_pending" }
   | { ok: false; reason: "bic_blocked_region" }
   | { ok: false; reason: "permission_revoked" }
   | { ok: false; reason: "rate_limited"; retryAt: string }
@@ -148,33 +155,65 @@ export class CallsService {
         now - contact.lastInboundAt.getTime() < 24 * 60 * 60 * 1000,
     );
     if (!skipPreflight && !insideWindow) {
-      const livePerm = await this.db.callPermissionRequest.findFirst({
-        where: { teamId: session.teamId, contactId: contact.id },
+      // A call is only permitted out-of-window against a GRANTED permission
+      // still inside its 72h validity. Sending a request is NOT a grant — the
+      // permission_granted webhook stamps `granted` + `grantedAt`. expiresAt
+      // alone (set +72h at REQUEST time) used to gate this, which made a merely-
+      // sent request a 72h green light and produced opaque provider_rejected
+      // errors for ungranted/denied contacts.
+      const grantedPerm = await this.db.callPermissionRequest.findFirst({
+        where: {
+          teamId: session.teamId,
+          contactId: contact.id,
+          status: CallPermissionStatus.granted,
+          expiresAt: { gt: new Date(now) },
+        },
         orderBy: { requestedAt: "desc" },
-        select: { expiresAt: true, rateLimitedUntil: true },
+        select: { id: true },
       });
-      const permLive =
-        livePerm?.expiresAt && livePerm.expiresAt.getTime() > now;
-      if (!permLive) {
-        // Decide between "rate_limited" and "permission_required" based on
-        // a fresh-enough rate-limit timestamp.
+      if (!grantedPerm) {
+        // No live grant. Look at the newest request row to decide the precise
+        // not-yet-callable reason the UI should render.
+        const latest = await this.db.callPermissionRequest.findFirst({
+          where: { teamId: session.teamId, contactId: contact.id },
+          orderBy: { requestedAt: "desc" },
+          select: {
+            status: true,
+            expiresAt: true,
+            rateLimitedUntil: true,
+          },
+        });
+        // Meta rate-limited a recent request (1/24h or 2/7d) — surface the
+        // retry time. This is now ONLY set on a genuine Meta rate-limit
+        // (see requestPermissionInternal), never on a transient failure.
         if (
-          livePerm?.rateLimitedUntil &&
-          livePerm.rateLimitedUntil.getTime() > now
+          latest?.rateLimitedUntil &&
+          latest.rateLimitedUntil.getTime() > now
         ) {
           return {
             ok: false,
             reason: "rate_limited",
-            retryAt: livePerm.rateLimitedUntil.toISOString(),
+            retryAt: latest.rateLimitedUntil.toISOString(),
           };
         }
-        // Fire the permission request opportunistically — if Meta accepts,
-        // log it; if Meta rate-limits, write the rateLimitedUntil row.
-        // Either way the UI surfaces "permission_required" and the agent
-        // re-clicks once granted. Swallow the throw: the permission row
-        // (success OR rate-limit) is the source of truth for the next click;
-        // a 5xx-bubble here would 502 the inbox button on every contact
-        // that's never received a permission request.
+        // A request is already out and still within its 72h window, but the
+        // customer hasn't accepted it (status still `pending`, and it's not a
+        // rate-limit placeholder). Don't re-fire — Meta caps requests at 1/24h
+        // and a second send would just burn the quota. Tell the agent we're
+        // waiting on the customer.
+        if (
+          latest?.status === CallPermissionStatus.pending &&
+          !latest.rateLimitedUntil &&
+          latest.expiresAt.getTime() > now
+        ) {
+          return { ok: false, reason: "permission_pending" };
+        }
+        // Nothing live on file (never requested, or the prior request expired /
+        // was denied). Fire a fresh permission request opportunistically and
+        // tell the agent to retry once the customer accepts. Swallow the throw:
+        // the permission row is the source of truth for the next click; a
+        // transient failure no longer writes a cooldown (it rethrows), so the
+        // agent can simply retry — a 5xx-bubble here would 502 the inbox button.
         try {
           await this.requestPermissionInternal(
             session.teamId,
@@ -502,23 +541,40 @@ export class CallsService {
           contactId,
           externalRequestId: out.permissionRequestId,
           expiresAt: out.expiresAt,
+          // The request was DELIVERED — but it's not a grant yet. The customer
+          // still has to accept; the permission_granted webhook flips this to
+          // `granted`. The pre-flight gate keys on `granted`, so `pending` here
+          // surfaces a clear "waiting on the customer" state, not a green light.
+          status: CallPermissionStatus.pending,
         },
       });
       return out;
     } catch (err) {
-      // Meta returns 4xx with a body that mentions rate-limiting on
-      // 1/24h or 2/7d violations. We don't try to parse the wire
-      // message — just record a 24h cooldown and let the next attempt
-      // surface a fresh state.
-      const rateLimitedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      await this.db.callPermissionRequest.create({
-        data: {
-          teamId,
-          contactId,
-          expiresAt: new Date(0),
-          rateLimitedUntil,
-        },
-      });
+      // ONLY persist a rate-limit cooldown when Meta ACTUALLY rate-limited the
+      // request (its 1/24h or 2/7d cap → numeric code 4 / 80007, normalized to
+      // `rate_limited`). A transient failure — a 5xx, a network error, or the
+      // 20s metaFetch timeout (which throws a plain Error, not a MetaSendError)
+      // — must NOT brick outbound calling to this contact for 24h under a
+      // misleading "rate_limited" reason. Those rethrow with no row written, so
+      // the agent can simply retry. Previously EVERY failure wrote a 24h cooldown
+      // and initiateCall reads only the NEWEST row, so one network blip shadowed
+      // any valid grant for a full day.
+      const normalized = normalizeMetaSendError(err);
+      if (normalized?.code === "rate_limited") {
+        const rateLimitedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        await this.db.callPermissionRequest.create({
+          data: {
+            teamId,
+            contactId,
+            expiresAt: new Date(0),
+            rateLimitedUntil,
+            // Never reached the customer → not a pending grant; the
+            // rateLimitedUntil timestamp is the discriminator the pre-flight
+            // reads to surface a "rate_limited" reason instead of "pending".
+            status: CallPermissionStatus.pending,
+          },
+        });
+      }
       throw err;
     }
   }
@@ -622,6 +678,15 @@ export class CallsService {
           data: {
             status: CallStatus.failed,
             endedAt,
+            // The optimistic CAS above stamped answeredByUserId + answeredAt to
+            // flip the row to in_progress. Meta then rejected the accept, so the
+            // call NEVER connected — null both back out. Leaving answeredAt set
+            // makes `connected: answeredAt !== null` (listTeamCalls) report a
+            // failed answer attempt as a connected call and permanently
+            // attributes the agent to a call they never spoke on. CAS-gated on
+            // status:in_progress, so a racing terminal webhook still wins.
+            answeredAt: null,
+            answeredByUserId: null,
             // durationSeconds left null — the call never actually connected.
           },
         });
@@ -752,6 +817,15 @@ export class CallsService {
         direction: CallDirection.out,
         status: CallStatus.ringing,
         answeredAt: null,
+        // Only the agent who PLACED the call can report its pickup — the
+        // browser pickup signal is local to the originating peer connection.
+        // Without this scope, any teammate with the default-true calls:make
+        // capability could flip another agent's ringing call to connected
+        // (stamping answeredAt, burning the 5/24h connected-call cap, and
+        // flipping the thread pill to in_progress for every viewer on a call
+        // that may never have been picked up). count 0 (not the initiator) →
+        // idempotent success, same as the already-connected/terminal case.
+        initiatedByUserId: session.userId,
       },
       data: { status: CallStatus.in_progress, answeredAt },
     });
@@ -783,6 +857,15 @@ export class CallsService {
    * terminated call returns success. Cap check is inline because either
    * make OR receive capability is sufficient (the answering agent + the
    * initiating agent can both hang up).
+   *
+   * DELIBERATELY team-scoped, NOT initiator/answerer-scoped: in a shared
+   * inbox any calling-capable teammate can end a live call (the same model
+   * as any teammate replying to / closing a conversation). We do NOT pin
+   * this to the initiator/answerer — that would block a supervisor or a
+   * second agent from rescuing a stuck call. Unlike markConnected (which
+   * stamps answeredAt and feeds the daily cap, so it MUST be initiator-only),
+   * ending is a terminal, idempotent, audit-logged action with no such
+   * accounting side effect, so the broader grant is the right product call.
    */
   async endCall(
     session: ApiSession,
@@ -807,6 +890,11 @@ export class CallsService {
         status: true,
         ringingAt: true,
         answeredAt: true,
+        // The contact behind this call — needed to bump the consecutive-
+        // unanswered-outbound counter when the agent ends a never-connected
+        // outbound (the webhook path can't, because we terminalize the row
+        // first and Meta's later terminate lands on an already-terminal row).
+        conversation: { select: { contactId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call not found" });
@@ -898,6 +986,22 @@ export class CallsService {
         callId: call.id,
         ringingAt: call.ringingAt.toISOString(),
       });
+      // Mirror Meta's auto-revocation counter (4 consecutive unanswered
+      // outbound calls). The webhook ingest path increments this on a genuine
+      // non-terminal→terminal `missed` transition — but the MOST COMMON no-
+      // answer ending goes through THIS REST endCall (the browser's 60s ring-
+      // timeout auto-POST + manual agent cancel), which terminalizes the row as
+      // `missed` first. Meta's own later terminate webhook then lands on an
+      // already-terminal row and the alreadyTerminal guard skips the increment,
+      // so without this the local early-warning mirror drifts low. Only the
+      // never-connected OUTBOUND case counts (inbound has no such cap, and a
+      // connected call resets the counter via the webhook's completed path).
+      if (call.direction === CallDirection.out && call.conversation?.contactId) {
+        await this.db.contact.update({
+          where: { id: call.conversation.contactId },
+          data: { consecutiveUnansweredOutCalls: { increment: 1 } },
+        });
+      }
     }
 
     return { ok: true, durationSeconds };

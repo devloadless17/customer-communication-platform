@@ -86,6 +86,10 @@ export function MessageSearch({
   useEffect(() => {
     inputRef.current?.focus();
     function onKey(e: KeyboardEvent) {
+      // A deeper modal layer (e.g. the MediaLightbox opened on top of search)
+      // owns the Escape and marks it handled — don't also close the search bar
+      // and wipe the agent's active query/match position.
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();

@@ -251,6 +251,10 @@ function BubbleContent({
           )}
           {message.body && (
             <p
+              // dir="auto" derives base direction from the first strong
+              // character so Arabic/Hebrew messages right-align with correct
+              // punctuation placement (WhatsApp Web behavior). Latin stays LTR.
+              dir="auto"
               className={cn(
                 "whitespace-pre-wrap wrap-break-word",
                 media || reply ? "px-2.5 pb-1.5 pt-2" : "",

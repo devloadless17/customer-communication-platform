@@ -41,6 +41,7 @@ import {
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { predictAssignmentStatus } from "@/features/inbox/lib/predict-status";
+import { STATUS_META } from "@/features/inbox/lib/status-meta";
 import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
@@ -61,12 +62,6 @@ import { EditableField } from "./contact-panel/editable-field";
 import { EditableHeading } from "./contact-panel/editable-heading";
 import { ReadOnlyRow } from "./contact-panel/read-only-row";
 import { Section } from "./contact-panel/section";
-
-const STATUS_LABEL: Record<ConversationStatus, string> = {
-  open: "Open",
-  pending: "Pending",
-  closed: "Closed",
-};
 
 /**
  * Shape of every editable contact field tracked by the panel. Used to type
@@ -129,6 +124,15 @@ interface PanelProps {
    *  Reuses the same `jumpTarget` state inbox-shell already drives for
    *  global search results. */
   onGoToMessage: (messageId: string) => void;
+  /**
+   * Layout container. `"aside"` (default) = the desktop `lg:`-only right rail
+   * with collapse-to-rail. `"sheet"` = render the body full-width with no
+   * `<aside>` chrome + no collapse toggle, for the mobile/tablet Sheet (the
+   * Sheet supplies its own container + close button). Below `lg` the desktop
+   * aside is hidden, so the Sheet is the ONLY way to reach contact details
+   * (tags, stage, custom fields, files) on a phone.
+   */
+  variant?: "aside" | "sheet";
 }
 
 function ContactPanelImpl({
@@ -141,7 +145,9 @@ function ContactPanelImpl({
   currentUserName,
   initialCollapsed,
   onGoToMessage,
+  variant = "aside",
 }: PanelProps) {
+  const isSheet = variant === "sheet";
   const { contact, conversation, messages, notes } = data;
   const router = useRouter();
   const softRefresh = useSoftRefresh();
@@ -922,40 +928,30 @@ function ContactPanelImpl({
     .filter((k) => !definedKeys.has(k))
     .sort();
 
-  return (
-    <aside
-      className="hidden h-full shrink-0 flex-col overflow-hidden border-l border-border bg-sidebar text-sidebar-foreground lg:flex"
-      style={{
-        width: collapsed ? 48 : 320,
-        transition: transitionEnabled
-          ? "width 250ms cubic-bezier(0.4, 0, 0.2, 1)"
-          : "none",
-      }}
-    >
-      {collapsed && (
-        // Collapsed rail: a single expand button filling the thin rail.
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              onClick={toggleCollapsed}
-              className="flex h-11 w-12 shrink-0 items-center justify-center border-b border-border text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
-              aria-label="Expand contact panel"
-            >
-              <ChevronLeft className="size-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="left">Contact details</TooltipContent>
-        </Tooltip>
-      )}
-      {/* Expanded body. Fixed 320px inner width + shrink-0 so the dense content
-          never reflows/squashes while the aside animates its width — it stays
-          full-width and the shrinking aside (overflow-hidden) clips it from the
-          right, a clean slide-out. Unmounted when collapsed so it can't stack
-          under the rail button in the 48px column. */}
-      {!collapsed && (
-      <div className="flex h-full w-[320px] shrink-0 flex-col">
-      {/* Header bar with the collapse toggle, at the panel's right edge. */}
+  // In the mobile Sheet the panel is always expanded full-width (the Sheet is
+  // the container) — the desktop collapse-to-rail doesn't apply.
+  const effectiveCollapsed = isSheet ? false : collapsed;
+
+  // Inner body — identical in both variants. Wrapped by either the desktop
+  // `<aside>` (with collapse rail) or, on mobile, a plain full-width flex div
+  // inside the Sheet.
+  const body = (
+      <div
+        className={cn(
+          "flex h-full shrink-0 flex-col",
+          isSheet ? "w-full" : "w-[320px]",
+        )}
+      >
+      {/* Header bar. Desktop: collapse toggle at the right edge. Sheet: just
+          the "Details" label (the Sheet renders its own close X; the `pr-11`
+          keeps the label clear of it). */}
+      {isSheet ? (
+        <div className="flex h-11 shrink-0 items-center border-b border-border pl-4 pr-11">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Details
+          </span>
+        </div>
+      ) : (
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border pl-4 pr-1.5">
         <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           Details
@@ -974,6 +970,7 @@ function ContactPanelImpl({
           <TooltipContent side="left">Collapse panel</TooltipContent>
         </Tooltip>
       </div>
+      )}
       {/* View tabs (Details / Files). Sits between the header strip and the
           panel body. Tiny segmented control to match the panel's density. */}
       <div className="flex shrink-0 items-center gap-1 border-b border-border px-3 py-2">
@@ -1395,13 +1392,51 @@ function ContactPanelImpl({
           <ReadOnlyRow
             icon={Clock}
             label="Status"
-            value={STATUS_LABEL[liveStatus]}
+            value={STATUS_META[liveStatus].label}
           />
         </Section>
 
       </ScrollArea>
       )}
       </div>
+  );
+
+  // Sheet variant: no `<aside>` chrome, no collapse — the Sheet owns the
+  // container. Render the body directly.
+  if (isSheet) return body;
+
+  return (
+    <aside
+      className="hidden h-full shrink-0 flex-col overflow-hidden border-l border-border bg-sidebar text-sidebar-foreground lg:flex"
+      style={{
+        width: effectiveCollapsed ? 48 : 320,
+        transition: transitionEnabled
+          ? "width 250ms cubic-bezier(0.4, 0, 0.2, 1)"
+          : "none",
+      }}
+    >
+      {effectiveCollapsed ? (
+        // Collapsed rail: a single expand button filling the thin rail.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              className="flex h-11 w-12 shrink-0 items-center justify-center border-b border-border text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+              aria-label="Expand contact panel"
+            >
+              <ChevronLeft className="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="left">Contact details</TooltipContent>
+        </Tooltip>
+      ) : (
+        // Expanded body. Fixed 320px inner width + shrink-0 so the dense
+        // content never reflows/squashes while the aside animates its width —
+        // it stays full-width and the shrinking aside (overflow-hidden) clips
+        // it from the right, a clean slide-out. Unmounted when collapsed so it
+        // can't stack under the rail button in the 48px column.
+        body
       )}
     </aside>
   );
@@ -1425,6 +1460,7 @@ function ContactPanelImpl({
  * shallow message-array changes don't need to invalidate the panel.
  */
 export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
+  if (prev.variant !== next.variant) return false;
   if (prev.initialCollapsed !== next.initialCollapsed) return false;
   if (prev.canManageFields !== next.canManageFields) return false;
   if (prev.currentUserName !== next.currentUserName) return false;

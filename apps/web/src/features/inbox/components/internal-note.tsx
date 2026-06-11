@@ -34,7 +34,7 @@ function InternalNoteImpl({
               <LocalTime iso={note.timestamp} format="messageTime" />
             </span>
           </div>
-          <p className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed">{note.body}</p>
+          <p dir="auto" className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed">{note.body}</p>
         </div>
         {onDelete && (
           <button

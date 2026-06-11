@@ -91,6 +91,17 @@ export interface NormalizedStatusUpdate {
   /** externalId of the message whose status is changing. */
   externalId: string;
   status: MessageStatus;
+  /**
+   * Delivery-failure diagnostics — set ONLY when `status === "failed"` and the
+   * provider surfaced a reason. For Meta these come from the status webhook's
+   * `errors[0]`: numeric `code` (e.g. 131049 frequency cap, 131026 undeliverable),
+   * short human `title`, and `error_data.details` (the actionable text). Ingest
+   * persists them on the Message row so the failed bubble can show WHY instead of
+   * a bare red icon. Absent on every non-failed transition.
+   */
+  errorCode?: number;
+  errorTitle?: string;
+  errorDetail?: string;
   timestamp: Date;
   rawPayload: Record<string, unknown>;
 }
@@ -162,10 +173,38 @@ export interface NormalizedCallEvent {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * A template's review/quality status changed on the provider side. Emitted from
+ * the provider's `message_template_status_update` webhook (Meta sends one when a
+ * template is approved, paused for quality, disabled, or rejected). Without
+ * ingesting these, the local catalog only refreshes on a manual "Sync" click —
+ * so a Meta-paused marketing template silently mass-fails a scheduled broadcast,
+ * and a newly-approved template never becomes sendable until someone clicks Sync.
+ *
+ * Ingest matches the local row by externalId (Meta's template id) when present,
+ * else by (name, language), and flips its `status`. `status` is null when the
+ * provider's event value doesn't map to a known TemplateStatus (forward-compat).
+ */
+export interface NormalizedTemplateStatusUpdate {
+  kind: "template_status";
+  /** Provider-side template id (Meta `message_template_id`), when present. */
+  externalId?: string;
+  /** Template name — the fallback match key when externalId is absent. */
+  name?: string;
+  /** Template language code — paired with name for the fallback match. */
+  language?: string;
+  /** New status, already mapped to our enum; null when unmappable. */
+  status: TemplateStatus | null;
+  /** Provider's human reason for the change (Meta `reason`), if any. */
+  reason?: string;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
-  | NormalizedCallEvent;
+  | NormalizedCallEvent
+  | NormalizedTemplateStatusUpdate;
 
 export interface SendTextArgs {
   /** E.164 digits, no '+'. */

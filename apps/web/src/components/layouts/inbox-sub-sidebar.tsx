@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AtSign,
   CheckCircle2,
@@ -98,6 +98,31 @@ export function InboxSubSidebar({
   // we fall back to the loaded-slice count below until the GET lands.
   const serverCounts = useConversationCounts();
   const liveCalls = useLiveCalls();
+
+  // Bridge the team-wide non-closed unread total to the page island (InboxShell)
+  // so it doesn't have to mount a SECOND useConversationCounts — which would
+  // double every counts GET + socket listener set per tab. The sub-sidebar
+  // (always mounted on /inbox via the layout) is the single owner; the shell
+  // listens for this CustomEvent for its document-title badge. Same window-event
+  // bridge the `ccp:contact-stage-delta` path uses to cross the layout/island
+  // boundary without a shared React context (no Zustand/Context coupling).
+  const activeUnread = serverCounts?.unread.active;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const emit = () => {
+      if (activeUnread === undefined) return;
+      window.dispatchEvent(
+        new CustomEvent("ccp:inbox-unread-total", { detail: { active: activeUnread } }),
+      );
+    };
+    // Emit whenever the value changes...
+    emit();
+    // ...and answer a late-mounting listener's request (the shell may install
+    // its listener after our initial emit; it dispatches this to pull the last
+    // known value rather than wait for the next count-changing event).
+    window.addEventListener("ccp:inbox-unread-request", emit);
+    return () => window.removeEventListener("ccp:inbox-unread-request", emit);
+  }, [activeUnread]);
 
   // Per-bucket UNREAD counts (conversations with unread messages). Server truth
   // when loaded, else derived from the loaded slice for first paint. These drive

@@ -8,7 +8,16 @@ import type { TeamChannelListItemDto } from "@ccp/shared/team-chat/types";
 
 /**
  * Sidebar-side channel list state. Subscribes to:
- *   - team:channel:message  → bump unreadForMe + preview on the matching channel
+ *   - team:channel:activity → (TEAM room) bump unreadForMe + mention counter +
+ *                             lastMessageAt for ANY channel, including ones this
+ *                             tab isn't subscribed to. This is the sole driver
+ *                             of the badge state — it reaches every channel
+ *                             uniformly, unlike the channel-room frame below.
+ *   - team:channel:message  → (CHANNEL room, only the active/subscribed channel)
+ *                             update lastMessagePreview only. Carries the body,
+ *                             which the team-room activity frame deliberately
+ *                             omits for confidentiality; badge bumps are NOT
+ *                             done here (that would double-count vs activity).
  *   - team:channel:read     → if read by ME, clear unreadForMe
  *   - team:catalog:changed/team-channels → refetch the full list (create / rename / delete)
  *
@@ -47,33 +56,69 @@ export function useTeamChannelsList(
   useEffect(() => {
     const socket = getClientSocket();
 
-    const onMessage: Parameters<typeof socket.on<"team:channel:message">>[1] = (payload) => {
-      // Replies (preview === null) shouldn't bump the channel preview. The
-      // list still cares about reply mentions but we keep that simple for
-      // v0 — only top-level mentions bump the mention counter.
-      if (payload.preview === null) return;
+    // TEAM-room frame — the badge driver. Reaches every channel (not just the
+    // subscribed one), so the sidebar dot + mention counter update live no
+    // matter which channel the tab currently has open.
+    const onActivity: Parameters<typeof socket.on<"team:channel:activity">>[1] = (payload) => {
       const isActive = payload.channelId === activeChannelIdRef.current;
+      setChannels((prev) => {
+        const idx = prev.findIndex((ch) => ch.id === payload.channelId);
+        if (idx === -1) return prev; // not a member of this channel → ignore
+        const existing = prev[idx]!;
+        // Author-of-this-message doesn't get a badge for their own send. Same
+        // posture for the channel the user is actively viewing — the per-channel
+        // hook fires markRead, no point round-tripping a true→false flip through
+        // the sidebar. Replies never bump the unread dot (mention-only).
+        const isOwnSend = payload.authorUserId === currentUserId;
+        const skipUnreadBump = isOwnSend || isActive || payload.isReply;
+        const mentionsMe = payload.mentionedUserIds.includes(currentUserId);
+        const bumpMention = mentionsMe && !isActive && !isOwnSend;
+        const nextLastMessageAt = payload.lastMessageAt ?? existing.lastMessageAt;
+        const nextUnread = skipUnreadBump ? existing.unreadForMe : true;
+        const nextMentionCount = bumpMention
+          ? existing.unreadMentionCount + 1
+          : existing.unreadMentionCount;
+        // Nothing changed (e.g. own send to a channel with nothing to bump) →
+        // bail to avoid a needless re-render of the whole sidebar list.
+        if (
+          nextLastMessageAt === existing.lastMessageAt &&
+          nextUnread === existing.unreadForMe &&
+          nextMentionCount === existing.unreadMentionCount
+        ) {
+          return prev;
+        }
+        const next = prev.slice();
+        next[idx] = {
+          ...existing,
+          lastMessageAt: nextLastMessageAt,
+          unreadForMe: nextUnread,
+          unreadMentionCount: nextMentionCount,
+        };
+        return next;
+      });
+    };
+
+    // CHANNEL-room frame — only reaches the subscribed/active channel and
+    // carries the body. Updates the preview text ONLY; the badge state is owned
+    // by onActivity above (the team-room frame) to avoid double-counting.
+    const onMessage: Parameters<typeof socket.on<"team:channel:message">>[1] = (payload) => {
+      // Replies (preview === null) don't surface in the channel-list preview.
+      if (payload.preview === null) return;
       setChannels((prev) => {
         const idx = prev.findIndex((ch) => ch.id === payload.channelId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
-        // Author-of-this-message doesn't get a badge for their own send.
-        // Same posture for the channel the user is actively viewing — the
-        // per-channel hook fires markRead, no point round-tripping a true→
-        // false flip through the sidebar.
-        const isOwnSend = payload.message.authorUserId === currentUserId;
-        const skipUnreadBump = isOwnSend || isActive;
-        const mentionsMe = payload.message.mentionedUserIds.includes(currentUserId);
-        const bumpMention = mentionsMe && !isActive;
+        if (
+          existing.lastMessagePreview === payload.preview &&
+          (payload.lastMessageAt ?? existing.lastMessageAt) === existing.lastMessageAt
+        ) {
+          return prev;
+        }
         const next = prev.slice();
         next[idx] = {
           ...existing,
           lastMessageAt: payload.lastMessageAt ?? existing.lastMessageAt,
           lastMessagePreview: payload.preview ?? existing.lastMessagePreview,
-          unreadForMe: skipUnreadBump ? existing.unreadForMe : true,
-          unreadMentionCount: bumpMention
-            ? existing.unreadMentionCount + 1
-            : existing.unreadMentionCount,
         };
         return next;
       });
@@ -141,6 +186,7 @@ export function useTeamChannelsList(
       });
     };
 
+    socket.on("team:channel:activity", onActivity);
     socket.on("team:channel:message", onMessage);
     socket.on("team:channel:read", onRead);
     socket.on("team:catalog:changed", onCatalog);
@@ -148,6 +194,7 @@ export function useTeamChannelsList(
     socket.on("connect", onConnect);
 
     return () => {
+      socket.off("team:channel:activity", onActivity);
       socket.off("team:channel:message", onMessage);
       socket.off("team:channel:read", onRead);
       socket.off("team:catalog:changed", onCatalog);

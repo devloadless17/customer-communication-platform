@@ -50,6 +50,7 @@ export function ChannelThread({
   onGoToLive,
   searchQuery,
   onOpenThread,
+  displayNameById,
 }: {
   messages: TeamChannelMessageDto[];
   channelId: string;
@@ -68,6 +69,8 @@ export function ChannelThread({
   /** When set, ChannelMessage highlights matching substrings inline. */
   searchQuery: string | null;
   onOpenThread: (rootMessageId: string) => void;
+  /** Canonical userId → name roster map for mention chip rendering. */
+  displayNameById: Map<string, string>;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
@@ -213,6 +216,7 @@ export function ChannelThread({
                       // on every event.
                       onOpenThread={onOpenThread}
                       searchQuery={searchQuery}
+                      displayNameById={displayNameById}
                     />
                   </div>
                 );

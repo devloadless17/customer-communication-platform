@@ -143,7 +143,7 @@ export class ExternalV1MessagingService {
       where: { id, teamId },
       include: EXTERNAL_CONVERSATION_INCLUDE,
     });
-    if (!row) throw new NotFoundException({ error: "conversation not found" });
+    if (!row) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
     // `conversation.contact` is embedded; the top-level `contact` is kept as a
     // convenience alias so the single-conversation response still surfaces it
     // at the root for callers that read response.contact directly.
@@ -213,13 +213,14 @@ export class ExternalV1MessagingService {
     });
     if (!result.ok) {
       if (result.reason === "not_found") {
-        throw new NotFoundException({ error: "conversation not found" });
+        throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
       }
       if (result.reason === "invalid_user") {
-        throw new BadRequestException({ error: "user not in team" });
+        throw new BadRequestException({ error: "user_not_in_team", detail: "user not in team" });
       }
       throw new ConflictException({
-        error: "conversation was reassigned by someone else",
+        error: "write_conflict",
+        detail: "conversation was reassigned by someone else",
       });
     }
     return { ok: true };
@@ -278,10 +279,11 @@ export class ExternalV1MessagingService {
     });
     if (!result.ok) {
       if (result.reason === "not_found") {
-        throw new NotFoundException({ error: "conversation not found" });
+        throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
       }
       throw new ConflictException({
-        error: "conversation status changed by someone else",
+        error: "write_conflict",
+        detail: "conversation status changed by someone else",
       });
     }
     return { ok: true };
@@ -304,7 +306,7 @@ export class ExternalV1MessagingService {
       where: { id: conversationId, teamId },
       include: EXTERNAL_CONVERSATION_INCLUDE,
     });
-    if (!conv) throw new NotFoundException({ error: "conversation not found" });
+    if (!conv) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
 
     const rows = await this.db.message.findMany({
       where: { conversationId },
@@ -329,7 +331,7 @@ export class ExternalV1MessagingService {
       // so a single message fetch carries who it's with — no follow-up call.
       include: { conversation: { include: EXTERNAL_CONVERSATION_INCLUDE } },
     });
-    if (!row) throw new NotFoundException({ error: "message not found" });
+    if (!row) throw new NotFoundException({ error: "message_not_found", detail: "message not found" });
     return {
       message: toExternalMessage(row),
       conversation: conversationRowToExternal(row.conversation),
@@ -401,7 +403,7 @@ export class ExternalV1MessagingService {
         },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation not found" });
+    if (!conversation) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
 
     let channel;
     try {
@@ -629,7 +631,7 @@ export class ExternalV1MessagingService {
         where: { id: contact.id, teamId },
         select: { id: true },
       });
-      if (!row) throw new NotFoundException({ error: "contact not found" });
+      if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
       return row.id;
     }
     const phone = normalizePhoneE164(contact.phone);
@@ -643,7 +645,7 @@ export class ExternalV1MessagingService {
       where: { teamId, phoneNumber: phone },
       select: { id: true },
     });
-    if (!row) throw new NotFoundException({ error: "contact not found" });
+    if (!row) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
     return row.id;
   }
 
@@ -658,7 +660,7 @@ export class ExternalV1MessagingService {
       where: { id: contactId, teamId },
       select: { id: true },
     });
-    if (!contactRow) throw new NotFoundException({ error: "contact not found" });
+    if (!contactRow) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
     const conv = await this.resolveContactConversation(teamId, contactId);
     if (!conv) {
       throw new NotFoundException({
@@ -688,7 +690,7 @@ export class ExternalV1MessagingService {
       where: { id: contactId, teamId },
       select: { id: true },
     });
-    if (!contactRow) throw new NotFoundException({ error: "contact not found" });
+    if (!contactRow) throw new NotFoundException({ error: "contact_not_found", detail: "contact not found" });
     const conv = await this.resolveContactConversation(teamId, contactId);
     if (!conv) {
       throw new NotFoundException({
@@ -887,7 +889,7 @@ export class ExternalV1MessagingService {
 
     // ---- Text send (default) ---------------------------------------------
     if (!input.text) {
-      throw new BadRequestException({ error: "text required" });
+      throw new BadRequestException({ error: "text_required", detail: "text required" });
     }
 
     const result = await this.sendMessage(
@@ -975,7 +977,7 @@ export class ExternalV1MessagingService {
       where: { id: conversationId, teamId },
       select: { id: true },
     });
-    if (!conv) throw new NotFoundException({ error: "conversation not found" });
+    if (!conv) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
 
     if (!input.authorUserId) {
       throw new BadRequestException({
@@ -992,7 +994,8 @@ export class ExternalV1MessagingService {
     });
     if (!u) {
       throw new BadRequestException({
-        error: "authorUserId is not a member of this team",
+        error: "user_not_in_team",
+        detail: "authorUserId is not a member of this team",
       });
     }
     const authorUserId: string = u.id;

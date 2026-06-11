@@ -9,12 +9,15 @@ import {
   Clock,
   ExternalLink,
   Loader2,
+  Octagon,
   RotateCcw,
   XCircle,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
 import { LocalTime } from "@/components/local-time";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
 import { cn, formatPhone } from "@ccp/shared/utils";
@@ -78,10 +81,32 @@ export interface BroadcastRecipientDto {
 
 const POLL_INTERVAL_MS = 2000;
 
+type RecipientStatusFilter = "all" | "failed" | "sent" | "queued";
+
+const RECIPIENT_STATUS_TABS: { value: RecipientStatusFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "failed", label: "Failed" },
+  { value: "sent", label: "Sent" },
+  { value: "queued", label: "Queued" },
+];
+
 export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
+  const { confirm, confirmDialog } = useConfirm();
   const [data, setData] = useState(initial);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [canceling, setCanceling] = useState(false);
+
+  // "Load more" recipients beyond the inline 500-row cap on the detail get().
+  // Status tabs filter the paged fetch server-side so an operator can isolate
+  // failures on a mass-failure broadcast (where they're what matters). These
+  // extra pages are appended below the inline `data.recipients`; the tabs reset
+  // the paging cursor and re-fetch from the chosen status.
+  const [statusFilter, setStatusFilter] = useState<RecipientStatusFilter>("all");
+  const [extraRecipients, setExtraRecipients] = useState<BroadcastRecipientDto[]>([]);
+  const [moreCursor, setMoreCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
 
   // Re-queue + re-run only the failed recipients. Server flips the broadcast
   // back to `running`; the socket `broadcast:status` echo refreshes the page.
@@ -103,6 +128,112 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       setRetrying(false);
     }
   }
+
+  // Stop an in-flight (or still-scheduled) broadcast. The backend CAS-flips it
+  // to `canceled` and the runner bails between recipients; already-sent
+  // messages stay sent (WhatsApp can't unsend). Behind a destructive confirm —
+  // it's an irreversible stop, not a delete.
+  async function cancelBroadcast() {
+    if (canceling) return;
+    const ok = await confirm({
+      title: "Stop this broadcast?",
+      description:
+        "Sending stops immediately. Recipients already delivered to stay sent — WhatsApp can't unsend them. The rest won't receive the message.",
+      confirmLabel: "Stop broadcast",
+      destructive: true,
+    });
+    if (!ok) return;
+    setCanceling(true);
+    try {
+      const res = await apiFetch(`/api/broadcasts/${data.id}/cancel`, { method: "POST" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        toast.error("Couldn't stop broadcast", {
+          description: body.detail ?? body.error ?? `HTTP ${res.status}`,
+        });
+        return;
+      }
+      toast.success("Broadcast stopped");
+      await refreshRef.current();
+    } catch {
+      toast.error("Couldn't stop broadcast", { description: "Network error" });
+    } finally {
+      setCanceling(false);
+    }
+  }
+
+  // Fetch one page of recipients from /recipients (cursor-paged, optionally
+  // status-filtered) and APPEND to extraRecipients. `cursor === null` starts a
+  // fresh page (a just-selected status tab); otherwise it continues after the
+  // given id. The server orders failed → sent → queued, matching the inline
+  // get(), so a status-less ("all") page picks up right after the inline 500.
+  async function fetchRecipientPage(
+    cursor: string | null,
+    filter: RecipientStatusFilter,
+    append: boolean,
+  ) {
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      if (filter !== "all") params.set("status", filter);
+      const res = await apiFetch(
+        `/api/broadcasts/${data.id}/recipients?${params.toString()}`,
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        setMoreError(body.detail ?? body.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      const json = (await res.json()) as {
+        recipients: BroadcastRecipientDto[];
+        nextCursor: string | null;
+      };
+      setExtraRecipients((prev) => (append ? [...prev, ...json.recipients] : json.recipients));
+      setMoreCursor(json.nextCursor);
+    } catch {
+      setMoreError("Network error");
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  // Status tab switch. `all` shows the inline first-500 (no fetch needed unless
+  // the operator loads more); a specific status does a fresh server-filtered
+  // fetch that REPLACES the appended set.
+  function selectStatus(next: RecipientStatusFilter) {
+    if (next === statusFilter) return;
+    setStatusFilter(next);
+    setExtraRecipients([]);
+    setMoreCursor(null);
+    if (next !== "all") void fetchRecipientPage(null, next, false);
+  }
+
+  // "Load more". In `all` mode the first page continues after the last inline
+  // recipient (seed the cursor from it); subsequent pages use the server's
+  // nextCursor. Filtered modes always page off the current cursor.
+  function loadMore() {
+    const seedCursor =
+      statusFilter === "all" && moreCursor === null && extraRecipients.length === 0
+        ? (data.recipients.at(-1)?.id ?? null)
+        : moreCursor;
+    void fetchRecipientPage(seedCursor, statusFilter, true);
+  }
+
+  // Whether more rows can be paged. In `all` mode we always allow the first
+  // "Load more" (the inline set was truncated); after that, the server cursor
+  // decides. In a filtered mode, the cursor decides from the first fetch.
+  const canLoadMore =
+    statusFilter === "all"
+      ? data.recipientsTruncated &&
+        (moreCursor !== null || extraRecipients.length === 0)
+      : moreCursor !== null;
+
+  // Recipients to render: inline-500 + appended in `all` mode; only the
+  // server-filtered page in a specific-status mode.
+  const visibleRecipients =
+    statusFilter === "all" ? [...data.recipients, ...extraRecipients] : extraRecipients;
 
   // Shared refresher so both the socket listeners and the poll go through
   // the same code path. Inside a ref so the socket effect can call it
@@ -245,6 +376,27 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {/* Stop is only meaningful while the broadcast can still send —
+                scheduled (not fired yet), queued/running (mid-send), or paused
+                (will auto-resume). The backend allows cancel in all of these. */}
+            {(data.status === "scheduled" ||
+              data.status === "queued" ||
+              data.status === "running" ||
+              data.status === "paused") && (
+              <button
+                type="button"
+                onClick={() => void cancelBroadcast()}
+                disabled={canceling}
+                className="inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-2.5 py-1 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-60"
+              >
+                {canceling ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Octagon className="size-3.5" />
+                )}
+                Stop broadcast
+              </button>
+            )}
             {/* Retry only makes sense on a finished broadcast that has
                 failures. Hidden while scheduled/queued/running. */}
             {data.failedCount > 0 &&
@@ -298,10 +450,19 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       </header>
 
       {data.lastError && (
-        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div
+          className={cn(
+            "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+            data.status === "paused"
+              ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+              : "border-destructive/30 bg-destructive/10 text-destructive",
+          )}
+        >
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
           <div>
-            <div className="font-medium">Broadcast failed</div>
+            <div className="font-medium">
+              {data.status === "paused" ? "Broadcast paused" : "Broadcast failed"}
+            </div>
             <div className="mt-0.5 wrap-break-word font-mono text-[11px]">
               {data.lastError}
             </div>
@@ -349,7 +510,10 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       <div className="text-[11px] text-muted-foreground">
         {progressPct}% processed
         {(data.status === "queued" || data.status === "running") && " · updates live"}
-        {data.status === "paused" && " · paused for server restart, will auto-resume"}
+        {data.status === "paused" &&
+          (data.lastError
+            ? " · paused — WhatsApp connection error; fix the connection and it will auto-resume"
+            : " · paused for server restart, will auto-resume")}
       </div>
 
       <section className="rounded-xl border border-border bg-card">
@@ -385,17 +549,38 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       </section>
 
       <section className="rounded-xl border border-border bg-card">
-        <header className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-3">
+        <header className="flex flex-col gap-3 border-b border-border bg-muted/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm font-semibold">Recipients</div>
             <div className="text-[11px] text-muted-foreground">
               Per-recipient delivery status. Click a row to jump to its
               conversation.
               {data.recipientsTruncated
-                ? ` Showing first ${data.recipientsShown ?? data.recipients.length} of ${data.totalCount}.`
+                ? ` ${data.totalCount} total — paged below.`
                 : null}
             </div>
           </div>
+          {/* Status tabs only matter once the inline set was truncated — under
+              500 recipients the full set is already on screen. */}
+          {data.recipientsTruncated && (
+            <div className="inline-flex w-fit rounded-lg border border-border bg-background p-0.5 text-xs">
+              {RECIPIENT_STATUS_TABS.map((tab) => (
+                <button
+                  key={tab.value}
+                  type="button"
+                  onClick={() => selectStatus(tab.value)}
+                  className={cn(
+                    "rounded-md px-2.5 py-1 font-medium transition-colors",
+                    statusFilter === tab.value
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          )}
         </header>
         <div className="max-h-120 overflow-auto">
           <table className="w-full min-w-140 text-sm">
@@ -408,7 +593,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               </tr>
             </thead>
             <tbody>
-              {data.recipients.map((r) => (
+              {visibleRecipients.map((r) => (
                 <tr
                   key={r.id}
                   className="border-b border-border last:border-b-0 hover:bg-accent/30"
@@ -438,10 +623,39 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   </td>
                 </tr>
               ))}
+              {visibleRecipients.length === 0 && !loadingMore && (
+                <tr>
+                  <td
+                    colSpan={4}
+                    className="px-4 py-8 text-center text-[12px] text-muted-foreground"
+                  >
+                    No {statusFilter === "all" ? "" : `${statusFilter} `}recipients.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
+        {(canLoadMore || loadingMore || moreError) && (
+          <div className="flex flex-col items-center gap-2 border-t border-border px-4 py-3">
+            {moreError && (
+              <div className="text-[11px] text-destructive">{moreError}</div>
+            )}
+            {canLoadMore && (
+              <button
+                type="button"
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-60"
+              >
+                {loadingMore && <Loader2 className="size-3.5 animate-spin" />}
+                {loadingMore ? "Loading…" : "Load more"}
+              </button>
+            )}
+          </div>
+        )}
       </section>
+      {confirmDialog}
     </div>
   );
 }

@@ -111,12 +111,21 @@ services:
     restart: unless-stopped
     networks: [ccp_net]
     # --appendonly yes: AOF durability (~1s loss window).
-    # --maxmemory + allkeys-lru: graceful eviction before the container's
-    # 256m hard cap turns into an OOMKilled. BullMQ working set is tiny
-    # (job IDs + small metadata) so 200mb is well above steady state; the
-    # ceiling exists so a runaway pub/sub or stuck stream evicts cold
-    # entries instead of crashing the queue.
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "200mb", "--maxmemory-policy", "allkeys-lru"]
+    # --maxmemory + noeviction: BullMQ HARD-REQUIRES noeviction (it warns on
+    # every connection otherwise, and its Lua scripts assume queue/job/meta
+    # keys exist). allkeys-lru would evict the COLDEST keys under memory
+    # pressure — which are exactly the durable long-lived ones we must never
+    # lose: delayed-job hashes for scheduled broadcasts queued days ahead,
+    # workflow wait/resume jobs, wf-run-locks, and webhook-delivery jobs.
+    # Silent eviction of those = scheduled broadcasts that never fire,
+    # dropped customer-visible sends, and double-executed non-idempotent
+    # workflow side effects (Meta sends). With noeviction, hitting the 200mb
+    # cap instead makes enqueues fail LOUDLY with OOM errors that the existing
+    # dispatcher retries, workflow-waiting sweeper, and queued-row reconcilers
+    # already surface and recover from. BullMQ working set is tiny (job IDs +
+    # small metadata) so 200mb is well above steady state; the cap still
+    # contains a runaway pub/sub backlog before the 256m container OOMKill.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "200mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - redis_data:/data
     ports:
@@ -133,7 +142,9 @@ services:
       retries: 5
     # BullMQ working set is tiny — workflow jobs are pointers, not bulk
     # data. 256MB is well above what Redis ever uses for the pilot scale;
-    # the cap mostly catches a runaway pub/sub or a stuck stream.
+    # the cap mostly catches a runaway pub/sub or a stuck stream. Eviction
+    # is OFF (noeviction, see the command above) so at the 200mb maxmemory
+    # writes fail loudly rather than silently evicting durable job state.
     mem_limit: 256m
     mem_reservation: 64m
     # Redis is single-threaded and never the CPU bottleneck at our scale;
@@ -196,9 +207,11 @@ services:
       # check on signin endpoints.
       BETTER_AUTH_URL: ${BETTER_AUTH_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
-      # AES-256-GCM key for per-team Meta secret envelope encryption.
-      # Rotating this without re-encrypting Team rows breaks every team's WhatsApp integration.
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # ENCRYPTION_KEY is intentionally NOT injected here. Every envelope
+      # encrypt/decrypt call site lives in apps/api; the web process never
+      # imports the envelope module, so the master key has no reason to sit on
+      # the larger internet-facing render surface. validateEnv treats it as
+      # api-only (apiRequired). See the api service below.
       # We sit behind one trusted reverse proxy (Caddy on the host). The
       # rate limiter in middleware.ts uses this to pick the right XFF entry.
       TRUSTED_PROXY_HOPS: "1"
@@ -214,10 +227,10 @@ services:
       # (same-host through Caddy) while the web container reaches the api
       # container directly over the internal docker network.
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://api:4000}
-      # Shared secret for the cross-process cache-revalidate bridge —
-      # NestJS POSTs to /api/internal/revalidate when a catalog mutates,
-      # this endpoint requires the same secret. Must match the value
-      # on the api service. validateEnv requires this in prod.
+      # Shared secret for the cross-process internal bridge: web POSTs to
+      # api's /api/internal/session-invalidated (on signout/deactivation) to
+      # drop NestJS's session caches + force-disconnect sockets. Must match
+      # the value on the api service. validateEnv requires this in prod.
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
       # Post-Phase-5: Next.js owns auth pages + RSC reads only. The NestJS
       # api container owns everything else (REST, Socket.io, webhooks, the
@@ -302,7 +315,7 @@ services:
       NODE_ENV: production
       # Separate pg.Pool from `app`'s (both hit the same Postgres). The api
       # owns all REST + Socket.io + workers, so its pool is the larger one
-      # (max: 25 in db.service.ts vs web's 10). Pool size lives in code, not
+      # (max: 50 in db.service.ts vs web's 10). Pool size lives in code, not
       # this URL — see the DATABASE_URL note on the `app` service above.
       DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-ccp}?schema=public
       REDIS_URL: redis://redis:6379
@@ -334,6 +347,11 @@ services:
       # Per-team max concurrent broadcast deliveries (in-process broadcast
       # runner). Same fairness shape as the workflow worker.
       BROADCAST_PER_TEAM_CONCURRENCY: ${BROADCAST_PER_TEAM_CONCURRENCY:-2}
+      # Per-team cap on concurrent recipient sends WITHIN a single broadcast's
+      # lanes (broadcast-runner.ts). Distinct from the per-team concurrent-
+      # broadcast cap above. Default 5 (matches the global SEND_CONCURRENCY).
+      # Passed through so it's actually tunable in prod, not just in code.
+      BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY: ${BROADCAST_PER_TEAM_RECIPIENT_CONCURRENCY:-5}
       # Per-team max concurrent outbound-webhook deliveries (in-process
       # worker). Tuned higher than workflows since each delivery is mostly
       # network-bound on the partner.
@@ -351,13 +369,11 @@ services:
       WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP: ${WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP:-1}
       # safe-fetch SSRF defense. Set 1 ONLY in dev (hits a local receiver).
       INTEGRATIONS_ALLOW_PRIVATE_HOSTS: ${INTEGRATIONS_ALLOW_PRIVATE_HOSTS:-0}
-      # Shared secret for the cache-revalidate bridge — same value as the
-      # web service. validateEnv requires this in prod.
+      # Shared secret for the web→api session-invalidation bridge — same value
+      # as the web service. The web process POSTs to this api's
+      # /api/internal/session-invalidated on signout/deactivation; the handler
+      # checks this secret. validateEnv requires it in prod.
       INTERNAL_BUS_SECRET: ${INTERNAL_BUS_SECRET}
-      # Where this process posts cache-revalidate calls to the Next.js
-      # process. Defaults to the docker DNS for the web service; override
-      # only if the topology changes.
-      WEB_INTERNAL_URL: ${WEB_INTERNAL_URL:-http://app:3000}
       # Optional: tunable Meta Graph fetch timeout. Default 15s.
       META_FETCH_TIMEOUT_MS: ${META_FETCH_TIMEOUT_MS:-}
       # Orphan-blob sweeper cadence (UploadThing files referenced by no live

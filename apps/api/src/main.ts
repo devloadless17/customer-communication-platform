@@ -269,6 +269,32 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   }
 
+  // Same fail-loud posture for RUN_WORKER_INLINE=0 in production. Setting it
+  // disables the in-process workflow worker, ALL sweepers, the broadcast-
+  // schedule worker, the send worker, and the outbound-webhook worker
+  // (WorkflowWorkerService.onModuleInit + the sibling worker services all gate
+  // on it). It's meant to hand off to a standalone worker container — but no
+  // such entrypoint exists today (only main.ts; the `worker` compose service +
+  // worker entrypoint were removed post-Phase-5). So `0` is NOT "external
+  // worker takes over" — it's a TOTAL silent outage: message sends still 2xx,
+  // health checks stay green, but nothing drains. A single mistyped
+  // API_RUN_WORKER_INLINE on a deploy would dark-fail the whole automation +
+  // send + broadcast + webhook surface. Refuse to boot loudly until a real
+  // external worker entrypoint ships (at which point relax this guard).
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.RUN_WORKER_INLINE === "0"
+  ) {
+    console.error(
+      "FATAL: RUN_WORKER_INLINE=0 in production, but no external worker " +
+        "entrypoint exists — the workflow worker, all sweepers, the broadcast " +
+        "scheduler, and the send/webhook workers would all be silently disabled " +
+        "(sends still 2xx, health stays green, nothing drains). Refusing to boot. " +
+        "Leave RUN_WORKER_INLINE unset or =1 until a standalone worker container ships.",
+    );
+    process.exit(1);
+  }
+
   // NOTE: CORS preflight (OPTIONS) responses are emitted by enableCors BEFORE
   // any guard runs — the SessionGuard / RateLimitInterceptor / ApiKeyGuard chain is
   // skipped for OPTIONS by design. Today this is harmless because Caddy makes
@@ -304,12 +330,24 @@ async function bootstrap(): Promise<void> {
   // slowloris client or a partner that opens a POST and never closes it can
   // pin parser threads and FDs indefinitely. Numbers picked so:
   //   - headersTimeout (10s) is shorter than Caddy's idle (60s) so a stuck
-  //     header phase is reaped before Caddy gives up.
-  //   - requestTimeout (30s) covers the slowest legitimate upload preflight
-  //     while still bounding a stuck body.
+  //     header phase is reaped before Caddy gives up. This is the ACTUAL
+  //     slow-loris vector — an attacker dribbling headers byte-by-byte — and
+  //     it stays tight regardless of the body budget below.
+  //   - requestTimeout (300s) counts against receiving the ENTIRE request
+  //     INCLUDING the body (Node ≥18). The 30s it used to be silently killed
+  //     the media-send path the product explicitly supports: multipart uploads
+  //     up to 100 MiB (image 4.8MB, video/audio 15MB, document 95MB per the
+  //     reply-box client caps), which on a normal uplink can legitimately take
+  //     minutes — Caddy streams the body straight through, so this server's
+  //     timer is what fires. 300s (Node's own default) covers the worst
+  //     legitimate upload; slow-loris protection lives in headersTimeout, not
+  //     here. NOTE: the client's media AbortController (reply-box.tsx, 90s) is
+  //     intentionally TIGHTER — it gives up on a stalled upload before the
+  //     server does; this ceiling just stops the server pre-empting a slow but
+  //     live transfer.
   //   - keepAliveTimeout (65s) is just over the typical proxy idle so we
   //     don't reset connections Caddy still thinks are alive.
-  server.requestTimeout = 30_000;
+  server.requestTimeout = 300_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 65_000;
 

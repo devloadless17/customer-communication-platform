@@ -1,0 +1,22 @@
+-- Drop Conversation_lastMessagePreview_trgm_idx — a pg_trgm GIN maintained on
+-- every message send/receive (it backs the inbox-list summary UPDATE, the
+-- single hottest UPDATE in the system, inbound AND outbound) that NO query plan
+-- can ever use.
+--
+-- Its only consumer is the inbox-list search clause (lib/queries/conversations.ts
+-- searchClause), where `lastMessagePreview contains` is OR'd with two Contact
+-- RELATION filters (contact.name contains, contact.phoneNumber contains).
+-- Prisma renders relation filters as a join/EXISTS, and Postgres cannot
+-- BitmapOr across tables — so no plan shape can use this GIN for that query; the
+-- planner walks the team's conversation partition and filters. That walk is
+-- fine at pilot scale (bounded by one team's conversation count), so dropping
+-- the index changes nothing about the search latency — it only removes the
+-- write amplification + the misleading "this is indexed" signal.
+--
+-- If list search ever shows up hot, the fix is NOT this index — it's to
+-- restructure into two indexed branches (a contact-id prefilter + a
+-- preview-only query, unioned), and only then re-add a single-table GIN.
+--
+-- IF EXISTS = idempotent. No CONCURRENTLY (migrate transaction; brief lock).
+
+DROP INDEX IF EXISTS "Conversation_lastMessagePreview_trgm_idx";

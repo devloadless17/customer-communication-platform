@@ -8,6 +8,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -25,9 +26,11 @@ import { SessionGuard } from "../auth/session.guard";
 import type { ApiSession } from "../auth/session.guard";
 import { zBody } from "../common/zod-validation.pipe";
 import {
+  ResetUserPasswordSchema,
   UpdateMyAvailabilitySchema,
   UpdateMyProfileSchema,
   UpdateUserSchema,
+  type ResetUserPasswordInput,
   type UpdateMyAvailabilityInput,
   type UpdateMyProfileInput,
   type UpdateUserInput,
@@ -145,6 +148,39 @@ export class UsersController {
       body,
     );
     return { user };
+  }
+
+  /**
+   * Admin-initiated password reset for a teammate. The only recovery path —
+   * there's no self-serve email reset (no mail provider). Admin/superAdmin
+   * sets a new password, then hands it to the user out-of-band. Scoped to the
+   * caller's own team; cross-team reset is the superAdmin route on
+   * AdminTeamsController. `canModifyUser` (in the service) blocks an admin
+   * from resetting a superAdmin.
+   */
+  @RequireRole("admin")
+  @Post(":id/reset-password")
+  @HttpCode(200)
+  async resetPassword(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(ResetUserPasswordSchema)) body: ResetUserPasswordInput,
+  ) {
+    // Admin reset is for OTHER members. Resetting your own credentials here
+    // would delete your own sessions mid-request (sign you out) — route the
+    // self case to change-password, which verifies the current password.
+    if (id === session.userId) {
+      throw new BadRequestException({
+        error: "Use change password to update your own account",
+      });
+    }
+    await this.users.resetPassword(
+      session.teamId,
+      session.role,
+      id,
+      body.newPassword,
+    );
+    return { ok: true };
   }
 
   @RequireRole("admin")

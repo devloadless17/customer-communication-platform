@@ -108,6 +108,9 @@ function ConversationListItemImpl({
         {/* Row 2: message preview + unread badge */}
         <div className="flex items-center gap-1.5">
           <p
+            // dir="auto" so an Arabic/Hebrew preview reads right-aligned with
+            // correct base direction (matches the thread bubble + WhatsApp Web).
+            dir="auto"
             className={cn(
               "min-w-0 flex-1 truncate text-[12px] leading-snug",
               unread ? "text-foreground/80" : "text-muted-foreground",

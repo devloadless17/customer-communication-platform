@@ -1,4 +1,9 @@
-import { Prisma, CallStatus, CallDirection } from "@prisma/client";
+import {
+  Prisma,
+  CallStatus,
+  CallDirection,
+  CallPermissionStatus,
+} from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publishInTx } from "@/lib/events/outbox";
@@ -500,6 +505,50 @@ async function handlePermissionEvent(
         consecutiveUnansweredOutCalls: 0,
       },
     });
+    // Flip the matching outstanding request to `granted`. Without this the
+    // CallPermissionRequest row stayed `pending` forever and the placeCall
+    // pre-flight (which now gates on `granted`) would never let a call out
+    // even after the customer accepted. We can't correlate the webhook to a
+    // specific request id (the normalized event carries only the contact), so
+    // we grant the newest still-pending, non-rate-limited request — there's at
+    // most one live one per contact (Meta caps requests at 1/24h). The 72h
+    // calling-validity window runs from the REAL grant time, so we re-stamp
+    // expiresAt from now rather than the request-time +72h.
+    const grantedAt = evt.timestamp;
+    const grantExpiresAt = new Date(grantedAt.getTime() + 72 * 60 * 60 * 1000);
+    const pending = await db.callPermissionRequest.findFirst({
+      where: {
+        teamId,
+        contactId: contact.id,
+        status: CallPermissionStatus.pending,
+        rateLimitedUntil: null,
+      },
+      orderBy: { requestedAt: "desc" },
+      select: { id: true },
+    });
+    if (pending) {
+      await db.callPermissionRequest.update({
+        where: { id: pending.id },
+        data: {
+          status: CallPermissionStatus.granted,
+          grantedAt,
+          expiresAt: grantExpiresAt,
+        },
+      });
+    } else {
+      // Customer granted without a request row on file (e.g. they accepted a
+      // request that predated this tracking, or the row was pruned). Record a
+      // synthetic granted row so the pre-flight has a live grant to read.
+      await db.callPermissionRequest.create({
+        data: {
+          teamId,
+          contactId: contact.id,
+          status: CallPermissionStatus.granted,
+          grantedAt,
+          expiresAt: grantExpiresAt,
+        },
+      });
+    }
   } else if (evt.phase === "permission_revoked") {
     // Far-future timestamp acts as "revoked until further notice" — Meta
     // doesn't expire revocation on its own; the customer has to grant a
@@ -514,6 +563,21 @@ async function handlePermissionEvent(
         // confirms the revocation — they've already taken the action.
         consecutiveUnansweredOutCalls: 0,
       },
+    });
+    // Mark any live grant/pending request as `denied` so a stale `granted`
+    // row can't keep authorizing calls after Meta revoked permission. The
+    // Contact.callPermissionRevokedUntil gate already blocks the call, but
+    // keeping the request rows consistent prevents the pre-flight from
+    // disagreeing with itself if that column is ever cleared independently.
+    await db.callPermissionRequest.updateMany({
+      where: {
+        teamId,
+        contactId: contact.id,
+        status: {
+          in: [CallPermissionStatus.pending, CallPermissionStatus.granted],
+        },
+      },
+      data: { status: CallPermissionStatus.denied },
     });
   }
 }

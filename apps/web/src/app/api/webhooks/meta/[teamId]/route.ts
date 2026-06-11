@@ -43,6 +43,43 @@ export const dynamic = "force-dynamic";
 
 const INTERNAL_API_URL = process.env.INTERNAL_API_URL ?? "http://127.0.0.1:4000";
 
+// Hard ceiling on the buffered body. Meta webhook bodies are KB-scale (they
+// reference media by URL rather than embed binary), and the downstream NestJS
+// bodyParser caps JSON at 10mb anyway — so anything larger is either garbage
+// or an attack. Without a cap, `req.arrayBuffer()` buffers the whole body into
+// the web (auth/pages) container's heap before NestJS ever verifies the HMAC;
+// the endpoint is unauthenticated, so an attacker can repeatedly POST oversized
+// bodies to OOM-kill the user-facing container. Reading with a byte ceiling and
+// returning 413 on overflow bounds that to a fixed buffer per request.
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Read the request body into a single Buffer, aborting with `null` the moment
+ * the accumulated size exceeds `MAX_BODY_BYTES`. Streaming the chunks (rather
+ * than `req.arrayBuffer()`) lets us bail BEFORE buffering an unbounded body.
+ */
+async function readBodyCapped(req: Request): Promise<Buffer | null> {
+  const reader = req.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        // Stop pulling; let the upstream connection reset rather than keep
+        // draining an attacker's oversized stream into memory.
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  }
+  return Buffer.concat(chunks);
+}
+
 // Header allow-list — strip hop-by-hop headers per RFC 7230 §6.1 plus the
 // Host header (the upstream sets its own). Everything else (notably
 // X-Hub-Signature-256, content-type, content-length) is forwarded as-is.
@@ -94,14 +131,34 @@ async function forward(
   // For POST, read the raw bytes and pass them through unchanged so the
   // HMAC computed by NestJS over `req.rawBody` still matches Meta's
   // X-Hub-Signature-256. Any JSON re-stringification here would corrupt
-  // the signature.
-  const body = method === "POST" ? await req.arrayBuffer() : undefined;
+  // the signature. Capped at MAX_BODY_BYTES so an unauthenticated attacker
+  // can't OOM this container by streaming an unbounded body — null means the
+  // cap was exceeded; reject with 413 before forwarding.
+  // `fetch`'s BodyInit accepts `BufferSource` = `ArrayBufferView<ArrayBuffer>`,
+  // but Node's `Buffer` is `Buffer<ArrayBufferLike>` (its backing buffer may be
+  // a slice of a shared pool), which the DOM lib types reject. Copy the bytes
+  // into a fresh, exactly-sized `ArrayBuffer`-backed `Uint8Array` so the body
+  // is an unambiguous BodyInit. The bytes pass through verbatim, so the HMAC
+  // NestJS computes over the raw body still matches Meta's signature.
+  let body: Uint8Array<ArrayBuffer> | undefined;
+  if (method === "POST") {
+    const read = await readBodyCapped(req);
+    if (read === null) {
+      return NextResponse.json(
+        { error: "payload too large" },
+        { status: 413 },
+      );
+    }
+    const copy = new Uint8Array(read.byteLength);
+    copy.set(read);
+    body = copy;
+  }
 
   try {
     const upstream = await fetch(target, {
       method,
       headers: buildForwardHeaders(req.headers),
-      body: body ? Buffer.from(body) : undefined,
+      body,
       // The upstream redirects (if any) shouldn't be followed at the proxy
       // layer; the verification handler is the terminal endpoint.
       redirect: "manual",

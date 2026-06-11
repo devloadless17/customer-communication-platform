@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   AlertTriangle,
   ChevronRight,
@@ -119,18 +120,28 @@ function EmptyState({ query }: { query: string }) {
       <FileText className="size-5 text-muted-foreground" />
       <div className="text-sm font-medium">No templates yet</div>
       <p className="max-w-md text-[12px] leading-relaxed text-muted-foreground">
-        Submit templates for review in WhatsApp Manager. Once Meta approves
-        them, click <span className="font-medium">Refresh</span> to load them
-        here.
+        Create a template here and submit it to Meta for review. Once approved,
+        click <span className="font-medium">Refresh</span> to load it.
       </p>
-      <a
-        className="mt-1 text-[12px] font-medium text-primary hover:underline"
-        href="https://business.facebook.com/wa/manage/message-templates"
-        target="_blank"
-        rel="noreferrer"
-      >
-        Open WhatsApp Manager →
-      </a>
+      <div className="mt-1 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+        {/* In-app builder first — keep the agent in the product. /templates/new
+            redirects non-managers to /templates, so /templates is the safe
+            universal target. */}
+        <Link
+          href="/templates"
+          className="text-[12px] font-medium text-primary hover:underline"
+        >
+          Create one in Templates →
+        </Link>
+        <a
+          className="text-[12px] font-medium text-muted-foreground hover:underline"
+          href="https://business.facebook.com/wa/manage/message-templates"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open WhatsApp Manager →
+        </a>
+      </div>
     </div>
   );
 }

@@ -357,9 +357,23 @@ function ConversationListImpl({
       ) : (
         <ScrollArea viewportRef={viewportRef} className="flex-1">
         {visible.length === 0 ? (
-          <div className="px-3 py-12 text-center text-xs text-muted-foreground">
-            No conversations match.
-          </div>
+          // Distinguish first-run (no conversations exist yet, broad view) from
+          // a filter/stage narrowing nothing. A new team lands on the `active`
+          // preset, so an empty `active`/`all` view is the true first-run — guide
+          // them instead of reading like a broken filter.
+          filter.kind === "preset" && (filter.id === "active" || filter.id === "all") ? (
+            <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-14 text-center">
+              <div className="text-sm font-medium">No conversations yet</div>
+              <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
+                Messages from your connected WhatsApp number will appear here.
+                Make sure WhatsApp is connected in Settings.
+              </p>
+            </div>
+          ) : (
+            <div className="px-3 py-12 text-center text-xs text-muted-foreground">
+              No conversations match this view.
+            </div>
+          )
         ) : (
           // Virtualized list. The outer div has the full estimated height
           // (sum of all row sizes) so the scrollbar's drag handle reflects

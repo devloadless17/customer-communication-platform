@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { Plus, Workflow } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
@@ -27,6 +28,15 @@ const TRIGGER_LABELS: Record<string, string> = {
 export default async function WorkflowsPage() {
   const { user } = await getSession();
   const canManage = canManageUsers(user.role);
+  // Workflows are admin-only: GET /api/team/workflows is @RequireRole("admin"),
+  // so a non-admin reaching this page would hit a 403 from listWorkflows() and
+  // land on a generic "Workflows failed to load" error boundary. Redirect to a
+  // page they can use instead — mirroring the new/[id] sub-pages' own guards.
+  // The rail icon is already filtered out for them (app-rail.tsx); this covers
+  // a direct URL / stale link.
+  if (!canManage) {
+    redirect("/inbox");
+  }
 
   const rows = await listWorkflows();
 

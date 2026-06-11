@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { type ConversationEventKind, Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import type {
@@ -41,6 +41,21 @@ export const MESSAGES_PAGE = 30;
 export const ACTIVITY_WINDOW = 100;
 
 /**
+ * ConversationEvent kinds that are written for the DB audit trail but have NO
+ * timeline-pill renderer (activity-entry.tsx has no case for them). Today this
+ * is the call_* lifecycle family: the visible inline element for a call is the
+ * CallBubble built from the Call row, not a pill, so carrying these rows into
+ * the thread hydration / events refetch would only waste the ACTIVITY_WINDOW
+ * budget. Excluded from both read paths below.
+ */
+const NON_PILL_EVENT_KINDS: ConversationEventKind[] = [
+  "call_completed",
+  "call_missed",
+  "call_rejected",
+  "call_failed",
+];
+
+/**
  * Page of conversations for a team, sorted by recency.
  *
  * Keyset cursor on `(lastMessageAt, id)` instead of offset because realtime
@@ -51,9 +66,13 @@ export const ACTIVITY_WINDOW = 100;
  * `search` filters by contact name / phone / latest-message preview using
  * case-insensitive substring match. Searches the loaded slice's haystack
  * server-side so the user can find threads buried under hundreds of others
- * without scrolling. Without a pg_trgm index this is a sequential scan —
- * fine at pilot scale (single-digit ms for a few thousand rows). Switch to
- * a trigram index past ~50k conversations.
+ * without scrolling. This OR spans the Contact join (name / phone are relation
+ * filters), so Postgres can't BitmapOr it against any single-table index — the
+ * plan is a team-partition walk + filter regardless. Fine at pilot scale
+ * (single-digit ms for a few thousand rows). A plain trgm GIN on
+ * lastMessagePreview does NOT help (cross-table OR — it was dropped, see the
+ * Conversation model note); past ~50k conversations, split into a contact-id
+ * prefilter + a preview-only query (unioned) and index those.
  *
  * Includes contact + assigned user; does NOT pull messages/notes (the
  * thread page hydrates those separately to keep the list query lean).
@@ -101,6 +120,10 @@ export async function listConversations(
   // Search clause: name / phone / last-message preview, case-insensitive.
   // Phone numbers are stored normalised so a plain `contains` covers
   // "5551234" matching "+15551234567" — no need for digit-only stripping.
+  // NOTE: name/phone are Contact RELATION filters, so this OR spans a join;
+  // Postgres can't BitmapOr across tables, so the planner walks the team's
+  // conversation partition and filters (no single-table index serves it — the
+  // preview trgm GIN was dropped for exactly this reason, 20260611130300).
   const searchClause: Prisma.ConversationWhereInput | null = search
     ? {
         OR: [
@@ -288,8 +311,12 @@ export async function getConversationWithRefs(
       // hides any that predate the oldest loaded message. `user` is joined for
       // the actor name; `apiKey` for its label so external /v1 changes read as
       // the integration name, not a blank actor. Rides the
-      // (conversationId, at DESC) index.
+      // (conversationId, at DESC) index. call_* kinds are excluded
+      // (NON_PILL_EVENT_KINDS) — they're DB-only audit rows with no
+      // activity-entry renderer (the visible element is CallBubble from the
+      // Call row), so carrying them would only waste the ACTIVITY_WINDOW budget.
       events: {
+        where: { kind: { notIn: NON_PILL_EVENT_KINDS } },
         orderBy: { at: "desc" },
         take: ACTIVITY_WINDOW,
         include: {
@@ -441,7 +468,9 @@ export async function listConversationEvents(
   if (!owns) return [];
 
   const rows = await db.conversationEvent.findMany({
-    where: { conversationId, teamId },
+    // Mirror the hydration's exclusion so the events-only refetch never
+    // surfaces a call_* row the timeline can't render (CallBubble owns calls).
+    where: { conversationId, teamId, kind: { notIn: NON_PILL_EVENT_KINDS } },
     orderBy: { at: "desc" },
     take: ACTIVITY_WINDOW,
     include: {

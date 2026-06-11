@@ -2,7 +2,12 @@ import { Prisma, type WorkflowStepType, type WorkflowTriggerEvent } from "@prism
 
 import { db } from "@/lib/db";
 import { type WorkflowEventEnvelope } from "@/lib/workflows/events";
-import { findNextStep, MAX_WORKFLOW_NODES, toGraph } from "@/lib/workflows/graph";
+import {
+  findNextStep,
+  MAX_WORKFLOW_NODES,
+  toGraph,
+  type WorkflowGraph,
+} from "@/lib/workflows/graph";
 import {
   acquireWorkflowRunLock,
   enqueueWorkflowResume,
@@ -198,13 +203,36 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   // ask_question, `pendingAnswer` lingers on the run (nothing clears it until
   // the next ask_question), so it can't distinguish a fresh inbound reply from
   // a stale timeout job that fires while the run is parked at a later wait.
-  if (
-    run.status === "waiting" &&
-    run.waitUntil &&
-    !input.isInboundResume &&
-    Date.now() < run.waitUntil.getTime() - RESUME_NOT_DUE_TOLERANCE_MS
-  ) {
-    return { runId: run.id, status: "waiting" };
+  //
+  // BUT job-kind alone is too coarse for the INBOUND path. The
+  // `inbound-${runId}-${tag}` job's `isInboundResume=true` bypasses the
+  // not-due guard so an early reply can wake an ask_question before its
+  // timeout. The hazard: nothing cancels the dangling ask_question TIMEOUT
+  // job (`resume-${runId}-${waitSeq}`). In the knife-edge reply≈timeout race
+  // both fire; if the timeout job's enqueue happens to carry the inbound flag
+  // (it can't today — only `inbound-` jobs set it — but a future enqueue path
+  // could), OR the run has since advanced to a LATER wait step, an
+  // unconditional inbound bypass would run downstream steps prematurely +
+  // concurrently with the legitimate resume (double side-effects). So gate the
+  // bypass on the run ACTUALLY being parked on an ask_question awaiting a
+  // reply: `currentStepId` resolves to an ask_question node whose newest
+  // stepLog entry is `waiting`. (We can't require a live WorkflowAwaitingReply
+  // row — the inbound ingest hook deletes it BEFORE enqueueing this resume.)
+  // If the run isn't parked there, this inbound pickup is stale → no-op like
+  // any other stale resume.
+  if (run.status === "waiting" && run.waitUntil) {
+    const notYetDue =
+      Date.now() < run.waitUntil.getTime() - RESUME_NOT_DUE_TOLERANCE_MS;
+    if (input.isInboundResume) {
+      if (notYetDue && !isParkedOnAskQuestionAwaitingReply(graph, run.currentStepId, run.stepLog)) {
+        // Inbound resume for a run that is NOT parked on an ask_question (it
+        // advanced to a later wait, or never reached one) AND whose current
+        // wait isn't due — a stale/dangling job. Leave it parked.
+        return { runId: run.id, status: "waiting" };
+      }
+    } else if (notYetDue) {
+      return { runId: run.id, status: "waiting" };
+    }
   }
 
   await db.workflowRun.update({
@@ -768,6 +796,45 @@ interface StepLogEntry {
  * the latter is at-least-once by HTTP semantics anyway and its callee is
  * expected to dedupe) are excluded so the stepLog stays focused.
  */
+/**
+ * True when the run is genuinely parked on an `ask_question` step awaiting an
+ * inbound reply: `currentStepId` resolves to an `ask_question` node whose
+ * NEWEST stepLog entry for that step is `waiting`. The await_reply path keeps
+ * `currentStepId` on the same step and pushes a `waiting` entry, so this is the
+ * exact parking signature.
+ *
+ * Used to gate the `isInboundResume` bypass of the not-due guard (see the
+ * resume guard above). A dangling ask_question timeout job that wins the
+ * reply≈timeout race — or any inbound pickup for a run that has since advanced
+ * to a LATER wait step — fails this check and is treated as a stale resume,
+ * preventing premature + double execution of post-wait steps. We deliberately
+ * do NOT require a live WorkflowAwaitingReply row: the inbound ingest hook
+ * deletes it (findAndConsumeAwaitingReplies) BEFORE enqueueing the resume job,
+ * so it's always gone by the time this runs.
+ */
+function isParkedOnAskQuestionAwaitingReply(
+  graph: WorkflowGraph,
+  currentStepId: string | null,
+  rawStepLog: unknown,
+): boolean {
+  if (!currentStepId) return false;
+  const node = graph.nodes.find((n) => n.id === currentStepId);
+  if (!node || node.type !== "ask_question") return false;
+  const stepLog = Array.isArray(rawStepLog)
+    ? (rawStepLog as StepLogEntry[])
+    : [];
+  // Walk backwards for the newest entry belonging to this step; it must be
+  // `waiting` (the await_reply pause). A later `success`/`failed`/`skipped`
+  // entry would mean the step already resumed and advanced.
+  for (let i = stepLog.length - 1; i >= 0; i--) {
+    const entry = stepLog[i];
+    if (entry?.stepId === currentStepId) {
+      return entry.status === "waiting";
+    }
+  }
+  return false;
+}
+
 function hasSideEffect(type: WorkflowStepType): boolean {
   // Drive the answer from the per-handler `sideEffect` declaration so adding
   // a new step type forces the author to opt in/out at the type-system

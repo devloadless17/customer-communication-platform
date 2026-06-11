@@ -25,7 +25,7 @@ import {
 // searches team-wide across EVERY conversation, in three scopes:
 //
 //   contacts — name / phone / email          (trgm on name, btree on phone)
-//   messages — body / mediaCaption           (Message_body_trgm_idx)
+//   messages — body (caption lives in body)  (Message_body_trgm_idx)
 //   notes    — internal-note body            (InternalNote_body_trgm_idx)
 //
 // All three are case-insensitive substring (ILIKE). We keep substring rather
@@ -147,9 +147,20 @@ export async function searchContacts(
 // ---------------------------------------------------------------------------
 
 /**
- * Messages whose body OR mediaCaption matches `query`, across every
- * conversation in the team, newest-first. Joins the conversation's contact for
- * the row header. Rides Message_body_trgm_idx for the team-wide ILIKE.
+ * Messages whose body matches `query`, across every conversation in the team,
+ * newest-first. Joins the conversation's contact for the row header. Rides
+ * Message_body_trgm_idx for the team-wide ILIKE.
+ *
+ * We match `body` ONLY — NOT `mediaCaption` — even though the in-thread search
+ * (search.ts) ORs both. The caption is always copied into `body` at every
+ * write site (inbound ingest, outbound media send, forward — verified), so a
+ * caption-only match is impossible and the arm is provably redundant. Dropping
+ * it lets Postgres BitmapAnd the `teamId` filter with Message_body_trgm_idx;
+ * an OR over un-indexed `mediaCaption` would force a BitmapOr that needs an
+ * index on every arm, defeating the trgm GIN and degrading to a team-wide
+ * seq-scan. (The in-thread search keeps the OR because that query is already
+ * scoped to one conversation's tiny slice via the keyset index, so the planner
+ * never relies on a trgm index there.)
  */
 export async function searchAllMessages(
   teamId: string,
@@ -160,17 +171,16 @@ export async function searchAllMessages(
   if (query.length === 0) return { items: [], nextCursor: null };
 
   const cursor = parseMessageCursor(opts.cursor ?? null);
-  const matchOr = [
-    { body: { contains: query, mode: "insensitive" as const } },
-    { mediaCaption: { contains: query, mode: "insensitive" as const } },
-  ];
+  const matchBody = {
+    body: { contains: query, mode: "insensitive" as const },
+  };
 
   const rows = await db.message.findMany({
     where: cursor
       ? {
           teamId,
+          ...matchBody,
           AND: [
-            { OR: matchOr },
             {
               OR: [
                 { timestamp: { lt: cursor.timestamp } },
@@ -179,14 +189,13 @@ export async function searchAllMessages(
             },
           ],
         }
-      : { teamId, OR: matchOr },
+      : { teamId, ...matchBody },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
     take: take + 1,
     select: {
       id: true,
       conversationId: true,
       body: true,
-      mediaCaption: true,
       mediaKind: true,
       direction: true,
       timestamp: true,
@@ -204,21 +213,15 @@ export async function searchAllMessages(
       ? encodeMessageCursor({ timestamp: last.timestamp, id: last.id })
       : null;
 
-  const lowered = query.toLowerCase();
   const items: GlobalMessageHit[] = sliced.map((m) => {
-    // Prefer the caption as the snippet when IT is what matched (so a media
-    // message surfaces the matched caption, not an empty/placeholder body).
-    const captionMatched =
-      m.mediaCaption != null &&
-      m.mediaCaption.toLowerCase().includes(lowered) &&
-      !m.body.toLowerCase().includes(lowered);
-    const source = captionMatched ? (m.mediaCaption ?? m.body) : m.body;
+    // `body` already carries any media caption (copied at every write site),
+    // so it's the single snippet source — the matched text is always in here.
     const contact = m.conversation.contact;
     return {
       messageId: m.id,
       conversationId: m.conversationId,
       contactName: contact?.name ?? "Unknown",
-      snippet: snippet(source),
+      snippet: snippet(m.body),
       direction: m.direction as MessageDirection,
       timestamp: m.timestamp.toISOString(),
       ...(contact?.avatarUrl ? { contactAvatarUrl: contact.avatarUrl } : {}),

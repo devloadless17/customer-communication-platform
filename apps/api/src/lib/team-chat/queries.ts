@@ -391,23 +391,47 @@ export async function listChannelMessagesAround(
  * Fetch new messages strictly after `after`. Used by reconnect-backfill +
  * the anchored-mode "load newer" path. Returns the same `{ items, nextCursor }`
  * envelope as `listChannelMessages` so callers don't have to guess at the
- * page boundary from `items.length`. `nextCursor` is the timestamp of the
- * newest row in the slice when more remains, else null.
+ * page boundary from `items.length`. `nextCursor` is the OPAQUE encoded cursor
+ * of the newest row in the slice when more remains, else null — symmetric with
+ * the `?before=` path + `listChannelMessagesAround`'s `afterCursor`, so a
+ * forward-paginating client can feed it straight back into `?after=`.
+ *
+ * `after` accepts EITHER the `{ createdAt, id }` keyset (decoded from an
+ * opaque cursor) OR a bare timestamp with `id: null` (the reconnect-backfill
+ * path passes the newest known message's `createdAt`, which has no id). When
+ * an id is present we use the full keyset `(createdAt, id)` so a same-
+ * millisecond sibling — committed in the same ms as a row the client already
+ * has — isn't skipped by a strict `createdAt >` filter. The id-less path uses
+ * `createdAt >=` (relying on the client's id-dedupe) for the same reason:
+ * `>` would drop a same-ms sibling the client missed.
  */
 export async function listChannelMessagesAfter(
   channelId: string,
   teamId: string,
-  after: string,
+  after: { createdAt: string; id: string | null },
   take = PAGE_SIZE,
 ): Promise<{ items: TeamChannelMessageDto[]; nextCursor: string | null }> {
   const limit = Math.min(take, MAX_PAGE_SIZE);
+  const afterDate = new Date(after.createdAt);
   // +1 lookahead matches the keyset pattern in `listChannelMessages`.
   const rows = await db.teamChannelMessage.findMany({
     where: {
       channelId,
       teamId,
       threadRootId: null,
-      createdAt: { gt: new Date(after) },
+      ...(after.id
+        ? {
+            // Full keyset: rows strictly after (createdAt, id). Excludes the
+            // cursor row itself but keeps same-ms siblings with a higher id.
+            OR: [
+              { createdAt: { gt: afterDate } },
+              { createdAt: afterDate, id: { gt: after.id } },
+            ],
+          }
+        : // id-less (timestamp-only) cursor: include the cursor ms so a
+          // same-ms sibling the client missed still arrives; the client
+          // dedupes by id.
+          { createdAt: { gte: afterDate } }),
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: limit + 1,
@@ -418,7 +442,7 @@ export async function listChannelMessagesAfter(
   const items = slice.map(mapMessage);
   const nextCursor =
     hasMore && slice.length > 0
-      ? slice[slice.length - 1]!.createdAt.toISOString()
+      ? encodeCursor(slice[slice.length - 1]!.createdAt, slice[slice.length - 1]!.id)
       : null;
   return { items, nextCursor };
 }

@@ -32,6 +32,7 @@ type SweeperName =
   | "auth-cleanup"
   | "api-idempotency"
   | "inbound-media"
+  | "stale-calls"
   | "conversation-analytics-drift"
   | "outbound-webhook-delivery-cleanup";
 
@@ -56,6 +57,7 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "auth-cleanup": 25 * 60 * 60 * 1000,
   "api-idempotency": 75 * 60 * 1000, // hourly
   "inbound-media": 5 * 60 * 1000, // 60s cadence
+  "stale-calls": 5 * 60 * 1000, // 60s cadence
   "conversation-analytics-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "outbound-webhook-delivery-cleanup": 25 * 60 * 60 * 1000, // nightly cadence
 };

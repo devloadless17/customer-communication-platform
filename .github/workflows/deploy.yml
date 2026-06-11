@@ -13,11 +13,14 @@
 #   When only one app changed, the other build job is SKIPPED entirely —
 #   the dominant time cost of a deploy is `next build`, so skipping it on
 #   an api-only push saves ~3–5 minutes.
-# - `changes` also handles fail-fast secret validation and always retags
-#   BOTH :latest-{web,api} as :previous-* (regardless of which builds run).
-#   Always-retag is correct rollback semantics: :previous-* must reflect
-#   the registry state BEFORE this push for both variants, even if one
-#   wasn't rebuilt this time.
+# - `changes` also handles fail-fast secret validation.
+# - :previous-{web,api} is written at the END of `ship`, AFTER the health gate
+#   proves the new images live (the "Promote shipped image to :previous" step).
+#   It used to be retagged at the START of `changes` from registry :latest-*,
+#   but :latest-* is pushed BEFORE Trivy/smoke/health — so a blocked deploy
+#   could leave :previous-* pointing at an image that never served traffic,
+#   poisoning the auto-rollback target. Promote-after-health makes :previous-*
+#   always mean "last image that actually passed health".
 # - `workflow_dispatch` forces a full rebuild (paths-filter is bypassed).
 name: Deploy
 
@@ -132,23 +135,16 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Server-side manifest copy (no layer transfer). Retag BOTH variants
-      # every push regardless of which apps actually rebuilt — :previous-*
-      # must reflect "state before this push" for the rollback to be
-      # semantically meaningful even when only one app rebuilt.
-      - name: Retag current :latest-{web,api} as :previous-{web,api}
-        env:
-          REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}
-        run: |
-          set -euo pipefail
-          for variant in web api; do
-            if docker buildx imagetools inspect "$REPO:latest-$variant" >/dev/null 2>&1; then
-              docker buildx imagetools create --tag "$REPO:previous-$variant" "$REPO:latest-$variant"
-              echo "✓ retagged $REPO:latest-$variant → :previous-$variant"
-            else
-              echo "no :latest-$variant in registry yet (first deploy?), skipping retag"
-            fi
-          done
+      # NOTE: :previous-{web,api} is NO LONGER retagged here. It used to be
+      # retagged from registry :latest-* at the START of every push — but
+      # images are pushed to :latest-* BEFORE the Trivy gate and BEFORE
+      # smoke/health, so a Trivy/smoke/health-blocked deploy left registry
+      # :latest-* pointing at an image that NEVER served traffic. The next
+      # push then retagged THAT unvetted image as :previous-*, poisoning the
+      # auto-rollback target. :previous-* is now written at the END of the
+      # `ship` job, AFTER the health gate proves the image is live — so
+      # :previous-* always means "last image that actually served traffic".
+      # See the "Promote shipped image to :previous" step on the ship job.
 
       # paths-filter decides which images need rebuilding. The `shared`
       # block uses a YAML anchor so both filters pick up monorepo-level
@@ -619,7 +615,25 @@ jobs:
             # app gates with a 401), reverting images alone leaves the broken
             # new Caddyfile in place and the site stays dark. They must move
             # together. Restored by the "Auto-rollback" step below.
-            sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.prev 2>/dev/null || true
+            #
+            # RUN-SCOPED: clear any stale .prev from a PRIOR deploy generation
+            # first, so `Caddyfile.prev` exists ONLY if THIS run snapshotted.
+            # Without this, a ship failure BEFORE the cp below (tar extract,
+            # .env render, compose mv) would let auto-rollback restore the
+            # generation-N-1 Caddyfile over a still-current config — reverting
+            # the proxy one generation too far while images stay current. The
+            # rollback gates on /tmp/caddy-snapshotted-<sha> (written after the
+            # cp) so it never restores a .prev this run didn't write.
+            sudo rm -f /etc/caddy/Caddyfile.prev
+            # Clear stale run markers from prior deploys (they accumulate in
+            # /tmp on every successful deploy since only a rollback rm's its own).
+            rm -f /tmp/caddy-snapshotted-* || true
+            # No `|| true` on the cp: if the deploy user's sudoers allowlist is
+            # out of lockstep (missing this cp), the snapshot must FAIL the
+            # deploy LOUDLY rather than silently disarm the rollback's Caddyfile
+            # restore. Keep deploy/README.md's allowlist in sync with this line.
+            sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.prev
+            touch "/tmp/caddy-snapshotted-${{ github.sha }}"
             sudo mv /tmp/ccp-deploy/Caddyfile    /etc/caddy/Caddyfile
             install -m 0755 /tmp/ccp-deploy/pg-backup.sh /opt/ccp/pg-backup.sh
 
@@ -817,6 +831,31 @@ jobs:
             docker exec "$app_id" pnpm run db:seed:superadmin
             echo "✓ superadmin seed complete"
 
+      # Promote the just-shipped images to :previous-* — ONLY after the health
+      # gate proved them live. This is the rollback-target write that used to
+      # run (wrongly) at the start of the `changes` job, BEFORE Trivy/smoke/
+      # health, which could poison :previous-* with an image that never served
+      # traffic. Now :previous-* is always "the last image that actually passed
+      # health", which is exactly what auto-rollback should fall back to.
+      # Gated on the health step succeeding (not just `success()`) so a deploy
+      # that limped to here some other way can't write a bad rollback target.
+      # Manifest-only copy from the verified-live :latest-* — no layer transfer.
+      - name: Promote shipped image to :previous
+        if: steps.health.outcome == 'success'
+        env:
+          REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.APP_IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          for variant in web api; do
+            if docker buildx imagetools inspect "$REPO:latest-$variant" >/dev/null 2>&1; then
+              docker buildx imagetools create --tag "$REPO:previous-$variant" "$REPO:latest-$variant"
+              echo "✓ promoted verified-live $REPO:latest-$variant → :previous-$variant"
+            else
+              echo "no :latest-$variant in registry (unexpected post-ship) — skipping"
+            fi
+          done
+
       # Fires when external health failed OR the ship step itself failed. The
       # ship step swaps the live Caddyfile + runs `docker compose up` BEFORE
       # the health check; if it aborts mid-way, the health step is SKIPPED
@@ -824,9 +863,13 @@ jobs:
       # leave the new (possibly broken) images + swapped Caddyfile live with no
       # revert. Rolling back on a ship failure that never touched the VPS is
       # harmless — it just re-asserts the :previous images (== current) and
-      # skips the Caddyfile restore when no .prev snapshot exists. Retags both
-      # :previous-{web,api} → :latest-{web,api} on the VPS, recreates via
-      # docker compose, restores Caddyfile.prev. Back on last-good in ~30s.
+      # skips the Caddyfile restore because no run-scoped snapshot marker exists
+      # (the ship step writes /tmp/caddy-snapshotted-<sha> only AFTER it
+      # actually replaces the proxy config — a ship failure before that point
+      # leaves the live Caddyfile untouched, so there's nothing to revert).
+      # Retags both :previous-{web,api} → :latest-{web,api} on the VPS,
+      # recreates via docker compose, restores Caddyfile.prev only when this run
+      # snapshotted it. Back on last-good in ~30s.
       - name: Auto-rollback on health or ship failure
         if: always() && (steps.health.outcome == 'failure' || steps.ship.outcome == 'failure')
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
@@ -862,13 +905,42 @@ jobs:
             done
             cd /opt/ccp
             docker compose --env-file .env up -d --remove-orphans
+
+            # P3009 detection. If THIS deploy's migration failed mid-apply,
+            # Prisma recorded a FAILED row in _prisma_migrations, and every
+            # subsequent `prisma migrate deploy` — INCLUDING the one the
+            # rolled-back :previous-api image just ran in its boot CMD — exits
+            # with P3009 ("migrate found failed migrations") and crash-loops.
+            # The image swap above cannot recover this failure class on its own.
+            # Surface it loudly with the exact manual-resolve runbook instead of
+            # the rollback falsely reporting success. (Give the api a moment to
+            # attempt its boot migrate, then scan its recent logs.)
+            sleep 8
+            api_logs="$(docker compose --env-file .env logs --tail=120 api 2>&1 || true)"
+            if printf '%s' "$api_logs" | grep -q 'P3009'; then
+              echo "::error::P3009 — a failed migration is blocking the api boot. The image rollback CANNOT clear this; the rolled-back container crash-loops on the same FAILED _prisma_migrations row."
+              echo "::error::RUNBOOK: SSH to the VPS and either (a) restore the pre-deploy snapshot /opt/ccp/backups/pre-deploy-*-$(echo "${{ github.sha }}").sql.gz then redeploy, OR (b) inspect + resolve the marker:"
+              echo "::error::  docker compose --env-file .env run --rm --entrypoint sh api -c 'cd /app && pnpm prisma migrate status'"
+              echo "::error::  docker compose --env-file .env run --rm --entrypoint sh api -c 'cd /app && pnpm prisma migrate resolve --rolled-back <FAILED_MIGRATION_NAME>'"
+              echo "::error::See deploy/README.md → 'Rolling back' → 'A migration that failed mid-apply (P3009)'."
+            fi
+
             # Revert the proxy config too if the failed deploy changed it. A
             # rollback that restores images but keeps the NEW Caddyfile can
             # leave a working app behind a broken proxy (e.g. a health_uri the
             # rolled-back image doesn't satisfy → web upstream stays down →
             # site still 503s). /etc/caddy/Caddyfile.prev is snapshotted by the
             # ship step before it overwrites the live config.
-            if [ -f /etc/caddy/Caddyfile.prev ]; then
+            #
+            # Gate on the RUN-SCOPED marker the ship step writes ONLY after a
+            # successful snapshot THIS run. A bare `-f Caddyfile.prev` check
+            # would restore a stale generation-N-1 snapshot when the ship step
+            # failed BEFORE snapshotting (the .prev that the ship step's first
+            # line, `rm -f Caddyfile.prev`, may not have cleared if even that
+            # didn't run). The marker means: only restore the proxy config when
+            # THIS deploy actually replaced it.
+            SNAP_MARKER="/tmp/caddy-snapshotted-${{ github.sha }}"
+            if [ -f "$SNAP_MARKER" ] && [ -f /etc/caddy/Caddyfile.prev ]; then
               sudo cp -a /etc/caddy/Caddyfile.prev /etc/caddy/Caddyfile
               if sudo caddy validate --config /etc/caddy/Caddyfile; then
                 sudo systemctl reload caddy
@@ -876,7 +948,10 @@ jobs:
               else
                 echo "⚠ previous Caddyfile failed validation — left current config in place"
               fi
+            else
+              echo "ℹ this run did not snapshot the Caddyfile (ship failed before the proxy swap) — leaving live config untouched"
             fi
+            rm -f "$SNAP_MARKER"
             echo "✓ rolled back to :previous-{web,api} (registry + local in sync)"
             # MIGRATION SAFETY NOTE (read before trusting this rollback):
             # this step swaps CODE images only — it does NOT revert any database

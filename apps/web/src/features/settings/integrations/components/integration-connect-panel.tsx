@@ -5,6 +5,7 @@ import { CheckCircle2, Copy, KeyRound, Loader2, RefreshCw, Terminal, Zap } from 
 
 import { LocalTime } from "@/components/local-time";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type { ApiKeyListItem } from "@/lib/api/queries";
@@ -39,6 +40,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
   const [generating, setGenerating] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirm();
   // Filled in after mount — `window` isn't available during the SSR pass,
   // and we want the curls to use the user's actual host (works against
   // localhost, staging, and prod without per-env overrides).
@@ -114,13 +116,13 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
    */
   async function rotate() {
     if (!connected) return;
-    if (
-      !window.confirm(
-        `Rotate the "${connected.name}" key? The old key stops working immediately. You'll need to paste the new key into ${preset.label}.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Rotate the "${connected.name}" key?`,
+      description: `The old key stops working immediately. You'll need to paste the new key into ${preset.label}.`,
+      confirmLabel: "Rotate key",
+      destructive: true,
+    });
+    if (!ok) return;
     setError(null);
     setRotating(true);
     try {
@@ -333,6 +335,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
 
         </div>
       </div>
+      {confirmDialog}
     </section>
   );
 }

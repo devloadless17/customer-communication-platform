@@ -45,6 +45,8 @@ import type { Message } from "@ccp/shared/types";
  *
  *   - STREAK_429            — 429 streak count (per-broadcast)
  *   - PAUSE_429             — global pause deadline (per-broadcast)
+ *   - PERMANENT_STREAK      — consecutive permanent-error count (per-broadcast)
+ *   - FATAL_PAUSE           — fatal-error pause signal (per-broadcast)
  *   - inFlightRuns          — top-level runBroadcast promise
  *   - broadcastTeamSlots    — per-TEAM concurrent-broadcast gate
  *   - teamRecipientSlots    — per-TEAM concurrent-RECIPIENT gate (lane-level)
@@ -163,6 +165,42 @@ function lanePauseRemaining(broadcastId: string): number {
   }
   return remaining;
 }
+
+/**
+ * Permanent-error circuit breaker. The 429 streak above handles TRANSIENT rate
+ * limits (back off, retry). But a credential that's dead for the whole run —
+ * an expired/revoked Meta token (`auth_expired`) or a WhatsApp number that was
+ * deconfigured mid-flight (`provider_not_configured`) — makes EVERY remaining
+ * recipient a guaranteed-failing Meta call at full lane speed: a wall of false
+ * `failed` rows, wasted calls against a flagged credential, and a delayed
+ * operator discovery of the real cause. The send config is resolved ONCE at
+ * run start, so a token that dies after that never self-heals within the run.
+ *
+ * When N consecutive sends fail with a permanent class, we CAS the broadcast
+ * `running → paused` and signal all lanes to stop. `paused` is the existing
+ * resume state: the boot reconciler flips it back to `queued` and re-fires the
+ * runner (re-resolving the config), and the per-recipient CAS keeps already-
+ * sent rows untouched. The operator sees "paused — WhatsApp connection error"
+ * and can fix the credential + retry instead of staring at thousands of
+ * failures. Reset on any success so an isolated rejection (one bad number)
+ * doesn't trip it.
+ */
+const PERMANENT_ERROR_PAUSE_THRESHOLD = 5;
+const PERMANENT_STREAK: Map<string, number> = new Map();
+function trackPermanentHit(broadcastId: string): number {
+  const next = (PERMANENT_STREAK.get(broadcastId) ?? 0) + 1;
+  PERMANENT_STREAK.set(broadcastId, next);
+  return next;
+}
+function resetPermanentStreak(broadcastId: string): void {
+  PERMANENT_STREAK.delete(broadcastId);
+}
+/**
+ * Lanes set this when the permanent-error breaker trips so the OTHER lanes
+ * stop pulling recipients (mirrors `canceled`, but driven in-memory rather
+ * than via a DB status poll — the breaker already wrote `paused` to the row).
+ */
+const FATAL_PAUSE: Set<string> = new Set();
 
 interface BroadcastVariables {
   body: string[];
@@ -502,9 +540,12 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // Resume case: the boot reconciler flips `paused` → `queued` and re-fires
   // startBroadcast, so by the time we get here a previously-paused broadcast
   // is `queued` again and the same CAS picks it up. No special-case needed.
+  // Clear `lastError` on (re)claim — the permanent-error breaker stamps it when
+  // it pauses, and a successful resume must not leave a stale "WhatsApp
+  // connection error" banner on the eventually-completed broadcast.
   const claimed = await db.broadcast.updateMany({
     where: { id: broadcast.id, status: "queued" },
-    data: { status: "running", startedAt: new Date() },
+    data: { status: "running", startedAt: new Date(), lastError: null },
   });
   if (claimed.count === 0) return;
 
@@ -597,6 +638,11 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         phoneNumber: true,
         email: true,
         location: true,
+        // Re-checked at SEND time (not just at audience-resolution time) so a
+        // contact deleted AFTER the broadcast was created — the de-facto
+        // opt-out path, most likely on a SCHEDULED broadcast whose create→fire
+        // gap is hours/days — is skipped instead of getting a billed template.
+        deletedAt: true,
         customFields: true,
       },
     },
@@ -614,6 +660,7 @@ async function runBroadcast(broadcastId: string): Promise<void> {
             phoneNumber: true,
             email: true,
             location: true,
+            deletedAt: true,
           },
         },
       } as unknown as typeof RECIPIENT_SELECT_FULL);
@@ -696,6 +743,10 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     Array.from({ length: lanes }, async () => {
       while (true) {
         if (await checkCanceled()) return;
+        // Fatal-error breaker tripped by another (or this) lane — the broadcast
+        // row is already `paused` and the boot reconciler will resume it once
+        // the credential is fixed. Stop pulling new recipients.
+        if (FATAL_PAUSE.has(broadcast.id)) return;
         // Graceful-shutdown check: the NestJS wrapper signals shutdown
         // before awaiting in-flight runs. Each lane exits the loop here,
         // which means the current recipient (if any was already started
@@ -759,6 +810,11 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // Drop the 429 state so neither Map grows across many broadcasts.
   reset429Streak(broadcast.id);
   PAUSE_429.delete(broadcast.id);
+  // Drop the permanent-error breaker state too. If the breaker tripped, the
+  // row is already `paused` (handled in the tail branch below); clearing the
+  // FATAL_PAUSE signal here is safe because every lane has already drained.
+  resetPermanentStreak(broadcast.id);
+  const fatalPaused = FATAL_PAUSE.delete(broadcast.id);
 
   // Flush any pending throttled progress emit + drop the throttle entry so
   // the Map doesn't grow unbounded across many broadcasts. Without this the
@@ -774,18 +830,23 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     progressThrottles.delete(broadcast.id);
   }
 
-  // Three possible exits from the lane loop:
+  // Four possible exits from the lane loop:
   //   1. canceled by operator → cancel endpoint owns the status emit.
-  //   2. shuttingDown (graceful drain) → flip `running` → `paused`. Boot
+  //   2. fatalPaused (permanent-error breaker) → the tripping lane already
+  //      CAS'd `running` → `paused` and published; nothing more to do here.
+  //      Boot reconciler resumes it once the credential is fixed.
+  //   3. shuttingDown (graceful drain) → flip `running` → `paused`. Boot
   //      reconciler on the next process will flip back to `queued` and call
   //      startBroadcast(); recipient CAS prevents double-send.
-  //   3. recipients exhausted (normal completion) → flip `running` →
+  //   4. recipients exhausted (normal completion) → flip `running` →
   //      `completed`.
   //
   // Every branch is gated on status="running" so a race with cancel/pause
   // never overwrites the more specific terminal status.
   if (canceled) {
     // cancel endpoint already published the status change.
+  } else if (fatalPaused) {
+    // Permanent-error breaker already wrote `paused` + published. No-op.
   } else if (shuttingDown) {
     const queuedRemaining = await db.broadcastRecipient.count({
       where: { broadcastId: broadcast.id, status: "queued" },
@@ -843,6 +904,7 @@ async function processOneRecipient(
       phoneNumber: string | null;
       email: string | null;
       location: string | null;
+      deletedAt: Date | null;
       customFields: Prisma.JsonValue;
     };
   },
@@ -863,6 +925,22 @@ async function processOneRecipient(
   const sendTemplate = provider.sendTemplate;
   if (!sendTemplate) {
     await markRecipientFailed(recipient.id, "provider does not support templates");
+    bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
+    return;
+  }
+  // Re-check contact liveness at FIRE time. Audience resolution filters
+  // `deletedAt: null` at create time, but a contact can be soft-deleted in the
+  // create→fire gap (seconds for "send now", hours/days for a scheduled
+  // broadcast). Deleting a contact is the de-facto opt-out, so we must not
+  // deliver a billed template to one Meta would charge for and the customer
+  // could report as spam. Short-circuits BEFORE conversation resolution so we
+  // don't reopen a closed thread for someone who was removed. Mirrors the
+  // missing-phone guard below.
+  if (recipient.contact.deletedAt) {
+    await markRecipientFailed(
+      recipient.id,
+      "Contact was deleted after the broadcast was created.",
+    );
     bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { failed: 1 }, pendingBumps);
     return;
   }
@@ -1013,9 +1091,13 @@ async function processOneRecipient(
         );
       } catch (err) {
         // Meta rate-limit handling: a flagged number / rapid burst can produce
-        // a 4/80007 response. Without a backoff, the entire broadcast becomes
-        // a wall of "rate_limited"-failed recipients — and Meta charges
-        // quality score for it. One sleep+retry is the cheapest mitigation:
+        // a rate/throughput/messaging-limit response — 4 / 80007 (app-level) or,
+        // far more commonly under a real broadcast, 130429 (per-second throughput),
+        // 131048 (spam/quality limit) or 131056 (pair limit). All five normalize
+        // to `rate_limited` (see normalizeMetaSendError), so this branch now fires
+        // on the errors broadcasts actually hit. Without a backoff, the entire
+        // broadcast becomes a wall of "rate_limited"-failed recipients — and Meta
+        // charges quality score for it. One sleep+retry is the cheapest mitigation:
         // we wait for ~3s of cooldown then send the same recipient again.
         // Only ONE retry — a permanently-flagged number shouldn't loop.
         if (normalizeMetaSendError(err)?.code === "rate_limited") {
@@ -1072,9 +1154,20 @@ async function processOneRecipient(
             { failed: 1 },
             pendingBumps,
           );
+          // Permanent-error breaker: a credential that's dead for the whole run
+          // (expired/revoked token → `auth_expired`, deconfigured number →
+          // `provider_not_configured`) fails every remaining recipient. Track
+          // the consecutive streak; once it crosses the threshold, pause the
+          // broadcast so the operator can reconnect + retry instead of burning
+          // through the audience as false failures.
+          await maybeTripPermanentBreaker(broadcast, err);
           return;
         }
       }
+      // A send (or reconcile) succeeded — clear the permanent-error streak so
+      // an isolated rejection earlier in the run can't accumulate toward the
+      // breaker across unrelated good sends.
+      resetPermanentStreak(broadcast.id);
       // Meta accepted — stamp the attempt `completed` (with the wamid) BEFORE
       // the recipient `queued → sent` flip so a crash in that window resumes
       // into the reconcile path instead of re-sending to Meta.
@@ -1196,6 +1289,70 @@ async function markRecipientFailed(recipientId: string, message: string): Promis
     where: { id: recipientId, status: "queued" },
     data: { status: "failed", errorMessage: message.slice(0, 500) },
   });
+}
+
+/**
+ * Whether a send error is a PERMANENT credential failure — one that will recur
+ * for every remaining recipient until the operator reconnects WhatsApp, as
+ * opposed to a per-recipient rejection (bad number, unsupported content) or a
+ * transient rate limit (handled by the 429 streak). Only these classes feed
+ * the permanent-error breaker.
+ */
+function isPermanentCredentialError(err: unknown): boolean {
+  if (err instanceof ProviderNotConfiguredError) return true;
+  return normalizeMetaSendError(err)?.code === "auth_expired";
+}
+
+/**
+ * Permanent-error breaker. Called from the non-rate-limited failure branch.
+ * Bumps the consecutive permanent-error streak; when it crosses the threshold,
+ * CAS the broadcast `running → paused`, set the in-memory FATAL_PAUSE signal so
+ * every lane stops pulling, and publish the paused status so the UI surfaces
+ * "paused — WhatsApp connection error". The boot reconciler resumes a `paused`
+ * broadcast (re-resolving the send config) once the credential is fixed.
+ */
+async function maybeTripPermanentBreaker(
+  broadcast: { id: string; teamId: string },
+  err: unknown,
+): Promise<void> {
+  if (!isPermanentCredentialError(err)) {
+    // A non-permanent rejection (bad number, unsupported message) breaks any
+    // accumulating permanent streak — those are isolated, not a dead credential.
+    resetPermanentStreak(broadcast.id);
+    return;
+  }
+  const streak = trackPermanentHit(broadcast.id);
+  if (streak < PERMANENT_ERROR_PAUSE_THRESHOLD) return;
+  if (FATAL_PAUSE.has(broadcast.id)) return; // another lane already tripped it
+  // Claim the trip atomically in-memory before the DB write so two lanes
+  // crossing the threshold in the same tick don't both pause/publish.
+  FATAL_PAUSE.add(broadcast.id);
+  const reason = isProviderNotConfigured(err)
+    ? "WhatsApp connection error — the number is no longer configured."
+    : "WhatsApp connection error — the access token expired or was revoked.";
+  const paused = await db.broadcast.updateMany({
+    where: { id: broadcast.id, status: "running" },
+    data: { status: "paused", lastError: reason },
+  });
+  if (paused.count === 0) {
+    // Already left `running` (canceled / completed by a racing path). Leave the
+    // FATAL_PAUSE flag set so lanes still stop; the tail clears it.
+    return;
+  }
+  console.warn(
+    `[broadcast ${broadcast.id}] ${PERMANENT_ERROR_PAUSE_THRESHOLD} consecutive permanent send errors — pausing broadcast (${reason})`,
+  );
+  await publish({
+    type: "broadcast.status_changed",
+    teamId: broadcast.teamId,
+    broadcastId: broadcast.id,
+    status: "paused",
+    error: reason,
+  });
+}
+
+function isProviderNotConfigured(err: unknown): boolean {
+  return err instanceof ProviderNotConfiguredError;
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,6 +1733,8 @@ export async function pruneBroadcastInMemoryStateForTerminalRows(): Promise<void
   for (const row of terminal) {
     if (STREAK_429.delete(row.id)) cleared++;
     if (PAUSE_429.delete(row.id)) cleared++;
+    if (PERMANENT_STREAK.delete(row.id)) cleared++;
+    if (FATAL_PAUSE.delete(row.id)) cleared++;
     if (inFlightRuns.delete(row.id)) cleared++;
     const throttle = progressThrottles.get(row.id);
     if (throttle) {

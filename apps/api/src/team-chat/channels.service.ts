@@ -414,13 +414,25 @@ export class ChannelsService {
     await this.requireChannelMembership(teamId, userId, channelId);
 
     if (opts.after) {
-      if (Number.isNaN(Date.parse(opts.after))) {
+      // The `?after=` value is EITHER an opaque encoded cursor (from
+      // `listChannelMessagesAround`'s `afterCursor` + this path's own
+      // `nextCursor` — forward pagination after a search jump-to) OR a bare
+      // ISO timestamp (the reconnect-backfill path sends the newest known
+      // message's `createdAt`, which carries no id). Decode the keyset form
+      // first; fall back to the timestamp form so both callers work.
+      const decoded = decodeCursor(opts.after);
+      const after = decoded
+        ? decoded
+        : !Number.isNaN(Date.parse(opts.after))
+          ? { createdAt: opts.after, id: null }
+          : null;
+      if (!after) {
         throw new BadRequestException({ error: "invalid after" });
       }
       // Now returns { items, nextCursor } symmetrically with the
       // ?before= path — client doesn't have to infer pagination state
       // from `items.length >= PAGE_SIZE` anymore.
-      return listChannelMessagesAfter(channelId, teamId, opts.after);
+      return listChannelMessagesAfter(channelId, teamId, after);
     }
 
     const before = opts.before ? decodeCursor(opts.before) : null;
@@ -848,6 +860,48 @@ export class ChannelsService {
   async markRead(teamId: string, userId: string, channelId: string) {
     await this.requireChannelMembership(teamId, userId, channelId);
     const now = new Date();
+
+    // Already-read short-circuit: if the receipt is already at-or-after the
+    // channel's newest activity, there is nothing new to mark. Skip both the
+    // write and the team-room `team:channel:read` frame so a chatty channel —
+    // or a client over-calling markRead on every visible mount — doesn't fan
+    // out a redundant frame to the user's whole device cohort. Cheap: one
+    // already-selected receipt + the denormalized `lastMessageAt`.
+    //
+    // `lastMessageAt` covers TOP-LEVEL activity only — a thread reply bumps
+    // `threadLastReplyAt`, NOT `lastMessageAt`. A thread reply that @-mentions
+    // the user therefore leaves an unread mention the `lastMessageAt` compare
+    // can't see. We MUST still write through (and publish `team:channel:read`)
+    // in that case, or `onRead` never fires and the sidebar mention badge
+    // stays stuck after the user reads the thread. So the short-circuit also
+    // requires zero unread mentions for this user in this channel.
+    const [channel, receipt] = await Promise.all([
+      this.db.teamChannel.findUnique({
+        where: { id: channelId },
+        select: { lastMessageAt: true },
+      }),
+      this.db.teamChannelReadReceipt.findUnique({
+        where: { userId_channelId: { userId, channelId } },
+        select: { lastReadAt: true },
+      }),
+    ]);
+    if (
+      channel &&
+      receipt &&
+      receipt.lastReadAt.getTime() >= channel.lastMessageAt.getTime()
+    ) {
+      const unreadMention = await this.db.teamChannelMention.findFirst({
+        where: {
+          mentionedUserId: userId,
+          message: { channelId, teamId, createdAt: { gt: receipt.lastReadAt } },
+        },
+        select: { id: true },
+      });
+      if (!unreadMention) {
+        return { lastReadAt: receipt.lastReadAt.toISOString() };
+      }
+    }
+
     await this.db.teamChannelReadReceipt.upsert({
       where: { userId_channelId: { userId, channelId } },
       create: { userId, channelId, lastReadAt: now },
@@ -1035,14 +1089,21 @@ export class ChannelsService {
           skipDuplicates: true,
         });
       }
-      await tx.teamChannelMessage.update({
+      // Return the POST-increment count from the same atomic update so the
+      // fanout publishes the true new total. Reading `root.threadReplyCount`
+      // (a pre-transaction snapshot) and publishing `+1` lets two concurrent
+      // replies both broadcast `N+1`; the client applies it as an ABSOLUTE
+      // value, so the pill sticks at `N+1` instead of `N+2`. Mirrors the
+      // decrement path in `deleteMessage`.
+      const updatedRoot = await tx.teamChannelMessage.update({
         where: { id: rootMessageId },
         data: {
           threadReplyCount: { increment: 1 },
           threadLastReplyAt: receivedAt,
         },
+        select: { threadReplyCount: true },
       });
-      return msg;
+      return { id: msg.id, threadReplyCount: updatedRoot.threadReplyCount };
     });
 
     const dto = buildFreshMessageDto({
@@ -1063,7 +1124,7 @@ export class ChannelsService {
       message: dto,
       preview: null,
       lastMessageAt: null,
-      threadReplyCount: root.threadReplyCount + 1,
+      threadReplyCount: created.threadReplyCount,
       ...(input.clientTempId ? { clientTempId: input.clientTempId } : {}),
     });
 
@@ -1092,7 +1153,6 @@ export class ChannelsService {
     const receivedAt = new Date();
     await this.requireChannelMembership(teamId, userId, channelId);
 
-    let rootForFanout: { threadReplyCount: number } | null = null;
     if (args.threadRootId) {
       const root = await this.db.teamChannelMessage.findFirst({
         where: {
@@ -1101,12 +1161,11 @@ export class ChannelsService {
           teamId,
           threadRootId: null,
         },
-        select: { id: true, threadReplyCount: true },
+        select: { id: true },
       });
       if (!root) {
         throw new BadRequestException({ error: "invalid thread root" });
       }
-      rootForFanout = root;
     }
 
     const kind = kindFromMime(args.file.mimeType);
@@ -1177,16 +1236,20 @@ export class ChannelsService {
           where: { id: channelId },
           data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
         });
-      } else {
-        await tx.teamChannelMessage.update({
-          where: { id: args.threadRootId },
-          data: {
-            threadReplyCount: { increment: 1 },
-            threadLastReplyAt: receivedAt,
-          },
-        });
+        return { id: msg.id, threadReplyCount: 0 };
       }
-      return msg;
+      // Capture the POST-increment count from the atomic update (same fix as
+      // postThreadReply) so concurrent replies don't both publish a stale
+      // absolute count that sticks on the parent pill.
+      const updatedRoot = await tx.teamChannelMessage.update({
+        where: { id: args.threadRootId },
+        data: {
+          threadReplyCount: { increment: 1 },
+          threadLastReplyAt: receivedAt,
+        },
+        select: { threadReplyCount: true },
+      });
+      return { id: msg.id, threadReplyCount: updatedRoot.threadReplyCount };
     });
 
     const dto = await loadMessageForEmit(created.id, teamId);
@@ -1202,7 +1265,7 @@ export class ChannelsService {
       message: dto,
       preview: args.threadRootId ? null : preview,
       lastMessageAt: args.threadRootId ? null : receivedAt.toISOString(),
-      threadReplyCount: rootForFanout ? rootForFanout.threadReplyCount + 1 : 0,
+      threadReplyCount: created.threadReplyCount,
       ...(args.clientTempId ? { clientTempId: args.clientTempId } : {}),
     });
 

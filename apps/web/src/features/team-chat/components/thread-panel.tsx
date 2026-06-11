@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useThreadEvents } from "@/features/team-chat/hooks/use-thread-events";
+import { toast } from "@/lib/toast";
 import { canDeleteMessage } from "@ccp/shared/team-chat/permissions";
 import type { TeamChannelMessageDto } from "@ccp/shared/team-chat/types";
 import type { User } from "@ccp/shared/types";
@@ -45,7 +46,12 @@ export function ThreadPanel({
     markOptimisticFailed,
     removeOptimistic,
     typingUserIds,
-  } = useThreadEvents(channelId, rootMessage.id);
+  } = useThreadEvents(channelId, rootMessage.id, () => {
+    // Root deleted out from under us — close the panel so the user isn't
+    // stuck replying into a dead thread (those replies 404).
+    toast.info("This thread was deleted");
+    onClose();
+  });
 
   // Tiny lookup so the indicator can render names without a parent prop.
   const namesById = useMemo(() => {
@@ -79,6 +85,7 @@ export function ThreadPanel({
             canPin={canPin}
             canDelete={canDeleteMessage(currentUser.role, rootMessage.authorUserId, currentUser.id)}
             isThreadReply={false}
+            displayNameById={namesById}
           />
           <div className="my-2 flex items-center gap-2 px-4">
             <div className="h-px flex-1 bg-border" />
@@ -100,6 +107,7 @@ export function ThreadPanel({
                   canPin={false}
                   canDelete={canDeleteMessage(currentUser.role, m.authorUserId, currentUser.id)}
                   isThreadReply={true}
+                  displayNameById={namesById}
                 />
               ))}
               {hasMore && (

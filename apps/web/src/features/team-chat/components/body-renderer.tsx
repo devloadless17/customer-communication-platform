@@ -11,6 +11,14 @@ import { cn } from "@ccp/shared/utils";
  * matches inside text tokens are wrapped in `<mark>` so the user can see
  * matches in context — same WhatsApp-style highlight the inbox does.
  *
+ * Mention chip label resolution: the name INSIDE the markup (`@[Name](id)`)
+ * is authored by the sender and never validated server-side, so a teammate
+ * could hand-type `@[Alice](bobs-id)` and the chip would read "Alice" while
+ * Bob gets pinged — a display-spoofing / misattribution vector. We resolve
+ * the chip label from the canonical team-members map (`displayNameById`) by
+ * userId, falling back to the authored name only for users who have since
+ * left the team (no map entry). This also keeps chips fresh after a rename.
+ *
  * Whitespace preservation: `whitespace-pre-wrap` keeps newlines without
  * forcing a heavyweight Markdown pipeline — agents typing multi-line
  * notes are the dominant case.
@@ -19,6 +27,7 @@ export function BodyRenderer({
   body,
   highlightUserId,
   searchQuery,
+  displayNameById,
 }: {
   body: string;
   highlightUserId?: string;
@@ -26,6 +35,9 @@ export function BodyRenderer({
    *  with a `<mark>` highlight inside the bubble. Whitespace is trimmed by
    *  the caller; this component treats falsy/empty as "no highlight". */
   searchQuery?: string | null;
+  /** Canonical userId → name map (team roster). Used to render mention chip
+   *  labels authoritatively instead of trusting the authored name. */
+  displayNameById?: Map<string, string>;
 }) {
   const tokens = tokenizeBody(body);
   const q = searchQuery?.trim() ?? "";
@@ -46,7 +58,7 @@ export function BodyRenderer({
                 : "bg-primary/10 text-primary",
             )}
           >
-            @{tok.name}
+            @{displayNameById?.get(tok.userId) ?? tok.name}
           </span>
         ),
       )}

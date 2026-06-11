@@ -117,21 +117,27 @@ export function EmojiPopover({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // Capture phase + stopImmediatePropagation: Escape closes only this
+      // popover, not also the layer beneath (e.g. message-selection mode).
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        onClose();
+      }
     };
     const onClick = (e: MouseEvent) => {
       const el = popoverRef.current;
       if (!el) return;
       if (!el.contains(e.target as Node)) onClose();
     };
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
     // Defer one tick so the same click that opened the popover doesn't
     // immediately close it on the document-level handler.
     const t = window.setTimeout(() => {
       window.addEventListener("mousedown", onClick);
     }, 0);
     return () => {
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("mousedown", onClick);
       window.clearTimeout(t);
     };

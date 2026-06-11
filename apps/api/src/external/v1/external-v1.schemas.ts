@@ -249,6 +249,10 @@ export const ExternalUpdateContactSchema = z.object({
 export type ExternalUpdateContactInput = z.infer<typeof ExternalUpdateContactSchema>;
 
 // Same body as create but always succeeds (find-or-create on phoneNumber).
+// On the UPDATE branch (existing live contact) every field is forwarded to the
+// update path; `tagIds` is applied ADDITIVELY (tags are added, never removed —
+// upsert is a merge, not a replace). To unassign a tag use the dedicated
+// DELETE /contacts/:id/tags/:tagId route.
 export const ExternalUpsertContactSchema = ExternalCreateContactSchema;
 export type ExternalUpsertContactInput = z.infer<typeof ExternalUpsertContactSchema>;
 

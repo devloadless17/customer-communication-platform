@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowRight, ImageOff, MessageSquare, X, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useFocusTrap } from "@/hooks/use-modal-overlay";
 import { cn } from "@ccp/shared/utils";
 import type { Message } from "@ccp/shared/types";
 
@@ -41,11 +42,19 @@ export function MediaLightbox({
   onGoToMessage?: (messageId: string) => void;
 }) {
   const current = items[index];
+  const dialogRef = useRef<HTMLDivElement>(null);
   const [zoomed, setZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState<{ x: number; y: number }>({ x: 50, y: 50 });
   // Per-item load-failure flag so a broken/expired media URL shows a graceful
   // fallback instead of the browser's raw broken-image glyph.
   const [errored, setErrored] = useState(false);
+
+  // Keyboard a11y: Tab cycles inside the viewer + focus returns to the opener
+  // on close. The lightbox keeps its OWN scroll-lock + capture-phase Escape/
+  // arrow handler above (the focus trap's bubble-phase Escape is pre-empted by
+  // our capture handler's stopImmediatePropagation), so we take only the
+  // Tab-trap + focus-return half here.
+  useFocusTrap(dialogRef, true);
 
   // Reset zoom + error whenever the visible item changes so state from one
   // slide doesn't carry to the next.
@@ -61,6 +70,13 @@ export function MediaLightbox({
     (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        // The lightbox is the topmost modal layer — it can open ON TOP of the
+        // in-thread search bar or selection mode, which keep their OWN window
+        // keydown listeners. `stopImmediatePropagation` (paired with the
+        // capture-phase registration below) keeps this Escape from also
+        // reaching those handlers, so peeking at an image doesn't wipe the
+        // agent's active search session / selection in the same keystroke.
+        e.stopImmediatePropagation();
         onClose();
         return;
       }
@@ -78,8 +94,11 @@ export function MediaLightbox({
   );
 
   useEffect(() => {
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase: this runs BEFORE the bubble-phase window listeners that
+    // the search bar / selection mode register, regardless of mount order —
+    // so the lightbox can stopImmediatePropagation and own the Escape.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onKey]);
 
   // Body scroll lock — restore on unmount even if the parent un-mounts us
@@ -112,6 +131,7 @@ export function MediaLightbox({
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"

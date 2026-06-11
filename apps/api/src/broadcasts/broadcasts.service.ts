@@ -563,7 +563,13 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     }
     const rows = await this.db.broadcastRecipient.findMany({
       where,
-      orderBy: [{ status: "asc" }, { id: "asc" }],
+      // Failed-first, matching the inline get() ordering rationale: the
+      // BroadcastRecipientStatus enum declares (queued, sent, failed) so
+      // `status: "desc"` yields failed → sent → queued — the actionable rows
+      // (failures the operator triages) come first as "Load more" pages. An
+      // explicit `status` filter narrows to one bucket anyway, so the ordering
+      // only matters for the unfiltered "all recipients" paging.
+      orderBy: [{ status: "desc" }, { id: "asc" }],
       take: take + 1,
       ...(opts.cursor
         ? { cursor: { id: opts.cursor }, skip: 1 }
@@ -589,11 +595,42 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Cancel a broadcast that's still queued or already running. The runner
-   * checks the row's `status` between recipients and bails out the moment
+   * Return EVERY recipient contact id for a broadcast — used by the "Duplicate"
+   * flow to reconstruct a hand-picked (`selected`/`custom`) audience, which only
+   * lives on BroadcastRecipient rows (the parent stores tag/group refs, not the
+   * resolved contact set). Lightweight: ids only, no contact join. Bounded by
+   * MAX_RECIPIENTS_IN_PROCESS (10k), so a single query is fine.
+   */
+  async listRecipientContactIds(
+    teamId: string,
+    broadcastId: string,
+  ): Promise<{ contactIds: string[] }> {
+    const broadcast = await this.db.broadcast.findFirst({
+      where: { id: broadcastId, teamId },
+      select: { id: true },
+    });
+    if (!broadcast) throw new NotFoundException({ error: "not found" });
+    const rows = await this.db.broadcastRecipient.findMany({
+      where: { broadcastId },
+      select: { contactId: true },
+    });
+    return { contactIds: Array.from(new Set(rows.map((r) => r.contactId))) };
+  }
+
+  /**
+   * Cancel a broadcast that's still scheduled, queued, running, or paused. The
+   * runner checks the row's `status` between recipients and bails out the moment
    * it sees `canceled`. Already-sent recipients stay sent (Meta can't be
    * unsent); remaining `queued` recipient rows are left untouched in the
    * DB so the operator can audit what would have been sent.
+   *
+   * `paused` is cancelable too: a broadcast paused by graceful-shutdown OR by the
+   * permanent-error breaker (dead Meta credential) has no live runner — the boot
+   * reconciler is the only thing that would resume it, and it only matches rows
+   * STILL `paused`, so flipping paused→canceled here is permanent (no
+   * resurrection). The detail-page "Stop broadcast" button is shown for `paused`
+   * precisely so an operator can abandon a credential-failed broadcast instead of
+   * waiting for an auto-resume that would just re-fail.
    *
    * Compare-and-set on the previous status so two operators clicking
    * cancel at once (or cancel-while-already-canceled) don't double-emit.
@@ -607,15 +644,16 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
     if (
       row.status !== "scheduled" &&
       row.status !== "queued" &&
-      row.status !== "running"
+      row.status !== "running" &&
+      row.status !== "paused"
     ) {
       throw new ConflictException({
         error: "broadcast not cancelable",
-        detail: `Broadcast is already ${row.status}; cancel is only valid while scheduled, queued, or running.`,
+        detail: `Broadcast is already ${row.status}; cancel is only valid while scheduled, queued, running, or paused.`,
       });
     }
     const updated = await this.db.broadcast.updateMany({
-      where: { id, status: { in: ["scheduled", "queued", "running"] } },
+      where: { id, status: { in: ["scheduled", "queued", "running", "paused"] } },
       data: { status: "canceled" },
     });
     if (updated.count === 0) {

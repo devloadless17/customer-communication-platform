@@ -19,6 +19,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { cn } from "@ccp/shared/utils";
 import type { ContactFieldDefinition, ContactStage, Tag, TemplateDto } from "@ccp/shared/types";
 import type { ContactLabel } from "@/features/contacts/components/contact-select-dialog";
@@ -61,6 +62,7 @@ export function NewBroadcastForm({
   preselectedContactIds,
   preselectedTagIds,
   preselectedGroupId,
+  preselectAllAudience = false,
   cloneTemplateId = null,
   cloneBodyVars = null,
   cloneHeaderVar = null,
@@ -75,12 +77,15 @@ export function NewBroadcastForm({
   preselectedContactIds: string[];
   preselectedTagIds: string[];
   preselectedGroupId: string | null;
+  /** Clone of an "all contacts" broadcast — open the form in All-contacts mode. */
+  preselectAllAudience?: boolean;
   /** Clone prefill (from `?from=<id>`) — select this template + fill vars. */
   cloneTemplateId?: string | null;
   cloneBodyVars?: string[] | null;
   cloneHeaderVar?: string | null;
 }) {
   const router = useRouter();
+  const { confirm, confirmDialog } = useConfirm();
 
   // Local copy so a "save as group" from the custom builder can append the new
   // group and select it without a round-trip.
@@ -90,6 +95,14 @@ export function NewBroadcastForm({
   // "saved group"; preselected tags/contacts (from the contacts page) land on
   // the custom builder pre-loaded. Default is the custom builder.
   const [audience, setAudience] = useState<AudienceState>(() => {
+    if (preselectAllAudience) {
+      return {
+        mode: "all",
+        selectedIds: [],
+        selectedTagIds: [],
+        selectedGroupId: null,
+      };
+    }
     if (preselectedGroupId) {
       return {
         mode: "group",
@@ -361,6 +374,23 @@ export function NewBroadcastForm({
         return;
       }
       scheduledAtIso = when.toISOString();
+    }
+
+    // Highest-blast-radius action in the product — an immediate "Send now"
+    // dispatches irreversible, customer-visible WhatsApp template messages to
+    // the WHOLE audience on one click (and, post-send, can't be stopped). Gate
+    // it behind a destructive confirm, matching the friction the product
+    // already requires to delete a single contact. Scheduling stays one-click:
+    // a scheduled broadcast can be canceled/deleted before it fires.
+    if (!scheduledAtIso) {
+      const ok = await confirm({
+        title: `Send to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"} now?`,
+        description:
+          "This sends the template immediately over WhatsApp. It can't be undone once recipients start receiving it.",
+        confirmLabel: "Send now",
+        destructive: true,
+      });
+      if (!ok) return;
     }
 
     setSendError(null);
@@ -666,6 +696,7 @@ export function NewBroadcastForm({
         title="Broadcast recipients"
         subtitle={previewSubtitle}
       />
+      {confirmDialog}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   Check,
   Copy,
+  KeyRound,
   Loader2,
   Mail,
   ShieldAlert,
@@ -34,6 +35,10 @@ import {
 import type { Role } from "@ccp/shared/types";
 import { initials } from "@ccp/shared/utils";
 import { LocalTime } from "@/components/local-time";
+import {
+  ResetPasswordDialog,
+  type ResetPasswordTarget,
+} from "@/features/settings/reset-password-dialog";
 
 export interface TeamUserRow {
   id: string;
@@ -84,6 +89,9 @@ export function TeamSettings({
   // Sharing `pending` made clicking "Delete organization" look like nothing
   // happened while quietly disabling every other button on the page.
   const [deletingOrg, setDeletingOrg] = useState(false);
+  // Admin-initiated password reset — the recovery path for a locked-out
+  // teammate (no self-serve email reset exists). Non-null = dialog open.
+  const [resetTarget, setResetTarget] = useState<ResetPasswordTarget | null>(null);
   // Live team name — listens to `team:renamed` so the input + delete dialog
   // + danger-zone copy stay in sync with what this tab just dispatched OR
   // with another admin's rename on a different tab/device.
@@ -337,6 +345,12 @@ export function TeamSettings({
               onDelete={() => {
                 void confirmDeleteUser(u.id, u.name);
               }}
+              onResetPassword={() =>
+                setResetTarget({
+                  name: u.name,
+                  endpoint: `/api/users/${u.id}/reset-password`,
+                })
+              }
             />
           ))}
         </ul>
@@ -353,6 +367,7 @@ export function TeamSettings({
       )}
 
       {confirmDialog}
+      <ResetPasswordDialog target={resetTarget} onClose={() => setResetTarget(null)} />
       {deletingOrg && <DeletingOrgOverlay teamName={liveTeamName} />}
     </div>
   );
@@ -386,6 +401,7 @@ function UserRow({
   pending,
   onPatch,
   onDelete,
+  onResetPassword,
 }: {
   user: TeamUserRow;
   isSelf: boolean;
@@ -393,6 +409,7 @@ function UserRow({
   pending: boolean;
   onPatch: (body: { role?: Role; deactivated?: boolean }) => void;
   onDelete: () => void;
+  onResetPassword: () => void;
 }) {
   const editable = canManageUsers(actorRole) && canModifyUser(actorRole, user.role);
   const options = useMemo(() => {
@@ -476,6 +493,19 @@ function UserRow({
                 Disable
               </>
             )}
+          </Button>
+        )}
+        {editable && !isSelf && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={pending}
+            title="Set a new password for this teammate"
+            onClick={onResetPassword}
+          >
+            <KeyRound className="size-3.5" />
+            Reset password
           </Button>
         )}
         {editable && !isSelf && (

@@ -180,9 +180,12 @@ function ThumbTile({ message, onOpen }: { message: Message; onOpen: () => void }
   const media = message.media;
   if (!media) return null;
   const isVideo = media.kind === "video";
-  // Prefer thumbnailUrl for videos (server-extracted poster) so we don't
-  // pay a video-decode roundtrip per tile.
-  const thumbSrc = isVideo ? media.thumbnailUrl ?? media.url : media.url;
+  // Prefer the server-generated thumbnail for BOTH images and videos so we
+  // don't download a full-res original to paint a square tile — videos get a
+  // poster JPEG, images get a downscaled JPEG (~640px). Falls back to the
+  // original when no thumbnail exists yet (legacy rows, pending 2-phase
+  // download). Full-res is still used in the lightbox.
+  const thumbSrc = media.thumbnailUrl ?? media.url;
   return (
     <button
       type="button"

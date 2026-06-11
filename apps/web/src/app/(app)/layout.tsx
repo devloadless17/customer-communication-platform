@@ -84,7 +84,7 @@ export default async function AppShellLayout({
         {/* App-wide voice-call layer: the single useCall instance + the
             incoming-call toast / active-call panel, so a call ringing in is
             visible on every page (not just the inbox). */}
-        <CallProvider>
+        <CallProvider canReceiveCalls={permissions["calls:receive"]}>
           <div className="relative flex h-svh w-full flex-col overflow-hidden bg-background text-foreground md:flex-row">
             <AppRail
               currentUser={user}

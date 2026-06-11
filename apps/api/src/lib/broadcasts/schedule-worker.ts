@@ -25,6 +25,7 @@ import {
 interface WorkerGlobals {
   worker?: Worker<BroadcastScheduleJobData>;
   connection?: IORedis;
+  shuttingDown?: boolean;
 }
 const g = globalThis as unknown as { __ccpBroadcastScheduleWorker?: WorkerGlobals };
 const state: WorkerGlobals = (g.__ccpBroadcastScheduleWorker ??= {});
@@ -37,9 +38,28 @@ async function fireScheduled(broadcastId: string): Promise<void> {
     data: { status: "queued" },
   });
   if (promoted.count === 0) {
-    // Canceled, deleted, or already fired — nothing to do.
+    // The CAS matched nothing. Most of the time that's benign — the row was
+    // canceled / deleted / already fired. But there's ONE stranding case it
+    // hides: a PARTIAL first attempt that flipped scheduled→queued and then
+    // died (or had its job re-delivered) before `startBroadcast` claimed the
+    // row. That leaves the broadcast stuck at `queued` forever — the boot
+    // reconciler is the only thing that ever picks it up. Re-fire a still-
+    // `queued` row here: startBroadcast is idempotent (runBroadcast's own
+    // queued→running CAS + in-process inFlightRuns dedupe), so this is a no-op
+    // when a runner is already on it and a recovery otherwise.
+    const cur = await db.broadcast.findUnique({
+      where: { id: broadcastId },
+      select: { status: true },
+    });
+    if (cur?.status === "queued") {
+      startBroadcast(broadcastId);
+    }
     return;
   }
+  // Hand off to the runner FIRST (claims `queued` → `running`, sends, etc.)
+  // before the cosmetic publish, so a throw in the publish path can't strand a
+  // row that's already been promoted to `queued` with no runner kicked off.
+  startBroadcast(broadcastId);
   // Surface the scheduled → queued flip so any open detail page updates live.
   const row = await db.broadcast.findUnique({
     where: { id: broadcastId },
@@ -53,12 +73,13 @@ async function fireScheduled(broadcastId: string): Promise<void> {
       status: "queued",
     });
   }
-  // Hand off to the runner (claims `queued` → `running`, sends, etc.).
-  startBroadcast(broadcastId);
 }
 
 export function startBroadcastScheduleWorker(): void {
   if (state.worker) return;
+  // A fresh start (incl. a self-respawn after a fatal Redis error) clears the
+  // shutdown flag — the previous stop() may have set it.
+  state.shuttingDown = false;
   const connection = createBroadcastScheduleWorkerConnection();
   state.connection = connection;
   state.worker = new Worker<BroadcastScheduleJobData>(
@@ -98,9 +119,46 @@ export function startBroadcastScheduleWorker(): void {
       err,
     );
   });
+
+  state.worker.on("error", (err) => {
+    console.error("[broadcast-schedule] worker error", err);
+    // Fatal error classes (an ECONNRESET BullMQ can't recover from, a Redis
+    // auth failure) can wedge the worker: jobs stop processing but state.worker
+    // stays set, making startBroadcastScheduleWorker() a no-op. It's called
+    // ONLY once at boot (onModuleInit) — no sweeper or dispatcher re-arms it —
+    // so without a self-respawn here ONE unrecoverable Redis blip stalls ALL
+    // scheduled-broadcast firing until a manual restart (scheduled campaigns
+    // silently never go out). Mirror the workflow / send / webhook workers:
+    // close the wedged worker + connection and re-spawn after 1s. ioredis
+    // reconnects the underlying socket, so the fresh Worker picks up jobs
+    // immediately.
+    const msg = err instanceof Error ? err.message : String(err);
+    const fatal =
+      msg.includes("Connection is closed") ||
+      msg.includes("WRONGPASS") ||
+      msg.includes("NOAUTH");
+    if (fatal && !state.shuttingDown) {
+      console.warn(
+        "[broadcast-schedule] worker entered unrecoverable state; re-spawning",
+      );
+      // Best-effort close; ignore errors since the connection is already broken.
+      state.worker?.close().catch(() => undefined);
+      connection.disconnect();
+      state.worker = undefined;
+      state.connection = undefined;
+      // Self-respawn on a short delay. Skipped during shutdown so it doesn't
+      // fight stop().
+      setTimeout(() => {
+        if (!state.shuttingDown) startBroadcastScheduleWorker();
+      }, 1_000).unref();
+    }
+  });
 }
 
 export async function stopBroadcastScheduleWorker(): Promise<void> {
+  // Set BEFORE close() so the 'error' listener's self-respawn can't fire
+  // mid-shutdown and resurrect a worker we're trying to drain.
+  state.shuttingDown = true;
   if (state.worker) {
     // Hard cap on worker.close() so a scheduled-fire handler stuck behind a
     // Postgres pool stall can't hang shutdown past compose's stop_grace_period

@@ -360,6 +360,7 @@ export function TeamChatWorkspace({
           pendingLiveCount={channelState.pendingLiveCount}
           onGoToLive={channelState.goToLive}
           searchQuery={activeSearchQuery}
+          displayNameById={namesById}
           onOpenThread={(rootId) => {
             const root = channelState.messages.find((m) => m.id === rootId);
             if (root) setThread(root);

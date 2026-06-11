@@ -5,13 +5,16 @@ source code — only config files.
 
 Every deploy is one workflow (`.github/workflows/deploy.yml`):
 
-1. `typecheck` job — `npm ci`, `prisma generate`, `tsc --noEmit`. Runs on every push and PR.
+1. `typecheck` job — `pnpm install --frozen-lockfile`, `prisma generate`, `tsc --noEmit`, `lint`. Runs on every push and PR. (pnpm-only — npm breaks the `workspace:*` lockfile.)
 2. `deploy` job — runs only on push to `main` (or manual `workflow_dispatch`). Needs typecheck to pass.
-   - retags the current `:latest` as `:previous` on Docker Hub (manifest-only copy, free)
-   - builds the new image and pushes it as `:latest`
+   - builds the new image and pushes it as `:latest` (Trivy CVE gate + smoke-boot before ship)
    - SSHes to the VPS and writes/refreshes the config files
    - `docker compose pull && docker compose up -d --remove-orphans && docker image prune -f && systemctl reload caddy`
    - polls `/api/health` end-to-end
+   - **only after health is green**, retags the now-verified-live `:latest` as
+     `:previous` on Docker Hub (manifest-only copy, free) — so the rollback
+     target is always an image that actually served traffic, never a
+     Trivy/smoke/health-blocked one
 
 > **No systemd.** The stack is driven directly by `docker compose` (there is
 > no `ccp` systemd unit any more — the deploy auto-removes a legacy one if it
@@ -43,7 +46,9 @@ Every deploy is one workflow (`.github/workflows/deploy.yml`):
 Caddy splits traffic by path between the two app containers — see
 `deploy/Caddyfile.template` for the exact rule order. Short version:
 
-- `/api/auth/change-password*` and `/api/*`, `/webhooks/*`, `/socket.io/*` → api (NestJS)
+- `/api/auth/change-password*` and `/api/*`, `/webhooks/*` → api (NestJS). The
+  Socket.io client connects on `/api/socket/*` (caught by the `/api/*` matcher —
+  there is no separate `/socket.io/*` rule).
 - everything else (`/`, `/_next/*`, `/api/auth/*`, `/api/health`, `/api/webhooks/meta/*`) → web (Next.js)
 
 ## What lives on the VPS
@@ -90,7 +95,11 @@ You only do this once. Future deploys are fully automated.
 
 ```bash
 apt-get install -y docker.io docker-compose-plugin caddy ufw
-ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw enable
+# 443/udp is REQUIRED for HTTP/3 (QUIC) — the Caddyfile enables `protocols h3
+# h2 h1`, and h3 runs over UDP. Without this rule Caddy still advertises
+# `h3=":443"` via Alt-Svc but every QUIC attempt is dropped at the firewall,
+# costing clients a failed handshake before they silently fall back to h2.
+ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 443/udp && ufw enable
 ```
 
 ## 1b. Create the `deploy` user + prerequisites
@@ -180,11 +189,16 @@ POSTGRES_DB           ccp
 POSTGRES_USER         app
 POSTGRES_PASSWORD     (openssl rand -hex 32)
 BETTER_AUTH_SECRET    (openssl rand -base64 32)
+ENCRYPTION_KEY        (openssl rand -base64 32)
+INTERNAL_BUS_SECRET   (openssl rand -base64 32)
 UPLOADTHING_TOKEN     (from UploadThing dashboard)
 ```
 
-12 secrets. The superAdmin login is **not** in GitHub Secrets — it's seeded
-manually by running `prisma/seeds/seed-superadmin.ts` once after the first deploy.
+14 secrets. ENCRYPTION_KEY and INTERNAL_BUS_SECRET are **hard-validated** by the
+deploy workflow's `changes` job (empty → the deploy fails fast), so missing
+either breaks the very first deploy — they belong in this list. The superAdmin
+login is **not** in GitHub Secrets — it's seeded automatically on every deploy
+(idempotent upsert; credentials hardcoded in `prisma/seeds/seed-superadmin.ts`).
 See "First-time superAdmin seed" below.
 
 ### One-shot to set them all (after you have the values)
@@ -211,6 +225,11 @@ gh secret set POSTGRES_DB       --repo "$REPO" --body "ccp"
 gh secret set POSTGRES_USER     --repo "$REPO" --body "app"
 gh secret set POSTGRES_PASSWORD --repo "$REPO" --body "$(openssl rand -hex 32)"
 gh secret set BETTER_AUTH_SECRET --repo "$REPO" --body "$(openssl rand -base64 32)"
+
+# Envelope encryption (per-team Meta + API-key + webhook secrets) and the
+# web↔api internal-bridge shared secret. Both are deploy-blocking.
+gh secret set ENCRYPTION_KEY     --repo "$REPO" --body "$(openssl rand -base64 32)"
+gh secret set INTERNAL_BUS_SECRET --repo "$REPO" --body "$(openssl rand -base64 32)"
 
 # Blob storage
 gh secret set UPLOADTHING_TOKEN --repo "$REPO" --body "<your-uploadthing-token>"
@@ -376,13 +395,58 @@ either way — fix forward at the schema layer.
 > hand-written down-migration. Prefer expand-contract for destructive changes
 > so `:previous` stays schema-compatible and this decision never arises.
 
+## A migration that failed mid-apply (P3009)
+
+This is the one failure class the fast `:previous` swap **cannot** fix on its
+own. The api container runs `pnpm prisma migrate deploy` as the first step of
+boot. If a migration fails partway (the classic case: a constraint violation
+against real pilot data — CI smoke runs on a fresh DB so it can't catch
+data-dependent failures), Prisma records a **FAILED** row in
+`_prisma_migrations`. From then on *every* `prisma migrate deploy` — including
+the one the **rolled-back `:previous-api` image runs on boot** — exits with
+**P3009** (`migrate found failed migrations`) and the container crash-loops
+(`restart: unless-stopped` keeps retrying). The auto-rollback step in the
+workflow detects this (greps the api logs for `P3009`) and prints this runbook
+pointer instead of claiming success.
+
+Recover manually over SSH (`cd /opt/ccp`):
+
+```bash
+# 1. See which migration is stuck.
+docker compose --env-file .env run --rm --entrypoint sh api \
+  -c 'cd /app && pnpm prisma migrate status'
+
+# 2a. EASIEST when the migration applied NOTHING (failed on the first
+#     statement): mark it rolled-back so deploy retries it cleanly, then bring
+#     the stack up. Fix the migration itself in a follow-up commit.
+docker compose --env-file .env run --rm --entrypoint sh api \
+  -c 'cd /app && pnpm prisma migrate resolve --rolled-back <FAILED_MIGRATION_NAME>'
+docker compose --env-file .env up -d
+
+# 2b. If the migration applied PARTIAL changes (some statements landed before
+#     the failure), the schema is now inconsistent. Restore the pre-deploy
+#     snapshot the deploy wrote seconds before the migration, which resets BOTH
+#     the data AND _prisma_migrations to the pre-migration state:
+docker compose --env-file .env stop app api
+gunzip -c /opt/ccp/backups/pre-deploy-*-<failed-sha>.sql.gz \
+  | docker compose --env-file .env exec -T postgres psql -U app -d ccp
+# then roll the CODE back to :previous (see "Fast rollback" below) and redeploy
+# a corrected migration.
+```
+
+Prevention: prefer expand-contract migrations and test data-dependent ones
+against a copy of prod data before merging.
+
 ## Fast rollback (~30s) — `:previous` swap
 
-Every deploy retags the prior `:latest-{web,api}` as `:previous-{web,api}`
-on Docker Hub (manifest-only copy, no layer transfer, no extra storage). To
-roll back one step: promote `:previous-*` back to `:latest-*`, then pull +
-recreate. (The deploy workflow's auto-rollback does this for you when a
-post-deploy health check fails — this is the manual equivalent.)
+Every deploy that goes green retags the just-shipped (health-verified)
+`:latest-{web,api}` as `:previous-{web,api}` on Docker Hub at the END of the
+ship job (manifest-only copy, no layer transfer, no extra storage). So
+`:previous-*` is always the last image that actually served traffic — a
+Trivy/smoke/health-blocked deploy never overwrites it. To roll back one step:
+promote `:previous-*` back to `:latest-*`, then pull + recreate. (The deploy
+workflow's auto-rollback does this for you when a post-deploy health check
+fails — this is the manual equivalent.)
 
 From your dev machine (one-shot):
 
@@ -435,6 +499,9 @@ cat > /etc/sudoers.d/deploy <<'EOF'
 # Deploy user — minimum-needed sudo for the GitHub Actions deploy job.
 # See .github/workflows/deploy.yml for the exact invocations.
 deploy ALL=(root) NOPASSWD: \
+  /bin/rm -f /etc/caddy/Caddyfile.prev, \
+  /usr/bin/cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.prev, \
+  /usr/bin/cp -a /etc/caddy/Caddyfile.prev /etc/caddy/Caddyfile, \
   /usr/bin/mv /tmp/ccp-deploy/Caddyfile /etc/caddy/Caddyfile, \
   /usr/bin/mkdir -p /var/log/caddy, \
   /usr/bin/chown -R caddy\:caddy /var/log/caddy, \
@@ -447,6 +514,13 @@ EOF
 chmod 440 /etc/sudoers.d/deploy
 visudo -c   # syntax check — refuses to commit if invalid
 ```
+
+The first three lines are LOAD-BEARING for auto-rollback: the deploy snapshots
+the live Caddyfile to `Caddyfile.prev` before overwriting it (run-scoped — it
+`rm -f`s any stale `.prev` first), and the rollback restores it. The snapshot
+`cp` runs WITHOUT `|| true` in the workflow, so if this allowlist is missing
+those exact lines the deploy fails LOUDLY (`a password is required`) instead of
+silently disarming the rollback's proxy-config restore.
 
 The `ccp.service` disable / rm / daemon-reload lines are only exercised once
 (the first deploy after this change, which removes the legacy systemd unit);
@@ -481,29 +555,56 @@ CRON_LINE="17 3 * * * cd /opt/ccp && /opt/ccp/pg-backup.sh >> /opt/ccp/pg-backup
 # Pick the dump file you want.
 ls /opt/ccp/backups/
 
-# Stop the app so nothing writes during restore, but keep postgres up.
-docker compose stop web api
+# Stop the app + api so nothing writes during restore, but keep postgres up.
+# The Next.js container's compose service is `app` (NOT `web`) — stopping a
+# non-existent `web` service errors AND leaves the still-running app container
+# writing Better Auth sessions / RSC reads straight into the DB you're about
+# to overwrite. Stop both real app containers.
+docker compose --env-file .env stop app api
 
 # Restore into the running postgres. --clean --if-exists in the dump means
 # the file already DROPs existing objects, so this is a full overwrite.
+# (Use POSTGRES_USER / POSTGRES_DB from /opt/ccp/.env if you changed them.)
 gunzip -c /opt/ccp/backups/ccp-20260526T031700Z.sql.gz \
-  | docker compose exec -T postgres psql -U app -d ccp
+  | docker compose --env-file .env exec -T postgres psql -U app -d ccp
 
 # Bring the app back.
-docker compose start api web
+docker compose --env-file .env start api app
 ```
 
-**Offsite copy** (recommended; the on-VPS backups don't survive a disk
-failure). Two simple options:
+**Offsite copy** (the on-VPS backups live on the SAME disk as the
+`postgres_data` volume — a disk failure loses both). The backup script
+(`scripts/pg-backup.sh`) pushes each fresh dump offsite **automatically when
+you set one env var** in `/opt/ccp/.env`, and is a clean no-op when unset (so
+nothing is hardcoded and the default deploy stays local-only). Wire ONE of:
 
-- `rclone copy /opt/ccp/backups remote:bucket/ccp-backups --max-age 24h` after
-  the cron job. Add an `&&` to the cron line.
-- For S3/R2/Backblaze: `aws s3 sync /opt/ccp/backups s3://bucket/ccp-backups
-  --delete` (requires `aws` CLI on the VPS and an IAM key in `/opt/ccp/.env`).
+```bash
+# rclone (any of its 70+ remotes — S3, R2, B2, GDrive, …). One-time:
+#   rclone config        # create a remote named e.g. "ccpbackup"
+echo 'BACKUP_RCLONE_REMOTE=ccpbackup:ccp-backups' >> /opt/ccp/.env
 
-Either path: the dump is plain SQL and gzip-compressed; encrypt at rest with
-the bucket's KMS / SSE setting, or pipe through `gpg -c` before upload if the
-target bucket isn't encrypted.
+# …or the aws CLI directly (needs creds in the env / ~/.aws on the VPS):
+echo 'BACKUP_S3_BUCKET=s3://my-bucket/ccp-backups' >> /opt/ccp/.env
+```
+
+Optional hardening, also via `/opt/ccp/.env`:
+
+```bash
+# Encrypt each dump with GPG before upload (offsite copy becomes .sql.gz.gpg).
+# Import the public key first: `gpg --import backup-pub.asc`. Leave unset to
+# rely on the bucket's own SSE/KMS instead.
+echo 'BACKUP_GPG_RECIPIENT=backups@yourco.com' >> /opt/ccp/.env
+
+# Dead-man's switch — a silently-failing nightly backup is the worst kind.
+# Create a check at healthchecks.io (free) and paste its ping URL; the script
+# pings <url>/start at the top and <url> on success, so a missed ping pages
+# you. A failed offsite push fails the script → no success ping → you're paged.
+echo 'BACKUP_HEALTHCHECK_URL=https://hc-ping.com/<uuid>' >> /opt/ccp/.env
+```
+
+No `&&`-on-the-cron-line edit is needed any more — the offsite leg + ping live
+inside `pg-backup.sh`, so they stay in lockstep with every deploy. Install the
+`rclone` / `aws` / `gpg` binary the chosen path needs on the VPS once.
 
 # Things to set up later (with trigger conditions)
 

@@ -254,7 +254,12 @@ export function BroadcastsBrowser({
       </div>
 
       {view === "table" ? (
-        <TableView rows={rows} canManage={canManage} loading={loading} />
+        <TableView
+          rows={rows}
+          canManage={canManage}
+          loading={loading}
+          filtered={filter !== "all" || search.trim().length > 0}
+        />
       ) : (
         <CalendarView rows={rows} />
       )}
@@ -266,15 +271,35 @@ function TableView({
   rows,
   canManage,
   loading,
+  filtered,
 }: {
   rows: BroadcastListItem[];
   canManage: boolean;
   loading: boolean;
+  /** A status filter or search is narrowing the list (vs. a true empty list). */
+  filtered: boolean;
 }) {
   if (rows.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
-        {loading ? "Loading…" : "No broadcasts match this filter."}
+        {loading ? (
+          "Loading…"
+        ) : filtered ? (
+          "No broadcasts match this filter."
+        ) : (
+          // No filter active and still empty — guide rather than read as a
+          // broken filter. (The SSR page already shows a richer first-run
+          // state when the team has never had a broadcast; this covers the
+          // in-browser "cleared filter, nothing left" case.)
+          <div className="flex flex-col items-center gap-2">
+            <span className="font-medium text-foreground">No broadcasts yet</span>
+            {canManage && (
+              <Link href="/broadcasts/new" className="text-primary hover:underline">
+                New broadcast →
+              </Link>
+            )}
+          </div>
+        )}
       </div>
     );
   }

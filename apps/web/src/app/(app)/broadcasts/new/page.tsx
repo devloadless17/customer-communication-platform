@@ -4,6 +4,7 @@ import { getSession } from "@/lib/auth/current-user";
 import {
   countAllContacts,
   getBroadcast,
+  getBroadcastRecipientContactIds,
   getTeamWhatsappConfig,
   listAudienceGroups,
   listContactFieldDefinitions,
@@ -43,6 +44,16 @@ export default async function NewBroadcastPage({
   // Clone source (best-effort — a stale/foreign id just falls through to an
   // empty form rather than erroring).
   const source = fromId ? await getBroadcast(fromId).catch(() => null) : null;
+  // For a hand-picked clone (`selected`/`custom`) the resolved contact set only
+  // lives on BroadcastRecipient rows — reconstruct it so "Duplicate" carries
+  // the same audience instead of landing on an empty builder. An `all` clone
+  // passes a flag so the form opens in All-contacts mode; tag/group clones
+  // already carry through their refs.
+  const cloneContactIds =
+    source &&
+    (source.audienceMode === "selected" || source.audienceMode === "custom")
+      ? await getBroadcastRecipientContactIds(source.id).catch(() => [])
+      : [];
   const clone = source
     ? {
         templateId: source.templateId,
@@ -50,11 +61,15 @@ export default async function NewBroadcastPage({
         audienceMode: source.audienceMode,
         tagIds: source.audienceTagIds ?? [],
         groupId: source.audienceGroupId ?? null,
+        contactIds: cloneContactIds,
       }
     : null;
 
   // Audience prefill — clone's audience wins; otherwise the deep-link params.
-  const preselectedContactIds = normalizeIds(sp.contactIds);
+  const preselectedContactIds =
+    clone && clone.contactIds.length > 0
+      ? clone.contactIds
+      : normalizeIds(sp.contactIds);
   const preselectedTagIds =
     clone && clone.tagIds.length > 0 ? clone.tagIds : normalizeIds(sp.tagIds);
   const preselectedGroupId =
@@ -62,6 +77,9 @@ export default async function NewBroadcastPage({
     (typeof sp.groupId === "string" && sp.groupId.trim().length > 0
       ? sp.groupId.trim()
       : null);
+  // All-contacts clone: tell the form to open in "all" mode (there's no id
+  // set to carry — it's "everyone at send time").
+  const preselectAllAudience = clone?.audienceMode === "all";
 
   // The wizard never loads the whole contact list — it works off ids and
   // resolves counts / chip labels server-side. So all we fetch here is the
@@ -103,6 +121,7 @@ export default async function NewBroadcastPage({
       preselectedContactIds={preselectedContactIds}
       preselectedTagIds={preselectedTagIds}
       preselectedGroupId={preselectedGroupId}
+      preselectAllAudience={preselectAllAudience}
       cloneTemplateId={clone?.templateId ?? null}
       cloneBodyVars={clone?.variables.body ?? null}
       cloneHeaderVar={clone?.variables.header ?? null}

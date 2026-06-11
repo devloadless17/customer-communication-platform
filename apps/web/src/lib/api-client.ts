@@ -67,19 +67,27 @@ export class ApiError extends Error {
 /**
  * Retry only when the upstream isn't reachable at all (TCP refused, DNS,
  * undici socket close mid-flight). These manifest as `TypeError: fetch
- * failed` and only happen in dev when the NestJS process restarts on a
- * code change — prod has Caddy in front so the proxy returns 502 (an HTTP
- * response, not a fetch throw) for the same ~3s window.
+ * failed`.
+ *
+ * This happens in BOTH environments, contrary to an earlier comment here that
+ * claimed prod was immune because "Caddy returns a 502 (an HTTP response, not
+ * a throw)". That premise was wrong: `BASE` is `INTERNAL_API_URL` which in prod
+ * is `http://api:4000` — the api container DIRECTLY over the docker network,
+ * NOT through Caddy. So during any api downtime where web stays up (an OOM
+ * auto-restart ~10s, or an api-only `compose up` recreate) these fetches throw
+ * `ECONNREFUSED` exactly as in dev, and without retry every RSC render / hard
+ * navigation drops straight to the (app) SegmentError boundary. Caddy only
+ * fronts the BROWSER's requests, never this server-to-server hop.
  *
  * Limited to idempotent verbs so a POST that DID reach NestJS but timed
- * out on the response isn't double-applied. Three retries with linear
- * backoff covers a typical @swc-node restart (~2-5s); past that, the
- * caller's RSC error boundary takes over.
+ * out on the response isn't double-applied. Retries with linear backoff
+ * cover a typical @swc-node dev restart or a prod api recreate; past the
+ * budget the caller's RSC error boundary takes over.
  */
-const NETWORK_RETRY_BUDGET_MS = 6_000;
-const NETWORK_RETRY_DELAYS_MS = [400, 800, 1_500];
+const NETWORK_RETRY_BUDGET_MS = 10_000;
+const NETWORK_RETRY_DELAYS_MS = [400, 800, 1_500, 2_500];
 
-async function fetchWithDevRestartRetry(
+async function fetchWithRestartRetry(
   url: URL,
   init: RequestInit,
   method: string,
@@ -91,12 +99,12 @@ async function fetchWithDevRestartRetry(
     try {
       return await fetch(url, init);
     } catch (err) {
-      // Only retry network failures, only on idempotent verbs, only in dev,
-      // and only within the budget. Everything else: throw so the original
+      // Only retry network failures, only on idempotent verbs, and only
+      // within the budget. Runs in prod too (api restart = ECONNREFUSED on
+      // this direct web→api hop). Everything else: throw so the original
       // error path runs.
       if (
         !idempotent ||
-        process.env.NODE_ENV === "production" ||
         attempt >= NETWORK_RETRY_DELAYS_MS.length ||
         Date.now() - start > NETWORK_RETRY_BUDGET_MS ||
         init.signal?.aborted
@@ -126,6 +134,11 @@ export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
   // here was removed 2026-05-29: every caller passed `cache: "no-store"`
   // anyway, so the bridge was firing a cross-process round-trip to
   // invalidate tags nothing ever fetched with.
+  // Correlation id minted at the edge (proxy.ts) and stamped on this page's
+  // request headers. Forward it so NestJS's correlation middleware ADOPTS it
+  // instead of generating a fresh id per fetch — all ~8 parallel RSC fan-out
+  // calls behind one page load then share the originating request's id.
+  const requestId = headerStore.get("x-request-id");
   const fetchInit: RequestInit = {
     method: opts.method ?? "GET",
     headers: {
@@ -134,12 +147,13 @@ export async function api<T>(path: string, opts: ApiOptions = {}): Promise<T> {
       // Forward client IP so NestJS's trust-proxy + rate limiter see the
       // real client, not 127.0.0.1.
       "x-forwarded-for": headerStore.get("x-forwarded-for") ?? "",
+      ...(requestId ? { "x-request-id": requestId } : {}),
     },
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     cache: "no-store",
     signal: opts.signal,
   };
-  const res = await fetchWithDevRestartRetry(url, fetchInit, opts.method ?? "GET");
+  const res = await fetchWithRestartRetry(url, fetchInit, opts.method ?? "GET");
 
   if (res.status === 401) {
     if ((opts.on401 ?? "redirect") === "redirect") {

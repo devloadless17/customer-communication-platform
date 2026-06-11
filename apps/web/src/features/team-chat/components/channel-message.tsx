@@ -56,6 +56,7 @@ function ChannelMessageImpl({
   isThreadReply,
   onOpenThread,
   searchQuery,
+  displayNameById,
 }: {
   message: TeamChannelMessageDto;
   currentUser: User;
@@ -79,6 +80,12 @@ function ChannelMessageImpl({
    * highlight. Pass-through; memo skips on stable-null identity.
    */
   searchQuery?: string | null;
+  /**
+   * Canonical userId → name roster map. Forwarded to BodyRenderer so mention
+   * chips render the authoritative name (not the author-supplied label).
+   * Stable identity (memoized in the parent) so the memo comparator skips.
+   */
+  displayNameById?: Map<string, string>;
 }) {
   const [showReactions, setShowReactions] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -94,9 +101,14 @@ function ChannelMessageImpl({
     setShowReactions(false);
     // Optimistic: compute the next userIds list (toggle current user in or
     // out) and dispatch the same socket frame the server will broadcast.
-    // Version=1 is intentionally far below any server `Date.now()` so the
-    // real frame's later version always wins on arrival (see version
-    // tracking in use-team-channel-events.ts).
+    // Version is `Date.now()` at click time — the per-(message,emoji) version
+    // guard in use-team-channel-events.ts discards anything not strictly newer,
+    // so a fixed low version (e.g. 1) only ever applies on the FIRST toggle and
+    // every re-toggle silently no-ops until the round-trip lands (laggy un-react).
+    // A wall-clock click stamp is monotonic with the server's publish-time
+    // `Date.now()`: the click necessarily precedes the server stamp, so the
+    // authoritative frame still wins, while consecutive client toggles each
+    // advance the version and apply instantly.
     const existing = message.reactions.find((r) => r.emoji === emoji);
     const has = existing?.userIds.includes(currentUser.id) ?? false;
     const nextUserIds = has
@@ -108,7 +120,7 @@ function ChannelMessageImpl({
       messageId: message.id,
       emoji,
       userIds: nextUserIds,
-      version: 1,
+      version: Date.now(),
     });
     try {
       await fetchWithSessionGuard(
@@ -311,6 +323,7 @@ function ChannelMessageImpl({
               body={message.body}
               highlightUserId={currentUser.id}
               searchQuery={searchQuery}
+              displayNameById={displayNameById}
             />
             {message.media && <MediaAttachment media={message.media} />}
           </div>
@@ -499,7 +512,8 @@ export const ChannelMessage = memo(
       prev.canDelete === next.canDelete &&
       prev.isThreadReply === next.isThreadReply &&
       prev.onOpenThread === next.onOpenThread &&
-      prev.searchQuery === next.searchQuery
+      prev.searchQuery === next.searchQuery &&
+      prev.displayNameById === next.displayNameById
     ) {
       return true;
     }
@@ -512,7 +526,8 @@ export const ChannelMessage = memo(
       prev.canDelete !== next.canDelete ||
       prev.isThreadReply !== next.isThreadReply ||
       prev.onOpenThread !== next.onOpenThread ||
-      prev.searchQuery !== next.searchQuery
+      prev.searchQuery !== next.searchQuery ||
+      prev.displayNameById !== next.displayNameById
     ) {
       return false;
     }

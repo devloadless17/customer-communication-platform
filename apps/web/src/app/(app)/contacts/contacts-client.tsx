@@ -569,12 +569,29 @@ export function ContactsClient({
         onDelete={async () => {
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
+          // Meta Cloud has no history sync, so deleted WhatsApp history is
+          // unrecoverable. For large blast radius (>25) require typing DELETE
+          // so a big purge can't go through on the same reflexive click as a
+          // single-row delete.
+          const requireTyped = ids.length > 25;
           const ok = await confirm({
             title: `Delete ${ids.length} contact${ids.length === 1 ? "" : "s"}?`,
             description:
-              "This also removes their conversations, messages, and notes. This can't be undone.",
+              "This also removes their conversations, messages, and notes. WhatsApp history can't be recovered. This can't be undone.",
             confirmLabel: "Delete",
             destructive: true,
+            ...(requireTyped
+              ? {
+                  requireText: "DELETE",
+                  requireTextLabel: (
+                    <>
+                      Type{" "}
+                      <span className="font-semibold text-foreground">DELETE</span>{" "}
+                      to remove {ids.length} contacts
+                    </>
+                  ),
+                }
+              : {}),
           });
           if (!ok) return;
           const res = await apiFetch("/api/contacts/bulk", {

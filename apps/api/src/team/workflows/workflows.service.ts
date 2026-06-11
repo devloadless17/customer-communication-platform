@@ -12,6 +12,7 @@ import {
 
 import { decryptSecret, encryptSecret, isEncrypted } from "@/lib/crypto/envelope";
 import { describeStep } from "@/lib/workflows/steps";
+import { REDACTED_HEADER_VALUE } from "@/lib/workflows/steps/http-request";
 import { dispatchManualTrigger } from "@/lib/workflows/dispatcher";
 import {
   parseWorkflowBody,
@@ -180,7 +181,11 @@ export class WorkflowsService {
       published: existing.published,
     };
 
-    // Secret merge — preserve bearerToken on http_request steps when not re-entered.
+    // Secret merge — preserve http_request secrets (bearerToken + custom-header
+    // VALUES) when the admin didn't re-enter them. redactGraph strips both
+    // before they reach the UI (bearerToken → bearerTokenSet flag, removed from
+    // config; each customHeaders value → REDACTED_HEADER_VALUE sentinel), so a
+    // straight save would otherwise wipe / corrupt the stored ciphertext.
     if (body.graph) {
       const oldNodes =
         (existing.graph as {
@@ -193,14 +198,34 @@ export class WorkflowsService {
       for (const inN of incomingNodes) {
         const oldN = oldNodes.find((n) => n.id === inN.id);
         if (!oldN || oldN.type !== inN.type) continue;
+        if (inN.type !== "http_request") continue;
         const inCfg = inN.config as Record<string, unknown>;
         const oldCfg = oldN.config as Record<string, unknown>;
-        if (
-          inN.type === "http_request" &&
-          !inCfg.bearerToken &&
-          typeof oldCfg.bearerToken === "string"
-        ) {
+        if (!inCfg.bearerToken && typeof oldCfg.bearerToken === "string") {
           inCfg.bearerToken = oldCfg.bearerToken;
+        }
+        // Per-header restore: an incoming value still equal to the redaction
+        // sentinel means "unchanged" — copy the stored (encrypted) value back
+        // from the matching old header key. A value the admin actually edited
+        // arrives as new plaintext and is left alone (encryptGraphStepSecrets
+        // encrypts it on write).
+        const inHeaders = inCfg.customHeaders;
+        const oldHeaders = oldCfg.customHeaders;
+        if (
+          inHeaders &&
+          typeof inHeaders === "object" &&
+          !Array.isArray(inHeaders) &&
+          oldHeaders &&
+          typeof oldHeaders === "object" &&
+          !Array.isArray(oldHeaders)
+        ) {
+          const inH = inHeaders as Record<string, unknown>;
+          const oldH = oldHeaders as Record<string, unknown>;
+          for (const [k, v] of Object.entries(inH)) {
+            if (v === REDACTED_HEADER_VALUE && typeof oldH[k] === "string") {
+              inH[k] = oldH[k];
+            }
+          }
         }
       }
     }
@@ -1059,9 +1084,13 @@ function encryptTriggerConfigSecret(
 
 /**
  * Mirror of `encryptTriggerConfigSecret` for step-config secrets stored
- * inside the workflow graph JSONB. Today only `http_request.bearerToken`
- * qualifies — extend the dispatch table if a future step type ships a new
- * one (e.g. an API-key field on a third-party integration step).
+ * inside the workflow graph JSONB. For `http_request` this covers BOTH the
+ * `bearerToken` AND every `customHeaders` VALUE — a custom header is the normal
+ * place to put `X-API-Key: <secret>` / a non-Bearer `Authorization` header when
+ * the target API doesn't use Bearer auth, so those values are credentials too
+ * and must be envelope-encrypted at rest like the bearer token. Header NAMES
+ * stay plaintext (they're not secret and are needed to merge/redact by key).
+ * Extend the dispatch if a future step type ships a new secret field.
  *
  * Returns a shallow-cloned graph so the caller's `parsed.graph` reference
  * stays untouched and the original is safe to inspect/log.
@@ -1084,6 +1113,23 @@ function encryptGraphStepSecrets(
       if (typeof t === "string" && t.length > 0 && !isEncrypted(t)) {
         cfg.bearerToken = encryptSecret(t);
         mutated = true;
+      }
+      const headers = cfg.customHeaders;
+      if (headers && typeof headers === "object" && !Array.isArray(headers)) {
+        const enc: Record<string, unknown> = {};
+        let headersMutated = false;
+        for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
+          if (typeof v === "string" && v.length > 0 && !isEncrypted(v)) {
+            enc[k] = encryptSecret(v);
+            headersMutated = true;
+          } else {
+            enc[k] = v;
+          }
+        }
+        if (headersMutated) {
+          cfg.customHeaders = enc;
+          mutated = true;
+        }
       }
     }
     return mutated ? { ...node, config: cfg } : node;

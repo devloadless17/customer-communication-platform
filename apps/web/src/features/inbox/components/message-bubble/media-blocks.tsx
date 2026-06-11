@@ -139,6 +139,12 @@ function pendingPresentation(kind: "audio" | "document" | "sticker"): {
 function ImageBlock({ media, message }: { media: MediaAttachment; message: Message }) {
   const [open, setOpen] = useState(false);
   const [errored, setErrored] = useState(false);
+  // The bubble paints a 320×240 box — use the server-generated downscaled
+  // thumbnail (~640px JPEG) when present so an image-heavy thread doesn't
+  // download N full-res originals (100KB–5MB each) to fill thumbnail slots.
+  // Falls back to the original for legacy rows / before the 2-phase thumbnail
+  // lands. The lightbox (below) still opens `media.url` (full resolution).
+  const thumbSrc = media.thumbnailUrl ?? media.url;
   // `loaded` drives the fade-in + shimmer. Without it the slot is a bare dark
   // box (bg-black/80) until the <img> decodes, then the photo POPS in — on a
   // hard refresh with several cached images you catch frames of dark boxes
@@ -191,7 +197,7 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
     } else {
       setErrored(true);
     }
-  }, [errored, media.url]);
+  }, [errored, thumbSrc]);
 
   return (
     <>
@@ -233,7 +239,7 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               ref={imgRef}
-              src={media.url}
+              src={thumbSrc}
               alt={media.caption ?? "image"}
               onLoad={() => setLoaded(true)}
               onError={() => setErrored(true)}

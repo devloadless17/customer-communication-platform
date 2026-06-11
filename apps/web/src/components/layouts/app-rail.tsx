@@ -31,7 +31,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSignOutOverlay } from "@/components/auth/signout-overlay";
 import { useLiveTeamName } from "@/hooks/use-live-team-name";
-import { roleLabel } from "@ccp/shared/auth/permissions";
+import { canManageUsers, roleLabel } from "@ccp/shared/auth/permissions";
 import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
@@ -120,8 +120,17 @@ const PRIMARY_ITEMS: RailItem[] = [
     icon: Megaphone,
     match: ["/templates", "/broadcasts/groups"],
   },
-  { href: "/workflows", label: "Workflows", icon: Workflow },
 ];
+
+// Workflows is admin-only: GET /api/team/workflows is @RequireRole("admin")
+// and the page redirects non-admins (workflows/page.tsx). Surfacing the rail
+// icon to agents/managers would resolve to a permanent "failed to load" error
+// boundary — appended only when the user can actually use it.
+const WORKFLOWS_ITEM: RailItem = {
+  href: "/workflows",
+  label: "Workflows",
+  icon: Workflow,
+};
 
 export function AppRail({
   currentUser,
@@ -214,8 +223,12 @@ export function AppRail({
     }
   }
 
+  const canManageWorkflows = canManageUsers(currentUser.role);
   const items = useMemo<RailItem[]>(() => {
     const out = [...PRIMARY_ITEMS];
+    // Workflows is admin-only — see WORKFLOWS_ITEM. Appended right after the
+    // primary items (its prior position) so the layout is unchanged for admins.
+    if (canManageWorkflows) out.push(WORKFLOWS_ITEM);
     out.push({
       href: "/settings",
       label: "Settings",
@@ -225,7 +238,7 @@ export function AppRail({
     // No platform-admin entry here: super-admins are redirected out of the
     // (app) shell entirely (→ /platform), so they never render this rail.
     return out;
-  }, []);
+  }, [canManageWorkflows]);
 
   const railStyle: React.CSSProperties = {
     width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,
@@ -419,7 +432,6 @@ function RailLink({
   const active = matchAll.some(
     (p) => pathname === p || pathname.startsWith(p + "/"),
   );
-  const isAdmin = href === "/admin";
   const hasBadge = badge > 0;
   const badgeText = badge > 99 ? "99+" : String(badge);
 
@@ -429,18 +441,9 @@ function RailLink({
       className={cn(
         "group relative flex h-9 w-full items-center rounded-lg transition-colors",
         collapsed ? "justify-center" : "gap-2.5 px-2.5",
-        isAdmin
-          ? cn(
-              "border border-dashed border-amber-500/30",
-              active
-                ? "bg-amber-500/10 text-amber-600 dark:text-amber-300"
-                : "text-amber-700/80 hover:bg-amber-500/10 hover:text-foreground dark:text-amber-300/80",
-            )
-          : cn(
-              active
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-            ),
+        active
+          ? "bg-primary/10 text-primary"
+          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
       )}
       aria-current={active ? "page" : undefined}
       aria-label={hasBadge ? `${label} (${badge} unread)` : label}
@@ -471,7 +474,7 @@ function RailLink({
         </span>
       )}
       {/* Active indicator — lives at the inner left edge of the rail */}
-      {active && !isAdmin && (
+      {active && (
         <span className="absolute left-0 top-1.5 h-6 w-0.5 -translate-x-2 rounded-r-full bg-primary" />
       )}
     </Link>
