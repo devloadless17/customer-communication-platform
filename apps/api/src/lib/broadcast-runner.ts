@@ -1151,6 +1151,15 @@ async function processOneRecipient(
               { failed: 1 },
               pendingBumps,
             );
+            // A first error that looked like a rate-limit can resolve into a
+            // permanent credential failure on retry (token revoked mid-run,
+            // number deconfigured). Consult the breaker here too — otherwise a
+            // dead credential whose first symptom was a 429 would burn the
+            // whole audience as false failures (the else-branch below is the
+            // only other place this runs). Self-classifying: a genuinely
+            // rate-limited retryErr is a non-permanent error and just resets
+            // the streak.
+            await maybeTripPermanentBreaker(broadcast, retryErr);
             return;
           }
         } else {

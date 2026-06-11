@@ -95,6 +95,7 @@ export function roleLabel(role: Role): string {
 export type Capability =
   | "conversations:delete"
   | "contacts:delete"
+  | "contacts:export"
   | "broadcasts:manage"
   | "templates:manage"
   | "audienceGroups:manage"
@@ -109,6 +110,7 @@ export type Capability =
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
   "contacts:delete",
+  "contacts:export",
   "broadcasts:manage",
   "templates:manage",
   "audienceGroups:manage",
@@ -129,6 +131,7 @@ export type EditableRole = (typeof EDITABLE_ROLES)[number];
 export const CAPABILITY_LABELS: Record<Capability, string> = {
   "conversations:delete": "Delete conversations",
   "contacts:delete": "Delete contacts",
+  "contacts:export": "Export the contact book (CSV)",
   "broadcasts:manage": "Create & manage broadcasts",
   "templates:manage": "Create & manage templates",
   "audienceGroups:manage": "Manage audience groups",
@@ -158,6 +161,10 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
   agent: {
     "conversations:delete": true,
     "contacts:delete": true,
+    // Export was UNGATED before this capability existed (any agent could pull
+    // the full contact CSV), so default `true` preserves today's behavior. An
+    // admin can flip it off to stop low-trust agents exfiltrating the book.
+    "contacts:export": true,
     "broadcasts:manage": true,
     "templates:manage": true,
     "audienceGroups:manage": true,

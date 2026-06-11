@@ -62,6 +62,7 @@ export default async function ContactsPage({
       canManageFields={permissions["contactFields:manage"]}
       canManageStages={permissions["stages:manage"]}
       canDeleteContacts={permissions["contacts:delete"]}
+      canExportContacts={permissions["contacts:export"]}
     />
   );
 }

@@ -152,6 +152,7 @@ export class ContactsController {
   }
 
   @Get("export")
+  @RequireCapability("contacts:export")
   async exportCsv(
     @CurrentSession() session: ApiSession,
     @Res() res: Response,

@@ -110,6 +110,7 @@ export function ContactsClient({
   canManageFields,
   canManageStages,
   canDeleteContacts,
+  canExportContacts,
 }: {
   initialItems: ContactListItem[];
   initialNextCursor: string | null;
@@ -123,6 +124,7 @@ export function ContactsClient({
   canManageFields: boolean;
   canManageStages: boolean;
   canDeleteContacts: boolean;
+  canExportContacts: boolean;
 }) {
   const router = useRouter();
   const softRefresh = useSoftRefresh();
@@ -364,14 +366,16 @@ export function ContactsClient({
                   </Link>
                 </DropdownMenuItem>
               )}
-              <DropdownMenuItem asChild>
-                {/* Plain anchor: lets the browser handle Content-Disposition
-                    and save the file without a fetch + Blob round-trip. */}
-                <a href="/api/contacts/export" download>
-                  <Download className="size-4" />
-                  Export CSV
-                </a>
-              </DropdownMenuItem>
+              {canExportContacts && (
+                <DropdownMenuItem asChild>
+                  {/* Plain anchor: lets the browser handle Content-Disposition
+                      and save the file without a fetch + Blob round-trip. */}
+                  <a href="/api/contacts/export" download>
+                    <Download className="size-4" />
+                    Export CSV
+                  </a>
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onSelect={() => setImporting(true)}>
                 <Upload className="size-4" />
                 Import CSV

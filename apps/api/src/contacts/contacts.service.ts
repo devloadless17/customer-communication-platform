@@ -1131,6 +1131,32 @@ export class ContactsService {
       }
     }
 
+    // One coalesced socket frame so every open contact list refetches the new
+    // rows in realtime — without it, imported contacts stayed invisible to
+    // other agents until a manual reload (audit 2026-06-11 #29). We emit a
+    // single `contact.bulk_updated` (the documented coalesced-fanout pattern)
+    // rather than per-contact `contact.created` frames: a 10k-row import would
+    // otherwise be a 10k-frame socket storm, and there's no per-contact
+    // automation that needs the granular event (no workflow triggers on
+    // contact.created). Only emit when the import actually changed the
+    // directory.
+    if (created + revived > 0) {
+      const importedPhones = [...toCreate, ...toRevive].map((p) => p.phoneNumber);
+      const importedRows = await this.db.contact.findMany({
+        where: { teamId, phoneNumber: { in: importedPhones }, deletedAt: null },
+        select: { id: true },
+      });
+      if (importedRows.length > 0) {
+        await this.bus.publish({
+          type: "contact.bulk_updated",
+          teamId,
+          contactIds: importedRows.map((r) => r.id),
+          changeKind: "mixed",
+          changedByUserId: userId,
+        });
+      }
+    }
+
     return {
       total: parsed.rows.length,
       created,
