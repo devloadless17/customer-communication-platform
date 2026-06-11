@@ -57,6 +57,8 @@ export interface SuperAdminTeamRow {
   whatsappConnected: boolean;
   whatsappDisplayNumber: string | null;
   userCount: number;
+  /** Hard cap on ACTIVE member accounts. Default 2; only a superAdmin raises it. */
+  maxMembers: number;
   contactCount: number;
   conversationCount: number;
   messageCount: number;

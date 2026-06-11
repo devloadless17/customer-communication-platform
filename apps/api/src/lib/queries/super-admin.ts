@@ -30,6 +30,7 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
       status: true,
       statusReason: true,
       statusUpdatedAt: true,
+      maxMembers: true,
       channelConnections: {
         where: { channel: "whatsapp" },
         select: { config: true },
@@ -60,6 +61,7 @@ export async function listAllTeamsForSuperAdmin(): Promise<SuperAdminTeamRow[]> 
     whatsappConnected: Boolean(cfg.phoneNumberId),
     whatsappDisplayNumber: cfg.displayPhoneNumber ?? null,
     userCount: t._count.users,
+    maxMembers: t.maxMembers,
     contactCount: t._count.contacts,
     conversationCount: t._count.conversations,
     messageCount: t._count.messages,
@@ -80,6 +82,7 @@ export async function getTeamDetailForSuperAdmin(
       status: true,
       statusReason: true,
       statusUpdatedAt: true,
+      maxMembers: true,
       channelConnections: {
         where: { channel: "whatsapp" },
         select: { config: true },
@@ -126,6 +129,7 @@ export async function getTeamDetailForSuperAdmin(
       status: team.status as TeamStatus,
       statusReason: team.statusReason,
       statusUpdatedAt: team.statusUpdatedAt?.toISOString() ?? null,
+      maxMembers: team.maxMembers,
       whatsappConnected: Boolean(waCfg.phoneNumberId),
       whatsappDisplayNumber: waCfg.displayPhoneNumber ?? null,
       userCount: team._count.users,

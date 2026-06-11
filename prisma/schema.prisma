@@ -299,6 +299,14 @@ model Team {
   // is not wired up yet. See packages/shared/src/auth/plans.ts. UI hidden.
   plan      Plan     @default(starter)
 
+  // Hard cap on ACTIVE member accounts (deactivated members don't count). A
+  // new org starts at 2; only a superAdmin can raise it (platform org-detail
+  // page → PATCH /api/admin/teams/:id/max-members). Enforced at the authoritative
+  // chokepoint — invite-accept, under a row lock — with a soft pre-check at
+  // invite-create for early UX. Registration always starts a team at 1 member,
+  // so it never trips the cap.
+  maxMembers Int @default(2)
+
   // Org-approval gate (see `TeamStatus`). A new self-signup is `pending` until
   // a superAdmin approves it; `suspended` when access is revoked. Enforced at
   // BOTH chokepoints — the NestJS SessionGuard (every API request) and the

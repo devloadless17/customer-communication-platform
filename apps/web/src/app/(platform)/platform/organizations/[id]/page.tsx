@@ -12,6 +12,7 @@ import { roleLabel } from "@ccp/shared/auth/permissions";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 
 import { DeleteTeamButton } from "./delete-team-button";
+import { MaxMembersControl } from "./max-members-control";
 import { MemberResetPasswordButton } from "./member-reset-password-button";
 
 export const metadata = { title: "Organization · Platform" };
@@ -39,6 +40,11 @@ export default async function PlatformOrganizationDetailPage({
   const isOwnTeam = team.id === session.teamId;
   const activeMembers = members.filter((m) => !m.deactivatedAt);
   const deactivatedMembers = members.filter((m) => m.deactivatedAt);
+  // Member-cap seats = active, non-superAdmin users (a platform operator
+  // co-located into an org doesn't consume a seat — mirrors the API count).
+  const memberSeatCount = activeMembers.filter(
+    (m) => m.role !== "superAdmin",
+  ).length;
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 md:px-8 md:py-8">
@@ -125,14 +131,20 @@ export default async function PlatformOrganizationDetailPage({
       </section>
 
       <section className="rounded-xl border border-border bg-card">
-        <header className="flex items-center justify-between border-b border-border bg-muted/30 px-4 py-3">
-          <div className="text-sm font-semibold">Members</div>
-          <div className="text-[11px] text-muted-foreground">
-            {activeMembers.length} active
-            {deactivatedMembers.length > 0
-              ? ` · ${deactivatedMembers.length} deactivated`
-              : ""}
+        <header className="flex items-center justify-between gap-3 border-b border-border bg-muted/30 px-4 py-3">
+          <div className="flex items-baseline gap-2">
+            <div className="text-sm font-semibold">Members</div>
+            {deactivatedMembers.length > 0 && (
+              <span className="text-[11px] text-muted-foreground">
+                · {deactivatedMembers.length} deactivated
+              </span>
+            )}
           </div>
+          <MaxMembersControl
+            teamId={team.id}
+            maxMembers={team.maxMembers}
+            activeMembers={memberSeatCount}
+          />
         </header>
         {members.length === 0 ? (
           <div className="px-6 py-8 text-center text-[12px] text-muted-foreground">

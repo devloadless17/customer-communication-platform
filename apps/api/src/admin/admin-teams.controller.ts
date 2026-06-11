@@ -38,6 +38,14 @@ const SetStatusSchema = z.object({
 });
 type SetStatusInput = z.infer<typeof SetStatusSchema>;
 
+// Per-org member cap. Min 1 (an org always has at least its owner); a generous
+// upper bound keeps a typo from creating a nonsensical value. Default is 2 on
+// the Team row — this only raises/lowers it.
+const SetMaxMembersSchema = z.object({
+  maxMembers: z.number().int().min(1).max(1000),
+});
+type SetMaxMembersInput = z.infer<typeof SetMaxMembersSchema>;
+
 /**
  * superAdmin cross-team admin surface.
  *
@@ -135,6 +143,32 @@ export class AdminTeamsController {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Set an org's member cap (default 2). Lowering it below the current active
+   * count is allowed — existing members are grandfathered; the cap only blocks
+   * NEW joins (invite-accept enforces it). Returns the current active count so
+   * the UI can warn when the new cap is already met/exceeded.
+   *
+   *   PATCH /api/admin/teams/:id/max-members   { maxMembers }
+   */
+  @Patch(":id/max-members")
+  async setMaxMembers(
+    @Param("id") teamId: string,
+    @Body(zBody(SetMaxMembersSchema)) body: SetMaxMembersInput,
+  ) {
+    const updated = await this.db.team.updateMany({
+      where: { id: teamId },
+      data: { maxMembers: body.maxMembers },
+    });
+    if (updated.count === 0) {
+      throw new NotFoundException({ error: "team not found" });
+    }
+    const activeMembers = await this.db.user.count({
+      where: { teamId, deactivatedAt: null, role: { not: "superAdmin" } },
+    });
+    return { ok: true, maxMembers: body.maxMembers, activeMembers };
   }
 
   /**

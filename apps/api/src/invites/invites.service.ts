@@ -103,6 +103,35 @@ export class InvitesService {
       },
     });
 
+    // Member-cap pre-check (soft UX gate — invite-accept is the authoritative
+    // race-safe enforcement). Each still-pending invite reserves a future seat,
+    // so `active members + pending invites` must stay under the cap or an
+    // accepted invite would exceed it. Counted AFTER the cleanup above, so a
+    // re-invite to the same email (whose prior pending row was just deleted)
+    // doesn't double-count its own slot. Active members only — deactivated
+    // accounts don't hold a seat.
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { maxMembers: true },
+    });
+    const [activeMembers, pendingInvites] = await Promise.all([
+      // superAdmins are platform operators, not org seats — never counted. In
+      // production a customer org has none; this only matters where tooling
+      // co-locates an operator into a team.
+      this.db.user.count({
+        where: { teamId, deactivatedAt: null, role: { not: "superAdmin" } },
+      }),
+      this.db.invite.count({
+        where: { teamId, acceptedAt: null, expiresAt: { gt: new Date() } },
+      }),
+    ]);
+    if (team && activeMembers + pendingInvites >= team.maxMembers) {
+      throw new ConflictException({
+        error: "member_limit_reached",
+        detail: `This organization is at its member limit (${team.maxMembers} member${team.maxMembers === 1 ? "" : "s"}). Ask your platform administrator to raise the limit before inviting more.`,
+      });
+    }
+
     const token = generateInviteToken();
     const tokenHash = hashInviteToken(token);
     const invite = await this.db.invite.create({
@@ -246,6 +275,29 @@ export class InvitesService {
           throw new InviteAcceptError(
             "email_taken",
             "An account with this email already exists. Sign in instead.",
+          );
+        }
+
+        // Member-cap enforcement (authoritative). `FOR UPDATE` locks the team
+        // row for this transaction so two invites accepted in the same instant
+        // can't both read "1 of 2" and both insert → 3. The lock serializes
+        // them; the second waits, re-reads the now-current count, and is
+        // rejected. Active members only — deactivated accounts free their seat.
+        const lockedTeam = await tx.$queryRaw<{ maxMembers: number }[]>`
+          SELECT "maxMembers" FROM "Team" WHERE id = ${invite.teamId} FOR UPDATE
+        `;
+        const maxMembers = lockedTeam[0]?.maxMembers ?? 2;
+        const memberCount = await tx.user.count({
+          where: {
+            teamId: invite.teamId,
+            deactivatedAt: null,
+            role: { not: "superAdmin" },
+          },
+        });
+        if (memberCount >= maxMembers) {
+          throw new InviteAcceptError(
+            "team_full",
+            `This organization has reached its member limit (${maxMembers} member${maxMembers === 1 ? "" : "s"}). Ask the organization's admin to request a higher limit.`,
           );
         }
 
