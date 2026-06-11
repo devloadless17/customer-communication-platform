@@ -1514,3 +1514,60 @@ Branch `audit-remediation-2026-06-11`. Implemented via 14 file-disjoint cluster 
 2. **Offsite backup**: set the rclone/S3 env vars in prod `.env` to activate the now-wired offsite push (no-op until set).
 3. **Redis `noeviction`**: takes effect on next `docker compose up` (recreates the redis container); the running local/prod redis keeps `allkeys-lru` until then.
 4. Review the deferred #3 (media templates) — the one remaining HIGH.
+
+---
+
+# REMEDIATION ROUND 2 + PRE-DEPLOY E2E — 2026-06-11
+
+The remaining deferred items from round 1 are now done, and a full end-to-end
+suite was run against the real prod-imitate Docker stack.
+
+## Completed this round
+- **#3 (HIGH) media-header templates — now fully sendable.** `headerMedia`
+  (public UploadThing link, reusable across broadcast recipients) threaded
+  through provider → send-template-internal (validates media-format headers)
+  → new `POST /api/messages/template-header-media` upload route → inbox
+  template picker + broadcast composer (shared `HeaderMediaField`) → /v1 schema
+  → send_template workflow step.
+- **#29 (MEDIUM):** CSV import emits one coalesced `contact.bulk_updated` socket
+  frame so open contact lists refetch the new rows in realtime (storm-free).
+- **#87 (LOW):** broadcast permanent-error breaker now also consulted on the
+  retry-failure path (dead credential first seen as a 429 no longer burns the
+  audience).
+- **#97 (exfil control):** new `contacts:export` capability (default true)
+  gating `GET /api/contacts/export` + the Export CSV menu item.
+- **#111:** api Dockerfile deps-scoping VALIDATED by the prod-imitate build.
+
+## Deferred (with rationale)
+- **#38 image thumbnails (perf):** UploadThing has no transform API, so the fix
+  is a next/image migration of the chat media bubbles — a documented layout
+  landmine that needs careful visual verification. Perf, not correctness.
+- **#94 web/api DTO dedup:** net-negative churn per the round-1 reviewer.
+
+## E2E regression caught + fixed
+The suite caught a regression from round 1's M-settings-admin fix: org
+suspension deleted member sessions (full logout → /login) instead of keeping
+them for the /pending "suspended" screen. Org suspension ≠ user deactivation —
+`revoke()` already cuts realtime (socket kick + cache bust + gate). Removed the
+session deletion; suspended members now correctly see the /pending explanation.
+
+## Pre-deploy e2e result: 94/94 GREEN
+Ran `pnpm prod:local` (Caddy→web→api Docker stack on :8080, BOTH images rebuilt
+from the new Dockerfiles, 6 new migrations applied on api boot) then
+`pnpm test:e2e`:
+- health (db+api via Caddy), auth (login/logout/session), inbox mount, socket.io
+- every route renders clean (no server/console/page errors): inbox, broadcasts,
+  contacts, templates, workflows, team, all 8 settings pages
+- /v1 security (unauth + browser-origin rejection)
+- platform org-approval gate (register → approve → suspend → /pending)
+- calls module; workflows (happy path, chain-depth, realtime two-tab sync,
+  outbound webhook delivery, outbox drainer); security-hardening; membership +
+  search; assignment/status; attachment probe; team-chat reconnect; v1 chain depth
+- NEW: media-header template upload route (exists/auth/validates/rejects-audio);
+  contact export capability gate
+
+## Remaining manual steps at deploy
+1. Migrations apply via the api boot path (verified locally).
+2. Set offsite-backup rclone/S3 env vars to activate the wired offsite push.
+3. Redis `noeviction` lands on the next `docker compose up` (verified: the
+   prod-imitate redis came up clean).
