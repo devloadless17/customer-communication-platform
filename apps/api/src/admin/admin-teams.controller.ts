@@ -112,18 +112,20 @@ export class AdminTeamsController {
 
     if (body.status === "suspended") {
       // A suspend is a hard access-cut (non-payment / abuse / TOS), so it must
-      // also drop LIVE connections — busting the 15s cache alone only gates the
-      // next HTTP request and leaves any already-open Socket.io tab streaming
-      // the org's inbound WhatsApp + realtime team data until it reconnects.
-      // `revoke` busts the cache AND kicks every socket; deleting the Session
-      // rows first means a kicked tab can't simply re-handshake with its still
-      // -valid Better Auth session (the socket-auth + SessionGuard team-status
-      // gate would refuse it, but a full sign-out is the cleaner contract and
-      // mirrors user deactivation exactly). superAdmin members are exempt from
-      // the gate, but revoking them here is harmless — they re-auth normally.
-      await this.db.session.deleteMany({
-        where: { userId: { in: members.map((m) => m.id) } },
-      });
+      // drop LIVE connections — busting the 15s cache alone only gates the next
+      // HTTP request and leaves any already-open Socket.io tab streaming the
+      // org's inbound WhatsApp + realtime team data until it reconnects.
+      // `revoke` busts the cache AND kicks every socket, and socket-auth's
+      // team-status gate refuses any re-handshake. We deliberately do NOT
+      // delete the Better Auth Session rows: org suspension ≠ user
+      // deactivation. The member is still a valid user whose ORG is suspended,
+      // so their persisted session must survive for the (app) layout to render
+      // the "/pending → suspended" explanation screen (with statusReason). The
+      // SessionGuard 403s every API call and the layout redirects to /pending
+      // on that still-valid session — access is fully cut without dumping the
+      // member onto a context-free /login. (Deleting sessions added nothing
+      // security-wise — the gate already blocks everything — but broke the
+      // suspended-org UX; regression caught by platform.spec.ts 2026-06-11.)
       for (const m of members) this.sessionInvalidator.revoke(m.id, "suspension");
     } else {
       // Approve / reactivate: only bust the cache so a re-approved member is let
