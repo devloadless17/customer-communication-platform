@@ -43,6 +43,7 @@ export interface SendTemplateInternalArgs {
   variables: {
     body: string[];
     header?: string;
+    headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
   };
   /** Null for system / automation sends. */
   senderUserId: string | null;
@@ -70,6 +71,8 @@ export class SendTemplateValidationError extends Error {
     | "template_not_approved"
     | "wrong_body_var_count"
     | "header_var_required"
+    | "header_media_required"
+    | "header_media_unsupported"
     | "contact_has_no_phone"
     | "provider_not_configured"
     | "provider_no_template_support";
@@ -147,6 +150,51 @@ export async function sendTemplateInternal(
     );
   }
 
+  // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the actual media for
+  // this send, supplied as a public link. Without it Meta rejects the send,
+  // so catch it here with an actionable message instead of a cryptic 400.
+  const HEADER_MEDIA_FORMATS = { IMAGE: "image", VIDEO: "video", DOCUMENT: "document" } as const;
+  const headerMediaKind =
+    headerComp && headerComp.format && headerComp.format in HEADER_MEDIA_FORMATS
+      ? HEADER_MEDIA_FORMATS[headerComp.format as keyof typeof HEADER_MEDIA_FORMATS]
+      : null;
+  if (headerComp?.format === "LOCATION") {
+    throw new SendTemplateValidationError(
+      "header_media_unsupported",
+      "location header not supported",
+      "Templates with a LOCATION header can't be sent from here yet.",
+    );
+  }
+  if (headerMediaKind) {
+    const media = args.variables.headerMedia;
+    if (!media || !media.link) {
+      throw new SendTemplateValidationError(
+        "header_media_required",
+        "header media required",
+        `This template's header is a ${headerMediaKind} — attach one before sending.`,
+      );
+    }
+    if (media.kind !== headerMediaKind) {
+      throw new SendTemplateValidationError(
+        "header_media_required",
+        "header media kind mismatch",
+        `This template's header expects a ${headerMediaKind}, not a ${media.kind}.`,
+      );
+    }
+  }
+  // Build the media payload once: only attach when the template header is a
+  // media format AND the caller supplied one (validated above).
+  const headerMedia =
+    headerMediaKind && args.variables.headerMedia
+      ? {
+          kind: headerMediaKind,
+          link: args.variables.headerMedia.link,
+          ...(args.variables.headerMedia.filename
+            ? { filename: args.variables.headerMedia.filename }
+            : {}),
+        }
+      : undefined;
+
   let channel;
   try {
     channel = resolveContactChannel(conversation.contact);
@@ -202,6 +250,7 @@ export async function sendTemplateInternal(
       variables: {
         body: args.variables.body,
         ...(args.variables.header ? { header: args.variables.header } : {}),
+        ...(headerMedia ? { headerMedia } : {}),
       },
     },
     sendConfig,
@@ -240,6 +289,7 @@ export async function sendTemplateInternal(
       variables: {
         body: args.variables.body,
         ...(args.variables.header ? { header: args.variables.header } : {}),
+        ...(headerMedia ? { headerMedia } : {}),
       },
     } as Prisma.InputJsonValue,
     timestamp: messageTimestamp,

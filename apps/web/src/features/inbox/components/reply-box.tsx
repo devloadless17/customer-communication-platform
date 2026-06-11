@@ -509,7 +509,11 @@ export function ReplyBox({
   const sendTemplate = useCallback(
     async (args: {
       template: TemplateDto;
-      variables: { body: string[]; header?: string };
+      variables: {
+        body: string[];
+        header?: string;
+        headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+      };
     }) => {
       const clientTempId = newClientTempId();
       try {

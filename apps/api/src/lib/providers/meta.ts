@@ -1390,7 +1390,19 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
     // `parameters` array of `{ type: "text", text }`. Empty arrays are omitted
     // entirely — sending an empty `parameters` triggers Meta error 132000.
     const components: Array<Record<string, unknown>> = [];
-    if (args.variables.header && args.variables.header.length > 0) {
+    // Media header (IMAGE/VIDEO/DOCUMENT) takes precedence — Meta wants the
+    // parameter typed to the media kind with a `{ link }` (or `{ id }`) object,
+    // NOT a text parameter. A template's header is either text OR media, never
+    // both, so these two branches are mutually exclusive.
+    if (args.variables.headerMedia) {
+      const { kind, link, filename } = args.variables.headerMedia;
+      const media: Record<string, unknown> = { link };
+      if (kind === "document" && filename) media.filename = filename;
+      components.push({
+        type: "header",
+        parameters: [{ type: kind, [kind]: media }],
+      });
+    } else if (args.variables.header && args.variables.header.length > 0) {
       components.push({
         type: "header",
         parameters: [{ type: "text", text: args.variables.header }],

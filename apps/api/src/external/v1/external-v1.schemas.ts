@@ -91,6 +91,15 @@ export const ExternalTopLevelSendMessageSchema = z.object({
         .object({
           body: z.array(z.string().max(MAX_TEXT)).default([]),
           header: z.string().max(MAX_TEXT).optional(),
+          // Media for an IMAGE/VIDEO/DOCUMENT template header. Partners supply
+          // a public URL to the media; Meta fetches it at send time.
+          headerMedia: z
+            .object({
+              kind: z.enum(["image", "video", "document"]),
+              link: z.string().url().max(2048),
+              filename: z.string().max(255).optional(),
+            })
+            .optional(),
         })
         .default({ body: [] }),
     })

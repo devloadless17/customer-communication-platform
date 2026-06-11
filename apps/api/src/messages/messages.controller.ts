@@ -125,6 +125,38 @@ export class MessagesController {
     }
   }
 
+  /**
+   * Upload a media file for an IMAGE/VIDEO/DOCUMENT template header. Returns a
+   * public link (UploadThing) the caller passes back as
+   * `variables.headerMedia.link` on the subsequent template send. Separate
+   * from `media` (which sends a message) — this only stages the header media.
+   */
+  @Post("template-header-media")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: 100 * 1024 * 1024 },
+      storage: diskStorage({
+        destination: tmpdir(),
+        filename: (_req, file, cb) =>
+          cb(null, `ccp-tplhdr-${randomUUID()}-${sanitizeOriginalName(file.originalname)}`),
+      }),
+    }),
+  )
+  async uploadTemplateHeaderMedia(
+    @CurrentSession() session: ApiSession,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    if (!file) {
+      throw new BadRequestException({ error: "file is required" });
+    }
+    try {
+      const out = await this.messages.uploadTemplateHeaderMedia(session.teamId, file);
+      return { ok: true, ...out };
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
+  }
+
   @Post("template")
   async sendTemplate(
     @CurrentSession() session: ApiSession,

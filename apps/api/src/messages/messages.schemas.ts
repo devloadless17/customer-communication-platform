@@ -15,6 +15,15 @@ export const SendTemplateSchema = z.object({
     .object({
       body: z.array(z.string()).default([]),
       header: z.string().optional(),
+      // Media for an IMAGE/VIDEO/DOCUMENT template header. `link` is a public
+      // URL (the UploadThing URL the composer already produces).
+      headerMedia: z
+        .object({
+          kind: z.enum(["image", "video", "document"]),
+          link: z.string().url().max(2048),
+          filename: z.string().max(255).optional(),
+        })
+        .optional(),
     })
     .default({ body: [] }),
   clientTempId: z.string().min(1).optional(),

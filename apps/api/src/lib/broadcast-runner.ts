@@ -205,6 +205,10 @@ const FATAL_PAUSE: Set<string> = new Set();
 interface BroadcastVariables {
   body: string[];
   header?: string;
+  /** Campaign-level media for an IMAGE/VIDEO/DOCUMENT template header — one
+   *  media reused across every recipient (a public link, reusable unlike
+   *  Meta's single-use upload-media id). */
+  headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
 }
 
 /**
@@ -1085,6 +1089,7 @@ async function processOneRecipient(
             variables: {
               body: perRecipientVars.body,
               ...(perRecipientVars.header ? { header: perRecipientVars.header } : {}),
+              ...(variables.headerMedia ? { headerMedia: variables.headerMedia } : {}),
             },
           },
           config,
@@ -1129,6 +1134,9 @@ async function processOneRecipient(
                   body: perRecipientVars.body,
                   ...(perRecipientVars.header
                     ? { header: perRecipientVars.header }
+                    : {}),
+                  ...(variables.headerMedia
+                    ? { headerMedia: variables.headerMedia }
                     : {}),
                 },
               },
@@ -1816,12 +1824,31 @@ function parseVariables(v: Prisma.JsonValue): BroadcastVariables {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return { body: [] };
   }
-  const obj = v as { body?: unknown; header?: unknown };
+  const obj = v as { body?: unknown; header?: unknown; headerMedia?: unknown };
   const body = Array.isArray(obj.body)
     ? obj.body.filter((x): x is string => typeof x === "string")
     : [];
   const header = typeof obj.header === "string" ? obj.header : undefined;
-  return { body, ...(header ? { header } : {}) };
+  let headerMedia: BroadcastVariables["headerMedia"];
+  const hm = obj.headerMedia as
+    | { kind?: unknown; link?: unknown; filename?: unknown }
+    | undefined;
+  if (
+    hm &&
+    (hm.kind === "image" || hm.kind === "video" || hm.kind === "document") &&
+    typeof hm.link === "string"
+  ) {
+    headerMedia = {
+      kind: hm.kind,
+      link: hm.link,
+      ...(typeof hm.filename === "string" ? { filename: hm.filename } : {}),
+    };
+  }
+  return {
+    body,
+    ...(header ? { header } : {}),
+    ...(headerMedia ? { headerMedia } : {}),
+  };
 }
 
 function errorDetail(err: unknown): string {

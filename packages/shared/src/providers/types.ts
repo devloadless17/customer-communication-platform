@@ -368,11 +368,29 @@ export interface ProviderTemplate {
  * substitutions also have their own component entries; we don't support those
  * yet (TODO: dynamic button URLs).
  */
+/**
+ * Media supplied for an IMAGE/VIDEO/DOCUMENT template header at SEND time.
+ * Distinct from the `example.header_handle` used at template CREATE time —
+ * that handle is only valid for the create call. For a send, Meta wants the
+ * actual media for THIS message, by public `link` (we use the UploadThing URL
+ * the composer already produces) or a pre-uploaded media `id`.
+ */
+export interface TemplateHeaderMedia {
+  kind: "image" | "video" | "document";
+  /** Public URL to the media (e.g. an UploadThing utfs.io URL). */
+  link: string;
+  /** Filename shown to the recipient — DOCUMENT headers only. */
+  filename?: string;
+}
+
 export interface TemplateVariableSet {
   /** Body `{{1}}, {{2}}, …` values in order. Empty array when body has no vars. */
   body: string[];
   /** Header `{{1}}` value when the header is TEXT with a placeholder. */
   header?: string;
+  /** Media for an IMAGE/VIDEO/DOCUMENT header. Required when the template's
+   *  HEADER component format is one of those; ignored for TEXT headers. */
+  headerMedia?: TemplateHeaderMedia;
 }
 
 export interface SendTemplateArgs {

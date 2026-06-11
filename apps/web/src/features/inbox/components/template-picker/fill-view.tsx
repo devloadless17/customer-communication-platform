@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check, Loader2, Send } from "lucide-react";
+import { AlertTriangle, Check, FileText, Loader2, Send } from "lucide-react";
 
+import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
+import { HeaderMediaField } from "@/features/templates/components/header-media-field";
 import type { TemplateComponent } from "@ccp/shared/providers/types";
 import type {
   Contact,
@@ -54,7 +56,11 @@ export function TemplateFillView({
   fieldDefinitions: ContactFieldDefinition[];
   /** Last inbound timestamp — folded into ContactLike for window-state tokens. */
   lastInboundAt: string | null;
-  onSubmit: (vars: { body: string[]; header?: string }) => Promise<void>;
+  onSubmit: (vars: {
+    body: string[];
+    header?: string;
+    headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+  }) => Promise<void>;
 }) {
   // The DTO carries `components: unknown[]` to keep the boundary loose;
   // narrow once here so the rest of the component sees a real shape.
@@ -70,18 +76,70 @@ export function TemplateFillView({
     headerComp?.format === "TEXT" && headerComp.text
       ? countPlaceholders(headerComp.text)
       : 0;
+  // IMAGE/VIDEO/DOCUMENT headers need real media supplied at send time.
+  const headerMediaKind: "image" | "video" | "document" | null =
+    headerComp?.format === "IMAGE"
+      ? "image"
+      : headerComp?.format === "VIDEO"
+        ? "video"
+        : headerComp?.format === "DOCUMENT"
+          ? "document"
+          : null;
 
   const [bodyVars, setBodyVars] = useState<string[]>(() =>
     Array.from({ length: bodyVarCount }, () => ""),
   );
   const [headerVar, setHeaderVar] = useState("");
+  const [headerMedia, setHeaderMedia] = useState<{
+    kind: "image" | "video" | "document";
+    link: string;
+    filename?: string;
+  } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Reset whenever the template changes — agents pick template A, back out,
   // pick template B; we don't want B's slots prefilled with A's values.
   useEffect(() => {
     setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
     setHeaderVar("");
+    setHeaderMedia(null);
+    setUploadError(null);
   }, [template.id, bodyVarCount]);
+
+  const uploadHeaderMedia = useCallback(
+    async (file: File) => {
+      setUploadError(null);
+      setUploading(true);
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await apiFetch("/api/messages/template-header-media", {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as {
+            detail?: string;
+            error?: string;
+          } | null;
+          setUploadError(data?.detail ?? data?.error ?? "Upload failed");
+          return;
+        }
+        const data = (await res.json()) as {
+          link: string;
+          kind: "image" | "video" | "document";
+          filename?: string;
+        };
+        setHeaderMedia({ kind: data.kind, link: data.link, filename: data.filename });
+      } catch {
+        setUploadError("Upload failed — check your connection and try again.");
+      } finally {
+        setUploading(false);
+      }
+    },
+    [],
+  );
 
   const firstEmptyRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -125,7 +183,8 @@ export function TemplateFillView({
 
   const allFilled =
     resolvedBodyVars.every((v) => v.trim().length > 0) &&
-    (headerVarCount === 0 || resolvedHeaderVar.trim().length > 0);
+    (headerVarCount === 0 || resolvedHeaderVar.trim().length > 0) &&
+    (headerMediaKind === null || headerMedia !== null);
 
   return (
     <form
@@ -140,10 +199,31 @@ export function TemplateFillView({
         void onSubmit({
           body: resolvedBodyVars,
           ...(headerVarCount > 0 ? { header: resolvedHeaderVar } : {}),
+          ...(headerMedia ? { headerMedia } : {}),
         });
       }}
     >
       <div className="flex-1 overflow-y-auto px-4 py-4">
+        {/* Media header attachment — required for IMAGE/VIDEO/DOCUMENT headers */}
+        {headerMediaKind && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              {headerMediaKind} header
+            </div>
+            <HeaderMediaField
+              kind={headerMediaKind}
+              media={headerMedia}
+              uploading={uploading}
+              error={uploadError}
+              onPick={uploadHeaderMedia}
+              onClear={() => {
+                setHeaderMedia(null);
+                setUploadError(null);
+              }}
+            />
+          </div>
+        )}
+
         {/* Variables form */}
         {bodyVarCount + headerVarCount > 0 ? (
           <div className="flex flex-col gap-3">
@@ -200,6 +280,7 @@ export function TemplateFillView({
           <PreviewBubble
             headerComp={headerComp}
             headerValue={resolvedHeaderVar}
+            headerMedia={headerMedia}
             bodyText={template.bodyText}
             bodyVars={resolvedBodyVars}
             footerComp={footerComp}
@@ -320,6 +401,7 @@ function VarField({
 function PreviewBubble({
   headerComp,
   headerValue,
+  headerMedia,
   bodyText,
   bodyVars,
   footerComp,
@@ -327,6 +409,7 @@ function PreviewBubble({
 }: {
   headerComp: TemplateComponent | undefined;
   headerValue: string;
+  headerMedia: { kind: "image" | "video" | "document"; link: string; filename?: string } | null;
   bodyText: string;
   bodyVars: string[];
   footerComp: TemplateComponent | undefined;
@@ -348,9 +431,32 @@ function PreviewBubble({
           </div>
         )}
         {headerComp && headerComp.format !== "TEXT" && (
-          <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-[11px] text-muted-foreground">
-            {headerComp.format ?? "MEDIA"} header
-          </div>
+          headerMedia ? (
+            headerMedia.kind === "image" ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={headerMedia.link}
+                alt="Header preview"
+                className="mb-2 max-h-40 w-full rounded-md object-cover"
+              />
+            ) : headerMedia.kind === "video" ? (
+              <video
+                src={headerMedia.link}
+                className="mb-2 max-h-40 w-full rounded-md"
+                controls
+                muted
+              />
+            ) : (
+              <div className="mb-2 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-foreground">
+                <FileText className="size-4 shrink-0 text-emerald-600" />
+                <span className="truncate">{headerMedia.filename ?? "Document"}</span>
+              </div>
+            )
+          ) : (
+            <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-[11px] text-muted-foreground">
+              {headerComp.format ?? "MEDIA"} header
+            </div>
+          )
         )}
 
         {/* Body */}
@@ -384,3 +490,4 @@ function PreviewBubble({
     </div>
   );
 }
+

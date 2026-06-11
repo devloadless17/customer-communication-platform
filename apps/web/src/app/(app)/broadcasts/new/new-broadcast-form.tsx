@@ -36,6 +36,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { AudiencePicker, type AudienceState } from "@/features/broadcasts/components/audience-picker";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
+import { HeaderMediaField } from "@/features/templates/components/header-media-field";
 import { TokenHighlightInput } from "@/features/templates/components/token-highlight";
 
 /**
@@ -134,6 +135,13 @@ export function NewBroadcastForm({
   const [templateQuery, setTemplateQuery] = useState("");
   const [bodyVars, setBodyVars] = useState<string[]>([]);
   const [headerVar, setHeaderVar] = useState("");
+  const [headerMedia, setHeaderMedia] = useState<{
+    kind: "image" | "video" | "document";
+    link: string;
+    filename?: string;
+  } | null>(null);
+  const [headerMediaUploading, setHeaderMediaUploading] = useState(false);
+  const [headerMediaError, setHeaderMediaError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   // Optional operator label + scheduling. `scheduleMode` toggles between
@@ -260,11 +268,53 @@ export function NewBroadcastForm({
     headerComp?.format === "TEXT" && headerComp.text
       ? countPlaceholders(headerComp.text)
       : 0;
+  // IMAGE/VIDEO/DOCUMENT headers need one campaign media (reused for everyone).
+  const headerMediaKind: "image" | "video" | "document" | null =
+    headerComp?.format === "IMAGE"
+      ? "image"
+      : headerComp?.format === "VIDEO"
+        ? "video"
+        : headerComp?.format === "DOCUMENT"
+          ? "document"
+          : null;
+
+  const uploadHeaderMedia = useCallback(async (file: File) => {
+    setHeaderMediaError(null);
+    setHeaderMediaUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await apiFetch("/api/messages/template-header-media", {
+        method: "POST",
+        body: fd,
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          detail?: string;
+          error?: string;
+        } | null;
+        setHeaderMediaError(data?.detail ?? data?.error ?? "Upload failed");
+        return;
+      }
+      const data = (await res.json()) as {
+        link: string;
+        kind: "image" | "video" | "document";
+        filename?: string;
+      };
+      setHeaderMedia({ kind: data.kind, link: data.link, filename: data.filename });
+    } catch {
+      setHeaderMediaError("Upload failed — check your connection and try again.");
+    } finally {
+      setHeaderMediaUploading(false);
+    }
+  }, []);
 
   // Reset variable arrays whenever the chosen template changes. When the
   // template carries bindings, prefill each input with the matching token so
   // the agent sees the personalization upfront and can override.
   useEffect(() => {
+    setHeaderMedia(null);
+    setHeaderMediaError(null);
     if (!selectedTemplate) {
       setBodyVars(Array.from({ length: bodyVarCount }, () => ""));
       setHeaderVar("");
@@ -335,7 +385,8 @@ export function NewBroadcastForm({
   const variablesDone =
     templateDone &&
     bodyVars.every((v) => v.trim().length > 0) &&
-    (headerVarCount === 0 || headerVar.trim().length > 0);
+    (headerVarCount === 0 || headerVar.trim().length > 0) &&
+    (headerMediaKind === null || headerMedia !== null);
   const readyToSend = audienceDone && templateDone && variablesDone;
 
   const filteredTemplates = useMemo(() => {
@@ -406,6 +457,7 @@ export function NewBroadcastForm({
           variables: {
             body: bodyVars,
             ...(headerVarCount > 0 ? { header: headerVar } : {}),
+            ...(headerMedia ? { headerMedia } : {}),
           },
           audience:
             audience.mode === "all"
@@ -516,18 +568,38 @@ export function NewBroadcastForm({
           }
           done={variablesDone}
         >
-          {bodyVarCount + headerVarCount === 0 ? (
+          {bodyVarCount + headerVarCount === 0 && !headerMediaKind ? (
             <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
               This template has no variables — it&apos;ll send as-is to every
               recipient.
             </div>
           ) : (
             <div className="flex flex-col gap-3">
-              <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-                Type a value or insert a{" "}
-                <code className="rounded bg-muted px-1 text-[10.5px]">$var.contact.field</code>{" "}
-                token to fill each variable per recipient.
-              </p>
+              {headerMediaKind && (
+                <div>
+                  <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {headerMediaKind} header — sent to every recipient
+                  </div>
+                  <HeaderMediaField
+                    kind={headerMediaKind}
+                    media={headerMedia}
+                    uploading={headerMediaUploading}
+                    error={headerMediaError}
+                    onPick={uploadHeaderMedia}
+                    onClear={() => {
+                      setHeaderMedia(null);
+                      setHeaderMediaError(null);
+                    }}
+                  />
+                </div>
+              )}
+              {bodyVarCount + headerVarCount > 0 && (
+                <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                  Type a value or insert a{" "}
+                  <code className="rounded bg-muted px-1 text-[10.5px]">$var.contact.field</code>{" "}
+                  token to fill each variable per recipient.
+                </p>
+              )}
               {headerVarCount > 0 && (
                 <VarField
                   label="Header {{1}}"

@@ -196,6 +196,30 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
         detail: "This template's header has a placeholder — fill it in.",
       });
     }
+    // Media-header templates (IMAGE/VIDEO/DOCUMENT) need the campaign media
+    // supplied as a public link — one media reused across every recipient.
+    const HEADER_MEDIA_FORMATS: Record<string, "image" | "video" | "document"> = {
+      IMAGE: "image",
+      VIDEO: "video",
+      DOCUMENT: "document",
+    };
+    const headerMediaKind = headerComp?.format
+      ? HEADER_MEDIA_FORMATS[headerComp.format]
+      : undefined;
+    if (headerMediaKind) {
+      if (!variables.headerMedia?.link) {
+        throw new BadRequestException({
+          error: "header media required",
+          detail: `This template's header is a ${headerMediaKind} — attach one before scheduling.`,
+        });
+      }
+      if (variables.headerMedia.kind !== headerMediaKind) {
+        throw new BadRequestException({
+          error: "header media kind mismatch",
+          detail: `This template's header expects a ${headerMediaKind}.`,
+        });
+      }
+    }
 
     // Resolve recipient contact ids based on audience mode. `by_tag` is the
     // OR-union over selected tags (matches segmentation-tool convention).

@@ -82,6 +82,21 @@ const META_AUDIO_ALLOWED = new Set([
   "audio/ogg",
 ]);
 
+/**
+ * Map a mime type to the template-header media kind. Templates only allow
+ * IMAGE/VIDEO/DOCUMENT headers (audio/sticker are not valid header media).
+ * Anything else returns null so the caller can reject with a clear message.
+ */
+function templateHeaderKindFromMime(
+  mime: string,
+): "image" | "video" | "document" | null {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return null;
+  // Everything else Meta treats as a document header (pdf, docx, xlsx, …).
+  return "document";
+}
+
 @Injectable()
 export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
@@ -2075,6 +2090,44 @@ export class MessagesService {
   }
 
   /**
+   * Upload a media file for an IMAGE/VIDEO/DOCUMENT template header and return
+   * its public CDN link. Templates with a media header need the actual media
+   * supplied at SEND time as a public `link` (Meta fetches it). We store it on
+   * UploadThing — a link is reusable across recipients (broadcasts) and across
+   * the 24h gap, unlike Meta's single-use upload-media id. The returned link is
+   * then passed back as `variables.headerMedia.link` on the template send.
+   */
+  async uploadTemplateHeaderMedia(
+    teamId: string,
+    file: Express.Multer.File,
+  ): Promise<{ link: string; kind: "image" | "video" | "document"; filename?: string }> {
+    const kind = templateHeaderKindFromMime(file.mimetype);
+    if (!kind) {
+      throw new BadRequestException({
+        error: "unsupported_media_type",
+        detail: "A template header accepts an image, video, or document.",
+      });
+    }
+    const bytes = new Uint8Array(await readFile(file.path));
+    const result = await blobStorage.upload({
+      bytes,
+      mimeType: file.mimetype,
+      kind,
+      context: {
+        teamId,
+        direction: "out",
+        externalId: `tpl-hdr-${randomUUID()}`,
+        originalFilename: file.originalname,
+      },
+    });
+    return {
+      link: result.url,
+      kind,
+      ...(kind === "document" ? { filename: file.originalname } : {}),
+    };
+  }
+
+  /**
    * Template send. Delegates to lib/messaging/send-template-internal which
    * is also called by the `send_template` workflow step — the route and
    * the workflow path produce identical message rows.
@@ -2298,6 +2351,8 @@ const TEMPLATE_ERROR_STATUS: Record<SendTemplateValidationError["code"], number>
   template_not_approved: 409,
   wrong_body_var_count: 400,
   header_var_required: 400,
+  header_media_required: 400,
+  header_media_unsupported: 422,
   contact_has_no_phone: 400,
   provider_not_configured: 409,
   provider_no_template_support: 501,

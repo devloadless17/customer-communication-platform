@@ -64,7 +64,11 @@ interface PickerProps {
   onRefresh: () => void;
   onSend: (args: {
     template: TemplateDto;
-    variables: { body: string[]; header?: string };
+    variables: {
+      body: string[];
+      header?: string;
+      headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
+    };
   }) => Promise<{ ok: boolean; error?: string }>;
 }
 

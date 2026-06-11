@@ -57,6 +57,15 @@ export type AudienceInput = z.infer<typeof AudienceSchema>;
 export const BroadcastVariablesSchema = z.object({
   body: z.array(z.string()).default([]),
   header: z.string().optional(),
+  // Campaign-level media for an IMAGE/VIDEO/DOCUMENT template header — a single
+  // public link (UploadThing) reused across every recipient.
+  headerMedia: z
+    .object({
+      kind: z.enum(["image", "video", "document"]),
+      link: z.string().url().max(2048),
+      filename: z.string().max(255).optional(),
+    })
+    .optional(),
 });
 export type BroadcastVariablesInput = z.infer<typeof BroadcastVariablesSchema>;
 

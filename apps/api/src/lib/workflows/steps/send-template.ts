@@ -29,6 +29,9 @@ export interface SendTemplateStepConfig {
   variables: {
     body: string[];
     header?: string;
+    /** Static media for an IMAGE/VIDEO/DOCUMENT template header — a public link
+     *  the workflow author sets once (same media for every triggered send). */
+    headerMedia?: { kind: "image" | "video" | "document"; link: string; filename?: string };
   };
   /** Who to send to. Default = the trigger conversation's contact. A `phone`
    *  target reaches ANY number (auto-creates the contact + conversation) —
@@ -61,10 +64,35 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       body.push(x);
     }
     const header = typeof v.header === "string" && v.header.length > 0 ? v.header : undefined;
+    let headerMedia: SendTemplateStepConfig["variables"]["headerMedia"];
+    const hm = v.headerMedia as
+      | { kind?: unknown; link?: unknown; filename?: unknown }
+      | undefined;
+    if (hm && typeof hm === "object") {
+      if (
+        (hm.kind === "image" || hm.kind === "video" || hm.kind === "document") &&
+        typeof hm.link === "string" &&
+        hm.link.length > 0
+      ) {
+        headerMedia = {
+          kind: hm.kind,
+          link: hm.link,
+          ...(typeof hm.filename === "string" ? { filename: hm.filename } : {}),
+        };
+      } else {
+        throw new StepConfigError(
+          "send_template.variables.headerMedia must be { kind: image|video|document, link }",
+        );
+      }
+    }
     const target = parseStepTarget(r.target);
     return {
       templateId: r.templateId,
-      variables: { body, ...(header ? { header } : {}) },
+      variables: {
+        body,
+        ...(header ? { header } : {}),
+        ...(headerMedia ? { headerMedia } : {}),
+      },
       ...(target ? { target } : {}),
     };
   },
@@ -100,6 +128,10 @@ export const sendTemplateStepHandler: StepHandler<SendTemplateStepConfig> = {
       body: config.variables.body.map((v) => resolveFieldTokens(v, contact, extras)),
       ...(config.variables.header
         ? { header: resolveFieldTokens(config.variables.header, contact, extras) }
+        : {}),
+      // headerMedia is a static public link — no token resolution.
+      ...(config.variables.headerMedia
+        ? { headerMedia: config.variables.headerMedia }
         : {}),
     };
 
