@@ -1342,6 +1342,7 @@ export function useConversationEvents(
     const ACTIVITY_REFRESH_EVENTS = new Set([
       "conversation:status",
       "conversation:assigned",
+      "conversation:ai",
       "contact:updated",
       "note:deleted",
     ]);
