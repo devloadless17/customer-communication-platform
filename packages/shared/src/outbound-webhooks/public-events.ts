@@ -1140,6 +1140,11 @@ function wireMessageBlock(
   return {
     messageId: m.id,
     channelMessageId: m.external_id ?? null,
+    // The thread this message belongs to. Surfaced so a partner (n8n, etc.)
+    // can address a reply back via POST /v1/conversations/:id/messages — the
+    // /v1 send path is keyed on conversation id, and it's the only id the
+    // inbound webhook didn't previously expose.
+    conversationId: m.conversation_id,
     contactId: m.contact_id,
     channelId,
     traffic,
