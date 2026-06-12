@@ -1105,12 +1105,17 @@ function toWorkflowConversation(c: {
   incomingMessagesCount?: number;
   outgoingMessagesCount?: number;
   responsesCount?: number;
+  aiEnabled?: boolean;
 }): WorkflowConversationSnapshot {
   return {
     id: c.id,
     channel: c.channel,
     status: c.status as WorkflowConversationSnapshot["status"],
     assignedUserId: c.assignedUserId,
+    // Surfaced as `ai_enabled` on the message.received outbound webhook (the
+    // n8n gate). Without this it defaulted to true and a paused conversation
+    // still reported ai_enabled:true. Defaults true only when truly absent.
+    aiEnabled: c.aiEnabled ?? true,
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     firstAssignedAt: c.firstAssignedAt?.toISOString() ?? null,
