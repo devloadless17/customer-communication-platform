@@ -171,6 +171,27 @@ export class ExternalV1Controller {
     return trimmed;
   }
 
+  // Same as idemKey() but MANDATORY — for routes that send to Meta. A WhatsApp
+  // send is non-idempotent (Meta assigns the wamid; we can't dedupe before the
+  // call returns), bills the team, and counts against their quality rating. The
+  // only thing that makes a partner's retry-after-5xx safe is a stable client
+  // key, so we refuse the send without one rather than risk double-texting the
+  // customer. Use a unique value per logical send (e.g. the inbound message id).
+  private idemKeyRequired(raw: string | undefined): string {
+    const key = this.idemKey(raw);
+    if (!key) {
+      throw new HttpException(
+        {
+          error: "idempotency_key_required",
+          detail:
+            "Send an Idempotency-Key header (unique per logical send, e.g. the inbound message id) so a retry can't double-send to WhatsApp.",
+        },
+        400,
+      );
+    }
+    return key;
+  }
+
   // ---- Contacts: list + find -----------------------------------------
 
   @Get("contacts")
@@ -614,7 +635,7 @@ export class ExternalV1Controller {
       auth.teamId,
       auth.apiKeyId,
       body,
-      this.idemKey(idempotencyKey),
+      this.idemKeyRequired(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
   }
@@ -660,7 +681,7 @@ export class ExternalV1Controller {
       auth.apiKeyId,
       id,
       body,
-      this.idemKey(idempotencyKey),
+      this.idemKeyRequired(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
     return { ok: true, message: out.message };
