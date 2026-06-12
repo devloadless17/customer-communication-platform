@@ -12,6 +12,7 @@ import { getSession } from "@/lib/auth/current-user";
 import { listApiKeys } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 
+import { ApiKeysManager } from "@/features/settings/integrations/components/api-keys-manager";
 import { IntegrationConnectPanel } from "@/features/settings/integrations/components/integration-connect-panel";
 import { N8N_PRESET } from "@/features/settings/integrations/presets";
 
@@ -102,6 +103,10 @@ export default async function IntegrationsLanding() {
       </div>
 
       <div className="mt-12">
+        <ApiKeysManager initialKeys={keys} />
+      </div>
+
+      <div className="mt-6">
         <IntegrationConnectPanel
           preset={N8N_PRESET}
           initialKeys={keys}
