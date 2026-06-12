@@ -131,6 +131,64 @@ After this, every new inbound for that conversation arrives with
 - An agent can also flip it manually with the **AI Autopilot** toggle in the conversation header.
 - A `conversation.ai_changed` outbound webhook fires on every toggle, if you want n8n to observe handoffs.
 
+## Sample Google Sheet data (to test with)
+
+Create a sheet named `OrgInfo` with two columns — `topic` and `details` — and
+paste these rows. The AI Agent reads the whole sheet as its knowledge base.
+
+| topic | details |
+|---|---|
+| Business name | Bean & Brew Coffee |
+| Hours | Mon–Fri 7am–7pm, Sat–Sun 8am–5pm |
+| Location | 12 Hamra Street, Beirut. Dine-in + takeaway. |
+| Delivery | Free delivery over $20 within Beirut, 30–45 min |
+| Menu & prices | Espresso $2, Latte $3.5, Cappuccino $3.5, Cold brew $4, Croissant $2 |
+| Payment | Cash, card, and WhatsApp Pay |
+| Loyalty | 10th coffee free with the Bean & Brew card |
+| Allergens | Oat & almond milk available; products may contain nut traces |
+| Refunds & complaints | A human teammate handles these case by case — escalate |
+| Catering & wholesale | A human handles catering quotes — escalate |
+
+Test questions and what should happen:
+- "What time do you open on Saturday?" → AI answers (8am).
+- "How much is a latte?" → AI answers ($3.50).
+- "Do you deliver to Hamra?" → AI answers (yes, free over $20).
+- "I want a refund for my order" → AI replies `<<HANDOFF>>` → escalation branch.
+- "Can you cater 50 coffees for an event?" → `<<HANDOFF>>` → escalation branch.
+
+## Testing the flow WITHOUT WhatsApp
+
+You don't need a real WhatsApp message to test the n8n logic. In the Webhook
+node click **Listen for test event**, then POST a sample inbound payload to the
+node's test URL:
+
+```bash
+curl -X POST 'https://YOUR_N8N/webhook-test/whatsapp-incoming' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "event_type": "message.received",
+    "ai_enabled": true,
+    "contact": { "id": "c_test", "phoneNumber": "96170000000", "name": "Test Customer" },
+    "assignee": null,
+    "message": {
+      "messageId": "test_msg_1",
+      "conversationId": "test_conv_1",
+      "message": { "type": "text", "text": "What time do you open on Saturday?" }
+    }
+  }'
+```
+
+Change `message.message.text` to `"I want a refund"` to exercise the handoff
+branch. (The final reply HTTP node will only succeed against a REAL
+conversationId once you're sending live WhatsApp messages — for pure logic
+testing, disable/mock that last node or watch the branch it takes.)
+
+> Reachability for the live reply: your app is on `localhost:4000`; n8n at
+> `marketing.bbcorp.trade` can't reach localhost. Expose it for a live test —
+> `cloudflared tunnel --url http://localhost:4000` — and use that host as
+> `YOUR_APP_HOST`. The inbound webhook direction works regardless (your app
+> calls out to n8n).
+
 ## Loop safety
 
 - The webhook only fires on `message.received` (inbound). The AI's reply is an
