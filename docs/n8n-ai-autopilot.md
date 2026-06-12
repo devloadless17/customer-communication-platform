@@ -78,6 +78,14 @@ outbound-webhook config above.
 ### 3. Google Sheets — Get Row(s)
 Read your org-info sheet. Output feeds the agent's knowledge.
 
+### 3b. Limit — collapse the sheet to ONE item  ⚠️ important
+A sheet with N rows outputs **N items**, and n8n runs every downstream node
+**once per item** — so without this the AI Agent and the reply would fire N
+times (N AI calls, N sends). Add a **Limit** node (Max Items = `1`) right after
+the Sheets node. The agent still reads ALL rows via
+`$('Get row(s) in sheet').all()` in its system message; this just makes the
+chain run once. (An **Aggregate** node "combine all into one" works too.)
+
 ### 4. AI Agent (Anthropic Claude)
 - Chat model: `claude-sonnet-4-6` (or `claude-haiku-4-5` for speed/cost).
 - Text: `={{ $('Webhook').item.json.body.message.message.text }}`
