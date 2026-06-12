@@ -419,6 +419,8 @@ export type ConversationEventKind =
   | "stage_changed"
   | "note_added"
   | "note_deleted"
+  | "ai_paused"
+  | "ai_resumed"
   | "call_completed"
   | "call_missed"
   | "call_rejected"
@@ -471,6 +473,13 @@ export interface Conversation {
   contactId: string;
   assignedUserId: string | null;
   status: ConversationStatus;
+  /**
+   * AI Autopilot — true = the conversation is eligible for the external AI
+   * auto-reply flow; false = a human is handling it (AI stays silent). Drives
+   * the inbox "AI Autopilot" toggle. Optional for source-compat; absent =
+   * true (the column default).
+   */
+  aiEnabled?: boolean;
   /**
    * Team-wide unread counter — the single source of truth for both the row
    * badge AND the bold-text "unread" cue across the inbox UI. Unread is

@@ -3,6 +3,7 @@
 import { memo } from "react";
 import {
   ArrowRightLeft,
+  Bot,
   CircleDot,
   Tag,
   Trash2,
@@ -81,6 +82,24 @@ function describe(e: ConversationActivityEvent): {
         ),
       };
     }
+    case "ai_paused":
+      return {
+        icon: Bot,
+        text: (
+          <>
+            <b>{who}</b> paused AI Autopilot
+          </>
+        ),
+      };
+    case "ai_resumed":
+      return {
+        icon: Bot,
+        text: (
+          <>
+            <b>{who}</b> resumed AI Autopilot
+          </>
+        ),
+      };
     case "stage_changed": {
       const from = (e.before?.stageName as string | null | undefined) ?? null;
       const to = (e.after?.stageName as string | null | undefined) ?? null;

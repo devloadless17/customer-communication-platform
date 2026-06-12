@@ -168,6 +168,11 @@ enum ConversationEventKind {
   stage_changed
   note_added
   note_deleted
+  // AI Autopilot toggled off / on for this conversation (by a human in the
+  // inbox, by the AI on escalation via /v1, or auto-paused on a human reply).
+  // Rendered as an inline timeline pill, same as status/assignment.
+  ai_paused
+  ai_resumed
   // Voice-call lifecycle audit rows. Written by the audit subscriber on every
   // terminal call state for the DB-only audit trail — they are NOT rendered as
   // timeline pills (activity-entry.tsx has no call_* case; the visible inline
@@ -819,6 +824,15 @@ model Conversation {
   // broadcast runner, and the message-forward path all rely on this
   // default; existing conversations are untouched by the migration.
   status             ConversationStatus @default(pending)
+  // AI Autopilot — when true the conversation is eligible for the external AI
+  // auto-reply flow (n8n etc.); when false a human is handling it and the AI
+  // must stay silent. Default true (new chats are AI-eligible). Flipped to
+  // false automatically when a human replies (autoAssignOnAgentSend), by the
+  // AI itself on escalation (POST /v1/conversations/:id/ai), or by the inbox
+  // "Pause AI" toggle; flipped back to true by the toggle or on close. The
+  // value rides the message.received/sent outbound webhook as `ai_enabled`
+  // so the partner flow gates on it. NOT a workflow trigger.
+  aiEnabled          Boolean            @default(true)
   unreadCount        Int                @default(0)
   lastMessageAt      DateTime           @default(now())
   lastMessagePreview String             @default("")

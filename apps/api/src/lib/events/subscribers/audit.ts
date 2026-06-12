@@ -84,6 +84,19 @@ export function registerAuditSubscribers(): () => void {
     });
   });
 
+  subscribe("conversation.ai_changed", async (e) => {
+    if (e.previousAiEnabled === e.newAiEnabled) return;
+    await recordConversationEvent({
+      conversationId: e.conversationId,
+      teamId: e.teamId,
+      userId: e.changedByUserId,
+      apiKeyId: e.changedByApiKeyId ?? null,
+      kind: e.newAiEnabled ? "ai_resumed" : "ai_paused",
+      before: { aiEnabled: e.previousAiEnabled },
+      after: { aiEnabled: e.newAiEnabled },
+    });
+  });
+
   // Note added / deleted — audit so an admin can trace who added/removed a
   // teammate's note. Note bodies themselves stay off the audit row (the row
   // may outlive the note via retention policy); we keep just the noteId + a

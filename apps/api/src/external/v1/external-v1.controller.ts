@@ -34,6 +34,7 @@ import {
   ExternalCreateTagSchema,
   ExternalNoteSchema,
   ExternalSendMessageSchema,
+  ExternalSetAiSchema,
   ExternalStatusSchema,
   ExternalTopLevelSendMessageSchema,
   ExternalUpdateContactSchema,
@@ -53,6 +54,7 @@ import {
   type ExternalCreateTagInput,
   type ExternalNoteInput,
   type ExternalSendMessageInput,
+  type ExternalSetAiInput,
   type ExternalStatusInput,
   type ExternalTopLevelSendMessageInput,
   type ExternalUpdateTagInput,
@@ -565,6 +567,23 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
+    return { ok: true };
+  }
+
+  // AI Autopilot toggle — the AI escalation branch calls this with
+  // { aiEnabled: false } to hand a conversation to a human (and optionally
+  // { aiEnabled: true } to hand it back). `silent: true` skips the webhook echo.
+  @Post("conversations/:id/ai")
+  @RequireScope("write:conversations")
+  async setAi(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalSetAiSchema)) body: ExternalSetAiInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    await this.api.setAiEnabled(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
     return { ok: true };
   }
 

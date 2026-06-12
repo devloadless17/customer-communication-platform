@@ -11,6 +11,7 @@ import type { ContactStage, ConversationStatus, User } from "@ccp/shared/types";
 
 import { AssignmentDropdown } from "./assignment-dropdown";
 import { ConversationMenu } from "./conversation-menu";
+import { AiToggle } from "./ai-toggle";
 import { StatusDropdown } from "./status-dropdown";
 
 /**
@@ -67,6 +68,7 @@ export function ThreadHeader({
   contactName,
   phone,
   status,
+  aiEnabled,
   assignedUserId,
   assignedUserName,
   assignedUserAvatarUrl,
@@ -91,6 +93,8 @@ export function ThreadHeader({
   contactName: string;
   phone: string | null;
   status: ConversationStatus;
+  /** AI Autopilot state for the header toggle. */
+  aiEnabled: boolean;
   assignedUserId: string | null;
   assignedUserName: string | null;
   assignedUserAvatarUrl?: string | null;
@@ -205,6 +209,13 @@ export function ThreadHeader({
           current={status}
           assignedUserId={assignedUserId}
           teamMembers={teamMembers}
+          currentUserName={currentUserName}
+          onAlert={onAlert}
+        />
+        <AiToggle
+          teamId={teamId}
+          conversationId={conversationId}
+          aiEnabled={aiEnabled}
           currentUserName={currentUserName}
           onAlert={onAlert}
         />

@@ -370,6 +370,8 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       unread_count: number | null;
       last_message_at: string;
       assignee: AssigneeInfo | null;
+      // camelCase to match what the wire mapper reads (d.conversation?.aiEnabled).
+      aiEnabled: boolean;
     };
     type SentData = { contact: PublicContact | null; conversation: SentConversation };
 
@@ -403,6 +405,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         assignee: ext.assignee
           ? { type: "user", id: ext.assignee.id, name: ext.assignee.name, email: ext.assignee.email }
           : null,
+        aiEnabled: row.aiEnabled,
       };
       for (const data of targets) {
         data.contact = contact;

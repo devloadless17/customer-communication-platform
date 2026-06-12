@@ -123,6 +123,21 @@ export function buildOptimisticStatusChange(args: {
   return build(args.teamId, args.conversationId, e);
 }
 
+export function buildOptimisticAiChange(args: {
+  teamId: string;
+  conversationId: string;
+  actorName: string;
+  aiEnabled: boolean;
+}): OptimisticActivityBuild {
+  const e = base(
+    args.conversationId,
+    args.actorName,
+    args.aiEnabled ? "ai_resumed" : "ai_paused",
+  );
+  e.after = { aiEnabled: args.aiEnabled };
+  return build(args.teamId, args.conversationId, e);
+}
+
 export function buildOptimisticAssignment(args: {
   teamId: string;
   conversationId: string;

@@ -76,6 +76,11 @@ export const SetConversationStatusSchema = z.object({
 });
 export type SetConversationStatusInput = z.infer<typeof SetConversationStatusSchema>;
 
+export const SetConversationAiEnabledSchema = z.object({
+  aiEnabled: z.boolean(),
+});
+export type SetConversationAiEnabledInput = z.infer<typeof SetConversationAiEnabledSchema>;
+
 export const BulkDeleteConversationsSchema = z.object({
   conversationIds: z.array(z.string().min(1)).min(1).max(500),
 });

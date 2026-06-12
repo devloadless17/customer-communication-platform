@@ -125,6 +125,10 @@ export interface WorkflowConversationSnapshot {
   channel: Channel;
   status: ConversationStatus;
   assignedUserId: string | null;
+  /** AI Autopilot state. Surfaced as `ai_enabled` on the message.received /
+   *  message.sent outbound webhook so a partner flow gates on it. Optional /
+   *  defaults true at the builder boundary. */
+  aiEnabled?: boolean;
   unreadCount: number;
   lastMessageAt: string;
   // Analytics fields — populated incrementally; null when the event hasn't
@@ -218,6 +222,7 @@ export function workflowConversationSnapshot(c: {
   incomingMessagesCount?: number;
   outgoingMessagesCount?: number;
   responsesCount?: number;
+  aiEnabled?: boolean;
   // PR 2.4 input — populated when the call site JOINed User.
   assignedUser?: { id: string; name: string; email: string } | null;
 }): WorkflowConversationSnapshot {
@@ -226,6 +231,7 @@ export function workflowConversationSnapshot(c: {
     channel: c.channel,
     status: c.status,
     assignedUserId: c.assignedUserId,
+    aiEnabled: c.aiEnabled ?? true,
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     firstAssignedAt: c.firstAssignedAt?.toISOString() ?? null,

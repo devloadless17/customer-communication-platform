@@ -143,6 +143,19 @@ export const ExternalStatusSchema = z.object({
 });
 export type ExternalStatusInput = z.infer<typeof ExternalStatusSchema>;
 
+/**
+ * Toggle AI Autopilot from the partner side — the AI escalation branch calls
+ * this with `{ aiEnabled: false }` to hand the conversation to a human (the
+ * value then rides every subsequent message.received as `ai_enabled` so the
+ * partner flow stops auto-replying). `silent` skips the outbound-webhook echo
+ * so the AI doesn't get its own ai_changed delivery back.
+ */
+export const ExternalSetAiSchema = z.object({
+  aiEnabled: z.boolean(),
+  silent: SilentFlag,
+});
+export type ExternalSetAiInput = z.infer<typeof ExternalSetAiSchema>;
+
 export const ExternalNoteSchema = z.object({
   body: z.string().trim().min(1).max(8000),
   authorUserId: z.string().min(1).optional(),

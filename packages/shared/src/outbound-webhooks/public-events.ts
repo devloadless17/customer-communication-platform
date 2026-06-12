@@ -32,6 +32,7 @@ import type {
   ContactTagChangedEvent,
   ContactUpdatedEvent,
   ContactDeletedEvent,
+  ConversationAiChangedEvent,
   ConversationAssignedEvent,
   ConversationStatusChangedEvent,
   DomainEvent,
@@ -60,6 +61,10 @@ export const PUBLIC_EVENT_TYPES = [
   // this, partners would have to filter status in their own flow.
   "conversation.opened",
   "conversation.closed",
+  // AI Autopilot toggled on/off for a conversation — lets a partner flow track
+  // the human↔AI handoff state (the inbound message.received also carries the
+  // current state inline as `ai_enabled`).
+  "conversation.ai_changed",
   "contact.created",
   "contact.updated",
   "contact.tag_changed",
@@ -724,6 +729,21 @@ export function toPublicEnvelopes(
       }
       break;
     }
+    case "conversation.ai_changed": {
+      const e = event as ConversationAiChangedEvent;
+      out.push({
+        type: "conversation.ai_changed",
+        envelope: build(e.teamId, occurredAt, "conversation.ai_changed", {
+          conversation_id: e.conversationId,
+          contact_id: e.contact.id,
+          ai_enabled: e.newAiEnabled,
+          previous_ai_enabled: e.previousAiEnabled,
+          changed_by_user_id: e.changedByUserId,
+          changed_by_api_key_id: e.changedByApiKeyId ?? null,
+        }),
+      });
+      break;
+    }
     case "contact.created": {
       const e = event as ContactCreatedEvent;
       out.push({
@@ -865,6 +885,7 @@ export function busEventTypesToSubscribe(): DomainEventType[] {
     "message.status_changed",
     "conversation.assigned",
     "conversation.status_changed",
+    "conversation.ai_changed",
     "contact.created",
     "contact.updated",
     "contact.tag_changed",
@@ -1198,6 +1219,9 @@ export function toWirePayload(
         // that AND surface the proper contact here.
         contact: wireContact(d.contact),
         assignee: wireAssignee(d.conversation?.assignee),
+        // AI Autopilot state for this conversation — the partner flow gates its
+        // auto-reply on this (true = AI may answer; false = a human owns it).
+        ai_enabled: d.conversation?.aiEnabled ?? true,
         message: wireMessageBlock(d.message, "incoming", channelId),
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
@@ -1208,6 +1232,7 @@ export function toWirePayload(
         // The customer the message was sent to (same conversation contact).
         contact: wireContact(d.contact),
         assignee: wireAssignee(d.conversation?.assignee),
+        ai_enabled: d.conversation?.aiEnabled ?? true,
         message: wireMessageBlock(d.message, "outgoing", channelId),
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
@@ -1245,6 +1270,17 @@ export function toWirePayload(
         changedByApiKeyId: d.changed_by_api_key_id ?? null,
         closedCategory: d.closed_category ?? null,
         closedSummary: d.closed_summary ?? null,
+        channel: wireChannel(ctx.channelBase, null),
+      };
+    case "conversation.ai_changed":
+      return {
+        event_type: type,
+        conversationId: d.conversation_id,
+        contactId: d.contact_id,
+        aiEnabled: d.ai_enabled,
+        previousAiEnabled: d.previous_ai_enabled ?? null,
+        changedByUserId: d.changed_by_user_id ?? null,
+        changedByApiKeyId: d.changed_by_api_key_id ?? null,
         channel: wireChannel(ctx.channelBase, null),
       };
     case "contact.created":

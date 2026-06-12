@@ -230,6 +230,7 @@ export function mapConversation(c: PrismaConversation): Conversation {
     contactId: c.contactId,
     assignedUserId: c.assignedUserId,
     status: c.status as ConversationStatus,
+    aiEnabled: c.aiEnabled,
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,

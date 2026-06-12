@@ -45,6 +45,7 @@ import type {
   ExternalCreateTagInput,
   ExternalNoteInput,
   ExternalSendMessageInput,
+  ExternalSetAiInput,
   ExternalStatusInput,
   ExternalTopLevelSendMessageInput,
   ExternalUpdateContactInput,
@@ -144,6 +145,16 @@ export class ExternalV1Service {
     idempotencyKey?: string,
   ) {
     return this.messaging.setStatus(teamId, apiKeyId, conversationId, input, idempotencyKey);
+  }
+
+  setAiEnabled(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalSetAiInput,
+    idempotencyKey?: string,
+  ) {
+    return this.messaging.setAiEnabled(teamId, apiKeyId, conversationId, input, idempotencyKey);
   }
 
   listMessages(

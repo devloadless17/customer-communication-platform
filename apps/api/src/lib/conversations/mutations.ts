@@ -329,13 +329,19 @@ export async function setConversationStatus(args: {
   }
 
   const unassignOnClose = status === "closed" && previousAssignedUserId !== null;
+  // Auto-resume AI Autopilot on close (product decision): closing hands the
+  // thread back to the AI so the next time the customer writes the AI handles
+  // it fresh. Only flips when currently paused, so no redundant ai_changed.
+  const resumeAiOnClose = status === "closed" && conversation.aiEnabled === false;
+
+  const updateData: Prisma.ConversationUncheckedUpdateInput = { status };
+  if (unassignOnClose) updateData.assignedUserId = null;
+  if (resumeAiOnClose) updateData.aiEnabled = true;
 
   try {
     await db.conversation.update({
       where: { id: conversationId, teamId, status: previousStatus },
-      data: unassignOnClose
-        ? { status, assignedUserId: null }
-        : { status },
+      data: updateData,
     });
   } catch (err) {
     if (isP2025(err)) return { ok: false, reason: "conflict" };
@@ -399,6 +405,22 @@ export async function setConversationStatus(args: {
     });
   }
 
+  if (resumeAiOnClose) {
+    // The close handed the thread back to the AI — surface it like any other
+    // ai toggle so the inbox pill, socket, and outbound webhook stay in sync.
+    await publish({
+      type: "conversation.ai_changed",
+      teamId,
+      conversationId,
+      previousAiEnabled: false,
+      newAiEnabled: true,
+      changedByUserId,
+      ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+      contact,
+      silent: silent === true,
+    });
+  }
+
   return {
     ok: true,
     changed: true,
@@ -406,4 +428,73 @@ export async function setConversationStatus(args: {
     previousStatus,
     previousAssignedUserId,
   };
+}
+
+/**
+ * Toggle AI Autopilot for a conversation. CAS on the previous value so a
+ * concurrent toggle / auto-pause can't double-fire, idempotent when already in
+ * the target state (no event). Mirrors setConversationStatus: framework-
+ * agnostic, publishes `conversation.ai_changed` (drives the inbox toggle via
+ * socket, the activity-log pill via the audit subscriber, and the outbound
+ * webhook). `silent` skips only the outbound-webhook echo — used by the AI's
+ * own /v1 self-pause so it doesn't loop a delivery back to itself.
+ */
+export async function setConversationAiEnabled(args: {
+  db: Db;
+  publish: Publish;
+  teamId: string;
+  conversationId: string;
+  aiEnabled: boolean;
+  changedByUserId: string | null;
+  changedByApiKeyId?: string | null;
+  silent?: boolean;
+}): Promise<
+  ConversationMutationOutcome<{ changed: boolean; previousAiEnabled: boolean }>
+> {
+  const {
+    db,
+    publish,
+    teamId,
+    conversationId,
+    aiEnabled,
+    changedByUserId,
+    changedByApiKeyId,
+    silent,
+  } = args;
+
+  const conversation = await db.conversation.findFirst({
+    where: { id: conversationId, teamId },
+    include: { contact: { include: { tags: { select: { id: true } } } } },
+  });
+  if (!conversation) return { ok: false, reason: "not_found" };
+
+  const previousAiEnabled = conversation.aiEnabled;
+  if (previousAiEnabled === aiEnabled) {
+    return { ok: true, changed: false, previousAiEnabled };
+  }
+
+  try {
+    await db.conversation.update({
+      where: { id: conversationId, teamId, aiEnabled: previousAiEnabled },
+      data: { aiEnabled },
+    });
+  } catch (err) {
+    if (isP2025(err)) return { ok: false, reason: "conflict" };
+    throw err;
+  }
+
+  const contact = workflowContactSnapshot(conversation.contact as Contact);
+  await publish({
+    type: "conversation.ai_changed",
+    teamId,
+    conversationId,
+    previousAiEnabled,
+    newAiEnabled: aiEnabled,
+    changedByUserId,
+    ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+    contact,
+    silent: silent === true,
+  });
+
+  return { ok: true, changed: true, previousAiEnabled };
 }

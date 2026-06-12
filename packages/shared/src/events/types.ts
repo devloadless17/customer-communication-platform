@@ -247,6 +247,27 @@ export interface ConversationStatusChangedEvent {
   silent?: boolean;
 }
 
+/**
+ * AI Autopilot toggled for a conversation. Drives the inbox toggle (socket),
+ * the activity-log pill (audit subscriber), and an outbound `conversation.
+ * ai_changed` webhook so a partner flow knows the human↔AI handoff state.
+ * Deliberately NOT a workflow trigger (no WorkflowConversationSnapshot needed)
+ * — toggling AI is an operational signal, not a customer-journey event.
+ */
+export interface ConversationAiChangedEvent {
+  teamId: string;
+  conversationId: string;
+  previousAiEnabled: boolean;
+  newAiEnabled: boolean;
+  /** null when toggled by the system (e.g. auto-resume on close). */
+  changedByUserId: string | null;
+  /** Set when the AI itself paused via the /v1 API, for audit attribution. */
+  changedByApiKeyId?: string | null;
+  contact: WorkflowContactSnapshot;
+  /** Skip outbound-webhook echo (the AI's own /v1 toggle sets this to avoid a loop). */
+  silent?: boolean;
+}
+
 export interface ConversationDeletedEvent {
   teamId: string;
   conversationId: string;
@@ -930,6 +951,7 @@ export interface DomainEventMap {
   "message.media_ready": MessageMediaReadyEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;
+  "conversation.ai_changed": ConversationAiChangedEvent;
   "conversation.deleted": ConversationDeletedEvent;
   "conversation.read": ConversationReadEvent;
   "contact.created": ContactCreatedEvent;

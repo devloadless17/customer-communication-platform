@@ -43,6 +43,7 @@ import { computeWindowStatus } from "@ccp/shared/utils/window";
 import {
   assignConversation,
   setConversationStatus,
+  setConversationAiEnabled,
 } from "@/lib/conversations/mutations";
 
 import { EventBus } from "../../events/event-bus.module";
@@ -55,6 +56,7 @@ import type {
   ExternalNoteInput,
   ExternalSendMessageInput,
   ExternalStatusInput,
+  ExternalSetAiInput,
   ExternalTopLevelSendMessageInput,
   ListConversationsQueryInput,
   ListMessagesQueryInput,
@@ -284,6 +286,66 @@ export class ExternalV1MessagingService {
       throw new ConflictException({
         error: "write_conflict",
         detail: "conversation status changed by someone else",
+      });
+    }
+    return { ok: true };
+  }
+
+  async setAiEnabled(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalSetAiInput,
+    idempotencyKey?: string,
+  ): Promise<{ ok: true }> {
+    // Idempotency — see setStatus(). A retry must not re-publish ai_changed.
+    if (idempotencyKey) {
+      const claim = await this.idem.claim<{ ok: true }>(
+        teamId,
+        apiKeyId,
+        idempotencyKey,
+        this.idem.fingerprint("set_ai", { conversationId, aiEnabled: input.aiEnabled }),
+      );
+      if (claim.kind === "replay") return claim.result;
+    }
+    try {
+      const result = await this.setAiEnabledInternal(teamId, apiKeyId, conversationId, input);
+      if (idempotencyKey) {
+        await this.idem.complete(teamId, apiKeyId, idempotencyKey, result);
+      }
+      return result;
+    } catch (err) {
+      if (idempotencyKey) await this.idem.release(teamId, apiKeyId, idempotencyKey);
+      throw err;
+    }
+  }
+
+  private async setAiEnabledInternal(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+    input: ExternalSetAiInput,
+  ): Promise<{ ok: true }> {
+    // Same shared CAS + publish as the inbox toggle. `silent` defaults true-ish
+    // intent for the AI's self-pause (skip the outbound webhook echo so the AI
+    // doesn't get its own ai_changed delivery back); honored as supplied.
+    const result = await setConversationAiEnabled({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
+      teamId,
+      conversationId,
+      aiEnabled: input.aiEnabled,
+      changedByUserId: null,
+      changedByApiKeyId: apiKeyId,
+      silent: input.silent === true,
+    });
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
+      }
+      throw new ConflictException({
+        error: "write_conflict",
+        detail: "conversation ai setting changed by someone else",
       });
     }
     return { ok: true };

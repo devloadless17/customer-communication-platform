@@ -53,6 +53,17 @@ export function applyConversationStatus(
   };
 }
 
+export function applyConversationAi(
+  prev: ConversationWithRefs,
+  payload: { aiEnabled: boolean },
+): ConversationWithRefs {
+  if ((prev.conversation.aiEnabled ?? true) === payload.aiEnabled) return prev;
+  return {
+    ...prev,
+    conversation: { ...prev.conversation, aiEnabled: payload.aiEnabled },
+  };
+}
+
 export function applyConversationAssignment(
   prev: ConversationWithRefs,
   payload: { assignedUser: User | null },
@@ -319,6 +330,7 @@ function reducerEntry<E extends keyof ServerToClientEvents>(
 
 export const THREAD_REDUCER_EVENTS = [
   reducerEntry({ event: "conversation:status", apply: applyConversationStatus }),
+  reducerEntry({ event: "conversation:ai", apply: applyConversationAi }),
   reducerEntry({ event: "conversation:assigned", apply: applyConversationAssignment }),
   reducerEntry({ event: "conversation:read", apply: applyConversationRead }),
   reducerEntry({ event: "message:status", apply: applyMessageStatus }),

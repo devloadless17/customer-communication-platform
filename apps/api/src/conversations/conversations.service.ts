@@ -31,6 +31,7 @@ import {
 import {
   assignConversation,
   setConversationStatus,
+  setConversationAiEnabled,
 } from "@/lib/conversations/mutations";
 
 import { EventBus } from "../events/event-bus.module";
@@ -39,6 +40,7 @@ import { runWithConcurrency } from "../common/concurrency";
 import type {
   AssignConversationInput,
   BulkDeleteConversationsInput,
+  SetConversationAiEnabledInput,
   SetConversationStatusInput,
   StartConversationInput,
 } from "./conversations.schemas";
@@ -490,6 +492,35 @@ export class ConversationsService {
       }
       throw new ConflictException({
         error: "conversation status changed by someone else",
+      });
+    }
+  }
+
+  /**
+   * Toggle AI Autopilot for a conversation (inbox "Pause AI" / "Resume AI").
+   * CAS + event publishing live in the shared lib helper so the /v1 self-pause
+   * and the auto-pause-on-human-reply run identically.
+   */
+  async setAiEnabled(
+    teamId: string,
+    actorUserId: string,
+    conversationId: string,
+    input: SetConversationAiEnabledInput,
+  ): Promise<void> {
+    const result = await setConversationAiEnabled({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
+      teamId,
+      conversationId,
+      aiEnabled: input.aiEnabled,
+      changedByUserId: actorUserId,
+    });
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        throw new NotFoundException({ error: "conversation not found" });
+      }
+      throw new ConflictException({
+        error: "conversation ai setting changed by someone else",
       });
     }
   }

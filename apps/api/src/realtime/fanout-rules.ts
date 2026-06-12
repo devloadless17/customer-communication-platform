@@ -168,6 +168,14 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  "conversation.ai_changed": (e, emitter) => {
+    emitter.emitToTeam(e.teamId, "conversation:ai", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      aiEnabled: e.newAiEnabled,
+    });
+  },
+
   "conversation.deleted": (e, emitter) => {
     emitter.emitToTeam(e.teamId, "conversation:deleted", {
       teamId: e.teamId,

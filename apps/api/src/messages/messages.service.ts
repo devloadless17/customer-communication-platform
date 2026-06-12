@@ -26,6 +26,7 @@ import {
 } from "@/lib/messaging/conversation-send-budget";
 import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
 import { commitOutboundSend } from "@/lib/messaging/commit-outbound-send";
+import { setConversationAiEnabled } from "@/lib/conversations/mutations";
 import { SendTextValidationError } from "@/lib/messaging/send-text-internal";
 import { sendInteractiveInternal } from "@/lib/messaging/send-interactive-internal";
 import {
@@ -269,6 +270,22 @@ export class MessagesService {
           include: { contact: { include: { tags: { select: { id: true } } } } },
         });
         if (!convo) return;
+
+        // Human reply = takeover → pause AI Autopilot so the external AI flow
+        // stops auto-replying over the human. Idempotent (no-op if already
+        // paused) + independent fire-and-forget so it can't affect the claim
+        // or the send. Resume is explicit (inbox toggle) or on close. Gated on
+        // the current value to skip the redundant re-read in the common case.
+        if (convo.aiEnabled) {
+          void setConversationAiEnabled({
+            db: this.db,
+            publish: (e) => this.bus.publish(e),
+            teamId,
+            conversationId,
+            aiEnabled: false,
+            changedByUserId: userId,
+          }).catch(() => {});
+        }
 
         // Both branches wrap CAS + publish in one transaction via
         // publishInTx — a crash between commit and emit on the prior

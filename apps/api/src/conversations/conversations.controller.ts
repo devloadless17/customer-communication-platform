@@ -25,6 +25,7 @@ import {
   ListMessagesQuerySchema,
   MessageContextQuerySchema,
   SearchMessagesQuerySchema,
+  SetConversationAiEnabledSchema,
   SetConversationStatusSchema,
   StartConversationSchema,
   type AssignConversationInput,
@@ -34,6 +35,7 @@ import {
   type ListMessagesQuery,
   type MessageContextQuery,
   type SearchMessagesQuery,
+  type SetConversationAiEnabledInput,
   type SetConversationStatusInput,
   type StartConversationInput,
 } from "./conversations.schemas";
@@ -226,6 +228,17 @@ export class ConversationsController {
     @Body(zBody(SetConversationStatusSchema)) body: SetConversationStatusInput,
   ) {
     await this.conversations.setStatus(session.teamId, session.userId, id, body);
+    return { ok: true };
+  }
+
+  @Post(":id/ai")
+  @HttpCode(200)
+  async setAiEnabled(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Body(zBody(SetConversationAiEnabledSchema)) body: SetConversationAiEnabledInput,
+  ) {
+    await this.conversations.setAiEnabled(session.teamId, session.userId, id, body);
     return { ok: true };
   }
 

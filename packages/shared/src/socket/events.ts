@@ -135,6 +135,15 @@ export interface ServerToClientEvents {
     optimistic?: boolean;
   }) => void;
 
+  /** AI Autopilot enabled/disabled for a conversation. */
+  "conversation:ai": (payload: {
+    teamId: string;
+    conversationId: string;
+    aiEnabled: boolean;
+    /** See `conversation:assigned.optimistic`. */
+    optimistic?: boolean;
+  }) => void;
+
   /**
    * Conversation was hard-deleted by an agent. Every client splices it out
    * of its list; an open detail view should bounce back to /inbox.

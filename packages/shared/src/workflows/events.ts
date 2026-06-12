@@ -44,6 +44,9 @@ export interface WorkflowConversationSnapshot {
   channel: Channel;
   status: ConversationStatus;
   assignedUserId: string | null;
+  /** AI Autopilot state. Surfaced as `ai_enabled` on the message.received /
+   *  message.sent outbound webhook. Optional / defaults true. */
+  aiEnabled?: boolean;
   unreadCount: number;
   lastMessageAt: string;
   firstAssignedAt: string | null;
