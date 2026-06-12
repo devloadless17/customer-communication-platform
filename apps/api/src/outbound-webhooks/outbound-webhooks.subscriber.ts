@@ -238,6 +238,25 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       );
     }
 
+    // Workspace-level AI Autopilot opt-in. Folded into the wire `ai_enabled`
+    // (team-on AND conversation-on) so an org with the feature OFF reports
+    // ai_enabled:false on EVERY conversation regardless of the per-conversation
+    // flag. Resolved fresh (not cached) so an admin toggling the setting in
+    // Settings takes effect on the very next inbound. Cheap indexed PK lookup;
+    // degrade-to-false on error (fail safe — don't let the AI run if unknown).
+    let teamAiAutopilotEnabled = false;
+    try {
+      const t = await this.db.team.findUnique({
+        where: { id: event.teamId },
+        select: { aiAutopilotEnabled: true },
+      });
+      teamAiAutopilotEnabled = t?.aiAutopilotEnabled ?? false;
+    } catch (err) {
+      this.logger.warn(
+        `resolve team aiAutopilot failed, treating as off: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
     for (const { type, envelope } of envelopes) {
       const matching = webhooks.filter((w) => w.eventTypes.includes(type));
       if (matching.length === 0) continue;
@@ -250,7 +269,10 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       // by team from the body — the flat shape otherwise omits it.
       const payload = {
         team_id: event.teamId,
-        ...toWirePayload(type, (envelope as { data: unknown }).data, { channelBase }),
+        ...toWirePayload(type, (envelope as { data: unknown }).data, {
+          channelBase,
+          teamAiAutopilotEnabled,
+        }),
       };
 
       // Bounded fan-out (DB insert + BullMQ enqueue per matching webhook).

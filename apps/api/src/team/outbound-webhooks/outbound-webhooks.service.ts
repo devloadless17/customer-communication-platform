@@ -266,13 +266,23 @@ export class OutboundWebhooksService {
         }
       : null;
 
+    // Reflect the workspace AI Autopilot opt-in in the test ping's `ai_enabled`
+    // so a Test fired while the feature is off matches what a real inbound shows.
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { aiAutopilotEnabled: true },
+    });
+
     const deliveryId = randomUUID();
     // team_id stamped first + `test: true` marker, then the type's real wire
     // shape — exactly what the production fanout produces (subscriber.ts:245).
     const payload = {
       team_id: teamId,
       test: true,
-      ...toWirePayload(eventType, samplePayloadFor(eventType), { channelBase }),
+      ...toWirePayload(eventType, samplePayloadFor(eventType), {
+        channelBase,
+        teamAiAutopilotEnabled: team?.aiAutopilotEnabled ?? false,
+      }),
     };
     const created = await this.db.outboundWebhookDelivery.create({
       data: {

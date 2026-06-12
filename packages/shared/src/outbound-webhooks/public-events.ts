@@ -1204,10 +1204,20 @@ function wireContact(c: PublicContact | null | undefined): Record<string, unknow
 export function toWirePayload(
   type: PublicEventType,
   data: unknown,
-  ctx: { channelBase: WireChannelBase | null },
+  ctx: {
+    channelBase: WireChannelBase | null;
+    /** Workspace AI Autopilot opt-in. ANDed into `ai_enabled` so a team with
+     *  the feature off reports false regardless of the per-conversation flag.
+     *  Absent = true (assume on) for synthetic/test callers; the real
+     *  subscriber always supplies it. */
+    teamAiAutopilotEnabled?: boolean;
+  },
 ): Record<string, unknown> {
   const d = data as Record<string, any>;
   const channelId = ctx.channelBase?.id ?? null;
+  // Effective AI gate = workspace opted in AND this conversation not paused.
+  const aiEnabled =
+    (ctx.teamAiAutopilotEnabled ?? true) && (d.conversation?.aiEnabled ?? true);
 
   switch (type) {
     case "message.received":
@@ -1221,7 +1231,7 @@ export function toWirePayload(
         assignee: wireAssignee(d.conversation?.assignee),
         // AI Autopilot state for this conversation — the partner flow gates its
         // auto-reply on this (true = AI may answer; false = a human owns it).
-        ai_enabled: d.conversation?.aiEnabled ?? true,
+        ai_enabled: aiEnabled,
         message: wireMessageBlock(d.message, "incoming", channelId),
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
@@ -1232,7 +1242,7 @@ export function toWirePayload(
         // The customer the message was sent to (same conversation contact).
         contact: wireContact(d.contact),
         assignee: wireAssignee(d.conversation?.assignee),
-        ai_enabled: d.conversation?.aiEnabled ?? true,
+        ai_enabled: aiEnabled,
         message: wireMessageBlock(d.message, "outgoing", channelId),
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
