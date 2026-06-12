@@ -5,7 +5,7 @@ One API key per organization; it scopes every request to that org automatically.
 
 ## Files
 
-- `ccp-org-api.postman_collection.json` — all 34 endpoints, grouped into folders.
+- `ccp-org-api.postman_collection.json` — all 35 endpoints, grouped into folders (incl. AI Autopilot toggle).
 - `ccp-local.postman_environment.json` — `baseUrl` + `apiKey` + id variables for local dev.
 
 ## Setup (60 seconds)

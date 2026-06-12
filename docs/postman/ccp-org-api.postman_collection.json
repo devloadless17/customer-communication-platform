@@ -165,6 +165,24 @@
           }
         },
         {
+          "name": "Toggle AI Autopilot (pause / resume)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"aiEnabled\": false,\n  \"silent\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/external/v1/conversations/{{conversationId}}/ai",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "external", "v1", "conversations", "{{conversationId}}", "ai"]
+            },
+            "description": "Pause (aiEnabled:false) or resume (true) AI Autopilot for a conversation. The AI escalation branch in n8n calls this with false to hand off to a human. `silent:true` skips the outbound-webhook echo so the AI doesn't get its own ai_changed delivery back. After pausing, every message.received for this conversation carries ai_enabled:false. Note: a human reply in the inbox auto-pauses, and closing the conversation auto-resumes — so you usually only need the false call on escalation. Scope: write:conversations."
+          }
+        },
+        {
           "name": "Add internal note",
           "request": {
             "method": "POST",
