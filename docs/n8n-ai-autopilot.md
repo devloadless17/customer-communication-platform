@@ -39,7 +39,7 @@ You never call anything to *resume* — a human resumes by closing the chat
 
 1. Create an **API key**: app → Settings → Integrations → **Organization API keys** → Create (Full access, or scopes `write:messages` + `write:conversations` + `read:conversations`). Copy the `ccp_…` token.
 2. Create an **Outbound webhook**: Settings → Integrations → Webhooks → URL = your n8n Webhook URL, event = `message.received`.
-3. `YOUR_APP_HOST` below = the app's public URL (e.g. `https://app.example.com`, no port). It must be reachable from your n8n box. In local dev the app is on `localhost:4000`; expose it with a tunnel (`cloudflared tunnel --url http://localhost:4000`) for n8n cloud to reach it.
+3. `YOUR_APP_HOST` below = the app's public URL (e.g. `https://app.example.com`, no port). It must be reachable from your n8n box. In local dev the app is on `localhost:4000`; expose it with a tunnel — `ngrok http 4000` (→ `https://<id>.ngrok-free.dev`) or `cloudflared tunnel --url http://localhost:4000` — and use that host. With ngrok's free tier, add header `ngrok-skip-browser-warning: true` on the HTTP Request nodes so the interstitial never intercepts a call.
 
 ## The inbound webhook payload (what n8n receives)
 
@@ -59,6 +59,11 @@ Relevant fields (camelCase; the message text is double-nested):
 }
 ```
 
+> **n8n wraps the POST body under `json.body`.** So inside n8n you reference
+> these fields as `$json.body.ai_enabled`, `$('Webhook').item.json.body.message.
+> conversationId`, etc. (not `$json.ai_enabled`). The expressions below already
+> include `.body`.
+
 ## The n8n nodes
 
 ### 1. Webhook (trigger)
@@ -66,7 +71,7 @@ POST, path e.g. `whatsapp-incoming`, respond immediately. Its URL goes in the
 outbound-webhook config above.
 
 ### 2. IF — "Is AI allowed to answer?"
-- Condition (boolean): `{{ $json.ai_enabled }}` is `true`
+- Condition (boolean): `{{ $json.body.ai_enabled }}` is `true`
 - **false →** stop (no further nodes). A human owns the conversation.
 - **true →** continue.
 
@@ -75,13 +80,13 @@ Read your org-info sheet. Output feeds the agent's knowledge.
 
 ### 4. AI Agent (Anthropic Claude)
 - Chat model: `claude-sonnet-4-6` (or `claude-haiku-4-5` for speed/cost).
-- Text: `={{ $('Webhook').item.json.message.message.text }}`
+- Text: `={{ $('Webhook').item.json.body.message.message.text }}`
 - System message — give it an escape hatch:
   > Answer the customer using ONLY the organization info below. If you cannot
   > fully help (needs a human, billing/refund dispute, angry customer, or they
   > ask for a person), reply with EXACTLY `<<HANDOFF>>` on the first line, then
   > a one-line reason. Never guess.
-  > Organization info: `={{ JSON.stringify($('Google Sheets').all().map(i => i.json)) }}`
+  > Organization info: `={{ JSON.stringify($('Get row(s) in sheet').all().map(i => i.json)) }}`
 
 ### 5. IF — "Does the AI need a human?"
 - Condition: `{{ $json.output }}` starts with `<<HANDOFF>>`
@@ -93,10 +98,10 @@ This is the normal path.
 | Field | Value |
 |---|---|
 | Method | `POST` |
-| URL | `={{ "https://YOUR_APP_HOST/api/external/v1/conversations/" + $('Webhook').item.json.message.conversationId + "/messages" }}` |
+| URL | `={{ "https://YOUR_APP_HOST/api/external/v1/conversations/" + $('Webhook').item.json.body.message.conversationId + "/messages" }}` |
 | Send Headers | ON |
 | → Authorization | `Bearer ccp_YOUR_KEY` |
-| → Idempotency-Key | `={{ $('Webhook').item.json.message.messageId }}` |
+| → Idempotency-Key | `={{ $('Webhook').item.json.body.message.messageId }}` |
 | → Content-Type | `application/json` |
 | Send Body | ON · JSON |
 | → JSON | `={{ JSON.stringify({ body: $json.output }) }}` |
@@ -111,7 +116,7 @@ The only place you POST to `…/ai`. Send NOTHING to the customer here.
 | Field | Value |
 |---|---|
 | Method | `POST` |
-| URL | `={{ "https://YOUR_APP_HOST/api/external/v1/conversations/" + $('Webhook').item.json.message.conversationId + "/ai" }}` |
+| URL | `={{ "https://YOUR_APP_HOST/api/external/v1/conversations/" + $('Webhook').item.json.body.message.conversationId + "/ai" }}` |
 | Headers | `Authorization: Bearer ccp_YOUR_KEY`, `Content-Type: application/json` |
 | JSON body | `{ "aiEnabled": false, "silent": true }` |
 
