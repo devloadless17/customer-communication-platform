@@ -46,6 +46,12 @@ export type ListMessagesQueryInput = z.infer<typeof ListMessagesQuerySchema>;
 export const ExternalSendMessageSchema = z.object({
   body: z.string().trim().min(1).max(4096),
   replyToMessageId: z.string().min(1).optional(),
+  // No-interrupt guard for AI auto-replies: when true, the send is skipped
+  // (200 `{ skipped: "ai_disabled" }`, no WhatsApp send) if AI Autopilot has
+  // been paused for the conversation since the inbound arrived — i.e. a human
+  // took over mid-generation. The n8n reply node sets this so the AI can never
+  // talk over a human.
+  onlyIfAiEnabled: z.boolean().optional(),
 });
 export type ExternalSendMessageInput = z.infer<typeof ExternalSendMessageSchema>;
 

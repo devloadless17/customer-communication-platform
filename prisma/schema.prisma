@@ -352,6 +352,15 @@ model Team {
   // editable, so the org owner can't be locked out of their own org.
   rolePermissions        Json    @default("{}")
 
+  // AI Autopilot opt-in. OFF for every new org — the per-conversation AI
+  // controls (the inbox toggle, auto-pause-on-human-reply, the activity pills)
+  // only appear once an admin turns this on after wiring their AI/n8n flow.
+  // When false the feature is invisible: no AI ever runs (no webhook anyway),
+  // a human reply does NOT write an "AI paused" pill, and the header toggle is
+  // hidden. The per-conversation `Conversation.aiEnabled` flag still exists
+  // (default true) but is only meaningful when this team flag is on.
+  aiAutopilotEnabled     Boolean @default(false)
+
   users                   User[]
   contacts                Contact[]
   conversations           Conversation[]

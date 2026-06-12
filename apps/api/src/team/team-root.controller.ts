@@ -25,6 +25,11 @@ const RenameTeamSchema = z.object({
 });
 type RenameTeamInput = z.infer<typeof RenameTeamSchema>;
 
+const SetAiAutopilotSchema = z.object({
+  aiAutopilotEnabled: z.boolean(),
+});
+type SetAiAutopilotInput = z.infer<typeof SetAiAutopilotSchema>;
+
 @Controller("api/team")
 @UseGuards(SessionGuard)
 export class TeamRootController {
@@ -37,10 +42,27 @@ export class TeamRootController {
   async get(@CurrentSession() session: ApiSession) {
     const team = await this.db.team.findUnique({
       where: { id: session.teamId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, aiAutopilotEnabled: true },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
     return { team };
+  }
+
+  // Admin toggles whether the org uses AI Autopilot. Default false; flipping it
+  // shows/hides the inbox per-conversation AI controls + gates auto-pause. Not
+  // on the session (loaded fresh per page via getCurrentTeam), so no cache to
+  // bust — it lands on the next page load / navigation.
+  @RequireRole("admin")
+  @Patch("ai-autopilot")
+  async setAiAutopilot(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SetAiAutopilotSchema)) body: SetAiAutopilotInput,
+  ) {
+    await this.db.team.update({
+      where: { id: session.teamId },
+      data: { aiAutopilotEnabled: body.aiAutopilotEnabled },
+    });
+    return { ok: true, aiAutopilotEnabled: body.aiAutopilotEnabled };
   }
 
   @RequireRole("admin")

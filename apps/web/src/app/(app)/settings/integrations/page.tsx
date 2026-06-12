@@ -9,9 +9,10 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import { listApiKeys } from "@/lib/api/queries";
+import { listApiKeys, getCurrentTeam } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 
+import { AiAutopilotToggle } from "@/features/settings/integrations/components/ai-autopilot-toggle";
 import { ApiKeysManager } from "@/features/settings/integrations/components/api-keys-manager";
 import { IntegrationConnectPanel } from "@/features/settings/integrations/components/integration-connect-panel";
 import { N8N_PRESET } from "@/features/settings/integrations/presets";
@@ -36,7 +37,7 @@ export default async function IntegrationsLanding() {
   // One round-trip serves both the "Connect" status on tiles AND the
   // connect panel's already-connected detection. Cheap (single SELECT,
   // never returns plaintext) and the page is `force-dynamic` anyway.
-  const keys = await listApiKeys();
+  const [keys, team] = await Promise.all([listApiKeys(), getCurrentTeam()]);
   const n8nConnected = keys.some(
     (k) => !k.revokedAt && k.name === N8N_PRESET.defaultName,
   );
@@ -103,6 +104,10 @@ export default async function IntegrationsLanding() {
       </div>
 
       <div className="mt-12">
+        <AiAutopilotToggle initialEnabled={team.aiAutopilotEnabled} />
+      </div>
+
+      <div className="mt-6">
         <ApiKeysManager initialKeys={keys} />
       </div>
 

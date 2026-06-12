@@ -36,6 +36,7 @@ You never call anything to *resume* — a human resumes by closing the chat
 
 ## Setup (platform side)
 
+0. **Turn on AI Autopilot** for the org: app → Settings → Integrations → flip the **AI Autopilot** switch on. (Off by default — until it's on, the inbox AI toggle is hidden and auto-pause-on-reply doesn't fire, so orgs not using AI see nothing.)
 1. Create an **API key**: app → Settings → Integrations → **Organization API keys** → Create (Full access, or scopes `write:messages` + `write:conversations` + `read:conversations`). Copy the `ccp_…` token.
 2. Create an **Outbound webhook**: Settings → Integrations → Webhooks → URL = your n8n Webhook URL, event = `message.received`.
 3. `YOUR_APP_HOST` below = the app's public URL (e.g. `https://app.example.com`, no port). It must be reachable from your n8n box. In local dev the app is on `localhost:4000`; expose it with a tunnel — `ngrok http 4000` (→ `https://<id>.ngrok-free.dev`) or `cloudflared tunnel --url http://localhost:4000` — and use that host. With ngrok's free tier, add header `ngrok-skip-browser-warning: true` on the HTTP Request nodes so the interstitial never intercepts a call.
@@ -114,11 +115,18 @@ This is the normal path.
 | → Idempotency-Key | `={{ $('Webhook').item.json.body.message.messageId }}` |
 | → Content-Type | `application/json` |
 | Send Body | ON · JSON |
-| → JSON | `={{ JSON.stringify({ body: $json.output }) }}` |
+| → JSON | `={{ JSON.stringify({ body: $json.output, onlyIfAiEnabled: true }) }}` |
 
 The `Idempotency-Key` (the inbound message id) makes n8n's retry-after-timeout
 safe — the same key never double-sends to WhatsApp. (It's required on send
 routes.)
+
+**`onlyIfAiEnabled: true` is the no-interrupt guard.** If a human (or the
+customer typing "human") took over WHILE the AI was generating, AI Autopilot is
+already paused — and the platform then **skips this send** server-side
+(returns `200 { "ok": true, "skipped": "ai_disabled", "message": null }`, no
+WhatsApp send). So the AI can never land a message on top of a live
+human↔customer chat, even in the race window. No client-side re-check needed.
 
 ### 6b. HTTP Request — escalate to a human (pause the AI)
 The only place you POST to `…/ai`. Send NOTHING to the customer here.

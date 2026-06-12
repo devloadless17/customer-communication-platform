@@ -69,6 +69,7 @@ export function ThreadHeader({
   phone,
   status,
   aiEnabled,
+  aiAutopilotEnabled,
   assignedUserId,
   assignedUserName,
   assignedUserAvatarUrl,
@@ -93,8 +94,10 @@ export function ThreadHeader({
   contactName: string;
   phone: string | null;
   status: ConversationStatus;
-  /** AI Autopilot state for the header toggle. */
+  /** AI Autopilot state for the header toggle (per-conversation). */
   aiEnabled: boolean;
+  /** Team-level opt-in — when false the AI toggle is hidden entirely. */
+  aiAutopilotEnabled: boolean;
   assignedUserId: string | null;
   assignedUserName: string | null;
   assignedUserAvatarUrl?: string | null;
@@ -212,13 +215,15 @@ export function ThreadHeader({
           currentUserName={currentUserName}
           onAlert={onAlert}
         />
-        <AiToggle
-          teamId={teamId}
-          conversationId={conversationId}
-          aiEnabled={aiEnabled}
-          currentUserName={currentUserName}
-          onAlert={onAlert}
-        />
+        {aiAutopilotEnabled && (
+          <AiToggle
+            teamId={teamId}
+            conversationId={conversationId}
+            aiEnabled={aiEnabled}
+            currentUserName={currentUserName}
+            onAlert={onAlert}
+          />
+        )}
         {canDeleteConversations && (
           <ConversationMenu
             conversationId={conversationId}

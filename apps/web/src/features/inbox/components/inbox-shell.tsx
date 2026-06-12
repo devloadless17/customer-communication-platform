@@ -1201,6 +1201,7 @@ export function InboxShell({
                     displayedThread.data.contact.callPermissionRevokedUntil,
                   )
                 }
+                aiAutopilotEnabled={team.aiAutopilotEnabled ?? false}
                 onInitiateCall={initiateCallForActiveThread}
                 tags={tags}
                 initialContactPanelCollapsed={initialContactPanelCollapsed}
@@ -1312,6 +1313,7 @@ function ThreadWorkspace({
   canManageContactFields,
   canDeleteConversations,
   canMakeCalls,
+  aiAutopilotEnabled,
   onInitiateCall,
   tags,
   initialContactPanelCollapsed,
@@ -1335,6 +1337,8 @@ function ThreadWorkspace({
   canManageContactFields: boolean;
   canDeleteConversations: boolean;
   canMakeCalls: boolean;
+  /** Team-level AI Autopilot opt-in — gates the header AI toggle visibility. */
+  aiAutopilotEnabled: boolean;
   onInitiateCall: () => void | Promise<void>;
   tags: Tag[];
   initialContactPanelCollapsed: boolean;
@@ -1372,6 +1376,7 @@ function ThreadWorkspace({
         canManageStages={canManageStages}
         canDeleteConversations={canDeleteConversations}
         canMakeCalls={canMakeCalls}
+        aiAutopilotEnabled={aiAutopilotEnabled}
         onInitiateCall={onInitiateCall}
         onMarkRead={onMarkRead}
         onSnapshot={onThreadSnapshot}

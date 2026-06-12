@@ -22,6 +22,10 @@ export type Channel = "whatsapp";
 export interface Team {
   id: string;
   name: string;
+  /** AI Autopilot opt-in (default false). When false the per-conversation AI
+   *  controls are hidden and auto-pause-on-human-reply is skipped. Optional for
+   *  source-compat; absent = false. */
+  aiAutopilotEnabled?: boolean;
 }
 
 /**

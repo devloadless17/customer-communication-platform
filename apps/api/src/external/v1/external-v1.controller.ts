@@ -703,6 +703,12 @@ export class ExternalV1Controller {
       this.idemKeyRequired(idempotencyKey),
       parseChainDepth(xCcpDepth),
     );
+    // No-interrupt skip (onlyIfAiEnabled + a human took over): 200 with a
+    // skipped marker and no message, so the n8n flow treats it as a clean
+    // no-op instead of a retryable error.
+    if ("skipped" in out && out.skipped) {
+      return { ok: true, skipped: out.skipped, message: null };
+    }
     return { ok: true, message: out.message };
   }
 

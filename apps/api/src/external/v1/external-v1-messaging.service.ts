@@ -455,6 +455,7 @@ export class ExternalV1MessagingService {
         contactId: true,
         // Channel is conversation-owned — bind + stamp from here.
         channel: true,
+        aiEnabled: true,
         contact: {
           select: {
             phoneNumber: true,
@@ -466,6 +467,19 @@ export class ExternalV1MessagingService {
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
+
+    // No-interrupt guard. When the AI flow sets `onlyIfAiEnabled`, send ONLY if
+    // AI Autopilot is still on for this conversation. This closes the race
+    // where a human (or the customer typing "human") takes over WHILE the AI is
+    // mid-generation: the AI's queued reply must NOT land on top of a live
+    // human↔customer chat. Checked right before the send (ms window, vs the
+    // seconds-long client GET re-check), and we release the idempotency claim
+    // so a legitimate later send can reuse the key. Returns 200 {skipped} so
+    // n8n treats it as a clean no-op, not a retryable error.
+    if (input.onlyIfAiEnabled && conversation.aiEnabled === false) {
+      if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      return { message: null, skipped: "ai_disabled" as const };
+    }
 
     let channel;
     try {
@@ -964,6 +978,11 @@ export class ExternalV1MessagingService {
       },
       idempotencyKey,
     );
+    // The top-level send never sets `onlyIfAiEnabled`, so the no-interrupt skip
+    // can't fire here — `message` is always present. Guard keeps the types honest.
+    if (!result.message) {
+      throw new BadGatewayException({ error: "send_failed", detail: "send skipped unexpectedly" });
+    }
     return { ok: true, message: result.message };
   }
 

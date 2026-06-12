@@ -80,8 +80,10 @@ export interface SnippetDto {
  * nav (parent layout + SectionShell each calling independently).
  */
 export const getCurrentTeam = cache(
-  async (): Promise<{ id: string; name: string }> => {
-    const { team } = await api<{ team: { id: string; name: string } }>("/api/team");
+  async (): Promise<{ id: string; name: string; aiAutopilotEnabled: boolean }> => {
+    const { team } = await api<{
+      team: { id: string; name: string; aiAutopilotEnabled: boolean };
+    }>("/api/team");
     return team;
   },
 );

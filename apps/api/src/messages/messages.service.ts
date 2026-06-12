@@ -267,7 +267,10 @@ export class MessagesService {
         // payload and feeds workflow-dispatch in lieu of a fresh DB read.
         const convo = await this.db.conversation.findFirst({
           where: { id: conversationId, teamId },
-          include: { contact: { include: { tags: { select: { id: true } } } } },
+          include: {
+            contact: { include: { tags: { select: { id: true } } } },
+            team: { select: { aiAutopilotEnabled: true } },
+          },
         });
         if (!convo) return;
 
@@ -275,8 +278,9 @@ export class MessagesService {
         // stops auto-replying over the human. Idempotent (no-op if already
         // paused) + independent fire-and-forget so it can't affect the claim
         // or the send. Resume is explicit (inbox toggle) or on close. Gated on
-        // the current value to skip the redundant re-read in the common case.
-        if (convo.aiEnabled) {
+        // the TEAM opt-in (orgs without AI never get pause events / pills) AND
+        // the current value (skip the redundant re-read in the common case).
+        if (convo.team.aiAutopilotEnabled && convo.aiEnabled) {
           void setConversationAiEnabled({
             db: this.db,
             publish: (e) => this.bus.publish(e),
