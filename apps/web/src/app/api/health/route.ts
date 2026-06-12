@@ -36,9 +36,11 @@ async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise
 
 async function probeApi(): Promise<{ ok: boolean; err?: string }> {
   // INTERNAL_API_URL is the docker-compose service name path (e.g.
-  // `http://api:4000`); on host dev it falls back to localhost. NestJS
-  // exposes /health (NOT /api/health — different mount).
-  const base = process.env.INTERNAL_API_URL ?? "http://api:4000";
+  // `http://api:4000`, always set in compose); on host dev it's unset and
+  // falls back to localhost — matching api-client.ts / session-invalidation.ts
+  // so the probe actually resolves. NestJS exposes /health (NOT /api/health —
+  // different mount).
+  const base = process.env.INTERNAL_API_URL ?? "http://127.0.0.1:4000";
   const url = `${base.replace(/\/$/, "")}/health`;
   try {
     const res = await withTimeout(
