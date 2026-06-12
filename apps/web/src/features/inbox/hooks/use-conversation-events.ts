@@ -776,6 +776,7 @@ export function useConversationEvents(
                   assignedUserId: string | null;
                   assignedUser: ConversationWithRefs["assignedUser"];
                   unreadCount: number;
+                  aiEnabled: boolean;
                   lastInboundAt: string | null;
                 };
               }>)
@@ -802,6 +803,7 @@ export function useConversationEvents(
                 next.conversation.status !== freshState.status ||
                 next.conversation.assignedUserId !== freshState.assignedUserId ||
                 next.conversation.unreadCount !== freshState.unreadCount ||
+                (next.conversation.aiEnabled ?? true) !== freshState.aiEnabled ||
                 (next.assignedUser?.id ?? null) !==
                   (freshState.assignedUser?.id ?? null) ||
                 next.lastInboundAt !== freshState.lastInboundAt;
@@ -813,6 +815,7 @@ export function useConversationEvents(
                     status: freshState.status,
                     assignedUserId: freshState.assignedUserId,
                     unreadCount: freshState.unreadCount,
+                    aiEnabled: freshState.aiEnabled,
                   },
                   assignedUser: freshState.assignedUser,
                   lastInboundAt: freshState.lastInboundAt,

@@ -555,6 +555,10 @@ export async function listNewerMessages(
     assignedUserId: string | null;
     assignedUser: import("@ccp/shared/types").User | null;
     unreadCount: number;
+    /** AI Autopilot state — carried in the delta resync so a conversation:ai
+     *  frame missed during a socket gap converges on the next backfill (matches
+     *  the "every recovery path converges to server state" rule). */
+    aiEnabled: boolean;
     /**
      * Customer's most-recent inbound timestamp — drives the 24h-window
      * lock on the reply-box composer. Pulled from `Contact.lastInboundAt`
@@ -597,6 +601,7 @@ export async function listNewerMessages(
       assignedUserId: owns.assignedUserId,
       assignedUser: owns.assignedUser ? mapUser(owns.assignedUser) : null,
       unreadCount: owns.unreadCount,
+      aiEnabled: owns.aiEnabled,
       lastInboundAt: owns.contact.lastInboundAt
         ? owns.contact.lastInboundAt.toISOString()
         : null,
