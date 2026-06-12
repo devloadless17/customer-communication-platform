@@ -26,6 +26,13 @@ interface RecordArgs {
   kind: ConversationEventKind;
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
+  /** When the action actually happened. Defaults to write-time `now()` when
+   *  omitted — but the audit subscriber runs ASYNC (drainer + background tier),
+   *  so write-time can land AFTER a message the agent sent a beat later,
+   *  inverting the timeline order. Callers that have the action time (e.g. the
+   *  ai_changed handler via the event's occurredAt) pass it so the pill sorts
+   *  where it happened, not where it was written. */
+  at?: Date | string;
 }
 
 export async function recordConversationEvent(args: RecordArgs): Promise<void> {
@@ -41,6 +48,7 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
         userId: args.userId,
         apiKeyId: args.apiKeyId ?? null,
         kind: args.kind,
+        ...(args.at ? { at: new Date(args.at) } : {}),
         before:
           args.before == null
             ? Prisma.JsonNull

@@ -264,6 +264,11 @@ export interface ConversationAiChangedEvent {
   /** Set when the AI itself paused via the /v1 API, for audit attribution. */
   changedByApiKeyId?: string | null;
   contact: WorkflowContactSnapshot;
+  /** Action time (ISO), stamped at publish. The audit subscriber writes it as
+   *  the ConversationEvent `at` so the activity pill sorts where the toggle
+   *  happened — not where the async subscriber later wrote the row (which can
+   *  land after a message the agent sent right after, inverting the order). */
+  occurredAt: string;
   /** Skip outbound-webhook echo (the AI's own /v1 toggle sets this to avoid a loop). */
   silent?: boolean;
 }

@@ -94,6 +94,9 @@ export function registerAuditSubscribers(): () => void {
       kind: e.newAiEnabled ? "ai_resumed" : "ai_paused",
       before: { aiEnabled: e.previousAiEnabled },
       after: { aiEnabled: e.newAiEnabled },
+      // Action time, not async-write time — so the pill sorts where the toggle
+      // happened (else a message sent right after can sort above the pill).
+      at: e.occurredAt,
     });
   });
 

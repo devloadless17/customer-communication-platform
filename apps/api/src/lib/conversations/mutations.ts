@@ -417,6 +417,7 @@ export async function setConversationStatus(args: {
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
       contact,
+      occurredAt: new Date().toISOString(),
       silent: silent === true,
     });
   }
@@ -493,6 +494,7 @@ export async function setConversationAiEnabled(args: {
     changedByUserId,
     ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
     contact,
+    occurredAt: new Date().toISOString(),
     silent: silent === true,
   });
 
