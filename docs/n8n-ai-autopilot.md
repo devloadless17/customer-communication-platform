@@ -16,13 +16,12 @@ Customer texts you on WhatsApp
         │
    NO ──┴── STOP. A human is handling it. Send nothing.
         │
-       YES → Google Sheets (org info) → AI Agent (Claude)
-                 │
-            Did the AI decide it needs a human?
+       YES → Did the customer ask for a human? (message contains "human")
                  │
          NO ─────┴───── YES
          │               │
-   Send the reply   Pause AI + assign to a human  (send nothing to the customer)
+   Sheets → AI Agent   Pause AI + assign to a human  (send nothing to the customer)
+   → Send the reply
 ```
 
 Two distinct things happen, and they are easy to mix up:
@@ -86,19 +85,22 @@ the Sheets node. The agent still reads ALL rows via
 `$('Get row(s) in sheet').all()` in its system message; this just makes the
 chain run once. (An **Aggregate** node "combine all into one" works too.)
 
-### 4. AI Agent (Anthropic Claude)
+### "Customer wants a human?" IF — place it right after the gate (before Sheets)
+Handoff is decided by the CUSTOMER's words, so check the inbound message — no
+need to run the AI first.
+- Value 1: `={{ ($('Webhook').item.json.body.message.message.text || "").toLowerCase() }}`
+- Operation: String **contains** · Value 2: `human`
+  (the `|| ""` guards against a media-only message that has no `.text`.)
+- **true →** escalate (node 6b). **false →** continue to Sheets → AI (node 4).
+- (Optional: add an OR condition with `agent` / `representative` to catch more.)
+
+### 4. AI Agent (Anthropic Claude)  — runs only on the "false" (no-human) branch
 - Chat model: `claude-sonnet-4-6` (or `claude-haiku-4-5` for speed/cost).
 - Text: `={{ $('Webhook').item.json.body.message.message.text }}`
-- System message — give it an escape hatch:
-  > Answer the customer using ONLY the organization info below. If you cannot
-  > fully help (needs a human, billing/refund dispute, angry customer, or they
-  > ask for a person), reply with EXACTLY `<<HANDOFF>>` on the first line, then
-  > a one-line reason. Never guess.
+- System message:
+  > Answer the customer using ONLY the organization info below. Keep replies
+  > short, friendly, plain text. Never invent details.
   > Organization info: `={{ JSON.stringify($('Get row(s) in sheet').all().map(i => i.json)) }}`
-
-### 5. IF — "Does the AI need a human?"
-- Condition: `{{ $json.output }}` starts with `<<HANDOFF>>`
-- **false →** node 6a (reply). **true →** node 6b (escalate).
 
 ### 6a. HTTP Request — send the AI reply to the customer
 This is the normal path.
