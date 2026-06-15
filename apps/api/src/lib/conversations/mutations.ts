@@ -106,6 +106,9 @@ export async function assignConversation(args: {
   changedByUserId: string | null;
   /** Carry through to events so downstream attribution is correct. */
   changedByApiKeyId?: string | null;
+  /** Set by workflow steps to the running workflow's id — carried on the
+   *  published events so the audit row attributes the change to the automation. */
+  changedByWorkflowId?: string | null;
   /** When true, workflow-dispatch + outbound-webhooks skip their reactions
    *  (loop avoidance / no echo). Socket fanout + audit still fire. */
   silent?: boolean;
@@ -127,6 +130,7 @@ export async function assignConversation(args: {
     targetUserId,
     changedByUserId,
     changedByApiKeyId,
+    changedByWorkflowId,
     silent,
   } = args;
 
@@ -219,6 +223,7 @@ export async function assignConversation(args: {
       newAssignedUserId: targetUserId,
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
       contact,
       conversation: assignedSnapshot,
       silent: silent === true,
@@ -234,7 +239,7 @@ export async function assignConversation(args: {
     // still route through it for one source of truth.
     const statusSnapshot = workflowConversationSnapshotAfterStatusChange(
       { ...updated, assignedUser: updated.assignedUser },
-      { previousStatus, changedByUserId },
+      { previousStatus, changedByUserId, changedByApiKeyId },
     );
     await publish({
       type: "conversation.status_changed",
@@ -244,6 +249,7 @@ export async function assignConversation(args: {
       newStatus: nextStatus,
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
       contact,
       conversation: statusSnapshot,
       silent: silent === true,
@@ -284,6 +290,9 @@ export async function setConversationStatus(args: {
   status: ConversationStatus;
   changedByUserId: string | null;
   changedByApiKeyId?: string | null;
+  /** Set by workflow steps to the running workflow's id — carried on the
+   *  published events so the audit row attributes the change to the automation. */
+  changedByWorkflowId?: string | null;
   silent?: boolean;
   closedCategory?: string | null;
   closedSummary?: string | null;
@@ -303,6 +312,7 @@ export async function setConversationStatus(args: {
     status,
     changedByUserId,
     changedByApiKeyId,
+    changedByWorkflowId,
     silent,
     closedCategory,
     closedSummary,
@@ -359,7 +369,7 @@ export async function setConversationStatus(args: {
       status,
       assignedUserId: unassignOnClose ? null : previousAssignedUserId,
     },
-    { previousStatus, changedByUserId, closedCategory, closedSummary },
+    { previousStatus, changedByUserId, changedByApiKeyId, closedCategory, closedSummary },
   );
 
   await publish({
@@ -370,6 +380,7 @@ export async function setConversationStatus(args: {
     newStatus: status,
     changedByUserId,
     ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+    ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
     contact,
     conversation: statusSnapshot,
     ...(closedCategory !== undefined ? { closedCategory } : {}),
@@ -399,6 +410,7 @@ export async function setConversationStatus(args: {
       newAssignedUserId: null,
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
       contact,
       conversation: assignedSnapshot,
       silent: silent === true,
@@ -416,6 +428,7 @@ export async function setConversationStatus(args: {
       newAiEnabled: true,
       changedByUserId,
       ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+      ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
       contact,
       occurredAt: new Date().toISOString(),
       silent: silent === true,
@@ -448,6 +461,9 @@ export async function setConversationAiEnabled(args: {
   aiEnabled: boolean;
   changedByUserId: string | null;
   changedByApiKeyId?: string | null;
+  /** Set by a workflow step to the running workflow's id — carried on the
+   *  published event so the audit row attributes the toggle to the automation. */
+  changedByWorkflowId?: string | null;
   silent?: boolean;
 }): Promise<
   ConversationMutationOutcome<{ changed: boolean; previousAiEnabled: boolean }>
@@ -460,6 +476,7 @@ export async function setConversationAiEnabled(args: {
     aiEnabled,
     changedByUserId,
     changedByApiKeyId,
+    changedByWorkflowId,
     silent,
   } = args;
 
@@ -493,6 +510,7 @@ export async function setConversationAiEnabled(args: {
     newAiEnabled: aiEnabled,
     changedByUserId,
     ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
+    ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
     contact,
     occurredAt: new Date().toISOString(),
     silent: silent === true,

@@ -163,7 +163,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // later, outside that scope, so it can't read this itself. Persisted on the
     // delivery row + echoed as X-CCP-Trace-Id. Undefined for events published
     // outside an HTTP request (sweepers, boot reconciler). F6 in
-    // docs/architecture-review-2026-05-25.md.
+    // docs/audit-guide.md.
     const correlationId = getCorrelationId() ?? null;
     // Capture the inbound chain depth in the SAME synchronous ALS scope as the
     // correlation id (the BullMQ worker runs later, outside this scope). The
@@ -220,6 +220,13 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     } catch (err) {
       this.logger.warn(
         `hydrateUsers failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    try {
+      await this.enrichLeanContacts(envelopes);
+    } catch (err) {
+      this.logger.warn(
+        `enrichLeanContacts failed, delivering without contact: ${err instanceof Error ? err.message : err}`,
       );
     }
 
@@ -342,14 +349,31 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * Enrich message-bearing envelopes from the DB in one batched lookup:
    *   - `external_id` (the provider wamid → `channelMessageId` on the wire)
    *   - `media.url` + `media.thumbnail_url` (public CDN links) on file messages
-   * One query across all messages in the event (≤2 in practice). Best-effort:
-   * a missing row leaves the documented nulls in place.
+   *   - `reply_to` quote backfill for /v1-origin sends (the mapper only fills
+   *     it when the domain message carried the JOINed ReplySnapshot; an external
+   *     send carries only `replyToMessageId`, so the wire `reply_to` would be
+   *     null even though the message IS a reply — see (VII)).
+   * One query across all messages in the event (≤2 in practice), plus at most
+   * one extra `findMany` for the quoted rows. Best-effort: a missing row leaves
+   * the documented nulls in place.
    */
   private async enrichMessages(
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
     type MediaShape = { url: string | null; thumbnail_url: string | null };
-    type MsgShape = { id?: string; external_id?: string | null; media?: MediaShape | null };
+    type ReplyShape = {
+      message_id: string;
+      body: string;
+      direction: string;
+      sender_name: string | null;
+      media_kind: string | null;
+    };
+    type MsgShape = {
+      id?: string;
+      external_id?: string | null;
+      media?: MediaShape | null;
+      reply_to?: ReplyShape | null;
+    };
     type MsgData = { message?: MsgShape };
 
     const messagesById = new Map<string, MsgShape>();
@@ -361,8 +385,18 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
 
     const rows = await this.db.message.findMany({
       where: { id: { in: [...messagesById.keys()] } },
-      select: { id: true, externalId: true, mediaUrl: true, mediaThumbnailUrl: true },
+      select: {
+        id: true,
+        externalId: true,
+        mediaUrl: true,
+        mediaThumbnailUrl: true,
+        // (VII) — drives the quote backfill below. Only a /v1-origin send leaves
+        // `reply_to` unset on the envelope while this column is populated.
+        replyToMessageId: true,
+      },
     });
+    // Collect quoted-message ids whose envelope is missing the `reply_to` block.
+    const quotedIdToTargets = new Map<string, MsgShape[]>();
     for (const row of rows) {
       const msg = messagesById.get(row.id);
       if (!msg) continue;
@@ -371,6 +405,39 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         msg.media.url = row.mediaUrl ?? null;
         msg.media.thumbnail_url = row.mediaThumbnailUrl ?? null;
       }
+      if (row.replyToMessageId && msg.reply_to == null) {
+        const list = quotedIdToTargets.get(row.replyToMessageId) ?? [];
+        list.push(msg);
+        quotedIdToTargets.set(row.replyToMessageId, list);
+      }
+    }
+
+    if (quotedIdToTargets.size === 0) return;
+    // One batched load of the quoted rows. Mirrors the read-side reply snapshot:
+    // body, direction, the authoring teammate's name (outbound only), mediaKind.
+    const quotedRows = await this.db.message.findMany({
+      where: { id: { in: [...quotedIdToTargets.keys()] } },
+      select: {
+        id: true,
+        body: true,
+        direction: true,
+        mediaKind: true,
+        sender: { select: { name: true } },
+      },
+    });
+    for (const q of quotedRows) {
+      const targets = quotedIdToTargets.get(q.id);
+      if (!targets) continue;
+      const reply: ReplyShape = {
+        message_id: q.id,
+        body: q.body,
+        direction: q.direction === "out" ? "out" : "in",
+        // Authoring teammate's name on an outbound quote; null on inbound
+        // (the contact has no User row) — same convention as ReplySnapshot.
+        sender_name: q.direction === "out" ? q.sender?.name ?? null : null,
+        media_kind: q.mediaKind ?? null,
+      };
+      for (const msg of targets) msg.reply_to = reply;
     }
   }
 
@@ -442,6 +509,9 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    *   - `conversation.assignee` on message.received (mapper emits id only)
    *   - `previous_assignee` / `assignee` on conversation.assigned
    *   - `message.sender` on outbound agent sends ("who sent it")
+   *   - `note.author_user_id` on note.created → stamps `author_name` /
+   *     `author_email` onto the note block (III) so the wire carries who wrote
+   *     the comment, not just the id.
    * Skips refs already hydrated (e.g. the conversation.assignee on message.sent,
    * which `enrichSentMessageContext` filled with name+email from the include).
    */
@@ -456,7 +526,15 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       role?: string | null;
       created_at?: string | null;
     };
+    // (III) note.created's author is a flat id (not a {type,id} ref), so it gets
+    // its own collection — stamped post-lookup onto author_name / author_email.
+    type NoteShape = {
+      author_user_id?: string | null;
+      author_name?: string | null;
+      author_email?: string | null;
+    };
     const refs: Array<{ ref: UserRef; withEmail: boolean }> = [];
+    const noteBlocks: NoteShape[] = [];
     const collect = (ref: UserRef | null | undefined, withEmail: boolean) => {
       // Only `user`-typed refs map to a User row; `ai_agent` lives elsewhere
       // (future), `contact` / `api` / `workflow` have no name to hydrate.
@@ -474,15 +552,22 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         conversation?: { assignee?: UserRef | null };
         assignee?: UserRef | null;
         previous_assignee?: UserRef | null;
+        note?: NoteShape;
       };
       collect(data.message?.sender, false);
       collect(data.conversation?.assignee, true);
       collect(data.assignee, true);
       collect(data.previous_assignee, true);
+      if (data.note?.author_user_id) noteBlocks.push(data.note);
     }
-    if (refs.length === 0) return;
+    if (refs.length === 0 && noteBlocks.length === 0) return;
 
-    const ids = Array.from(new Set(refs.map((r) => r.ref.id as string)));
+    const ids = Array.from(
+      new Set([
+        ...refs.map((r) => r.ref.id as string),
+        ...noteBlocks.map((n) => n.author_user_id as string),
+      ]),
+    );
     const users = await this.db.user.findMany({
       where: { id: { in: ids } },
       select: { id: true, name: true, email: true, role: true, createdAt: true },
@@ -498,6 +583,115 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         ref.role = u.role;
         ref.created_at = u.createdAt.toISOString();
       }
+    }
+    for (const note of noteBlocks) {
+      const u = byId.get(note.author_user_id as string);
+      if (!u) continue;
+      note.author_name = u.name;
+      note.author_email = u.email;
+    }
+  }
+
+  /**
+   * (II) Stamp a LEAN contact block `{ id, phoneNumber, name }` onto every
+   * non-message envelope that today carries only a contact/conversation id, so
+   * a partner flow can route by the contact without a callback to /v1. Applies
+   * to:
+   *   - conversation.assigned / status_changed / opened / closed / ai_changed
+   *     (`data.contact_id` on the envelope)
+   *   - contact.tag_changed / contact.lifecycle_changed (`data.contact_id`)
+   *   - note.created / note.deleted (only a conversation id is on the envelope,
+   *     so resolve conversation → contactId first)
+   *
+   * Deliberately LEAN — no tags / customFields / stage (that's bloat; receivers
+   * that want the full record call GET /v1/contacts/:id). Message events already
+   * carry the full `contact` via enrichSentMessageContext / the inbound mapper,
+   * so they're skipped here.
+   *
+   * Two batched reads at most: one conversation lookup (notes only) + one
+   * contact lookup. Best-effort — a missing row just leaves `contact` absent.
+   */
+  private async enrichLeanContacts(
+    envelopes: Array<{ type: PublicEventType; envelope: { data: unknown } }>,
+  ): Promise<void> {
+    type LeanContact = { id: string; phoneNumber: string | null; name: string };
+    type LeanData = {
+      contact_id?: string;
+      conversation_id?: string;
+      note?: { conversation_id?: string };
+      contact?: LeanContact | null;
+    };
+
+    // contactId → envelope data blocks awaiting a lean contact stamp.
+    const targetsByContactId = new Map<string, LeanData[]>();
+    // For note events we only know the conversation id up front; resolve it to a
+    // contactId in one batched lookup, then funnel into the same contact load.
+    const targetsByConversationId = new Map<string, LeanData[]>();
+
+    const pushContact = (contactId: string, data: LeanData) => {
+      const list = targetsByContactId.get(contactId) ?? [];
+      list.push(data);
+      targetsByContactId.set(contactId, list);
+    };
+    const pushConversation = (conversationId: string, data: LeanData) => {
+      const list = targetsByConversationId.get(conversationId) ?? [];
+      list.push(data);
+      targetsByConversationId.set(conversationId, list);
+    };
+
+    for (const { type, envelope } of envelopes) {
+      const data = envelope.data as LeanData;
+      switch (type) {
+        case "conversation.assigned":
+        case "conversation.status_changed":
+        case "conversation.opened":
+        case "conversation.closed":
+        case "conversation.ai_changed":
+        case "contact.tag_changed":
+        case "contact.lifecycle_changed": {
+          if (data.contact_id) pushContact(data.contact_id, data);
+          break;
+        }
+        case "note.created": {
+          const convId = data.note?.conversation_id;
+          if (convId) pushConversation(convId, data);
+          break;
+        }
+        case "note.deleted": {
+          if (data.conversation_id) pushConversation(data.conversation_id, data);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    if (targetsByConversationId.size > 0) {
+      const convs = await this.db.conversation.findMany({
+        where: { id: { in: [...targetsByConversationId.keys()] } },
+        select: { id: true, contactId: true },
+      });
+      for (const c of convs) {
+        const list = targetsByConversationId.get(c.id);
+        if (!list) continue;
+        for (const data of list) pushContact(c.contactId, data);
+      }
+    }
+
+    if (targetsByContactId.size === 0) return;
+    const contacts = await this.db.contact.findMany({
+      where: { id: { in: [...targetsByContactId.keys()] } },
+      select: { id: true, phoneNumber: true, name: true },
+    });
+    for (const row of contacts) {
+      const list = targetsByContactId.get(row.id);
+      if (!list) continue;
+      const lean: LeanContact = {
+        id: row.id,
+        phoneNumber: row.phoneNumber ?? null,
+        name: row.name,
+      };
+      for (const data of list) data.contact = lean;
     }
   }
 
@@ -540,7 +734,9 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       // `source` is the partner-style "<medium>_business" string.
       name: conn.channel,
       source: channelSourceFor(conn.channel),
-      created_at: Math.floor(conn.createdAt.getTime() / 1000),
+      // Epoch MS, consistent with every other wire timestamp (message/contact/
+      // assignee). Was epoch-seconds — the one field that didn't match.
+      created_at: conn.createdAt.getTime(),
     };
     this.channelCache.set(key, base);
     return base;

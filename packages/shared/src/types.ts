@@ -353,6 +353,16 @@ export interface Message {
   channel: Channel;
   status: MessageStatus;
   /**
+   * Provider failure diagnostics — present ONLY on a `status: "failed"`
+   * outbound message that carried a Meta `errors[0]` reason. Surfaces WHY a
+   * send failed to the agent in the inbox failed bubble (tooltip / muted
+   * line). Persisted on Message.statusError* and hydrated by `mapMessage` so a
+   * page refresh stays consistent with the live `message:status` socket frame.
+   */
+  statusErrorCode?: number | null;
+  statusErrorTitle?: string | null;
+  statusErrorDetail?: string | null;
+  /**
    * Original webhook payload, kept verbatim in the DB for debugging
    * (CLAUDE.md rule #4). NOT hydrated on read paths — the column is `omit`ed
    * from every message query so a full JSONB blob per row never travels
@@ -375,6 +385,14 @@ export interface Message {
   replyToMessageId?: string | null;
   /** Snapshot used by the bubble to render the quote block inline. */
   replyTo?: ReplySnapshot | null;
+  /**
+   * Interactive reply payload — set when this inbound message is the customer
+   * tapping a button / list option (WhatsApp interactive reply). `kind` is the
+   * parser value (`"button_reply"` | `"list_reply"`); `id` is the stable author-
+   * assigned option id (what workflows branch on); `title` is the localized
+   * label the customer saw. Absent / null for every plain text or media message.
+   */
+  interactive?: { kind: string; id: string; title: string } | null;
   // ----- Optimistic UI (client-side only — never persisted by the server) -----
   /**
    * Round-tripped through the API + socket emit so the client can match an
@@ -430,8 +448,15 @@ export type ConversationEventKind =
   | "call_rejected"
   | "call_failed";
 
-/** Who triggered the change. `system` = no human + no API key (automation). */
-export type ActivityActorKind = "user" | "apiKey" | "system";
+/**
+ * Who triggered the change.
+ *  - `user`     — a human session (actorName = their name)
+ *  - `apiKey`   — an external /v1 integration (actorName = the key's label)
+ *  - `workflow` — an automation step (actorWorkflowName = the workflow's name,
+ *                 or null/undefined for a since-deleted workflow → generic label)
+ *  - `system`   — no human, no API key, no workflow (retention sweeps, etc.)
+ */
+export type ActivityActorKind = "user" | "apiKey" | "workflow" | "system";
 
 /**
  * One inline activity entry. `before`/`after` carry the per-kind payload the
@@ -450,6 +475,11 @@ export interface ConversationActivityEvent {
   /** Pre-resolved target-user name for `assigned` (the new assignee), null on
    *  unassign. Other kinds leave it undefined. */
   assignedToName?: string | null;
+  /** Pre-resolved workflow name when `actorKind === "workflow"` (the automation
+   *  that caused the change). null when the workflow was since deleted (the row
+   *  kept its `workflowId` but the name can't be resolved) → the timeline falls
+   *  back to a generic "Automation" label. Other actor kinds leave it undefined. */
+  actorWorkflowName?: string | null;
   /** Raw per-kind payload as written by the audit subscriber. */
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;

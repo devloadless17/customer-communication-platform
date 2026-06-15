@@ -864,6 +864,11 @@ model Conversation {
   // refer to the most-recent close.
   closedAt              DateTime?
   closedByUserId        String?
+  // Denormalized API-key actor mirroring closedByUserId — set when a /v1 partner
+  // call or a workflow step closed the thread (closedByUserId is null then). Plain
+  // column (no FK) to match closedByUserId; the durable "who/what closed this"
+  // answer so automation closes aren't attributed to nobody.
+  closedByApiKeyId      String?
   // Free-text fields populated by the close_conversation step + the manual
   // "Close" action in the inbox (round 2b adds the inbox surface).
   closedCategory        String?
@@ -1732,7 +1737,7 @@ model OutboundWebhookDelivery {
   /// a partner-side failure back to the originating request in our logs.
   /// Nullable: events published outside an HTTP request (sweepers, the boot
   /// reconciler) have no correlation scope. F6 in
-  /// docs/architecture-review-2026-05-25.md.
+  /// docs/audit-guide.md.
   correlationId  String?
   createdAt      DateTime @default(now())
 
@@ -1796,6 +1801,12 @@ model ConversationEvent {
   /// integrations have no human author. SetNull on key revoke so audit
   /// history survives key rotation.
   apiKeyId       String?
+  /// Set when a WORKFLOW caused the mutation (assign / close / AI toggle) —
+  /// neither a human session nor an API key. Lets the timeline render
+  /// "by workflow «name»" instead of a bare "System". Plain column (no FK,
+  /// matching the denormalized actor style here); a deleted workflow's rows
+  /// simply render the generic automation label.
+  workflowId     String?
   kind           ConversationEventKind
   before         Json?
   after          Json?
@@ -1810,7 +1821,7 @@ model ConversationEvent {
   // Drives the retention sweeper's `WHERE at < cutoff` scan — the composite
   // index above leads with conversationId and can't serve an at-only filter.
   // See lib/sweepers/conversation-event-retention.ts (N2,
-  // docs/architecture-review-2026-05-25-pass2.md).
+  // docs/audit-guide.md).
   @@index([at])
   // FK index for the `user` relation's onDelete: SetNull — without it,
   // hard-deleting a teammate seq-scans this (large, append-only) audit table

@@ -52,6 +52,10 @@ export async function runSetStatus(
     conversationId,
     status,
     changedByUserId: null,
+    // Attribute the status change to the running workflow on the audit row.
+    // Shared by set_status / open_conversation / close_conversation (the
+    // latter two delegate here), so all three carry the attribution.
+    changedByWorkflowId: ctx.workflowId,
     silent: true,
     ...(extras.closedCategory !== undefined ? { closedCategory: extras.closedCategory } : {}),
     ...(extras.closedSummary !== undefined ? { closedSummary: extras.closedSummary } : {}),

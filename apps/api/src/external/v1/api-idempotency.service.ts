@@ -32,7 +32,7 @@ export type IdempotencyClaim<T> =
  * template send paths. Extracted here so the NON-send /v1 mutations (assign,
  * status, tag add/remove, contact update) — which live in a different service —
  * reuse the EXACT same logic instead of a parallel copy. This closes F2 from
- * docs/architecture-review-2026-05-25.md: a partner retry of an assign/tag/etc.
+ * docs/audit-guide.md: a partner retry of an assign/tag/etc.
  * no longer re-fires the mutation + its workflow/webhook reactions.
  *
  * Usage (mirrors the send paths):

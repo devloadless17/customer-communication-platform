@@ -163,7 +163,7 @@ export class ExternalV1MessagingService {
     // Idempotency — a partner retry of the same assign (n8n re-firing on a
     // timeout) must not re-publish conversation.assigned + re-trigger workflows
     // / webhooks. CLAIM-then-execute via the shared service (F2 in
-    // docs/architecture-review-2026-05-25.md). A replay returns the prior
+    // docs/audit-guide.md). A replay returns the prior
     // { ok: true } with zero side effects.
     if (idempotencyKey) {
       const claim = await this.idem.claim<{ ok: true }>(
@@ -443,6 +443,7 @@ export class ExternalV1MessagingService {
           conversationId,
           body: input.body,
           replyToMessageId: input.replyToMessageId ?? null,
+          onlyIfAiEnabled: input.onlyIfAiEnabled ?? false,
         }),
       );
       if (claim.kind === "replay") return claim.result;
@@ -796,7 +797,7 @@ export class ExternalV1MessagingService {
     idempotencyKey?: string,
     /** See `sendMessage` chainDepth doc — same cross-system cap. */
     chainDepth?: number,
-  ): Promise<{ ok: true; message: ExternalMessage }> {
+  ): Promise<{ ok: true; message: ExternalMessage; clientTempId: string | null }> {
     if (chainDepth !== undefined && chainDepth >= MAX_CHAIN_DEPTH) {
       throw new HttpException(
         {
@@ -900,7 +901,11 @@ export class ExternalV1MessagingService {
       // (audit 2026-05-22). Claimed AFTER the template lookup so a bad
       // template name doesn't strand a pending row.
       if (idempotencyKey) {
-        const claim = await this.claimIdempotency<{ ok: true; message: ExternalMessage }>(
+        const claim = await this.claimIdempotency<{
+          ok: true;
+          message: ExternalMessage;
+          clientTempId: string | null;
+        }>(
           teamId,
           apiKeyId,
           idempotencyKey,
@@ -912,7 +917,7 @@ export class ExternalV1MessagingService {
         if (claim.kind === "replay") return claim.result;
       }
 
-      let out: { ok: true; message: ExternalMessage };
+      let out: { ok: true; message: ExternalMessage; clientTempId: string | null };
       try {
         const result = await sendTemplateInternal({
           teamId,
@@ -926,7 +931,11 @@ export class ExternalV1MessagingService {
         const message = await this.db.message.findUniqueOrThrow({
           where: { id: result.messageId },
         });
-        out = { ok: true, message: toExternalMessage(message) };
+        out = {
+          ok: true,
+          message: toExternalMessage(message),
+          clientTempId: input.client_temp_id ?? null,
+        };
       } catch (err) {
         if (err instanceof SendTemplateValidationError) {
           // Pre-delivery validation failure — nothing was sent. Release the
@@ -983,7 +992,7 @@ export class ExternalV1MessagingService {
     if (!result.message) {
       throw new BadGatewayException({ error: "send_failed", detail: "send skipped unexpectedly" });
     }
-    return { ok: true, message: result.message };
+    return { ok: true, message: result.message, clientTempId: input.client_temp_id ?? null };
   }
 
   // ===========================================================================

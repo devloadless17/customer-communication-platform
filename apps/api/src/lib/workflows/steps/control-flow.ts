@@ -12,7 +12,9 @@ import {
   type StepResult,
   StepConfigError,
   advanceWithError,
+  envelopeContact,
 } from "./types";
+import { buildTokenContext } from "./token-context";
 
 /**
  * Control-flow steps: branch, wait, jump_to_step.
@@ -77,10 +79,25 @@ export const branchStepHandler: StepHandler<BranchStepConfig> = {
     if (config.preset) return describeBranchPreset(config.preset);
     return "Branch";
   },
-  async run(envelope, config): Promise<StepResult> {
-    const matched = config.preset
-      ? await evaluateBranchPreset(config.preset, envelope)
-      : evaluateConditions(config.conditions, envelope.data);
+  async run(envelope, config, ctx): Promise<StepResult> {
+    let matched: boolean;
+    if (config.preset) {
+      // IX — token determinism: evaluate the tag/stage/field presets against
+      // the SAME live-loaded contact that `$var.contact.*` resolves from, so a
+      // single run can't see a contact in one state for a branch and another
+      // for a token. Branch has no send target, so resolve against the trigger
+      // contact (the default `buildTokenContext` target).
+      const triggerContactId = envelopeContact(envelope)?.id;
+      const { contact } = await buildTokenContext(
+        envelope,
+        ctx,
+        ctx.teamId,
+        triggerContactId,
+      );
+      matched = await evaluateBranchPreset(config.preset, envelope, contact);
+    } else {
+      matched = evaluateConditions(config.conditions, envelope.data);
+    }
     return {
       kind: "branch",
       status: 200,

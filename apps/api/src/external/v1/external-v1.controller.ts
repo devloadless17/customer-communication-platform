@@ -553,7 +553,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     await this.api.assign(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
-    return { ok: true };
+    return { ok: true, conversationId: id };
   }
 
   @Post("conversations/:id/status")
@@ -567,7 +567,7 @@ export class ExternalV1Controller {
   ) {
     this.guardChainDepth(xCcpDepth);
     await this.api.setStatus(auth.teamId, auth.apiKeyId, id, body, this.idemKey(idempotencyKey));
-    return { ok: true };
+    return { ok: true, conversationId: id };
   }
 
   // AI Autopilot toggle — the AI escalation branch calls this with
@@ -644,6 +644,7 @@ export class ExternalV1Controller {
    */
   @Post("messages")
   @RequireScope("write:messages")
+  @RateLimit({ perMinute: 60 })
   async sendTopLevelMessage(
     @CurrentApiKey() auth: ApiKeyContext,
     @Body(zBody(ExternalTopLevelSendMessageSchema)) body: ExternalTopLevelSendMessageInput,
@@ -680,6 +681,7 @@ export class ExternalV1Controller {
 
   @Post("conversations/:id/messages")
   @RequireScope("write:messages")
+  @RateLimit({ perMinute: 60 })
   async sendMessage(
     @CurrentApiKey() auth: ApiKeyContext,
     @Param("id") id: string,

@@ -262,7 +262,9 @@ export class OutboundWebhooksService {
           id: conn.id,
           name: conn.channel,
           source: channelSourceFor(conn.channel),
-          created_at: Math.floor(conn.createdAt.getTime() / 1000),
+          // Epoch MS — must match the production fanout (subscriber) so the Test
+          // ping is byte-identical to a live delivery for parser validation.
+          created_at: conn.createdAt.getTime(),
         }
       : null;
 

@@ -9,7 +9,7 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * on conversation delete, so it's bounded by live conversations — but on an
  * active account it's the fastest-growing audit surface after `Message`. Every
  * other high-churn table has a retention sweep; this one was the gap (N2 in
- * docs/architecture-review-2026-05-25-pass2.md).
+ * docs/audit-guide.md).
  *
  * Retention policy: delete rows older than the cutoff, full stop. Unlike the
  * outbox sweep there's no "keep failed rows" carve-out — every row is a

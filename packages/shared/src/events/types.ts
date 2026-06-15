@@ -119,20 +119,25 @@ export interface MessageStatusChangedEvent {
   messageId: string;
   status: MessageStatus;
   /**
+   * When the status transition actually occurred (ISO 8601), stamped at publish
+   * in ingest. Carried so the outbound-webhook `status_changed` wire payload can
+   * emit a real `timestamp` (epoch ms) instead of synthesizing one at delivery
+   * time. Optional for source-compat; absent → the wire `timestamp` is null.
+   */
+  occurredAt?: string;
+  /**
    * Delivery-failure diagnostics — present ONLY on a `status: "failed"`
    * transition that carried a provider reason (Meta `errors[0]`). Carries WHY a
    * message failed (frequency cap, undeliverable, quality block) on the domain
    * event so an outbound-webhook subscriber can forward it without a DB read.
    * Absent on every non-failed transition.
    *
-   * NOTE (wiring status): these are PERSISTED on the Message row
-   * (statusErrorCode/Title/Detail) and carried on this in-process domain event,
-   * but they are NOT yet forwarded on the `message:status` SOCKET frame (see
-   * fanout-rules.ts / socket/events.ts) and no thread-hydration query selects
-   * the columns — so the inbox failed-bubble can't surface the reason yet. To
-   * complete the end-to-end path: add the fields to the `message:status` socket
-   * payload + fanout rule, select the columns in the thread query, extend the
-   * Message type + applyMessageStatus reducer, and render in the bubble.
+   * Wired end-to-end: PERSISTED on the Message row (statusErrorCode/Title/Detail),
+   * carried on this in-process domain event, forwarded on the `message:status`
+   * SOCKET frame (fanout-rules.ts / socket/events.ts), hydrated by `mapMessage`
+   * so a refresh stays consistent, carried through `applyMessageStatus`, and
+   * rendered on the inbox failed-bubble (bubble-meta.tsx) so the agent sees WHY
+   * a send failed — not just a bare red icon.
    */
   errorCode?: number;
   errorTitle?: string;
@@ -186,6 +191,10 @@ export interface ConversationAssignedEvent {
   changedByUserId: string | null;
   /** Set on /v1 external-API mutations for audit attribution. */
   changedByApiKeyId?: string | null;
+  /** Set when a workflow step drove this mutation — the running workflow's id,
+   *  so the audit row attributes the change to the automation (not an opaque
+   *  null actor). Mutually exclusive in practice with user/api-key actors. */
+  changedByWorkflowId?: string | null;
   /** Contact attached to the conversation, for workflow snapshot. */
   contact: WorkflowContactSnapshot;
   /**
@@ -224,6 +233,9 @@ export interface ConversationStatusChangedEvent {
   changedByUserId: string | null;
   /** Set on /v1 external-API mutations for audit attribution. */
   changedByApiKeyId?: string | null;
+  /** Set when a workflow step drove this mutation — the running workflow's id,
+   *  so the audit row attributes the change to the automation. */
+  changedByWorkflowId?: string | null;
   contact: WorkflowContactSnapshot;
   /**
    * Post-mutation conversation snapshot captured at publish time, with the
@@ -263,6 +275,9 @@ export interface ConversationAiChangedEvent {
   changedByUserId: string | null;
   /** Set when the AI itself paused via the /v1 API, for audit attribution. */
   changedByApiKeyId?: string | null;
+  /** Set when a workflow step drove this mutation — the running workflow's id,
+   *  so the audit row attributes the toggle to the automation. */
+  changedByWorkflowId?: string | null;
   contact: WorkflowContactSnapshot;
   /** Action time (ISO), stamped at publish. The audit subscriber writes it as
    *  the ConversationEvent `at` so the activity pill sorts where the toggle
@@ -388,6 +403,16 @@ export interface ContactCreatedEvent {
   createdByApiKeyId?: string | null;
   /** Skip downstream reactions (workflows + outbound webhooks). See ConversationAssignedEvent.silent. */
   silent?: boolean;
+  /**
+   * Set by the CSV import path so the realtime fanout subscriber SKIPS the
+   * per-row socket emit — the import already publishes one coalesced
+   * `contact.bulk_updated` that carries the whole id set, and that's what fans
+   * out to clients. The WEBHOOK + audit + workflow subscribers still receive
+   * the per-row `contact.created` (they want per-contact granularity and don't
+   * read this flag). Bounds a 500-row import from 500×N agent frames down to
+   * 1×N. Mirrors ContactUpdatedEvent.suppressSocketFanout.
+   */
+  suppressSocketFanout?: boolean;
 }
 
 /**

@@ -44,6 +44,20 @@ const MAX_BYTES = 1 * 1024 * 1024;
 const MAX_ROWS = 5000;
 const MAX_TEXT = 500;
 
+// Built-in (non-customField) Contact columns whose changes are surfaced as
+// ContactFieldChange entries on contact.updated (so the outbound webhook's
+// fieldChanges shows a rename / email edit etc.). Workflow-dispatch's
+// contact_field_updated trigger MUST exclude these keys (stays custom-only).
+const BUILT_IN_KEYS = [
+  "name",
+  "firstName",
+  "lastName",
+  "email",
+  "location",
+  "language",
+  "countryCode",
+] as const;
+
 export interface ImportResult {
   /** Rows we attempted to process (after header). */
   total: number;
@@ -389,6 +403,18 @@ export class ContactsService {
     for (const key of allKeys) {
       const prev = oldCustom[key] ?? null;
       const next = newCustom[key] ?? null;
+      if (prev !== next) fieldChanges.push({ key, previous: prev, next });
+    }
+    // Also surface changed BUILT-IN columns (name/firstName/.../countryCode) as
+    // fieldChanges so the outbound webhook's `fieldChanges` reflects a renamed
+    // contact, not just custom-field edits. Pre/post images are full rows, so
+    // we diff the columns directly. NOTE: workflow-dispatch's
+    // contact_field_updated fan-out deliberately SKIPS these keys (it stays
+    // custom-fields-only) — that guard lives on the dispatch side, keyed off
+    // the same BUILT_IN_KEYS list.
+    for (const key of BUILT_IN_KEYS) {
+      const prev = (existing[key] as string | null) ?? null;
+      const next = (updated[key] as string | null) ?? null;
       if (prev !== next) fieldChanges.push({ key, previous: prev, next });
     }
 
@@ -1131,15 +1157,49 @@ export class ContactsService {
       }
     }
 
+    // Per-row `contact.created` for the NEWLY-CREATED rows (NOT the revived
+    // ones — the revive loop above already published `contact.created` for
+    // each). `suppressSocketFanout: true` keeps the socket on the single
+    // coalesced `contact.bulk_updated` frame below (no 10k-frame storm) while
+    // the WEBHOOK + audit + workflow subscribers still receive one
+    // `contact.created` per imported row. Scoped to `toCreate` phones (the rows
+    // that had no prior active OR tombstoned row), fetched live with their now-
+    // linked tags so the published Contact carries real tagIds. A
+    // skipDuplicates collision (a concurrent inbound created the same phone
+    // mid-import): this re-reads ALL toCreate phones, so a row that inbound just
+    // created is included here too (and that inbound also published its own
+    // contact.created). The outbound-webhook subscriber dedups on the per-delivery
+    // X-CCP-Delivery id, NOT on contact id, so a partner CAN receive two
+    // contact.created for the same contact. Accepted at-least-once tradeoff —
+    // partners must treat contact.created as idempotent on contact id (rare race,
+    // benign for an upserting receiver).
+    if (created > 0 && toCreate.length > 0) {
+      const createdPhones = toCreate.map((p) => p.phoneNumber);
+      const createdRows = await this.db.contact.findMany({
+        where: { teamId, phoneNumber: { in: createdPhones }, deletedAt: null },
+        include: { tags: { select: { id: true } } },
+      });
+      for (const row of createdRows) {
+        await this.bus.publish({
+          type: "contact.created",
+          teamId,
+          contact: toContactWire(row, { tagIds: row.tags.map((t) => t.id) }),
+          source: "import",
+          createdByUserId: userId,
+          suppressSocketFanout: true,
+        });
+      }
+    }
+
     // One coalesced socket frame so every open contact list refetches the new
     // rows in realtime — without it, imported contacts stayed invisible to
     // other agents until a manual reload (audit 2026-06-11 #29). We emit a
     // single `contact.bulk_updated` (the documented coalesced-fanout pattern)
-    // rather than per-contact `contact.created` frames: a 10k-row import would
-    // otherwise be a 10k-frame socket storm, and there's no per-contact
-    // automation that needs the granular event (no workflow triggers on
-    // contact.created). Only emit when the import actually changed the
-    // directory.
+    // for the SOCKET rather than per-contact `contact.created` frames: a
+    // 10k-row import would otherwise be a 10k-frame socket storm. The non-socket
+    // subscribers (webhook / audit / workflow) get the granular per-row
+    // `contact.created` above (suppressSocketFanout). Only emit when the import
+    // actually changed the directory.
     if (created + revived > 0) {
       const importedPhones = [...toCreate, ...toRevive].map((p) => p.phoneNumber);
       const importedRows = await this.db.contact.findMany({

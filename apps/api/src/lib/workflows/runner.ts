@@ -241,6 +241,16 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
   });
 
   const envelope = buildEnvelope(wf.teamId, run.trigger, run.eventPayload);
+  // VIII — media_url rehydrate. The trigger-time message snapshot pinned on
+  // eventPayload predates the async media download (inbound media is fetched
+  // out-of-band; see CLAUDE.md "Inbound media downloads ASYNC"), so its
+  // `mediaUrl` is usually null at dispatch even when the binary later lands.
+  // Re-read the message row by id once here, BEFORE token resolution /
+  // envelope serialization, and overlay the fresh CDN links onto
+  // `envelope.data.message` so `$var.message.media_url` is populated. Mirrors
+  // the outbound-webhooks subscriber's enrichMessages media re-read. Best-
+  // effort: a missing/uncompleted row leaves the existing nulls in place.
+  await rehydrateMessageMedia(envelope);
   // Resolve the entry step. A NULL `currentStepId` only means "start from the
   // beginning" for a genuinely-fresh run (the initial `queued` pickup with no
   // stepLog). The terminal-status guard above already rejects completed/failed/
@@ -890,6 +900,45 @@ function buildEnvelope(
       contact: `${base}/api/external/v1/contacts/${contactId}`,
     },
   };
+}
+
+/**
+ * Re-read the trigger message's media links from the DB and overlay them onto
+ * `envelope.data.message` so `$var.message.media_url` resolves to the live CDN
+ * URL even though the trigger-time snapshot was built before the async media
+ * download finished (see CLAUDE.md "Inbound media downloads ASYNC"). Mirrors
+ * the outbound-webhooks subscriber's `enrichMessages`. Mutates the envelope in
+ * place; best-effort — a missing row or a not-yet-completed download leaves the
+ * existing values untouched. No-op for triggers that carry no message snapshot.
+ */
+async function rehydrateMessageMedia(envelope: WorkflowEventEnvelope): Promise<void> {
+  const data = envelope.data as {
+    message?: {
+      id?: string;
+      mediaKind?: string | null;
+      mediaUrl?: string | null;
+      mediaThumbnailUrl?: string | null;
+    };
+  };
+  const message = data.message;
+  // Text-only messages can never have a media URL — skip the PK lookup entirely.
+  // mediaKind rides the pinned snapshot, so this gate costs nothing and spares
+  // every text run (and each wait/resume) a needless read.
+  if (!message?.id || message.mediaKind == null) return;
+  try {
+    const row = await db.message.findUnique({
+      where: { id: message.id },
+      select: { mediaUrl: true, mediaThumbnailUrl: true },
+    });
+    if (!row) return;
+    // Only overlay when the DB has a value — never blank out a snapshot URL
+    // the publisher already managed to populate (the snapshot can win the
+    // race for outbound sends where the URL is known at publish time).
+    if (row.mediaUrl != null) message.mediaUrl = row.mediaUrl;
+    if (row.mediaThumbnailUrl != null) message.mediaThumbnailUrl = row.mediaThumbnailUrl;
+  } catch {
+    // Best-effort enrichment — a read failure must not abort the run.
+  }
 }
 
 async function markSkipped(runId: string, reason: string): Promise<void> {

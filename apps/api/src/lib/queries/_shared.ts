@@ -258,6 +258,19 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     channel: m.channel as Channel,
     status: m.status as MessageStatus,
     timestamp: m.timestamp.toISOString(),
+    // Persisted provider failure reason — only meaningful on a `failed` send,
+    // and only set when Meta returned an `errors[0]`. Carried so a refresh
+    // surfaces the same diagnostic the live `message:status` socket frame does
+    // (the failed-bubble tooltip / muted line).
+    ...(m.status === "failed" && m.statusErrorCode != null
+      ? { statusErrorCode: m.statusErrorCode }
+      : {}),
+    ...(m.status === "failed" && m.statusErrorTitle != null
+      ? { statusErrorTitle: m.statusErrorTitle }
+      : {}),
+    ...(m.status === "failed" && m.statusErrorDetail != null
+      ? { statusErrorDetail: m.statusErrorDetail }
+      : {}),
     ...(m.replyToMessageId
       ? {
           replyToMessageId: m.replyToMessageId,
@@ -320,6 +333,11 @@ type PrismaActivityEventRow = {
   at: Date;
   userId: string | null;
   apiKeyId: string | null;
+  // Set when a workflow step (not a human/api-key) caused the change. There's
+  // no FK to join (denormalized actor style — see the schema note), so the
+  // caller batch-resolves the name into `workflowNameById`, mirroring the
+  // `assigneeNameById` pattern.
+  workflowId: string | null;
   user: { name: string } | null;
   apiKey: { name: string } | null;
 };
@@ -333,14 +351,27 @@ function asJsonObject(v: unknown): Record<string, unknown> | null {
 export function mapActivityEvent(
   e: PrismaActivityEventRow,
   assigneeNameById?: Map<string, string>,
+  workflowNameById?: Map<string, string>,
 ): ConversationActivityEvent {
-  // Actor precedence: human user > API key > system (automation / retention).
+  // Actor precedence: human user > API key > workflow (automation) > system
+  // (retention sweeps / unattributed). These are mutually exclusive in practice
+  // — a workflow-driven mutation carries `workflowId` and no userId/apiKeyId —
+  // but the precedence keeps the resolution deterministic if a row ever set
+  // more than one.
   const actorKind: ActivityActorKind = e.user
     ? "user"
     : e.apiKey
       ? "apiKey"
-      : "system";
+      : e.workflowId
+        ? "workflow"
+        : "system";
   const actorName = e.user?.name ?? e.apiKey?.name ?? null;
+  // null = workflow since deleted (its `workflowId` row survives, but the name
+  // can't be resolved) → the timeline renders the generic "Automation" label.
+  const actorWorkflowName: string | null | undefined =
+    actorKind === "workflow" && e.workflowId
+      ? workflowNameById?.get(e.workflowId) ?? null
+      : undefined;
 
   const after = asJsonObject(e.after);
   let assignedToName: string | null | undefined;
@@ -362,5 +393,6 @@ export function mapActivityEvent(
     after,
     at: e.at.toISOString(),
     ...(assignedToName !== undefined ? { assignedToName } : {}),
+    ...(actorWorkflowName !== undefined ? { actorWorkflowName } : {}),
   };
 }

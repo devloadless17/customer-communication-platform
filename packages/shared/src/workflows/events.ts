@@ -33,6 +33,12 @@ export interface WorkflowMessageSnapshot {
   body: string;
   mediaKind: MediaKind | null;
   mediaCaption: string | null;
+  /**
+   * Interactive reply payload — set when this inbound message is the customer
+   * tapping a button / list option. `id` is what the `message_received` trigger's
+   * `option_id` condition resolves to. Absent for plain text / media messages.
+   */
+  interactive?: { kind: string; id: string; title: string };
   timestamp: string;
   senderUserId: string | null;
 }
@@ -56,6 +62,9 @@ export interface WorkflowConversationSnapshot {
   firstResponseByUserId: string | null;
   closedAt: string | null;
   closedByUserId: string | null;
+  /** API-key actor that closed the conversation (mirrors closedByUserId for
+   *  /v1 + workflow closes). Null on reopen / user-driven closes. */
+  closedByApiKeyId?: string | null;
   closedCategory: string | null;
   closedSummary: string | null;
   assignmentsCount: number;

@@ -179,7 +179,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       // Daily reconciler for the Conversation analytics MESSAGE COUNTERS
       // (incoming/outgoing), which the fire-and-forget analytics helpers can
       // drift on a swallowed error. Same set-based-UPDATE shape as the contact
-      // drift sweep. F3 in docs/architecture-review-2026-05-25.md.
+      // drift sweep. F3 in docs/audit-guide.md.
       startConversationAnalyticsDriftSweeper();
       this.analyticsDriftSweeperStarted = true;
       this.logger.log("Conversation analytics drift sweeper started");
@@ -189,7 +189,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       // Daily delete of EXPIRED Better Auth Session + Verification rows
       // (Better Auth invalidates-on-read but never prunes). Active sessions
-      // are untouched. F5 in docs/architecture-review-2026-05-25.md.
+      // are untouched. F5 in docs/audit-guide.md.
       startAuthTableCleanupSweeper();
       this.authCleanupSweeperStarted = true;
       this.logger.log("Auth-table cleanup sweeper started");
@@ -263,7 +263,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       // Daily retention on ConversationEvent (audit timeline) — the one
       // high-churn table that previously had no sweep. 90-day cutoff (tunable
       // via CONVERSATION_EVENT_RETENTION_DAYS). N2 in
-      // docs/architecture-review-2026-05-25-pass2.md.
+      // docs/audit-guide.md.
       startConversationEventRetentionSweeper();
       this.conversationEventRetentionStarted = true;
       this.logger.log("Conversation event retention sweeper started");

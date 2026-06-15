@@ -1,4 +1,5 @@
 import { computeWindowStatus } from "@ccp/shared/utils/window";
+import type { ContactLike } from "@ccp/shared/field-tokens";
 
 import { db } from "@/lib/db";
 import type { WorkflowEventEnvelope } from "@/lib/workflows/events";
@@ -84,19 +85,53 @@ export function describeBranchPreset(preset: BranchPreset): string {
 }
 
 /**
+ * Tag/stage/field-bearing view of the live-loaded contact. `buildTokenContext`
+ * hands `evaluateBranchPreset` the SAME `ContactLike` it built `$var.contact.*`
+ * from — at runtime that's a `WorkflowContactSnapshot` (carrying `tagIds` /
+ * `stageId` alongside `customFields`), but the static `ContactLike` type erases
+ * those, so we re-read them through this structural view. (IX — token
+ * determinism: branch has_tag / in_stage / field_equals must agree with the
+ * `$var.contact.*` tokens within a single run.)
+ */
+type LiveContactView = {
+  tagIds?: string[];
+  stageId?: string | null;
+  customFields?: unknown;
+};
+
+/**
  * Evaluate a branch preset against the runtime envelope. Returns true → the
  * "true" outgoing edge fires; false → the "false" edge. Missing data
  * (e.g. no contact on the envelope) returns false — fail closed, matches
  * how `evaluateConditions` treats missing fields.
+ *
+ * `liveContact` (IX): when the caller has already built the token context
+ * (`buildTokenContext`), it threads the SAME live-loaded contact here so the
+ * tag/stage/field presets read identical values to `$var.contact.*` within
+ * the run, instead of the (possibly staler) trigger-time envelope snapshot.
+ * Falls back to the envelope snapshot when omitted (the canvas-test path and
+ * any future caller that doesn't pre-load).
  */
 export async function evaluateBranchPreset(
   preset: BranchPreset,
   envelope: WorkflowEventEnvelope,
+  liveContact?: ContactLike | null,
 ): Promise<boolean> {
   const data = envelope.data as {
     contact?: { id?: string; tagIds?: string[]; stageId?: string | null; customFields?: Record<string, string> };
     message?: { body?: string };
   };
+  // Prefer the live-loaded contact (uniform-live with $var tokens) and fall
+  // back to the trigger-time envelope snapshot. The live ContactLike is a
+  // WorkflowContactSnapshot at runtime, so tagIds/stageId/customFields are
+  // present even though the static type hides them.
+  const live = (liveContact ?? undefined) as LiveContactView | undefined;
+  const tagIds = live?.tagIds ?? data.contact?.tagIds ?? [];
+  const stageId = live?.stageId ?? data.contact?.stageId ?? null;
+  const customFields = (live?.customFields ?? data.contact?.customFields ?? {}) as Record<
+    string,
+    string
+  >;
   switch (preset.type) {
     case "window_open": {
       const contactId = data.contact?.id;
@@ -111,11 +146,11 @@ export async function evaluateBranchPreset(
       return computeWindowStatus(iso).state === "open";
     }
     case "has_tag":
-      return (data.contact?.tagIds ?? []).includes(preset.tagId);
+      return tagIds.includes(preset.tagId);
     case "in_stage":
-      return data.contact?.stageId === preset.stageId;
+      return stageId === preset.stageId;
     case "field_equals":
-      return (data.contact?.customFields ?? {})[preset.fieldKey] === preset.value;
+      return customFields[preset.fieldKey] === preset.value;
     case "message_contains": {
       const body = data.message?.body ?? "";
       if (preset.caseSensitive) return body.includes(preset.needle);

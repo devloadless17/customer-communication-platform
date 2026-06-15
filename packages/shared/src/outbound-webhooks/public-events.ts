@@ -289,6 +289,19 @@ export const PUBLIC_EVENT_GROUPS: Array<{
           closed_summary: null,
         },
       },
+      {
+        type: "conversation.ai_changed",
+        label: "On AI Autopilot toggled",
+        description: "AI Autopilot turned on/off for a conversation — tracks the human↔AI handoff state.",
+        samplePayload: {
+          conversation_id: "cmpconv_01",
+          contact_id: "cmpcnt_01",
+          ai_enabled: false,
+          previous_ai_enabled: true,
+          changed_by_user_id: "cmpusr_01",
+          changed_by_api_key_id: null,
+        },
+      },
     ],
   },
   {
@@ -502,6 +515,18 @@ export interface PublicMedia {
   caption: string | null;
 }
 
+export interface PublicReplyRef {
+  /** Internal id of the quoted message. */
+  message_id: string;
+  /** Caption for media, body for text (truncated server-side). */
+  body: string;
+  direction: "in" | "out";
+  /** Authoring teammate's name on an outbound quote; null on inbound. */
+  sender_name: string | null;
+  /** When the quoted message was media, what kind; null otherwise. */
+  media_kind: string | null;
+}
+
 export interface PublicMessage {
   id: string;
   conversation_id: string;
@@ -523,6 +548,20 @@ export interface PublicMessage {
   sender_api_key_id: string | null;
   /** Attachment details, or null for a text-only message. */
   media: PublicMedia | null;
+  /**
+   * Quoted/replied-to message reference, mirroring the socket frame's reply
+   * context. Null when this message isn't a reply. `message_id` is the original's
+   * INTERNAL id; the quoted message's provider wamid is not carried (resolving it
+   * would cost a per-message DB lookup — use GET /v1/messages/:id if needed).
+   */
+  reply_to: PublicReplyRef | null;
+  /**
+   * Interactive reply payload — set when this inbound message is the customer
+   * tapping a button / list option. `id` is the stable option id a partner flow
+   * branches on; `title` is the localized label the customer saw. Null for every
+   * plain text / media / outbound message.
+   */
+  interactive: { kind: string; id: string; title: string } | null;
 }
 
 export interface PublicContact {
@@ -556,6 +595,13 @@ export interface PublicConversation {
   last_message_at: string;
   /** Who's handling this thread. Null when unassigned. */
   assignee: AssigneeInfo | null;
+  /**
+   * AI Autopilot state for this conversation. Folded into the wire `ai_enabled`
+   * (team opt-in AND this flag) and surfaced on message.received so a partner
+   * gates auto-reply on the per-conversation human↔AI handoff. Optional because
+   * conversation refs on other events don't carry it.
+   */
+  aiEnabled?: boolean;
 }
 
 /**
@@ -592,6 +638,28 @@ export interface PublicNote {
   author_user_id: string | null;
   body: string;
   timestamp: string;
+  /**
+   * Author's display name / email — stamped by the subscriber from a batched
+   * user lookup (the framework-agnostic mapper can't query). Null when the
+   * author was a removed user OR the lookup found nothing.
+   */
+  author_name?: string | null;
+  author_email?: string | null;
+}
+
+/**
+ * Lean contact block carried on the non-message events that today expose only
+ * a `contact_id` (conversation.assigned / status_changed / ai_changed and
+ * contact.tag_changed / lifecycle_changed + note.created / deleted). Just the
+ * three identity fields a partner needs to route — deliberately NOT the full
+ * PublicContact (no tags / custom_fields / stage; that would be bloat on a
+ * status-change frame). The subscriber stamps this onto the internal `data`
+ * (`d.contact`) before `toWirePayload` runs.
+ */
+export interface PublicContactLean {
+  id: string;
+  phone_number: string | null;
+  name: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +703,11 @@ export function toPublicEnvelopes(
             assignee: e.conversation.assignedUserId
               ? assigneeRef(e.conversation.assignedUserId)
               : null,
+            // Per-conversation AI pause — folded into the wire `ai_enabled` so a
+            // paused thread reports ai_enabled:false even when team AI is on
+            // (the message.sent path gets this from the subscriber's DB enrich;
+            // the inbound path must carry it here or it defaulted to true).
+            aiEnabled: e.conversation.aiEnabled,
           } satisfies PublicConversation,
           is_new_conversation: e.isNewConversation,
           reopened: e.reopened,
@@ -673,6 +746,15 @@ export function toPublicEnvelopes(
           conversation_id: e.conversationId,
           contact_id: e.contactId,
           status: e.status,
+          // When the transition actually occurred (ISO), carried into the wire
+          // shape as an epoch `timestamp`. Falls back to the envelope's
+          // generated-at if the publisher didn't stamp it.
+          occurred_at: e.occurredAt ?? occurredAt,
+          // Delivery-failure diagnostics — only present on a failed transition
+          // that carried a provider reason.
+          ...(e.errorCode != null
+            ? { error_code: e.errorCode, error_title: e.errorTitle, error_detail: e.errorDetail }
+            : {}),
         }),
       });
       break;
@@ -966,6 +1048,16 @@ function messageFromDomain(
           caption: m.media.caption ?? null,
         }
       : null,
+    reply_to: m.replyTo
+      ? {
+          message_id: m.replyTo.id,
+          body: m.replyTo.body,
+          direction: m.replyTo.direction,
+          sender_name: m.replyTo.senderName,
+          media_kind: m.replyTo.mediaKind ?? null,
+        }
+      : null,
+    interactive: m.interactive ?? null,
   };
 }
 
@@ -1060,10 +1152,6 @@ function toEpochMs(iso: string | null | undefined): number | null {
   const t = new Date(iso).getTime();
   return Number.isFinite(t) ? t : null;
 }
-function toEpochSec(iso: string | null | undefined): number | null {
-  const ms = toEpochMs(iso);
-  return ms === null ? null : Math.floor(ms / 1000);
-}
 function splitName(name: string | null | undefined): { firstName: string | null; lastName: string | null } {
   const trimmed = (name ?? "").trim();
   if (!trimmed) return { firstName: null, lastName: null };
@@ -1102,7 +1190,7 @@ function wireAssignee(a: AssigneeWithMeta | null | undefined): Record<string, un
     firstName,
     lastName,
     role: a.role ?? null,
-    created_at: toEpochSec(a.created_at),
+    created_at: toEpochMs(a.created_at),
   };
 }
 
@@ -1171,6 +1259,22 @@ function wireMessageBlock(
     traffic,
     timestamp: toEpochMs(m.timestamp),
     message: { type: m.media ? m.media.kind : "text", text: m.body },
+    // Quoted-reply reference, mirroring the socket frame's reply context.
+    // `messageId` is the quoted message's INTERNAL id (its provider wamid is not
+    // carried — that would need a per-message DB lookup; resolve via
+    // GET /v1/messages/:id if required). null when this message isn't a reply.
+    replyTo: m.reply_to
+      ? {
+          messageId: m.reply_to.message_id,
+          body: m.reply_to.body,
+          direction: m.reply_to.direction,
+          senderName: m.reply_to.sender_name,
+          ...(m.reply_to.media_kind ? { mediaKind: m.reply_to.media_kind } : {}),
+        }
+      : null,
+    // Interactive reply (button/list tap) — a partner flow branches on
+    // `interactive.id`. null for plain text / media / outbound messages.
+    interactive: m.interactive ?? null,
     // Extra vs. the partner sample, ignored by text flows; carries file links.
     media: m.media,
   };
@@ -1192,7 +1296,25 @@ function wireContact(c: PublicContact | null | undefined): Record<string, unknow
     stageId: c.stage_id,
     tagIds: c.tag_ids,
     customFields: c.custom_fields,
-    created_at: toEpochSec(c.created_at),
+    created_at: toEpochMs(c.created_at),
+  };
+}
+
+/**
+ * Lean contact block for the non-message events that only carry a contact_id.
+ * Tolerates absence — the subscriber stamps `d.contact` from a batched
+ * {id, phoneNumber, name} lookup; older callers / failed lookups leave it
+ * undefined and we emit null. Deliberately three fields only (see
+ * PublicContactLean).
+ */
+function wireContactLean(
+  c: { id?: string; phoneNumber?: string | null; phone_number?: string | null; name?: string } | null | undefined,
+): Record<string, unknown> | null {
+  if (!c || !c.id) return null;
+  return {
+    id: c.id,
+    phoneNumber: c.phoneNumber ?? c.phone_number ?? null,
+    name: c.name ?? null,
   };
 }
 
@@ -1232,6 +1354,15 @@ export function toWirePayload(
         // AI Autopilot state for this conversation — the partner flow gates its
         // auto-reply on this (true = AI may answer; false = a human owns it).
         ai_enabled: aiEnabled,
+        // Thread state so a partner can route on new-vs-reopen and current
+        // status/unread WITHOUT a callback to /v1/conversations/:id. The data is
+        // already on the envelope (computed at ingest); only the wire dropped it.
+        conversation: {
+          status: d.conversation?.status ?? null,
+          unreadCount: d.conversation?.unread_count ?? null,
+          isNewConversation: d.is_new_conversation ?? false,
+          reopened: d.reopened ?? false,
+        },
         message: wireMessageBlock(d.message, "incoming", channelId),
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
@@ -1243,6 +1374,12 @@ export function toWirePayload(
         contact: wireContact(d.contact),
         assignee: wireAssignee(d.conversation?.assignee),
         ai_enabled: aiEnabled,
+        // Thread state (status/unread), stamped by the subscriber's DB enrich —
+        // symmetric with message.received so one partner branch reads both.
+        conversation: {
+          status: d.conversation?.status ?? null,
+          unreadCount: d.conversation?.unread_count ?? null,
+        },
         message: wireMessageBlock(d.message, "outgoing", channelId),
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
@@ -1254,6 +1391,14 @@ export function toWirePayload(
         contactId: d.contact_id,
         conversationId: d.conversation_id,
         status: d.status,
+        // When the transition occurred (epoch ms). Null when the publisher
+        // didn't stamp occurred_at.
+        timestamp: toEpochMs(d.occurred_at),
+        // Delivery-failure diagnostics — only emitted on a failed transition
+        // that carried a provider reason (read from the snake_case data shape).
+        ...(d.error_code != null
+          ? { errorCode: d.error_code, errorTitle: d.error_title, errorDetail: d.error_detail }
+          : {}),
         channel: wireChannel(ctx.channelBase, null),
       };
     case "conversation.assigned":
@@ -1261,6 +1406,7 @@ export function toWirePayload(
         event_type: type,
         conversationId: d.conversation_id,
         contactId: d.contact_id,
+        contact: wireContactLean(d.contact),
         assignee: wireAssignee(d.assignee),
         previousAssignee: wireAssignee(d.previous_assignee),
         changedByUserId: d.changed_by_user_id ?? null,
@@ -1274,6 +1420,7 @@ export function toWirePayload(
         event_type: type,
         conversationId: d.conversation_id,
         contactId: d.contact_id,
+        contact: wireContactLean(d.contact),
         previousStatus: d.previous_status ?? null,
         status: d.status,
         changedByUserId: d.changed_by_user_id ?? null,
@@ -1287,8 +1434,9 @@ export function toWirePayload(
         event_type: type,
         conversationId: d.conversation_id,
         contactId: d.contact_id,
-        aiEnabled: d.ai_enabled,
-        previousAiEnabled: d.previous_ai_enabled ?? null,
+        contact: wireContactLean(d.contact),
+        ai_enabled: d.ai_enabled,
+        previous_ai_enabled: d.previous_ai_enabled ?? null,
         changedByUserId: d.changed_by_user_id ?? null,
         changedByApiKeyId: d.changed_by_api_key_id ?? null,
         channel: wireChannel(ctx.channelBase, null),
@@ -1315,6 +1463,7 @@ export function toWirePayload(
       return {
         event_type: type,
         contactId: d.contact_id,
+        contact: wireContactLean(d.contact),
         before: d.before ?? null,
         after: d.after ?? null,
         added: d.added ?? [],
@@ -1326,6 +1475,7 @@ export function toWirePayload(
       return {
         event_type: type,
         contactId: d.contact_id,
+        contact: wireContactLean(d.contact),
         before: d.before ?? null,
         after: d.after ?? null,
         changedByUserId: d.changed_by_user_id ?? null,
@@ -1343,10 +1493,15 @@ export function toWirePayload(
       return {
         event_type: type,
         conversationId: d.note?.conversation_id,
+        contact: wireContactLean(d.contact),
         note: {
           id: d.note?.id,
           conversationId: d.note?.conversation_id,
           authorUserId: d.note?.author_user_id ?? null,
+          // Author display name / email — stamped by the subscriber's batched
+          // user lookup. Null for a removed-user author.
+          authorName: d.note?.author_name ?? null,
+          authorEmail: d.note?.author_email ?? null,
           body: d.note?.body,
           timestamp: toEpochMs(d.note?.timestamp),
         },
@@ -1355,6 +1510,7 @@ export function toWirePayload(
       return {
         event_type: type,
         conversationId: d.conversation_id,
+        contact: wireContactLean(d.contact),
         noteId: d.note_id,
         deletedByUserId: d.deleted_by_user_id ?? null,
       };

@@ -120,14 +120,37 @@ export function applyConversationRead(
 
 export function applyMessageStatus(
   prev: ConversationWithRefs,
-  payload: { messageId: string; status: MessageStatus },
+  payload: {
+    messageId: string;
+    status: MessageStatus;
+    // Provider failure reason — present only on a `failed` frame that carried
+    // a Meta `errors[0]`. Carried onto the message so the failed bubble can
+    // surface WHY it failed instead of a bare red icon.
+    errorCode?: number;
+    errorTitle?: string;
+    errorDetail?: string;
+  },
 ): ConversationWithRefs {
   const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
   if (idx === -1) return prev;
   const existing = prev.messages[idx]!;
   if (existing.status === payload.status) return prev;
   const nextMessages = prev.messages.slice();
-  nextMessages[idx] = { ...existing, status: payload.status };
+  nextMessages[idx] = {
+    ...existing,
+    status: payload.status,
+    // Stamp the failure diagnostics when the transition is to `failed` and the
+    // frame carried them; otherwise leave any prior values untouched.
+    ...(payload.status === "failed" && payload.errorCode !== undefined
+      ? { statusErrorCode: payload.errorCode }
+      : {}),
+    ...(payload.status === "failed" && payload.errorTitle !== undefined
+      ? { statusErrorTitle: payload.errorTitle }
+      : {}),
+    ...(payload.status === "failed" && payload.errorDetail !== undefined
+      ? { statusErrorDetail: payload.errorDetail }
+      : {}),
+  };
   return { ...prev, messages: nextMessages };
 }
 

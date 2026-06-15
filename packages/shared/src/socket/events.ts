@@ -61,6 +61,16 @@ export interface ServerToClientEvents {
     conversationId: string;
     messageId: string;
     status: MessageStatus;
+    /**
+     * Provider failure diagnostics — present ONLY on a `status: "failed"`
+     * frame that carried a Meta `errors[0]` reason. Lets the inbox failed
+     * bubble surface WHY a send failed (e.g. outside the 24h window, number
+     * undeliverable) to the agent, not just a bare red icon. Absent on every
+     * non-failed transition. Mirrors the persisted Message.statusError* columns.
+     */
+    errorCode?: number;
+    errorTitle?: string;
+    errorDetail?: string;
   }) => void;
 
   /**

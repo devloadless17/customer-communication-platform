@@ -272,6 +272,10 @@ async function ingestStatusUpdate(
     contactId: existing.conversation.contactId,
     messageId: existing.id,
     status: evt.status,
+    // Stamp the transition time at publish so the webhook status_changed wire
+    // can emit a `timestamp` and downstream sorting reflects when the status
+    // actually flipped (the status webhook carries no provider timestamp).
+    occurredAt: new Date().toISOString(),
     ...(evt.status === "failed" && evt.errorCode !== undefined
       ? { errorCode: evt.errorCode }
       : {}),
@@ -429,6 +433,9 @@ export async function drainParkedStatus(
     contactId,
     messageId,
     status: parked,
+    // Stamped at drain (when the parked status is actually applied) — same
+    // role as the live-status publish above.
+    occurredAt: new Date().toISOString(),
   });
 }
 
@@ -538,7 +545,7 @@ async function ingestInboundMessage(
       // partial unique constrains across deletedAt too (the tombstone holds
       // the slot; see schema comment on Contact phoneNumber).
       //
-      // TODO(multi-channel / F4 in docs/architecture-review-2026-05-25.md):
+      // TODO(multi-channel / F4 in docs/audit-guide.md):
       // This lookup keys on `phoneNumber` ONLY and does NOT filter by channel.
       // Correct today because WhatsApp is the only channel. BEFORE shipping a
       // second channel (Telegram/Instagram), this MUST switch to the
@@ -579,6 +586,10 @@ async function ingestInboundMessage(
         contact = await tx.contact.update({
           where: { id: existingContact.id },
           data: { deletedAt: null },
+          // Load tags as `{ id }` so the `message.received` contact snapshot
+          // (toWorkflowContact below) emits the RETURNING contact's real
+          // tagIds — without this the relation is absent and tagIds is [].
+          include: { tags: { select: { id: true } } },
         });
       } else {
         contact = await tx.contact.create({
@@ -597,6 +608,10 @@ async function ingestInboundMessage(
             countryCode: getCountryFromPhone(evt.contactPhone),
             stageId: defaultStageId,
           },
+          // Same `{ id }` tags shape as the returning-contact path so the
+          // snapshot mapper reads the relation uniformly (a brand-new contact
+          // simply has none yet — emits [], which is correct).
+          include: { tags: { select: { id: true } } },
         });
       }
 
@@ -835,6 +850,9 @@ async function ingestInboundMessage(
         mediaKind: evt.media?.kind ?? null,
         mediaCaption: evt.media && evt.body ? evt.body : null,
         timestamp: evt.timestamp,
+        // Surface the button / list tap so the message_received trigger's
+        // `option_id` condition + `$var.message.interactive.*` tokens resolve.
+        interactive: evt.interactiveReply ?? null,
       });
       // tx-scoped read so the snapshot sees the just-inserted row's
       // consistency snapshot, not a global-pool query that might miss
@@ -1019,6 +1037,11 @@ function buildMessageDomain(args: {
     // raw_payload stays in the DB row (created above) but is deliberately
     // left off the socket payload — no client needs the verbatim Meta body.
     timestamp: evt.timestamp.toISOString(),
+    // Structured interactive reply (button / list tap) when the contact
+    // tapped an option. `kind` is the parser value ("button_reply" |
+    // "list_reply"), `id` the stable author id, `title` the localized label.
+    // Absent on plain text / media inbounds.
+    ...(evt.interactiveReply ? { interactive: evt.interactiveReply } : {}),
     ...(replySnapshot
       ? { replyToMessageId: replySnapshot.id, replyTo: replySnapshot }
       : {}),
@@ -1068,6 +1091,14 @@ function toWorkflowMessage(m: {
   /** Display name of whoever sent it — contact name for inbound. Drives
    *  `$var.message.sender_name`; empty when the call site doesn't supply it. */
   senderName?: string | null;
+  /** Structured interactive reply (button / list tap). Drives the
+   *  `option_id` workflow condition + `$var.message.interactive.*` tokens.
+   *  Absent on plain text / media inbounds. */
+  interactive?: { kind: string; id: string; title: string } | null;
+  /** Public CDN URL of the attachment, when already downloaded. Null while the
+   *  2-phase inbound media upload is still in flight (the trigger message is
+   *  re-hydrated in the runner; recent-history messages carry it directly). */
+  mediaUrl?: string | null;
 }): WorkflowMessageSnapshot {
   return {
     id: m.id,
@@ -1081,6 +1112,8 @@ function toWorkflowMessage(m: {
     timestamp: m.timestamp.toISOString(),
     senderUserId: m.senderUserId,
     ...(m.senderName != null ? { senderName: m.senderName } : {}),
+    ...(m.interactive != null ? { interactive: m.interactive } : {}),
+    ...(m.mediaUrl != null ? { mediaUrl: m.mediaUrl } : {}),
     hasMedia: m.mediaKind != null,
   };
 }
@@ -1099,6 +1132,7 @@ function toWorkflowConversation(c: {
   firstResponseByUserId?: string | null;
   closedAt?: Date | null;
   closedByUserId?: string | null;
+  closedByApiKeyId?: string | null;
   closedCategory?: string | null;
   closedSummary?: string | null;
   assignmentsCount?: number;
@@ -1125,6 +1159,7 @@ function toWorkflowConversation(c: {
     firstResponseByUserId: c.firstResponseByUserId ?? null,
     closedAt: c.closedAt?.toISOString() ?? null,
     closedByUserId: c.closedByUserId ?? null,
+    closedByApiKeyId: c.closedByApiKeyId ?? null,
     closedCategory: c.closedCategory ?? null,
     closedSummary: c.closedSummary ?? null,
     assignmentsCount: c.assignmentsCount ?? 0,
@@ -1228,6 +1263,7 @@ async function loadRecentForWorkflow(
       body: true,
       mediaKind: true,
       mediaCaption: true,
+      mediaUrl: true,
       timestamp: true,
       senderUserId: true,
     },
@@ -1242,6 +1278,7 @@ async function loadRecentForWorkflow(
       body: r.body,
       mediaKind: r.mediaKind as import("@ccp/shared/types").MediaKind | null,
       mediaCaption: r.mediaCaption,
+      mediaUrl: r.mediaUrl,
       timestamp: r.timestamp,
       senderUserId: r.senderUserId,
     }))

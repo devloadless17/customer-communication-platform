@@ -86,7 +86,7 @@ export class ExternalV1Service {
    * `work`) when `idempotencyKey` is absent, so existing callers that don't pass
    * a key are unchanged. A replay short-circuits the thunk entirely — zero side
    * effects — and returns the prior response. Used by the contact tag mutations
-   * (F2 in docs/architecture-review-2026-05-25.md). The conversation mutations
+   * (F2 in docs/audit-guide.md). The conversation mutations
    * inline the same pattern in ExternalV1MessagingService.
    */
   private async withIdempotency<T>(
@@ -600,7 +600,7 @@ export class ExternalV1Service {
   ): Promise<ExternalContact> {
     // Idempotency — a partner retry must not re-publish contact.updated /
     // lifecycle_changed and re-trigger workflows/webhooks. F2 in
-    // docs/architecture-review-2026-05-25.md.
+    // docs/audit-guide.md.
     if (idempotencyKey) {
       const claim = await this.idem.claim<ExternalContact>(
         teamId,

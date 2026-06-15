@@ -369,6 +369,7 @@ export async function dispatchManualTrigger(args: {
           firstResponseByUserId: conversation.firstResponseByUserId,
           closedAt: conversation.closedAt?.toISOString() ?? null,
           closedByUserId: conversation.closedByUserId,
+          closedByApiKeyId: conversation.closedByApiKeyId,
           closedCategory: conversation.closedCategory,
           closedSummary: conversation.closedSummary,
           assignmentsCount: conversation.assignmentsCount,

@@ -22,6 +22,8 @@ export type ConditionField =
   | "body"
   | "body_lower"
   | "direction"
+  // Stable id of an interactive button/list reply tap (message_received)
+  | "option_id"
   // Conversation fields (most triggers carry a conversation snapshot)
   | "status_from"
   | "status_to"
@@ -76,7 +78,7 @@ export interface ConditionGroup {
  */
 export const FIELDS_BY_TRIGGER: Record<WorkflowTriggerEvent, ConditionField[]> = {
   message_received: [
-    "body", "body_lower", "direction",
+    "body", "body_lower", "direction", "option_id",
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
     "conversation_status", "assigned_user_id",
   ],
@@ -272,7 +274,11 @@ function validateGroup(
 
 function readField(field: ConditionField, payload: EventPayload): string | null {
   const p = payload as unknown as {
-    message?: { body?: string; direction?: string };
+    message?: {
+      body?: string;
+      direction?: string;
+      interactive?: { kind?: string; id?: string; title?: string } | null;
+    };
     contact?: {
       phoneNumber?: string;
       name?: string;
@@ -297,6 +303,8 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
       return p.message?.body?.toLowerCase() ?? null;
     case "direction":
       return p.message?.direction ?? null;
+    case "option_id":
+      return p.message?.interactive?.id ?? null;
     case "status_from":
       return p.previousStatus ?? null;
     case "status_to":

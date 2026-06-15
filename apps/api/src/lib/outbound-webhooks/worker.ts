@@ -532,16 +532,17 @@ async function resolvePendingMediaUrl(
 ): Promise<void> {
   const message = (
     payload as {
-      data?: {
-        message?: {
-          id?: string;
-          media?: { url?: string | null; thumbnail_url?: string | null } | null;
-        };
+      message?: {
+        // Flat wire block (wireMessageBlock) keys the internal id as `messageId`,
+        // NOT `id` — reading `id` here always yielded undefined and short-circuited
+        // the poll, leaving slow-upload media permanently null.
+        messageId?: string;
+        media?: { url?: string | null; thumbnail_url?: string | null } | null;
       };
     }
-  )?.data?.message;
+  )?.message;
   const media = message?.media;
-  const messageId = message?.id;
+  const messageId = message?.messageId;
   if (!media || !messageId || media.url) return;
 
   const deadline = Date.now() + MEDIA_RESOLVE_WAIT_MS;

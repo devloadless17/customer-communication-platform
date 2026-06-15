@@ -9,7 +9,7 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * expects the app to prune. Left alone, every expired session (90-day cap,
  * re-created on each device sign-in) and every consumed/expired verification
  * token lingers forever. Not a correctness bug (expired rows never authorize),
- * just unbounded table growth. F5 in docs/architecture-review-2026-05-25.md.
+ * just unbounded table growth. F5 in docs/audit-guide.md.
  *
  * Active sessions are NOT touched — only rows already past `expiresAt`, so a
  * signed-in user can't be logged out by this sweep. (`Account` is intentionally

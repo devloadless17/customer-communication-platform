@@ -49,6 +49,25 @@ import type { DomainEventOf, DomainEventType } from "@ccp/shared/events/types";
 import { subscribe as busSubscribe, SubscriberPriority } from "@/lib/events/bus";
 import { dispatch } from "@/lib/workflows/dispatcher";
 
+/**
+ * Built-in Contact columns that `contacts.service.update` now records as
+ * `ContactFieldChange`s so the OUTBOUND WEBHOOK's `fieldChanges` shows them.
+ * The `contact_field_updated` workflow TRIGGER, however, stays custom-fields-
+ * only by contract — built-in changes (name / email / etc.) flow through their
+ * own dedicated triggers / surfaces, not this generic one. So we filter these
+ * keys out of the per-change fan-out below while leaving the webhook deltas
+ * intact. Mirrors BUILT_IN_KEYS in contacts.service.
+ */
+const BUILT_IN_KEYS: ReadonlySet<string> = new Set([
+  "name",
+  "firstName",
+  "lastName",
+  "email",
+  "location",
+  "language",
+  "countryCode",
+]);
+
 export function registerWorkflowDispatchSubscribers(): () => void {
   // WORKFLOW_DISPATCH tier — runs after analytics. Conversation snapshots
   // come from the EVENT PAYLOAD (publisher-built, post-CAS, with predicted
@@ -151,6 +170,10 @@ export function registerWorkflowDispatchSubscribers(): () => void {
     // wall-time bounded to the slowest single lookup.
     const dispatches: Array<Promise<unknown>> = [];
     for (const change of e.fieldChanges) {
+      // Keep the `contact_field_updated` trigger CUSTOM-fields-only: built-in
+      // column deltas (name/email/…) ride the webhook's fieldChanges now but
+      // must NOT fan out a workflow trigger. See BUILT_IN_KEYS above.
+      if (BUILT_IN_KEYS.has(change.key)) continue;
       dispatches.push(
         dispatch(e.teamId, "contact_field_updated", {
           contact: e.workflowContact,

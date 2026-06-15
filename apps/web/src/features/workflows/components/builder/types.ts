@@ -48,7 +48,7 @@ export interface WorkflowGraph {
 export type GroupOp = "AND" | "OR";
 
 export type ConditionField =
-  | "body" | "body_lower" | "direction"
+  | "body" | "body_lower" | "direction" | "option_id"
   | "status_from" | "status_to" | "assigned_user_id" | "conversation_status"
   | "contact_phone" | "contact_name" | "contact_email" | "contact_stage_id"
   | "tag_id" | "tag_change_kind"
@@ -151,6 +151,55 @@ export const STEP_OPTIONS: Array<{
   { value: "trigger_workflow", label: "Trigger Workflow", description: "Run another workflow for this contact.", group: "external" },
 ];
 
+// Trigger contact-context -------------------------------------------------
+//
+// `incoming_webhook` fires from a raw external POST with NO contact and NO
+// conversation attached (the server seeds `contact: null` / `contactId:
+// null` — see apps/api/.../workflows.service.ts). Every contact-scoped
+// condition field and every contact/conversation-acting step therefore
+// silently no-ops on that trigger. We surface that at author time instead:
+// the condition picker hides contact_* fields and the step palette badges
+// the acting steps. Keep this list in sync with the server resolver — these
+// are the steps whose `run()` reads `ctx.conversation` / `ctx.contact`.
+
+/** Triggers that DON'T carry a contact (and so can't act on one). Today only
+ *  `incoming_webhook`; broken out as a helper so callers read intent, not a
+ *  bare equality check. */
+export function triggerCarriesContact(trigger: Trigger): boolean {
+  return trigger !== "incoming_webhook";
+}
+
+/** Condition fields that resolve against the trigger's contact. Hidden by the
+ *  picker when the trigger carries no contact. */
+export const CONTACT_SCOPED_FIELDS: ReadonlySet<ConditionField> = new Set([
+  "contact_phone",
+  "contact_name",
+  "contact_email",
+  "contact_stage_id",
+]);
+
+/** Step types whose action targets the trigger's contact / conversation, so
+ *  they no-op on a contact-less trigger. The palette badges these (and the
+ *  same message is reusable in a step-level warning). */
+export const CONTACT_ACTING_STEPS: ReadonlySet<StepType> = new Set([
+  "send_message",
+  "send_template",
+  "add_comment",
+  "assign_to",
+  "set_status",
+  "open_conversation",
+  "close_conversation",
+  "add_tag",
+  "remove_tag",
+  "update_field",
+  "update_lifecycle",
+  "ask_question",
+]);
+
+/** Author-facing reason shown when a contact-acting step is offered on a
+ *  trigger with no contact. */
+export const NEEDS_CONTACT_TRIGGER_HINT = "Needs a contact-scoped trigger";
+
 export function emptyConfigFor(type: StepType): Record<string, unknown> {
   switch (type) {
     case "send_message":
@@ -195,7 +244,7 @@ export function emptyConfigFor(type: StepType): Record<string, unknown> {
 
 export const FIELDS_BY_TRIGGER: Record<Trigger, ConditionField[]> = {
   message_received: [
-    "body", "body_lower", "direction",
+    "body", "body_lower", "direction", "option_id",
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
     "conversation_status", "assigned_user_id",
   ],
@@ -215,6 +264,7 @@ export const FIELD_LABELS: Record<ConditionField, string> = {
   body: "Message body",
   body_lower: "Message body (lowercased)",
   direction: "Direction",
+  option_id: "Button/List option id",
   status_from: "Previous status",
   status_to: "New status",
   assigned_user_id: "Assigned user",
@@ -252,6 +302,7 @@ export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
   body: "text",
   body_lower: "text",
   direction: "direction",
+  option_id: "text",
   status_from: "status",
   status_to: "status",
   conversation_status: "status",

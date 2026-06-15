@@ -22,21 +22,36 @@ export function BubbleMeta({
   senderAvatarUrl: string | null;
   isOut: boolean;
 }) {
+  // Provider failure reason — only on a failed outbound send that carried a
+  // Meta `errors[0]`. Rendered as a tooltip on the alert icon plus a subtle
+  // muted line so the agent sees WHY a send failed, not just a red icon.
+  const failureReason =
+    isOut && message.status === "failed"
+      ? message.statusErrorDetail ?? message.statusErrorTitle ?? null
+      : null;
+
   return (
-    <div
-      className={cn(
-        "flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground",
-        isOut ? "flex-row-reverse" : "flex-row",
+    <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
+      <div
+        className={cn(
+          "flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground",
+          isOut ? "flex-row-reverse" : "flex-row",
+        )}
+      >
+        <LocalTime iso={message.timestamp} format="messageTime" />
+        {isOut && senderName && (
+          <>
+            <span className="opacity-50">·</span>
+            <SenderChip name={senderName} avatarUrl={senderAvatarUrl} />
+          </>
+        )}
+        {isOut && <StatusTicks message={message} reason={failureReason} />}
+      </div>
+      {failureReason && (
+        <span className="px-1 text-[10px] leading-tight text-destructive/80">
+          {failureReason}
+        </span>
       )}
-    >
-      <LocalTime iso={message.timestamp} format="messageTime" />
-      {isOut && senderName && (
-        <>
-          <span className="opacity-50">·</span>
-          <SenderChip name={senderName} avatarUrl={senderAvatarUrl} />
-        </>
-      )}
-      {isOut && <StatusTicks message={message} />}
     </div>
   );
 }
@@ -65,7 +80,15 @@ function SenderChip({
   );
 }
 
-function StatusTicks({ message }: { message: Message }) {
+function StatusTicks({
+  message,
+  reason,
+}: {
+  message: Message;
+  // Provider failure reason for the failed-status tooltip (native title);
+  // null on the optimistic-failed path (no provider reason yet).
+  reason?: string | null;
+}) {
   if (message.failed) {
     return <AlertCircle className="size-3 text-destructive" aria-label="Failed to send" />;
   }
@@ -74,7 +97,13 @@ function StatusTicks({ message }: { message: Message }) {
   }
   switch (message.status) {
     case "failed":
-      return <AlertCircle className="size-3 text-destructive" aria-label="Failed to send" />;
+      return (
+        <AlertCircle
+          className="size-3 text-destructive"
+          aria-label={reason ? `Failed to send: ${reason}` : "Failed to send"}
+          {...(reason ? { title: reason } : {})}
+        />
+      );
     case "sent":
       return <Check className="size-3 opacity-70" aria-label="Sent" />;
     case "delivered":

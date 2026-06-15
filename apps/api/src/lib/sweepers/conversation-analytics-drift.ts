@@ -10,7 +10,7 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * are fire-and-forget — they swallow + log on error so analytics bookkeeping
  * can never break a real send/assign/close. The trade-off is drift: a swallowed
  * exception (transient DB blip) leaves a counter low forever with no operator
- * signal. F3 in docs/architecture-review-2026-05-25.md.
+ * signal. F3 in docs/audit-guide.md.
  *
  * Scope is DELIBERATELY narrow — ONLY the two counters that re-derive EXACTLY
  * and CHEAPLY from `Message` (a plain COUNT by direction). We do NOT reconcile:

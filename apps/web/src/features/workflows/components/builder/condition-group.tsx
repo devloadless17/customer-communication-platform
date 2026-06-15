@@ -13,6 +13,7 @@ import {
   type ConditionOp,
   type GroupOp,
   type Trigger,
+  CONTACT_SCOPED_FIELDS,
   DIRECTION_VALUES,
   FIELDS_BY_TRIGGER,
   FIELD_LABELS,
@@ -21,6 +22,7 @@ import {
   STATUS_VALUES,
   TAG_CHANGE_KIND_VALUES,
   isGroup,
+  triggerCarriesContact,
 } from "./types";
 
 /**
@@ -83,9 +85,16 @@ export function ConditionGroupEditor({
   allowAllFields,
   catalogs,
 }: Props) {
+  // When the trigger carries no contact (incoming_webhook), its contact_*
+  // fields resolve against a null contact and never match — hide them so the
+  // author isn't offered a silent no-op. `allowAllFields` (branch steps) keeps
+  // the full set; the branch can still gate on prior step outputs.
+  const noContactTrigger = !allowAllFields && !triggerCarriesContact(trigger);
   const allowedFields = allowAllFields
     ? (Array.from(new Set(Object.values(FIELDS_BY_TRIGGER).flat())) as ConditionField[])
-    : FIELDS_BY_TRIGGER[trigger];
+    : noContactTrigger
+      ? FIELDS_BY_TRIGGER[trigger].filter((f) => !CONTACT_SCOPED_FIELDS.has(f))
+      : FIELDS_BY_TRIGGER[trigger];
   const isRoot = depth === 0;
   const canNestMore = depth < MAX_DEPTH - 1;
 
@@ -176,6 +185,14 @@ export function ConditionGroupEditor({
         )}
       </div>
 
+      {isRoot && noContactTrigger && (
+        <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+          This trigger has no contact, so contact filters (phone / name / email
+          / stage) aren&apos;t available — match on the webhook body inside a
+          Branch step instead.
+        </div>
+      )}
+
       {empty && (
         <div className="rounded-md border border-dashed border-border bg-background/40 px-3 py-2 text-[11px] text-muted-foreground">
           {isRoot ? "No filters — fires on every event." : "Empty group."}
@@ -211,7 +228,13 @@ export function ConditionGroupEditor({
       })}
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <Button type="button" variant="outline" size="sm" onClick={addCondition}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={addCondition}
+          disabled={allowedFields.length === 0}
+        >
           <Plus className="size-3.5" />
           Condition
         </Button>

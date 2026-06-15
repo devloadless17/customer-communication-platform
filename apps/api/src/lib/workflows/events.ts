@@ -142,6 +142,10 @@ export interface WorkflowConversationSnapshot {
   firstResponseByUserId: string | null;
   closedAt: string | null;
   closedByUserId: string | null;
+  /** API-key actor that closed the conversation (mirrors closedByUserId for
+   *  /v1 + workflow closes). Null on reopen / user-driven closes.
+   *  Mirrors @ccp/shared/workflows/events. */
+  closedByApiKeyId?: string | null;
   closedCategory: string | null;
   closedSummary: string | null;
   assignmentsCount: number;
@@ -216,6 +220,7 @@ export function workflowConversationSnapshot(c: {
   firstResponseByUserId?: string | null;
   closedAt?: Date | null;
   closedByUserId?: string | null;
+  closedByApiKeyId?: string | null;
   closedCategory?: string | null;
   closedSummary?: string | null;
   assignmentsCount?: number;
@@ -241,6 +246,7 @@ export function workflowConversationSnapshot(c: {
     firstResponseByUserId: c.firstResponseByUserId ?? null,
     closedAt: c.closedAt?.toISOString() ?? null,
     closedByUserId: c.closedByUserId ?? null,
+    closedByApiKeyId: c.closedByApiKeyId ?? null,
     closedCategory: c.closedCategory ?? null,
     closedSummary: c.closedSummary ?? null,
     assignmentsCount: c.assignmentsCount ?? 0,
@@ -300,8 +306,9 @@ export function workflowConversationSnapshotAfterAssign(
  *
  * Predicted fields:
  *   - newStatus === "closed":  `closedAt` = now, `closedByUserId` = `changedByUserId`,
- *     and `closedCategory` / `closedSummary` from the event (when supplied).
- *   - previousStatus === "closed" (reopen): nullify all four close fields.
+ *     `closedByApiKeyId` = `changedByApiKeyId`, and `closedCategory` /
+ *     `closedSummary` from the event (when supplied).
+ *   - previousStatus === "closed" (reopen): nullify all close fields.
  *
  * `c` is the row state with the NEW status already applied (callers pass the
  * row from their CAS-update return, OR the pre-flip row with the new status
@@ -312,6 +319,9 @@ export function workflowConversationSnapshotAfterStatusChange(
   args: {
     previousStatus: ConversationStatus;
     changedByUserId: string | null;
+    /** API-key actor on /v1 + workflow closes — predicted onto
+     *  closedByApiKeyId so the conversation_closed trigger exposes it. */
+    changedByApiKeyId?: string | null;
     closedCategory?: string | null;
     closedSummary?: string | null;
   },
@@ -323,6 +333,7 @@ export function workflowConversationSnapshotAfterStatusChange(
     closeOverrides = {
       closedAt: now,
       closedByUserId: args.changedByUserId,
+      closedByApiKeyId: args.changedByApiKeyId ?? null,
       ...(args.closedCategory !== undefined ? { closedCategory: args.closedCategory } : {}),
       ...(args.closedSummary !== undefined ? { closedSummary: args.closedSummary } : {}),
     };
@@ -330,6 +341,7 @@ export function workflowConversationSnapshotAfterStatusChange(
     closeOverrides = {
       closedAt: null,
       closedByUserId: null,
+      closedByApiKeyId: null,
       closedCategory: null,
       closedSummary: null,
     };

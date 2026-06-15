@@ -319,7 +319,19 @@ export async function getConversationWithRefs(
         where: { kind: { notIn: NON_PILL_EVENT_KINDS } },
         orderBy: { at: "desc" },
         take: ACTIVITY_WINDOW,
-        include: {
+        // `workflowId` rides along (no FK to join — denormalized actor style),
+        // batch-resolved to a name in mapActivityEventRows so a workflow-driven
+        // change renders "by workflow «name»" instead of a bare "System".
+        select: {
+          id: true,
+          conversationId: true,
+          kind: true,
+          before: true,
+          after: true,
+          at: true,
+          userId: true,
+          apiKeyId: true,
+          workflowId: true,
           user: { select: { name: true } },
           apiKey: { select: { name: true } },
         },
@@ -427,7 +439,13 @@ async function mapActivityEventRows(
   rowsDesc: ActivityEventRow[],
 ): Promise<ConversationWithRefs["events"]> {
   const assigneeIds = new Set<string>();
+  // Workflow-driven rows carry a denormalized `workflowId` (no FK to join) —
+  // collect the distinct ids so the name lookup is one batched query, mirroring
+  // the assignee-name resolution. A since-deleted workflow simply won't appear
+  // in the result map and renders the generic "Automation" label.
+  const workflowIds = new Set<string>();
   for (const e of rowsDesc) {
+    if (e.workflowId) workflowIds.add(e.workflowId);
     if (e.kind !== "assigned") continue;
     const after = e.after as { assignedUserId?: unknown } | null;
     if (after && typeof after.assignedUserId === "string") {
@@ -442,9 +460,19 @@ async function mapActivityEventRows(
     });
     for (const u of users) assigneeNameById.set(u.id, u.name);
   }
+  const workflowNameById = new Map<string, string>();
+  if (workflowIds.size > 0) {
+    const workflows = await db.workflow.findMany({
+      where: { id: { in: [...workflowIds] } },
+      select: { id: true, name: true },
+    });
+    for (const w of workflows) workflowNameById.set(w.id, w.name);
+  }
   // Reverse the desc fetch to chronological (oldest-first) so it merges into
   // the timeline the same way messages/notes do.
-  return [...rowsDesc].reverse().map((e) => mapActivityEvent(e, assigneeNameById));
+  return [...rowsDesc].reverse().map((e) =>
+    mapActivityEvent(e, assigneeNameById, workflowNameById),
+  );
 }
 
 /**
@@ -473,7 +501,18 @@ export async function listConversationEvents(
     where: { conversationId, teamId, kind: { notIn: NON_PILL_EVENT_KINDS } },
     orderBy: { at: "desc" },
     take: ACTIVITY_WINDOW,
-    include: {
+    // Same explicit select as the hydration so `workflowId` rides along and the
+    // "by workflow «name»" attribution converges on the post-frame refetch too.
+    select: {
+      id: true,
+      conversationId: true,
+      kind: true,
+      before: true,
+      after: true,
+      at: true,
+      userId: true,
+      apiKeyId: true,
+      workflowId: true,
       user: { select: { name: true } },
       apiKey: { select: { name: true } },
     },

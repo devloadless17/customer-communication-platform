@@ -745,6 +745,7 @@ function CanvasInner({
       {picker && (
         <StepPickerPopover
           anchor={picker}
+          trigger={triggerType}
           onPick={(type, anchor) => {
             onInsertStep(
               anchor.sourceId,

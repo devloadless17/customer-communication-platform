@@ -23,6 +23,9 @@ interface RecordArgs {
   /** Set on external /v1 mutations so the audit row attributes the change
    *  to the API key instead of leaving userId null + opaque. */
   apiKeyId?: string | null;
+  /** Set on workflow-step-driven mutations so the audit row attributes the
+   *  change to the automation instead of leaving every actor field null. */
+  workflowId?: string | null;
   kind: ConversationEventKind;
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
@@ -47,6 +50,7 @@ export async function recordConversationEvent(args: RecordArgs): Promise<void> {
         teamId: args.teamId,
         userId: args.userId,
         apiKeyId: args.apiKeyId ?? null,
+        workflowId: args.workflowId ?? null,
         kind: args.kind,
         ...(args.at ? { at: new Date(args.at) } : {}),
         before:

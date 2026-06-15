@@ -119,6 +119,19 @@ export const FANOUT_RULES: FanoutRuleMap = {
       conversationId: e.conversationId,
       messageId: e.messageId,
       status: e.status,
+      // Forward the provider failure reason to the viewing agent's failed
+      // bubble. Only on a `failed` transition that carried a Meta `errors[0]`
+      // (same conditional the ingest mapper uses to stamp the event); absent
+      // on every sent/delivered/read tick.
+      ...(e.status === "failed" && e.errorCode !== undefined
+        ? { errorCode: e.errorCode }
+        : {}),
+      ...(e.status === "failed" && e.errorTitle !== undefined
+        ? { errorTitle: e.errorTitle }
+        : {}),
+      ...(e.status === "failed" && e.errorDetail !== undefined
+        ? { errorDetail: e.errorDetail }
+        : {}),
     });
   },
 
@@ -214,6 +227,15 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // (contact-browser.tsx:reconcileContactUpdate). Re-using the wire frame
   // means no new client handler is needed for the same UX outcome.
   "contact.created": (e, emitter) => {
+    // CSV import publishes a per-row `contact.created` with
+    // `suppressSocketFanout: true` and relies on the coalesced
+    // `contact.bulk_updated` rule below for the single socket frame —
+    // mirroring how `contact.updated` honors the same flag. Webhook + audit
+    // + workflow subscribers still see the per-row created event (they don't
+    // read this flag); only socket fanout is short-circuited, so a 500-row
+    // import doesn't storm every connected tab with 500 `contact:updated`
+    // frames.
+    if (e.suppressSocketFanout) return;
     emitter.emitToTeam(e.teamId, "contact:updated", {
       teamId: e.teamId,
       contact: e.contact,

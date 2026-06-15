@@ -75,6 +75,8 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
       conversationId,
       targetUserId,
       changedByUserId: null,
+      // Attribute the assignment to the running workflow on the audit row.
+      changedByWorkflowId: ctx.workflowId,
       silent: true,
     });
 

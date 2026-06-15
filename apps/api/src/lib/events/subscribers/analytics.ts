@@ -55,6 +55,9 @@ export function registerAnalyticsSubscribers(): () => void {
       // System-driven transitions (e.g. reopen on inbound) carry null
       // changedByUserId; trackOnStatusChanged tolerates it.
       changedByUserId: e.changedByUserId,
+      // External /v1 + workflow closes carry an API-key actor instead of a
+      // user; mirror it onto closedByApiKeyId on the same close write.
+      changedByApiKeyId: e.changedByApiKeyId ?? null,
       // Step-driven closures (workflow close_conversation step) attach
       // category + free-text summary; trackOnStatusChanged persists them
       // alongside closedAt when newStatus === "closed".

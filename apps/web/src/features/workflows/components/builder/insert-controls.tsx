@@ -16,7 +16,14 @@ import { Copy, Plus, Search, Trash2, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@ccp/shared/utils";
 
-import { STEP_OPTIONS, type StepType } from "./types";
+import {
+  CONTACT_ACTING_STEPS,
+  NEEDS_CONTACT_TRIGGER_HINT,
+  STEP_OPTIONS,
+  type StepType,
+  type Trigger,
+  triggerCarriesContact,
+} from "./types";
 
 /**
  * Inline-insert UI for the workflow canvas. Three pieces:
@@ -502,11 +509,20 @@ export function StepPickerPopover({
   anchor,
   onPick,
   onClose,
+  trigger,
 }: {
   anchor: PickerAnchor;
   onPick: (type: StepType, anchor: PickerAnchor) => void;
   onClose: () => void;
+  /** Workflow's trigger — drives the "needs a contact-scoped trigger" badge on
+   *  contact/conversation-acting steps when the trigger carries no contact
+   *  (incoming_webhook). Optional so isolated callers still render the palette. */
+  trigger?: Trigger;
 }) {
+  // Steps that act on the trigger's contact / conversation no-op on a
+  // contact-less trigger. Badge them so the author sees the limitation before
+  // dropping the step rather than debugging a silent no-op later.
+  const noContactTrigger = !!trigger && !triggerCarriesContact(trigger);
   const [q, setQ] = useState("");
   const ref = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -600,26 +616,38 @@ export function StepPickerPopover({
               {GROUP_LABELS[group] ?? group}
             </div>
             <div className="flex flex-col">
-              {options.map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => {
-                    onPick(o.value, anchor);
-                  }}
-                  className={cn(
-                    "flex flex-col items-start rounded-md px-2 py-1.5 text-left transition-colors",
-                    "hover:bg-accent/60",
-                  )}
-                >
-                  <span className="text-[13px] font-medium leading-tight">
-                    {o.label}
-                  </span>
-                  <span className="line-clamp-1 text-[11px] text-muted-foreground">
-                    {o.description}
-                  </span>
-                </button>
-              ))}
+              {options.map((o) => {
+                const needsContact =
+                  noContactTrigger && CONTACT_ACTING_STEPS.has(o.value);
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    onClick={() => {
+                      onPick(o.value, anchor);
+                    }}
+                    className={cn(
+                      "flex flex-col items-start rounded-md px-2 py-1.5 text-left transition-colors",
+                      "hover:bg-accent/60",
+                    )}
+                  >
+                    <span className="flex w-full items-center gap-1.5 text-[13px] font-medium leading-tight">
+                      {o.label}
+                      {needsContact && (
+                        <span
+                          title={NEEDS_CONTACT_TRIGGER_HINT}
+                          className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400"
+                        >
+                          {NEEDS_CONTACT_TRIGGER_HINT}
+                        </span>
+                      )}
+                    </span>
+                    <span className="line-clamp-1 text-[11px] text-muted-foreground">
+                      {o.description}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         ))}

@@ -65,6 +65,9 @@ export function registerAuditSubscribers(): () => void {
       // attributes the change to the API key. Mutually exclusive with
       // userId in practice — partner integrations have no human author.
       apiKeyId: e.changedByApiKeyId ?? null,
+      // Workflow-step-driven mutations set changedByWorkflowId so the row
+      // attributes the change to the automation rather than null/opaque.
+      workflowId: e.changedByWorkflowId ?? null,
       kind: "assigned",
       before: { assignedUserId: e.previousAssignedUserId },
       after: { assignedUserId: e.newAssignedUserId },
@@ -78,6 +81,7 @@ export function registerAuditSubscribers(): () => void {
       teamId: e.teamId,
       userId: e.changedByUserId,
       apiKeyId: e.changedByApiKeyId ?? null,
+      workflowId: e.changedByWorkflowId ?? null,
       kind: "status_changed",
       before: { status: e.previousStatus },
       after: { status: e.newStatus },
@@ -91,6 +95,7 @@ export function registerAuditSubscribers(): () => void {
       teamId: e.teamId,
       userId: e.changedByUserId,
       apiKeyId: e.changedByApiKeyId ?? null,
+      workflowId: e.changedByWorkflowId ?? null,
       kind: e.newAiEnabled ? "ai_resumed" : "ai_paused",
       before: { aiEnabled: e.previousAiEnabled },
       after: { aiEnabled: e.newAiEnabled },

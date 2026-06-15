@@ -63,6 +63,10 @@ interface OnStatusChangedArgs {
   previousStatus: string;
   newStatus: string;
   changedByUserId: string | null;
+  /** API-key actor on /v1 + workflow closes — mirrors `changedByUserId` so the
+   *  close metadata records WHO (key) closed it. Set on the same update as
+   *  closedByUserId; nulled on reopen. */
+  changedByApiKeyId?: string | null;
   /** Optional close-context written when newStatus === "closed". */
   closedCategory?: string | null;
   closedSummary?: string | null;
@@ -76,6 +80,7 @@ export async function trackOnStatusChanged(args: OnStatusChangedArgs): Promise<v
     if (args.newStatus === "closed") {
       data.closedAt = new Date();
       data.closedByUserId = args.changedByUserId;
+      data.closedByApiKeyId = args.changedByApiKeyId ?? null;
       if (args.closedCategory !== undefined) data.closedCategory = args.closedCategory;
       if (args.closedSummary !== undefined) data.closedSummary = args.closedSummary;
     } else if (args.previousStatus === "closed") {
@@ -83,6 +88,7 @@ export async function trackOnStatusChanged(args: OnStatusChangedArgs): Promise<v
       // measure from THIS cycle, not the previous one.
       data.closedAt = null;
       data.closedByUserId = null;
+      data.closedByApiKeyId = null;
       data.closedCategory = null;
       data.closedSummary = null;
     }

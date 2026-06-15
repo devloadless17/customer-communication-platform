@@ -26,9 +26,23 @@ const STATUS_VERB: Record<ConversationStatus, string> = {
   closed: "closed the conversation",
 };
 
-/** Bold actor name fragment, reused across every kind. `System` for automation. */
-function actor(name: string | null): string {
-  return name ?? "System";
+/**
+ * Bold actor fragment, reused across every kind.
+ *  - user / apiKey → the resolved name ("Sara", "Zapier integration")
+ *  - workflow      → "workflow «name»" (the automation that made the change),
+ *                    or "Automation" when the workflow was since deleted
+ *  - system        → "System" (retention sweeps / unattributed)
+ * Rendered as one `<b>` so the surrounding sentence structure is unchanged for
+ * the existing kinds — only the *text* differs for the workflow actor.
+ */
+function actor(event: ConversationActivityEvent): React.ReactNode {
+  if (event.actorKind === "workflow") {
+    // actorWorkflowName === null → workflow deleted; undefined shouldn't happen
+    // for a workflow actor but the ?? guards it the same way.
+    const name = event.actorWorkflowName;
+    return name ? <b>workflow «{name}»</b> : <b>Automation</b>;
+  }
+  return <b>{event.actorName ?? "System"}</b>;
 }
 
 /**
@@ -40,7 +54,10 @@ function describe(e: ConversationActivityEvent): {
   icon: typeof CircleDot;
   text: React.ReactNode;
 } | null {
-  const who = actor(e.actorName);
+  // `who` is the bold actor node (name for user/apiKey, "workflow «name»" for
+  // an automation, "System" otherwise). Built once; each branch drops it into
+  // the sentence in place of the former inline `{who}`.
+  const who = actor(e);
   switch (e.kind) {
     case "assigned": {
       const toName = e.assignedToName;
@@ -50,7 +67,7 @@ function describe(e: ConversationActivityEvent): {
           icon: UserMinus,
           text: (
             <>
-              <b>{who}</b> unassigned the conversation
+              {who} unassigned the conversation
             </>
           ),
         };
@@ -61,11 +78,11 @@ function describe(e: ConversationActivityEvent): {
         icon: UserPlus,
         text: toSelf ? (
           <>
-            <b>{who}</b> self-assigned
+            {who} self-assigned
           </>
         ) : (
           <>
-            <b>{who}</b> assigned to <b>{toName}</b>
+            {who} assigned to <b>{toName}</b>
           </>
         ),
       };
@@ -77,7 +94,7 @@ function describe(e: ConversationActivityEvent): {
         icon: CircleDot,
         text: (
           <>
-            <b>{who}</b> {STATUS_VERB[status]}
+            {who} {STATUS_VERB[status]}
           </>
         ),
       };
@@ -87,7 +104,7 @@ function describe(e: ConversationActivityEvent): {
         icon: Bot,
         text: (
           <>
-            <b>{who}</b> paused AI Autopilot
+            {who} paused AI Autopilot
           </>
         ),
       };
@@ -96,7 +113,7 @@ function describe(e: ConversationActivityEvent): {
         icon: Bot,
         text: (
           <>
-            <b>{who}</b> resumed AI Autopilot
+            {who} resumed AI Autopilot
           </>
         ),
       };
@@ -107,7 +124,7 @@ function describe(e: ConversationActivityEvent): {
         icon: ArrowRightLeft,
         text: (
           <>
-            <b>{who}</b> moved stage{" "}
+            {who} moved stage{" "}
             {from ? <b>{from}</b> : <i>none</i>} → {to ? <b>{to}</b> : <i>none</i>}
           </>
         ),
@@ -119,7 +136,7 @@ function describe(e: ConversationActivityEvent): {
         icon: Tag,
         text: (
           <>
-            <b>{who}</b> added tag {name ? <b>{name}</b> : <i>tag</i>}
+            {who} added tag {name ? <b>{name}</b> : <i>tag</i>}
           </>
         ),
       };
@@ -130,7 +147,7 @@ function describe(e: ConversationActivityEvent): {
         icon: Tag,
         text: (
           <>
-            <b>{who}</b> removed tag {name ? <b>{name}</b> : <i>tag</i>}
+            {who} removed tag {name ? <b>{name}</b> : <i>tag</i>}
           </>
         ),
       };
@@ -140,7 +157,7 @@ function describe(e: ConversationActivityEvent): {
         icon: Trash2,
         text: (
           <>
-            <b>{who}</b> deleted an internal note
+            {who} deleted an internal note
           </>
         ),
       };
