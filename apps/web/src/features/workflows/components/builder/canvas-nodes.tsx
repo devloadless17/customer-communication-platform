@@ -236,7 +236,9 @@ export function BranchNode({ id, data }: NodeProps) {
         type="source"
         position={Position.Bottom}
         id="false"
-        style={{ left: "75%", background: "hsl(var(--destructive))" }}
+        // --destructive is an oklch() token, so it must be used directly — the
+        // old hsl(var(--destructive)) wrapper was invalid and rendered black.
+        style={{ left: "75%", background: "var(--destructive)" }}
       />
       {/* Per-output "+" affordances for empty handles. Without these, a
           freshly-added Branch step had two bare handles and the only way
