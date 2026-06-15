@@ -816,12 +816,21 @@ const ContactRow = memo(function ContactRow({
         </span>
       </button>
 
-      {/* Interactive right cluster — clicks here never open the drawer. */}
+      {/* Interactive right cluster — clicks here never open the drawer.
+          Each child is a fixed-width "lane" so columns line up vertically down
+          the list (matches the design's aligned-lanes treatment). Lanes still
+          reserve their width when empty, so a row with no tags/time/chat keeps
+          the same column rhythm as its neighbours. */}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground"
+        className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground"
       >
-        <div ref={tagBoxRef} className="relative hidden items-center gap-1 md:flex">
+        {/* Tags lane (no overflow-clip here — it would cut off the tag picker
+            popover, which is absolutely positioned inside this box). */}
+        <div
+          ref={tagBoxRef}
+          className="relative hidden w-[120px] shrink-0 items-center justify-end gap-1 md:flex"
+        >
           {shownTags.map((t) => (
             <TagChip key={t.id} tag={t} size="xs" />
           ))}
@@ -851,38 +860,47 @@ const ContactRow = memo(function ContactRow({
           )}
         </div>
 
-        <ContactStagePicker
-          stages={stageCatalog}
-          currentStageId={contact.stageId}
-          onChange={persistStage}
-          canManage={canManageStages}
-          size="xs"
-        />
-
-        <WindowBadge
-          lastInboundAt={lastInboundAt}
-          size="xs"
-          className="hidden lg:inline-flex"
-        />
-
-        {lastMessageAt && (
-          <LocalTime
-            iso={lastMessageAt}
-            format="listTime"
-            className="hidden w-12 text-right tabular-nums xl:inline"
+        {/* Stage lane */}
+        <div className="flex w-28 shrink-0 items-center justify-start">
+          <ContactStagePicker
+            stages={stageCatalog}
+            currentStageId={contact.stageId}
+            onChange={persistStage}
+            canManage={canManageStages}
+            size="xs"
           />
-        )}
+        </div>
 
-        {activeConversationId && (
-          <Link
-            href={`/inbox/${activeConversationId}`}
-            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-            title="Open chat"
-          >
-            <MessageSquare className="size-3" />
-            <span className="hidden sm:inline">Open chat</span>
-          </Link>
-        )}
+        {/* Window lane — wide enough for the longest one-line badge
+            ("Window closed · closed 24m ago") so it never wraps or clips. */}
+        <div className="hidden w-[210px] shrink-0 items-center justify-start lg:flex">
+          <WindowBadge lastInboundAt={lastInboundAt} size="xs" />
+        </div>
+
+        {/* Time lane */}
+        <div className="hidden w-12 shrink-0 items-center justify-end xl:flex">
+          {lastMessageAt && (
+            <LocalTime
+              iso={lastMessageAt}
+              format="listTime"
+              className="text-right tabular-nums"
+            />
+          )}
+        </div>
+
+        {/* Open-chat lane */}
+        <div className="flex w-[104px] shrink-0 items-center justify-end">
+          {activeConversationId && (
+            <Link
+              href={`/inbox/${activeConversationId}`}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+              title="Open chat"
+            >
+              <MessageSquare className="size-3" />
+              <span className="hidden sm:inline">Open chat</span>
+            </Link>
+          )}
+        </div>
       </div>
     </li>
   );

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 
+import Anthropic from "@anthropic-ai/sdk";
 import { Prisma } from "@prisma/client";
 import {
   BadGatewayException,
@@ -11,6 +12,7 @@ import {
   Logger,
   NotFoundException,
   PayloadTooLargeException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from "@nestjs/common";
 
@@ -65,6 +67,7 @@ import type {
   SendMediaFormInput,
   SendTemplateInput,
   SendTextInput,
+  TranslateInput,
 } from "./messages.schemas";
 import { runWithSendIdempotency } from "./send-idempotency";
 import { enqueueMessageSend } from "./send-queue";
@@ -101,11 +104,75 @@ function templateHeaderKindFromMime(
 @Injectable()
 export class MessagesService {
   private readonly logger = new Logger(MessagesService.name);
+  // Lazy Anthropic client for the composer translate endpoint. Built on first
+  // use (so a missing key surfaces a clean 503 instead of a boot crash) and
+  // reused across calls. The SDK reads no other config we care about here.
+  private anthropic: Anthropic | null = null;
 
   constructor(
     private readonly db: DbService,
     private readonly bus: EventBus,
   ) {}
+
+  /**
+   * Translate composer text to a target language via the Claude API. Stateless
+   * — it just transforms a string the agent is drafting (does NOT send or
+   * persist anything), so it takes raw text rather than a conversation id.
+   *
+   * Model: claude-opus-4-8. No thinking (translation is a simple transform —
+   * faster + cheaper without it) and a strict system prompt so the model emits
+   * ONLY the translation, never a preamble or its reasoning. No prompt caching:
+   * the prefix is far below Opus 4.8's 4096-token cache minimum, so a
+   * cache_control breakpoint would be a silent no-op. Key in `ANTHROPIC_API_KEY`
+   * for now (env, like the other secrets — moves to the Team table when
+   * multi-tenant). `targetLang` is a language NAME (e.g. "Arabic").
+   */
+  async translate(input: TranslateInput): Promise<{ text: string }> {
+    const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+    if (!apiKey) {
+      throw new ServiceUnavailableException(
+        "Translation isn't configured — set ANTHROPIC_API_KEY.",
+      );
+    }
+    if (!this.anthropic) this.anthropic = new Anthropic({ apiKey });
+
+    try {
+      const message = await this.anthropic.messages.create({
+        model: "claude-opus-4-8",
+        // Output is bounded by the input length (composer text ≤ 8000 chars);
+        // 8192 leaves headroom for languages that expand. Non-streaming is fine
+        // well under the SDK's timeout threshold.
+        max_tokens: 8192,
+        system:
+          `You are a translation engine. Translate the user's message into ${input.targetLang}. ` +
+          `Preserve meaning, tone, line breaks, emoji, @mentions, URLs, and any placeholders exactly. ` +
+          `Output ONLY the translated text — no preamble, no explanation, no quotes, no notes.`,
+        messages: [{ role: "user", content: input.text }],
+      });
+
+      const text = message.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("")
+        .trim();
+
+      if (!text) throw new BadGatewayException("Translation returned no result.");
+      return { text };
+    } catch (err) {
+      if (err instanceof HttpException) throw err; // our own 502 above
+      if (err instanceof Anthropic.APIError) {
+        this.logger.warn(`Anthropic translate failed: ${err.status} ${err.message}`);
+        if (err instanceof Anthropic.RateLimitError) {
+          throw new ServiceUnavailableException(
+            "Translation is busy — try again in a moment.",
+          );
+        }
+        throw new BadGatewayException("Translation failed. Try again.");
+      }
+      this.logger.warn(`Translate error: ${String(err)}`);
+      throw new BadGatewayException("Translation failed. Try again.");
+    }
+  }
 
   /**
    * Commit the side-effects that follow a successful outbound DB write:

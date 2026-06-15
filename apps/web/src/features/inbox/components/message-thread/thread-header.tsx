@@ -4,7 +4,7 @@ import { ChevronLeft, Info, Phone, Search as SearchIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { ContactStageStepper } from "@/features/contacts/components/contact-stage-picker";
+import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { formatPhone, initials } from "@ccp/shared/utils";
 import type { ContactStage, ConversationStatus, User } from "@ccp/shared/types";
@@ -164,11 +164,15 @@ export function ThreadHeader({
       </div>
 
       <div className="ml-3 hidden shrink-0 md:flex">
-        <ContactStageStepper
+        {/* Just the clickable stage pill (opens the picker to jump to any
+            stage). The prev/next stepper arrows were removed per design —
+            the pill's dropdown covers the same moves. */}
+        <ContactStagePicker
           stages={stageCatalog}
           currentStageId={currentStageId}
           onChange={onStageChange}
           canManage={canManageStages}
+          size="sm"
         />
       </div>
 

@@ -97,6 +97,35 @@ export const listTeamMembers = cache(async (): Promise<User[]> => {
   return users;
 });
 
+/** Period window for the team-activity report. `all` = all-time. */
+export type StatsPeriod = "day" | "week" | "month" | "year" | "all";
+
+/** Per-member activity for the team-activity settings page (admin-only). */
+export interface MemberStat {
+  userId: string;
+  name: string;
+  email: string;
+  role: Role;
+  deactivated: boolean;
+  /** Chats currently assigned (point-in-time, ignores the period). */
+  activeAssigned: number;
+  /** Assignment actions to them within the period. */
+  assigned: number;
+  /** Outbound messages they sent within the period. */
+  messagesSent: number;
+  /** Conversations they closed within the period. */
+  closed: number;
+}
+
+export const getMemberStats = cache(
+  async (period: StatsPeriod = "all"): Promise<MemberStat[]> => {
+    const { stats } = await api<{ stats: MemberStat[] }>(
+      `/api/users/stats?period=${period}`,
+    );
+    return stats;
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Super-admin (cross-team)
 // ---------------------------------------------------------------------------

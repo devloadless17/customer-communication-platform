@@ -289,6 +289,7 @@ function MessageThreadImpl({
   onOpenContactDetails,
   jumpToMessageId,
   jumpNonce,
+  rightPanel,
 }: {
   data: ConversationWithRefs;
   /** True when `data` is a possibly-stale LRU snapshot (cache-hit switch-back):
@@ -345,6 +346,11 @@ function MessageThreadImpl({
    *  jump to the SAME message id re-fire — without it the handled-guard below
    *  would treat the unchanged id as already-done and the click is a no-op. */
   jumpNonce?: number;
+  /** Optional right-hand column (the ContactPanel) rendered as a sibling of the
+   *  message body, BELOW the full-width header. Lets the header + action bar
+   *  span across the thread AND the details panel (the details sits under the
+   *  name/status bar) while the composer stays under the messages only. */
+  rightPanel?: React.ReactNode;
 }) {
   const {
     data,
@@ -1331,6 +1337,16 @@ function MessageThreadImpl({
         onOpenContactDetails={onOpenContactDetails}
       />
 
+      {/* Body row sits BELOW the full-width header: the message list + composer
+          on the left, the optional details panel (rightPanel) on the right.
+          This is what makes the header/action bar span across both columns
+          while the composer stays under the messages only. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Messages + composer column. lg:min-w keeps the thread usable when the
+            details panel is open and the window is resized (the resizers also
+            clamp to this at drag-time — see MIN_THREAD_WIDTH in inbox-shell). */}
+        <div className="relative flex min-w-0 flex-1 flex-col lg:min-w-[560px]">
+
       {searchOpen && (
         <MessageSearch
           conversationId={conversation.id}
@@ -1397,7 +1413,13 @@ function MessageThreadImpl({
             // keeps the content at its natural height in the flex column (so the
             // viewport scrolls) instead of being squeezed to fit the viewport.
             style={{ overflowAnchor: "none" }}
-            className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-2 px-6 py-6"
+            // max-w-6xl: when the details panel is collapsed the thread gets
+            // wide; a tighter cap left a big empty margin before the rail.
+            // Bubbles are individually capped at 70% (message-bubble.tsx), so a
+            // wide container fills the space cleanly without over-long lines.
+            // MUST match the composer's max-width (reply-box.tsx) so messages
+            // and the reply box align — a mismatch reads as a layout gap.
+            className="mx-auto flex w-full max-w-6xl shrink-0 flex-col gap-2 px-6 py-6"
           >
             {/* Top sentinel — IntersectionObserver target for "load older".
                 The loading indicator is rendered OUTSIDE the scroll content (a
@@ -1452,8 +1474,9 @@ function MessageThreadImpl({
       </div>
 
       {/* Older-messages spinner — floats over the top of the thread, never in
-          the scroll flow, so loading a page doesn't nudge the view at all. */}
-      <div className="pointer-events-none absolute inset-x-0 top-15 z-10 flex justify-center pt-2">
+          the scroll flow, so loading a page doesn't nudge the view at all.
+          Anchored near the top of the (header-less) left column. */}
+      <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center pt-2">
         <AnimatePresence>
           {loadingOlder && (
             <motion.span
@@ -1524,6 +1547,11 @@ function MessageThreadImpl({
           />
         </div>
       )}
+        </div>
+        {/* Details panel (+ its own resize handle) — sits under the header,
+            to the right of the messages/composer column. */}
+        {rightPanel}
+      </div>
 
       {/* Gated render (like MessageSearch below) so next/dynamic only fetches
           the chunk when forward is actually opened — rendering it

@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
+import { AppearanceMode } from "./account/appearance-mode";
 
 export const metadata = { title: "Team settings" };
 export const dynamic = "force-dynamic";
@@ -71,6 +72,17 @@ export default async function TeamSettingsIndex() {
           in the workspace.
         </p>
       </header>
+
+      <section className="mb-8 rounded-xl border border-border bg-card p-5">
+        <div className="mb-4">
+          <div className="text-sm font-medium">Mode</div>
+          <div className="text-[11px] text-muted-foreground">
+            Light or dark mode. “System” follows your device. Applies to your
+            account on this device.
+          </div>
+        </div>
+        <AppearanceMode />
+      </section>
 
       <CardGrid cards={cards} />
     </div>

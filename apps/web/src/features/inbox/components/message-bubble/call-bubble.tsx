@@ -100,8 +100,10 @@ export function CallBubble({
       "border-border bg-muted/40 text-muted-foreground",
     info:
       "border-sky-300/50 bg-sky-50 text-sky-900 dark:border-sky-700/40 dark:bg-sky-900/20 dark:text-sky-200",
+    // Missed / no-answer calls. A soft "comfy" red (rose) — clearly negative
+    // without the harshness of the `destructive` red used for failed/declined.
     warn:
-      "border-amber-300/50 bg-amber-50 text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200",
+      "border-rose-300/50 bg-rose-50 text-rose-900 dark:border-rose-700/40 dark:bg-rose-900/20 dark:text-rose-200",
     danger:
       "border-destructive/40 bg-destructive/10 text-destructive",
   } as const;

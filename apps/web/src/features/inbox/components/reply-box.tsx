@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  Languages,
   MessageSquare,
   MousePointerClick,
   Paperclip,
@@ -61,6 +62,7 @@ import {
   safeReadError,
 } from "./reply-box/utils";
 import { EmojiPopover } from "./reply-box/emoji-popover";
+import { TranslatePopover } from "./reply-box/translate-popover";
 import {
   MicButton,
   RecordingBar,
@@ -224,6 +226,7 @@ export function ReplyBox({
   const [attachment, setAttachment] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [translateOpen, setTranslateOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -905,9 +908,16 @@ export function ReplyBox({
 
   return (
     <div className="relative border-t border-border bg-background">
-      <div className="mx-auto w-full max-w-3xl px-4 pt-3 pb-4">
-        <div className="mb-2 flex items-center gap-2">
-          <div className="inline-flex rounded-md border border-border bg-muted/40 p-0.5">
+      {/* max-w-6xl: keep in sync with the message-list container
+          (message-thread.tsx) so the composer and messages line up at the same
+          width — otherwise the two columns look misaligned / gappy. */}
+      <div className="mx-auto w-full max-w-6xl px-4 pt-3 pb-4">
+        {/* flex-wrap + gap-y so that if the thread is ever narrow enough that
+            the toggle + window badge + Send template can't share one line, they
+            wrap onto the next line instead of overlapping. The resizers also
+            clamp the thread to MIN_THREAD_WIDTH so this is just a safety net. */}
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-2">
+          <div className="inline-flex shrink-0 rounded-md border border-border bg-muted/40 p-0.5">
             <ToggleButton active={mode === "reply"} onClick={() => setMode("reply")} icon={MessageSquare} label="Reply" />
             <ToggleButton active={mode === "note"} onClick={() => setMode("note")} icon={StickyNote} label="Note" />
           </div>
@@ -916,7 +926,7 @@ export function ReplyBox({
             <Button
               type="button"
               size="sm"
-              className="ml-auto h-7 gap-1.5 text-xs"
+              className="ml-auto h-7 shrink-0 gap-1.5 text-xs"
               onClick={() => setPickerOpen(true)}
             >
               <Sparkles className="size-3.5" />
@@ -1095,7 +1105,7 @@ export function ReplyBox({
               }}
             />
           ) : (
-          <div className="flex items-center gap-1 px-2 pb-2 pt-0">
+          <div className="@container flex items-center gap-1 px-2 pb-2 pt-0">
             <input
               ref={fileInputRef}
               type="file"
@@ -1225,6 +1235,31 @@ export function ReplyBox({
                     : "Record a voice message"
               }
             />
+            {/* Translate the current draft to a language of choice (DeepL).
+                Sits right next to the voice button; replaces the composer text
+                with the translation. */}
+            <div className="relative">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 text-muted-foreground"
+                type="button"
+                title="Translate this message"
+                aria-label="Translate this message"
+                onClick={() => {
+                  setEmojiOpen(false);
+                  setTranslateOpen((v) => !v);
+                }}
+              >
+                <Languages className="size-4" />
+              </Button>
+              <TranslatePopover
+                open={translateOpen}
+                onClose={() => setTranslateOpen(false)}
+                text={value}
+                onTranslated={(translated) => setValue(translated)}
+              />
+            </div>
 
             <AnimatePresence>
               {isNote && (
@@ -1240,25 +1275,37 @@ export function ReplyBox({
               )}
             </AnimatePresence>
 
-            <span className="ml-auto text-[10px] text-muted-foreground">
-              ↵ to send · ⇧↵ for newline
-            </span>
-            <Button
-              size="sm"
-              onClick={() => submit()}
-              // Disable while a previous submit is still being POSTed — pairs
-              // with the sendInFlightRef guard in `submit()` to make double-
-              // click a no-op. The ref is the source of truth; this just
-              // mirrors it visually so the user sees the button respond.
-              disabled={!canSend || sendInFlight}
-              className={cn(
-                "h-8 gap-1.5",
-                isNote && "bg-note-fg text-background hover:bg-note-fg/90",
-              )}
-            >
-              <Send className="size-3.5" />
-              {isNote ? "Save note" : attachment ? "Send media" : "Send"}
-            </Button>
+            {/* Trailing cluster: keyboard hint + Send. As the composer is
+                squished (resizable list/details eat the thread width), the hint
+                drops first, then the Send button collapses to a round
+                icon-only button — driven by the @container on this row. */}
+            <div className="ml-auto flex items-center gap-2">
+              <span className="hidden text-[10px] text-muted-foreground @[34rem]:inline">
+                ↵ to send · ⇧↵ for newline
+              </span>
+              <Button
+                size="sm"
+                onClick={() => submit()}
+                // Disable while a previous submit is still being POSTed — pairs
+                // with the sendInFlightRef guard in `submit()` to make double-
+                // click a no-op. The ref is the source of truth; this just
+                // mirrors it visually so the user sees the button respond.
+                disabled={!canSend || sendInFlight}
+                title={isNote ? "Save note" : attachment ? "Send media" : "Send"}
+                className={cn(
+                  "h-8 gap-1.5 @max-[26rem]:w-8 @max-[26rem]:gap-0 @max-[26rem]:rounded-full @max-[26rem]:px-0",
+                  // Note mode: a warm caramel that complements the beige note
+                  // palette (not the dark `note-fg`, which is the note TEXT
+                  // color and reads as muddy on a button).
+                  isNote && "bg-amber-700 text-white hover:bg-amber-800",
+                )}
+              >
+                <Send className="size-3.5" />
+                <span className="@max-[26rem]:hidden">
+                  {isNote ? "Save note" : attachment ? "Send media" : "Send"}
+                </span>
+              </Button>
+            </div>
           </div>
           )}
         </motion.div>

@@ -2,6 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import {
+  BarChart3,
   Bell,
   Layers,
   ListChecks,
@@ -72,6 +73,14 @@ export function SettingsSubSidebar({
             label="Role permissions"
             leading={<ShieldCheck className="size-4" />}
             active={isActive("/settings/permissions")}
+          />
+        )}
+        {permissions["teamActivity:view"] && (
+          <SubSidebarItem
+            href="/settings/activity"
+            label="Team activity"
+            leading={<BarChart3 className="size-4" />}
+            active={isActive("/settings/activity")}
           />
         )}
       </SubSidebarSection>

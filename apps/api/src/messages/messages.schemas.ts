@@ -8,6 +8,23 @@ export const SendTextSchema = z.object({
 });
 export type SendTextInput = z.infer<typeof SendTextSchema>;
 
+/**
+ * Composer translate. Stateless text transform (no conversation context).
+ * `targetLang` is a language NAME (e.g. "Arabic", "French") — Claude reads a
+ * name more reliably than a locale code. Constrained to letters/spaces/parens
+ * so the UI's curated list is the only realistic input.
+ */
+export const TranslateSchema = z.object({
+  text: z.string().trim().min(1).max(8000),
+  targetLang: z
+    .string()
+    .trim()
+    .min(2)
+    .max(40)
+    .regex(/^[A-Za-z()'\- ]+$/, "Invalid language"),
+});
+export type TranslateInput = z.infer<typeof TranslateSchema>;
+
 export const SendTemplateSchema = z.object({
   conversationId: z.string().min(1),
   templateId: z.string().min(1),

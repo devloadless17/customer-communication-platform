@@ -42,6 +42,7 @@ import {
 } from "@/features/inbox/lib/optimistic-activity";
 import { predictAssignmentStatus } from "@/features/inbox/lib/predict-status";
 import { STATUS_META } from "@/features/inbox/lib/status-meta";
+import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
@@ -192,13 +193,40 @@ function ContactPanelImpl({
     document.cookie = `contact-panel-collapsed=${String(next)}; path=/; max-age=31536000; samesite=lax`;
   }
 
+  // Drag-to-resize the expanded panel. Handle sits on the panel's LEFT edge so
+  // dragging left widens it (grow: "left"). Persisted width; null until mount
+  // (falls back to 320 = the prior fixed width, so no hydration mismatch).
+  const {
+    width: detailsWidth,
+    dragging: resizing,
+    onHandleDown,
+    onHandleKeyDown,
+  } = usePanelResize({
+    storageKey: "inbox-details-width",
+    min: 260,
+    max: 520,
+    def: 320,
+    grow: "left",
+    // Don't let dragging the details panel so wide that the messages column
+    // (its sibling in the body row) drops below a usable thread width. Measured
+    // live from the handle's parent (the body row = messages + handle + panel).
+    getDragMax: (handle) => {
+      const row = handle.parentElement;
+      if (!row) return Infinity;
+      const MIN_THREAD = 560; // keep in sync with inbox-shell MIN_THREAD_WIDTH
+      return row.getBoundingClientRect().width - 4 /* handle */ - MIN_THREAD;
+    },
+  });
+  const expandedWidth = detailsWidth ?? 320;
+
   // ------------------------------------------------------------------
-  // Live stats. ContactPanel is a SIBLING of MessageThread (see
-  // app/inbox/[conversationId]/page.tsx) — both receive the same
-  // server-rendered `data` snapshot, but only MessageThread runs
-  // useConversationEvents, so its prop stays frozen on this side. We
-  // mirror the small slice the panel renders (status + counts) by
-  // subscribing to the same events here. Two listeners for the same
+  // Live stats. ContactPanel is rendered in MessageThread's `rightPanel`
+  // slot (see inbox-shell ThreadWorkspace) but is NOT driven by its state —
+  // it receives the same frozen server-rendered `data` snapshot the thread
+  // got, and only MessageThread runs useConversationEvents, so this `data`
+  // prop stays frozen on this side. We mirror the small slice the panel
+  // renders (status + counts) by subscribing to the same events here. Two
+  // listeners for the same
   // events is cheap; the alternative would be lifting the hook into
   // a shared parent, which is a much larger refactor for this one
   // panel.
@@ -1406,11 +1434,32 @@ function ContactPanelImpl({
   if (isSheet) return body;
 
   return (
+    <>
+      {/* Drag-to-resize handle on the panel's left edge — desktop, expanded
+          only. Mirrors the conversation-list resizer in inbox-shell. */}
+      {!effectiveCollapsed && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize contact details panel"
+          aria-valuemin={260}
+          aria-valuemax={520}
+          aria-valuenow={expandedWidth}
+          tabIndex={0}
+          onPointerDown={onHandleDown}
+          onKeyDown={onHandleKeyDown}
+          className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none select-none outline-none lg:block"
+        >
+          <span className="absolute inset-y-0 -left-1 -right-1 z-10 transition-colors group-hover:bg-primary/30 group-focus-visible:bg-primary/50" />
+        </div>
+      )}
     <aside
       className="hidden h-full shrink-0 flex-col overflow-hidden border-l border-border bg-sidebar text-sidebar-foreground lg:flex"
       style={{
-        width: effectiveCollapsed ? 48 : 320,
-        transition: transitionEnabled
+        // Suppress the collapse width-transition while actively dragging so the
+        // resize tracks the pointer 1:1.
+        width: effectiveCollapsed ? 48 : expandedWidth,
+        transition: transitionEnabled && !resizing
           ? "width 250ms cubic-bezier(0.4, 0, 0.2, 1)"
           : "none",
       }}
@@ -1438,7 +1487,8 @@ function ContactPanelImpl({
         // can't stack under the rail button in the 48px column.
         body
       )}
-    </aside>
+      </aside>
+    </>
   );
 }
 
