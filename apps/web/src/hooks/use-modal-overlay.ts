@@ -43,6 +43,16 @@ export function useBodyScrollLock(active: boolean): void {
 }
 
 /**
+ * Module-level stack of open focus-traps. Only the TOP-most trap handles
+ * Escape + Tab, so a dialog opened ON TOP of another overlay (e.g. a confirm
+ * inside a Sheet) closes ONLY itself on Escape — without this, both overlays'
+ * window listeners fired and Escape closed the inner dialog AND the drawer
+ * underneath it. Single-overlay behavior is unchanged (the sole entry is also
+ * the top). Tokens are per-activation symbols so re-activation re-stacks cleanly.
+ */
+const overlayStack: symbol[] = [];
+
+/**
  * Focus-trap + Escape-to-close + focus restoration. Attach to the
  * dialog's content root via `ref`; pass `onClose` to receive Escape.
  *
@@ -59,7 +69,14 @@ export function useFocusTrap<T extends HTMLElement>(
     if (!active) return;
     lastFocusedRef.current = document.activeElement as HTMLElement | null;
 
+    const token = Symbol("overlay");
+    overlayStack.push(token);
+    const isTop = () => overlayStack[overlayStack.length - 1] === token;
+
     function onKey(e: KeyboardEvent) {
+      // Only the top-most overlay owns the keyboard — nested overlays stay
+      // inert until they become top (their child closes).
+      if (!isTop()) return;
       if (e.key === "Escape") {
         onClose?.();
         return;
@@ -83,6 +100,8 @@ export function useFocusTrap<T extends HTMLElement>(
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
+      const i = overlayStack.indexOf(token);
+      if (i >= 0) overlayStack.splice(i, 1);
       lastFocusedRef.current?.focus?.();
     };
     // ref is stable across renders by convention; depending on it here

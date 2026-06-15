@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 /**
  * A label/value row that becomes an Input on click.
@@ -38,6 +39,7 @@ export function EditableField({
   const [draft, setDraft] = useState(value);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { confirm, confirmDialog } = useConfirm();
 
   useEffect(() => {
     if (editing) {
@@ -59,6 +61,7 @@ export function EditableField({
   }
 
   return (
+    <>
     <div className="group flex items-start gap-2 py-1 text-xs">
       {Icon ? (
         <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
@@ -100,7 +103,15 @@ export function EditableField({
       {onDelete && !editing && (
         <button
           type="button"
-          onClick={onDelete}
+          onClick={async () => {
+            const ok = await confirm({
+              title: `Remove ${label}?`,
+              description: "This clears the field from this contact.",
+              confirmLabel: "Remove",
+              destructive: true,
+            });
+            if (ok) await onDelete?.();
+          }}
           aria-label={`Remove ${label}`}
           className="ml-0.5 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-accent hover:text-destructive group-hover:opacity-100"
         >
@@ -108,5 +119,7 @@ export function EditableField({
         </button>
       )}
     </div>
+    {confirmDialog}
+    </>
   );
 }
