@@ -40,7 +40,7 @@ export function TagChip({
     <span
       onClick={onClick}
       className={cn(
-        "inline-flex items-center rounded-full border font-medium transition-colors",
+        "inline-flex min-w-0 max-w-full items-center rounded-full border font-medium transition-colors",
         sizing,
         colors.chip,
         onClick && "cursor-pointer hover:brightness-110",
@@ -49,7 +49,7 @@ export function TagChip({
         className,
       )}
     >
-      <span className={cn("size-2 rounded-full", colors.solid)} />
+      <span className={cn("size-2 shrink-0 rounded-full", colors.solid)} />
       <span className="truncate">{tag.name}</span>
       {onRemove && (
         <button

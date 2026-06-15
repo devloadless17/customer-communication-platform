@@ -63,7 +63,7 @@ export const BrowserRow = memo(function BrowserRow({
         </Avatar>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span className="truncate text-sm font-medium">{label}</span>
-          <span className="hidden shrink-0 font-mono text-2xs text-muted-foreground sm:inline">
+          <span className="hidden shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums text-muted-foreground sm:inline">
             {formatPhone(contact.phoneNumber)}
           </span>
         </div>
@@ -78,7 +78,7 @@ export const BrowserRow = memo(function BrowserRow({
         {stage && (
           <span
             className={cn(
-              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-3xs font-medium sm:inline-flex",
+              "hidden max-w-30 shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-3xs font-medium sm:inline-flex",
               tagColorClasses(stage.color).pill,
             )}
             title={`Stage: ${stage.name}`}
@@ -89,7 +89,7 @@ export const BrowserRow = memo(function BrowserRow({
                 tagColorClasses(stage.color).solid,
               )}
             />
-            {stage.name}
+            <span className="min-w-0 truncate">{stage.name}</span>
           </span>
         )}
         <WindowBadge

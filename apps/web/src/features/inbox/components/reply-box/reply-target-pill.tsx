@@ -25,7 +25,7 @@ export function ReplyTargetPill({
     <div className="flex items-stretch gap-2 px-3 py-2">
       <CornerUpLeft className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
-        <div className="text-2xs text-muted-foreground">
+        <div className="truncate text-2xs text-muted-foreground">
           Replying to <span className="font-medium text-foreground">{senderLabel}</span>
         </div>
         <div className="truncate text-[12px] text-muted-foreground">{bodyLabel}</div>

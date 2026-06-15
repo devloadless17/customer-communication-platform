@@ -327,14 +327,14 @@ function TableView({
               key={b.id}
               className="border-b border-border last:border-b-0 hover:bg-accent/30"
             >
-              <td className="px-4 py-3">
+              <td className="max-w-0 px-4 py-3">
                 <Link
                   href={`/broadcasts/${b.id}`}
-                  className="font-medium text-foreground hover:text-primary"
+                  className="block truncate font-medium text-foreground hover:text-primary"
                 >
                   {b.name || b.templateName}
                 </Link>
-                <div className="text-2xs text-muted-foreground">
+                <div className="truncate text-2xs text-muted-foreground">
                   {b.name ? `${b.templateName} · ` : ""}
                   {b.templateLanguage} · by {b.createdByName}
                 </div>

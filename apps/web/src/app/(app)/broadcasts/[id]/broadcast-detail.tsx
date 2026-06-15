@@ -598,9 +598,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   key={r.id}
                   className="border-b border-border last:border-b-0 hover:bg-accent/30"
                 >
-                  <td className="px-4 py-2.5">
-                    <div className="font-medium">{r.contactName}</div>
-                    <div className="text-2xs text-muted-foreground">
+                  <td className="max-w-0 px-4 py-2.5">
+                    <div className="truncate font-medium">{r.contactName}</div>
+                    <div className="truncate text-2xs tabular-nums text-muted-foreground">
                       {formatPhone(r.contactPhone)}
                     </div>
                   </td>

@@ -811,7 +811,7 @@ const ContactRow = memo(function ContactRow({
         <span className="truncate text-sm font-medium">
           {contact.name || formatPhone(contact.phoneNumber)}
         </span>
-        <span className="hidden shrink-0 font-mono text-2xs text-muted-foreground sm:inline">
+        <span className="hidden shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums text-muted-foreground sm:inline">
           {formatPhone(contact.phoneNumber)}
         </span>
       </button>
@@ -960,7 +960,7 @@ function BulkActionBar({
     <div className="pointer-events-none fixed inset-x-0 bottom-6 z-40 flex justify-center px-4">
       <div
         ref={containerRef}
-        className="pointer-events-auto relative flex items-center gap-2 rounded-full border border-border bg-popover px-3 py-2 shadow-2xl ring-1 ring-foreground/5"
+        className="pointer-events-auto relative flex max-w-[calc(100vw-2rem)] items-center gap-2 overflow-x-auto rounded-full border border-border bg-popover px-3 py-2 shadow-2xl ring-1 ring-foreground/5 *:shrink-0"
       >
         <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-primary/10 px-2.5 text-xs font-medium text-primary tabular-nums">
           {selectedCount} selected

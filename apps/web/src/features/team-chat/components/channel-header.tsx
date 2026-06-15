@@ -60,7 +60,7 @@ export function ChannelHeader({
       >
         <PanelLeft className="size-4" />
       </button>
-      <Hash className="size-4 text-muted-foreground" />
+      <Hash className="size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-semibold">{channel.name}</span>

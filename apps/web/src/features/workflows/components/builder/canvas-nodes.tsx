@@ -306,13 +306,13 @@ export function AskQuestionNode({ id, data }: NodeProps) {
       {nWay ? (
         <div className="flex items-center justify-between px-3 py-2 text-2xs text-muted-foreground">
           {options.map((opt) => (
-            <span key={opt.id} className="flex items-center gap-1 truncate" title={opt.id}>
-              <span className="size-1.5 rounded-full bg-emerald-500" />
+            <span key={opt.id} className="flex min-w-0 items-center gap-1" title={opt.id}>
+              <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
               <span className="truncate">{opt.id}</span>
             </span>
           ))}
-          <span className="flex items-center gap-1">
-            <span className="size-1.5 rounded-full bg-amber-500" /> timeout
+          <span className="flex shrink-0 items-center gap-1 whitespace-nowrap">
+            <span className="size-1.5 shrink-0 rounded-full bg-amber-500" /> timeout
           </span>
         </div>
       ) : (

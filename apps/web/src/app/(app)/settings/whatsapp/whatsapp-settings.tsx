@@ -308,17 +308,17 @@ function ConnectionStatus({
           </>
         )}
         <dt>Phone number id</dt>
-        <dd className="font-mono">{current.phoneNumberId}</dd>
+        <dd className="min-w-0 break-all font-mono">{current.phoneNumberId}</dd>
         {current.wabaId && (
           <>
             <dt>WABA id</dt>
-            <dd className="font-mono">{current.wabaId}</dd>
+            <dd className="min-w-0 break-all font-mono">{current.wabaId}</dd>
           </>
         )}
         {current.appId && (
           <>
             <dt>App id</dt>
-            <dd className="font-mono">{current.appId}</dd>
+            <dd className="min-w-0 break-all font-mono">{current.appId}</dd>
           </>
         )}
       </dl>

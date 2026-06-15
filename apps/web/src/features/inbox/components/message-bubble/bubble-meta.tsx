@@ -34,7 +34,7 @@ export function BubbleMeta({
     <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
       <div
         className={cn(
-          "flex items-center gap-1.5 px-1 text-3xs text-muted-foreground",
+          "flex min-w-0 items-center gap-1.5 px-1 text-3xs text-muted-foreground",
           isOut ? "flex-row-reverse" : "flex-row",
         )}
       >
@@ -70,12 +70,12 @@ function SenderChip({
   avatarUrl: string | null;
 }) {
   return (
-    <span className="inline-flex items-center gap-1">
-      <Avatar className="size-3.5">
+    <span className="inline-flex min-w-0 max-w-48 items-center gap-1">
+      <Avatar className="size-3.5 shrink-0">
         {avatarUrl ? <AvatarImage src={avatarUrl} alt={name} /> : null}
         <AvatarFallback className="text-[7px]">{initials(name)}</AvatarFallback>
       </Avatar>
-      <span>{name}</span>
+      <span className="truncate">{name}</span>
     </span>
   );
 }

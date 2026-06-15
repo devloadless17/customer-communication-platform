@@ -292,7 +292,7 @@ export function ContactDetailDrawer({
                 }}
               />
             </div>
-            <div className="mt-0.5 font-mono text-xs text-muted-foreground">
+            <div className="mt-0.5 truncate font-mono text-xs tabular-nums text-muted-foreground">
               {formatPhone(contact.phoneNumber)}
             </div>
           </div>
@@ -320,9 +320,9 @@ export function ContactDetailDrawer({
           <Separator />
 
           <Section title="Contact info">
-            <div className="flex items-center gap-2 px-1 py-1 text-[13px]">
+            <div className="flex min-w-0 items-center gap-2 px-1 py-1 text-[13px]">
               <Phone className="size-4 shrink-0 text-muted-foreground" />
-              <span className="font-mono">{formatPhone(contact.phoneNumber)}</span>
+              <span className="min-w-0 truncate font-mono tabular-nums">{formatPhone(contact.phoneNumber)}</span>
             </div>
             {builtins.firstName && (
               <EditableField

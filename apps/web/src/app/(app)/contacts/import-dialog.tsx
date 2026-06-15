@@ -176,10 +176,12 @@ export function ImportContactsDialog({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="flex w-full items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-4 py-8 text-sm hover:bg-accent hover:text-foreground"
+              className="flex w-full min-w-0 items-center justify-center gap-2 rounded-md border border-dashed border-border bg-background px-4 py-8 text-sm hover:bg-accent hover:text-foreground"
             >
-              <FileUp className="size-4" />
-              {file ? file.name : "Choose a .csv file"}
+              <FileUp className="size-4 shrink-0" />
+              <span className="min-w-0 truncate">
+                {file ? file.name : "Choose a .csv file"}
+              </span>
             </button>
             <input
               ref={fileInputRef}

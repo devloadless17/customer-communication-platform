@@ -275,11 +275,11 @@ function ContactRow({
             )}
           </div>
           {secondary && (
-            <div className="mt-0.5 flex items-center gap-1 truncate text-xs text-muted-foreground">
+            <div className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
               {hit.matchedField === "phone" && (
                 <Phone className="size-3 shrink-0" />
               )}
-              <span className="truncate">{highlight(secondary, query)}</span>
+              <span className="min-w-0 truncate">{highlight(secondary, query)}</span>
             </div>
           )}
         </div>

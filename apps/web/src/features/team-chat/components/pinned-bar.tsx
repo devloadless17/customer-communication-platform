@@ -69,7 +69,7 @@ export function PinnedBar({
                   <AvatarFallback seed={author} className="text-[9px]">{initials(author)}</AvatarFallback>
                 </Avatar>
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium">{author}</div>
+                  <div className="truncate font-medium">{author}</div>
                   <div className="truncate text-muted-foreground">{preview}</div>
                 </div>
                 {canPin && onUnpin && (

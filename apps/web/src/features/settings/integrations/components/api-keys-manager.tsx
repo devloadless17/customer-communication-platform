@@ -308,8 +308,8 @@ export function ApiKeysManager({ initialKeys }: Props) {
               <ul className="divide-y divide-border rounded-md border border-border">
                 {keys.map((k) => (
                   <li key={k.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5">
-                    <span className="text-sm font-medium">{k.name}</span>
-                    <code className="font-mono text-2xs text-muted-foreground">{k.tokenPrefix}…</code>
+                    <span className="min-w-0 max-w-full truncate text-sm font-medium">{k.name}</span>
+                    <code className="shrink-0 font-mono text-2xs text-muted-foreground">{k.tokenPrefix}…</code>
                     <span className="inline-flex items-center gap-1">
                       {k.scopes.includes("*") ? (
                         <code className="rounded bg-primary/10 px-1 py-0.5 font-mono text-3xs text-primary">

@@ -24,11 +24,11 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
       onClick={() => router.push(href)}
       className="cursor-pointer border-b border-border last:border-b-0 hover:bg-accent/40"
     >
-      <td className="px-4 py-3">
+      <td className="max-w-0 px-4 py-3">
         <Link
           href={href}
           onClick={(e) => e.stopPropagation()}
-          className="font-medium text-foreground hover:text-primary"
+          className="block truncate font-medium text-foreground hover:text-primary"
         >
           {group.name}
         </Link>
@@ -37,7 +37,7 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
             {group.description}
           </div>
         )}
-        <div className="text-3xs text-muted-foreground">by {group.createdByName}</div>
+        <div className="truncate text-3xs text-muted-foreground">by {group.createdByName}</div>
       </td>
       <td className="px-4 py-3">
         <div className="flex flex-wrap items-center gap-1">

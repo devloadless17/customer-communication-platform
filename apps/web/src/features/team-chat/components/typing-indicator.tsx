@@ -26,13 +26,13 @@ export function TypingIndicator({
   else label = `${names[0]}, ${names[1]} and ${others.length - 2} more are typing…`;
 
   return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className="flex items-center gap-0.5">
+    <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <span className="flex shrink-0 items-center gap-0.5">
         <span className="size-1 animate-pulse rounded-full bg-current" style={{ animationDelay: "0ms" }} />
         <span className="size-1 animate-pulse rounded-full bg-current" style={{ animationDelay: "200ms" }} />
         <span className="size-1 animate-pulse rounded-full bg-current" style={{ animationDelay: "400ms" }} />
       </span>
-      <span className="truncate">{label}</span>
+      <span className="min-w-0 truncate">{label}</span>
     </div>
   );
 }

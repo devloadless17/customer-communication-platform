@@ -935,7 +935,7 @@ function TemplatePickerInline({
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="truncate text-sm font-medium">{t.name}</span>
+                      <span className="min-w-0 truncate text-sm font-medium">{t.name}</span>
                       <CategoryPill category={t.category} />
                       <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
                         {t.language}

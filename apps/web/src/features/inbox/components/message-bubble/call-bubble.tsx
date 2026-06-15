@@ -116,20 +116,20 @@ export function CallBubble({
     <div className="flex items-center justify-center py-1.5">
       <div
         className={
-          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-2xs " +
+          "inline-flex max-w-64 items-center gap-1.5 rounded-full border px-3 py-1 text-2xs " +
           tones[tone]
         }
       >
         <Icon className="size-3.5 shrink-0" />
         {actor && (
           <>
-            <span className="font-semibold">{actor}</span>
-            <span className="opacity-50">·</span>
+            <span className="min-w-0 truncate font-semibold">{actor}</span>
+            <span className="shrink-0 opacity-50">·</span>
           </>
         )}
-        <span className="font-medium">{label}</span>
+        <span className="shrink-0 whitespace-nowrap font-medium">{label}</span>
         {call.durationSeconds !== null && call.durationSeconds > 0 && (
-          <span className="opacity-70">· {formatDuration(call.durationSeconds)}</span>
+          <span className="shrink-0 whitespace-nowrap opacity-70">· {formatDuration(call.durationSeconds)}</span>
         )}
       </div>
     </div>

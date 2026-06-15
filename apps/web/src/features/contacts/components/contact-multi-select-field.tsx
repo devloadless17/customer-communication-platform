@@ -105,16 +105,16 @@ export function ContactMultiSelectField({
             return (
               <span
                 key={id}
-                className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 py-0.5 pl-0.5 pr-1.5 text-xs"
+                className="inline-flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 py-0.5 pl-0.5 pr-1.5 text-xs"
               >
-                <Avatar className="size-5">
+                <Avatar className="size-5 shrink-0">
                   <AvatarFallback className="text-[9px]">{initials(label)}</AvatarFallback>
                 </Avatar>
-                <span className="font-medium">{label}</span>
+                <span className="max-w-50 truncate font-medium">{label}</span>
                 <button
                   type="button"
                   onClick={() => remove(id)}
-                  className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+                  className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
                   aria-label={`Remove ${label}`}
                 >
                   <X className="size-3" />

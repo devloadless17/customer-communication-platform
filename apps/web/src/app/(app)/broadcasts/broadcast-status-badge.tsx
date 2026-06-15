@@ -18,11 +18,11 @@ export function BroadcastStatusBadge({ status }: { status: string }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-2xs font-medium",
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-1.5 py-0.5 text-2xs font-medium",
         tone,
       )}
     >
-      <Icon className={cn("size-3", spin && "animate-spin")} />
+      <Icon className={cn("size-3 shrink-0", spin && "animate-spin")} />
       {label}
     </span>
   );

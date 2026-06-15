@@ -25,13 +25,13 @@ function FilterChip({
   children: React.ReactNode;
 }) {
   return (
-    <span className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-card pl-2 pr-1 text-2xs text-foreground">
+    <span className="inline-flex h-6 min-w-0 items-center gap-1 rounded-full border border-border bg-card pl-2 pr-1 text-2xs text-foreground">
       {leading}
-      <span className="font-medium">{children}</span>
+      <span className="max-w-40 truncate font-medium">{children}</span>
       <button
         type="button"
         onClick={onRemove}
-        className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+        className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
         aria-label="Remove filter"
       >
         <X className="size-3" />

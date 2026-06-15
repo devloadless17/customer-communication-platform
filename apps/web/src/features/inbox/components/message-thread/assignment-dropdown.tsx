@@ -175,10 +175,10 @@ export function AssignmentDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="h-8 gap-1.5" disabled={pending}>
+        <Button variant="outline" size="sm" className="h-8 min-w-0 gap-1.5" disabled={pending}>
           {currentName ? (
             <>
-              <Avatar className="size-4">
+              <Avatar className="size-4 shrink-0">
                 {currentAvatarUrl ? (
                   <AvatarImage src={currentAvatarUrl} alt={currentName} />
                 ) : null}
@@ -186,12 +186,12 @@ export function AssignmentDropdown({
                   {initials(currentName)}
                 </AvatarFallback>
               </Avatar>
-              <span className="font-normal">{currentName.split(" ")[0]}</span>
+              <span className="truncate max-w-32 font-normal">{currentName.split(" ")[0]}</span>
             </>
           ) : (
             <span className="text-muted-foreground">Unassigned</span>
           )}
-          <ChevronDown className="size-3.5 text-muted-foreground" />
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

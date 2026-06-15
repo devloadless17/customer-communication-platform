@@ -85,7 +85,7 @@ export function WindowBadgeFromStatus({
         // whitespace-nowrap: keep the label + relative time on ONE line. Without
         // it the text wraps inside a fixed-width lane (contacts row) or a tight
         // composer header, breaking row alignment.
-        "inline-flex items-center gap-1 whitespace-nowrap rounded-full border tabular-nums",
+        "inline-flex min-w-0 max-w-full items-center gap-1 whitespace-nowrap rounded-full border tabular-nums",
         sizing,
         tone,
         className,
@@ -93,8 +93,8 @@ export function WindowBadgeFromStatus({
       title={title}
     >
       <Icon className={cn("shrink-0", size === "xs" ? "size-3" : "size-3.5")} />
-      <span className="font-medium">{windowStateLabel(state)}</span>
-      <span className="opacity-80">· {formatWindowRemaining(status)}</span>
+      <span className="shrink-0 font-medium">{windowStateLabel(state)}</span>
+      <span className="truncate opacity-80">· {formatWindowRemaining(status)}</span>
     </span>
   );
 }

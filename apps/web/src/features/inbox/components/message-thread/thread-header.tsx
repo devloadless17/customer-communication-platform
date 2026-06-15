@@ -33,11 +33,11 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
       : `${viewers.map((v) => v.name).join(", ")} are also viewing this chat`;
   return (
     <div
-      className="ml-2 flex items-center gap-1.5 rounded-full border border-amber-300/50 bg-amber-50 px-2 py-0.5 text-2xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
+      className="ml-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-amber-300/50 bg-amber-50 px-2 py-0.5 text-2xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
       title={title}
       aria-label={title}
     >
-      <div className="flex -space-x-1.5">
+      <div className="flex shrink-0 -space-x-1.5">
         {shown.map((u) => (
           <Avatar
             key={u.id}
@@ -160,7 +160,9 @@ export function ThreadHeader({
           <h2 className="truncate text-sm font-semibold">{contactName}</h2>
           <ConversationViewersPill viewers={otherViewers} />
         </div>
-        <div className="font-mono text-2xs text-muted-foreground">{formatPhone(phone)}</div>
+        <div className="truncate font-mono text-2xs tabular-nums text-muted-foreground">
+          {formatPhone(phone)}
+        </div>
       </div>
 
       <div className="ml-3 hidden shrink-0 md:flex">
