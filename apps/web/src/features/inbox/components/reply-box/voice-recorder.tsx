@@ -389,7 +389,7 @@ export function MicButton({
     <Button
       variant="ghost"
       size="icon"
-      className="size-7 text-muted-foreground"
+      className="size-7 pointer-coarse:size-9 text-muted-foreground"
       type="button"
       disabled={disabled}
       aria-label={ariaLabel ?? title}

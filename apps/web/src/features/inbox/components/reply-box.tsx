@@ -1135,7 +1135,7 @@ export function ReplyBox({
             <Button
               variant="ghost"
               size="icon"
-              className="size-7 text-muted-foreground"
+              className="size-7 pointer-coarse:size-9 text-muted-foreground"
               type="button"
               disabled={isNote || windowClosed}
               aria-label="Attach file"
@@ -1153,7 +1153,7 @@ export function ReplyBox({
             <Button
               variant="ghost"
               size="icon"
-              className="size-7 text-muted-foreground"
+              className="size-7 pointer-coarse:size-9 text-muted-foreground"
               type="button"
               disabled={isNote}
               aria-label="Send a template"
@@ -1170,7 +1170,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 text-muted-foreground"
+                className="size-7 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
                 disabled={isNote || windowClosed}
                 aria-label="Send buttons"
@@ -1209,7 +1209,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 text-muted-foreground"
+                className="size-7 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
                 disabled={isNote && false /* emojis valid in notes too */}
                 aria-label="Insert emoji"
@@ -1247,7 +1247,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 text-muted-foreground"
+                className="size-7 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
                 title="Translate this message"
                 aria-label="Translate this message"
