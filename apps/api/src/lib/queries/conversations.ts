@@ -249,9 +249,7 @@ export async function listConversations(
 
   // Pull lastInboundAt straight from the denormalized `Contact.lastInboundAt`
   // column maintained by the ingest path — saves the per-page lateral
-  // MAX(m.timestamp) GROUP BY contactId roundtrip the inbox list used to do
-  // (still kept below as `fetchLastInboundMap` for any future caller that
-  // needs the same value on a contact NOT yet in the SELECT).
+  // MAX(m.timestamp) GROUP BY contactId roundtrip the inbox list used to do.
   const inboundMap = new Map<string, string | null>(
     sliced.map((r) => [
       r.contact.id,

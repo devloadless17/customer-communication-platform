@@ -23,7 +23,6 @@ import type {
   InternalNote,
   MediaAttachment,
   MessageStatus,
-  Channel,
   User,
 } from "../types";
 import type { TeamChannelMessageDto } from "../socket/events";
@@ -1030,9 +1029,3 @@ export type DomainEventOf<K extends DomainEventType> = { type: K } & DomainEvent
 export type DomainEvent = {
   [K in DomainEventType]: DomainEventOf<K>;
 }[DomainEventType];
-
-/**
- * Provider hint — `Channel` lives in the Prisma client enum. Surface
- * it here so subscribers can pivot on channel without re-importing Prisma.
- */
-export type EventProvider = Channel;

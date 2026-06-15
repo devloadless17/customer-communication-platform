@@ -1247,6 +1247,12 @@ export function useTeamEvents(
       socket.off("call:incoming", onCallIncoming);
       socket.off("call:ended", onCallEnded);
     };
+    // INVARIANT: this effect re-binds handlers ONLY on [teamId, currentUserId].
+    // Every other value the handlers read (filter, activeThread, activeId, …) is
+    // mirrored via a ref SYNCED DURING RENDER (filterRef/activeThreadRef/activeIdRef
+    // above) — never in a useEffect — so the first event right after a chat-switch
+    // already sees the fresh value. If you add a new handler dependency, mirror it
+    // the SAME way; a useEffect-synced ref reintroduces the stale-first-event bug.
   }, [teamId, currentUserId]);
 
   return { conversations, hasMore: nextCursor !== null, loadingMore, loadMore };

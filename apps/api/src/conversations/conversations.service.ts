@@ -95,8 +95,14 @@ export class ConversationsService {
    * to the team and the viewer, fixes the badge truthfulness without
    * forcing the list to load every conversation.
    *
-   * Five queries fan out in parallel. The preset counts hit the
-   * (teamId, status, lastMessageAt) + (teamId, assignedUserId) indexes.
+   * Eleven queries fan out in parallel: 5 status/preset totals, 5 unread-filtered
+   * (`unreadCount > 0`) variants, and 1 per-stage groupBy. The total/preset counts
+   * hit the (teamId, status, lastMessageAt) + (teamId, assignedUserId) indexes;
+   * the 5 unread counts narrow on those same indexes then count-filter
+   * `unreadCount > 0` as a residual (no index covers unreadCount — acceptable at
+   * pilot scale; if EXPLAIN ever shows it hot, add a hand-written partial index
+   * `Conversation(teamId) WHERE unreadCount > 0`, tiny because zero-unread rows
+   * dominate, NOT a full unreadCount index which would bloat every markRead write).
    * The per-stage count is a server-side GROUP BY through Contact (NOT a
    * full-table walk into JS): one conversation per contact is DB-enforced
    * (@@unique([teamId, contactId])), so counting contacts that have a

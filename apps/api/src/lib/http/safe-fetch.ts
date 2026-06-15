@@ -214,21 +214,58 @@ function isBlockedIpv4(ip: string): boolean {
   return false;
 }
 
+/**
+ * Expand any IPv6 textual form (`::` compression, a trailing dotted-quad, a
+ * zone id) into its 8 16-bit groups as numbers, or null if unparseable.
+ * Normalizing to NUMBERS is what makes the block check notation-agnostic — the
+ * old string/regex approach only caught the dotted-decimal mapped form
+ * (`::ffff:1.2.3.4`) and let the hex form (`::ffff:7f00:1` = 127.0.0.1) and the
+ * fully-expanded loopback (`0:0:0:0:0:0:0:1`) sail through. dns.lookup returns
+ * AAAA records VERBATIM, so an attacker-controlled record can pick the notation.
+ */
+function expandIpv6(ip: string): number[] | null {
+  let s = ip.toLowerCase();
+  const pct = s.indexOf("%"); // strip zone id (fe80::1%eth0)
+  if (pct !== -1) s = s.slice(0, pct);
+  // A trailing dotted-quad (::ffff:1.2.3.4, 64:ff9b::1.2.3.4) → two hex groups.
+  const lastColon = s.lastIndexOf(":");
+  const tail = s.slice(lastColon + 1);
+  if (tail.includes(".")) {
+    if (isIP(tail) !== 4) return null;
+    const q = tail.split(".").map((n) => Number.parseInt(n, 10));
+    if (q.length !== 4 || q.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) return null;
+    s = `${s.slice(0, lastColon + 1)}${((q[0]! << 8) | q[1]!).toString(16)}:${((q[2]! << 8) | q[3]!).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const back = halves.length === 2 ? (halves[1] ? halves[1].split(":") : []) : null;
+  const groups =
+    back === null
+      ? head
+      : [...head, ...Array(8 - head.length - back.length).fill("0"), ...back];
+  if (groups.length !== 8) return null;
+  const nums = groups.map((g) => (g === "" ? 0 : Number.parseInt(g, 16)));
+  if (nums.some((n) => !Number.isFinite(n) || n < 0 || n > 0xffff)) return null;
+  return nums;
+}
+
 function isBlockedIpv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  if (lower === "::" || lower === "::1") return true;
-  // IPv4-mapped: ::ffff:1.2.3.4 — re-check the embedded v4.
-  const mapped = lower.match(/^::ffff:([0-9.]+)$/);
-  if (mapped && isIP(mapped[1]!) === 4) {
-    return isBlockedIpv4(mapped[1]!);
+  const g = expandIpv6(ip);
+  if (!g) return true; // unparseable = block (fail closed)
+  const hiZero = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0 && g[6] === 0;
+  if (hiZero && (g[7] === 0 || g[7] === 1)) return true; // :: (unspecified) and ::1 (loopback), any notation
+  // IPv4-mapped ::ffff:0:0/96 and NAT64 well-known 64:ff9b::/96 embed a v4 in
+  // the last 32 bits — re-check it against the v4 block list regardless of how
+  // the address was written (hex groups OR dotted-quad both land here).
+  const v4Mapped = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0xffff;
+  const nat64 = g[0] === 0x64 && g[1] === 0xff9b && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0;
+  if (v4Mapped || nat64) {
+    return isBlockedIpv4(`${g[6]! >> 8}.${g[6]! & 0xff}.${g[7]! >> 8}.${g[7]! & 0xff}`);
   }
-  // fe80::/10 (link-local), fc00::/7 (ULA, incl fd00::/8)
-  if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) {
-    return true;
-  }
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
-  // ff00::/8 multicast
-  if (lower.startsWith("ff")) return true;
+  if ((g[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local (incl. IMDS-adjacent)
+  if ((g[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7 ULA (fc00–fdff)
+  if ((g[0]! & 0xff00) === 0xff00) return true; // ff00::/8 multicast
   return false;
 }
 
