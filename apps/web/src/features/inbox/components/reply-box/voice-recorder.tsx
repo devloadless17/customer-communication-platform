@@ -376,10 +376,14 @@ export function MicButton({
   onClick,
   disabled,
   title,
+  ariaLabel,
 }: {
   onClick: () => void;
   disabled?: boolean;
   title: string;
+  /** Concise accessible name (the `title` may carry contextual disabled copy
+   *  that's too verbose as an a11y name). Falls back to `title`. */
+  ariaLabel?: string;
 }) {
   return (
     <Button
@@ -388,6 +392,7 @@ export function MicButton({
       className="size-7 text-muted-foreground"
       type="button"
       disabled={disabled}
+      aria-label={ariaLabel ?? title}
       title={title}
       onClick={onClick}
     >

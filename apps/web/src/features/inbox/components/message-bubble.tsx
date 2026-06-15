@@ -52,6 +52,18 @@ interface MessageBubbleProps {
    *  a persistent yellow ring around the bubble so the user can find it
    *  visually after scrollIntoView lands. */
   isActiveSearchMatch?: boolean;
+  // ----- consecutive-message grouping (driven by the thread) -----
+  /**
+   * Last bubble of a same-sender group. The TAIL carries the shared chrome:
+   * the inbound avatar (bottom-aligned to the group, WhatsApp-style) and the
+   * meta row (timestamp / sender / ticks). Earlier bubbles in the group render
+   * an equal-width avatar spacer and no meta, so a burst reads as one cluster.
+   * Defaults to true → a lone/ungrouped message looks exactly as before.
+   */
+  showAvatar?: boolean;
+  /** See `showAvatar`. When false the meta row is omitted (a non-tail bubble in
+   *  a group). Pending/failed rows always pass true so their status never hides. */
+  showMeta?: boolean;
 }
 
 /**
@@ -128,6 +140,8 @@ function BubbleContent({
   onRetryFailed,
   searchQuery,
   isActiveSearchMatch,
+  showAvatar = true,
+  showMeta = true,
 }: MessageBubbleProps) {
   const isOut = message.direction === "out";
   const media = message.media;
@@ -146,23 +160,22 @@ function BubbleContent({
     return (
       <div className={cn("flex w-full gap-2", isOut ? "justify-end" : "justify-start")}>
         {!isOut && (
-          <Avatar className="size-7 shrink-0 self-end">
-            <AvatarFallback
-              className="text-[10px] text-white"
-              style={{ backgroundImage: avatarGradient(contactSeed) }}
-            >
-              {initials(contactName)}
-            </AvatarFallback>
-          </Avatar>
+          <InboundAvatarSlot
+            show={showAvatar}
+            contactName={contactName}
+            contactSeed={contactSeed}
+          />
         )}
         <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
           <StickerImage url={media.url} />
-          <BubbleMeta
-          message={message}
-          senderName={senderName}
-          senderAvatarUrl={senderAvatarUrl ?? null}
-          isOut={isOut}
-        />
+          {showMeta && (
+            <BubbleMeta
+              message={message}
+              senderName={senderName}
+              senderAvatarUrl={senderAvatarUrl ?? null}
+              isOut={isOut}
+            />
+          )}
         </div>
       </div>
     );
@@ -176,14 +189,11 @@ function BubbleContent({
       )}
     >
       {!isOut && (
-        <Avatar className="size-7 shrink-0 self-end">
-          <AvatarFallback
-            className="text-[10px] text-white"
-            style={{ backgroundImage: avatarGradient(contactSeed) }}
-          >
-            {initials(contactName)}
-          </AvatarFallback>
-        </Avatar>
+        <InboundAvatarSlot
+          show={showAvatar}
+          contactName={contactName}
+          contactSeed={contactSeed}
+        />
       )}
 
       {/* Reply action sits next to the bubble; visible only on hover so it
@@ -281,12 +291,14 @@ function BubbleContent({
           )}
         </div>
 
-        <BubbleMeta
-          message={message}
-          senderName={senderName}
-          senderAvatarUrl={senderAvatarUrl ?? null}
-          isOut={isOut}
-        />
+        {showMeta && (
+          <BubbleMeta
+            message={message}
+            senderName={senderName}
+            senderAvatarUrl={senderAvatarUrl ?? null}
+            isOut={isOut}
+          />
+        )}
         {message.failed && (
           <FailedRecovery
             // Both text and media retries are supported. The composer caches
@@ -312,6 +324,34 @@ function BubbleContent({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Inbound avatar column. Renders the contact avatar on the group TAIL
+ * (`show`), or an equal-width spacer on earlier bubbles of a consecutive
+ * group, so a same-sender burst keeps its left edge aligned under a single
+ * bottom-anchored avatar (WhatsApp-style) instead of repeating it per bubble.
+ */
+function InboundAvatarSlot({
+  show,
+  contactName,
+  contactSeed,
+}: {
+  show: boolean;
+  contactName: string;
+  contactSeed: string;
+}) {
+  if (!show) return <div className="size-7 shrink-0" aria-hidden />;
+  return (
+    <Avatar className="size-7 shrink-0 self-end">
+      <AvatarFallback
+        className="text-[10px] text-white"
+        style={{ backgroundImage: avatarGradient(contactSeed) }}
+      >
+        {initials(contactName)}
+      </AvatarFallback>
+    </Avatar>
   );
 }
 

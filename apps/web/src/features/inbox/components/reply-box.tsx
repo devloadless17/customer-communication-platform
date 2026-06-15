@@ -1138,6 +1138,7 @@ export function ReplyBox({
               className="size-7 text-muted-foreground"
               type="button"
               disabled={isNote || windowClosed}
+              aria-label="Attach file"
               title={
                 isNote
                   ? "Notes can't have attachments"
@@ -1155,6 +1156,7 @@ export function ReplyBox({
               className="size-7 text-muted-foreground"
               type="button"
               disabled={isNote}
+              aria-label="Send a template"
               title={
                 isNote
                   ? "Templates can only be sent in Reply mode"
@@ -1171,6 +1173,7 @@ export function ReplyBox({
                 className="size-7 text-muted-foreground"
                 type="button"
                 disabled={isNote || windowClosed}
+                aria-label="Send buttons"
                 title={
                   isNote
                     ? "Buttons can only be sent in Reply mode"
@@ -1209,6 +1212,7 @@ export function ReplyBox({
                 className="size-7 text-muted-foreground"
                 type="button"
                 disabled={isNote && false /* emojis valid in notes too */}
+                aria-label="Insert emoji"
                 title="Insert emoji"
                 onClick={() => setEmojiOpen((v) => !v)}
               >
@@ -1227,6 +1231,7 @@ export function ReplyBox({
                 void voice.start();
               }}
               disabled={isNote || windowClosed}
+              ariaLabel="Record voice message"
               title={
                 isNote
                   ? "Voice messages aren't supported in Note mode"
@@ -1291,6 +1296,7 @@ export function ReplyBox({
                 // click a no-op. The ref is the source of truth; this just
                 // mirrors it visually so the user sees the button respond.
                 disabled={!canSend || sendInFlight}
+                aria-label={isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 title={isNote ? "Save note" : attachment ? "Send media" : "Send"}
                 className={cn(
                   "h-8 gap-1.5 @max-[26rem]:w-8 @max-[26rem]:gap-0 @max-[26rem]:rounded-full @max-[26rem]:px-0",

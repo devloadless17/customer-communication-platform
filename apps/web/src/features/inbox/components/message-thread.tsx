@@ -2,14 +2,14 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDown, Loader2, X } from "lucide-react";
+import { ArrowDown, Loader2, MessageSquareDashed, X } from "lucide-react";
 
 import { dispatchLocalSocketEvent, dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useTzNow } from "@/providers/tz-provider";
-import { calendarDayKey, formatDaySeparator } from "@ccp/shared/utils";
+import { calendarDayKey, cn, formatDaySeparator } from "@ccp/shared/utils";
 import type {
   CallSnapshot,
   ContactFieldDefinition,
@@ -91,6 +91,30 @@ function entryTimestamp(entry: TimelineEntry): string {
   }
 }
 
+// Consecutive messages from the same sender within this window collapse into a
+// visual group (one avatar + one meta row at the tail), like WhatsApp/Slack.
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
+// Short, human label for a media-only inbound, used by the screen-reader
+// announcement when there's no text body to read.
+const MEDIA_ANNOUNCE_LABEL: Partial<Record<MediaKind, string>> = {
+  image: "sent a photo",
+  video: "sent a video",
+  audio: "sent a voice message",
+  document: "sent a document",
+  sticker: "sent a sticker",
+};
+
+// One-line announcement for a newly-arrived inbound message (text preview, or a
+// media/interactive fallback). Capped so a long message doesn't flood the AT
+// buffer. Pure — safe at module scope.
+function inboundAnnouncementText(m: Message): string {
+  const body = m.body?.trim();
+  if (body) return body.length > 120 ? `${body.slice(0, 117)}…` : body;
+  if (m.media?.kind) return MEDIA_ANNOUNCE_LABEL[m.media.kind] ?? "sent an attachment";
+  return "sent a message";
+}
+
 // Scroll behavior for jump-to-message (reply quote, search match, note, Files
 // "Jump"). Honor `prefers-reduced-motion`: a long smooth scroll across the
 // thread is exactly the vestibular trigger those users opt out of. The CSS
@@ -119,6 +143,7 @@ function jumpScrollBehavior(): ScrollBehavior {
 const TimelineRows = memo(function TimelineRows({
   timeline,
   dayLabels,
+  continuationFlags,
   memberById,
   contactName,
   contactSeed,
@@ -139,6 +164,7 @@ const TimelineRows = memo(function TimelineRows({
 }: {
   timeline: TimelineEntry[];
   dayLabels: Array<string | null>;
+  continuationFlags: boolean[];
   memberById: Map<string, User>;
   contactName: string;
   contactSeed: string;
@@ -162,6 +188,24 @@ const TimelineRows = memo(function TimelineRows({
       {timeline.map((entry, idx) => {
         const dayLabel = dayLabels[idx];
         const showDay = dayLabel !== null;
+        // Grouping (message rows only). `isContinuation` = this row groups under
+        // the one above (tighten spacing, hide its own avatar/meta). `isTail` =
+        // the next row does NOT continue this group, so THIS row carries the
+        // shared avatar (bottom-anchored, inbound) + meta. Pending/failed rows
+        // always show meta so their status icon is never hidden.
+        const isMessage = entry.kind === "message";
+        const isContinuation = isMessage && continuationFlags[idx] === true;
+        const isTail = isMessage && continuationFlags[idx + 1] !== true;
+        // A failed send must ALWAYS show its meta (the red AlertCircle + reason
+        // live only in BubbleMeta), regardless of group position — including a
+        // server-confirmed failure (`status === "failed"`, set by a message:status
+        // frame) which leaves the optimistic `failed`/`pending` flags false.
+        const showMeta =
+          isTail ||
+          (isMessage &&
+            (entry.data.pending ||
+              entry.data.failed ||
+              entry.data.status === "failed"));
         // For outbound messages we key on clientTempId when present so the React
         // node survives the optimistic→confirmed swap (server assigns a fresh id,
         // but the bubble is conceptually the same — no unmount, no re-animation).
@@ -196,7 +240,16 @@ const TimelineRows = memo(function TimelineRows({
                   ? "1"
                   : undefined
               }
-              className="rounded-2xl transition-shadow"
+              data-continuation={isContinuation ? "" : undefined}
+              className={cn(
+                "rounded-2xl transition-shadow",
+                // Within a same-sender group, collapse the inter-bubble gap from
+                // the content list's gap-2 (8px) down to ~2px via a negative
+                // top margin. The container's gap-2 stays the BETWEEN-group
+                // spacing — keep this -mt in sync with that gap (message list
+                // div below: `flex-col gap-2`).
+                isContinuation && "-mt-1.5",
+              )}
             >
               {/* Local ErrorBoundary per row — a single malformed payload (or a
                   bug in a sub-component) renders a placeholder for that one row
@@ -232,6 +285,8 @@ const TimelineRows = memo(function TimelineRows({
                         : undefined
                     }
                     isActiveSearchMatch={searchOpen && entry.data.id === activeMatchId}
+                    showAvatar={isTail}
+                    showMeta={showMeta}
                   />
                 ) : entry.kind === "note" ? (
                   <InternalNoteCard
@@ -1135,6 +1190,62 @@ function MessageThreadImpl({
     currentUser.id,
   );
 
+  // ── Screen-reader live region for newly-arrived inbound messages ──────────
+  // A polite, visually-hidden announcer that speaks ONLY genuinely-new inbound
+  // messages — never the backlog on mount, never on history pagination, never
+  // on a conversation switch, never on an older context-window jump. Driven by
+  // a monotonic high-water-mark on the newest inbound timestamp.
+  const newestInbound = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]!.direction === "in") return messages[i]!;
+    }
+    return null;
+  }, [messages]);
+  const [inboundAnnouncement, setInboundAnnouncement] = useState("");
+  const lastAnnouncedInboundTsRef = useRef(0);
+  const lastAnnouncedInboundIdRef = useRef<string | null>(null);
+  const announceNonceRef = useRef(false);
+  // Seed the baseline to "newest inbound right now" on mount AND on every
+  // conversation switch, so the freshly-loaded backlog is never read aloud.
+  // Declared BEFORE the announce effect so it re-seeds first on a switch.
+  useEffect(() => {
+    lastAnnouncedInboundTsRef.current = newestInbound
+      ? new Date(newestInbound.timestamp).getTime()
+      : 0;
+    lastAnnouncedInboundIdRef.current = newestInbound?.id ?? null;
+    setInboundAnnouncement("");
+    // Re-seed once per conversation, not per message — newestInbound is read
+    // but intentionally NOT a dependency (that would suppress live arrivals).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation.id]);
+  useEffect(() => {
+    if (!newestInbound) return;
+    const ts = new Date(newestInbound.timestamp).getTime();
+    // WhatsApp timestamps are second-granular, so two distinct messages can
+    // share a ts. Gate on (ts, id): announce anything strictly newer, OR the
+    // same second but a different message id — the same `>=` + id-dedupe rule
+    // the inbox-list badge uses (project_unread_replay_recency_guard). Older
+    // context-window jumps (replaceWithContext) have ts < the mark → silent.
+    if (ts < lastAnnouncedInboundTsRef.current) return;
+    if (
+      ts === lastAnnouncedInboundTsRef.current &&
+      newestInbound.id === lastAnnouncedInboundIdRef.current
+    )
+      return;
+    lastAnnouncedInboundTsRef.current = ts;
+    lastAnnouncedInboundIdRef.current = newestInbound.id;
+    // Toggle a trailing zero-width space so two consecutive IDENTICAL messages
+    // ("ok" then "ok"; two photos → both "sent a photo") still produce a DOM
+    // text DIFF — an aria-live region only announces on change, and React skips
+    // re-setting identical text.
+    announceNonceRef.current = !announceNonceRef.current;
+    setInboundAnnouncement(
+      `${contact.name}: ${inboundAnnouncementText(newestInbound)}${
+        announceNonceRef.current ? "​" : ""
+      }`,
+    );
+  }, [newestInbound, contact.name]);
+
   // Notes come back from the server unpaginated (typically <10 per thread),
   // but messages are loaded 50-at-a-time. Without this filter, a note older
   // than the oldest loaded message would stick to the very top of the
@@ -1258,6 +1369,41 @@ function MessageThreadImpl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timeline, tz, todayKey]);
 
+  // Consecutive-message grouping. `continuationFlags[i]` is true when message
+  // `i` continues a same-sender run started by message `i-1` — used to suppress
+  // the repeated avatar/meta and tighten spacing. A run is broken by ANY
+  // non-message row (note / activity pill / call), a day separator, a
+  // direction/sender change, a >5-min gap, or an in-flight/failed predecessor
+  // (those stand alone so their clock/alert status always shows). The TAIL of a
+  // run (computed in render as `!continuationFlags[i+1]`) carries the shared
+  // avatar + meta. Pure primitives derived from the same inputs as `dayLabels`,
+  // so SSR/first-paint agree and the reveal-gate/bottom-snap are untouched.
+  const continuationFlags = useMemo(() => {
+    const flags = new Array<boolean>(timeline.length).fill(false);
+    for (let i = 1; i < timeline.length; i++) {
+      const cur = timeline[i]!;
+      const prev = timeline[i - 1]!;
+      if (cur.kind !== "message" || prev.kind !== "message") continue;
+      if (dayLabels[i] !== null) continue; // a day separator opens a fresh group
+      // An in-flight / failed row (optimistic flags OR a server-confirmed
+      // `status === "failed"`) stands alone, on BOTH sides: it never tightens
+      // under its predecessor and nothing groups under it — so its status
+      // affordance (clock / red AlertCircle + reason / retry) is always visible.
+      if (prev.data.pending || prev.data.failed || prev.data.status === "failed")
+        continue;
+      if (cur.data.pending || cur.data.failed || cur.data.status === "failed")
+        continue;
+      if (cur.data.direction !== prev.data.direction) continue;
+      if (cur.data.senderUserId !== prev.data.senderUserId) continue;
+      const dt =
+        new Date(cur.data.timestamp).getTime() -
+        new Date(prev.data.timestamp).getTime();
+      if (dt < 0 || dt > GROUP_WINDOW_MS) continue;
+      flags[i] = true;
+    }
+    return flags;
+  }, [timeline, dayLabels]);
+
   // ---------------------------------------------------------------------
   // Scroll behavior — see `useChatScroll`. All the messy bits (viewport
   // resolution, scroll listener, ResizeObserver for stick-to-bottom,
@@ -1309,6 +1455,13 @@ function MessageThreadImpl({
 
   return (
     <section className="relative flex min-w-0 flex-1 flex-col bg-background">
+      {/* Screen-reader announcer for newly-arrived inbound messages. Mounted
+          OUTSIDE the reveal gate (so gate opacity can't mute it) and starts
+          empty (so SSR and first paint match — no hydration diff). Polite so it
+          never interrupts an agent mid-compose. See the announce effect above. */}
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {inboundAnnouncement}
+      </p>
       <ThreadHeader
         teamId={conversation.teamId}
         conversationId={conversation.id}
@@ -1343,9 +1496,15 @@ function MessageThreadImpl({
           while the composer stays under the messages only. */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Messages + composer column. lg:min-w keeps the thread usable when the
-            details panel is open and the window is resized (the resizers also
-            clamp to this at drag-time — see MIN_THREAD_WIDTH in inbox-shell). */}
-        <div className="relative flex min-w-0 flex-1 flex-col lg:min-w-[560px]">
+            details panel is open + the window is resized (the resizers also clamp
+            to this at drag-time — see MIN_THREAD_WIDTH in inbox-shell). The floor
+            stays at lg: ON PURPOSE — forcing it into the 768–1023 two-pane band
+            would push list(min 260) + thread(560) past the viewport and clip the
+            composer (every ancestor is overflow-hidden). Below lg the thread is
+            flex-1 min-w-0 and shrinks gracefully. The 2xl cap + mx-auto stop the
+            column (list AND composer, both max-w-6xl inside) from sprawling with
+            dead gutters on very wide displays (2xl = 1536px+). */}
+        <div className="relative flex min-w-0 flex-1 flex-col lg:min-w-[560px] 2xl:mx-auto 2xl:max-w-[1400px]">
 
       {searchOpen && (
         <MessageSearch
@@ -1438,27 +1597,53 @@ function MessageThreadImpl({
                 specific older message.
               </div>
             )}
-            <TimelineRows
-              timeline={timeline}
-              dayLabels={dayLabels}
-              memberById={memberById}
-              contactName={contact.name}
-              contactSeed={contact.id}
-              searchOpen={searchOpen}
-              matchedIds={matchedIds}
-              searchQuery={searchQuery}
-              activeMatchId={activeMatchId}
-              selecting={selection.selecting}
-              isSelected={selection.isSelected}
-              onToggleSelect={selection.toggle}
-              onReply={beginReply}
-              onJumpToOriginal={jumpToOriginal}
-              onForward={forwardOne}
-              onStartSelect={startSelect}
-              onDismissFailed={dismissFailed}
-              onRetryFailed={retryFailed}
-              onDeleteNote={deleteNote}
-            />
+            {timeline.length === 0 ? (
+              // Freshly-started conversation (get-or-create reopen, or a brand
+              // new thread with no socket frame yet) — render a calm empty state
+              // instead of a blank void above the composer. Lives INSIDE the
+              // reveal gate's body so the loader covers it on first paint and it
+              // cross-fades in; the gate owns the only entrance animation. When
+              // the first message:new lands, timeline.length flips and
+              // TimelineRows takes over with no extra wiring.
+              <div
+                data-thread-empty
+                className="flex min-h-[40vh] flex-col items-center justify-center gap-2 px-6 text-center"
+              >
+                <MessageSquareDashed
+                  aria-hidden
+                  className="size-9 text-muted-foreground/40"
+                />
+                <p className="text-sm font-medium text-muted-foreground">
+                  No messages yet
+                </p>
+                <p className="max-w-xs text-xs text-muted-foreground/70">
+                  Send the first message below to start the conversation.
+                </p>
+              </div>
+            ) : (
+              <TimelineRows
+                timeline={timeline}
+                dayLabels={dayLabels}
+                continuationFlags={continuationFlags}
+                memberById={memberById}
+                contactName={contact.name}
+                contactSeed={contact.id}
+                searchOpen={searchOpen}
+                matchedIds={matchedIds}
+                searchQuery={searchQuery}
+                activeMatchId={activeMatchId}
+                selecting={selection.selecting}
+                isSelected={selection.isSelected}
+                onToggleSelect={selection.toggle}
+                onReply={beginReply}
+                onJumpToOriginal={jumpToOriginal}
+                onForward={forwardOne}
+                onStartSelect={startSelect}
+                onDismissFailed={dismissFailed}
+                onRetryFailed={retryFailed}
+                onDeleteNote={deleteNote}
+              />
+            )}
           </div>
         </div>
         {/* Loader shown until the gate reveals (fades out via CSS on data-ready).
@@ -1518,7 +1703,7 @@ function MessageThreadImpl({
                   transition={{ duration: 0.15 }}
                   className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
                 >
-                  <ArrowDown className="size-3.5" />
+                  <ArrowDown className="size-3.5" aria-hidden />
                   {unreadBelow} new {unreadBelow === 1 ? "message" : "messages"}
                 </motion.button>
               )}
