@@ -811,7 +811,7 @@ const ContactRow = memo(function ContactRow({
         <span className="truncate text-sm font-medium">
           {contact.name || formatPhone(contact.phoneNumber)}
         </span>
-        <span className="hidden shrink-0 font-mono text-[11px] text-muted-foreground sm:inline">
+        <span className="hidden shrink-0 font-mono text-2xs text-muted-foreground sm:inline">
           {formatPhone(contact.phoneNumber)}
         </span>
       </button>
@@ -835,7 +835,7 @@ const ContactRow = memo(function ContactRow({
             <TagChip key={t.id} tag={t} size="xs" />
           ))}
           {extraTags > 0 && (
-            <span className="text-[10px] text-muted-foreground">+{extraTags}</span>
+            <span className="text-3xs text-muted-foreground">+{extraTags}</span>
           )}
           <TagAddButton
             size="xs"
@@ -843,7 +843,7 @@ const ContactRow = memo(function ContactRow({
             onClick={() => setTagPickerOpen((v) => !v)}
           />
           {tagSaveError && (
-            <span className="text-[10px] text-destructive">{tagSaveError}</span>
+            <span className="text-3xs text-destructive">{tagSaveError}</span>
           )}
           {tagPickerOpen && (
             <div className="absolute right-0 top-full z-20 mt-1">
@@ -1101,7 +1101,7 @@ function BulkTagMenu({
 
   return (
     <div className="absolute bottom-full left-1/2 mb-2 w-72 -translate-x-1/2 overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
-      <div className="border-b border-border px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="border-b border-border px-3 py-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
         {action === "tag-add" ? "Add tag to selection" : "Remove tag from selection"}
       </div>
 
@@ -1152,7 +1152,7 @@ function BulkTagMenu({
 
       {canCreate && (
         <div className="border-t border-border bg-muted/30 px-3 py-2">
-          <div className="mb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <div className="mb-1.5 text-3xs uppercase tracking-wide text-muted-foreground">
             Create new
           </div>
           <div className="flex items-center gap-2">
@@ -1169,7 +1169,7 @@ function BulkTagMenu({
               type="button"
               onClick={() => void createTag()}
               disabled={creating}
-              className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+              className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-2 py-1 text-2xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
             >
               {creating ? (
                 <Loader2 className="size-3 animate-spin" />
@@ -1198,7 +1198,7 @@ function BulkTagMenu({
             })}
           </div>
           {createError && (
-            <div className="mt-2 text-[10px] text-destructive">{createError}</div>
+            <div className="mt-2 text-3xs text-destructive">{createError}</div>
           )}
         </div>
       )}
@@ -1206,7 +1206,7 @@ function BulkTagMenu({
       <button
         type="button"
         onClick={onClose}
-        className="block w-full cursor-pointer border-t border-border px-3 py-1.5 text-center text-[11px] text-muted-foreground hover:bg-accent/40"
+        className="block w-full cursor-pointer border-t border-border px-3 py-1.5 text-center text-2xs text-muted-foreground hover:bg-accent/40"
       >
         Cancel
       </button>

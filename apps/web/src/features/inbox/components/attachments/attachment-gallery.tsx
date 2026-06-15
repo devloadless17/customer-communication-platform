@@ -237,7 +237,7 @@ function FileRow({
       </div>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{label}</div>
-        <div className="text-[11px] text-muted-foreground">
+        <div className="text-2xs text-muted-foreground">
           {new Date(message.timestamp).toLocaleString()}
           {media.sizeBytes > 0 && ` · ${formatBytes(media.sizeBytes)}`}
         </div>
@@ -355,7 +355,7 @@ function NotesPanel({
             <p className="whitespace-pre-wrap wrap-break-word text-sm text-foreground/90">
               {n.body}
             </p>
-            <div className="mt-1.5 text-[11px] text-muted-foreground">
+            <div className="mt-1.5 text-2xs text-muted-foreground">
               <LocalTime iso={n.timestamp} format="listTime" />
             </div>
           </li>

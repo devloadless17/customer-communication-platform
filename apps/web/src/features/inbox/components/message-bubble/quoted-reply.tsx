@@ -49,7 +49,7 @@ export function QuotedReply({
         )}
       />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[11px] font-medium opacity-90">
+        <span className="block truncate text-2xs font-medium opacity-90">
           {senderLabel}
         </span>
         <span dir="auto" className="block truncate text-[12px] opacity-75">

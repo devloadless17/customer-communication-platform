@@ -253,7 +253,7 @@ function SaveAudienceAsGroup({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex w-fit items-center gap-1.5 text-[11px] font-medium text-primary hover:underline"
+        className="inline-flex w-fit items-center gap-1.5 text-2xs font-medium text-primary hover:underline"
       >
         <FolderHeart className="size-3.5" />
         Save this audience as a reusable group
@@ -288,12 +288,12 @@ function SaveAudienceAsGroup({
             setOpen(false);
             setError(null);
           }}
-          className="text-[11px] text-muted-foreground hover:text-foreground"
+          className="text-2xs text-muted-foreground hover:text-foreground"
         >
           Cancel
         </button>
       </div>
-      {error && <span className="text-[11px] text-destructive">{error}</span>}
+      {error && <span className="text-2xs text-destructive">{error}</span>}
     </div>
   );
 }
@@ -317,7 +317,7 @@ function GroupSelector({
         </p>
         <Link
           href="/broadcasts/groups/new"
-          className="mt-2 inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="mt-2 inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-3 py-1 text-2xs font-medium text-primary-foreground hover:bg-primary/90"
         >
           New group
         </Link>
@@ -353,16 +353,16 @@ function GroupSelector({
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{g.name}</span>
-                    <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
+                    <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-3xs tabular-nums text-muted-foreground">
                       {g.memberCount} member{g.memberCount === 1 ? "" : "s"}
                     </span>
                   </div>
                   {g.description && (
-                    <div className="line-clamp-1 text-[11px] text-muted-foreground">
+                    <div className="line-clamp-1 text-2xs text-muted-foreground">
                       {g.description}
                     </div>
                   )}
-                  <div className="mt-0.5 text-[10px] text-muted-foreground">
+                  <div className="mt-0.5 text-3xs text-muted-foreground">
                     {g.tagIds.length > 0 && (
                       <span>
                         {g.tagIds.length} tag{g.tagIds.length === 1 ? "" : "s"}
@@ -378,7 +378,7 @@ function GroupSelector({
                   </div>
                 </div>
                 {selected ? (
-                  <span className="text-[11px] font-medium text-primary">Selected</span>
+                  <span className="text-2xs font-medium text-primary">Selected</span>
                 ) : (
                   <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                 )}
@@ -387,7 +387,7 @@ function GroupSelector({
           );
         })}
       </ul>
-      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between text-2xs text-muted-foreground">
         <span>
           Members are resolved at send time — newly-tagged contacts added later
           don&apos;t join in-flight broadcasts.

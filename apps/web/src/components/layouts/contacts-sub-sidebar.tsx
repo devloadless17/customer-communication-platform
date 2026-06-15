@@ -86,7 +86,7 @@ export function ContactsSubSidebar({
                 leading={<Users2 className="size-3.5" />}
                 active={active}
                 trailing={
-                  <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                  <span className="text-3xs tabular-nums text-muted-foreground/70">
                     {group.memberCount}
                   </span>
                 }

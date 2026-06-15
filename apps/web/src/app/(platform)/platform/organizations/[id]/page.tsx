@@ -110,7 +110,7 @@ export default async function PlatformOrganizationDetailPage({
             </p>
           )}
           {team.statusUpdatedAt && (
-            <p className="text-[11px] text-muted-foreground/80">
+            <p className="text-2xs text-muted-foreground/80">
               Last changed <LocalTime iso={team.statusUpdatedAt} format="listTime" />
             </p>
           )}
@@ -135,7 +135,7 @@ export default async function PlatformOrganizationDetailPage({
           <div className="flex items-baseline gap-2">
             <div className="text-sm font-semibold">Members</div>
             {deactivatedMembers.length > 0 && (
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 · {deactivatedMembers.length} deactivated
               </span>
             )}
@@ -161,29 +161,29 @@ export default async function PlatformOrganizationDetailPage({
                 )}
               >
                 <Avatar className="size-8 shrink-0">
-                  <AvatarFallback seed={m.id} className="text-[10px]">
+                  <AvatarFallback seed={m.id} className="text-3xs">
                     {initials(m.name)}
                   </AvatarFallback>
                 </Avatar>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{m.name}</span>
-                    <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
+                    <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-3xs uppercase text-muted-foreground">
                       {roleLabel(m.role)}
                     </span>
                     {m.deactivatedAt && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-3xs text-amber-700 dark:text-amber-300">
                         <ShieldX className="size-2.5" />
                         Deactivated
                       </span>
                     )}
                   </div>
-                  <div className="truncate text-[11px] text-muted-foreground">
+                  <div className="truncate text-2xs text-muted-foreground">
                     {m.email}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="hidden text-[11px] text-muted-foreground sm:inline">
+                  <span className="hidden text-2xs text-muted-foreground sm:inline">
                     Joined <LocalTime iso={m.createdAt} format="listTime" />
                   </span>
                   {m.id !== session.user.id && (
@@ -200,7 +200,7 @@ export default async function PlatformOrganizationDetailPage({
         )}
       </section>
 
-      <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+      <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-2xs text-amber-700 dark:text-amber-300">
         <Users className="size-3.5 shrink-0" />
         <span>
           Platform-admin view. Members and aggregate counts only — conversations
@@ -214,7 +214,7 @@ export default async function PlatformOrganizationDetailPage({
 function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-xl border border-border bg-card px-4 py-3">
-      <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </div>
       <div className="mt-1 tabular-nums text-2xl font-semibold">{value}</div>

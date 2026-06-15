@@ -268,7 +268,7 @@ export function NewContactDialog({
 
           {(fieldDefinitions.length > 0 || perContactKeys.length > 0) && (
             <div className="border-t border-border pt-3">
-              <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="mb-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Custom fields
               </div>
               <div className="space-y-2">

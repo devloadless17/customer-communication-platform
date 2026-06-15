@@ -176,7 +176,7 @@ function TargetSelector({
   const phone = target?.kind === "phone" ? target.phoneNumber : "";
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
         Target
       </div>
       <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -434,7 +434,7 @@ export function SendTemplateEditor({
       </Field>
       {selected && (
         <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">
-          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Preview</div>
+          <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">Preview</div>
           <pre className="mt-1 whitespace-pre-wrap font-sans text-sm">{selected.bodyText}</pre>
         </div>
       )}
@@ -639,7 +639,7 @@ export function TagEditor({
           {selected && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <TagIcon className="size-3.5" />
-              <span className="inline-flex items-center rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium text-primary">
+              <span className="inline-flex items-center rounded-full bg-primary/15 px-2 py-0.5 text-3xs font-medium text-primary">
                 {selected.name}
               </span>
             </div>
@@ -1353,7 +1353,7 @@ export function AskQuestionEditor({
         </select>
       </Field>
 
-      <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+      <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-2xs text-muted-foreground">
         {answerKind === "free_text" ? (
           <>
             Downstream steps read the answer via{" "}

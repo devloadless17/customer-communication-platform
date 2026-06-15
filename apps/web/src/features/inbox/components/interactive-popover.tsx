@@ -222,7 +222,7 @@ export function InteractivePopover({
               value={opt.id}
               onChange={(e) => setOption(idx, { id: e.target.value })}
               placeholder="id"
-              className="max-w-[80px] font-mono text-[11px]"
+              className="max-w-[80px] font-mono text-2xs"
               aria-label={`Button ${idx + 1} id`}
             />
             <Input
@@ -248,20 +248,20 @@ export function InteractivePopover({
           type="button"
           onClick={addOption}
           disabled={options.length >= 3}
-          className="inline-flex w-fit items-center gap-1 rounded-md border border-dashed border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex w-fit items-center gap-1 rounded-md border border-dashed border-border px-2 py-0.5 text-2xs text-muted-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
         >
           + Add button
         </button>
       </div>
 
       {error && (
-        <div className="mb-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+        <div className="mb-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive">
           {error}
         </div>
       )}
 
       {!error && validationHint && (
-        <div className="mb-2 rounded border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400">
+        <div className="mb-2 rounded border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-2xs text-amber-700 dark:text-amber-400">
           {validationHint}
         </div>
       )}

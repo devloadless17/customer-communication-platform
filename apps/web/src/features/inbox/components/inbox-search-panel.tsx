@@ -178,7 +178,7 @@ export function InboxSearchPanel({
           {current.nextCursor && (
             <div
               ref={sentinelRef}
-              className="flex items-center justify-center py-3 text-[11px] text-muted-foreground"
+              className="flex items-center justify-center py-3 text-2xs text-muted-foreground"
             >
               {current.loadingMore ? (
                 <span className="inline-flex items-center gap-1.5">
@@ -212,7 +212,7 @@ function HitAvatar({ name, url }: { name: string; url?: string }) {
     <Avatar className="size-9 shrink-0">
       {url ? <AvatarImage src={url} alt="" /> : null}
       <AvatarFallback
-        className="text-[11px] font-medium text-white"
+        className="text-2xs font-medium text-white"
         style={{ background: avatarGradient(name) }}
       >
         {initials(name)}
@@ -269,7 +269,7 @@ function ContactRow({
               {highlight(hit.name, query)}
             </span>
             {!hit.conversationId && (
-              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
                 no chat
               </span>
             )}
@@ -309,7 +309,7 @@ function MessageRow({
             <LocalTime
               iso={hit.timestamp}
               format="listTime"
-              className="shrink-0 text-[10px] text-muted-foreground"
+              className="shrink-0 text-3xs text-muted-foreground"
             />
           </div>
           <div className="mt-0.5 truncate text-xs text-muted-foreground">
@@ -352,13 +352,13 @@ function NoteRow({
             <LocalTime
               iso={hit.timestamp}
               format="listTime"
-              className="shrink-0 text-[10px] text-muted-foreground"
+              className="shrink-0 text-3xs text-muted-foreground"
             />
           </div>
           <div className="mt-0.5 truncate text-xs text-muted-foreground">
             {highlight(hit.snippet, query)}
           </div>
-          <div className="mt-0.5 truncate text-[10px] text-muted-foreground/70">
+          <div className="mt-0.5 truncate text-3xs text-muted-foreground/70">
             — {hit.authorName ?? "Removed user"}
           </div>
         </div>

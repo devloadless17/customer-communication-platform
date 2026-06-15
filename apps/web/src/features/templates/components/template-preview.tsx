@@ -50,7 +50,7 @@ export function TemplatePreview({
               : <span className="text-muted-foreground">No body</span>}
           </p>
           {footer?.text && (
-            <p className="mt-1.5 text-[11px] text-muted-foreground">{footer.text}</p>
+            <p className="mt-1.5 text-2xs text-muted-foreground">{footer.text}</p>
           )}
         </div>
       </div>

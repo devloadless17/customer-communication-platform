@@ -74,7 +74,7 @@ export function LoginForm({ next }: { next: string }) {
           {/* No self-serve reset (no email provider by design) — recovery is
               admin-initiated. Point users at the right person instead of a
               dead "Forgot password?" link. */}
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-2xs text-muted-foreground">
             Forgot it? Ask your admin to reset it.
           </span>
         </div>

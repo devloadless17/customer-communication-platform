@@ -17,7 +17,7 @@ export default async function RegisterPage() {
           </div>
           <div>
             <div className="text-sm font-semibold leading-tight">Loadless Inbox</div>
-            <div className="text-[11px] text-muted-foreground">Shared WhatsApp inbox</div>
+            <div className="text-2xs text-muted-foreground">Shared WhatsApp inbox</div>
           </div>
         </div>
 
@@ -32,7 +32,7 @@ export default async function RegisterPage() {
           <RegisterForm />
         </div>
 
-        <p className="mt-4 text-center text-[11px] text-muted-foreground">
+        <p className="mt-4 text-center text-2xs text-muted-foreground">
           Already have an account?{" "}
           <Link href="/login" className="text-primary hover:underline">
             Sign in

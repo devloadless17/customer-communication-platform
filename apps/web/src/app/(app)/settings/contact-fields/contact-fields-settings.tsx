@@ -443,7 +443,7 @@ export function ContactFieldsSettings({
                 </div>
               </div>
               {isReservedFieldKey(newLabel) && (
-                <div className="mt-2 text-[11px] text-destructive">
+                <div className="mt-2 text-2xs text-destructive">
                   &ldquo;{newLabel}&rdquo; is a built-in contact field — pick a
                   different name.
                 </div>
@@ -561,12 +561,12 @@ function FieldRow({
 
       {/* The key is immutable — surface it so admins know what JSON path
           shows up in exports / API responses. */}
-      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
         {field.key}
       </code>
 
       {!field.isVisible && (
-        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-3xs font-medium text-amber-700 dark:text-amber-400">
           Hidden
         </span>
       )}
@@ -613,7 +613,7 @@ function BuiltinRow({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{label}</span>
           {!visible && (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-3xs font-medium text-amber-700 dark:text-amber-400">
               Hidden
             </span>
           )}

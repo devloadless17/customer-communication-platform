@@ -39,7 +39,7 @@ export default async function PlatformOverviewPage() {
 
       {/* Organizations by approval status. */}
       <section className="flex flex-col gap-3">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <h2 className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
           Organizations
         </h2>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -76,7 +76,7 @@ export default async function PlatformOverviewPage() {
       {a.pendingOrgs.length > 0 && (
         <section className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <h2 className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
               Awaiting approval
             </h2>
             {a.orgs.pending > a.pendingOrgs.length && (
@@ -101,7 +101,7 @@ export default async function PlatformOverviewPage() {
                   >
                     {o.name}
                   </Link>
-                  <div className="text-[11px] text-muted-foreground">
+                  <div className="text-2xs text-muted-foreground">
                     Signed up <LocalTime iso={o.createdAt} format="listTime" />
                   </div>
                 </div>
@@ -121,7 +121,7 @@ export default async function PlatformOverviewPage() {
 
       {/* Platform totals. */}
       <section className="flex flex-col gap-3">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <h2 className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
           Across the platform
         </h2>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -176,7 +176,7 @@ function StatCard({
     <div className="flex flex-col gap-2 rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/30">
       <div className="flex items-center justify-between">
         <span className={toneClass}>{icon}</span>
-        {hint && <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">{hint}</span>}
+        {hint && <span className="text-2xs font-medium text-amber-600 dark:text-amber-400">{hint}</span>}
       </div>
       <div>
         <div className="tabular-nums text-2xl font-semibold">{value}</div>

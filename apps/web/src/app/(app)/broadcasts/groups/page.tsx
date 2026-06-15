@@ -45,7 +45,7 @@ export default async function AudienceGroupsPage() {
         <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="w-full min-w-160 text-sm">
             <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
+              <tr className="border-b border-border bg-muted/30 text-2xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Group</th>
                 <th className="px-4 py-2.5 text-left font-medium">Composition</th>
                 <th className="px-4 py-2.5 text-right font-medium">Members</th>

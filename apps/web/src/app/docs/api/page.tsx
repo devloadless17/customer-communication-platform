@@ -350,7 +350,7 @@ function verify(rawBody, header, secret) {
                   <code className="font-mono text-xs">{e.type}</code>
                   <span className="text-xs font-medium">{e.label}</span>
                   <span className="text-xs text-muted-foreground">{e.description}</span>
-                  <details className="mt-1 text-[11px]">
+                  <details className="mt-1 text-2xs">
                     <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
                       Sample payload
                     </summary>
@@ -411,7 +411,7 @@ function Endpoint({
   return (
     <div className="flex flex-col gap-1 px-2 py-1.5">
       <div className="flex items-center gap-2">
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${color}`}>{method}</span>
+        <span className={`rounded px-1.5 py-0.5 text-3xs font-bold ${color}`}>{method}</span>
         <code className="truncate font-mono text-xs">{path}</code>
         <CopyCurlButton method={method} path={path} body={body} headers={headers} />
       </div>

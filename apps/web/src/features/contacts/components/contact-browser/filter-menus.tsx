@@ -21,7 +21,7 @@ import type {
 
 function MenuLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+    <div className="px-3 pb-1 pt-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
       {children}
     </div>
   );

@@ -147,7 +147,7 @@ export function MediaLightbox({
           <div className="truncate text-sm font-medium">
             {current.media.filename ?? captionFallback(current)}
           </div>
-          <div className="text-[11px] text-white/60">
+          <div className="text-2xs text-white/60">
             {items.length > 1 && `${index + 1} of ${items.length} · `}
             {current.media.sizeBytes > 0 && `${formatBytes(current.media.sizeBytes)} · `}
             {new Date(current.timestamp).toLocaleString()}

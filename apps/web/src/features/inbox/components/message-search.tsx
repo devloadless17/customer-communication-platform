@@ -214,7 +214,7 @@ export function MessageSearch({
         )}
       </div>
 
-      <div className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums">
+      <div className="flex shrink-0 items-center gap-1 text-2xs tabular-nums">
         {loading ? (
           <span className="inline-flex items-center gap-1 text-muted-foreground">
             <Loader2 className="size-3 animate-spin" />

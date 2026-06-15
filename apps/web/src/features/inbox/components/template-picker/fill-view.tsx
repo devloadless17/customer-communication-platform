@@ -207,7 +207,7 @@ export function TemplateFillView({
         {/* Media header attachment — required for IMAGE/VIDEO/DOCUMENT headers */}
         {headerMediaKind && (
           <div className="mb-4">
-            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="mb-1.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
               {headerMediaKind} header
             </div>
             <HeaderMediaField
@@ -227,7 +227,7 @@ export function TemplateFillView({
         {/* Variables form */}
         {bodyVarCount + headerVarCount > 0 ? (
           <div className="flex flex-col gap-3">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
               Fill the placeholders
             </div>
             {headerVarCount > 0 && (
@@ -265,7 +265,7 @@ export function TemplateFillView({
             ))}
           </div>
         ) : (
-          <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+          <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground">
             This template has no variables — it&apos;ll send as-is.
           </div>
         )}
@@ -273,7 +273,7 @@ export function TemplateFillView({
         {/* Preview — uses RESOLVED values so the agent sees exactly what the
             customer will receive (not the raw `$var.contact.name` tokens). */}
         <div className="mt-5">
-          <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <div className="mb-2 flex items-center gap-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
             <span>Preview</span>
             <span className="h-px flex-1 bg-border" />
           </div>
@@ -297,7 +297,7 @@ export function TemplateFillView({
       )}
 
       <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-4 py-3">
-        <div className="text-[11px] text-muted-foreground">
+        <div className="text-2xs text-muted-foreground">
           <Check className="mr-1 inline size-3 text-emerald-500" />
           Sending opens a fresh 24h window after the customer replies.
         </div>
@@ -367,7 +367,7 @@ function VarField({
 
   return (
     <label className="flex flex-col gap-1">
-      <span className="font-mono text-[11px] font-medium text-foreground">
+      <span className="font-mono text-2xs font-medium text-foreground">
         {label}
       </span>
       <div className="flex items-center gap-1.5">
@@ -453,7 +453,7 @@ function PreviewBubble({
               </div>
             )
           ) : (
-            <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-[11px] text-muted-foreground">
+            <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-2xs text-muted-foreground">
               {headerComp.format ?? "MEDIA"} header
             </div>
           )
@@ -468,7 +468,7 @@ function PreviewBubble({
 
         {/* Footer */}
         {footerComp?.text && (
-          <div className="mt-2 text-[11px] text-muted-foreground">
+          <div className="mt-2 text-2xs text-muted-foreground">
             {footerComp.text}
           </div>
         )}

@@ -180,7 +180,7 @@ function SearchResultRow({
         className="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-accent/40"
       >
         <span
-          className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground"
+          className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-3xs font-medium text-muted-foreground"
           aria-hidden
         >
           {initials(message.authorName ?? "?")}

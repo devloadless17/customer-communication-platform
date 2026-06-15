@@ -60,7 +60,7 @@ export function QuickApproveButton({ teamId }: { teamId: string }) {
         )}
         Approve
       </Button>
-      {error && <span className="text-[10px] text-destructive">{error}</span>}
+      {error && <span className="text-3xs text-destructive">{error}</span>}
     </div>
   );
 }
@@ -178,7 +178,7 @@ export function TeamStatusControls({
       {error && (
         <div
           role="alert"
-          className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"
+          className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-2xs text-destructive"
         >
           {error}
         </div>

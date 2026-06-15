@@ -612,7 +612,7 @@ export function StepPickerPopover({
       <div className="flex-1 overflow-y-auto px-2 py-2">
         {Object.entries(grouped).map(([group, options]) => (
           <div key={group} className="mb-2 last:mb-0">
-            <div className="px-1.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <div className="px-1.5 pb-1 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
               {GROUP_LABELS[group] ?? group}
             </div>
             <div className="flex flex-col">
@@ -642,7 +642,7 @@ export function StepPickerPopover({
                         </span>
                       )}
                     </span>
-                    <span className="line-clamp-1 text-[11px] text-muted-foreground">
+                    <span className="line-clamp-1 text-2xs text-muted-foreground">
                       {o.description}
                     </span>
                   </button>

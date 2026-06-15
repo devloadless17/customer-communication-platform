@@ -10,7 +10,7 @@ export function Section({
   return (
     <div className="px-5 py-4">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <div className="text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
           {title}
         </div>
         {right}

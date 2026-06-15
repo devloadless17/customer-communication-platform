@@ -65,7 +65,7 @@ export function MentionPopup({
       style={{ left: position.left, top: position.top }}
       onMouseDown={(e) => e.preventDefault() /* keep textarea focus */}
     >
-      <div className="border-b border-border px-2 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
+      <div className="border-b border-border px-2 py-1.5 text-2xs uppercase tracking-wider text-muted-foreground">
         Mention teammate
       </div>
       <div className="max-h-72 overflow-y-auto py-1">
@@ -81,11 +81,11 @@ export function MentionPopup({
             )}
           >
             <Avatar className="size-6">
-              <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
+              <AvatarFallback seed={u.id} className="text-3xs">{initials(u.name)}</AvatarFallback>
             </Avatar>
             <div className="min-w-0 flex-1">
               <div className="truncate font-medium">{u.name}</div>
-              <div className="truncate text-[11px] text-muted-foreground">{u.email}</div>
+              <div className="truncate text-2xs text-muted-foreground">{u.email}</div>
             </div>
           </button>
         ))}

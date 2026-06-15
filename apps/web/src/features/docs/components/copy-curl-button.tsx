@@ -52,7 +52,7 @@ export function CopyCurlButton({ method, path, body, headers }: Props) {
     <button
       type="button"
       onClick={copy}
-      className="ml-auto inline-flex items-center gap-1 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+      className="ml-auto inline-flex items-center gap-1 rounded border border-border bg-background px-1.5 py-0.5 text-3xs font-medium text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
       title="Copy curl with $CCP_TOKEN placeholder"
     >
       {copied ? <Check className="size-3" /> : <Copy className="size-3" />}

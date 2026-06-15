@@ -169,7 +169,7 @@ export function TagMultiPicker({
             className="overflow-hidden border-t border-border bg-muted/30"
           >
             <div className="px-2.5 py-2">
-              <div className="mb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1.5 text-3xs uppercase tracking-wide text-muted-foreground">
                 Create new
               </div>
               <div className="flex items-center gap-2">
@@ -186,7 +186,7 @@ export function TagMultiPicker({
                   type="button"
                   onClick={() => void createTag()}
                   disabled={creating}
-                  className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+                  className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-2 py-1 text-2xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
                 >
                   {creating ? (
                     <Loader2 className="size-3 animate-spin" />
@@ -215,7 +215,7 @@ export function TagMultiPicker({
                 })}
               </div>
               {createError && (
-                <div className="mt-2 text-[10px] text-destructive">{createError}</div>
+                <div className="mt-2 text-3xs text-destructive">{createError}</div>
               )}
             </div>
           </motion.div>

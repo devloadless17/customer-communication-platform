@@ -133,7 +133,7 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
           <div className="truncate font-medium">
             {value.name ?? formatPhone(value.phoneNumber)}
           </div>
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <div className="flex items-center gap-1.5 text-2xs text-muted-foreground">
             <span className="font-mono">{formatPhone(value.phoneNumber)}</span>
             {statusLabel && (
               <>
@@ -241,7 +241,7 @@ function ContactRow({
     >
       <div className="min-w-0 flex-1">
         <div className="truncate font-medium">{item.contact.name}</div>
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-1.5 text-2xs text-muted-foreground">
           <span className="font-mono">{formatPhone(item.contact.phoneNumber)}</span>
           <span aria-hidden>·</span>
           <span

@@ -220,7 +220,7 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
         {errored ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-muted-foreground">
             <ImageOff className="size-5" />
-            <span className="text-[11px]">Image unavailable</span>
+            <span className="text-2xs">Image unavailable</span>
           </div>
         ) : (
           <>
@@ -302,7 +302,7 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
     return (
       <div className="flex aspect-4/3 max-h-65 w-80 max-w-full flex-col items-center justify-center gap-1.5 rounded-xl bg-black/80 text-muted-foreground">
         <Film className="size-5" />
-        <span className="text-[11px]">Video unavailable</span>
+        <span className="text-2xs">Video unavailable</span>
       </div>
     );
   }
@@ -381,7 +381,7 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
         )}
       />
       {media.durationMs != null && (
-        <span className="shrink-0 text-[10px] opacity-70">
+        <span className="shrink-0 text-3xs opacity-70">
           {formatDuration(media.durationMs)}
         </span>
       )}
@@ -419,7 +419,7 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
         <div className="truncate text-xs font-medium">
           {media.filename ?? "Document"}
         </div>
-        <div className={cn("text-[10px] opacity-70")}>
+        <div className={cn("text-3xs opacity-70")}>
           {formatBytes(media.sizeBytes)}
         </div>
       </div>

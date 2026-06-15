@@ -80,11 +80,11 @@ export function DevTools({
               <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Dev tools
               </span>
-              <span className="ml-auto text-[10px] text-muted-foreground">socket.io</span>
+              <span className="ml-auto text-3xs text-muted-foreground">socket.io</span>
             </header>
 
             <div className="px-3 py-3">
-              <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+              <label className="mb-1 block text-3xs font-medium uppercase tracking-wider text-muted-foreground">
                 Target conversation
               </label>
               <select
@@ -155,7 +155,7 @@ export function DevTools({
               </div>
             )}
 
-            <footer className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
+            <footer className="border-t border-border px-3 py-2 text-3xs text-muted-foreground">
               Dev only · set ENABLE_DEV_TOOLS=1 to enable the route.
             </footer>
           </motion.div>
@@ -189,7 +189,7 @@ function ActionButton({
       <span className="mt-0.5 text-muted-foreground">{pending ? <Loader2 className="size-3.5 animate-spin" /> : icon}</span>
       <span className="flex-1">
         <span className="block text-xs font-medium">{label}</span>
-        <span className="block text-[10px] font-normal text-muted-foreground">{desc}</span>
+        <span className="block text-3xs font-normal text-muted-foreground">{desc}</span>
       </span>
     </Button>
   );

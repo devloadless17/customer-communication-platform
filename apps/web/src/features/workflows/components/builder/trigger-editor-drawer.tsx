@@ -65,7 +65,7 @@ export function TriggerEditorDrawer({
     <aside className="flex h-full w-[min(20rem,80vw)] shrink-0 flex-col border-l border-border bg-card sm:w-96">
       <header className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div>
-          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="text-3xs font-medium uppercase tracking-wider text-muted-foreground">
             Trigger
           </div>
           <div className="text-sm font-medium">When this fires</div>
@@ -82,7 +82,7 @@ export function TriggerEditorDrawer({
             <div className="flex flex-col gap-3">
               {Object.entries(grouped).map(([group, options]) => (
                 <div key={group}>
-                  <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  <div className="mb-1 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
                     {TRIGGER_GROUPS[group] ?? group}
                   </div>
                   <div className="flex flex-col gap-1.5">
@@ -111,7 +111,7 @@ export function TriggerEditorDrawer({
                           />
                           <div>
                             <div className="font-medium">{o.label}</div>
-                            <div className="text-[11px] text-muted-foreground">{o.description}</div>
+                            <div className="text-2xs text-muted-foreground">{o.description}</div>
                           </div>
                         </div>
                       </label>

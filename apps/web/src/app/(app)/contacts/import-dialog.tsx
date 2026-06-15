@@ -169,7 +169,7 @@ export function ImportContactsDialog({
             >
               <Download className="size-3.5" />
               Download template
-              <span className="text-[10px] text-muted-foreground/60">
+              <span className="text-3xs text-muted-foreground/60">
                 (with an example row + your fields)
               </span>
             </button>

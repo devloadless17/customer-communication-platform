@@ -79,20 +79,20 @@ export default async function WorkflowsPage() {
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{r.name}</span>
                     {r.published ? (
-                      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-3xs font-medium uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
                         Live
                       </span>
                     ) : (
-                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                         Draft
                       </span>
                     )}
                   </div>
-                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                  <div className="mt-0.5 truncate text-2xs text-muted-foreground">
                     {TRIGGER_LABELS[r.trigger] ?? r.trigger} · {stepCount} step{stepCount === 1 ? "" : "s"}
                   </div>
                 </div>
-                <div className="hidden flex-col items-end gap-0.5 text-right text-[11px] text-muted-foreground sm:flex">
+                <div className="hidden flex-col items-end gap-0.5 text-right text-2xs text-muted-foreground sm:flex">
                   <div>{r.runCount} run{r.runCount === 1 ? "" : "s"}</div>
                   <div><LocalTime iso={r.createdAt} format="listTime" /></div>
                 </div>

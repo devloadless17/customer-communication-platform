@@ -102,7 +102,7 @@ export function NotificationsSettings() {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mb-2 px-0.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+    <div className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground/70">
       {children}
     </div>
   );

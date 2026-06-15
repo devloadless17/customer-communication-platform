@@ -75,7 +75,7 @@ export function DeleteTeamButton({
       {error && (
         <div
           role="alert"
-          className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"
+          className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-2xs text-destructive"
         >
           {error}
         </div>

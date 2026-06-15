@@ -182,7 +182,7 @@ function IntegrationTile({
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>
         <div
-          className={`mt-2 inline-flex items-center gap-1 text-[11px] font-medium ${
+          className={`mt-2 inline-flex items-center gap-1 text-2xs font-medium ${
             connected ? "text-emerald-600" : "text-muted-foreground"
           }`}
         >

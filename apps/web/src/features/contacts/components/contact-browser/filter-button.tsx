@@ -38,7 +38,7 @@ export function FilterButton({
     >
       {label}
       {count ? (
-        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground">
+        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold tabular-nums text-primary-foreground">
           {count}
         </span>
       ) : null}

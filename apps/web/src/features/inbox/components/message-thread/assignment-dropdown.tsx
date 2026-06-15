@@ -269,7 +269,7 @@ function AssignableMembers({
     <>
       {available.length > 0 && (
         <>
-          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-3xs font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
             Available
           </DropdownMenuLabel>
           {available.map((u) => (
@@ -287,7 +287,7 @@ function AssignableMembers({
       {offline.length > 0 && (
         <>
           {available.length > 0 && <DropdownMenuSeparator className="my-1" />}
-          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+          <DropdownMenuLabel className="px-2 pb-1 pt-2 text-3xs font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
             Offline
           </DropdownMenuLabel>
           {offline.map((u) => (
@@ -349,7 +349,7 @@ function MemberRow({
         <div className="relative">
           <Avatar className={cn("size-5", dimmed && "opacity-80")}>
             {user.avatarUrl ? <AvatarImage src={user.avatarUrl} alt={user.name} /> : null}
-            <AvatarFallback seed={user.id} className="text-[10px]">{initials(user.name)}</AvatarFallback>
+            <AvatarFallback seed={user.id} className="text-3xs">{initials(user.name)}</AvatarFallback>
           </Avatar>
           <span
             className={cn(
@@ -364,14 +364,14 @@ function MemberRow({
         <div className="flex items-center gap-2">
           <span className="min-w-0 flex-1 truncate">{user.name}</span>
           {cue && (
-            <span className="shrink-0 text-[10px] text-muted-foreground">{cue}</span>
+            <span className="shrink-0 text-3xs text-muted-foreground">{cue}</span>
           )}
         </div>
         {/* Availability note — the teammate's own status message. Surfaced
             inline (was a hover-only `title` tooltip nobody could find). */}
         {note && (
           <span
-            className="truncate text-[10px] leading-tight text-muted-foreground/80"
+            className="truncate text-3xs leading-tight text-muted-foreground/80"
             title={note}
           >
             {note}

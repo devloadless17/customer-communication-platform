@@ -77,7 +77,7 @@ export function StepEditorDrawer({
     <aside className="flex h-full w-[min(20rem,80vw)] shrink-0 flex-col border-l border-border bg-card sm:w-96">
       <header className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="text-3xs font-medium uppercase tracking-wider text-muted-foreground">
             {meta?.label ?? node.type}
           </div>
           {/* Inline rename. Defaults to empty when the node has no name so

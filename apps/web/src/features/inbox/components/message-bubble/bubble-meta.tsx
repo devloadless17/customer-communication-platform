@@ -34,7 +34,7 @@ export function BubbleMeta({
     <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
       <div
         className={cn(
-          "flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground",
+          "flex items-center gap-1.5 px-1 text-3xs text-muted-foreground",
           isOut ? "flex-row-reverse" : "flex-row",
         )}
       >
@@ -48,7 +48,7 @@ export function BubbleMeta({
         {isOut && <StatusTicks message={message} reason={failureReason} />}
       </div>
       {failureReason && (
-        <span className="px-1 text-[10px] leading-tight text-destructive/80">
+        <span className="px-1 text-3xs leading-tight text-destructive/80">
           {failureReason}
         </span>
       )}

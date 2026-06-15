@@ -99,7 +99,7 @@ function ConversationListItemImpl({
             iso={conversation.lastMessageAt}
             format="listTime"
             className={cn(
-              "shrink-0 text-[11px] tabular-nums",
+              "shrink-0 text-2xs tabular-nums",
               unread ? "text-primary font-medium" : "text-muted-foreground",
             )}
           />
@@ -128,7 +128,7 @@ function ConversationListItemImpl({
                mount animation. Subsequent count increases don't re-mount. */
             <span
               key="badge-visible"
-              className="animate-badge-pop flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold tabular-nums text-primary-foreground"
+              className="animate-badge-pop flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-3xs font-bold tabular-nums text-primary-foreground"
             >
               {conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}
             </span>
@@ -138,17 +138,17 @@ function ConversationListItemImpl({
         {/* Row 3: status chip + assignment */}
         <div className="flex items-center gap-1.5">
           {conversation.status === "pending" && (
-            <span className="inline-flex h-4.5 items-center rounded-sm bg-amber-500/12 px-1.5 text-[10px] font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+            <span className="inline-flex h-4.5 items-center rounded-sm bg-amber-500/12 px-1.5 text-3xs font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
               pending
             </span>
           )}
           {conversation.status === "closed" && (
-            <span className="inline-flex h-4.5 items-center rounded-sm bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-4.5 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
               closed
             </span>
           )}
           {assignedUser ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
               <Avatar className="size-3.5">
                 <AvatarFallback
                   seed={assignedUser.id}
@@ -160,7 +160,7 @@ function ConversationListItemImpl({
               <span className="truncate">{assignedUser.name.split(" ")[0]}</span>
             </span>
           ) : (
-            <span className="text-[11px] italic text-muted-foreground/60">
+            <span className="text-2xs italic text-muted-foreground/60">
               unassigned
             </span>
           )}

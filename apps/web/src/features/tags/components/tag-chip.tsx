@@ -32,10 +32,10 @@ export function TagChip({
   const colors = tagColorClasses(tag.color);
   const sizing =
     size === "xs"
-      ? "h-5 px-1.5 text-[10px] gap-1"
+      ? "h-5 px-1.5 text-3xs gap-1"
       : size === "md"
         ? "h-7 px-2.5 text-xs gap-1.5"
-        : "h-6 px-2 text-[11px] gap-1.5";
+        : "h-6 px-2 text-2xs gap-1.5";
   return (
     <span
       onClick={onClick}
@@ -82,7 +82,7 @@ export function TagAddButton({
   className?: string;
 }) {
   const sizing =
-    size === "xs" ? "h-5 px-1.5 text-[10px]" : "h-6 px-2 text-[11px]";
+    size === "xs" ? "h-5 px-1.5 text-3xs" : "h-6 px-2 text-2xs";
   return (
     <button
       type="button"

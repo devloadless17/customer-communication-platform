@@ -456,7 +456,7 @@ function ConversationListImpl({
         )}
 
         {hasMore && (
-          <div className="flex items-center justify-center px-3 py-4 text-[11px] text-muted-foreground">
+          <div className="flex items-center justify-center px-3 py-4 text-2xs text-muted-foreground">
             {loadingMore ? (
               <span className="inline-flex items-center gap-1.5">
                 <Loader2 className="size-3 animate-spin" />
@@ -485,7 +485,7 @@ function ConversationListImpl({
             transition={{ type: "spring", duration: 0.3, bounce: 0.2 }}
             className="flex items-center gap-2 border-t border-border bg-popover px-3 py-2 shadow-lg"
           >
-            <span className="inline-flex h-7 items-center rounded-full bg-primary/10 px-2.5 text-[11px] font-medium text-primary tabular-nums">
+            <span className="inline-flex h-7 items-center rounded-full bg-primary/10 px-2.5 text-2xs font-medium text-primary tabular-nums">
               {selectedIds.size} selected
             </span>
             <Button

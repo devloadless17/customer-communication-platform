@@ -135,7 +135,7 @@ export function VariableBindingsEditor({
   if (bodyVarCount === 0 && !headerHasVar) {
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-[12px] text-muted-foreground">
-        This template has no <code className="rounded bg-muted px-1 text-[11px]">{"{{n}}"}</code> variables.
+        This template has no <code className="rounded bg-muted px-1 text-2xs">{"{{n}}"}</code> variables.
       </div>
     );
   }
@@ -163,10 +163,10 @@ export function VariableBindingsEditor({
       {templateId && (
         <div className="flex items-center justify-end gap-2">
           {error && (
-            <span className="mr-auto text-[11px] text-destructive">{error}</span>
+            <span className="mr-auto text-2xs text-destructive">{error}</span>
           )}
           {savedAt !== null && !saving && !error && (
-            <span className="mr-auto inline-flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400">
+            <span className="mr-auto inline-flex items-center gap-1 text-2xs text-emerald-700 dark:text-emerald-400">
               <Check className="size-3" />
               Saved
             </span>
@@ -207,7 +207,7 @@ function BindingRow({
   return (
     <div className="rounded-lg border border-border bg-background p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[11px] font-medium text-primary">{slot}</span>
+        <span className="font-mono text-2xs font-medium text-primary">{slot}</span>
         <Input
           value={binding.label}
           onChange={(e) => onLabelChange(e.target.value)}
@@ -248,7 +248,7 @@ function BindingRow({
       </div>
 
       {binding.source.kind !== "manual" && (
-        <label className="mt-2 flex items-center gap-2 text-[11px]">
+        <label className="mt-2 flex items-center gap-2 text-2xs">
           <span className="shrink-0 text-muted-foreground">Default if empty:</span>
           <Input
             value={binding.defaultValue ?? ""}
@@ -276,7 +276,7 @@ function SourcePill({
       type="button"
       onClick={onClick}
       className={cn(
-        "rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
+        "rounded-full border px-2 py-0.5 text-2xs font-medium transition-colors",
         active
           ? "border-primary bg-primary text-primary-foreground"
           : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground",

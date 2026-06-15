@@ -210,11 +210,11 @@ export function ChannelMembersDialog({
           <div>
             <div className="text-base font-semibold">#{channel.name} members</div>
             {channel.isDefault ? (
-              <div className="text-[11px] text-muted-foreground">
+              <div className="text-2xs text-muted-foreground">
                 The default channel — everyone in the team is automatically a member.
               </div>
             ) : (
-              <div className="text-[11px] text-muted-foreground">
+              <div className="text-2xs text-muted-foreground">
                 {members?.length ?? 0} {members?.length === 1 ? "person" : "people"} in this channel
               </div>
             )}
@@ -240,7 +240,7 @@ export function ChannelMembersDialog({
                         setSelectedToAdd(new Set());
                         setPickerFilter("");
                       }}
-                      className="text-[11px] text-muted-foreground hover:text-foreground"
+                      className="text-2xs text-muted-foreground hover:text-foreground"
                     >
                       Cancel
                     </button>
@@ -292,12 +292,12 @@ export function ChannelMembersDialog({
                               </span>
                               <Avatar className="size-6">
                                 {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                                <AvatarFallback seed={u.id} className="text-[10px]">
+                                <AvatarFallback seed={u.id} className="text-3xs">
                                   {initials(u.name)}
                                 </AvatarFallback>
                               </Avatar>
                               <span className="min-w-0 flex-1 truncate font-medium">{u.name}</span>
-                              <span className="shrink-0 text-[10px] text-muted-foreground">
+                              <span className="shrink-0 text-3xs text-muted-foreground">
                                 {u.role}
                               </span>
                             </button>
@@ -367,7 +367,7 @@ export function ChannelMembersDialog({
                   >
                     <Avatar className="size-7">
                       {m.avatarUrl ? <AvatarImage src={m.avatarUrl} alt={m.name} /> : null}
-                      <AvatarFallback seed={m.userId} className="text-[10px]">{initials(m.name)}</AvatarFallback>
+                      <AvatarFallback seed={m.userId} className="text-3xs">{initials(m.name)}</AvatarFallback>
                     </Avatar>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
@@ -378,11 +378,11 @@ export function ChannelMembersDialog({
                           </span>
                         ) : null}
                       </div>
-                      <div className="truncate text-[11px] text-muted-foreground">
+                      <div className="truncate text-2xs text-muted-foreground">
                         {m.email}
                       </div>
                     </div>
-                    <span className="shrink-0 text-[10px] capitalize text-muted-foreground">
+                    <span className="shrink-0 text-3xs capitalize text-muted-foreground">
                       {m.role}
                     </span>
                     {showRemove ? (

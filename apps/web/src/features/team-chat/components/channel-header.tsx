@@ -65,7 +65,7 @@ export function ChannelHeader({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-semibold">{channel.name}</span>
           {channel.isDefault && (
-            <span className="rounded-full bg-muted px-1.5 py-0 text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span className="rounded-full bg-muted px-1.5 py-0 text-3xs uppercase tracking-wider text-muted-foreground">
               default
             </span>
           )}

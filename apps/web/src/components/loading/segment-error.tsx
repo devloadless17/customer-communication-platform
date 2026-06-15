@@ -60,7 +60,7 @@ export function SegmentError({
           {error.message || "Unknown error."}
         </p>
         {error.digest ? (
-          <p className="font-mono text-[11px] text-muted-foreground/70">
+          <p className="font-mono text-2xs text-muted-foreground/70">
             digest: {error.digest}
           </p>
         ) : null}

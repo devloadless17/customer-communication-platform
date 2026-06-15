@@ -262,7 +262,7 @@ export function AvailabilityPicker({
 
   return (
     <div className="flex flex-col px-1 py-1">
-      <div className="px-2 pb-1.5 pt-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
+      <div className="px-2 pb-1.5 pt-0.5 text-3xs font-semibold uppercase tracking-[0.08em] text-muted-foreground/60">
         Availability
       </div>
       <div className="flex flex-col gap-0.5">
@@ -335,10 +335,10 @@ export function AvailabilityPicker({
         {/* Fixed height so toggling between the char count and the Save button
             never re-lays-out the dropdown. */}
         <div className="mt-1 flex h-6 items-center justify-between gap-2 px-1">
-          <span className="text-[10px] tabular-nums text-muted-foreground/60">
+          <span className="text-3xs tabular-nums text-muted-foreground/60">
             {message.length > 0 ? `${message.length}/100` : ""}
           </span>
-          <div className="flex items-center text-[10px]">
+          <div className="flex items-center text-3xs">
             {error ? (
               <span className="text-destructive">{error}</span>
             ) : noteState === "saving" ? (
@@ -355,7 +355,7 @@ export function AvailabilityPicker({
               <button
                 type="button"
                 onClick={() => void saveNote()}
-                className="inline-flex h-6 cursor-pointer items-center rounded-md bg-foreground px-2.5 text-[11px] font-medium text-background outline-none transition-colors hover:bg-foreground/90 focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex h-6 cursor-pointer items-center rounded-md bg-foreground px-2.5 text-2xs font-medium text-background outline-none transition-colors hover:bg-foreground/90 focus-visible:ring-2 focus-visible:ring-ring"
               >
                 Save
               </button>

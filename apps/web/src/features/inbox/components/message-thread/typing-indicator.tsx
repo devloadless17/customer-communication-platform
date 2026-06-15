@@ -49,7 +49,7 @@ export function TypingIndicator({
             transition={{ duration: 0.14 }}
             className="border-t border-border bg-background"
           >
-            <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 py-1.5 text-[11px] text-muted-foreground">
+            <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 py-1.5 text-2xs text-muted-foreground">
               <TypingDots />
               <span>{sentence}</span>
             </div>

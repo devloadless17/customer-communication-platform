@@ -101,7 +101,7 @@ export function HeaderMediaField({
         {uploading ? "Uploading…" : `Attach ${kind}`}
       </Button>
       {error && (
-        <div className="flex items-start gap-1.5 text-[11px] text-destructive">
+        <div className="flex items-start gap-1.5 text-2xs text-destructive">
           <AlertTriangle className="mt-0.5 size-3 shrink-0" />
           <span>{error}</span>
         </div>

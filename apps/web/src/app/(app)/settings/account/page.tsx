@@ -20,7 +20,7 @@ export default async function AccountPage() {
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Profile</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             How teammates see you in chat, assignments, and message attribution.
           </div>
         </div>
@@ -38,7 +38,7 @@ export default async function AccountPage() {
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Email + role</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             Managed by your admin. Contact them to change either.
           </div>
         </div>
@@ -53,7 +53,7 @@ export default async function AccountPage() {
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Change password</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             Use 8+ characters. Old sessions stay valid.
           </div>
         </div>

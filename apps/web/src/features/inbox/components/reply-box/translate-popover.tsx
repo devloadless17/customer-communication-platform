@@ -141,7 +141,7 @@ export function TranslatePopover({
     >
       {preview ? (
         <div>
-          <div className="flex items-center gap-1.5 border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="flex items-center gap-1.5 border-b border-border px-3 py-2 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
             <span>Translated to</span>
             <span className="normal-case">{preview.language}</span>
           </div>
@@ -171,7 +171,7 @@ export function TranslatePopover({
         </div>
       ) : (
         <>
-          <div className="border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="border-b border-border px-3 py-2 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
             Translate to
           </div>
           {!hasText ? (
@@ -204,7 +204,7 @@ export function TranslatePopover({
         </>
       )}
       {error && (
-        <div className="border-t border-border px-3 py-2 text-[11px] text-destructive">
+        <div className="border-t border-border px-3 py-2 text-2xs text-destructive">
           {error}
         </div>
       )}

@@ -210,7 +210,7 @@ function ResultRow({
             <span className="truncate text-sm font-medium">
               {hit.message.authorName ?? "Removed user"}
             </span>
-            <span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            <span className="ml-auto shrink-0 text-2xs tabular-nums text-muted-foreground">
               {stamp}
             </span>
           </span>

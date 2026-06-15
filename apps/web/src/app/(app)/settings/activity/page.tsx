@@ -98,7 +98,7 @@ export default async function TeamActivityPage({
       <section className="overflow-hidden rounded-xl border border-border bg-card">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
+            <tr className="border-b border-border text-2xs uppercase tracking-wide text-muted-foreground">
               <th className="px-4 py-2.5 text-left font-medium">Member</th>
               <th className="px-4 py-2.5 text-right font-medium">Assigned</th>
               <th className="px-4 py-2.5 text-right font-medium">Messages sent</th>
@@ -111,7 +111,7 @@ export default async function TeamActivityPage({
                 <td className="px-4 py-2.5">
                   <div className="flex items-center gap-2.5">
                     <Avatar className="size-7 shrink-0">
-                      <AvatarFallback seed={s.userId} className="text-[10px]">
+                      <AvatarFallback seed={s.userId} className="text-3xs">
                         {initials(s.name || s.email)}
                       </AvatarFallback>
                     </Avatar>
@@ -119,12 +119,12 @@ export default async function TeamActivityPage({
                       <div className="flex items-center gap-1.5">
                         <span className="truncate font-medium">{s.name}</span>
                         {s.deactivated && (
-                          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          <span className="rounded bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
                             deactivated
                           </span>
                         )}
                       </div>
-                      <div className="truncate text-[11px] text-muted-foreground">
+                      <div className="truncate text-2xs text-muted-foreground">
                         {roleLabel(s.role)} · {s.email}
                       </div>
                     </div>

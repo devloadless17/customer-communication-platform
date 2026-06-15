@@ -219,7 +219,7 @@ const TimelineRows = memo(function TimelineRows({
             {showDay && (
               <div className="my-3 flex items-center gap-3">
                 <div className="h-px flex-1 bg-border" />
-                <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                <span className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
                   {dayLabel}
                 </span>
                 <div className="h-px flex-1 bg-border" />
@@ -1519,7 +1519,7 @@ function MessageThreadImpl({
       )}
       {searchError && (
         <div className="pointer-events-none flex justify-center bg-background pt-1">
-          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 text-[11px] text-destructive shadow-xs">
+          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 text-2xs text-destructive shadow-xs">
             {searchError}
             <button
               type="button"
@@ -1669,7 +1669,7 @@ function MessageThreadImpl({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.15 }}
-              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-[11px] text-muted-foreground shadow-xs"
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-2xs text-muted-foreground shadow-xs"
             >
               <Loader2 className="size-3 animate-spin" />
               Loading older messages…

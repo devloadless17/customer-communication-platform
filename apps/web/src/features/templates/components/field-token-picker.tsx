@@ -90,7 +90,7 @@ export function FieldTokenPicker({
         <button
           type="button"
           className={cn(
-            "inline-flex h-7 items-center gap-1 rounded-md border border-border bg-background px-2 text-[11px] font-medium text-muted-foreground transition-colors",
+            "inline-flex h-7 items-center gap-1 rounded-md border border-border bg-background px-2 text-2xs font-medium text-muted-foreground transition-colors",
             "hover:border-primary/40 hover:text-foreground",
             className,
           )}
@@ -107,7 +107,7 @@ export function FieldTokenPicker({
         // the bottom of the screen.
         className="max-h-(--radix-dropdown-menu-content-available-height) min-w-55 overflow-y-auto scrollbar-thin"
       >
-        <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <DropdownMenuLabel className="text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
           Contact
         </DropdownMenuLabel>
         {builtins.map((t) => (
@@ -118,7 +118,7 @@ export function FieldTokenPicker({
           >
             {iconFor(t.token)}
             <span className="flex-1">{t.label}</span>
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+            <code className="rounded bg-muted px-1 py-0.5 text-3xs text-muted-foreground">
               {compactToken(t.token)}
             </code>
           </DropdownMenuItem>
@@ -126,7 +126,7 @@ export function FieldTokenPicker({
         {customs.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <DropdownMenuLabel className="text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
               Custom fields
             </DropdownMenuLabel>
             {customs.map((t) => (
@@ -137,7 +137,7 @@ export function FieldTokenPicker({
               >
                 <Hash className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
-                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                <code className="rounded bg-muted px-1 py-0.5 text-3xs text-muted-foreground">
                   {compactToken(t.token)}
                 </code>
               </DropdownMenuItem>
@@ -147,7 +147,7 @@ export function FieldTokenPicker({
         {senders.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <DropdownMenuLabel className="text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
               Sender
             </DropdownMenuLabel>
             {senders.map((t) => (
@@ -158,7 +158,7 @@ export function FieldTokenPicker({
               >
                 <UserCircle className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
-                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                <code className="rounded bg-muted px-1 py-0.5 text-3xs text-muted-foreground">
                   {compactToken(t.token)}
                 </code>
               </DropdownMenuItem>
@@ -168,7 +168,7 @@ export function FieldTokenPicker({
         {messages.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <DropdownMenuLabel className="text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
               Trigger message
             </DropdownMenuLabel>
             {messages.map((t) => (
@@ -179,7 +179,7 @@ export function FieldTokenPicker({
               >
                 <MessageSquare className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
-                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                <code className="rounded bg-muted px-1 py-0.5 text-3xs text-muted-foreground">
                   {compactToken(t.token)}
                 </code>
               </DropdownMenuItem>
@@ -189,7 +189,7 @@ export function FieldTokenPicker({
         {conversations.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <DropdownMenuLabel className="text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
               Conversation
             </DropdownMenuLabel>
             {conversations.map((t) => (
@@ -200,7 +200,7 @@ export function FieldTokenPicker({
               >
                 <Inbox className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
-                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                <code className="rounded bg-muted px-1 py-0.5 text-3xs text-muted-foreground">
                   {compactToken(t.token)}
                 </code>
               </DropdownMenuItem>
@@ -210,7 +210,7 @@ export function FieldTokenPicker({
         {agents.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <DropdownMenuLabel className="text-3xs font-semibold uppercase tracking-wide text-muted-foreground">
               Agent
             </DropdownMenuLabel>
             {agents.map((t) => (
@@ -221,7 +221,7 @@ export function FieldTokenPicker({
               >
                 <UserCircle className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
-                <code className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                <code className="rounded bg-muted px-1 py-0.5 text-3xs text-muted-foreground">
                   {compactToken(t.token)}
                 </code>
               </DropdownMenuItem>

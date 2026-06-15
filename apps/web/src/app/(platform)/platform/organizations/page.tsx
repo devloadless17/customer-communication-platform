@@ -62,7 +62,7 @@ export default async function PlatformOrganizationsPage() {
         <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="w-full min-w-200 text-sm">
             <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
+              <tr className="border-b border-border bg-muted/30 text-2xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Organization</th>
                 <th className="px-4 py-2.5 text-left font-medium">Status</th>
                 <th className="px-4 py-2.5 text-left font-medium">WhatsApp</th>
@@ -87,7 +87,7 @@ export default async function PlatformOrganizationsPage() {
                     >
                       {t.name}
                     </Link>
-                    <div className="font-mono text-[11px] text-muted-foreground">
+                    <div className="font-mono text-2xs text-muted-foreground">
                       {t.id}
                     </div>
                   </td>
@@ -145,7 +145,7 @@ export default async function PlatformOrganizationsPage() {
         </div>
       )}
 
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-2xs text-muted-foreground">
         <Phone className="mr-1 inline size-3" />
         Phone numbers shown are the WhatsApp Business numbers each team has connected.
       </p>

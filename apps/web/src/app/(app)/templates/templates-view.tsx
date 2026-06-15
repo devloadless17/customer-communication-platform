@@ -359,7 +359,7 @@ function TemplateCard({
           </div>
           <div className="min-w-0">
             <div className="truncate text-sm font-medium leading-tight">{template.name}</div>
-            <div className="mt-0.5 flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <div className="mt-0.5 flex items-center gap-1 text-3xs uppercase tracking-wide text-muted-foreground">
               <span className="font-mono">{template.language}</span>
               <span aria-hidden="true">·</span>
               <CategoryPill category={template.category} />
@@ -373,7 +373,7 @@ function TemplateCard({
         {template.bodyText || "—"}
       </p>
 
-      <div className="mt-auto flex items-center gap-2 text-[10px] text-muted-foreground">
+      <div className="mt-auto flex items-center gap-2 text-3xs text-muted-foreground">
         {headerComp && (
           <span className="rounded-full bg-muted/60 px-1.5 py-0.5 font-medium">
             {headerComp.format ?? "TEXT"} header
@@ -529,14 +529,14 @@ function DetailDrawer({
                   </h2>
                   <StatusPill status={template.status} />
                 </div>
-                <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <div className="mt-0.5 flex items-center gap-2 text-2xs text-muted-foreground">
                   <span className="font-mono">{template.language}</span>
                   <span aria-hidden="true">·</span>
                   <CategoryPill category={template.category} />
                   {template.externalId && (
                     <>
                       <span aria-hidden="true">·</span>
-                      <code className="rounded bg-muted/60 px-1 py-0.5 text-[10px]">
+                      <code className="rounded bg-muted/60 px-1 py-0.5 text-3xs">
                         {template.externalId}
                       </code>
                     </>
@@ -571,7 +571,7 @@ function DetailDrawer({
                 <section>
                   <SectionLabel>Variable bindings</SectionLabel>
                   <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                    Pull each <code className="rounded bg-muted px-1 text-[11px]">{"{{n}}"}</code> from a contact
+                    Pull each <code className="rounded bg-muted px-1 text-2xs">{"{{n}}"}</code> from a contact
                     field, or leave it as a manual value the agent fills at
                     broadcast time. Default values cover contacts whose field
                     is empty.
@@ -612,7 +612,7 @@ function DetailDrawer({
 
                 <section>
                   <SectionLabel>Components (Meta wire format)</SectionLabel>
-                  <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/30 p-3 text-[11px] leading-relaxed">
+                  <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/30 p-3 text-2xs leading-relaxed">
                     {JSON.stringify(template.components, null, 2)}
                   </pre>
                 </section>
@@ -627,7 +627,7 @@ function DetailDrawer({
                 </div>
               )}
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-2xs text-muted-foreground">
                   Last synced <LocalTime iso={template.syncedAt} format="localeString" />
                 </span>
                 <div className="flex items-center gap-2">
@@ -670,7 +670,7 @@ function DetailDrawer({
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className="flex items-center gap-2 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
       <span>{children}</span>
       <span className="h-px flex-1 bg-border" />
     </div>

@@ -174,7 +174,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
         </div>
         <div className="flex flex-col gap-1.5">
           <div className="text-sm font-medium">{user.name}</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             PNG, JPG, or WEBP. Up to 2 MiB.
           </div>
           {avatarUrl ? (
@@ -182,7 +182,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
               type="button"
               onClick={onClearAvatar}
               disabled={uploadingAvatar}
-              className="inline-flex w-fit items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
+              className="inline-flex w-fit items-center gap-1 text-2xs text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
             >
               <Trash2 className="size-3" />
               Remove

@@ -70,7 +70,7 @@ export function WindowBadgeFromStatus({
           : "border-border bg-muted/40 text-muted-foreground";
 
   const sizing =
-    size === "xs" ? "h-5 px-1.5 text-[10px]" : "h-6 px-2 text-[11px]";
+    size === "xs" ? "h-5 px-1.5 text-3xs" : "h-6 px-2 text-2xs";
 
   const title =
     state === "never"

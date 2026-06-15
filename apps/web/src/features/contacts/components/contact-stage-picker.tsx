@@ -67,7 +67,7 @@ export function ContactStagePicker({
   const popoverAlign = size === "md" ? "left-0" : "right-0";
   const triggerHeight = size === "xs" ? "h-6" : size === "sm" ? "h-7" : "h-8";
   const dotSize = size === "xs" ? "size-2" : "size-2.5";
-  const textSize = size === "xs" ? "text-[11px]" : "text-xs";
+  const textSize = size === "xs" ? "text-2xs" : "text-xs";
 
   async function pick(stageId: string) {
     if (stageId === currentStageId || saving) return;
@@ -130,7 +130,7 @@ export function ContactStagePicker({
 
       {open && (
         <div className={cn("absolute top-full z-30 mt-1 w-60 overflow-hidden rounded-xl border border-border bg-popover shadow-xl", popoverAlign)}>
-          <div className="border-b border-border px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="border-b border-border px-3 py-2 text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
             Customer stage
           </div>
           <ul className="max-h-72 overflow-y-auto py-1">
@@ -161,7 +161,7 @@ export function ContactStagePicker({
                     />
                     <span className="min-w-0 flex-1 truncate">{s.name}</span>
                     {s.isDefault && (
-                      <span className="text-[10px] text-muted-foreground">default</span>
+                      <span className="text-3xs text-muted-foreground">default</span>
                     )}
                     {isCurrent && <Check className="size-3.5 text-primary" />}
                   </button>
@@ -172,7 +172,7 @@ export function ContactStagePicker({
           {canManage && (
             <Link
               href="/settings/stages"
-              className="flex items-center gap-2 border-t border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+              className="flex items-center gap-2 border-t border-border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground hover:bg-accent/40 hover:text-foreground"
             >
               <Settings2 className="size-3" />
               Manage stages…

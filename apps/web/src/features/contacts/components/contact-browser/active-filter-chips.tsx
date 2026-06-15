@@ -25,7 +25,7 @@ function FilterChip({
   children: React.ReactNode;
 }) {
   return (
-    <span className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-card pl-2 pr-1 text-[11px] text-foreground">
+    <span className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-card pl-2 pr-1 text-2xs text-foreground">
       {leading}
       <span className="font-medium">{children}</span>
       <button
@@ -164,7 +164,7 @@ export function ActiveFilterChips({
       <button
         type="button"
         onClick={onClearAll}
-        className="ml-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+        className="ml-0.5 text-2xs text-muted-foreground hover:text-foreground hover:underline"
       >
         Clear all
       </button>

@@ -63,7 +63,7 @@ export const BrowserRow = memo(function BrowserRow({
         </Avatar>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span className="truncate text-sm font-medium">{label}</span>
-          <span className="hidden shrink-0 font-mono text-[11px] text-muted-foreground sm:inline">
+          <span className="hidden shrink-0 font-mono text-2xs text-muted-foreground sm:inline">
             {formatPhone(contact.phoneNumber)}
           </span>
         </div>
@@ -72,13 +72,13 @@ export const BrowserRow = memo(function BrowserRow({
             <TagChip key={t.id} tag={t} size="xs" />
           ))}
           {extraTags > 0 && (
-            <span className="text-[10px] text-muted-foreground">+{extraTags}</span>
+            <span className="text-3xs text-muted-foreground">+{extraTags}</span>
           )}
         </div>
         {stage && (
           <span
             className={cn(
-              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium sm:inline-flex",
+              "hidden shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-3xs font-medium sm:inline-flex",
               tagColorClasses(stage.color).pill,
             )}
             title={`Stage: ${stage.name}`}

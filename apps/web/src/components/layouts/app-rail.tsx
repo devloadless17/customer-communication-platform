@@ -369,7 +369,7 @@ export function AppRail({
           >
             <div className="relative shrink-0">
               <Avatar className="size-7 ring-1 ring-sidebar-border transition-shadow group-hover:ring-foreground/20">
-                <AvatarFallback seed={currentUser.id} className="text-[10px]">
+                <AvatarFallback seed={currentUser.id} className="text-3xs">
                   {initials(currentUser.name)}
                 </AvatarFallback>
               </Avatar>
@@ -401,7 +401,7 @@ export function AppRail({
                 <p className="truncate text-[13px] font-medium leading-tight text-sidebar-foreground whitespace-nowrap">
                   {currentUser.name}
                 </p>
-                <p className="truncate text-[11px] leading-tight text-muted-foreground whitespace-nowrap">
+                <p className="truncate text-2xs leading-tight text-muted-foreground whitespace-nowrap">
                   {roleLabel(currentUser.role)}
                 </p>
               </div>
@@ -454,7 +454,7 @@ function RailLink({
             reads as "unread on Inbox" even with no label. ring-sidebar lifts it
             off the icon. */}
         {hasBadge && collapsed && (
-          <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground ring-2 ring-sidebar">
+          <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold leading-none text-primary-foreground ring-2 ring-sidebar">
             {badgeText}
           </span>
         )}
@@ -469,7 +469,7 @@ function RailLink({
       )}
       {/* Expanded: the count sits at the row's right edge, past the label. */}
       {hasBadge && showLabels && (
-        <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-semibold leading-none text-primary-foreground">
+        <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-2xs font-semibold leading-none text-primary-foreground">
           {badgeText}
         </span>
       )}
@@ -520,10 +520,10 @@ function UserMenu({
           <DropdownMenuLabel>
             <div className="flex flex-col">
               <span className="text-sm font-medium">{currentUser.name}</span>
-              <span className="text-[11px] font-normal text-muted-foreground">
+              <span className="text-2xs font-normal text-muted-foreground">
                 {currentUser.email}
               </span>
-              <span className="mt-0.5 text-[10px] font-normal text-muted-foreground/80">
+              <span className="mt-0.5 text-3xs font-normal text-muted-foreground/80">
                 {roleLabel(currentUser.role)}
               </span>
             </div>

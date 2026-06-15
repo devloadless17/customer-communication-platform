@@ -179,7 +179,7 @@ function PickerPanel(props: PickerProps) {
           <div className="truncate text-sm font-semibold">
             {selected ? selected.name : "Send a template"}
           </div>
-          <div className="truncate text-[11px] text-muted-foreground">
+          <div className="truncate text-2xs text-muted-foreground">
             {selected
               ? `${selected.language} · ${labelCategory(selected.category)}`
               : "Pre-approved messages — required outside the 24h window."}

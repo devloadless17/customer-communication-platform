@@ -312,7 +312,7 @@ function TableView({
     >
       <table className="w-full min-w-180 text-sm">
         <thead>
-          <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
+          <tr className="border-b border-border bg-muted/30 text-2xs uppercase tracking-wide text-muted-foreground">
             <th className="px-4 py-2.5 text-left font-medium">Broadcast</th>
             <th className="px-4 py-2.5 text-left font-medium">Audience</th>
             <th className="px-4 py-2.5 text-left font-medium">Status</th>
@@ -334,7 +334,7 @@ function TableView({
                 >
                   {b.name || b.templateName}
                 </Link>
-                <div className="text-[11px] text-muted-foreground">
+                <div className="text-2xs text-muted-foreground">
                   {b.name ? `${b.templateName} · ` : ""}
                   {b.templateLanguage} · by {b.createdByName}
                 </div>
@@ -472,7 +472,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
           <div
             key={d}
-            className="bg-muted/40 py-1.5 text-center text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+            className="bg-muted/40 py-1.5 text-center text-3xs font-medium uppercase tracking-wide text-muted-foreground"
           >
             {d}
           </div>
@@ -488,7 +488,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
             <div key={key} className="min-h-20 bg-background p-1">
               <div
                 className={cn(
-                  "mb-1 inline-flex size-5 items-center justify-center rounded-full text-[11px]",
+                  "mb-1 inline-flex size-5 items-center justify-center rounded-full text-2xs",
                   isToday ? "bg-primary font-semibold text-primary-foreground" : "text-muted-foreground",
                 )}
               >
@@ -501,7 +501,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
                     href={`/broadcasts/${b.id}`}
                     title={b.name || b.templateName}
                     className={cn(
-                      "truncate rounded px-1 py-0.5 text-[10px] font-medium transition-opacity hover:opacity-80",
+                      "truncate rounded px-1 py-0.5 text-3xs font-medium transition-opacity hover:opacity-80",
                       b.status === "scheduled"
                         ? "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
                         : b.status === "failed"
@@ -513,7 +513,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
                   </Link>
                 ))}
                 {items.length > 3 && (
-                  <span className="px-1 text-[10px] text-muted-foreground">
+                  <span className="px-1 text-3xs text-muted-foreground">
                     +{items.length - 3} more
                   </span>
                 )}

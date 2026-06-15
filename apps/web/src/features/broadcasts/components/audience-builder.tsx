@@ -146,14 +146,14 @@ export function AudienceBuilder({
             <button
               type="button"
               onClick={() => setPreviewOpen(true)}
-              className="ml-auto inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-background/60 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-background dark:text-emerald-300"
+              className="ml-auto inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-background/60 px-2 py-0.5 text-2xs font-medium text-emerald-700 hover:bg-background dark:text-emerald-300"
             >
               <Users className="size-3" />
               Preview
             </button>
           )}
         </div>
-        <div className="mt-1 text-[11px] text-muted-foreground">
+        <div className="mt-1 text-2xs text-muted-foreground">
           {manualCount} hand-picked · {taggedOnlyCount} via tag membership · resolved at
           send time
         </div>
@@ -210,10 +210,10 @@ function Section({
           </div>
           <div>
             <div className="text-sm font-semibold">{title}</div>
-            <div className="text-[11px] text-muted-foreground">{hint}</div>
+            <div className="text-2xs text-muted-foreground">{hint}</div>
           </div>
         </div>
-        <span className="text-[11px] text-muted-foreground">{count} selected</span>
+        <span className="text-2xs text-muted-foreground">{count} selected</span>
       </header>
       <div className="px-4 py-3">{children}</div>
     </section>

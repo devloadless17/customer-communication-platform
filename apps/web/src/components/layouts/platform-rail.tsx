@@ -61,7 +61,7 @@ export function PlatformRail({
         </span>
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold leading-tight">Platform</div>
-          <div className="truncate text-[11px] text-muted-foreground">Super admin</div>
+          <div className="truncate text-2xs text-muted-foreground">Super admin</div>
         </div>
       </header>
 
@@ -92,13 +92,13 @@ export function PlatformRail({
 
       <div className="mt-auto hidden items-center gap-2.5 border-t border-sidebar-border px-3 py-3 md:flex">
         <Avatar className="size-8 shrink-0">
-          <AvatarFallback seed={user.email} className="text-[10px]">
+          <AvatarFallback seed={user.email} className="text-3xs">
             {initials(user.name)}
           </AvatarFallback>
         </Avatar>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-medium">{user.name}</div>
-          <div className="truncate text-[11px] text-muted-foreground">
+          <div className="truncate text-2xs text-muted-foreground">
             {roleLabel(user.role)}
           </div>
         </div>

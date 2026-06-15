@@ -84,7 +84,7 @@ export function AddFieldRow({
         className="h-7 text-xs"
       />
       {canManageFields && (
-        <div className="mt-2 flex gap-1 text-[11px]">
+        <div className="mt-2 flex gap-1 text-2xs">
           <ScopeChip
             active={scope === "contact"}
             onClick={() => setScope("contact")}

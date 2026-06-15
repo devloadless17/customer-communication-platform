@@ -1273,7 +1273,7 @@ export function ReplyBox({
                   initial={{ opacity: 0, x: -4 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: -4 }}
-                  className="ml-1 text-[11px] font-medium text-note-fg"
+                  className="ml-1 text-2xs font-medium text-note-fg"
                 >
                   Internal · not sent to WhatsApp
                 </motion.span>
@@ -1285,7 +1285,7 @@ export function ReplyBox({
                 drops first, then the Send button collapses to a round
                 icon-only button — driven by the @container on this row. */}
             <div className="ml-auto flex items-center gap-2">
-              <span className="hidden text-[10px] text-muted-foreground @[34rem]:inline">
+              <span className="hidden text-3xs text-muted-foreground @[34rem]:inline">
                 ↵ to send · ⇧↵ for newline
               </span>
               <Button
@@ -1317,7 +1317,7 @@ export function ReplyBox({
         </motion.div>
 
         {error && (
-          <p className="mt-2 text-[11px] text-destructive">
+          <p className="mt-2 text-2xs text-destructive">
             {error}
           </p>
         )}

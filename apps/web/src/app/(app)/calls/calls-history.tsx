@@ -134,7 +134,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           set). */}
       <div className="mb-4 flex flex-wrap items-end gap-2">
         <div className="flex min-w-55 flex-1 flex-col gap-1">
-          <label htmlFor="calls-q" className="text-[11px] font-medium text-muted-foreground">
+          <label htmlFor="calls-q" className="text-2xs font-medium text-muted-foreground">
             Search
           </label>
           <input
@@ -146,7 +146,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label htmlFor="calls-from" className="text-[11px] font-medium text-muted-foreground">
+          <label htmlFor="calls-from" className="text-2xs font-medium text-muted-foreground">
             From
           </label>
           <input
@@ -159,7 +159,7 @@ export function CallsHistory({ canCall }: { canCall: boolean }) {
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label htmlFor="calls-to" className="text-[11px] font-medium text-muted-foreground">
+          <label htmlFor="calls-to" className="text-2xs font-medium text-muted-foreground">
             To
           </label>
           <input
@@ -320,7 +320,7 @@ function CallRowItem({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{name}</span>
           {row.contactPhone && row.contactName && (
-            <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+            <span className="shrink-0 font-mono text-2xs text-muted-foreground">
               {row.contactPhone}
             </span>
           )}
@@ -345,7 +345,7 @@ function CallRowItem({
       <LocalTime
         iso={row.ringingAt}
         format="listTime"
-        className="shrink-0 text-[11px] tabular-nums text-muted-foreground"
+        className="shrink-0 text-2xs tabular-nums text-muted-foreground"
       />
 
       <div className="flex shrink-0 items-center gap-1">

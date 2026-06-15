@@ -114,14 +114,14 @@ export function TriggerNode({ data }: NodeProps) {
       <div className="flex items-center gap-2 border-b border-border bg-amber-500/10 px-3 py-2">
         <Zap className="size-4 text-amber-600" />
         <div className="flex-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-amber-700 dark:text-amber-300">
+          <div className="text-3xs font-medium uppercase tracking-wider text-amber-700 dark:text-amber-300">
             Trigger
           </div>
           <div className="truncate text-sm font-medium">{trigger?.label ?? "Pick a trigger"}</div>
         </div>
       </div>
       {trigger?.description && (
-        <div className="px-3 py-2 text-[11px] text-muted-foreground">{trigger.description}</div>
+        <div className="px-3 py-2 text-2xs text-muted-foreground">{trigger.description}</div>
       )}
       <Handle type="source" position={Position.Bottom} id="default" />
       {/* Empty-graph affordance — when no startNode is wired yet, the
@@ -164,14 +164,14 @@ export function StepNode({ id, data }: NodeProps) {
       <div className="flex items-center gap-2 border-b border-border bg-primary/5 px-3 py-2">
         <Icon className="size-4 text-primary" />
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="text-3xs font-medium uppercase tracking-wider text-muted-foreground">
             {step?.label ?? d.type}
           </div>
           <div className="truncate text-sm font-medium">{d.label}</div>
         </div>
       </div>
       {d.summary && (
-        <div className="truncate px-3 py-2 text-[11px] text-muted-foreground">{d.summary}</div>
+        <div className="truncate px-3 py-2 text-2xs text-muted-foreground">{d.summary}</div>
       )}
       <Handle type="source" position={Position.Bottom} id="default" />
       <NodeActions
@@ -212,13 +212,13 @@ export function BranchNode({ id, data }: NodeProps) {
       <div className="flex items-center gap-2 border-b border-border bg-indigo-500/10 px-3 py-2">
         <Filter className="size-4 text-indigo-600" />
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
+          <div className="text-3xs font-medium uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
             Branch
           </div>
           <div className="truncate text-sm font-medium">{d.label}</div>
         </div>
       </div>
-      <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between px-3 py-2 text-2xs text-muted-foreground">
         <span className="flex items-center gap-1">
           <span className="size-1.5 rounded-full bg-emerald-500" /> true
         </span>
@@ -294,17 +294,17 @@ export function AskQuestionNode({ id, data }: NodeProps) {
       <div className="flex items-center gap-2 border-b border-border bg-violet-500/10 px-3 py-2">
         <HelpCircle className="size-4 text-violet-600" />
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-violet-700 dark:text-violet-300">
+          <div className="text-3xs font-medium uppercase tracking-wider text-violet-700 dark:text-violet-300">
             Ask a Question
           </div>
           <div className="truncate text-sm font-medium">{d.label}</div>
         </div>
       </div>
       {d.summary && (
-        <div className="truncate px-3 py-2 text-[11px] text-muted-foreground">{d.summary}</div>
+        <div className="truncate px-3 py-2 text-2xs text-muted-foreground">{d.summary}</div>
       )}
       {nWay ? (
-        <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
+        <div className="flex items-center justify-between px-3 py-2 text-2xs text-muted-foreground">
           {options.map((opt) => (
             <span key={opt.id} className="flex items-center gap-1 truncate" title={opt.id}>
               <span className="size-1.5 rounded-full bg-emerald-500" />
@@ -316,7 +316,7 @@ export function AskQuestionNode({ id, data }: NodeProps) {
           </span>
         </div>
       ) : (
-        <div className="flex items-center justify-between px-3 py-2 text-[11px] text-muted-foreground">
+        <div className="flex items-center justify-between px-3 py-2 text-2xs text-muted-foreground">
           <span className="flex items-center gap-1">
             <span className="size-1.5 rounded-full bg-emerald-500" /> answered
           </span>

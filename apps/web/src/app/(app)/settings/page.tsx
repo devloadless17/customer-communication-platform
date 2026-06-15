@@ -76,7 +76,7 @@ export default async function TeamSettingsIndex() {
       <section className="mb-8 rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
           <div className="text-sm font-medium">Mode</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             Light or dark mode. “System” follows your device. Applies to your
             account on this device.
           </div>

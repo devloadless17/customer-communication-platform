@@ -211,7 +211,7 @@ export function MobileShellChrome({
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium">{teamName}</div>
-              <div className="truncate text-[11px] text-muted-foreground">
+              <div className="truncate text-2xs text-muted-foreground">
                 {currentUser.name} · {roleLabel(currentUser.role)}
               </div>
             </div>
@@ -241,11 +241,11 @@ export function MobileShellChrome({
           <div className="mt-auto border-t border-border p-2">
             <div className="flex items-center gap-2 px-2 py-1.5">
               <Avatar className="size-7">
-                <AvatarFallback seed={currentUser.id} className="text-[10px]">
+                <AvatarFallback seed={currentUser.id} className="text-3xs">
                   {initials(currentUser.name)}
                 </AvatarFallback>
               </Avatar>
-              <div className="min-w-0 flex-1 text-[11px] text-muted-foreground">
+              <div className="min-w-0 flex-1 text-2xs text-muted-foreground">
                 <div className="truncate text-foreground">{currentUser.name}</div>
                 <div className="truncate">{currentUser.email}</div>
               </div>

@@ -159,10 +159,10 @@ function SectionHeader({
 }) {
   return (
     <div>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <div className="text-3xs font-semibold uppercase tracking-wider text-muted-foreground">
         {title}
       </div>
-      <div className="text-[11px] text-muted-foreground">{subtitle}</div>
+      <div className="text-2xs text-muted-foreground">{subtitle}</div>
     </div>
   );
 }
@@ -184,7 +184,7 @@ function CollapsibleGroup({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1 text-2xs text-muted-foreground hover:text-foreground"
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         <span className="font-medium">{title}</span>
@@ -238,7 +238,7 @@ function ShapeTree({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-accent/40"
+        className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-2xs font-medium text-foreground transition-colors hover:bg-accent/40"
       >
         {open ? (
           <ChevronDown className="size-3 text-muted-foreground" />
@@ -246,7 +246,7 @@ function ShapeTree({
           <ChevronRight className="size-3 text-muted-foreground" />
         )}
         <span className="truncate">{label}</span>
-        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/70">
+        <span className="ml-auto text-3xs tabular-nums text-muted-foreground/70">
           {leaves.length}
         </span>
       </button>
@@ -274,7 +274,7 @@ function ShapeTree({
                     onClick={() => onInsertToken(token)}
                     disabled={readOnly}
                     className={cn(
-                      "group flex items-center gap-2 rounded px-1.5 py-1 text-left text-[11px] transition-colors",
+                      "group flex items-center gap-2 rounded px-1.5 py-1 text-left text-2xs transition-colors",
                       readOnly ? "cursor-default" : "cursor-pointer hover:bg-accent/60",
                     )}
                     title={readOnly ? leaf.description ?? leaf.type : `Insert ${token}`}

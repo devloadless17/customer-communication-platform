@@ -481,7 +481,7 @@ function WebhookForm({
           placeholder="https://your-n8n.example.com/webhook/abcd"
           required
         />
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           We'll POST a JSON envelope here with an{" "}
           <code className="font-mono">X-CCP-Signature</code> header.
         </p>
@@ -491,7 +491,7 @@ function WebhookForm({
         <div className="flex flex-col gap-3">
           {eventGroups.map((g) => (
             <div key={g.group}>
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
                 {g.group}
               </div>
               <div className="flex flex-col gap-1">
@@ -508,10 +508,10 @@ function WebhookForm({
                     />
                     <span className="flex-1">
                       <span className="font-medium">{evt.label}</span>
-                      <span className="ml-1.5 font-mono text-[10px] text-muted-foreground">
+                      <span className="ml-1.5 font-mono text-3xs text-muted-foreground">
                         {evt.type}
                       </span>
-                      <div className="text-[11px] text-muted-foreground">
+                      <div className="text-2xs text-muted-foreground">
                         {evt.description}
                       </div>
                     </span>
@@ -673,11 +673,11 @@ function WebhookRow({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{webhook.name}</span>
           {tripped ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-destructive">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-3xs font-medium uppercase tracking-wide text-destructive">
               <AlertTriangle className="size-3" /> auto-disabled
             </span>
           ) : !webhook.enabled ? (
-            <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
               disabled
             </span>
           ) : null}
@@ -691,20 +691,20 @@ function WebhookRow({
             is this for" without opening edit. */}
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
           {webhook.eventTypes.length === 0 ? (
-            <span className="text-[11px] text-muted-foreground">no events</span>
+            <span className="text-2xs text-muted-foreground">no events</span>
           ) : (
             <>
               {shownEvents.map((t) => (
                 <span
                   key={t}
                   title={t}
-                  className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
+                  className="rounded-full bg-muted px-2 py-0.5 text-3xs text-muted-foreground"
                 >
                   {eventLabel.get(t) ?? t}
                 </span>
               ))}
               {extra > 0 && (
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                <span className="rounded-full bg-muted px-2 py-0.5 text-3xs text-muted-foreground">
                   +{extra}
                 </span>
               )}
@@ -712,7 +712,7 @@ function WebhookRow({
           )}
         </div>
 
-        <div className="mt-1 text-[11px] text-muted-foreground">
+        <div className="mt-1 text-2xs text-muted-foreground">
           {hasError ? (
             <span
               className="inline-flex items-center gap-1 text-destructive"
@@ -935,7 +935,7 @@ function DeliveriesSheet({
               )}
               Refresh
             </Button>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               newest first · 25 per page
             </span>
           </div>
@@ -1029,16 +1029,16 @@ function DeliveryRow({
             <span className="truncate text-xs font-medium" title={d.eventType}>
               {eventLabel.get(d.eventType) ?? d.eventType}
             </span>
-            <span className={`rounded-full px-2 py-0.5 text-[10px] ${toneClass}`}>
+            <span className={`rounded-full px-2 py-0.5 text-3xs ${toneClass}`}>
               {state.label}
             </span>
             {d.attemptCount > 1 && (
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-3xs text-muted-foreground">
                 {d.attemptCount} attempts
               </span>
             )}
           </span>
-          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+          <span className="mt-0.5 block text-2xs text-muted-foreground">
             <LocalTime iso={d.createdAt} format="localeString" />
           </span>
         </span>
@@ -1046,11 +1046,11 @@ function DeliveryRow({
       {open && (
         <div className="flex flex-col gap-2 border-t border-border bg-muted/10 px-3 py-2">
           {d.errorMessage && (
-            <div className="text-[11px] text-destructive">{d.errorMessage}</div>
+            <div className="text-2xs text-destructive">{d.errorMessage}</div>
           )}
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <span className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                 Payload sent
               </span>
               <Button type="button" size="sm" variant="ghost" onClick={copyPayload}>
@@ -1058,16 +1058,16 @@ function DeliveryRow({
                 Copy
               </Button>
             </div>
-            <pre className="max-h-64 overflow-auto rounded-md border border-border bg-background p-2 text-[10px] leading-relaxed">
+            <pre className="max-h-64 overflow-auto rounded-md border border-border bg-background p-2 text-3xs leading-relaxed">
               <code>{payloadJson}</code>
             </pre>
           </div>
           {d.responseBody && (
             <div>
-              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                 Response{d.responseStatus != null ? ` · ${d.responseStatus}` : ""}
               </div>
-              <pre className="max-h-40 overflow-auto rounded-md border border-border bg-background p-2 text-[10px] leading-relaxed">
+              <pre className="max-h-40 overflow-auto rounded-md border border-border bg-background p-2 text-3xs leading-relaxed">
                 <code>{d.responseBody}</code>
               </pre>
             </div>
@@ -1148,7 +1148,7 @@ function SignatureVerificationGuide() {
         Verifying the <code className="font-mono">X-CCP-Signature</code> header
       </summary>
       <div className="mt-3 flex flex-col gap-3">
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+        <p className="text-2xs leading-relaxed text-muted-foreground">
           Every delivery includes <code className="font-mono">X-CCP-Signature: t=&lt;ts&gt;,v1=&lt;hex&gt;</code>.
           Compute <code className="font-mono">HMAC-SHA256(secret, t + &quot;.&quot; + rawBody)</code>{" "}
           and compare to <code className="font-mono">v1</code> in constant time. Reject deliveries
@@ -1178,7 +1178,7 @@ function SignatureVerificationGuide() {
             </Button>
           </div>
         </div>
-        <pre className="overflow-x-auto rounded-md border border-border bg-background p-3 text-[11px] leading-relaxed">
+        <pre className="overflow-x-auto rounded-md border border-border bg-background p-3 text-2xs leading-relaxed">
           <code>{lang === "js" ? VERIFY_JS : VERIFY_PY}</code>
         </pre>
       </div>

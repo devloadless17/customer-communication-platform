@@ -63,7 +63,7 @@ export function MaxMembersControl({
 
   if (!editing) {
     return (
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+      <div className="flex items-center gap-2 text-2xs text-muted-foreground">
         <span>
           <span className="font-medium tabular-nums text-foreground">
             {activeMembers}
@@ -73,7 +73,7 @@ export function MaxMembersControl({
         <button
           type="button"
           onClick={() => setEditing(true)}
-          className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-muted"
+          className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-3xs font-medium text-foreground transition-colors hover:bg-muted"
         >
           <Pencil className="size-2.5" />
           Limit
@@ -89,7 +89,7 @@ export function MaxMembersControl({
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex items-center gap-1.5">
-        <span className="text-[11px] text-muted-foreground">Max members</span>
+        <span className="text-2xs text-muted-foreground">Max members</span>
         <Input
           type="number"
           min={1}
@@ -129,12 +129,12 @@ export function MaxMembersControl({
         </Button>
       </div>
       {willStrandExisting && (
-        <span className="text-[10px] text-amber-600 dark:text-amber-400">
+        <span className="text-3xs text-amber-600 dark:text-amber-400">
           {activeMembers} members already — existing stay, no new joins.
         </span>
       )}
       {error && (
-        <span className="text-[10px] text-destructive" role="alert">
+        <span className="text-3xs text-destructive" role="alert">
           {error}
         </span>
       )}

@@ -323,7 +323,7 @@ export function TeamSettings({
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
             <div className="text-sm font-medium">Members ({users.length})</div>
-            <div className="text-[11px] text-muted-foreground">
+            <div className="text-2xs text-muted-foreground">
               {canManage ? "Last active admin can't be removed." : "Roles are managed by admins."}
             </div>
           </div>
@@ -444,32 +444,32 @@ function UserRow({
   return (
     <li className="flex items-center gap-3 px-4 py-3">
       <Avatar className="size-8">
-        <AvatarFallback seed={user.id} className="text-[11px]">{initials(user.name)}</AvatarFallback>
+        <AvatarFallback seed={user.id} className="text-2xs">{initials(user.name)}</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{user.name}</span>
           {isSelf && (
-            <Badge variant="muted" className="px-1.5 py-0 text-[10px]">
+            <Badge variant="muted" className="px-1.5 py-0 text-3xs">
               you
             </Badge>
           )}
           {user.role === "superAdmin" && (
             <Badge
               variant="muted"
-              className="flex items-center gap-1 px-1.5 py-0 text-[10px] text-primary"
+              className="flex items-center gap-1 px-1.5 py-0 text-3xs text-primary"
             >
               <ShieldAlert className="size-3" />
               super
             </Badge>
           )}
           {user.deactivated && (
-            <Badge variant="muted" className="px-1.5 py-0 text-[10px] text-destructive">
+            <Badge variant="muted" className="px-1.5 py-0 text-3xs text-destructive">
               disabled
             </Badge>
           )}
         </div>
-        <div className="truncate text-[11px] text-muted-foreground">{user.email}</div>
+        <div className="truncate text-2xs text-muted-foreground">{user.email}</div>
       </div>
       <div className="flex items-center gap-2">
         {editable && !isSelf ? (
@@ -486,7 +486,7 @@ function UserRow({
             ))}
           </select>
         ) : (
-          <Badge variant="muted" className="px-2 py-0.5 text-[10px] uppercase tracking-wider">
+          <Badge variant="muted" className="px-2 py-0.5 text-3xs uppercase tracking-wider">
             {roleLabel(user.role)}
           </Badge>
         )}
@@ -637,7 +637,7 @@ function OrgNameCard({
           Save
         </Button>
       </div>
-      <p className="mt-2 text-[11px] text-muted-foreground">
+      <p className="mt-2 text-2xs text-muted-foreground">
         Shown in the sidebar and at the top of every page. Changes appear live for every teammate.
       </p>
     </form>
@@ -685,7 +685,7 @@ function InviteCard({
           Generate link
         </Button>
       </div>
-      <p className="mt-2 text-[11px] text-muted-foreground">
+      <p className="mt-2 text-2xs text-muted-foreground">
         Re-inviting the same email replaces the previous link. Links expire after 7 days.
       </p>
     </form>
@@ -714,7 +714,7 @@ function InviteLinkCard({
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-medium text-foreground">Invite ready</div>
-          <div className="mt-0.5 text-[11px] text-muted-foreground">
+          <div className="mt-0.5 text-2xs text-muted-foreground">
             Share this link with <span className="font-medium">{invite.email}</span>. It expires{" "}
             <LocalTime iso={invite.expiresAt} format="localeDate" />.
           </div>
@@ -722,7 +722,7 @@ function InviteLinkCard({
         <button
           type="button"
           onClick={onClose}
-          className="text-[11px] text-muted-foreground hover:text-foreground"
+          className="text-2xs text-muted-foreground hover:text-foreground"
         >
           Dismiss
         </button>
@@ -767,7 +767,7 @@ function PendingInvitesCard({
             Pending invites ({invites.length})
           </div>
         </div>
-        <div className="text-[11px] text-muted-foreground">
+        <div className="text-2xs text-muted-foreground">
           Invite links expire after 7 days.
         </div>
       </div>
@@ -777,11 +777,11 @@ function PendingInvitesCard({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="truncate text-sm">{inv.email}</span>
-                <Badge variant="muted" className="px-1.5 py-0 text-[10px] uppercase tracking-wider">
+                <Badge variant="muted" className="px-1.5 py-0 text-3xs uppercase tracking-wider">
                   {roleLabel(inv.role)}
                 </Badge>
               </div>
-              <div className="text-[11px] text-muted-foreground">
+              <div className="text-2xs text-muted-foreground">
                 Invited by {inv.createdByName} · expires{" "}
                 <LocalTime iso={inv.expiresAt} format="localeDate" />
               </div>

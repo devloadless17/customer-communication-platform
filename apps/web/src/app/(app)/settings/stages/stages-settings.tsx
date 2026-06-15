@@ -464,7 +464,7 @@ function StageRow({
       {stage.isDefault ? (
         <span
           title="Default — new contacts land here"
-          className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+          className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-3xs font-medium text-amber-700 dark:text-amber-300"
         >
           <Star className="size-3 fill-current" />
           Default
@@ -475,7 +475,7 @@ function StageRow({
           onClick={onPromote}
           disabled={busy}
           title="Make this the default stage"
-          className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-700 disabled:opacity-50 dark:hover:text-amber-300"
+          className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2 py-0.5 text-3xs text-muted-foreground transition-colors hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-700 disabled:opacity-50 dark:hover:text-amber-300"
         >
           <Star className="size-3" />
           Set default
@@ -487,7 +487,7 @@ function StageRow({
       <a
         href={`/contacts?stage=${stage.id}`}
         title={`View contacts in "${stage.name}"`}
-        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-2xs text-muted-foreground hover:bg-accent hover:text-foreground"
       >
         <Users className="size-3" />
         <span className="tabular-nums">{count}</span>

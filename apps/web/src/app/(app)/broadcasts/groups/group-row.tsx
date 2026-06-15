@@ -33,11 +33,11 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
           {group.name}
         </Link>
         {group.description && (
-          <div className="line-clamp-1 text-[11px] text-muted-foreground">
+          <div className="line-clamp-1 text-2xs text-muted-foreground">
             {group.description}
           </div>
         )}
-        <div className="text-[10px] text-muted-foreground">by {group.createdByName}</div>
+        <div className="text-3xs text-muted-foreground">by {group.createdByName}</div>
       </td>
       <td className="px-4 py-3">
         <div className="flex flex-wrap items-center gap-1">
@@ -45,17 +45,17 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
             <TagChip key={t.id} tag={t} size="xs" />
           ))}
           {extraTagCount > 0 && (
-            <span className="text-[10px] text-muted-foreground">
+            <span className="text-3xs text-muted-foreground">
               +{extraTagCount} tag{extraTagCount === 1 ? "" : "s"}
             </span>
           )}
           {group.contactIds.length > 0 && (
-            <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+            <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-3xs font-medium text-violet-700 dark:text-violet-300">
               +{group.contactIds.length} manual
             </span>
           )}
           {sampleTags.length === 0 && group.contactIds.length === 0 && (
-            <span className="text-[11px] italic text-muted-foreground">Empty</span>
+            <span className="text-2xs italic text-muted-foreground">Empty</span>
           )}
         </div>
       </td>

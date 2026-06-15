@@ -218,7 +218,7 @@ export function CountryCodePicker({
                           {flagEmoji(c.iso)}
                         </span>
                         <span className="flex-1 truncate">{c.name}</span>
-                        <span className="font-mono text-[11px] text-muted-foreground">
+                        <span className="font-mono text-2xs text-muted-foreground">
                           +{c.dial}
                         </span>
                       </button>

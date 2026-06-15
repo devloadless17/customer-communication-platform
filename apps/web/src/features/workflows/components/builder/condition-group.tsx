@@ -158,10 +158,10 @@ export function ConditionGroupEditor({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <Layers className="size-3.5 text-muted-foreground" />
-          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <span className="text-3xs font-medium uppercase tracking-wider text-muted-foreground">
             {isRoot ? "Match" : "Group"}
           </span>
-          <div className="ml-1 flex overflow-hidden rounded-md border border-border bg-background text-[11px]">
+          <div className="ml-1 flex overflow-hidden rounded-md border border-border bg-background text-2xs">
             <button
               type="button"
               onClick={() => setOp("AND")}
@@ -213,7 +213,7 @@ export function ConditionGroupEditor({
       </div>
 
       {isRoot && noContactTrigger && (
-        <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+        <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 text-2xs text-amber-700 dark:text-amber-400">
           This trigger has no contact, so contact filters (phone / name / email
           / stage) aren&apos;t available — match on the webhook body inside a
           Branch step instead.
@@ -221,7 +221,7 @@ export function ConditionGroupEditor({
       )}
 
       {empty && (
-        <div className="rounded-md border border-dashed border-border bg-background/40 px-3 py-2 text-[11px] text-muted-foreground">
+        <div className="rounded-md border border-dashed border-border bg-background/40 px-3 py-2 text-2xs text-muted-foreground">
           {isRoot ? "No filters — fires on every event." : "Empty group."}
         </div>
       )}

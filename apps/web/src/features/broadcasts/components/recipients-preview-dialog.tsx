@@ -134,7 +134,7 @@ export function RecipientsPreviewDialog({
                 {data.sample.map((c) => (
                   <li key={c.id} className="flex items-start gap-3 px-4 py-2.5">
                     <Avatar className="size-7 shrink-0">
-                      <AvatarFallback className="text-[10px]">
+                      <AvatarFallback className="text-3xs">
                         {initials(c.name || c.phoneNumber)}
                       </AvatarFallback>
                     </Avatar>
@@ -142,7 +142,7 @@ export function RecipientsPreviewDialog({
                       <div className="truncate text-sm font-medium">
                         {c.name || formatPhone(c.phoneNumber)}
                       </div>
-                      <div className="truncate font-mono text-[11px] text-muted-foreground">
+                      <div className="truncate font-mono text-2xs text-muted-foreground">
                         {formatPhone(c.phoneNumber)}
                       </div>
                       {c.tags.length > 0 && (

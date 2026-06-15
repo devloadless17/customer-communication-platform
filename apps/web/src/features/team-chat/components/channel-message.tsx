@@ -269,10 +269,10 @@ function ChannelMessageImpl({
           <LocalTime
             iso={message.createdAt}
             format="messageTime"
-            className="text-[11px] text-muted-foreground"
+            className="text-2xs text-muted-foreground"
           />
           {message.editedAt && (
-            <span className="text-[11px] text-muted-foreground">(edited)</span>
+            <span className="text-2xs text-muted-foreground">(edited)</span>
           )}
           {message.pinned && !isThreadReply && (
             <Tooltip>

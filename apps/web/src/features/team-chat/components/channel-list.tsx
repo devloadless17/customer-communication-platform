@@ -102,7 +102,7 @@ export function ChannelList({
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <div>
           <div className="text-sm font-semibold">Team chat</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             {onlinePresenceCount} online
           </div>
         </div>
@@ -154,7 +154,7 @@ export function ChannelList({
         </div>
       </div>
 
-      <div className="px-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+      <div className="px-4 pb-1 text-3xs font-semibold uppercase tracking-wider text-muted-foreground/80">
         Channels
       </div>
 
@@ -228,7 +228,7 @@ const ChannelRow = memo(function ChannelRow({
       {c.unreadMentionCount > 0 && (
         <Badge
           variant="default"
-          className="h-4 min-w-4 rounded-full bg-red-500 px-1 text-[10px]"
+          className="h-4 min-w-4 rounded-full bg-red-500 px-1 text-3xs"
         >
           {c.unreadMentionCount}
         </Badge>

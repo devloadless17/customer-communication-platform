@@ -116,7 +116,7 @@ export function CallBubble({
     <div className="flex items-center justify-center py-1.5">
       <div
         className={
-          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] " +
+          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-2xs " +
           tones[tone]
         }
       >

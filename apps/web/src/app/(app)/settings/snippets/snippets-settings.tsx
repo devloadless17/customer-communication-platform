@@ -246,7 +246,7 @@ export function SnippetsSettings({
               <p className="max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
                 Pick a snippet to edit, or create a new one. Snippets show up
                 in the reply box when an agent types{" "}
-                <code className="rounded bg-muted px-1 text-[11px]">/</code>.
+                <code className="rounded bg-muted px-1 text-2xs">/</code>.
               </p>
               <Button type="button" size="sm" onClick={() => setEditingId("new")}>
                 <Plus className="size-3.5" />
@@ -365,7 +365,7 @@ function SnippetEditor({
             {isNew ? "New snippet" : "Edit snippet"}
           </div>
           {!isNew && snippet.createdByName && (
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
+            <div className="mt-0.5 text-2xs text-muted-foreground">
               Created by {snippet.createdByName} · last updated{" "}
               <LocalTime iso={snippet.updatedAt} format="localeDate" />
             </div>
@@ -440,7 +440,7 @@ function SnippetEditor({
       </Field>
 
       <div>
-        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
           Sample preview
         </div>
         <div className="whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-[13px] leading-relaxed">

@@ -98,7 +98,7 @@ export function NewChannelDialog({
               if (e.key === "Enter") void submit();
             }}
           />
-          <div className="mt-1 text-[11px] text-muted-foreground">
+          <div className="mt-1 text-2xs text-muted-foreground">
             Becomes <span className="font-mono">#{normalized || "channel-name"}</span> ·
             lowercase letters, digits, and dashes.
           </div>
@@ -174,7 +174,7 @@ export function EditChannelDialog({
             disabled={channel.isDefault}
           />
           {channel.isDefault && (
-            <div className="mt-1 text-[11px] text-muted-foreground">
+            <div className="mt-1 text-2xs text-muted-foreground">
               The default channel can't be renamed.
             </div>
           )}

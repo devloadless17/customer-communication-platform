@@ -424,7 +424,7 @@ export function TemplateForm({
                     Utility
                   </CategoryPill>
                 </div>
-                <p className="mt-1 text-[11px] text-muted-foreground">
+                <p className="mt-1 text-2xs text-muted-foreground">
                   Authentication category templates have a different shape and aren&apos;t supported here yet.
                 </p>
               </Field>
@@ -518,12 +518,12 @@ export function TemplateForm({
                     <span className="font-medium">
                       {headerHandle ? "Replace file" : `Upload ${headerKind.toLowerCase()}`}
                     </span>
-                    <span className="text-[11px] text-muted-foreground">
+                    <span className="text-2xs text-muted-foreground">
                       {headerFile?.name ?? "JPEG/PNG · MP4/3GP · PDF — up to 16 MB"}
                     </span>
                   </div>
                   {headerHandle && (
-                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-3xs font-medium text-emerald-700 dark:text-emerald-400">
                       <Check className="size-3" />
                       Uploaded
                     </span>
@@ -542,10 +542,10 @@ export function TemplateForm({
           {/* Body */}
           <Section index={3} title="Body" done={bodyValid}>
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 Up to 1024 chars · {body.length}/1024 · {bodyVarCount} variable{bodyVarCount === 1 ? "" : "s"}
               </span>
-              <Button type="button" variant="outline" size="sm" onClick={insertVar} className="h-7 gap-1.5 text-[11px]">
+              <Button type="button" variant="outline" size="sm" onClick={insertVar} className="h-7 gap-1.5 text-2xs">
                 <Plus className="size-3" />
                 Insert {`{{${bodyVarCount + 1}}}`}
               </Button>
@@ -559,7 +559,7 @@ export function TemplateForm({
               className="mt-2 min-h-35 font-mono text-[13px]"
             />
             {body.length > 0 && !bodyValid && (
-              <p className="mt-1 text-[11px] text-destructive">Body is required and must be 1024 chars or fewer.</p>
+              <p className="mt-1 text-2xs text-destructive">Body is required and must be 1024 chars or fewer.</p>
             )}
           </Section>
 
@@ -571,7 +571,7 @@ export function TemplateForm({
               placeholder="Reply STOP to opt out"
               maxLength={70}
             />
-            <p className="mt-1 text-[11px] text-muted-foreground">
+            <p className="mt-1 text-2xs text-muted-foreground">
               Up to 60 chars. No variables.
               {footer.length > 60 && (
                 <span className="ml-2 text-destructive">{footer.length}/60</span>
@@ -608,7 +608,7 @@ export function TemplateForm({
                 onChange={setBindings}
               />
               {!labelsValid && (
-                <p className="mt-2 text-[11px] text-destructive">Give every variable a short label.</p>
+                <p className="mt-2 text-2xs text-destructive">Give every variable a short label.</p>
               )}
             </Section>
           )}
@@ -634,7 +634,7 @@ export function TemplateForm({
         {/* ----------------------------- PREVIEW ----------------------------- */}
         <aside className="lg:sticky lg:top-6 lg:self-start">
           <div className="rounded-xl border border-border bg-card p-4">
-            <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <div className="mb-3 flex items-center gap-2 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
               <span>Live preview</span>
               <span className="h-px flex-1 bg-border" />
             </div>
@@ -646,7 +646,7 @@ export function TemplateForm({
                 headerMediaUrl={headerPreviewUrl}
               />
             </div>
-            <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+            <p className="mt-3 text-2xs leading-relaxed text-muted-foreground">
               Variables shown filled with example values. Bound variables will
               pull from each contact at broadcast time.
             </p>
@@ -748,13 +748,13 @@ function ButtonsEditor({
 
       {buttons.length < 10 && (
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => addButton("QUICK_REPLY")} className="h-7 gap-1.5 text-[11px]">
+          <Button type="button" variant="outline" size="sm" onClick={() => addButton("QUICK_REPLY")} className="h-7 gap-1.5 text-2xs">
             <Plus className="size-3" /> Quick reply
           </Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => addButton("URL")} className="h-7 gap-1.5 text-[11px]">
+          <Button type="button" variant="outline" size="sm" onClick={() => addButton("URL")} className="h-7 gap-1.5 text-2xs">
             <Plus className="size-3" /> URL
           </Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => addButton("PHONE_NUMBER")} className="h-7 gap-1.5 text-[11px]">
+          <Button type="button" variant="outline" size="sm" onClick={() => addButton("PHONE_NUMBER")} className="h-7 gap-1.5 text-2xs">
             <Plus className="size-3" /> Phone
           </Button>
         </div>
@@ -779,7 +779,7 @@ function ButtonKindPill({
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
+        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-2xs font-medium transition-colors",
         active
           ? "border-primary bg-primary/10 text-primary"
           : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground",
@@ -872,7 +872,7 @@ function Section({
         </div>
         <div className="flex-1">
           <div className="text-sm font-semibold">{title}</div>
-          {summary && <div className="text-[11px] text-muted-foreground">{summary}</div>}
+          {summary && <div className="text-2xs text-muted-foreground">{summary}</div>}
         </div>
         {done && <ChevronRight className="hidden size-3.5 text-muted-foreground sm:block" />}
       </header>

@@ -139,7 +139,7 @@ export function ContactMultiSelectField({
           <button
             type="button"
             onClick={() => onChange([])}
-            className="text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+            className="text-2xs text-muted-foreground hover:text-foreground hover:underline"
           >
             Clear all
           </button>

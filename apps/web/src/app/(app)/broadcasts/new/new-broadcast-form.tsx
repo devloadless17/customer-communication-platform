@@ -577,7 +577,7 @@ export function NewBroadcastForm({
             <div className="flex flex-col gap-3">
               {headerMediaKind && (
                 <div>
-                  <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  <div className="mb-1.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
                     {headerMediaKind} header — sent to every recipient
                   </div>
                   <HeaderMediaField
@@ -627,7 +627,7 @@ export function NewBroadcastForm({
           )}
 
           <div className="mt-5">
-            <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="mb-2 flex items-center gap-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
               <span>Preview</span>
               <span className="h-px flex-1 bg-border" />
             </div>
@@ -658,7 +658,7 @@ export function NewBroadcastForm({
               placeholder={selectedTemplate?.name ?? "e.g. Ramadan promo"}
               className="rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
             />
-            <span className="text-[11px] text-muted-foreground/70">
+            <span className="text-2xs text-muted-foreground/70">
               Shown in the broadcasts list. Falls back to the template name if blank.
             </span>
           </label>
@@ -730,7 +730,7 @@ export function NewBroadcastForm({
               <button
                 type="button"
                 onClick={() => setPreviewOpen(true)}
-                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground hover:bg-accent"
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-2xs font-medium text-foreground hover:bg-accent"
               >
                 <Users className="size-3.5" />
                 Preview recipients
@@ -806,7 +806,7 @@ function StepCard({
         <div className="flex-1">
           <div className="text-sm font-semibold">{title}</div>
           {summary && (
-            <div className="text-[11px] text-muted-foreground">{summary}</div>
+            <div className="text-2xs text-muted-foreground">{summary}</div>
           )}
         </div>
       </header>
@@ -937,11 +937,11 @@ function TemplatePickerInline({
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="truncate text-sm font-medium">{t.name}</span>
                       <CategoryPill category={t.category} />
-                      <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                      <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
                         {t.language}
                       </span>
                       {!sendable && (
-                        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] uppercase text-amber-700 dark:text-amber-300">
+                        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-3xs uppercase text-amber-700 dark:text-amber-300">
                           {t.status}
                         </span>
                       )}
@@ -1016,7 +1016,7 @@ function VarField({
 
   return (
     <label className="flex flex-col gap-1">
-      <span className="font-mono text-[11px] font-medium text-foreground">{label}</span>
+      <span className="font-mono text-2xs font-medium text-foreground">{label}</span>
       <div className="flex items-center gap-1.5">
         <TokenHighlightInput
           ref={inputRef}
@@ -1104,7 +1104,7 @@ function PreviewBubble({
           <div className="mb-1 text-sm font-semibold text-foreground">{renderedHeader}</div>
         )}
         {headerComp && headerComp.format !== "TEXT" && (
-          <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-[11px] text-muted-foreground">
+          <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-2xs text-muted-foreground">
             {headerComp.format ?? "MEDIA"} header
           </div>
         )}
@@ -1112,7 +1112,7 @@ function PreviewBubble({
           {renderedBody || <span className="text-muted-foreground">No body</span>}
         </div>
         {footerComp?.text && (
-          <div className="mt-2 text-[11px] text-muted-foreground">{footerComp.text}</div>
+          <div className="mt-2 text-2xs text-muted-foreground">{footerComp.text}</div>
         )}
       </div>
       {buttonsComp?.buttons && buttonsComp.buttons.length > 0 && (
@@ -1141,7 +1141,7 @@ function CategoryPill({ category }: { category: string }) {
   return (
     <span
       className={cn(
-        "rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+        "rounded-full border px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide",
         tone,
       )}
     >

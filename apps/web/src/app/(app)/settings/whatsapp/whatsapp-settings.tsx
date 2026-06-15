@@ -147,7 +147,7 @@ export function WhatsappSettings({
         <ExternalLink className="mt-0.5 size-5 text-muted-foreground" />
         <div className="flex-1">
           <div className="text-sm font-medium">Connect with Facebook</div>
-          <p className="mt-1 text-[11px] text-muted-foreground">
+          <p className="mt-1 text-2xs text-muted-foreground">
             One-click WhatsApp Embedded Signup. Enabled once Meta approves Loadless as
             a Tech Provider (business verification + app review). Until then, use
             manual setup above.
@@ -323,7 +323,7 @@ function ConnectionStatus({
         )}
       </dl>
       {showFinalStepHint && (
-        <p className="mt-3 border-t border-emerald-500/20 pt-2 text-[11px] text-muted-foreground">
+        <p className="mt-3 border-t border-emerald-500/20 pt-2 text-2xs text-muted-foreground">
           Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
           to the <span className="font-mono">messages</span> field. Without it, no
           incoming messages will arrive.
@@ -360,14 +360,14 @@ function ManualForm({
     >
       <div className="mb-4">
         {stepLabel && (
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+          <div className="mb-1 text-3xs font-semibold uppercase tracking-wide text-primary">
             {stepLabel}
           </div>
         )}
         <div className="text-sm font-medium">
           {current.connected ? "Update credentials" : "Paste credentials"}
         </div>
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-2xs text-muted-foreground">
           {current.connected
             ? "Edit any field and save. Unchanged fields keep their current value."
             : "From Meta’s Business dashboard → WhatsApp → API Setup."}
@@ -407,7 +407,7 @@ function ManualForm({
           <summary className="cursor-pointer text-xs font-medium">
             Templates &amp; advanced (optional)
           </summary>
-          <p className="mt-1 mb-3 text-[11px] text-muted-foreground">
+          <p className="mt-1 mb-3 text-2xs text-muted-foreground">
             WhatsApp Business Account ID is required to load templates. Meta App ID is
             required to upload template header media. Skip both unless you plan to
             use templates.
@@ -443,7 +443,7 @@ function ManualForm({
           </Button>
         )}
       </div>
-      <p className="mt-3 text-[11px] text-muted-foreground">
+      <p className="mt-3 text-2xs text-muted-foreground">
         We call Meta with these credentials to verify them before saving. Nothing is stored
         if validation fails.
       </p>
@@ -483,10 +483,10 @@ function Field({
       />
       {hint && (
         <details className="[&_summary::-webkit-details-marker]:hidden">
-          <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
+          <summary className="cursor-pointer text-2xs text-muted-foreground hover:text-foreground">
             Where do I find this?
           </summary>
-          <p className="mt-1 text-[11px] text-muted-foreground">{hint}</p>
+          <p className="mt-1 text-2xs text-muted-foreground">{hint}</p>
         </details>
       )}
     </div>
@@ -515,12 +515,12 @@ function WebhookConfigCard({
     <div className="rounded-xl border border-border bg-card p-5">
       <div className="mb-3">
         {stepLabel && (
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+          <div className="mb-1 text-3xs font-semibold uppercase tracking-wide text-primary">
             {stepLabel}
           </div>
         )}
         <div className="text-sm font-medium">Configure Meta&apos;s webhook</div>
-        <p className="mt-1 text-[11px] text-muted-foreground">{description}</p>
+        <p className="mt-1 text-2xs text-muted-foreground">{description}</p>
       </div>
       <div className="flex flex-col gap-3">
         <ReadonlyField label="Callback URL" value={webhookUrl} />

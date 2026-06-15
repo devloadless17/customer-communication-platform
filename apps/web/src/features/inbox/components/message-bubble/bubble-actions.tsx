@@ -95,7 +95,7 @@ export function FailedRecovery({
   onDismiss?: () => void;
 }) {
   return (
-    <div className="mt-1 flex items-center gap-2 text-[10px] text-destructive">
+    <div className="mt-1 flex items-center gap-2 text-3xs text-destructive">
       <AlertCircle className="size-3" />
       <span>Send failed</span>
       {canRetry && onRetry && (

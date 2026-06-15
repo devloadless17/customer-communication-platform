@@ -59,7 +59,7 @@ export default async function AcceptInvitePage({ params }: PageProps) {
           </div>
           <div>
             <div className="text-sm font-semibold leading-tight">Loadless Inbox</div>
-            <div className="text-[11px] text-muted-foreground">Shared WhatsApp inbox</div>
+            <div className="text-2xs text-muted-foreground">Shared WhatsApp inbox</div>
           </div>
         </div>
 

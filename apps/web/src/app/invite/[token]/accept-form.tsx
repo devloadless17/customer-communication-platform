@@ -37,7 +37,7 @@ export function AcceptForm({
       <div className="flex flex-col gap-1.5">
         <label className="text-xs font-medium text-foreground">Email</label>
         <Input value={email} readOnly disabled className="opacity-80" />
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           The admin invited this email. To use a different one, ask for a new link.
         </p>
       </div>

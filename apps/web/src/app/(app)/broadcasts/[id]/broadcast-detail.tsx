@@ -463,7 +463,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             <div className="font-medium">
               {data.status === "paused" ? "Broadcast paused" : "Broadcast failed"}
             </div>
-            <div className="mt-0.5 wrap-break-word font-mono text-[11px]">
+            <div className="mt-0.5 wrap-break-word font-mono text-2xs">
               {data.lastError}
             </div>
           </div>
@@ -507,7 +507,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           />
         </motion.div>
       </div>
-      <div className="text-[11px] text-muted-foreground">
+      <div className="text-2xs text-muted-foreground">
         {progressPct}% processed
         {(data.status === "queued" || data.status === "running") && " · updates live"}
         {data.status === "paused" &&
@@ -519,7 +519,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
       <section className="rounded-xl border border-border bg-card">
         <header className="border-b border-border bg-muted/30 px-4 py-3">
           <div className="text-sm font-semibold">Template snapshot</div>
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             Captured at the moment the broadcast was created — even if the
             template gets edited in WhatsApp Manager, this is what was sent.
           </div>
@@ -529,7 +529,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             <dl className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-[12px]">
               {variables.header !== undefined && (
                 <div className="flex flex-col">
-                  <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
                     Header
                   </dt>
                   <dd className="font-mono">{variables.header || "—"}</dd>
@@ -537,7 +537,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               )}
               {variables.body.map((v, i) => (
                 <div key={i} className="flex flex-col">
-                  <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
                     {`{{${i + 1}}}`}
                   </dt>
                   <dd className="font-mono">{v || "—"}</dd>
@@ -552,7 +552,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         <header className="flex flex-col gap-3 border-b border-border bg-muted/30 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm font-semibold">Recipients</div>
-            <div className="text-[11px] text-muted-foreground">
+            <div className="text-2xs text-muted-foreground">
               Per-recipient delivery status. Click a row to jump to its
               conversation.
               {data.recipientsTruncated
@@ -585,7 +585,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         <div className="max-h-120 overflow-auto">
           <table className="w-full min-w-140 text-sm">
             <thead className="sticky top-0 bg-card">
-              <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
+              <tr className="border-b border-border text-2xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Contact</th>
                 <th className="px-4 py-2.5 text-left font-medium">Status</th>
                 <th className="px-4 py-2.5 text-left font-medium">When</th>
@@ -600,7 +600,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 >
                   <td className="px-4 py-2.5">
                     <div className="font-medium">{r.contactName}</div>
-                    <div className="text-[11px] text-muted-foreground">
+                    <div className="text-2xs text-muted-foreground">
                       {formatPhone(r.contactPhone)}
                     </div>
                   </td>
@@ -639,7 +639,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         {(canLoadMore || loadingMore || moreError) && (
           <div className="flex flex-col items-center gap-2 border-t border-border px-4 py-3">
             {moreError && (
-              <div className="text-[11px] text-destructive">{moreError}</div>
+              <div className="text-2xs text-destructive">{moreError}</div>
             )}
             {canLoadMore && (
               <button
@@ -679,7 +679,7 @@ function Stat({
           : "border-border bg-muted/20";
   return (
     <div className={cn("flex flex-col gap-1 rounded-xl border px-4 py-3", toneClass)}>
-      <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </div>
       <div className="tabular-nums text-2xl font-semibold">{value}</div>

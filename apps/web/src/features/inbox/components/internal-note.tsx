@@ -26,7 +26,7 @@ function InternalNoteImpl({
         <div className="w-fit min-w-[220px] max-w-2xl rounded-lg border border-note-border bg-note-bg px-3 py-2 text-note-fg">
           {/* No "Internal note" label — the beige color is enough to read it as
               a note. Author + time sit at the top-RIGHT, signature-style. */}
-          <div className="mb-0.5 flex items-center justify-end gap-1.5 text-[11px] opacity-80">
+          <div className="mb-0.5 flex items-center justify-end gap-1.5 text-2xs opacity-80">
             <Avatar className="size-4">
               <AvatarFallback seed={author.id} className="text-[8px]">{initials(author.name)}</AvatarFallback>
             </Avatar>

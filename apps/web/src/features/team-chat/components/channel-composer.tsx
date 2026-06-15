@@ -391,7 +391,7 @@ function PendingFileChip({
       </div>
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">{file.name}</div>
-        <div className="text-[11px] text-muted-foreground">
+        <div className="text-2xs text-muted-foreground">
           {formatBytes(file.size)}
         </div>
       </div>

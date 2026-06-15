@@ -452,7 +452,7 @@ function TagRow({
       <a
         href={`/contacts?tag=${tag.id}`}
         title={`View contacts tagged "${tag.name}"`}
-        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-2xs text-muted-foreground hover:bg-accent hover:text-foreground"
       >
         <Users className="size-3" />
         <span className="tabular-nums">{count}</span>

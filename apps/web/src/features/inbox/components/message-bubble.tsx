@@ -346,7 +346,7 @@ function InboundAvatarSlot({
   return (
     <Avatar className="size-7 shrink-0 self-end">
       <AvatarFallback
-        className="text-[10px] text-white"
+        className="text-3xs text-white"
         style={{ backgroundImage: avatarGradient(contactSeed) }}
       >
         {initials(contactName)}

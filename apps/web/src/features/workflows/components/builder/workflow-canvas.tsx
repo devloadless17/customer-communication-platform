@@ -723,7 +723,7 @@ function CanvasInner({
             onClick={onRearrange}
             disabled={graph.nodes.length === 0}
             title="Rearrange layout"
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[11px] font-medium text-foreground shadow-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-2xs font-medium text-foreground shadow-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
           >
             <LayoutGrid className="size-3.5" />
             Rearrange

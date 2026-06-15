@@ -113,7 +113,7 @@ export function SnippetPopup({
       <div className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">
         <Sparkles className="size-3 text-primary" />
         <span>Snippets</span>
-        <span className="ml-auto font-mono text-[10px] normal-case text-muted-foreground">
+        <span className="ml-auto font-mono text-3xs normal-case text-muted-foreground">
           {query ? `/${query}` : "/"}
         </span>
       </div>
@@ -136,7 +136,7 @@ export function SnippetPopup({
                   i === activeIdx ? "bg-primary/10" : "hover:bg-accent/40",
                 )}
               >
-                <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 font-mono text-[10px] font-bold text-primary">
+                <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 font-mono text-3xs font-bold text-primary">
                   /
                 </span>
                 <span className="min-w-0 flex-1">
@@ -152,7 +152,7 @@ export function SnippetPopup({
           ))}
         </ul>
       )}
-      <div className="border-t border-border bg-muted/30 px-3 py-1.5 text-[10px] text-muted-foreground">
+      <div className="border-t border-border bg-muted/30 px-3 py-1.5 text-3xs text-muted-foreground">
         <span className="font-mono">↑↓</span> navigate · <span className="font-mono">↵</span> insert ·{" "}
         <span className="font-mono">Esc</span> close
       </div>

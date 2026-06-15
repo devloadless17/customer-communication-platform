@@ -975,13 +975,13 @@ function ContactPanelImpl({
           keeps the label clear of it). */}
       {isSheet ? (
         <div className="flex h-11 shrink-0 items-center border-b border-border pl-4 pr-11">
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <span className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
             Details
           </span>
         </div>
       ) : (
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border pl-4 pr-1.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
           Details
         </span>
         <Tooltip>
@@ -1041,14 +1041,14 @@ function ContactPanelImpl({
               <button
                 type="button"
                 onClick={acceptPendingRemote}
-                className="rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-amber-700"
+                className="rounded-md bg-amber-600 px-2 py-0.5 text-2xs font-medium text-white hover:bg-amber-700"
               >
                 Reload
               </button>
               <button
                 type="button"
                 onClick={dismissPendingRemote}
-                className="rounded-md border border-amber-400/60 px-2 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-800/30"
+                className="rounded-md border border-amber-400/60 px-2 py-0.5 text-2xs font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-800/30"
               >
                 Keep mine
               </button>
@@ -1334,7 +1334,7 @@ function ContactPanelImpl({
           />
 
           {error && (
-            <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+            <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive">
               {error}
             </div>
           )}
@@ -1366,7 +1366,7 @@ function ContactPanelImpl({
             onChange={(next) => void persistAssignee(next)}
           />
           {assigneeError && (
-            <div className="mt-2 text-[11px] text-destructive">
+            <div className="mt-2 text-2xs text-destructive">
               {assigneeError}
             </div>
           )}
@@ -1402,7 +1402,7 @@ function ContactPanelImpl({
             )}
           </div>
           {tagSaveError && (
-            <div className="mt-2 text-[10px] text-destructive">{tagSaveError}</div>
+            <div className="mt-2 text-3xs text-destructive">{tagSaveError}</div>
           )}
         </Section>
 
@@ -1604,7 +1604,7 @@ function AssigneePicker({
                 {current.avatarUrl ? (
                   <AvatarImage src={current.avatarUrl} alt={current.name} />
                 ) : null}
-                <AvatarFallback seed={current.id} className="text-[10px]">{initials(current.name)}</AvatarFallback>
+                <AvatarFallback seed={current.id} className="text-3xs">{initials(current.name)}</AvatarFallback>
               </Avatar>
               <span className="truncate font-normal">{current.name}</span>
             </>
@@ -1658,7 +1658,7 @@ function AssigneePicker({
                 <div className="relative">
                   <Avatar className="size-5">
                     {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                    <AvatarFallback seed={u.id} className="text-[10px]">{initials(u.name)}</AvatarFallback>
+                    <AvatarFallback seed={u.id} className="text-3xs">{initials(u.name)}</AvatarFallback>
                   </Avatar>
                   <span
                     className={cn(
@@ -1671,7 +1671,7 @@ function AssigneePicker({
               )}
               <span className="flex-1 truncate">{u.name}</span>
               {cue && (
-                <span className="shrink-0 text-[10px] text-muted-foreground">{cue}</span>
+                <span className="shrink-0 text-3xs text-muted-foreground">{cue}</span>
               )}
             </DropdownMenuItem>
           );

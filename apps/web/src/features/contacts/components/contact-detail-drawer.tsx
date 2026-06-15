@@ -518,7 +518,7 @@ export function ContactDetailDrawer({
             />
 
             {error && (
-              <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+              <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive">
                 {error}
               </div>
             )}
@@ -564,7 +564,7 @@ export function ContactDetailDrawer({
         <div className="border-t border-border">
           {error && !activeConversationId && (
             <div className="px-4 pt-2">
-              <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+              <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-2xs text-destructive">
                 {error}
               </div>
             </div>

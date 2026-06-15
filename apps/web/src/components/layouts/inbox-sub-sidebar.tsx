@@ -192,7 +192,7 @@ export function InboxSubSidebar({
               <span className="flex-1 text-left">{label}</span>
               {unread > 0 && (
                 <span
-                  className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold tabular-nums text-primary-foreground"
+                  className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-3xs font-bold tabular-nums text-primary-foreground"
                   title={`${unread} unread`}
                 >
                   {unread > 99 ? "99+" : unread}
@@ -226,7 +226,7 @@ export function InboxSubSidebar({
           <span className="flex-1 text-left">Calls</span>
           {liveCalls > 0 && (
             <span
-              className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-bold tabular-nums text-white"
+              className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-emerald-500 px-1 text-3xs font-bold tabular-nums text-white"
               title={`${liveCalls} call${liveCalls === 1 ? "" : "s"} in progress`}
             >
               {liveCalls > 99 ? "99+" : liveCalls}
@@ -240,7 +240,7 @@ export function InboxSubSidebar({
           type="button"
           onClick={() => setStagesOpen((v) => !v)}
           aria-expanded={stagesOpen}
-          className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+          className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
         >
           {stagesOpen ? (
             <ChevronDown className="size-3" />
@@ -249,7 +249,7 @@ export function InboxSubSidebar({
           )}
           <span className="flex-1 truncate">Stages</span>
           {!stagesOpen && stages.length > 0 && (
-            <span className="tabular-nums text-[10px] font-medium text-muted-foreground/70">
+            <span className="tabular-nums text-3xs font-medium text-muted-foreground/70">
               {stages.length}
             </span>
           )}
@@ -258,7 +258,7 @@ export function InboxSubSidebar({
         {stagesOpen && (
           <div className="flex flex-col gap-0.5 px-2">
             {stages.length === 0 ? (
-              <p className="px-2 py-1 text-[11px] text-muted-foreground">No stages yet.</p>
+              <p className="px-2 py-1 text-2xs text-muted-foreground">No stages yet.</p>
             ) : (
               stages.map((stage) => {
                 const active = filter.kind === "stage" && filter.stageId === stage.id;
@@ -295,7 +295,7 @@ export function InboxSubSidebar({
                     {count > 0 && (
                       <span
                         className={cn(
-                          "tabular-nums text-[10px]",
+                          "tabular-nums text-3xs",
                           active ? "text-foreground" : "text-muted-foreground",
                         )}
                       >
@@ -316,7 +316,7 @@ export function InboxSubSidebar({
             type="button"
             onClick={() => setTeammatesOpen((v) => !v)}
             aria-expanded={teammatesOpen}
-            className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
+            className="flex w-full cursor-pointer items-center gap-1.5 px-4 pb-1 text-left text-2xs font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:text-foreground"
           >
             {teammatesOpen ? (
               <ChevronDown className="size-3" />
@@ -325,7 +325,7 @@ export function InboxSubSidebar({
             )}
             <span className="flex-1 truncate">Teammates</span>
             {!teammatesOpen && (
-              <span className="tabular-nums text-[10px] font-medium text-muted-foreground/70">
+              <span className="tabular-nums text-3xs font-medium text-muted-foreground/70">
                 {orderedTeammates.length}
               </span>
             )}
@@ -390,7 +390,7 @@ export function InboxSubSidebar({
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate">{u.name}</span>
                         {u.id === currentUser.id && (
-                          <Badge variant="muted" className="shrink-0 px-1.5 py-0 text-[10px]">
+                          <Badge variant="muted" className="shrink-0 px-1.5 py-0 text-3xs">
                             you
                           </Badge>
                         )}
@@ -399,7 +399,7 @@ export function InboxSubSidebar({
                           `title` tooltip nobody could find). */}
                       {trimmedNote && (
                         <span
-                          className="truncate text-[11px] leading-tight text-muted-foreground/70"
+                          className="truncate text-2xs leading-tight text-muted-foreground/70"
                           title={trimmedNote}
                         >
                           {trimmedNote}

@@ -72,7 +72,7 @@ export function CurrentActivityPanel({
           <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
         </span>
         <h2 className="text-sm font-medium">Current activity</h2>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-2xs text-muted-foreground">
           live · open chats assigned right now
         </span>
       </div>
@@ -83,7 +83,7 @@ export function CurrentActivityPanel({
             className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3 py-2"
           >
             <Avatar className="size-7 shrink-0">
-              <AvatarFallback seed={r.userId} className="text-[10px]">
+              <AvatarFallback seed={r.userId} className="text-3xs">
                 {initials(r.name)}
               </AvatarFallback>
             </Avatar>

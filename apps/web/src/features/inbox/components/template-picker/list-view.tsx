@@ -81,7 +81,7 @@ export function TemplateListView({
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium">{t.name}</span>
                       <CategoryPill category={t.category} />
-                      <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                      <span className="rounded border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
                         {t.language}
                       </span>
                       {t.status !== "approved" && <StatusPill status={t.status} />}
@@ -109,7 +109,7 @@ function EmptyState({ query }: { query: string }) {
       <div className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center">
         <Search className="size-5 text-muted-foreground" />
         <div className="text-sm font-medium">No templates match “{query}”.</div>
-        <div className="text-[11px] text-muted-foreground">
+        <div className="text-2xs text-muted-foreground">
           Try a different name or language.
         </div>
       </div>
@@ -156,7 +156,7 @@ function CategoryPill({ category }: { category: string }) {
   return (
     <span
       className={cn(
-        "rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+        "rounded-full border px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide",
         tone,
       )}
     >
@@ -175,7 +175,7 @@ function StatusPill({ status }: { status: string }) {
   return (
     <span
       className={cn(
-        "rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase",
+        "rounded-full border px-1.5 py-0.5 text-3xs font-medium uppercase",
         tone,
       )}
     >

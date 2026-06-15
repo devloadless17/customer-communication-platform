@@ -21,6 +21,10 @@ const buttonVariants = cva(
         sm: "h-8 rounded-md px-3 text-xs has-[>svg]:px-2.5",
         lg: "h-10 rounded-md px-6 has-[>svg]:px-4",
         icon: "size-9",
+        // Compact icon button (the inbox/composer density). Replaces the
+        // repeated `size="icon" className="size-7"` overrides scattered across
+        // the app — adopt incrementally.
+        "icon-sm": "size-7",
       },
     },
     defaultVariants: {

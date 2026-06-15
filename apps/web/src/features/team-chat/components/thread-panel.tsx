@@ -70,7 +70,7 @@ export function ThreadPanel({
       <div className="flex items-center justify-between border-b border-border bg-background px-4 py-3">
         <div>
           <div className="text-sm font-semibold">Thread</div>
-          <div className="truncate text-[11px] text-muted-foreground">
+          <div className="truncate text-2xs text-muted-foreground">
             in #{channelName}
           </div>
         </div>
@@ -94,7 +94,7 @@ export function ThreadPanel({
           />
           <div className="my-2 flex items-center gap-2 px-4">
             <div className="h-px flex-1 bg-border" />
-            <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+            <span className="text-2xs uppercase tracking-wider text-muted-foreground">
               {replies.length} {replies.length === 1 ? "reply" : "replies"}
             </span>
             <div className="h-px flex-1 bg-border" />
