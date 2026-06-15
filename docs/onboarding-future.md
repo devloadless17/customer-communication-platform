@@ -1,7 +1,7 @@
 # Onboarding — future direction (WhatsApp Embedded Signup)
 
 > Read this before re-opening the onboarding question. Today's flow is the
-> polished manual paste (see `apps/web/src/app/settings/whatsapp/whatsapp-settings.tsx`
+> polished manual paste (see `apps/web/src/app/(app)/settings/whatsapp/whatsapp-settings.tsx`
 > — 3 visible fields + advanced disclosure). This doc captures the canonical
 > SaaS answer that we deferred until the pilot is happy.
 
@@ -27,7 +27,7 @@ approval lands. The dev work is mostly OAuth plumbing — straightforward, but
 gated behind that wait.
 
 The UI placeholder already exists at
-[whatsapp-settings.tsx](../apps/web/src/app/settings/whatsapp/whatsapp-settings.tsx)
+[whatsapp-settings.tsx](../apps/web/src/app/(app)/settings/whatsapp/whatsapp-settings.tsx)
 (the "Coming soon" `embeddedSignupCard`). That's where the activation drops in.
 
 ## Schema delta when Embedded Signup ships
@@ -115,7 +115,7 @@ When you come back to build this:
 4. **Phone registration** — `POST /{phone-number-id}/register` (the Cloud API
    register call), pin chosen by the customer during the JS SDK flow.
 5. **Activation point in UI** — wire up the existing `embeddedSignupCard` in
-   [whatsapp-settings.tsx](../apps/web/src/app/settings/whatsapp/whatsapp-settings.tsx).
+   [whatsapp-settings.tsx](../apps/web/src/app/(app)/settings/whatsapp/whatsapp-settings.tsx).
    Remove the `disabled` attribute, swap "Coming soon" for "Connect with
    Facebook", and bind the click to the FB.login flow.
 6. **Disconnect hygiene** — extend

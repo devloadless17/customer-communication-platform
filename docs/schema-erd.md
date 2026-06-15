@@ -1,6 +1,6 @@
-# Database schema — ER diagram (2026-05-22)
+# Database schema — ER diagram (updated 2026-06-15)
 
-Generated from `prisma/schema.prisma` (38 models). Vector diagram — renders crisp
+Generated from `prisma/schema.prisma` (40 models). Vector diagram — renders crisp
 at any zoom. **To view at high resolution:**
 - **GitHub** renders the Mermaid block below natively (open this file on GitHub).
 - **VS Code**: install the *"Markdown Preview Mermaid Support"* extension, then open
@@ -139,6 +139,37 @@ erDiagram
     User |o--o{ InternalNote : "author"
     Conversation ||--o{ ConversationEvent : ""
     User |o--o{ ConversationEvent : "actor"
+
+    %% ───────────────────────── Voice calls ─────────────────────────
+    Call {
+        string id PK
+        string teamId FK
+        string conversationId FK
+        string externalCallId
+        CallDirection direction
+        CallStatus status
+        string initiatedByUserId FK
+        string answeredByUserId FK
+        DateTime ringingAt
+        DateTime answeredAt
+        DateTime endedAt
+        int durationSeconds
+    }
+    CallPermissionRequest {
+        string id PK
+        string teamId FK
+        string contactId FK
+        CallPermissionStatus status
+        DateTime requestedAt
+        DateTime expiresAt
+        DateTime grantedAt
+    }
+    Team ||--o{ Call : ""
+    Conversation ||--o{ Call : ""
+    User |o--o{ Call : "initiated"
+    User |o--o{ Call : "answered"
+    Team ||--o{ CallPermissionRequest : ""
+    Contact ||--o{ CallPermissionRequest : ""
 
     %% ───────────────────────── Templates / broadcasts / snippets ─────────────────────────
     MessageTemplate {
