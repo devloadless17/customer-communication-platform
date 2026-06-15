@@ -196,6 +196,12 @@ const TimelineRows = memo(function TimelineRows({
         const isMessage = entry.kind === "message";
         const isContinuation = isMessage && continuationFlags[idx] === true;
         const isTail = isMessage && continuationFlags[idx + 1] !== true;
+        // Direction drives how tight a continuation sits. Inbound bubbles are
+        // light-grey + bordered on a near-white page (LOW edge contrast), so a
+        // 2px gap reads as "touching"; outbound bubbles are solid/high-contrast,
+        // where 2px looks right. Give inbound continuations more air below.
+        const isOutboundMsg =
+          entry.kind === "message" && entry.data.direction === "out";
         // A failed send must ALWAYS show its meta (the red AlertCircle + reason
         // live only in BubbleMeta), regardless of group position — including a
         // server-confirmed failure (`status === "failed"`, set by a message:status
@@ -244,11 +250,12 @@ const TimelineRows = memo(function TimelineRows({
               className={cn(
                 "rounded-2xl transition-shadow",
                 // Within a same-sender group, collapse the inter-bubble gap from
-                // the content list's gap-2 (8px) down to ~2px via a negative
-                // top margin. The container's gap-2 stays the BETWEEN-group
-                // spacing — keep this -mt in sync with that gap (message list
-                // div below: `flex-col gap-2`).
-                isContinuation && "-mt-1.5",
+                // the content list's gap-2 (8px) down via a negative top margin.
+                // Outbound (solid, high-contrast) → 2px. Inbound (grey+bordered,
+                // low-contrast) → 4px so the separation is actually visible.
+                // Both stay tighter than the 8px BETWEEN-group gap so grouping
+                // still reads (message list div below: `flex-col gap-2`).
+                isContinuation && (isOutboundMsg ? "-mt-1.5" : "-mt-1"),
               )}
             >
               {/* Local ErrorBoundary per row — a single malformed payload (or a
