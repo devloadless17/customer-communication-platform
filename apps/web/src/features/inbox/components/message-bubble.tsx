@@ -1,6 +1,7 @@
 "use client";
 
 import { memo } from "react";
+import { motion } from "framer-motion";
 import { Check, Paperclip } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -72,6 +73,10 @@ interface MessageBubbleProps {
    * ungrouped message keeps the tail exactly as before.
    */
   isTail?: boolean;
+  /** Fade+scale the bubble in on mount — ONLY for genuinely-new live messages
+   *  (TimelineRows gates it; false on initial load / load-older / refetch).
+   *  Transform + opacity only, so it never perturbs the column-reverse scroll. */
+  animateIn?: boolean;
 }
 
 /**
@@ -151,6 +156,7 @@ function BubbleContent({
   showAvatar = true,
   showMeta = true,
   isTail = true,
+  animateIn = false,
 }: MessageBubbleProps) {
   const isOut = message.direction === "out";
   const media = message.media;
@@ -220,11 +226,21 @@ function BubbleContent({
         />
       )}
 
-      <div
+      <motion.div
         className={cn(
           "flex max-w-[70%] flex-col gap-0.5",
           isOut ? "items-end" : "items-start",
         )}
+        // Entrance for genuinely-new live messages. Transform + opacity ONLY
+        // (no height/margin), so the column-reverse stick-to-bottom
+        // ResizeObserver never sees a layout change — the scroll stays pinned.
+        // initial={false} renders straight at the final state with no animation
+        // (initial load, load-older, reconnect-refetch). Scales up from the
+        // bubble's bottom corner so it grows into place.
+        initial={animateIn ? { opacity: 0, scale: 0.96 } : false}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        style={{ transformOrigin: isOut ? "right bottom" : "left bottom" }}
       >
         <div
           className={cn(
@@ -323,7 +339,7 @@ function BubbleContent({
             onDismiss={onDismissFailed ? () => onDismissFailed(message) : undefined}
           />
         )}
-      </div>
+      </motion.div>
 
       {!isOut && (
         <BubbleActions

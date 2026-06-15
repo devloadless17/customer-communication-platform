@@ -161,6 +161,7 @@ const TimelineRows = memo(function TimelineRows({
   onDismissFailed,
   onRetryFailed,
   onDeleteNote,
+  animArmed,
 }: {
   timeline: TimelineEntry[];
   dayLabels: Array<string | null>;
@@ -182,7 +183,24 @@ const TimelineRows = memo(function TimelineRows({
   onDismissFailed: (msg: Message) => void;
   onRetryFailed: (msg: Message) => void;
   onDeleteNote: (noteId: string) => void;
+  /** True once the thread has revealed (past the initial settle) — gates the
+   *  per-message entrance so the initial load doesn't mass-animate. */
+  animArmed: boolean;
 }) {
+  // Message keys already rendered ≥ once. A bubble animates ONLY the first time
+  // it appears near the tail while armed — so live arrivals fade in, but the
+  // initial load, a load-older prepend, and a reconnect refetch (re-rendering
+  // already-seen tails) do not.
+  const seenKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const e of timeline) {
+      if (e.kind === "message") {
+        seenKeysRef.current.add(
+          e.data.clientTempId ? `t_${e.data.clientTempId}` : e.data.id,
+        );
+      }
+    }
+  });
   return (
     <>
       {timeline.map((entry, idx) => {
@@ -202,6 +220,17 @@ const TimelineRows = memo(function TimelineRows({
         // where 2px looks right. Give inbound continuations more air below.
         const isOutboundMsg =
           entry.kind === "message" && entry.data.direction === "out";
+        // Entrance-animate a genuinely-new live message: armed, never-seen, and
+        // near the TAIL (appended — not a load-older prepend at the top).
+        const animateIn =
+          animArmed &&
+          entry.kind === "message" &&
+          !seenKeysRef.current.has(
+            entry.data.clientTempId
+              ? `t_${entry.data.clientTempId}`
+              : entry.data.id,
+          ) &&
+          idx >= timeline.length - 4;
         // A failed send must ALWAYS show its meta (the red AlertCircle + reason
         // live only in BubbleMeta), regardless of group position — including a
         // server-confirmed failure (`status === "failed"`, set by a message:status
@@ -295,6 +324,7 @@ const TimelineRows = memo(function TimelineRows({
                     showAvatar={isTail}
                     showMeta={showMeta}
                     isTail={isTail}
+                    animateIn={animateIn}
                   />
                 ) : entry.kind === "note" ? (
                   <InternalNoteCard
@@ -823,6 +853,9 @@ function MessageThreadImpl({
   // bottom on the first painted frame. Identical idea to the SSR script's
   // position-loop-then-reveal.
   const gateRef = useRef<HTMLDivElement>(null);
+  // Armed once the thread reveals (past the initial settle), so the per-message
+  // entrance animation fires for live arrivals but not the initial paint.
+  const [animArmed, setAnimArmed] = useState(false);
   // Latest jump intent, read without making it an effect dep. A search-jump open
   // owns its own scroll target, so the settle loop must NOT force the bottom.
   const jumpPendingRef = useRef(jumpToMessageId != null);
@@ -836,6 +869,7 @@ function MessageThreadImpl({
       if (done) return;
       done = true;
       gate.setAttribute("data-ready", "");
+      setAnimArmed(true);
     };
     const startSettle = () => {
       if (done) return;
@@ -1661,6 +1695,7 @@ function MessageThreadImpl({
                 onDismissFailed={dismissFailed}
                 onRetryFailed={retryFailed}
                 onDeleteNote={deleteNote}
+                animArmed={animArmed}
               />
             )}
           </div>
