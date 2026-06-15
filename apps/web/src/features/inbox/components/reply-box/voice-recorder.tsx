@@ -38,6 +38,18 @@ const MIME_CANDIDATES = [
   "audio/mp4",
 ] as const;
 
+/**
+ * Hard cap on recording length. Without it `durationSec` ticks forever, the
+ * agent walks away mid-record, and the eventual multi-minute blob only fails
+ * the size check AFTER a slow upload. At the cap we auto-STOP capture cleanly
+ * (we never auto-send — an irreversible Meta send must be a deliberate click);
+ * the captured clip stays recoverable via `stopAndCollect`, so the user can
+ * still hit Send (or Cancel) on the bar.
+ */
+const MAX_RECORDING_SEC = 300; // 5 minutes
+/** Show the remaining-time countdown in the bar once within this window. */
+const COUNTDOWN_FROM_SEC = 15;
+
 function pickRecorderMime(): string | null {
   if (typeof MediaRecorder === "undefined") return null;
   for (const mime of MIME_CANDIDATES) {
@@ -83,6 +95,10 @@ export function useVoiceRecorder(opts: {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  // Holds the File finalized when the cap auto-stops capture, so a later
+  // `stopAndCollect()` returns the captured audio instead of the empty
+  // already-inactive recorder. Cleared on cancel / fresh start / cleanup.
+  const cappedFileRef = useRef<File | null>(null);
   const startedAtRef = useRef<number>(0);
   const tickRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -112,6 +128,19 @@ export function useVoiceRecorder(opts: {
     chunksRef.current = [];
   };
 
+  // Build a File from the current chunks using the active mime. Shared by the
+  // cap auto-stop and `stopAndCollect`'s onstop so the naming/format is
+  // identical regardless of which path finalized the recording.
+  const buildFile = (): File | null => {
+    const mime = mimeRef.current || "audio/ogg";
+    const blob = new Blob(chunksRef.current, { type: mime });
+    if (blob.size === 0) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return new File([blob], `voice-${stamp}.${extForMime(mime)}`, {
+      type: mime,
+    });
+  };
+
   // Stop any in-flight recording when the host unmounts (chat switch
   // mid-record). Without this the mic tracks stay hot in the background.
   useEffect(() => {
@@ -124,6 +153,31 @@ export function useVoiceRecorder(opts: {
       cleanup();
     };
   }, []);
+
+  // Auto-stop when MAX_RECORDING_SEC is hit. Stops mic capture + the timer/raf
+  // loops but leaves `isRecording` true so the bar stays up; the finalized clip
+  // lands in `cappedFileRef` for `stopAndCollect()` to return. NEVER auto-sends.
+  const finalizeAtCap = (): void => {
+    // Freeze the timer so it doesn't re-enter this on the next 250ms tick.
+    if (tickRef.current !== null) {
+      window.clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    recorder.onstop = () => {
+      // Build the File BEFORE cleanup wipes the chunks, then keep stream/ctx
+      // torn down (cleanup) but preserve the captured File for collection.
+      cappedFileRef.current = buildFile();
+      cleanup();
+    };
+    try {
+      recorder.stop();
+    } catch {
+      // already inactive — nothing to finalize
+    }
+    onErrorRef.current("Max voice length reached (5:00) — send or discard.");
+  };
 
   const start = async (): Promise<void> => {
     if (isRecording) return;
@@ -158,6 +212,7 @@ export function useVoiceRecorder(opts: {
     streamRef.current = stream;
     mimeRef.current = mime;
     chunksRef.current = [];
+    cappedFileRef.current = null;
 
     // Live mic-level meter via WebAudio analyser. We sample RMS at
     // ~30Hz and shift it into a fixed-length ring so the bars animate
@@ -214,7 +269,16 @@ export function useVoiceRecorder(opts: {
     startedAtRef.current = Date.now();
     setDurationSec(0);
     tickRef.current = window.setInterval(() => {
-      setDurationSec(Math.floor((Date.now() - startedAtRef.current) / 1000));
+      const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
+      if (elapsed >= MAX_RECORDING_SEC) {
+        // Clamp the displayed timer at the cap and auto-stop capture. We DON'T
+        // auto-send — the finalized clip is stashed so the user still chooses
+        // Send or Discard on the bar.
+        setDurationSec(MAX_RECORDING_SEC);
+        finalizeAtCap();
+        return;
+      }
+      setDurationSec(elapsed);
     }, 250);
 
     try {
@@ -231,6 +295,17 @@ export function useVoiceRecorder(opts: {
 
   const stopAndCollect = (): Promise<File | null> => {
     return new Promise((resolve) => {
+      // If the cap already finalized the recording, hand back the stashed clip.
+      if (cappedFileRef.current) {
+        const file = cappedFileRef.current;
+        cappedFileRef.current = null;
+        cleanup();
+        setIsRecording(false);
+        setDurationSec(0);
+        setLevels(new Array(28).fill(0));
+        resolve(file);
+        return;
+      }
       const recorder = recorderRef.current;
       if (!recorder || recorder.state === "inactive") {
         cleanup();
@@ -239,20 +314,11 @@ export function useVoiceRecorder(opts: {
         return;
       }
       recorder.onstop = () => {
-        const mime = mimeRef.current || "audio/ogg";
-        const blob = new Blob(chunksRef.current, { type: mime });
+        const file = buildFile();
         cleanup();
         setIsRecording(false);
         setDurationSec(0);
         setLevels(new Array(28).fill(0));
-        if (blob.size === 0) {
-          resolve(null);
-          return;
-        }
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const file = new File([blob], `voice-${stamp}.${extForMime(mime)}`, {
-          type: mime,
-        });
         resolve(file);
       };
       try {
@@ -266,6 +332,8 @@ export function useVoiceRecorder(opts: {
   };
 
   const cancel = (): void => {
+    // Drop any clip the cap may have finalized.
+    cappedFileRef.current = null;
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       // Drop the data on the floor by clearing chunks BEFORE stop fires.
@@ -316,6 +384,11 @@ export function RecordingBar({
   onCancel: () => void;
   onSend: () => void;
 }) {
+  // Countdown shown only in the final stretch so the cap auto-stop isn't a
+  // surprise. `remaining` clamps at 0; the hook stops capture at the cap.
+  const remaining = Math.max(0, MAX_RECORDING_SEC - durationSec);
+  const showCountdown = remaining <= COUNTDOWN_FROM_SEC;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 4 }}
@@ -342,6 +415,15 @@ export function RecordingBar({
         <span className="w-12 shrink-0 font-mono text-xs tabular-nums text-foreground">
           {formatDuration(durationSec)}
         </span>
+        {showCountdown && (
+          <span
+            className="shrink-0 font-mono text-xs tabular-nums text-destructive"
+            aria-live="polite"
+            title="Time remaining before the recording auto-stops"
+          >
+            -0:{remaining.toString().padStart(2, "0")}
+          </span>
+        )}
         <div className="flex h-6 flex-1 items-center gap-0.5">
           {levels.map((v, i) => (
             <span

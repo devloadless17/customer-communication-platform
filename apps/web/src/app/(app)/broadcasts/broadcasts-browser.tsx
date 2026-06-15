@@ -8,12 +8,15 @@ import {
   ChevronRight,
   Copy,
   List,
+  Loader2,
+  RotateCcw,
   Search,
 } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { getClientSocket } from "@/lib/socket-client";
+import { toast } from "@/lib/toast";
 import { cn } from "@ccp/shared/utils";
 import type { BroadcastListItem } from "@/lib/api/queries";
 
@@ -334,6 +337,9 @@ function TableView({
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <BroadcastStatusBadge status={b.status} />
+                {canManage && canRetry(b) && (
+                  <BroadcastRetryButton broadcastId={b.id} failedCount={b.failedCount} />
+                )}
                 {canManage && (
                   <Link
                     href={`/broadcasts/new?from=${b.id}`}
@@ -423,6 +429,9 @@ function TableView({
               </td>
               <td className="px-4 py-3 text-right">
                 <div className="inline-flex items-center gap-1">
+                  {canManage && canRetry(b) && (
+                    <BroadcastRetryButton broadcastId={b.id} failedCount={b.failedCount} />
+                  )}
                   {canManage && (
                     <Link
                       href={`/broadcasts/new?from=${b.id}`}
@@ -589,6 +598,71 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
       </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Per-row "Retry failed" quick-action. Re-queues just the failed recipients via
+ * the SAME endpoint the detail page uses (`POST /api/broadcasts/:id/retry`),
+ * saving a hop to the detail view. Only rendered on a TERMINAL broadcast that
+ * actually has failures (gated by the caller). The server flips the broadcast
+ * back to `running`; the `broadcast:status` socket echo refetches this list, so
+ * no manual refresh is needed here.
+ */
+function BroadcastRetryButton({
+  broadcastId,
+  failedCount,
+}: {
+  broadcastId: string;
+  failedCount: number;
+}) {
+  const [retrying, setRetrying] = useState(false);
+
+  async function run() {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const res = await apiFetch(`/api/broadcasts/${broadcastId}/retry`, { method: "POST" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
+        toast.error("Couldn't retry broadcast", {
+          description: body.detail ?? body.error ?? `HTTP ${res.status}`,
+        });
+        return;
+      }
+      toast.success(
+        `Retrying ${failedCount} failed recipient${failedCount === 1 ? "" : "s"}`,
+      );
+    } catch {
+      toast.error("Couldn't retry broadcast", { description: "Network error" });
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={run}
+      disabled={retrying}
+      title={`Retry ${failedCount} failed recipient${failedCount === 1 ? "" : "s"}`}
+      aria-label={`Retry ${failedCount} failed recipient${failedCount === 1 ? "" : "s"}`}
+      className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground pointer-coarse:size-9"
+    >
+      {retrying ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        <RotateCcw className="size-3.5" />
+      )}
+    </button>
+  );
+}
+
+/** Terminal broadcast with at least one failure → retry is meaningful. */
+function canRetry(b: BroadcastListItem): boolean {
+  return (
+    b.failedCount > 0 &&
+    (b.status === "completed" || b.status === "failed" || b.status === "canceled")
   );
 }
 

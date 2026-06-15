@@ -712,6 +712,21 @@ function CanvasInner({
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={20} size={1} />
+        {/* First-run hint — only while the canvas is effectively empty (no
+            steps added yet, so just the synthetic trigger). Non-interactive
+            (`pointer-events-none`) so it never blocks panning, the trigger
+            click, or the trailing "+". Disappears the moment a first step
+            lands a startNode. Panel keeps it pinned to the canvas without
+            being a flow node, so zoom/pan don't move or scale it. */}
+        {graph.nodes.length === 0 && !graph.startNodeId && (
+          <Panel
+            position="bottom-center"
+            className="pointer-events-none select-none text-2xs text-muted-foreground"
+          >
+            Click <span className="font-medium">+</span> to add your first step ·
+            click the trigger to choose when this runs
+          </Panel>
+        )}
         <Controls />
         {/* Top-right "Rearrange" — opt-in auto-layout. We don't run it on
             every insert because users place nodes deliberately and the

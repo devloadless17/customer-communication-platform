@@ -100,7 +100,9 @@ export function NewBroadcastForm({
 
   // Pre-fill audience from the URL the agent arrived from. A groupId lands on
   // "saved group"; preselected tags/contacts (from the contacts page) land on
-  // the custom builder pre-loaded. Default is the custom builder.
+  // the custom builder pre-loaded. With no preselection we default to "all"
+  // (the explicit mode picker is right there) rather than dropping the agent
+  // into the highest-friction contact-by-contact builder.
   const [audience, setAudience] = useState<AudienceState>(() => {
     if (preselectAllAudience) {
       return {
@@ -127,7 +129,7 @@ export function NewBroadcastForm({
       };
     }
     return {
-      mode: "custom",
+      mode: "all",
       selectedIds: [],
       selectedTagIds: [],
       selectedGroupId: null,

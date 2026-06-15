@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
+  ArrowDown,
   ArrowRight,
   ExternalLink,
   Plug,
@@ -160,6 +161,13 @@ function IntegrationTile({
   disabled,
   connected,
 }: Tile) {
+  // A href with a `#` fragment scrolls to an inline section on THIS page
+  // (e.g. n8n → #n8n) rather than navigating to a sub-page (e.g. Webhooks).
+  // The affordance arrow must match: a downward "scroll to section" cue for
+  // anchors, the navigate-style right arrow for real page links. Same hover
+  // reveal either way — only the direction differs, so the arrow never lies.
+  const isAnchor = !!href && href.includes("#");
+  const Arrow = isAnchor ? ArrowDown : ArrowRight;
   const Inner = (
     <div className="flex h-full items-start gap-3">
       <div
@@ -175,7 +183,7 @@ function IntegrationTile({
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-medium">{title}</span>
           {!disabled && (
-            <ArrowRight className="size-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100" />
+            <Arrow className="size-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100" />
           )}
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>

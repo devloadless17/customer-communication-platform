@@ -1,6 +1,6 @@
 "use client";
 
-import { Hash, PanelLeft, Pencil, Search, Trash2, Users } from "lucide-react";
+import { Hash, PanelLeft, Pencil, Search, Settings, Trash2, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { openMobileNav } from "@/components/layouts/mobile-shell-chrome";
@@ -23,7 +23,7 @@ import { TypingIndicator } from "./typing-indicator";
 
 /**
  * Sticky header for the active channel: name + description + typing dots +
- * menu (edit, delete). Delete is gated by role AND `!isDefault`.
+ * channel-settings menu (edit, delete). Delete is gated by role AND `!isDefault`.
  */
 export function ChannelHeader({
   channel,
@@ -109,11 +109,21 @@ export function ChannelHeader({
       </Tooltip>
       {(canEdit || canDelete) && (
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button size="sm" variant="ghost" className="h-8">
-              Manage
-            </Button>
-          </DropdownMenuTrigger>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="size-8 pointer-coarse:size-9"
+                  aria-label="Channel settings"
+                >
+                  <Settings className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>Channel settings</TooltipContent>
+          </Tooltip>
           <DropdownMenuContent align="end" className="min-w-44">
             {canEdit && (
               <DropdownMenuItem onClick={onEdit}>

@@ -44,7 +44,7 @@ export function ConnectionBanner() {
           {state === "offline" ? (
             <>
               <WifiOff className="size-3.5" />
-              <span>You&apos;re offline — messages will retry when you reconnect</span>
+              <span>You&apos;re offline — sending is paused</span>
             </>
           ) : (
             <>
