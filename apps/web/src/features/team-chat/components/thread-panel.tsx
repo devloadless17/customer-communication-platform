@@ -61,7 +61,12 @@ export function ThreadPanel({
   }, [teamMembers]);
 
   return (
-    <aside className="flex h-full w-[24rem] shrink-0 flex-col border-l border-border bg-card/30">
+    // Below lg the panel OVERLAYS the feed (absolute, right-docked, shadowed)
+    // so it never squeezes the message column to an unusable width on tablet /
+    // mobile. At lg+ it's an in-flow 24rem column beside the feed. Single mount
+    // either way (it owns a fetch + socket subscriptions), so this is pure CSS
+    // — no media-query remount. The workspace root is `relative` to anchor it.
+    <aside className="absolute inset-y-0 right-0 z-20 flex h-full w-full max-w-md flex-col border-l border-border bg-background shadow-xl lg:static lg:z-auto lg:w-[24rem] lg:max-w-none lg:bg-card/30 lg:shadow-none lg:shrink-0">
       <div className="flex items-center justify-between border-b border-border bg-background px-4 py-3">
         <div>
           <div className="text-sm font-semibold">Thread</div>

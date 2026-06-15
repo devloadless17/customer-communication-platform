@@ -14,7 +14,7 @@ export default async function TeamIndexPage() {
   }
 
   return (
-    <div className="flex h-svh flex-col items-center justify-center gap-3 text-center">
+    <div className="flex h-[calc(100svh-3rem)] flex-col items-center justify-center gap-3 text-center md:h-svh">
       <h1 className="text-lg font-semibold">No channels yet</h1>
       <p className="max-w-md text-sm text-muted-foreground">
         Ask an admin to create the first channel — the default <code>#general</code>{" "}

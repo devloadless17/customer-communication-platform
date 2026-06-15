@@ -306,7 +306,7 @@ export function TeamChatWorkspace({
     // The channel-list sidebar lives in /team/layout.tsx (SectionShell slot)
     // now — both the desktop column and the mobile hamburger drawer. This
     // workspace is just the active channel's feed + composer + thread panel.
-    <div className="flex h-svh">
+    <div className="relative flex h-[calc(100svh-3rem)] md:h-svh">
       <div className="flex min-w-0 flex-1 flex-col">
         <ChannelHeader
           channel={initialChannel}

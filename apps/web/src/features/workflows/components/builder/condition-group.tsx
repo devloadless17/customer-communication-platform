@@ -3,6 +3,7 @@
 import { Plus, X, Layers } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 
 import {
@@ -56,6 +57,16 @@ function stampLazyId<T extends { _id?: string }>(child: T): string {
  * still get a useful default set).
  */
 
+/** Recursively count the leaf Conditions inside a group — drives the
+ *  "remove this group and its N conditions?" confirmation. */
+function countLeafConditions(group: Group): number {
+  let n = 0;
+  for (const child of group.children) {
+    n += isGroup(child) ? countLeafConditions(child) : 1;
+  }
+  return n;
+}
+
 const MAX_DEPTH = 3;
 
 interface Props {
@@ -97,6 +108,7 @@ export function ConditionGroupEditor({
       : FIELDS_BY_TRIGGER[trigger];
   const isRoot = depth === 0;
   const canNestMore = depth < MAX_DEPTH - 1;
+  const { confirm, confirmDialog } = useConfirm();
 
   function setOp(op: GroupOp) {
     onChange({ ...group, op });
@@ -136,6 +148,7 @@ export function ConditionGroupEditor({
   const empty = group.children.length === 0;
 
   return (
+    <>
     <div
       className={
         "flex flex-col gap-2 rounded-md border p-2 " +
@@ -176,7 +189,21 @@ export function ConditionGroupEditor({
             type="button"
             variant="ghost"
             size="icon"
-            onClick={onRemove}
+            onClick={async () => {
+              const count = countLeafConditions(group);
+              // Empty group removes with no data loss — don't over-confirm.
+              if (count > 0) {
+                const ok = await confirm({
+                  title: `Remove this group and its ${count} condition${count === 1 ? "" : "s"}?`,
+                  description:
+                    "The group and every condition inside it will be deleted. This can't be undone.",
+                  confirmLabel: "Remove",
+                  destructive: true,
+                });
+                if (!ok) return;
+              }
+              onRemove();
+            }}
             aria-label="Remove group"
             className="size-6 text-muted-foreground hover:text-destructive"
           >
@@ -246,6 +273,8 @@ export function ConditionGroupEditor({
         )}
       </div>
     </div>
+    {confirmDialog}
+    </>
   );
 }
 

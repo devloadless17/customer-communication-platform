@@ -860,8 +860,9 @@ const ContactRow = memo(function ContactRow({
           )}
         </div>
 
-        {/* Stage lane */}
-        <div className="flex w-28 shrink-0 items-center justify-start">
+        {/* Stage lane — hidden on phones so the name keeps its width; stage
+            stays editable from the row's detail drawer. */}
+        <div className="hidden w-28 shrink-0 items-center justify-start sm:flex">
           <ContactStagePicker
             stages={stageCatalog}
             currentStageId={contact.stageId}
@@ -888,8 +889,10 @@ const ContactRow = memo(function ContactRow({
           )}
         </div>
 
-        {/* Open-chat lane */}
-        <div className="flex w-[104px] shrink-0 items-center justify-end">
+        {/* Open-chat lane — hidden on phones (tap the row → detail drawer to
+            open the chat); reclaims the reserved width so the name doesn't
+            collapse on a 375px screen. */}
+        <div className="hidden w-[104px] shrink-0 items-center justify-end sm:flex">
           {activeConversationId && (
             <Link
               href={`/inbox/${activeConversationId}`}

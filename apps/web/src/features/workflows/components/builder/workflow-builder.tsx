@@ -301,8 +301,23 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     });
   }
 
-  function deleteSelected() {
+  // Shared confirm for step deletion. Covers BOTH the canvas trash button and
+  // the Delete/Backspace key path (both route through handleDeleteStep), plus
+  // the palette deleteSelected — a step + its config can't be recovered.
+  async function confirmStepDelete(id: string): Promise<boolean> {
+    const node = graph.nodes.find((n) => n.id === id);
+    const label = node?.name?.trim() ? `“${node.name.trim()}”` : "this step";
+    return confirm({
+      title: `Delete ${label}?`,
+      description: "This removes the step from the workflow. This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+  }
+
+  async function deleteSelected() {
     if (!selectedStepId) return;
+    if (!(await confirmStepDelete(selectedStepId))) return;
     setGraph(removeStep(graph, selectedStepId));
     setSelectedStepId(null);
   }
@@ -334,7 +349,8 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     setTriggerOpen(false);
   }
 
-  function handleDeleteStep(id: string) {
+  async function handleDeleteStep(id: string) {
+    if (!(await confirmStepDelete(id))) return;
     setGraph(removeStep(graph, id));
     if (selectedStepId === id) setSelectedStepId(null);
   }
@@ -345,7 +361,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   const isLive = published;
 
   return (
-    <form className="flex h-svh flex-col" onSubmit={handleSave}>
+    <form className="flex h-[calc(100svh-3rem)] flex-col md:h-svh" onSubmit={handleSave}>
       {/* Top bar */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border bg-card px-3 py-2 md:gap-3 md:px-4">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 md:gap-3">
@@ -424,7 +440,9 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
           "+" buttons on edges + the trailing "+" below leaf nodes, so the
           old left palette is gone. */}
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1">
+        {/* min-w-0 lets the canvas shrink (instead of overflowing) when a
+            shrink-0 editor drawer is open on a narrow viewport. */}
+        <div className="min-w-0 flex-1">
           <WorkflowCanvas
             graph={graph}
             selectedStepId={selectedStepId}

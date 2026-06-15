@@ -684,6 +684,11 @@ function CanvasInner({
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        // Disable React Flow's built-in Delete/Backspace handling — onCanvasKeyDown
+        // owns deletion so the confirm dialog (handleDeleteStep) governs it. Left
+        // active, RF would visually remove the node BEFORE the async confirm
+        // resolved and leave the canvas desynced on Cancel.
+        deleteKeyCode={null}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
@@ -738,7 +743,7 @@ function CanvasInner({
             return "var(--primary)";
           }}
           maskColor="rgba(0,0,0,0.05)"
-          className="bg-card! border! border-border! rounded-md!"
+          className="hidden bg-card! border! border-border! rounded-md! lg:block!"
           style={{ height: 110, width: 160 }}
         />
       </ReactFlow>

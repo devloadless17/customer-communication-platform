@@ -74,7 +74,7 @@ export function StepEditorDrawer({
   const meta = STEP_OPTIONS.find((s) => s.value === node.type);
 
   return (
-    <aside className="flex h-full w-96 flex-col border-l border-border bg-card">
+    <aside className="flex h-full w-[min(20rem,80vw)] shrink-0 flex-col border-l border-border bg-card sm:w-96">
       <header className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
         <div className="min-w-0 flex-1">
           <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">

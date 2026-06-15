@@ -336,12 +336,35 @@ export function TeamSettings({
               isSelf={u.id === currentUserId}
               actorRole={currentUserRole}
               pending={pending}
-              onPatch={(body) =>
+              onPatch={async (body) => {
+                // Confirm a role change or a disable BEFORE mutating — both
+                // change access immediately. Re-enable restores access, so it
+                // needs no guard. Confirm runs OUTSIDE startTransition so the
+                // page-wide `pending` flag doesn't light up while the dialog is
+                // open (same pattern as confirmDeleteUser).
+                if (body.role !== undefined && body.role !== u.role) {
+                  const ok = await confirm({
+                    title: `Change ${u.name || "this member"}'s role to ${roleLabel(body.role)}?`,
+                    description: "This immediately changes what they can access.",
+                    confirmLabel: "Change role",
+                  });
+                  if (!ok) return;
+                }
+                if (body.deactivated === true) {
+                  const ok = await confirm({
+                    title: `Disable ${u.name || "this member"}?`,
+                    description:
+                      "They'll be signed out and can't sign back in until you re-enable the account.",
+                    confirmLabel: "Disable",
+                    destructive: true,
+                  });
+                  if (!ok) return;
+                }
                 startTransition(async () => {
                   await patchUser(u.id, body);
                   refresh();
-                })
-              }
+                });
+              }}
               onDelete={() => {
                 void confirmDeleteUser(u.id, u.name);
               }}
