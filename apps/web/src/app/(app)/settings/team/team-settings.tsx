@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
@@ -477,18 +478,18 @@ function UserRow({
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
         {editable && !isSelf ? (
-          <select
+          <Select
             value={user.role}
             disabled={pending}
             onChange={(e) => onPatch({ role: e.target.value as Role })}
-            className="h-8 rounded-md border border-input bg-transparent px-2 text-xs shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-8 pl-2 pr-7 text-xs"
           >
             {options.map((r) => (
               <option key={r} value={r}>
                 {roleLabel(r)}
               </option>
             ))}
-          </select>
+          </Select>
         ) : (
           <Badge variant="muted" className="px-2 py-0.5 text-3xs uppercase tracking-wider">
             {roleLabel(user.role)}
@@ -679,18 +680,13 @@ function InviteCard({
           aria-label="Teammate email"
           required
         />
-        <select
-          name="role"
-          defaultValue="agent"
-          aria-label="Teammate role"
-          className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-        >
+        <Select name="role" defaultValue="agent" aria-label="Teammate role">
           {assignableRoles.map((r) => (
             <option key={r} value={r}>
               {roleLabel(r)}
             </option>
           ))}
-        </select>
+        </Select>
         <Button type="submit" disabled={pending}>
           {pending ? <Loader2 className="size-4 animate-spin" /> : <UserPlus className="size-4" />}
           Generate link

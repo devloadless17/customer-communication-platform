@@ -17,6 +17,7 @@ import {
   listContacts,
   lookupContacts,
   previewAudienceContacts,
+  resolveContactIdsByFilter,
   toContactWire,
   type ListContactsOpts,
 } from "@/lib/queries";
@@ -26,14 +27,16 @@ import { workflowContactSnapshot } from "@/lib/workflows/events";
 import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import { runWithConcurrency } from "../common/concurrency";
-import type {
-  AudienceCountInput,
-  AudiencePreviewInput,
-  BulkContactsInput,
-  CreateContactInput,
-  ListContactsQueryInput,
-  SetContactTagsInput,
-  UpdateContactInput,
+import {
+  MAX_FILTER_MATCH,
+  type AudienceCountInput,
+  type AudiencePreviewInput,
+  type BulkContactsInput,
+  type BulkFilterInput,
+  type CreateContactInput,
+  type ListContactsQueryInput,
+  type SetContactTagsInput,
+  type UpdateContactInput,
 } from "./contacts.schemas";
 
 // 5 MiB CSV is more than the 5000-row cap can ever fill (a 100-char row at
@@ -487,10 +490,16 @@ export class ContactsService {
    * because the auth + ownership filter + fan-out shape is identical; the
    * action discriminator lives in the input schema.
    *
+   * Addressing: `delete` and the default (`mode: "ids"`) tag op carry an
+   * explicit `contactIds` array. The `mode: "filter"` tag op instead carries
+   * the active contacts-list FILTER and the server expands it to every
+   * matching id ("select all N matching"). Delete is filter-mode-EXCLUDED by
+   * schema (capped to the loaded selection — a deliberate safety limit).
+   *
    * Returns:
-   *   { ok, count }            — delete
-   *   { ok, count, action }    — tag op (no failures)
-   *   { ok: false, count, action, failed } — tag op partial failure
+   *   { ok, count }                    — delete
+   *   { ok, count, action }            — tag op
+   *   { ok, count, action, capped }    — filter-mode tag op that hit the cap
    */
   async bulk(
     teamId: string,
@@ -501,17 +510,35 @@ export class ContactsService {
     count: number;
     action?: BulkContactsInput["action"];
     failed?: number;
+    capped?: boolean;
   }> {
-    // Scope to actually-owned, LIVE rows. Downstream calls already filter by
-    // teamId, but doing it explicitly lets us emit accurate per-id events and
-    // refuse client-supplied ids that aren't ours. `deletedAt: null` keeps a
-    // bulk tag/stage/field op from mutating tombstoned contacts (which would
-    // resurrect them invisibly in tag/stage joins).
-    const ownContacts = await this.db.contact.findMany({
-      where: { teamId, id: { in: input.contactIds }, deletedAt: null },
-      select: { id: true },
-    });
-    const ownedIds = ownContacts.map((c) => c.id);
+    // Resolve the target id set. Two addressing modes converge here so the rest
+    // of the method is mode-agnostic:
+    //   - filter mode (tag ops only): expand the active list filter to every
+    //     matching LIVE id server-side, capped at MAX_FILTER_MATCH. The
+    //     where-builder is the SAME one the list + count use, so the op targets
+    //     exactly what the user sees. No re-validation needed — these ids come
+    //     straight from a team-scoped, deletedAt-IS-NULL query.
+    //   - id mode (delete + default tag op): scope the client-supplied ids to
+    //     actually-owned, LIVE rows so we emit accurate per-id events and
+    //     refuse ids that aren't ours.
+    let ownedIds: string[];
+    let capped = false;
+    if (input.action !== "delete" && input.mode === "filter") {
+      const resolved = await resolveContactIdsByFilter(
+        teamId,
+        this.filterToListOpts(input.filter),
+        MAX_FILTER_MATCH,
+      );
+      ownedIds = resolved.ids;
+      capped = resolved.capped;
+    } else {
+      const ownContacts = await this.db.contact.findMany({
+        where: { teamId, id: { in: input.contactIds }, deletedAt: null },
+        select: { id: true },
+      });
+      ownedIds = ownContacts.map((c) => c.id);
+    }
     if (ownedIds.length === 0) {
       throw new NotFoundException({
         error: "no matching contacts in this team",
@@ -660,10 +687,33 @@ export class ContactsService {
 
     // After the join-table rewrite, the operation is one statement — either
     // it succeeded for every owned id or it threw. No partial-failure path.
+    // `capped` is surfaced so the client can warn that a select-all-matching op
+    // touched only the first MAX_FILTER_MATCH rows.
     return {
       ok: true,
       count: ownedIds.length,
       action,
+      ...(capped ? { capped: true } : {}),
+    };
+  }
+
+  /**
+   * Map the bulk `filter` payload (array tagIds, fieldKey/fieldValue pair) onto
+   * the `ListContactsOpts` the where-builder consumes — the same normalization
+   * `ContactsService.list` does for the GET query, so filter-mode bulk targets
+   * exactly the set the list shows.
+   */
+  private filterToListOpts(filter: BulkFilterInput): ListContactsOpts {
+    return {
+      search: filter.search,
+      fieldFilter:
+        filter.fieldKey && filter.fieldValue
+          ? { key: filter.fieldKey, value: filter.fieldValue }
+          : undefined,
+      source: filter.source,
+      tagIds: filter.tagIds,
+      window: filter.window,
+      stageId: filter.stageId,
     };
   }
 

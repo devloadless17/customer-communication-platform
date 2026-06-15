@@ -21,9 +21,19 @@ export async function SectionShell({
   children,
   mainClassName,
   capContentWidth,
+  title,
 }: {
   subSidebar?: React.ReactNode;
   children: React.ReactNode;
+  /** Section-level accessible page title. Rendered as a visually-hidden
+   *  desktop `<h1>` (`sr-only`) so sections whose desktop content starts at
+   *  `<h2>` — or has no heading at all (workflow canvas, team-chat feed) —
+   *  still expose a top-level landmark for screen-reader heading nav. Scoped
+   *  to desktop via `max-md:hidden` because the mobile chrome
+   *  (`MobileShellChrome`) already renders a visible `<h1>` below `md`; this
+   *  avoids a duplicate h1 on small screens. Omit for sections whose page
+   *  content already renders its own visible `<h1>`. */
+  title?: string;
   /** Tailwind classes appended to the `<main>` element. Defaults to
    *  `overflow-y-auto`. Pass `min-w-0` for sections that own internal
    *  scroll (e.g. team chat). */
@@ -64,6 +74,9 @@ export async function SectionShell({
         tabIndex={-1}
         className={`min-w-0 flex-1 focus:outline-none ${mainClassName ?? "overflow-y-auto"}`}
       >
+        {/* Desktop-only sr-only h1: the mobile chrome already owns the visible
+            h1 below `md`, so scope this to `md+` to avoid a duplicate. */}
+        {title ? <h1 className="sr-only max-md:hidden">{title}</h1> : null}
         {capContentWidth ? (
           <div className="mx-auto w-full max-w-350">{children}</div>
         ) : (

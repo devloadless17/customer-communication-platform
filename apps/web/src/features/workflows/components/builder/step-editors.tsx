@@ -4,6 +4,7 @@ import { useCallback, useRef } from "react";
 import { Tag as TagIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { ContactFieldDefinition } from "@ccp/shared/types";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
@@ -419,10 +420,9 @@ export function SendTemplateEditor({
             : "Only approved templates can be sent."
         }
       >
-        <select
+        <Select
           value={config.templateId ?? ""}
           onChange={(e) => pickTemplate(e.target.value)}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="">Select a template…</option>
           {approved.map((t) => (
@@ -430,7 +430,7 @@ export function SendTemplateEditor({
               {t.name} ({t.language})
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       {selected && (
         <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">
@@ -517,10 +517,11 @@ export function AssignToEditor({
           Assign to a teammate
         </label>
         {config.mode === "user" && (
-          <select
+          <Select
             value={config.userId ?? ""}
             onChange={(e) => onChange({ mode: "user", userId: e.target.value })}
-            className="ml-6 h-8 rounded-md border border-border bg-background px-2 text-sm"
+            className="h-8 px-2 pr-7"
+            wrapperClassName="ml-6"
           >
             <option value="">Select a user…</option>
             {users.map((u) => (
@@ -528,7 +529,7 @@ export function AssignToEditor({
                 {u.name} ({u.email})
               </option>
             ))}
-          </select>
+          </Select>
         )}
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -555,15 +556,14 @@ export function SetStatusEditor({
 }) {
   return (
     <Field label="Target status">
-      <select
+      <Select
         value={config.status ?? "open"}
         onChange={(e) => onChange({ status: e.target.value })}
-        className="h-9 rounded-md border border-border bg-background px-2 text-sm"
       >
         <option value="open">Open</option>
         <option value="pending">Pending</option>
         <option value="closed">Closed</option>
-      </select>
+      </Select>
     </Field>
   );
 }
@@ -624,10 +624,9 @@ export function TagEditor({
         hint={tags.length === 0 ? "No tags yet — create them in Settings → Tags." : `${verb} this tag from the contact.`}
       >
         <div className="flex flex-col gap-2">
-          <select
+          <Select
             value={config.tagId ?? ""}
             onChange={(e) => onChange({ ...config, tagId: e.target.value })}
-            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
           >
             <option value="">Select a tag…</option>
             {tags.map((t) => (
@@ -635,7 +634,7 @@ export function TagEditor({
                 {t.name}
               </option>
             ))}
-          </select>
+          </Select>
           {selected && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <TagIcon className="size-3.5" />
@@ -668,10 +667,9 @@ export function UpdateFieldEditor({
   return (
     <div className="flex flex-col gap-4">
       <Field label="Field" hint="The contact's custom fields. Add new ones in Settings → Contact Fields.">
-        <select
+        <Select
           value={config.fieldKey ?? ""}
           onChange={(e) => onChange({ ...config, fieldKey: e.target.value })}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="">Select a field…</option>
           {fields.map((f) => (
@@ -679,7 +677,7 @@ export function UpdateFieldEditor({
               {f.label} ({f.key})
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       <Field label="Value" hint="Tokens like $var.contact.email resolve per run.">
         <Input
@@ -709,10 +707,9 @@ export function UpdateLifecycleEditor({
   return (
     <div className="flex flex-col gap-4">
       <Field label="Stage">
-        <select
+        <Select
           value={config.stageId ?? ""}
           onChange={(e) => onChange({ ...config, stageId: e.target.value })}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="">Select a stage…</option>
           {stages.map((s) => (
@@ -720,7 +717,7 @@ export function UpdateLifecycleEditor({
               {s.name}
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       <TargetSelector
         target={config.target}
@@ -858,7 +855,7 @@ function BranchPresetEditor({
   return (
     <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/20 p-3">
       <Field label="Check">
-        <select
+        <Select
           value={preset.type}
           onChange={(e) => {
             const type = e.target.value as BranchPreset["type"];
@@ -866,24 +863,22 @@ function BranchPresetEditor({
             // never carries stale fields from another preset shape.
             onChange(emptyPreset(type));
           }}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           {BRANCH_PRESET_OPTIONS.map((o) => (
             <option key={o.type} value={o.type}>
               {o.label}
             </option>
           ))}
-        </select>
+        </Select>
         {meta && (
           <div className="text-xs text-muted-foreground">{meta.description}</div>
         )}
       </Field>
       {preset.type === "has_tag" && (
         <Field label="Tag">
-          <select
+          <Select
             value={preset.tagId}
             onChange={(e) => onChange({ type: "has_tag", tagId: e.target.value })}
-            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
           >
             <option value="">Select a tag…</option>
             {catalogs.tags.map((t) => (
@@ -891,15 +886,14 @@ function BranchPresetEditor({
                 {t.name}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
       )}
       {preset.type === "in_stage" && (
         <Field label="Stage">
-          <select
+          <Select
             value={preset.stageId}
             onChange={(e) => onChange({ type: "in_stage", stageId: e.target.value })}
-            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
           >
             <option value="">Select a stage…</option>
             {catalogs.stages.map((s) => (
@@ -907,16 +901,15 @@ function BranchPresetEditor({
                 {s.name}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
       )}
       {preset.type === "field_equals" && (
         <>
           <Field label="Custom field">
-            <select
+            <Select
               value={preset.fieldKey}
               onChange={(e) => onChange({ ...preset, fieldKey: e.target.value })}
-              className="h-9 rounded-md border border-border bg-background px-2 text-sm"
             >
               <option value="">Select a field…</option>
               {catalogs.fields.map((f) => (
@@ -924,7 +917,7 @@ function BranchPresetEditor({
                   {f.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <Field label="Equals">
             <Input
@@ -1024,19 +1017,18 @@ export function WaitEditor({
           }}
           className="max-w-30"
         />
-        <select
+        <Select
           value={initialUnit}
           onChange={(e) => {
             const unit = e.target.value as typeof initialUnit;
             onChange({ delayMs: value * multipliers[unit] });
           }}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="s">seconds</option>
           <option value="m">minutes</option>
           <option value="h">hours</option>
           <option value="d">days</option>
-        </select>
+        </Select>
       </div>
     </Field>
   );
@@ -1059,10 +1051,9 @@ export function JumpToStepEditor({
   return (
     <div className="flex flex-col gap-4">
       <Field label="Target step">
-        <select
+        <Select
           value={config.targetStepId ?? ""}
           onChange={(e) => onChange({ ...config, targetStepId: e.target.value })}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="">Select a step…</option>
           {otherNodes.map((n) => (
@@ -1070,7 +1061,7 @@ export function JumpToStepEditor({
               {n.id} ({n.type})
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       <Field label="Max jumps (optional)" hint="Per-run cap. The global ceiling is 100 steps regardless.">
         <Input
@@ -1331,7 +1322,7 @@ export function AskQuestionEditor({
       </Field>
 
       <Field label="Save answer to field (optional)" hint="When the contact replies, write their answer to a contact custom field.">
-        <select
+        <Select
           value={config.saveTo?.key ?? ""}
           onChange={(e) => {
             const key = e.target.value;
@@ -1342,7 +1333,7 @@ export function AskQuestionEditor({
               onChange({ ...config, saveTo: { kind: "custom_field", key } });
             }
           }}
-          className="h-9 max-w-xs rounded-md border border-border bg-background px-2 text-sm"
+          wrapperClassName="max-w-xs"
         >
           <option value="">— Don&apos;t save</option>
           {fields.map((f) => (
@@ -1350,7 +1341,7 @@ export function AskQuestionEditor({
               {f.label}
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
 
       <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-2 text-2xs text-muted-foreground">
@@ -1499,10 +1490,9 @@ export function TriggerWorkflowEditor({
           : "Only workflows with trigger = manual_trigger can be invoked from another workflow."
       }
     >
-      <select
+      <Select
         value={config.workflowId ?? ""}
         onChange={(e) => onChange({ workflowId: e.target.value })}
-        className="h-9 rounded-md border border-border bg-background px-2 text-sm"
       >
         <option value="">Select a workflow…</option>
         {eligible.map((w) => (
@@ -1510,7 +1500,7 @@ export function TriggerWorkflowEditor({
             {w.name}
           </option>
         ))}
-      </select>
+      </Select>
     </Field>
   );
 }

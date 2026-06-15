@@ -17,23 +17,21 @@ export const CONTACTS_PAGE = 50;
 export type { ListContactsOpts };
 
 /**
- * Page of contacts for /contacts.
+ * The filter predicates (everything except the keyset cursor + sort + limit)
+ * for a contacts list query, as a `Prisma.sql` fragment over an aliased
+ * `Contact c`. Factored out so the page query, the COUNT(*), AND the
+ * "select-all-matching" bulk path (contacts.service.ts) all share the EXACT
+ * same WHERE — a filter-mode bulk op can never target a different set than the
+ * list the user is looking at.
  *
- * Sort is by `lastMessageAt DESC, id DESC` — keyset cursor so realtime
- * inbound that bumps a contact to the top doesn't make us skip rows on the
- * next page. Contacts with no messages yet sort to the bottom (they have
- * createdAt as the fallback).
- *
- * customFields filter is a JSONB containment expression in raw SQL because
- * Prisma's typed where doesn't expose the JSON `?`/`@>` operators with case
- * folding. We cast to text and use ILIKE so partial matches work.
+ * The caller supplies the alias (always `c` today) and the same normalized
+ * `opts` the list query uses. The cursor clause is intentionally NOT here: the
+ * filter set is page-position-independent.
  */
-export async function listContacts(
+export function buildContactFilterWhere(
   teamId: string,
   opts: ListContactsOpts = {},
-): Promise<CursorPage<ContactListItem>> {
-  const take = clampTake(opts.take, CONTACTS_PAGE);
-  const cursor = parseContactCursor(opts.cursor ?? null);
+): Prisma.Sql {
   const search = opts.search?.trim() ?? "";
   const fieldFilter = opts.fieldFilter;
   const source = opts.source;
@@ -41,12 +39,7 @@ export async function listContacts(
   const stageFilter = opts.stageId;
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
 
-  // The filter predicates (everything except the keyset cursor + sort + limit)
-  // are factored out so the COUNT(*) below shares the EXACT same WHERE as the
-  // page query — the authoritative total can never drift from what the list
-  // would return. The cursor clause is intentionally NOT in here: the total
-  // is page-position-independent.
-  const filterWhere = Prisma.sql`
+  return Prisma.sql`
     c."teamId" = ${teamId}
     AND c."deletedAt" IS NULL
     ${
@@ -55,21 +48,6 @@ export async function listContacts(
             c.name ILIKE ${"%" + search + "%"}
             OR c."phoneNumber" ILIKE ${"%" + search + "%"}
             OR COALESCE(c.email, '') ILIKE ${"%" + search + "%"}
-            -- KNOWN INDEX-MISS (acceptable at pilot scale): a
-            -- 'customFields::text ILIKE' substring match has NO index that
-            -- can serve it — no JSONB GIN serves substring (a jsonb_path_ops
-            -- GIN only serves @>/@?/@@ containment, which is why the old
-            -- Contact_customFields_gin_idx was dropped as dead write
-            -- overhead, migration 20260611130200). This branch seq-scans, but
-            -- ONLY over this team's LIVE rows (the teamId + deletedAt IS NULL
-            -- predicates above narrow first via Contact_teamId_active_idx), so
-            -- it's bounded by one tenant's contact count. Dropping the arm
-            -- would lose "find a contact by any custom-field value" from
-            -- quick-search — a real UX regression — so we keep it. TRIGGER to
-            -- revisit: a team crosses ~50k contacts AND EXPLAIN shows this as
-            -- the hot cost. Fix then: a generated tsvector/trgm column over
-            -- the flattened customFields values, or push custom-field search
-            -- to the explicit fieldKey+fieldValue filter only.
             OR c."customFields"::text ILIKE ${"%" + search + "%"}
           )`
         : Prisma.empty
@@ -106,6 +84,73 @@ export async function listContacts(
           : Prisma.empty
     }
   `;
+}
+
+/**
+ * Resolve EVERY contact id matching `opts` (same filter set as the list),
+ * capped at `cap`. Drives the "select all N matching" bulk path: the client
+ * sends the active filter instead of an id array and the server expands it
+ * here. Team-scoped + `deletedAt IS NULL` via the shared where-builder, so the
+ * returned ids can be fed straight into a tenant-bounded bulk write.
+ *
+ * Returns `{ ids, capped }` — `capped` is true when the match count exceeded
+ * `cap` (the caller decides whether to proceed with the truncated set or
+ * reject). One flat query, no LATERAL join (the sort key isn't needed here).
+ */
+export async function resolveContactIdsByFilter(
+  teamId: string,
+  opts: ListContactsOpts,
+  cap: number,
+): Promise<{ ids: string[]; capped: boolean }> {
+  const where = buildContactFilterWhere(teamId, opts);
+  const rows = await db.$queryRaw<Array<{ id: string }>>`
+    SELECT c.id
+    FROM "Contact" c
+    WHERE ${where}
+    ORDER BY c.id
+    LIMIT ${cap + 1}
+  `;
+  const capped = rows.length > cap;
+  const ids = (capped ? rows.slice(0, cap) : rows).map((r) => r.id);
+  return { ids, capped };
+}
+
+/**
+ * Page of contacts for /contacts.
+ *
+ * Sort is by `lastMessageAt DESC, id DESC` — keyset cursor so realtime
+ * inbound that bumps a contact to the top doesn't make us skip rows on the
+ * next page. Contacts with no messages yet sort to the bottom (they have
+ * createdAt as the fallback).
+ *
+ * customFields filter is a JSONB containment expression in raw SQL because
+ * Prisma's typed where doesn't expose the JSON `?`/`@>` operators with case
+ * folding. We cast to text and use ILIKE so partial matches work.
+ */
+export async function listContacts(
+  teamId: string,
+  opts: ListContactsOpts = {},
+): Promise<CursorPage<ContactListItem>> {
+  const take = clampTake(opts.take, CONTACTS_PAGE);
+  const cursor = parseContactCursor(opts.cursor ?? null);
+
+  // The filter predicates (everything except the keyset cursor + sort + limit)
+  // are factored out into `buildContactFilterWhere` so the COUNT(*) below AND
+  // the "select-all-matching" bulk path share the EXACT same WHERE as the page
+  // query — neither the authoritative total nor a filter-mode bulk op can ever
+  // drift from what the list would return. The cursor clause is intentionally
+  // NOT in there: the filter set is page-position-independent.
+  //
+  // NOTE on the `customFields::text ILIKE` arm inside that builder: it's a
+  // KNOWN INDEX-MISS (acceptable at pilot scale). No JSONB GIN serves substring
+  // (jsonb_path_ops only serves @>/@?/@@ containment, which is why the old
+  // Contact_customFields_gin_idx was dropped as dead write overhead, migration
+  // 20260611130200). It seq-scans, but ONLY over this team's LIVE rows (teamId
+  // + deletedAt IS NULL narrow first via Contact_teamId_active_idx), so it's
+  // bounded by one tenant's contact count. Dropping the arm would lose "find a
+  // contact by any custom-field value" from quick-search. TRIGGER to revisit: a
+  // team crosses ~50k contacts AND EXPLAIN shows this as the hot cost.
+  const filterWhere = buildContactFilterWhere(teamId, opts);
 
   // Tag filter is now pushed down as `EXISTS (... _ContactToTag ...)` in
   // the raw query below. The previous approach pre-resolved every matching

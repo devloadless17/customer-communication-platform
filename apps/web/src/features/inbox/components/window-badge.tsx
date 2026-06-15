@@ -20,8 +20,9 @@ import { useNow } from "@/hooks/use-now";
  *     refresh. We don't subscribe to second-level updates — the cost of an
  *     extra render every 60s is negligible and keeps the badge accurate.
  *
- *   - Three visual variants pick the same colors as message status pills,
- *     so this fits the existing palette without new tokens.
+ *   - Tones route through the semantic status tokens (success / warning) plus
+ *     destructive / muted, so the badge matches every other status pill and the
+ *     token carries dark mode.
  */
 
 export function WindowBadge({
@@ -62,9 +63,9 @@ export function WindowBadgeFromStatus({
 
   const tone =
     state === "open"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      ? "border-success-border bg-success-bg text-success-fg"
       : state === "closing-soon"
-        ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+        ? "border-warning-border bg-warning-bg text-warning-fg"
         : state === "closed"
           ? "border-destructive/30 bg-destructive/10 text-destructive"
           : "border-border bg-muted/40 text-muted-foreground";

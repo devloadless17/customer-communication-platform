@@ -16,8 +16,9 @@ export function BubbleMeta({
   isOut: boolean;
 }) {
   // Provider failure reason — only on a failed outbound send that carried a
-  // Meta `errors[0]`. Rendered as a tooltip on the alert icon plus a subtle
-  // muted line so the agent sees WHY a send failed, not just a red icon.
+  // Meta `errors[0]`. Surfaced ONCE, via the AlertCircle tooltip in StatusTicks
+  // (plus the bubble's red ring + the FailedRecovery Retry/Dismiss row); no
+  // redundant muted line below the meta row.
   const failureReason =
     isOut && message.status === "failed"
       ? message.statusErrorDetail ?? message.statusErrorTitle ?? null
@@ -44,11 +45,6 @@ export function BubbleMeta({
             burst, not buried under its last bubble. The tail keeps time + ticks. */}
         {isOut && <StatusTicks message={message} reason={failureReason} />}
       </div>
-      {failureReason && (
-        <span className="px-1 text-3xs leading-tight text-destructive/80">
-          {failureReason}
-        </span>
-      )}
     </div>
   );
 }

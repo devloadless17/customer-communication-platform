@@ -197,6 +197,14 @@ export function ContactsClient({
   // Selection state for bulk actions. Set<string> keeps add/remove O(1) and
   // makes "select all on this page" a simple union.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  // "Select all N matching" mode (Gmail/HubSpot pattern). When the user has
+  // selected every LOADED row but more contacts match the filter than are
+  // loaded, a banner lets them escalate to "all matching": NON-DESTRUCTIVE
+  // bulk ops (tag-add / tag-remove) then send the active FILTER instead of an
+  // id array and the server applies the op to every matching contact. Delete
+  // + send-template stay bound to the loaded selection (deliberate safety
+  // limit — they never enter this mode).
+  const [allMatching, setAllMatching] = useState(false);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
   // Contact id whose detail drawer is open — null = closed. Storing the id
@@ -212,6 +220,18 @@ export function ContactsClient({
       return new Set(filtered);
     });
   }, [items]);
+
+  // "All matching" is only valid while every LOADED row is still selected —
+  // it's an escalation OF a full-visible selection. The moment the selection
+  // drops below all-visible (deselect a row, filter change pruned the set,
+  // socket delete removed a selected row), fall back to plain visible-selection
+  // semantics so a stale filter payload can't outlive the selection that
+  // justified it.
+  const allVisibleSelected =
+    items.length > 0 && items.every((i) => selectedIds.has(i.contact.id));
+  useEffect(() => {
+    if (allMatching && !allVisibleSelected) setAllMatching(false);
+  }, [allMatching, allVisibleSelected]);
 
   // Live updates: when a teammate edits or deletes a contact elsewhere
   // (inbox panel, another tab, bulk-tag op, etc.), reflect it here without
@@ -358,6 +378,91 @@ export function ContactsClient({
   // we don't need a "no results" hint per filter dimension. Just empty state.
   const showEmpty = !list.loading && items.length === 0;
 
+  // More contacts match the current filter than are loaded into the page — the
+  // precondition for offering "select all N matching". Mirrors the SSR/list
+  // "Showing N of TOTAL" gate (totalCount is the server-authoritative match
+  // count for the active filter).
+  const hasMoreMatching =
+    list.totalCount !== null && list.totalCount > items.length;
+
+  // Build the server-side filter payload for a filter-mode bulk op. Mirrors
+  // `fetchContactsPage`'s param mapping (the same filters the list query reads)
+  // so the server's where-builder targets exactly the set the user sees. Only
+  // non-default dimensions are included so the payload stays minimal.
+  const buildBulkFilter = useCallback(() => {
+    const f: {
+      search?: string;
+      fieldKey?: string;
+      fieldValue?: string;
+      source?: "inbound" | "manual";
+      tagIds?: string[];
+      window?: "open" | "closed";
+      stageId?: string;
+    } = {};
+    if (list.search.trim()) f.search = list.search.trim();
+    if (list.fieldFilter) {
+      f.fieldKey = list.fieldFilter.key;
+      f.fieldValue = list.fieldFilter.value;
+    }
+    if (list.sourceFilter !== "all") f.source = list.sourceFilter;
+    if (list.windowFilter !== "any") f.window = list.windowFilter;
+    if (list.tagIds.length > 0) f.tagIds = list.tagIds;
+    if (list.stageFilter !== "any") f.stageId = list.stageFilter;
+    return f;
+  }, [
+    list.search,
+    list.fieldFilter,
+    list.sourceFilter,
+    list.windowFilter,
+    list.tagIds,
+    list.stageFilter,
+  ]);
+
+  // Apply a tag op either to the loaded selection (id mode) or — when the user
+  // escalated to "all matching" — to every matching contact server-side
+  // (filter mode). Returns true on success. In all-matching mode we can't patch
+  // rows locally (we don't hold all the ids), so we refetch the visible page;
+  // the server's coalesced `contact.bulk_updated` frame reconciles other tabs.
+  const applyTagBulk = useCallback(
+    async (action: "tag-add" | "tag-remove", tagId: string): Promise<boolean> => {
+      const body = allMatching
+        ? { action, mode: "filter" as const, filter: buildBulkFilter(), tagId }
+        : { action, contactIds: Array.from(selectedIds), tagId };
+      if (!allMatching && (body as { contactIds: string[] }).contactIds.length === 0) {
+        return false;
+      }
+      const res = await apiFetch("/api/contacts/bulk", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const msg = await safeReadError(res);
+        setError(msg);
+        toast.error(
+          action === "tag-add" ? "Couldn't add tag" : "Couldn't remove tag",
+          { description: msg },
+        );
+        return false;
+      }
+      if (allMatching) {
+        const data = (await res
+          .json()
+          .catch(() => ({}))) as { count?: number; capped?: boolean };
+        if (data.capped) {
+          toast.warning(
+            `Applied to the first ${(data.count ?? 0).toLocaleString()} contacts`,
+            { description: "The match set was very large and was capped." },
+          );
+        }
+        // Can't splice locally without the full id set — pull the fresh page.
+        list.refetch();
+      }
+      return true;
+    },
+    [allMatching, buildBulkFilter, selectedIds, list, setError],
+  );
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 md:px-8 md:py-8">
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
@@ -490,6 +595,46 @@ export function ContactsClient({
                 </span>
               }
             />
+            {/* "Select all N matching" banner (Gmail/HubSpot pattern). Shows
+                once every LOADED row is selected AND more contacts match the
+                filter than are loaded. Escalating switches NON-DESTRUCTIVE bulk
+                ops (tag add/remove) to filter mode — the server applies them to
+                every matching contact. */}
+            {allVisibleSelected && (hasMoreMatching || allMatching) && (
+              <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-b border-border bg-primary/5 px-4 py-2 text-center text-xs text-muted-foreground">
+                {allMatching ? (
+                  <>
+                    <span className="font-medium text-foreground tabular-nums">
+                      All {(list.totalCount ?? items.length).toLocaleString()} matching
+                      contacts selected.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAllMatching(false);
+                        setSelectedIds(new Set());
+                      }}
+                      className="font-medium text-primary hover:underline"
+                    >
+                      Clear selection
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="tabular-nums">
+                      All {items.length.toLocaleString()} on this page selected.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setAllMatching(true)}
+                      className="font-medium text-primary hover:underline tabular-nums"
+                    >
+                      Select all {(list.totalCount ?? items.length).toLocaleString()} matching
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {/* @container so each row's metadata lanes show/hide based on the
                 LIST's real width, not the viewport — the list narrows when the
                 section sub-sidebar is present (md+), and viewport breakpoints
@@ -555,6 +700,12 @@ export function ContactsClient({
 
       <BulkActionBar
         selectedCount={selectedIds.size}
+        // In all-matching mode the bar reflects the TRUE total (the server
+        // applies to every match), not the loaded-row count.
+        effectiveCount={
+          allMatching ? list.totalCount ?? selectedIds.size : selectedIds.size
+        }
+        allMatching={allMatching}
         tags={tags}
         onTagCreatedAndApply={async (tag) => {
           // Splice the new tag into the catalog so the chips render and
@@ -564,70 +715,60 @@ export function ContactsClient({
               ? prev
               : [...prev, tag].sort((a, b) => a.name.localeCompare(b.name)),
           );
-          const ids = Array.from(selectedIds);
-          if (ids.length === 0) return;
-          const res = await apiFetch("/api/contacts/bulk", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "tag-add", contactIds: ids, tagId: tag.id }),
-          });
-          if (!res.ok) {
-            const msg = await safeReadError(res);
-            setError(msg);
-            toast.error("Couldn't apply tag", { description: msg });
-            return;
+          const ok = await applyTagBulk("tag-add", tag.id);
+          // Local patch only meaningful in id mode — applyTagBulk already
+          // refetched in all-matching mode.
+          if (ok && !allMatching) {
+            const ids = new Set(selectedIds);
+            setItems((prev) =>
+              prev.map((row) => {
+                if (!ids.has(row.contact.id)) return row;
+                const cur = row.contact.tagIds ?? [];
+                return cur.includes(tag.id)
+                  ? row
+                  : { ...row, contact: { ...row.contact, tagIds: [...cur, tag.id] } };
+              }),
+            );
           }
-          // Patch row tagIds the same way the existing tag-add path does.
-          setItems((prev) =>
-            prev.map((row) => {
-              if (!ids.includes(row.contact.id)) return row;
-              const cur = row.contact.tagIds ?? [];
-              return cur.includes(tag.id)
-                ? row
-                : { ...row, contact: { ...row.contact, tagIds: [...cur, tag.id] } };
-            }),
-          );
         }}
-        onClear={() => setSelectedIds(new Set())}
+        onClear={() => {
+          setAllMatching(false);
+          setSelectedIds(new Set());
+        }}
         onSendTemplate={() => {
+          // Send-template is DELIBERATELY id-scoped (never filter-mode): the
+          // broadcast wizard takes a contactId/tagId set, not the full contacts
+          // filter, and that surface is out of scope here. So it always targets
+          // the loaded selection — even in all-matching mode.
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
           router.push(`/broadcasts/new?contactIds=${ids.join(",")}`);
         }}
         onTagBulk={async (action, tagId) => {
-          const ids = Array.from(selectedIds);
-          if (ids.length === 0) return;
-          const res = await apiFetch("/api/contacts/bulk", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action, contactIds: ids, tagId }),
-          });
-          if (!res.ok) {
-            const msg = await safeReadError(res);
-            setError(msg);
-            toast.error(
-              action === "tag-add" ? "Couldn't add tag" : "Couldn't remove tag",
-              { description: msg },
-            );
-            return;
-          }
+          const ok = await applyTagBulk(action, tagId);
           // Patch each affected row's tagIds locally so the chips update
-          // immediately. Adds skip duplicates; removes filter out the tag.
-          setItems((prev) =>
-            prev.map((row) => {
-              if (!ids.includes(row.contact.id)) return row;
-              const cur = row.contact.tagIds ?? [];
-              const next =
-                action === "tag-add"
-                  ? cur.includes(tagId)
-                    ? cur
-                    : [...cur, tagId]
-                  : cur.filter((id) => id !== tagId);
-              return { ...row, contact: { ...row.contact, tagIds: next } };
-            }),
-          );
+          // immediately (id mode only — all-matching refetched the page).
+          if (ok && !allMatching) {
+            const ids = new Set(selectedIds);
+            setItems((prev) =>
+              prev.map((row) => {
+                if (!ids.has(row.contact.id)) return row;
+                const cur = row.contact.tagIds ?? [];
+                const next =
+                  action === "tag-add"
+                    ? cur.includes(tagId)
+                      ? cur
+                      : [...cur, tagId]
+                    : cur.filter((id) => id !== tagId);
+                return { ...row, contact: { ...row.contact, tagIds: next } };
+              }),
+            );
+          }
         }}
         onDelete={async () => {
+          // Delete stays bound to the loaded selection — it NEVER enters
+          // all-matching/filter mode (a deliberate safety limit: a filter-wide
+          // purge can't go through, since WhatsApp history is unrecoverable).
           const ids = Array.from(selectedIds);
           if (ids.length === 0) return;
           // Meta Cloud has no history sync, so deleted WhatsApp history is
@@ -1002,6 +1143,8 @@ async function safeReadError(res: Response): Promise<string> {
 
 function BulkActionBar({
   selectedCount,
+  effectiveCount,
+  allMatching,
   tags,
   onClear,
   onSendTemplate,
@@ -1010,7 +1153,14 @@ function BulkActionBar({
   onDelete,
   canDelete,
 }: {
+  /** Loaded-page selection size — drives the show/hide gate. */
   selectedCount: number;
+  /** Number the bar DISPLAYS. Equals selectedCount in id mode; equals the
+   *  filter's true total in all-matching mode (tag ops apply to every match). */
+  effectiveCount: number;
+  /** True when the user escalated to "select all N matching" — tag ops then run
+   *  server-side over the whole filter. Send-template + delete stay id-scoped. */
+  allMatching: boolean;
   tags: Tag[];
   onClear: () => void;
   onSendTemplate: () => void;
@@ -1044,7 +1194,7 @@ function BulkActionBar({
         className="pointer-events-auto relative flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-popover px-3 py-2 shadow-2xl ring-1 ring-foreground/5 *:shrink-0 sm:flex-nowrap sm:overflow-x-auto sm:rounded-full"
       >
         <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-primary/10 px-2.5 text-xs font-medium text-primary tabular-nums">
-          {selectedCount} selected
+          {effectiveCount.toLocaleString()} {allMatching ? "matching" : "selected"}
         </span>
 
         <Button
@@ -1052,7 +1202,11 @@ function BulkActionBar({
           className="gap-1.5"
           onClick={onSendTemplate}
           aria-label="Send template"
-          title="Send template"
+          title={
+            allMatching
+              ? "Send template (applies to the loaded selection, not all matching)"
+              : "Send template"
+          }
         >
           <Send className="size-3.5" />
           <span className="hidden sm:inline">Send template</span>
@@ -1088,7 +1242,11 @@ function BulkActionBar({
             className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
             onClick={onDelete}
             aria-label="Delete selected"
-            title="Delete selected"
+            title={
+              allMatching
+                ? "Delete (loaded selection only — all-matching delete is disabled)"
+                : "Delete selected"
+            }
           >
             <Trash2 className="size-3.5" />
             <span className="hidden sm:inline">Delete</span>

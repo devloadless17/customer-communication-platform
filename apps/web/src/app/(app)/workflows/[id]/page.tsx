@@ -28,23 +28,29 @@ export default async function WorkflowPage({
   // (bearer tokens swapped for `bearerTokenSet: true`) so the page can pass
   // the graph through unchanged.
   return (
-    <WorkflowBuilder
-      mode="edit"
-      catalogs={catalogs}
-      workflow={{
-        id: wf.id as string,
-        name: wf.name as string,
-        published: wf.published as boolean,
-        trigger: wf.trigger as WorkflowTriggerEvent,
-        triggerConfig:
-          wf.triggerConfig && typeof wf.triggerConfig === "object" && !Array.isArray(wf.triggerConfig)
-            ? (wf.triggerConfig as Record<string, unknown>)
-            : {},
-        triggerConditions: (wf.triggerConditions ?? null) as never,
-        triggerOncePerContact: (wf.triggerOncePerContact ?? false) as boolean,
-         
-        graph: wf.graph as any,
-      }}
-    />
+    <>
+      {/* The builder canvas has no visible heading on desktop (the mobile
+          chrome owns the h1 below `md`), so expose a top-level landmark for
+          SR heading nav. Scoped to desktop to avoid a duplicate mobile h1. */}
+      <h1 className="sr-only max-md:hidden">{wf.name as string}</h1>
+      <WorkflowBuilder
+        mode="edit"
+        catalogs={catalogs}
+        workflow={{
+          id: wf.id as string,
+          name: wf.name as string,
+          published: wf.published as boolean,
+          trigger: wf.trigger as WorkflowTriggerEvent,
+          triggerConfig:
+            wf.triggerConfig && typeof wf.triggerConfig === "object" && !Array.isArray(wf.triggerConfig)
+              ? (wf.triggerConfig as Record<string, unknown>)
+              : {},
+          triggerConditions: (wf.triggerConditions ?? null) as never,
+          triggerOncePerContact: (wf.triggerOncePerContact ?? false) as boolean,
+
+          graph: wf.graph as any,
+        }}
+      />
+    </>
   );
 }

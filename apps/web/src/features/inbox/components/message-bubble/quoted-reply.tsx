@@ -56,6 +56,15 @@ export function QuotedReply({
           {bodyLabel}
         </span>
       </span>
+      {reply.thumbnailUrl && (
+        // eslint-disable-next-line @next/next/no-img-element -- authenticated
+        // media stream, not a static asset; next/image can't carry the cookie.
+        <img
+          src={reply.thumbnailUrl}
+          alt=""
+          className="size-8 shrink-0 self-center rounded object-cover"
+        />
+      )}
     </button>
   );
 }

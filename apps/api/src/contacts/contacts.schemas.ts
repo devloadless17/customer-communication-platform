@@ -146,20 +146,63 @@ export type UpdateContactInput = z.infer<typeof UpdateContactSchema>;
 // ---------------------------------------------------------------------------
 // POST /api/contacts/bulk — discriminated union over `action`.
 //
-// `delete` carries only contactIds; `tag-add`/`tag-remove` additionally
-// carry a single tagId. MAX_BULK_IDS caps payload to bound DB roundtrip
-// count (tag ops fire one update per id — Prisma's M2M `connect`/`disconnect`
-// has no batch primitive that preserves OTHER existing tag links).
+// `delete` carries only contactIds; `tag-add`/`tag-remove` carry a single
+// tagId PLUS one of two addressing modes:
+//   - `mode: "ids"` (default) — an explicit contactId array (the loaded page
+//     selection, capped at MAX_BULK_IDS).
+//   - `mode: "filter"`        — the active contacts-list FILTER. The server
+//     expands it to every matching contact id server-side (capped at
+//     MAX_FILTER_MATCH). This is the Gmail/HubSpot "select all N matching"
+//     path — used when more contacts match than are loaded into the page.
+//
+// DELETE is DELIBERATELY excluded from filter mode (a safety limit — see the
+// task brief / contacts-client): a bulk purge stays capped to the explicitly
+// loaded + checked selection. Don't add a `mode: "filter"` arm for `delete`.
+//
+// MAX_BULK_IDS caps the explicit-id payload; MAX_FILTER_MATCH caps how many
+// rows a single filter-mode op may touch (a tenant-bounded, but still large,
+// safety ceiling so one request can't lock the table indefinitely). The
+// tag-add/tag-remove DB ops are a single set-based statement either way, so
+// the filter ceiling can be higher than the id-array cap.
 // ---------------------------------------------------------------------------
 const MAX_BULK_IDS = 500;
+export const MAX_FILTER_MATCH = 50_000;
+
+// The filter shape mirrors ListContactsQuerySchema's semantics exactly so the
+// server's where-builder produces the same set the list shows. tagIds is an
+// ARRAY here (already parsed) rather than the comma-string the GET query uses.
+export const BulkFilterSchema = z.object({
+  search: z.string().max(MAX_TEXT).optional(),
+  fieldKey: z.string().max(80).optional(),
+  fieldValue: z.string().max(MAX_TEXT).optional(),
+  source: z.enum(["inbound", "manual"]).optional(),
+  tagIds: z.array(z.string().min(1)).max(MAX_IDS).optional(),
+  window: z.enum(["open", "closed"]).optional(),
+  stageId: z.string().min(1).optional(),
+});
+export type BulkFilterInput = z.infer<typeof BulkFilterSchema>;
+
+const TagActionSchema = z.enum(["tag-add", "tag-remove"]);
+
 export const BulkContactsSchema = z.union([
   z.object({
     action: z.literal("delete"),
     contactIds: z.array(z.string().min(1)).min(1).max(MAX_BULK_IDS),
   }),
+  // Explicit-id tag op (the default — back-compat with callers that omit
+  // `mode`). `.default("ids")` makes the discriminant optional on the wire.
   z.object({
-    action: z.enum(["tag-add", "tag-remove"]),
+    action: TagActionSchema,
+    mode: z.literal("ids").default("ids"),
     contactIds: z.array(z.string().min(1)).min(1).max(MAX_BULK_IDS),
+    tagId: z.string().min(1),
+  }),
+  // Filter-mode tag op — "select all N matching". No contactIds; the server
+  // expands `filter` to the matching id set.
+  z.object({
+    action: TagActionSchema,
+    mode: z.literal("filter"),
+    filter: BulkFilterSchema,
     tagId: z.string().min(1),
   }),
 ]);

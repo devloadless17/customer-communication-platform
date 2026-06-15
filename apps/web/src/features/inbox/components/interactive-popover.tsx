@@ -266,7 +266,7 @@ export function InteractivePopover({
       )}
 
       {!error && validationHint && (
-        <div className="mb-2 rounded border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-2xs text-amber-700 dark:text-amber-400">
+        <div className="mb-2 rounded border border-warning-border bg-warning-bg px-2 py-1 text-2xs text-warning-fg">
           {validationHint}
         </div>
       )}

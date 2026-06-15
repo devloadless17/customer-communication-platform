@@ -2,9 +2,12 @@
 
 import { Plus, X, Layers } from "lucide-react";
 
+import { cn } from "@ccp/shared/utils";
+
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 
 import {
   type BuilderCatalogs,
@@ -322,13 +325,10 @@ function ConditionRow({
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background p-2">
-      <select
+      <Select
         value={condition.field}
         onChange={(e) => setField(e.target.value as ConditionField)}
-        className={
-          "h-8 rounded-md border bg-background px-2 text-sm " +
-          (fieldValid ? "border-border" : "border-destructive")
-        }
+        className={cn("h-8 px-2 pr-7 text-sm", !fieldValid && "border-destructive")}
       >
         {!fieldValid && <option value={condition.field}>{condition.field} (invalid)</option>}
         {allowedFields.map((f) => (
@@ -336,18 +336,18 @@ function ConditionRow({
             {FIELD_LABELS[f]}
           </option>
         ))}
-      </select>
-      <select
+      </Select>
+      <Select
         value={condition.op}
         onChange={(e) => onChange({ ...condition, op: e.target.value as ConditionOp })}
-        className="h-8 rounded-md border border-border bg-background px-2 text-sm"
+        className="h-8 px-2 pr-7 text-sm"
       >
         {opOptions.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
-      </select>
+      </Select>
       {op.needsValue && (
         <ConditionValueControl
           field={condition.field}
@@ -392,43 +392,58 @@ function ConditionValueControl({
   catalogs?: BuilderCatalogs;
 }) {
   const kind = FIELD_VALUE_KIND[field];
-  const selectClass =
-    "h-8 max-w-60 flex-1 rounded-md border border-border bg-background px-2 text-sm";
+  const selectClass = "h-8 px-2 pr-7 text-sm";
+  const selectWrapperClass = "max-w-60 flex-1";
 
   if (kind === "status") {
     return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={selectClass}>
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
         <option value="">Select status…</option>
         {STATUS_VALUES.map((s) => (
           <option key={s} value={s}>
             {s}
           </option>
         ))}
-      </select>
+      </Select>
     );
   }
   if (kind === "direction") {
     return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={selectClass}>
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
         <option value="">Select direction…</option>
         {DIRECTION_VALUES.map((d) => (
           <option key={d} value={d}>
             {d === "in" ? "in (inbound)" : "out (outbound)"}
           </option>
         ))}
-      </select>
+      </Select>
     );
   }
   if (kind === "tag_change_kind") {
     return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={selectClass}>
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
         <option value="">Select change…</option>
         {TAG_CHANGE_KIND_VALUES.map((k) => (
           <option key={k} value={k}>
             {k}
           </option>
         ))}
-      </select>
+      </Select>
     );
   }
   if (kind === "stage" && catalogs) {
@@ -497,13 +512,11 @@ function CatalogSelect({
   const knownIds = new Set(rows.map((r) => r.id));
   const stale = value && !knownIds.has(value);
   return (
-    <select
+    <Select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={
-        "h-8 max-w-60 flex-1 rounded-md border bg-background px-2 text-sm " +
-        (stale ? "border-destructive" : "border-border")
-      }
+      className={cn("h-8 px-2 pr-7 text-sm", stale && "border-destructive")}
+      wrapperClassName="max-w-60 flex-1"
     >
       <option value="">{placeholder}</option>
       {stale && <option value={value}>{value.slice(0, 12)}… (missing)</option>}
@@ -512,6 +525,6 @@ function CatalogSelect({
           {r.label}
         </option>
       ))}
-    </select>
+    </Select>
   );
 }

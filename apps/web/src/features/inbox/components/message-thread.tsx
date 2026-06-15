@@ -255,12 +255,16 @@ const TimelineRows = memo(function TimelineRows({
         return (
           <div key={entryKey} className="contents">
             {showDay && (
-              <div className="my-3 flex items-center gap-3">
-                <div className="h-px flex-1 bg-border" />
-                <span className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
+              // Sticky day pill (WhatsApp-style): stays pinned to the top of
+              // the viewport while its day's messages are in view, so an agent
+              // scrolled deep into history always knows the date. Pure CSS
+              // `sticky` — it never changes scrollHeight, so the column-reverse
+              // stick-to-bottom machinery is untouched. The translucent +
+              // blurred pill keeps text legible over messages scrolling under it.
+              <div className="sticky top-1.5 z-10 my-2 flex justify-center">
+                <span className="rounded-full border border-border bg-card/85 px-2.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-muted-foreground shadow-xs backdrop-blur-sm">
                   {dayLabel}
                 </span>
-                <div className="h-px flex-1 bg-border" />
               </div>
             )}
             <div

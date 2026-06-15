@@ -5,6 +5,7 @@ import {
   Loader2,
   MessageSquare,
   Phone,
+  Search,
   SearchX,
   StickyNote,
   Users,
@@ -62,9 +63,34 @@ export function InboxSearchPanel({
 }) {
   const [scope, setScope] = useState<InboxSearchScope>("contacts");
 
+  // Messages + notes are the heavy scopes (team-wide trigram LIKE). Two gates:
+  //   1) require >=2 chars — a 1-char query matches half the team, so don't
+  //      fire it; show a "Keep typing…" hint instead.
+  //   2) lazy-mount per tab — only fire a heavy scope once its tab has been
+  //      focused, then keep it warm (cached). Contacts stays eager.
+  // Both gates are applied by feeding the hook an empty query (→ inert) until
+  // the scope is eligible, so we don't have to touch the shared hook.
+  const heavyReady = query.trim().length >= 2;
+  const [openedScopes, setOpenedScopes] = useState<Set<InboxSearchScope>>(
+    () => new Set<InboxSearchScope>(["contacts"]),
+  );
+  const openScope = (id: InboxSearchScope) => {
+    setScope(id);
+    if (!openedScopes.has(id)) {
+      setOpenedScopes((prev) => new Set(prev).add(id));
+    }
+  };
+
+  const messagesEligible = heavyReady && openedScopes.has("messages");
+  const notesEligible = heavyReady && openedScopes.has("notes");
+
   const contacts = useInboxSearch("contacts", query);
-  const messages = useInboxSearch("messages", query);
-  const notes = useInboxSearch("notes", query);
+  const messages = useInboxSearch("messages", messagesEligible ? query : "");
+  const notes = useInboxSearch("notes", notesEligible ? query : "");
+
+  // Whether the active scope still needs more characters before it searches.
+  const needsMoreChars =
+    !heavyReady && (scope === "messages" || scope === "notes");
 
   const current =
     scope === "contacts" ? contacts : scope === "messages" ? messages : notes;
@@ -109,7 +135,7 @@ export function InboxSearchPanel({
               role="tab"
               aria-selected={isActive}
               type="button"
-              onClick={() => setScope(t.id)}
+              onClick={() => openScope(t.id)}
               className={cn(
                 "relative inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
                 isActive
@@ -129,7 +155,9 @@ export function InboxSearchPanel({
 
       <ScrollArea className="flex-1">
         <div className="px-1.5 py-2">
-          {current.loading && current.results.length === 0 ? (
+          {needsMoreChars ? (
+            <EmptyState text="Keep typing…" icon={Search} />
+          ) : current.loading && current.results.length === 0 ? (
             <EmptyState text="Searching…" spinner />
           ) : current.results.length === 0 ? (
             <EmptyStateCard
@@ -203,10 +231,19 @@ export function InboxSearchPanel({
   );
 }
 
-function EmptyState({ text, spinner }: { text: string; spinner?: boolean }) {
+function EmptyState({
+  text,
+  spinner,
+  icon: Icon,
+}: {
+  text: string;
+  spinner?: boolean;
+  icon?: typeof Users;
+}) {
   return (
     <div className="flex flex-col items-center gap-2 px-3 py-12 text-center text-xs text-muted-foreground">
       {spinner && <Loader2 className="size-4 animate-spin" />}
+      {!spinner && Icon && <Icon className="size-4 opacity-70" />}
       <span>{text}</span>
     </div>
   );

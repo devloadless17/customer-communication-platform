@@ -340,6 +340,13 @@ export interface ReplySnapshot {
   senderName: string | null;
   /** When the original was a media message, what kind. */
   mediaKind?: MediaKind;
+  /**
+   * Small thumbnail for the quoted-reply preview when the original was an
+   * image or video. Image: the authenticated media stream itself (it doubles
+   * as its own thumb); video: the extracted poster, only when one exists.
+   * Absent for non-image/video media (audio/document/sticker) and text.
+   */
+  thumbnailUrl?: string;
 }
 
 export interface Message {

@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 
 import { ConditionGroupEditor } from "./condition-group";
 import {
@@ -184,15 +185,14 @@ function TriggerConfigSection({
     return (
       <div>
         <label className="mb-1.5 block text-sm font-medium">Listen for</label>
-        <select
+        <Select
           value={(config.kind as string) ?? "any"}
           onChange={(e) => onChange({ ...config, kind: e.target.value })}
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="any">Any change</option>
           <option value="added">Tag added</option>
           <option value="removed">Tag removed</option>
-        </select>
+        </Select>
       </div>
     );
   }
@@ -200,12 +200,11 @@ function TriggerConfigSection({
     return (
       <div>
         <label className="mb-1.5 block text-sm font-medium">To stage (optional)</label>
-        <select
+        <Select
           value={(config.toStageId as string) ?? ""}
           onChange={(e) =>
             onChange({ ...config, toStageId: e.target.value || undefined })
           }
-          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
         >
           <option value="">Any stage</option>
           {catalogs.stages.map((s) => (
@@ -213,7 +212,7 @@ function TriggerConfigSection({
               {s.name}
             </option>
           ))}
-        </select>
+        </Select>
         <p className="mt-1 text-xs text-muted-foreground">
           Leave blank to fire on every stage move; pick a stage to scope to it.
         </p>

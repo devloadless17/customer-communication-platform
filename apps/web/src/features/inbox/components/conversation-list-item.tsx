@@ -5,9 +5,10 @@ import { Loader2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
+import { useTimezone } from "@/providers/tz-provider";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
-import { cn, initials } from "@ccp/shared/utils";
+import { cn, formatLocaleString, initials } from "@ccp/shared/utils";
 import type { Contact, Conversation, Tag, User } from "@ccp/shared/types";
 
 /**
@@ -84,6 +85,15 @@ function ConversationListItemImpl({
 
   const showMeta = hasStatusChip || assignedUser !== null || hasTags;
 
+  // Full localized date+time for the timestamp hover tooltip — row 1 only shows
+  // the relative "12m" / "Tue", so hovering surfaces the exact day+time without
+  // opening the thread. Mirrors BubbleMeta's fullDateTime (formatLocaleString +
+  // useTimezone). LocalTime itself has no title prop, so we wrap it in a span.
+  const tz = useTimezone();
+  const fullDateTime = conversation.lastMessageAt
+    ? formatLocaleString(conversation.lastMessageAt, tz)
+    : undefined;
+
   return (
     <div
       className={cn(
@@ -140,14 +150,16 @@ function ConversationListItemImpl({
           >
             {contact.name}
           </span>
-          <LocalTime
-            iso={conversation.lastMessageAt}
-            format="listTime"
-            className={cn(
-              "shrink-0 text-2xs tabular-nums",
-              unread ? "text-primary font-medium" : "text-muted-foreground",
-            )}
-          />
+          <span title={fullDateTime} className="shrink-0">
+            <LocalTime
+              iso={conversation.lastMessageAt}
+              format="listTime"
+              className={cn(
+                "text-2xs tabular-nums",
+                unread ? "text-primary font-medium" : "text-muted-foreground",
+              )}
+            />
+          </span>
         </div>
 
         {/* Row 2: message preview + unread badge */}

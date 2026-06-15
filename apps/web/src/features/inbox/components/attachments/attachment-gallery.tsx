@@ -331,10 +331,10 @@ function NotesPanel({
         return (
           <li
             key={n.id}
-            className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3"
+            className="rounded-md border border-note-border bg-note-bg p-3 text-note-fg"
           >
             <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="truncate text-xs font-medium text-foreground/80">
+              <span className="truncate text-xs font-medium opacity-80">
                 {author?.name ?? "Removed user"}
               </span>
               <button
@@ -352,10 +352,10 @@ function NotesPanel({
                 Jump
               </button>
             </div>
-            <p className="whitespace-pre-wrap wrap-break-word text-sm text-foreground/90">
+            <p className="whitespace-pre-wrap wrap-break-word text-sm">
               {n.body}
             </p>
-            <div className="mt-1.5 text-2xs text-muted-foreground">
+            <div className="mt-1.5 text-2xs opacity-70">
               <LocalTime iso={n.timestamp} format="listTime" />
             </div>
           </li>

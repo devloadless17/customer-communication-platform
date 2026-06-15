@@ -49,6 +49,9 @@ export const REPLY_TO_INCLUDE = {
     body: true,
     direction: true,
     mediaKind: true,
+    // Drives the quoted-reply video thumbnail — present only when ingest
+    // extracted a poster frame (NULL on outbound/older video; absent then).
+    mediaThumbnailUrl: true,
     sender: { select: { name: true } },
   },
 } as const;
@@ -58,17 +61,29 @@ type ReplyToRow = {
   body: string;
   direction: string;
   mediaKind: string | null;
+  mediaThumbnailUrl: string | null;
   sender: { name: string } | null;
 };
 
 export function mapReplySnapshot(row: ReplyToRow | null | undefined): ReplySnapshot | null {
   if (!row) return null;
+  // Quoted-reply thumbnail — mirrors how mapMessage builds the main media
+  // thumbnailUrl. Image: the authenticated stream itself doubles as its thumb.
+  // Video: the extracted poster, only when mediaThumbnailUrl is set. Non-
+  // image/video media (audio/document/sticker) carry no thumbnail.
+  const thumbnailUrl =
+    row.mediaKind === "image"
+      ? `/api/media/${row.id}`
+      : row.mediaKind === "video" && row.mediaThumbnailUrl
+        ? `/api/media/${row.id}/thumb`
+        : undefined;
   return {
     id: row.id,
     body: row.body.slice(0, 200),
     direction: row.direction as MessageDirection,
     senderName: row.sender?.name ?? null,
     ...(row.mediaKind ? { mediaKind: row.mediaKind as MediaKind } : {}),
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
   };
 }
 

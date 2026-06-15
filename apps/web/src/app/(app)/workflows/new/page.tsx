@@ -17,5 +17,13 @@ export default async function NewWorkflowPage() {
 
   const catalogs = await loadWorkflowCatalogs();
 
-  return <WorkflowBuilder mode="create" catalogs={catalogs} />;
+  return (
+    <>
+      {/* The builder canvas has no visible heading on desktop (the mobile
+          chrome owns the h1 below `md`), so expose a top-level landmark for
+          SR heading nav. Scoped to desktop to avoid a duplicate mobile h1. */}
+      <h1 className="sr-only max-md:hidden">New workflow</h1>
+      <WorkflowBuilder mode="create" catalogs={catalogs} />
+    </>
+  );
 }

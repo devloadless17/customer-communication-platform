@@ -41,9 +41,9 @@ export function MediaBlock({
   }
   switch (media.kind) {
     case "image":
-      return <ImageBlock media={media} message={message} />;
+      return <ImageBlock media={media} message={message} isOut={isOut} />;
     case "video":
-      return <VideoBlock media={media} />;
+      return <VideoBlock media={media} isOut={isOut} />;
     case "audio":
       return <AudioBlock media={media} isOut={isOut} />;
     case "document":
@@ -161,7 +161,15 @@ function pendingPresentation(kind: "audio" | "document" | "sticker"): {
   }
 }
 
-function ImageBlock({ media, message }: { media: MediaAttachment; message: Message }) {
+function ImageBlock({
+  media,
+  message,
+  isOut,
+}: {
+  media: MediaAttachment;
+  message: Message;
+  isOut: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [errored, setErrored] = useState(false);
   // The bubble paints a 320×240 box — use the server-generated downscaled
@@ -229,7 +237,7 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
   }, [errored, thumbSrc]);
 
   if (errored) {
-    return <MediaUnavailable kind="image" isOut={false} />;
+    return <MediaUnavailable kind="image" isOut={isOut} />;
   }
 
   return (
@@ -303,7 +311,7 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
   );
 }
 
-function VideoBlock({ media }: { media: MediaAttachment }) {
+function VideoBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
   const [errored, setErrored] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -322,7 +330,7 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
   // metadata-driven resize. Native video controls overlay the bottom of
   // the frame; fullscreen is available via the controls bar.
   if (errored) {
-    return <MediaUnavailable kind="video" isOut={false} />;
+    return <MediaUnavailable kind="video" isOut={isOut} />;
   }
   return (
     <video

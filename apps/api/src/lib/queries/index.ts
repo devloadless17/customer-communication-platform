@@ -18,10 +18,12 @@ export { listTeamMembers } from "./team-members";
 
 export {
   CONTACTS_PAGE,
+  buildContactFilterWhere,
   countContacts,
   listContactFieldDefinitions,
   listContacts,
   lookupContacts,
+  resolveContactIdsByFilter,
 } from "./contacts";
 export type { ListContactsOpts } from "./contacts";
 

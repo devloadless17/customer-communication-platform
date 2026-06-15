@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { toast } from "@/lib/toast";
 import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import {
   ArrowLeft,
@@ -131,6 +132,23 @@ function PickerPanel(props: PickerProps) {
 
   // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
   useModalOverlay(panelRef, true, onClose);
+
+  // Success toast on the falling edge of a Refresh/sync. The sync result lives
+  // in the parent (it owns the fetch); we observe `syncing` go true → false and
+  // confirm it landed cleanly — skip the 409 waba-missing path (`wabaMissing`)
+  // and any thrown error (`error`), both of which the parent surfaces in-panel.
+  const wasSyncing = useRef(syncing);
+  useEffect(() => {
+    const finishedSync = wasSyncing.current && !syncing;
+    wasSyncing.current = syncing;
+    if (!finishedSync) return;
+    if (wabaMissing || error) return;
+    toast.success(
+      templates.length > 0
+        ? `Loaded ${templates.length} template${templates.length === 1 ? "" : "s"}`
+        : "Templates up to date",
+    );
+  }, [syncing, wabaMissing, error, templates.length]);
 
   const selected = useMemo(
     () => templates.find((t) => t.id === selectedId) ?? null,

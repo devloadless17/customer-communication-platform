@@ -20,7 +20,7 @@ export interface StatusMeta {
 }
 
 export const STATUS_META: Record<ConversationStatus, StatusMeta> = {
-  open: { label: "Open", icon: CircleDashed, cls: "text-emerald-600 dark:text-emerald-400" },
-  pending: { label: "Pending", icon: CircleDashed, cls: "text-amber-600 dark:text-amber-400" },
+  open: { label: "Open", icon: CircleDashed, cls: "text-success-fg" },
+  pending: { label: "Pending", icon: CircleDashed, cls: "text-warning-fg" },
   closed: { label: "Closed", icon: Archive, cls: "text-muted-foreground" },
 };

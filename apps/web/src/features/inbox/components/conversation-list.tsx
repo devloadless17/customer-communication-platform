@@ -7,9 +7,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
   ArrowDownWideNarrow,
+  CheckCircle2,
   CheckSquare,
   Clock,
   Inbox as InboxIcon,
@@ -117,6 +119,12 @@ function ConversationListImpl({
   // onStartContactChat (get-or-create the thread, then open it). Single-select
   // by convention, like the forward flow takes the first id.
   const [newChatOpen, setNewChatOpen] = useState(false);
+  // Roving keyboard focus through the loaded rows (j/k or arrows; Enter opens).
+  // -1 = no row highlighted (the default; the highlight is opt-in via a keypress
+  // so it never competes with the active/unread cues on first paint). Distinct
+  // from `activeConversationId` (the OPEN thread) and `selectedIds` (selection
+  // mode) — this is purely a keyboard cursor.
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
 
   useEffect(() => {
     if (selectionMode) return;
@@ -137,6 +145,14 @@ function ConversationListImpl({
   useEffect(() => {
     setSelectedIds(new Set());
   }, [filterKey]);
+
+  // Drop the keyboard highlight whenever the underlying list identity changes
+  // (filter / stage switch / search) or the agent enters selection mode — the
+  // cursor's index no longer points at the same conversation, and selection
+  // mode owns row clicks via its own checkboxes.
+  useEffect(() => {
+    setHighlightedIndex(-1);
+  }, [filterKey, search, selectionMode]);
 
   // Hover-prefetch debounce. Without this, scrolling through 20 rows fires
   // 20 fetches in ~200ms — those evict useful entries from the LRU before
@@ -378,10 +394,97 @@ function ConversationListImpl({
     }
   }, [lastVirtualIndex, hasMore, loadingMore, visible.length]);
 
+  // ---- Keyboard navigation (j/k + arrows, Enter to open) ------------------
+  //
+  // A roving FOCUS highlight over the loaded rows. Attached to the list root
+  // so the keys work whenever the list region has focus, but we bail the
+  // moment the agent is typing in a field (search box, any future input) so
+  // search typing — and `j`/`k` as literal characters — is never swallowed.
+  // Selection mode and the search panel both take the list rows away, so we
+  // no-op there too. On every move we ask the virtualizer to scroll the new
+  // index into view (it may be outside the windowed/overscan set).
+  const isTypingTarget = (el: EventTarget | null): boolean => {
+    if (!(el instanceof HTMLElement)) return false;
+    const tag = el.tagName;
+    return (
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      el.isContentEditable
+    );
+  };
+
+  const onListKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      // Don't intercept while typing (search box / contenteditable) or when the
+      // rows aren't the active surface (selection mode, search panel open).
+      if (selectionMode || searchActive) return;
+      if (isTypingTarget(document.activeElement)) return;
+      if (visible.length === 0) return;
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+
+      const key = e.key;
+      const down = key === "j" || key === "ArrowDown";
+      const up = key === "k" || key === "ArrowUp";
+
+      if (down || up) {
+        e.preventDefault();
+        setHighlightedIndex((prev) => {
+          // First keypress with nothing highlighted enters at the top (down) or
+          // bottom (up); subsequent presses step and clamp at the ends.
+          const next =
+            prev < 0
+              ? down
+                ? 0
+                : visible.length - 1
+              : down
+                ? Math.min(prev + 1, visible.length - 1)
+                : Math.max(prev - 1, 0);
+          rowVirtualizer.scrollToIndex(next);
+          return next;
+        });
+        return;
+      }
+
+      if (key === "Enter" && highlightedIndex >= 0) {
+        const item = visible[highlightedIndex];
+        if (item) {
+          e.preventDefault();
+          onOpenConversation(item.conversation.id);
+        }
+      }
+    },
+    [
+      selectionMode,
+      searchActive,
+      visible,
+      highlightedIndex,
+      rowVirtualizer,
+      onOpenConversation,
+    ],
+  );
+
+  // Warm the cache for the keyboard-highlighted row so Enter opens instantly,
+  // mirroring the mouse hover-prefetch. Cheap + idempotent (no-ops if cached /
+  // in flight). Skipped while the highlight is cleared (-1).
+  useEffect(() => {
+    if (highlightedIndex < 0) return;
+    const item = visible[highlightedIndex];
+    if (item) onPrefetchConversation(item.conversation.id);
+  }, [highlightedIndex, visible, onPrefetchConversation]);
+
   // Width is owned by the parent column in inbox-shell (drag-resizable on
   // desktop, full-width on mobile); this just fills it.
   return (
-    <div className="flex h-full w-full flex-col bg-background">
+    <div
+      className="flex h-full w-full flex-col bg-background outline-none"
+      // Keyboard nav (j/k + arrows, Enter) — handler bails on input focus so
+      // search typing is unaffected. tabIndex lets the region take focus
+      // (e.g. on a click in the empty gutter) so the keys work without first
+      // focusing a row; -1 keeps it out of the Tab order.
+      tabIndex={-1}
+      onKeyDown={onListKeyDown}
+    >
       <header className="flex items-center justify-between gap-2 border-b border-border px-4 pt-4 pb-3">
         <div>
           <h1 className="text-base font-semibold leading-tight">{headerTitle}</h1>
@@ -489,16 +592,41 @@ function ConversationListImpl({
       ) : (
         <ScrollArea viewportRef={viewportRef} className="flex-1">
         {visible.length === 0 ? (
-          // Distinguish first-run (no conversations exist yet, broad view) from
-          // a filter/stage narrowing nothing. A new team lands on the `active`
-          // preset, so an empty `active`/`all` view is the true first-run — guide
-          // them instead of reading like a broken filter.
-          filter.kind === "preset" && (filter.id === "active" || filter.id === "all") ? (
+          // Context-aware empty copy. Three distinct cases, in priority order:
+          //   1. First-run — no conversations exist at all (broad `active`/`all`
+          //      preset, no active search). Guide setup instead of reading like
+          //      a broken filter. A new team always lands here.
+          //   2. "Caught up" — an empty `unassigned`/`mine` preset with NO active
+          //      search is GOOD news (nothing waiting / nothing on your plate),
+          //      so frame it as an achievement, not a failed lookup.
+          //   3. No-match — an active search OR an empty stage filter genuinely
+          //      narrowed everything out; keep the SearchX "try something else"
+          //      framing.
+          filter.kind === "preset" &&
+          (filter.id === "active" || filter.id === "all") &&
+          !searchActive ? (
             <EmptyState
               icon={InboxIcon}
               title="No conversations yet"
               description="Messages from your connected WhatsApp number will appear here. Make sure WhatsApp is connected in Settings."
               className="m-3 border-0 bg-transparent py-14"
+            />
+          ) : filter.kind === "preset" &&
+            (filter.id === "unassigned" || filter.id === "mine") &&
+            !searchActive ? (
+            <EmptyState
+              icon={CheckCircle2}
+              title={
+                filter.id === "unassigned"
+                  ? "Nothing unassigned 🎉"
+                  : "You're all caught up"
+              }
+              description={
+                filter.id === "unassigned"
+                  ? "Every conversation has an owner. New unassigned chats will show up here."
+                  : "No conversations are assigned to you right now. Nice work."
+              }
+              className="m-3 border-0 bg-transparent py-12"
             />
           ) : (
             <EmptyState
@@ -523,6 +651,11 @@ function ConversationListImpl({
               const item = visible[row.index]!;
               const { conversation, contact, assignedUser } = item;
               const checked = selectedIds.has(conversation.id);
+              // Keyboard cursor — only meaningful outside selection mode. A
+              // subtle inset ring + faint bg, deliberately distinct from the
+              // active(open) `bg-primary/10` and the unread blue left-bar so the
+              // three cues never read as one state.
+              const highlighted = !selectionMode && row.index === highlightedIndex;
               return (
                 <div
                   key={row.key}
@@ -539,20 +672,25 @@ function ConversationListImpl({
                   {selectionMode ? (
                     // <label> wrapping the checkbox is the canonical way to
                     // make the whole row a toggle target — valid HTML, native
-                    // keyboard support, no onClick+stopPropagation dance.
+                    // keyboard support, no onClick+stopPropagation dance. The
+                    // checkbox lives in a fixed-width LEAD COLUMN (`w-6`) that
+                    // is also reserved (empty) in normal mode below, so toggling
+                    // selection mode never shifts the row content sideways.
                     <label
                       className={cn(
-                        "flex w-full cursor-pointer items-center gap-2 pl-2",
+                        "flex w-full cursor-pointer items-center",
                         checked && "rounded-md bg-primary/5",
                       )}
                     >
-                      <input
-                        type="checkbox"
-                        className="size-4 cursor-pointer accent-primary"
-                        checked={checked}
-                        onChange={() => toggle(conversation.id)}
-                        aria-label={`Select ${contact.name}`}
-                      />
+                      <span className="flex w-6 shrink-0 items-center justify-center">
+                        <input
+                          type="checkbox"
+                          className="size-4 cursor-pointer accent-primary"
+                          checked={checked}
+                          onChange={() => toggle(conversation.id)}
+                          aria-label={`Select ${contact.name}`}
+                        />
+                      </span>
                       <div className="min-w-0 flex-1">
                         <ConversationListItem
                           conversation={conversation}
@@ -572,17 +710,29 @@ function ConversationListImpl({
                       onMouseEnter={() => scheduleHoverPrefetch(conversation.id)}
                       onMouseLeave={cancelHoverPrefetch}
                       onFocus={() => onPrefetchConversation(conversation.id)}
-                      className="block w-full text-left"
+                      className={cn(
+                        "flex w-full items-center rounded-lg text-left",
+                        highlighted &&
+                          "bg-accent/30 ring-1 ring-inset ring-primary/40",
+                      )}
+                      aria-current={highlighted ? "true" : undefined}
                     >
-                      <ConversationListItem
-                        conversation={conversation}
-                        contact={contact}
-                        assignedUser={assignedUser}
-                        tags={tags}
-                        currentUserId={currentUserId}
-                        active={activeConversationId === conversation.id}
-                        pending={pendingConversationId === conversation.id}
-                      />
+                      {/* Empty lead column matching the selection-mode checkbox
+                          gutter (`w-6`) so entering/leaving selection mode keeps
+                          the avatar/name/preview at the SAME x-position — no
+                          horizontal jump on toggle. */}
+                      <span className="w-6 shrink-0" aria-hidden="true" />
+                      <div className="min-w-0 flex-1">
+                        <ConversationListItem
+                          conversation={conversation}
+                          contact={contact}
+                          assignedUser={assignedUser}
+                          tags={tags}
+                          currentUserId={currentUserId}
+                          active={activeConversationId === conversation.id}
+                          pending={pendingConversationId === conversation.id}
+                        />
+                      </div>
                     </button>
                   )}
                 </div>
