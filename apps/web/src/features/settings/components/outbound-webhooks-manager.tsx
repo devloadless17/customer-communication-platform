@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import {
   AlertTriangle,
@@ -378,6 +378,10 @@ function WebhookForm({
     () => new Set(initial?.eventTypes ?? []),
   );
   const [error, setError] = useState<string | null>(null);
+  const nameId = useId();
+  const urlId = useId();
+  const urlHintId = useId();
+  const errorId = useId();
 
   function toggleEvent(type: string) {
     setSelected((prev) => {
@@ -463,25 +467,35 @@ function WebhookForm({
       className="flex flex-col gap-4 rounded-md border border-border bg-card p-4"
     >
       <div className="flex flex-col gap-2">
-        <label className="text-xs font-medium">Name</label>
+        <label htmlFor={nameId} className="text-xs font-medium">
+          Name
+        </label>
         <Input
+          id={nameId}
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="n8n CRM sync"
           maxLength={80}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
           required
         />
       </div>
       <div className="flex flex-col gap-2">
-        <label className="text-xs font-medium">URL</label>
+        <label htmlFor={urlId} className="text-xs font-medium">
+          URL
+        </label>
         <Input
+          id={urlId}
           type="url"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://your-n8n.example.com/webhook/abcd"
+          aria-describedby={error ? `${urlHintId} ${errorId}` : urlHintId}
+          aria-invalid={error ? true : undefined}
           required
         />
-        <p className="text-2xs text-muted-foreground">
+        <p id={urlHintId} className="text-2xs text-muted-foreground">
           We'll POST a JSON envelope here with an{" "}
           <code className="font-mono">X-CCP-Signature</code> header.
         </p>
@@ -522,7 +536,11 @@ function WebhookForm({
           ))}
         </div>
       </div>
-      {error && <div className="text-xs text-destructive">{error}</div>}
+      {error && (
+        <p id={errorId} role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      )}
       <div className="flex justify-end gap-2">
         <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
           Cancel

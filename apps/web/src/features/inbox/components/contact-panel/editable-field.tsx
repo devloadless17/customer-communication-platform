@@ -54,10 +54,29 @@ export function EditableField({
   }, [editing, value]);
 
   async function commit() {
+    // No-op guard: a stray blur (or Enter on an untouched field) must not fire
+    // a PATCH. Parent onSave handlers already early-return on an unchanged
+    // value, but short-circuiting here also skips the busy-spinner flash and a
+    // wasted round-trip — and keeps blur=commit from re-saving a value the user
+    // never edited. We compare the raw strings (the parent owns trim/null
+    // normalization), so the only thing skipped is a genuine identical value.
+    if (draft === value) {
+      setEditing(false);
+      return;
+    }
     setBusy(true);
     const ok = await onSave(draft);
     setBusy(false);
     if (ok) setEditing(false);
+  }
+
+  // Esc → cancel: restore the draft to the original and leave edit mode WITHOUT
+  // saving. Pulled out of the keydown handler so it can't accidentally race the
+  // blur-commit (Radix Input blurs on Escape) — we reset the draft first so the
+  // subsequent blur sees draft === value and no-ops.
+  function cancel() {
+    setDraft(value);
+    setEditing(false);
   }
 
   return (
@@ -93,7 +112,7 @@ export function EditableField({
               commit();
             } else if (e.key === "Escape") {
               e.preventDefault();
-              setEditing(false);
+              cancel();
             }
           }}
           disabled={busy}
@@ -113,7 +132,7 @@ export function EditableField({
             if (ok) await onDelete?.();
           }}
           aria-label={`Remove ${label}`}
-          className="ml-0.5 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-accent hover:text-destructive group-hover:opacity-100"
+          className="ml-0.5 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-accent hover:text-destructive group-hover:opacity-100 [@media(hover:none)]:opacity-100"
         >
           <Trash2 className="size-3" />
         </button>

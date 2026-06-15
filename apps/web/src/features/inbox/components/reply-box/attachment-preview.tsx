@@ -36,9 +36,10 @@ export function AttachmentPreview({
         type="button"
         variant="ghost"
         size="icon"
-        className="size-7 text-muted-foreground"
+        className="size-7 pointer-coarse:size-9 text-muted-foreground"
         onClick={onRemove}
         title="Remove attachment"
+        aria-label="Remove attachment"
       >
         <X className="size-3.5" />
       </Button>

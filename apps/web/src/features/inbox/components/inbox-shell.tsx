@@ -33,6 +33,7 @@ import {
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
+import { INBOX_LIST_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
 
 import dynamic from "next/dynamic";
 
@@ -196,6 +197,8 @@ export function InboxShell({
   initialActiveConversationId,
   initialThread,
   initialContactPanelCollapsed,
+  initialListWidth,
+  initialDetailsWidth,
 }: {
   currentUser: User;
   team: Team;
@@ -218,6 +221,11 @@ export function InboxShell({
   initialThread: CachedThread | null;
   /** Server-read cookie so the right panel SSRs in its persisted rail state. */
   initialContactPanelCollapsed: boolean;
+  /** Persisted drag-resize widths, SSR'd from cookies so the list + details
+   *  columns paint at their saved size on first render (no post-refresh jump).
+   *  Null = no cookie yet → the hook's CSS default applies. */
+  initialListWidth: number | null;
+  initialDetailsWidth: number | null;
 }) {
   // Filter lives in the layout-level InboxFilterProvider so it's shared with
   // the sub-sidebar (which now renders in /inbox/layout.tsx and owns the
@@ -613,13 +621,23 @@ export function InboxShell({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ contactId }),
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          // Surface the failure instead of swallowing it — a silent no-op
+          // after the agent picked a contact reads as a broken button.
+          toast.error("Couldn't start the conversation. Please try again.");
+          return;
+        }
         const { conversationId } = (await res.json()) as {
           conversationId: string;
         };
-        if (conversationId) openConversation(conversationId);
+        if (conversationId) {
+          openConversation(conversationId);
+        } else {
+          toast.error("Couldn't start the conversation. Please try again.");
+        }
       } catch {
         // Non-fatal: the agent can retry; the contact directory still works.
+        toast.error("Couldn't start the conversation. Please try again.");
       }
     },
     [openConversation],
@@ -1120,13 +1138,15 @@ export function InboxShell({
     onHandleDown,
     onHandleKeyDown,
   } = usePanelResize({
-    storageKey: "inbox-list-width",
+    storageKey: INBOX_LIST_WIDTH_COOKIE,
+    initial: initialListWidth,
     min: 260,
     max: 560,
     def: 320,
-    // Don't let dragging the list so wide that the thread (inside <main>, which
-    // also holds the details panel) drops below a usable width. Measured live
-    // from the handle's siblings so it adapts to window size + details width.
+    // Don't let dragging the list so wide that the thread (inside the thread
+    // <section>, which also holds the details panel) drops below a usable
+    // width. Measured live from the handle's siblings so it adapts to window
+    // size + details width.
     getDragMax: (handle) => {
       const listCol = handle.previousElementSibling as HTMLElement | null;
       const main = handle.nextElementSibling as HTMLElement | null;
@@ -1213,11 +1233,19 @@ export function InboxShell({
             onKeyDown={onHandleKeyDown}
             className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none select-none border-l border-border outline-none md:block"
           >
-            <span className="absolute inset-y-0 -left-1 -right-1 z-10 transition-colors group-hover:bg-primary/30 group-focus-visible:bg-primary/50" />
+            {/* Wide invisible grab zone so the thin indicator is still easy to grab. */}
+            <span className="absolute inset-y-0 -left-1.5 -right-1.5 z-10" />
+            {/* Thin, subtle resize indicator — transparent until hover / keyboard
+                focus, so it never reads as a big translucent green bar. */}
+            <span className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-transparent transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary" />
           </div>
-          {/* Mobile: main pane visible only when a thread is active.
-              Desktop: always visible. */}
-          <main
+          {/* Mobile: thread pane visible only when a thread is active.
+              Desktop: always visible. This is a <section> (NOT <main>) — the
+              layout's SectionShell already renders the page-level <main>, and
+              two nested <main> landmarks is an a11y violation. The aria-label
+              names the region for screen-reader landmark navigation. */}
+          <section
+            aria-label="Conversation"
             className={cn(
               // No md:border-l here — the resize handle (above) is the
               // list/thread separator on desktop now.
@@ -1270,6 +1298,7 @@ export function InboxShell({
                 onInitiateCall={initiateCallForActiveThread}
                 tags={tags}
                 initialContactPanelCollapsed={initialContactPanelCollapsed}
+                initialDetailsWidth={initialDetailsWidth}
                 onMarkRead={handleMarkRead}
                 onThreadSnapshot={handleThreadSnapshot}
                 onMobileBack={onMobileBack}
@@ -1290,7 +1319,7 @@ export function InboxShell({
             ) : (
               <EmptyInboxState />
             )}
-          </main>
+          </section>
             </>
           )}
         </div>
@@ -1382,6 +1411,7 @@ function ThreadWorkspace({
   onInitiateCall,
   tags,
   initialContactPanelCollapsed,
+  initialDetailsWidth,
   onMarkRead,
   onThreadSnapshot,
   onMobileBack,
@@ -1407,6 +1437,9 @@ function ThreadWorkspace({
   onInitiateCall: () => void | Promise<void>;
   tags: Tag[];
   initialContactPanelCollapsed: boolean;
+  /** SSR-read persisted details-panel width (cookie); forwarded to ContactPanel
+   *  so the right rail paints at its saved width on first render. */
+  initialDetailsWidth: number | null;
   onMarkRead: (conversationId: string) => void;
   onThreadSnapshot: (
     data: ConversationWithRefs,
@@ -1461,7 +1494,10 @@ function ThreadWorkspace({
             tagCatalog={tags}
             teamMembers={teamMembers}
             currentUserName={currentUser.name}
+            stageCatalog={stageCatalog}
+            canManageStages={canManageStages}
             initialCollapsed={initialContactPanelCollapsed}
+            initialDetailsWidth={initialDetailsWidth}
             onGoToMessage={onGoToMessage}
           />
         }
@@ -1488,7 +1524,10 @@ function ThreadWorkspace({
             tagCatalog={tags}
             teamMembers={teamMembers}
             currentUserName={currentUser.name}
+            stageCatalog={stageCatalog}
+            canManageStages={canManageStages}
             initialCollapsed={false}
+            initialDetailsWidth={initialDetailsWidth}
             onGoToMessage={(id) => {
               setDetailsOpen(false);
               onGoToMessage(id);
@@ -1538,7 +1577,7 @@ function ChatSkeleton({
             type="button"
             onClick={onMobileBack}
             aria-label="Back to conversations"
-            className="-ml-1 inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+            className="-ml-1 inline-flex size-8 pointer-coarse:size-9 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
           >
             <ChevronLeft className="size-5" />
           </button>

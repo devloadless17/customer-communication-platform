@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Loader2, Users, X } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { TagChip } from "@/features/tags/components/tag-chip";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { formatPhone, initials } from "@ccp/shared/utils";
@@ -41,10 +41,6 @@ export function RecipientsPreviewDialog({
   const [data, setData] = useState<PreviewResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
-  useModalOverlay(dialogRef, open, onClose);
 
   useEffect(() => {
     if (!open || !payload) return;
@@ -78,18 +74,12 @@ export function RecipientsPreviewDialog({
   const hidden = data ? Math.max(0, data.total - data.sample.length) : 0;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-16"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="flex max-h-[80vh] w-full max-w-md flex-col rounded-lg border border-border bg-card text-card-foreground shadow-lg"
+    <Dialog open={open} onClose={onClose}>
+      {/* flex-col + inner scroll region keeps the header pinned; override the
+          card's default block-scroll with `overflow-hidden`. */}
+      <DialogContent
+        ariaLabel={title}
+        className="flex max-h-[80vh] max-w-md flex-col overflow-hidden"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
@@ -110,7 +100,7 @@ export function RecipientsPreviewDialog({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           >
             <X className="size-4" />
           </button>
@@ -123,7 +113,9 @@ export function RecipientsPreviewDialog({
               Resolving recipients…
             </div>
           ) : error ? (
-            <div className="px-4 py-12 text-center text-sm text-destructive">{error}</div>
+            <div role="alert" className="px-4 py-12 text-center text-sm text-destructive">
+              {error}
+            </div>
           ) : !data || data.total === 0 ? (
             <div className="px-4 py-12 text-center text-sm text-muted-foreground">
               No recipients match this audience.
@@ -157,14 +149,14 @@ export function RecipientsPreviewDialog({
                 ))}
               </ul>
               {hidden > 0 && (
-                <div className="border-t border-border bg-muted/20 px-4 py-2.5 text-center text-[12px] text-muted-foreground">
+                <div className="border-t border-border bg-muted/20 px-4 py-2.5 text-center text-xs text-muted-foreground">
                   + {hidden} more recipient{hidden === 1 ? "" : "s"} not shown
                 </div>
               )}
             </>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

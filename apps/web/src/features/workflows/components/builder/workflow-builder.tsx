@@ -142,6 +142,32 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     [],
   );
 
+  // Create-mode unsaved-work guard. Edit mode auto-saves (above); create mode
+  // has no row to PATCH yet, so a full trigger+graph built on /workflows/new is
+  // otherwise lost on refresh / tab-close / external nav with no warning. Track
+  // a dirty flag (skipping the initial mount render) and prompt on beforeunload.
+  const createDirtyRef = useRef(false);
+  const createMountedRef = useRef(false);
+  useEffect(() => {
+    if (mode === "edit") return;
+    if (!createMountedRef.current) {
+      createMountedRef.current = true;
+      return;
+    }
+    createDirtyRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
+  useEffect(() => {
+    if (mode === "edit") return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!createDirtyRef.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [mode]);
+
   async function persist(opts: { silent?: boolean } = {}): Promise<boolean> {
     // Supersede any in-flight save — freshest input wins, prior
     // response is ignored on its way back.

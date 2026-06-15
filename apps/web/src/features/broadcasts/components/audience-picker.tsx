@@ -274,6 +274,7 @@ function SaveAudienceAsGroup({
             }
           }}
           placeholder="Group name, e.g. Ramadan customers"
+          aria-label="Group name"
           maxLength={80}
           autoFocus
           className="h-8 flex-1"
@@ -293,7 +294,11 @@ function SaveAudienceAsGroup({
           Cancel
         </button>
       </div>
-      {error && <span className="text-2xs text-destructive">{error}</span>}
+      {error && (
+        <span role="alert" className="text-2xs text-destructive">
+          {error}
+        </span>
+      )}
     </div>
   );
 }
@@ -309,7 +314,7 @@ function GroupSelector({
 }) {
   if (groups.length === 0) {
     return (
-      <div className="rounded-md border border-dashed border-border bg-muted/30 px-4 py-6 text-center text-[12px]">
+      <div className="rounded-md border border-dashed border-border bg-muted/30 px-4 py-6 text-center text-xs">
         <FolderHeart className="mx-auto mb-1 size-5 text-muted-foreground" />
         <div className="text-foreground">No saved groups yet.</div>
         <p className="mt-1 text-muted-foreground">
@@ -412,7 +417,7 @@ function AllContactsCard({ count }: { count: number }) {
             Broadcast to <span className="tabular-nums">{count}</span> contact
             {count === 1 ? "" : "s"}
           </div>
-          <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             Every contact in this team will receive the template. Marketing
             templates are billed per recipient by Meta — double-check the
             preview before sending.

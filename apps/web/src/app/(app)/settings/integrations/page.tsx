@@ -177,7 +177,7 @@ function IntegrationTile({
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-medium">{title}</span>
           {!disabled && (
-            <ArrowRight className="size-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+            <ArrowRight className="size-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100" />
           )}
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>

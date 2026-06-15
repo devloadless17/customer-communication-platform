@@ -54,13 +54,14 @@ export function TagFilterList({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search tags…"
+            aria-label="Search tags"
             className="h-8 pl-7 text-xs"
           />
         </div>
       </div>
       <div className="flex-1 overflow-y-auto py-1">
         {suggestions.length === 0 ? (
-          <div className="px-3 py-4 text-center text-[12px] text-muted-foreground">
+          <div className="px-3 py-4 text-center text-xs text-muted-foreground">
             {q ? `No tags match “${query}”.` : "No tags yet."}
           </div>
         ) : (

@@ -69,19 +69,19 @@ export function SubSidebar({
       className={cn(
         mobile
           ? "flex h-full w-full flex-1 flex-col bg-transparent text-sidebar-foreground"
-          : // Desktop column. Show only at lg+ (1024px). Below lg the same
-            // sub-sidebar tree renders inside the MobileShellChrome
-            // hamburger drawer — at the md-to-lg range (768-1023px) the
-            // three columns side-by-side squeezed the thread workspace
-            // hard. The hamburger drawer fits that range better.
+          : // Desktop column. Shown at md+ (768px) as a fixed column beside the
+            // AppRail — the (app) shell is already `md:flex-row`, so an <aside>
+            // slots in without the "header becomes a vertical strip" problem a
+            // top bar would have. Below md the SAME sub-sidebar tree renders in
+            // the MobileShellChrome hamburger drawer. Showing it at md (not lg)
+            // closes the old 768–1023 "no section nav" dead-band — the mobile
+            // top bar is md:hidden, so before this that band had NEITHER the
+            // drawer nor the column.
             //
-            // Width once shown: w-40 (160px) at lg, w-52 (208px) at xl+.
-            // Floor: min-w-32 (128px). The lg width is intentionally
-            // tight — at half-laptop-screen widths (1024-1279px) every
-            // pixel the chrome saves goes back to the thread + contact
-            // panel. Labels stay readable at 160px because each row is
-            // icon + short word ("All", "Mine", "Closed").
-            "hidden h-svh w-40 min-w-32 shrink flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground lg:flex xl:w-52",
+            // Width: w-40 (160px) md–lg, w-52 (208px) at xl+. Floor min-w-32.
+            // Tight on purpose so the main pane keeps room at laptop widths;
+            // each row is icon + short word so labels stay readable at 160px.
+            "hidden h-svh w-40 min-w-32 shrink flex-col border-r border-sidebar-border bg-sidebar/40 text-sidebar-foreground md:flex xl:w-52",
       )}
     >
       <header className="flex items-center gap-2 px-4 pb-3 pt-4">
@@ -192,7 +192,7 @@ export function SubSidebarItem({
   disabled,
 }: SubSidebarItemProps) {
   const className = cn(
-    "group flex h-8 items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
+    "group flex h-8 items-center gap-2 rounded-md px-2.5 text-sm transition-colors",
     disabled
       ? "cursor-not-allowed text-muted-foreground/50"
       : "hover:bg-accent hover:text-accent-foreground cursor-pointer",

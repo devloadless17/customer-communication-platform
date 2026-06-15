@@ -252,10 +252,10 @@ const TimelineRows = memo(function TimelineRows({
                 // Within a same-sender group, collapse the inter-bubble gap from
                 // the content list's gap-2 (8px) down via a negative top margin.
                 // Outbound (solid, high-contrast) → 2px. Inbound (grey+bordered,
-                // low-contrast) → 4px so the separation is actually visible.
+                // low-contrast) → 6px so the separation is clearly visible.
                 // Both stay tighter than the 8px BETWEEN-group gap so grouping
                 // still reads (message list div below: `flex-col gap-2`).
-                isContinuation && (isOutboundMsg ? "-mt-1.5" : "-mt-1"),
+                isContinuation && (isOutboundMsg ? "-mt-1.5" : "-mt-0.5"),
               )}
             >
               {/* Local ErrorBoundary per row — a single malformed payload (or a
@@ -294,6 +294,7 @@ const TimelineRows = memo(function TimelineRows({
                     isActiveSearchMatch={searchOpen && entry.data.id === activeMatchId}
                     showAvatar={isTail}
                     showMeta={showMeta}
+                    isTail={isTail}
                   />
                 ) : entry.kind === "note" ? (
                   <InternalNoteCard
@@ -936,10 +937,21 @@ function MessageThreadImpl({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const isFind = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f";
-      if (isFind) {
-        e.preventDefault();
-        openSearch();
-      }
+      if (!isFind) return;
+      // Don't hijack Cmd/Ctrl+F while the agent is typing — in the composer,
+      // a note field, or any editable surface they expect the OS/browser
+      // shortcut (or plain text entry) to work, not our in-thread search.
+      const target = e.target as HTMLElement | null;
+      const el =
+        target ?? (document.activeElement as HTMLElement | null) ?? null;
+      const isEditable =
+        !!el &&
+        (el.isContentEditable ||
+          el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA");
+      if (isEditable) return;
+      e.preventDefault();
+      openSearch();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1708,7 +1720,7 @@ function MessageThreadImpl({
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 8 }}
                   transition={{ duration: 0.15 }}
-                  className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
+                  className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-xs font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
                 >
                   <ArrowDown className="size-3.5" aria-hidden />
                   {unreadBelow} new {unreadBelow === 1 ? "message" : "messages"}

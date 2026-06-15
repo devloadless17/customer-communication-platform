@@ -370,7 +370,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
               {data.name || data.templateName}
             </h1>
             {data.name && (
-              <div className="mt-0.5 truncate text-[12px] text-muted-foreground">
+              <div className="mt-0.5 truncate text-xs text-muted-foreground">
                 Template: {data.templateName}
               </div>
             )}
@@ -420,7 +420,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
             <BroadcastStatusBadge status={data.status} />
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>Language: {data.templateLanguage}</span>
           <span>·</span>
           <span>By {data.createdByName}</span>
@@ -443,7 +443,10 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           )}
         </div>
         {retryError && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs text-destructive">
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs text-destructive"
+          >
             {retryError}
           </div>
         )}
@@ -451,6 +454,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
 
       {data.lastError && (
         <div
+          role="alert"
           className={cn(
             "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
             data.status === "paused"
@@ -526,7 +530,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         </header>
         <div className="px-4 py-4">
           {(variables.header || variables.body.length > 0) && (
-            <dl className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-[12px]">
+            <dl className="mb-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
               {variables.header !== undefined && (
                 <div className="flex flex-col">
                   <dt className="text-3xs uppercase tracking-wide text-muted-foreground">
@@ -607,14 +611,14 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                   <td className="px-4 py-2.5">
                     <RecipientStatusPill recipient={r} />
                   </td>
-                  <td className="px-4 py-2.5 text-[12px] text-muted-foreground">
+                  <td className="px-4 py-2.5 text-xs text-muted-foreground">
                     {r.sentAt ? <LocalTime iso={r.sentAt} format="listTime" /> : "—"}
                   </td>
                   <td className="px-4 py-2.5 text-right">
                     {r.conversationId ? (
                       <Link
                         href={`/inbox/${r.conversationId}`}
-                        className="inline-flex items-center gap-1 text-[12px] text-primary hover:underline"
+                        className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                       >
                         Open chat
                         <ExternalLink className="size-3" />
@@ -627,7 +631,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
                 <tr>
                   <td
                     colSpan={4}
-                    className="px-4 py-8 text-center text-[12px] text-muted-foreground"
+                    className="px-4 py-8 text-center text-xs text-muted-foreground"
                   >
                     No {statusFilter === "all" ? "" : `${statusFilter} `}recipients.
                   </td>
@@ -639,7 +643,9 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
         {(canLoadMore || loadingMore || moreError) && (
           <div className="flex flex-col items-center gap-2 border-t border-border px-4 py-3">
             {moreError && (
-              <div className="text-2xs text-destructive">{moreError}</div>
+              <div role="alert" className="text-2xs text-destructive">
+                {moreError}
+              </div>
             )}
             {canLoadMore && (
               <button
@@ -694,7 +700,7 @@ function RecipientStatusPill({
 }) {
   if (recipient.status === "sent") {
     return (
-      <span className="inline-flex items-center gap-1 text-[12px] text-emerald-700 dark:text-emerald-300">
+      <span className="inline-flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-300">
         <CheckCircle2 className="size-3.5" />
         Sent
       </span>
@@ -703,7 +709,7 @@ function RecipientStatusPill({
   if (recipient.status === "failed") {
     return (
       <span
-        className="inline-flex items-center gap-1 text-[12px] text-destructive"
+        className="inline-flex items-center gap-1 text-xs text-destructive"
         title={recipient.errorMessage ?? undefined}
       >
         <XCircle className="size-3.5" />
@@ -712,7 +718,7 @@ function RecipientStatusPill({
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 text-[12px] text-muted-foreground">
+    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
       <Clock className="size-3.5" />
       Queued
     </span>

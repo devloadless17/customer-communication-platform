@@ -81,7 +81,7 @@ export function PinnedBar({
                     }}
                     className={cn(
                       "shrink-0 self-center rounded p-1 text-muted-foreground opacity-0 transition-opacity",
-                      "hover:bg-amber-100 hover:text-foreground group-hover:opacity-100",
+                      "hover:bg-amber-100 hover:text-foreground group-hover:opacity-100 [@media(hover:none)]:opacity-100",
                       "focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40",
                       "dark:hover:bg-amber-900/30",
                     )}

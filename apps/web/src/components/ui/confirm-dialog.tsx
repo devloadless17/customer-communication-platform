@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useId, useState } from "react";
 import { AlertTriangle, HelpCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 
 /**
  * App-wide replacement for `window.confirm` / `window.alert` — a small modal
@@ -59,7 +58,6 @@ export function ConfirmDialog({
   const titleId = useId();
   const descId = useId();
   const inputId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Type-to-confirm text (cleared whenever a new dialog opens). Lives at the
   // top level so the hooks order stays stable across renders.
@@ -68,18 +66,11 @@ export function ConfirmDialog({
     if (open) setTyped("");
   }, [open, options]);
 
-  // Shared modal overlay primitives — body-scroll-lock + focus-trap +
-  // Escape-to-close + focus return. Same hook used by every other
-  // dialog in the app so behavior stays consistent.
+  // Escape / backdrop both resolve as cancelled (the shared <Dialog> owns
+  // body-scroll-lock + focus-trap + Escape + portal — see dialog.tsx).
   const onClose = useCallback(() => onResolve(false), [onResolve]);
-  useModalOverlay(dialogRef, open, onClose);
 
   if (!open || !options) return null;
-  // SSR guard — `useConfirm` is only called from client components, but the
-  // portal target is the DOM body so we need a live `document`. The early
-  // return above (`!open`) means this path doesn't run on the first server
-  // pass; once hydrated, `document` is defined.
-  if (typeof document === "undefined") return null;
   const {
     title,
     description,
@@ -96,25 +87,16 @@ export function ConfirmDialog({
   // stray space doesn't block a correct entry.
   const confirmBlocked = Boolean(requireText) && typed.trim() !== requireText;
 
-  // Portal to <body> so the fixed overlay isn't trapped inside a
-  // transformed ancestor (virtualized lists in team chat / inbox use
-  // `transform: translateY(...)` on each row, which creates a new
-  // containing block for `position: fixed` descendants — without the
-  // portal the dialog renders inside the row's stacking context and
-  // ends up behind the surrounding chrome).
-  return createPortal(
-    <div
-      ref={dialogRef}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
-      aria-describedby={description ? descId : undefined}
-      className="fixed inset-0 z-60 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onResolve(false);
-      }}
-    >
-      <div className="w-full max-w-sm rounded-lg border border-border bg-card text-card-foreground shadow-xl">
+  // z-60 keeps a confirm/alert ON TOP of any other open modal (e.g. a confirm
+  // fired from inside a Sheet or another Dialog), preserving the prior
+  // hand-rolled stacking. The shared <Dialog> portals to <body> + owns chrome.
+  return (
+    <Dialog open={open} onClose={onClose} overlayClassName="z-60">
+      <DialogContent
+        className="max-w-sm"
+        labelledBy={titleId}
+        describedBy={description ? descId : undefined}
+      >
         <div className="flex items-start gap-3 p-5">
           <div
             className={
@@ -179,9 +161,8 @@ export function ConfirmDialog({
             {confirmLabel}
           </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogContent>
+    </Dialog>
   );
 }
 

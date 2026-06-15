@@ -185,6 +185,7 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
           }}
           onFocus={() => setOpen(true)}
           placeholder="Search contacts in the 24h window…"
+          aria-label="Search contacts in the 24h window"
           className="pl-8"
         />
       </div>

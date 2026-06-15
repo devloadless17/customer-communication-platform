@@ -42,8 +42,11 @@ export default async function AudienceGroupsPage() {
       {groups.length === 0 ? (
         <EmptyState canManage={canManage} />
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-border bg-card">
-          <table className="w-full min-w-160 text-sm">
+        /* Sideways-scroll strip on phones — the table floor (min-w-140 = 35rem)
+           overflows narrow viewports, so the wrapper scrolls instead of breaking
+           the page layout. w-full keeps desktop full-width. */
+        <div className="w-full overflow-x-auto rounded-xl border border-border bg-card">
+          <table className="w-full min-w-140 text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/30 text-2xs uppercase tracking-wide text-muted-foreground">
                 <th className="px-4 py-2.5 text-left font-medium">Group</th>
@@ -79,7 +82,7 @@ function EmptyState({ canManage }: { canManage: boolean }) {
         <Users className="size-5" />
       </div>
       <div className="text-sm font-medium">No groups yet</div>
-      <p className="max-w-md text-[12px] leading-relaxed text-muted-foreground">
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
         Save a named audience now — pick contacts manually, by tag, or both —
         and reuse it in any future broadcast without re-selecting.
       </p>

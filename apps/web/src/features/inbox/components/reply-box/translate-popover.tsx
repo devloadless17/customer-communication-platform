@@ -148,7 +148,7 @@ export function TranslatePopover({
           {/* Read-only preview — the draft is NOT changed until Apply. */}
           <div
             dir="auto"
-            className="max-h-40 overflow-y-auto whitespace-pre-wrap wrap-break-word px-3 py-2.5 text-[13px] leading-relaxed"
+            className="max-h-40 overflow-y-auto whitespace-pre-wrap wrap-break-word px-3 py-2.5 text-sm leading-relaxed"
           >
             {preview.text}
           </div>
@@ -156,14 +156,14 @@ export function TranslatePopover({
             <button
               type="button"
               onClick={cancelPreview}
-              className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground hover:bg-accent/60"
+              className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent/60"
             >
               <X className="size-3.5" /> Cancel
             </button>
             <button
               type="button"
               onClick={applyPreview}
-              className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-medium text-primary-foreground hover:bg-primary/90"
+              className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
             >
               <Check className="size-3.5" /> Apply
             </button>
@@ -175,7 +175,7 @@ export function TranslatePopover({
             Translate to
           </div>
           {!hasText ? (
-            <div className="px-3 py-3 text-center text-[12px] text-muted-foreground">
+            <div className="px-3 py-3 text-center text-xs text-muted-foreground">
               Type a message first.
             </div>
           ) : (
@@ -187,7 +187,7 @@ export function TranslatePopover({
                     onClick={() => void translate(lang.label)}
                     disabled={pending !== null}
                     className={cn(
-                      "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[13px] hover:bg-accent/60",
+                      "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-sm hover:bg-accent/60",
                       pending !== null && "cursor-wait opacity-60",
                     )}
                   >

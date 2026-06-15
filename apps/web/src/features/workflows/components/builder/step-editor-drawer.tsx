@@ -95,7 +95,7 @@ export function StepEditorDrawer({
             aria-label="Rename step"
           />
         </div>
-        <Button type="button" variant="ghost" size="icon" onClick={onClose} className="size-8 shrink-0" aria-label="Close">
+        <Button type="button" variant="ghost" size="icon" onClick={onClose} className="size-8 shrink-0 pointer-coarse:size-9" aria-label="Close">
           <X className="size-4" />
         </Button>
       </header>

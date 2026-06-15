@@ -24,6 +24,18 @@ import type { ConversationStatus, User } from "@ccp/shared/types";
 
 import { readError } from "./utils";
 
+/**
+ * Solid-fill dot colour per status, mirroring the icon's `STATUS_META.cls`
+ * hue. Shown on the compact (icon-only) trigger below @2xl so the status is
+ * still readable at a glance without the text label. Kept here (not in
+ * status-meta) because the menu items use the coloured icon, not a dot.
+ */
+const STATUS_DOT_CLS: Record<ConversationStatus, string> = {
+  open: "bg-emerald-500",
+  pending: "bg-amber-500",
+  closed: "bg-muted-foreground/50",
+};
+
 export function StatusDropdown({
   teamId,
   conversationId,
@@ -180,10 +192,29 @@ export function StatusDropdown({
     <>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="h-8 gap-1.5" disabled={pending}>
-          <Icon className={cn("size-3.5", STATUS_META[current].cls)} />
-          <span className="font-normal">{STATUS_META[current].label}</span>
-          <ChevronDown className="size-3.5 text-muted-foreground" />
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5"
+          disabled={pending}
+          aria-label={`Status: ${STATUS_META[current].label} — change conversation status`}
+          title={`Status: ${STATUS_META[current].label}`}
+        >
+          <span className="relative inline-flex shrink-0 items-center">
+            <Icon className={cn("size-3.5", STATUS_META[current].cls)} />
+            {/* Coloured status dot — keeps the status legible on the compact
+                (label-hidden) trigger below @2xl. Hidden once the label is
+                back, where it'd be redundant with the coloured icon + text. */}
+            <span
+              className={cn(
+                "absolute -right-0.5 -top-0.5 size-1.5 rounded-full ring-1 ring-background @2xl:hidden",
+                STATUS_DOT_CLS[current],
+              )}
+              aria-hidden
+            />
+          </span>
+          <span className="hidden font-normal @2xl:inline">{STATUS_META[current].label}</span>
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

@@ -5,6 +5,7 @@ import { Check, Loader2, Search, Trash2, UserPlus } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
@@ -199,13 +200,13 @@ export function ChannelMembersDialog({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="flex w-full max-w-lg flex-col rounded-xl border border-border bg-background shadow-2xl">
+    <Dialog open onClose={onClose}>
+      {/* flex-col + inner scroll region keeps the header pinned; override the
+          card's default block-scroll with `overflow-hidden`. */}
+      <DialogContent
+        ariaLabel={`#${channel.name} members`}
+        className="flex max-w-lg flex-col overflow-hidden"
+      >
         <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
           <div>
             <div className="text-base font-semibold">#{channel.name} members</div>
@@ -224,7 +225,7 @@ export function ChannelMembersDialog({
           </Button>
         </div>
 
-        <div className="flex max-h-112 flex-col gap-3 overflow-hidden p-4">
+        <div className="flex min-h-0 max-h-112 flex-1 flex-col gap-3 overflow-hidden p-4">
           {canManage && !channel.isDefault ? (
             <div>
               {addPickerOpen ? (
@@ -251,6 +252,7 @@ export function ChannelMembersDialog({
                       value={pickerFilter}
                       onChange={(e) => setPickerFilter(e.target.value)}
                       placeholder="Filter teammates…"
+                      aria-label="Filter teammates"
                       className="pl-7"
                       autoFocus
                     />
@@ -343,6 +345,7 @@ export function ChannelMembersDialog({
               value={memberFilter}
               onChange={(e) => setMemberFilter(e.target.value)}
               placeholder="Filter members…"
+              aria-label="Filter members"
               className="pl-7"
             />
           </div>
@@ -392,7 +395,7 @@ export function ChannelMembersDialog({
                         disabled={busy}
                         aria-label={isSelfLeave ? "Leave channel" : `Remove ${m.name}`}
                         title={isSelfLeave ? "Leave channel" : `Remove ${m.name}`}
-                        className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+                        className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 pointer-coarse:size-9"
                       >
                         <Trash2 className="size-3.5" />
                       </button>
@@ -403,7 +406,7 @@ export function ChannelMembersDialog({
             )}
           </ul>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

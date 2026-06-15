@@ -295,7 +295,11 @@ export function ApiKeysManager({ initialKeys }: Props) {
             </div>
           )}
 
-          {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
+          {error && (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              {error}
+            </p>
+          )}
 
           {/* Existing keys */}
           <div className="mt-4">

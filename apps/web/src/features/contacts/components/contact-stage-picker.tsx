@@ -135,7 +135,7 @@ export function ContactStagePicker({
           </div>
           <ul className="max-h-72 overflow-y-auto py-1">
             {stages.length === 0 && (
-              <li className="px-3 py-4 text-center text-[12px] text-muted-foreground">
+              <li className="px-3 py-4 text-center text-xs text-muted-foreground">
                 No stages yet.
               </li>
             )}
@@ -306,7 +306,7 @@ function StepArrow({
             : "Already in the last stage"
       }
       className={cn(
-        "inline-flex size-7 cursor-pointer items-center justify-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+        "inline-flex size-7 cursor-pointer items-center justify-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9",
         "disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-card disabled:hover:text-muted-foreground",
       )}
     >

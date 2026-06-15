@@ -78,9 +78,24 @@ export function ChannelComposer({
         // Anchor the popup just above the textarea — caret-position math
         // would be more precise but adds a coord-measurement helper for a
         // marginal UX win. Above-the-input is unambiguous + always visible.
+        //
+        // Viewport clamps for narrow / short screens:
+        //   - left: keep the 256px (w-64) popup fully on-screen — never let
+        //     it run past the right edge (8px gutter → innerWidth - 264).
+        //   - top: the ~288px-tall popup would clip off the top on a short
+        //     viewport, so flip it BELOW the textarea when there's no room
+        //     above.
+        const POPUP_W = 256;
+        const POPUP_H = 280;
+        const GUTTER = 8;
+        const left = Math.max(
+          GUTTER,
+          Math.min(rect.left + GUTTER, window.innerWidth - POPUP_W - GUTTER),
+        );
+        const flipBelow = rect.top - GUTTER - POPUP_H < 0;
         setPopupPos({
-          left: rect.left + 8,
-          top: rect.top - 8 - 280,
+          left,
+          top: flipBelow ? rect.bottom + GUTTER : rect.top - GUTTER - POPUP_H,
         });
       } else {
         setPopupPos(null);
@@ -313,6 +328,7 @@ export function ChannelComposer({
             }
           }}
           placeholder={threadRootId ? "Reply in thread…" : `Message #${channelName}`}
+          aria-label={threadRootId ? "Reply in thread" : `Message #${channelName}`}
           rows={1}
           className="min-h-9 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
         />

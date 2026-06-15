@@ -14,6 +14,11 @@ import {
 } from "@/lib/api/queries";
 import { InboxShell } from "@/features/inbox/components/inbox-shell";
 import { SsrThreadBottomSnap } from "@/features/inbox/components/ssr-thread-bottom-snap";
+import {
+  INBOX_DETAILS_WIDTH_COOKIE,
+  INBOX_LIST_WIDTH_COOKIE,
+  parseWidthCookie,
+} from "@/features/inbox/lib/panel-cookies";
 
 /** Right contact-panel collapse cookie — read server-side so SSR renders the
  *  persisted state (no expand→collapse flash, same approach as the left
@@ -86,6 +91,14 @@ export default async function InboxPage({
 
   const contactPanelCollapsed =
     cookieStore.get(CONTACT_PANEL_COLLAPSED_COOKIE)?.value === "true";
+  // Persisted drag-resize widths, SSR'd so each column paints at its saved width
+  // on first render — no jump from the default after hydration (the hook clamps).
+  const initialListWidth = parseWidthCookie(
+    cookieStore.get(INBOX_LIST_WIDTH_COOKIE)?.value,
+  );
+  const initialDetailsWidth = parseWidthCookie(
+    cookieStore.get(INBOX_DETAILS_WIDTH_COOKIE)?.value,
+  );
 
   // When the URL pointed at a conversation that doesn't exist (deleted, wrong
   // team, typo'd id), strip the `?c=` from the URL with a server redirect.
@@ -132,6 +145,8 @@ export default async function InboxPage({
         initialActiveConversationId={initialActiveConversationId}
         initialThread={initialThread}
         initialContactPanelCollapsed={contactPanelCollapsed}
+        initialListWidth={initialListWidth}
+        initialDetailsWidth={initialDetailsWidth}
       />
       {/* SSR-only: when a thread was SSR'd on a real DOCUMENT load (hard refresh
           / deep link), pin its column-reverse viewport to the bottom during HTML

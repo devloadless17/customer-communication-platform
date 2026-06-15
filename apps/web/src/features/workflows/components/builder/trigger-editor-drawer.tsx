@@ -70,7 +70,7 @@ export function TriggerEditorDrawer({
           </div>
           <div className="text-sm font-medium">When this fires</div>
         </div>
-        <Button type="button" variant="ghost" size="icon" onClick={onClose} className="size-8" aria-label="Close">
+        <Button type="button" variant="ghost" size="icon" onClick={onClose} className="size-8 pointer-coarse:size-9" aria-label="Close">
           <X className="size-4" />
         </Button>
       </header>

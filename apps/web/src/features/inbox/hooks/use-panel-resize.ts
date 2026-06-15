@@ -4,13 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Drag-to-resize state for an inbox side column (the conversation list or the
- * contact-details panel). Width is persisted to localStorage and clamped to
- * [min, max]. The consumer applies the width however it likes (CSS var or
- * inline `width`) and gates it to desktop so mobile layouts are untouched.
+ * contact-details panel). Width is persisted to a COOKIE (server-readable) and
+ * clamped to [min, max]. The consumer applies the width however it likes (CSS
+ * var or inline `width`) and gates it to desktop so mobile layouts are untouched.
  *
- * `width` is `null` until mount so SSR and the first client paint both fall
- * back to the caller's CSS default — no hydration mismatch. After mount it
- * reads localStorage (defaulting to `def`).
+ * `width` is SEEDED from `initial` — the SSR-read width cookie — so the first
+ * client paint already matches the persisted width (no post-refresh resize
+ * jump). With no cookie yet it's `null` and the caller's CSS default applies.
+ * Changes write the cookie on drag-end / arrow-key so the next load SSRs right.
  *
  * `grow` says which edge the handle sits on, so a drag in the natural
  * direction enlarges the panel:
@@ -30,6 +31,9 @@ interface PanelResizeOptions {
    *  min(static max, this). Recomputed on each pointer-down (cheap), so it
    *  always reflects the current window/other-panel sizes. */
   getDragMax?: (handleEl: HTMLElement) => number;
+  /** SSR-read persisted width (the width cookie's value, parsed). When present,
+   *  `width` starts here so first paint matches — no resize jump on refresh. */
+  initial?: number | null;
 }
 
 const STEP = 16; // px per arrow-key press
@@ -41,8 +45,16 @@ export function usePanelResize({
   def,
   grow = "right",
   getDragMax,
+  initial,
 }: PanelResizeOptions) {
-  const [width, setWidth] = useState<number | null>(null);
+  // Seed from the SSR-read cookie so first paint is already at the persisted
+  // width (no jump). Clamp here too so a stale/hand-edited cookie can't push the
+  // column out of bounds. Null when there's no cookie yet → CSS default applies.
+  const [width, setWidth] = useState<number | null>(() =>
+    initial != null && Number.isFinite(initial)
+      ? Math.max(min, Math.min(max, Math.round(initial)))
+      : null,
+  );
   // Exposed so consumers can suppress any CSS width-transition while dragging
   // (otherwise each per-pixel update animates over the transition duration and
   // the drag feels laggy / rubber-bands).
@@ -60,11 +72,14 @@ export function usePanelResize({
   );
   const clamp = useCallback((n: number) => clampTo(n, max), [clampTo, max]);
 
-  useEffect(() => {
-    const raw = localStorage.getItem(storageKey);
-    const n = raw == null ? NaN : Number(raw);
-    setWidth(Number.isFinite(n) ? clamp(n) : def);
-  }, [storageKey, def, clamp]);
+  // Persist to a COOKIE (not localStorage) so the server reads it and SSRs the
+  // correct width on the next load — that's what removes the post-refresh jump.
+  const persist = useCallback(
+    (w: number) => {
+      document.cookie = `${storageKey}=${w}; path=/; max-age=31536000; samesite=lax`;
+    },
+    [storageKey],
+  );
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
@@ -85,10 +100,10 @@ export function usePanelResize({
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", stop);
     setWidth((w) => {
-      if (w != null) localStorage.setItem(storageKey, String(w));
+      if (w != null) persist(w);
       return w;
     });
-  }, [onPointerMove, storageKey]);
+  }, [onPointerMove, persist]);
 
   const onHandleDown = useCallback(
     (e: React.PointerEvent) => {
@@ -120,11 +135,11 @@ export function usePanelResize({
       const signed = grow === "left" ? -dir : dir;
       setWidth((w) => {
         const next = clamp((w ?? def) + signed * STEP);
-        localStorage.setItem(storageKey, String(next));
+        persist(next);
         return next;
       });
     },
-    [clamp, def, grow, storageKey],
+    [clamp, def, grow, persist],
   );
 
   // Drop window listeners if we unmount mid-drag (fast route change while

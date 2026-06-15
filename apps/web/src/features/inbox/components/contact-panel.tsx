@@ -12,6 +12,7 @@ import {
 } from "@/features/contacts/components/field-controls";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
+import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -35,14 +36,17 @@ import {
 } from "@/lib/socket-client";
 import {
   buildOptimisticAssignment,
+  buildOptimisticStageChange,
   buildOptimisticStatusChange,
   buildOptimisticTagAdded,
   buildOptimisticTagRemoved,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
+import { toast } from "@/lib/toast";
 import { predictAssignmentStatus } from "@/features/inbox/lib/predict-status";
 import { STATUS_META } from "@/features/inbox/lib/status-meta";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
+import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
 import {
   AVAILABILITY_DOT_CLASSES,
   AVAILABILITY_LABELS,
@@ -52,6 +56,7 @@ import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ContactPanelBuiltins,
+  ContactStage,
   ConversationStatus,
   ConversationWithRefs,
   Tag,
@@ -112,6 +117,13 @@ interface PanelProps {
   canManageFields: boolean;
   /** Team-wide tag catalog. Used by the tag picker for select/create. */
   tagCatalog: Tag[];
+  /** Team-wide stage catalog. Drives the Stage section's picker. Optional so
+   *  the panel still renders if a caller hasn't wired it yet — the Stage
+   *  section simply hides until a catalog is supplied. */
+  stageCatalog?: ContactStage[];
+  /** Whether the current user can manage (not just move between) stages —
+   *  gates the picker's "Manage stages…" footer link. */
+  canManageStages?: boolean;
   /** Team roster used to render the assignee picker. */
   teamMembers: User[];
   /** Current agent's display name — actor on optimistic activity pills
@@ -120,6 +132,9 @@ interface PanelProps {
   /** Server-read cookie so the panel SSRs in its persisted rail state (no
    *  expand→collapse flash). Default false (expanded). */
   initialCollapsed: boolean;
+  /** SSR-read persisted panel width (cookie) — seeds the drag-resize so the
+   *  rail paints at its saved width on first render (no post-refresh jump). */
+  initialDetailsWidth: number | null;
   /** Jump the thread to a specific message (id) — used by the Files tab so
    *  clicking "Jump" on an attachment scrolls + flashes the source bubble.
    *  Reuses the same `jumpTarget` state inbox-shell already drives for
@@ -142,9 +157,12 @@ function ContactPanelImpl({
   builtins,
   canManageFields,
   tagCatalog,
+  stageCatalog,
+  canManageStages = false,
   teamMembers,
   currentUserName,
   initialCollapsed,
+  initialDetailsWidth,
   onGoToMessage,
   variant = "aside",
 }: PanelProps) {
@@ -202,7 +220,8 @@ function ContactPanelImpl({
     onHandleDown,
     onHandleKeyDown,
   } = usePanelResize({
-    storageKey: "inbox-details-width",
+    storageKey: INBOX_DETAILS_WIDTH_COOKIE,
+    initial: initialDetailsWidth,
     min: 260,
     max: 520,
     def: 320,
@@ -339,7 +358,6 @@ function ContactPanelImpl({
   // without waiting for a router.refresh round-trip.
   const [tags, setTags] = useState<Tag[]>(tagCatalog);
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
-  const [tagSaveError, setTagSaveError] = useState<string | null>(null);
   const tagBoxRef = useRef<HTMLDivElement>(null);
 
   // Assignee — mirrors the thread header's AssignmentDropdown. Reads/writes
@@ -353,6 +371,18 @@ function ContactPanelImpl({
   const [assigneePending, setAssigneePending] = useState(false);
   const [assigneeError, setAssigneeError] = useState<string | null>(null);
 
+  // Stage — mirrors the thread header's ContactStagePicker. Reads/writes
+  // Contact.stageId; persistStage below fires the SAME optimistic frames the
+  // header's persistStageId does (contact:updated + stage-changed pill +
+  // byStage delta) so the header pill, sidebar badge, and this panel stay in
+  // lockstep. NOT part of the EditableState dirty-check set — stage is a
+  // single-tap pick with no in-progress text the conflict banner needs to
+  // guard, so it lives in its own state (the contact:updated listener above
+  // re-seeds it via the contact-prop re-sync effect, same as assigneeId).
+  const [stageId, setStageId] = useState<string | null>(
+    contact.stageId ?? null,
+  );
+
   // Re-sync when navigating to a different conversation. Without this the
   // panel would render the previous contact's edits against the new contact.
   useEffect(() => {
@@ -365,10 +395,10 @@ function ContactPanelImpl({
     setCountry(contact.countryCode ?? "");
     setCustomFields(contact.customFields ?? {});
     setTagIds(contact.tagIds ?? []);
+    setStageId(contact.stageId ?? null);
     setAssigneeId(data.assignedUser?.id ?? null);
     setAssigneeError(null);
     setTagPickerOpen(false);
-    setTagSaveError(null);
   }, [
     contact.id,
     contact.name,
@@ -380,6 +410,7 @@ function ContactPanelImpl({
     contact.countryCode,
     contact.customFields,
     contact.tagIds,
+    contact.stageId,
     data.assignedUser?.id,
   ]);
 
@@ -501,6 +532,11 @@ function ContactPanelImpl({
       payload,
     ) => {
       if (payload.contact.id !== contactId) return;
+      // Stage isn't part of the EditableState conflict guard (it's a single
+      // pick, no in-progress text to clobber) — converge it eagerly on every
+      // frame, exactly like assigneeId does in onAssigned. Covers a teammate's
+      // header/drawer stage change AND our own optimistic echo.
+      setStageId(payload.contact.stageId ?? null);
       const incoming = {
         name: payload.contact.name,
         firstName: payload.contact.firstName ?? "",
@@ -694,7 +730,13 @@ function ContactPanelImpl({
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
-      setError(body.error ?? "Couldn't save");
+      // Surface via toast, not a silent inline whisper — a field save that
+      // fails after the optimistic paint reverts otherwise looks like a glitch
+      // (the value flickers back with no explanation). Toast is visible,
+      // auto-dismissing, and consistent with the stage/tag failure path.
+      toast.error("Couldn't save contact", {
+        description: body.error ?? "Please try again.",
+      });
       // Roll back to the state the app believed BEFORE this patch: keep the
       // current local mirrors (which carry any prior committed-but-not-yet-
       // refreshed edits — the same base the optimistic build above uses) and
@@ -862,12 +904,84 @@ function ContactPanelImpl({
     }
   }
 
+  /**
+   * Stage picker. Byte-for-byte mirrors the thread header's `persistStageId`
+   * (message-thread.tsx) so a stage change from EITHER surface fans the same
+   * optimistic frames and converges identically:
+   *   1. `contact:updated` (optimistic) — flips the header pill, sidebar chip,
+   *      LRU cache, and this panel in one paint.
+   *   2. the `stage_changed` activity pill — keeps the timeline log in sync.
+   *   3. a `ccp:contact-stage-delta` window event — lets useConversationCounts
+   *      patch its byStage map locally so the sidebar badge flips in the same
+   *      frame instead of lagging a 50-300ms refetch.
+   * Bundled into ONE dispatchLocalSocketEvents so the chip + pill commit in a
+   * single paint. Rollback restores stageId + reverses every frame on failure;
+   * the error surfaces via toast (consistent with field/tag failures below).
+   */
+  async function persistStage(next: string) {
+    const prev = stageId;
+    if (next === prev) return;
+    setStageId(next);
+    const stageActivity = buildOptimisticStageChange({
+      teamId: contact.teamId,
+      conversationId: conversation.id,
+      actorName: currentUserName,
+      fromStageName: stageCatalog?.find((s) => s.id === prev)?.name ?? null,
+      toStageName: stageCatalog?.find((s) => s.id === next)?.name ?? null,
+    });
+    const stageActivityId = stageActivity.id;
+    dispatchLocalSocketEvents([
+      [
+        "contact:updated",
+        {
+          teamId: contact.teamId,
+          contact: { ...contact, stageId: next },
+          optimistic: true,
+        },
+      ],
+      stageActivity.frame,
+    ]);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("ccp:contact-stage-delta", {
+          detail: { contactId: contact.id, prevStageId: prev, nextStageId: next },
+        }),
+      );
+    }
+    const res = await apiFetch(`/api/contacts/${contact.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stageId: next }),
+    });
+    if (!res.ok) {
+      setStageId(prev);
+      dispatchLocalSocketEvent("contact:updated", {
+        teamId: contact.teamId,
+        contact: { ...contact, stageId: prev },
+        optimistic: true,
+      });
+      rollbackOptimisticActivity(contact.teamId, conversation.id, stageActivityId);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("ccp:contact-stage-delta", {
+            detail: { contactId: contact.id, prevStageId: next, nextStageId: prev },
+          }),
+        );
+      }
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      toast.error("Couldn't change stage", {
+        description: body.error ?? "Please try again.",
+      });
+    }
+    // No router.refresh(): the optimistic frames + byStage delta already flip
+    // every live surface and the server frame converges. See persistStageId.
+  }
+
   // PUT replaces the whole set (server semantics), so we hand it the full
   // next array. Optimistic: paint locally first, rollback on error.
   async function persistTagIds(nextIds: string[]) {
     const prevIds = tagIds;
     setTagIds(nextIds);
-    setTagSaveError(null);
     // Bundle the canonical `contact:updated` plus EVERY per-tag activity pill
     // into ONE flushSync. Without batching, a 3-tag swap fired 4 separate
     // flushSyncs (1 contact:updated + 3 activity) → 4 paints in a row, with the
@@ -926,7 +1040,9 @@ function ContactPanelImpl({
     });
     if (!res.ok) {
       setTagIds(prevIds);
-      setTagSaveError("Failed to save tags");
+      // Toast, not the old text-3xs inline whisper (no dismiss, easy to miss as
+      // a glitch when the chip silently reverts). Consistent with field/stage.
+      toast.error("Couldn't save tags", { description: "Please try again." });
       dispatchLocalSocketEvent("contact:updated", {
         teamId: contact.teamId,
         contact: { ...contact, tagIds: prevIds },
@@ -967,8 +1083,13 @@ function ContactPanelImpl({
       <div
         className={cn(
           "flex h-full shrink-0 flex-col",
-          isSheet ? "w-full" : "w-[320px]",
+          isSheet && "w-full",
         )}
+        // Desktop: fill the panel's CURRENT (resized) width so dragging the rail
+        // wider/narrower leaves no dead gutter and clips nothing — shrink-0 still
+        // keeps the content from squashing while the aside animates open/closed.
+        // Sheet: the w-full class above owns the width.
+        style={isSheet ? undefined : { width: expandedWidth }}
       >
       {/* Header bar. Desktop: collapse toggle at the right edge. Sheet: just
           the "Details" label (the Sheet renders its own close X; the `pr-11`
@@ -989,7 +1110,7 @@ function ContactPanelImpl({
             <button
               type="button"
               onClick={toggleCollapsed}
-              className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+              className="flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
               aria-label="Collapse contact panel"
             >
               <PanelRightClose className="size-4" />
@@ -1029,7 +1150,7 @@ function ContactPanelImpl({
         </button>
       </div>
       {pendingRemote && view === "details" ? (
-        <div className="flex items-start gap-2 border-b border-amber-300/40 bg-amber-50 px-4 py-2 text-[12px] text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
+        <div className="flex items-start gap-2 border-b border-amber-300/40 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
           <span className="mt-px inline-block size-1.5 shrink-0 rounded-full bg-amber-500" />
           <div className="min-w-0 flex-1">
             <div className="font-medium">A teammate just updated this contact</div>
@@ -1094,11 +1215,13 @@ function ContactPanelImpl({
           </div>
           <div className="mt-3 flex flex-wrap justify-center gap-1.5">
             <Badge variant="muted">WhatsApp</Badge>
-            <Badge variant="success">Active</Badge>
             {/* Distinguishes contacts an agent created (e.g. via the New
                 Contact dialog or CSV import) from contacts we got because a
-                customer messaged us. The list page filters by this too. */}
-            <Badge variant={contact.source === "manual" ? "muted" : "success"}>
+                customer messaged us. The list page filters by this too. Kept
+                MUTED (provenance, not status) — the removed always-green
+                "Active" badge was hardcoded and contradicted closed chats; live
+                status is shown in the Status row below. */}
+            <Badge variant="muted">
               {contact.source === "manual" ? "Added by you" : "Messaged you"}
             </Badge>
           </div>
@@ -1372,6 +1495,26 @@ function ContactPanelImpl({
           )}
         </Section>
 
+        {/* Stage — the highest-value CRM attribute, previously reachable only
+            from the @2xl-gated header pill. Mirrors contact-detail-drawer's
+            Stage section. Only rendered when a catalog is wired in (the prop is
+            optional); the picker itself shows an empty state when the team has
+            no stages defined yet. */}
+        {stageCatalog && (
+          <>
+            <Separator />
+            <Section title="Stage">
+              <ContactStagePicker
+                stages={stageCatalog}
+                currentStageId={stageId}
+                onChange={persistStage}
+                canManage={canManageStages}
+                size="md"
+              />
+            </Section>
+          </>
+        )}
+
         <Separator />
 
         <Section title="Tags">
@@ -1401,9 +1544,6 @@ function ContactPanelImpl({
               </div>
             )}
           </div>
-          {tagSaveError && (
-            <div className="mt-2 text-3xs text-destructive">{tagSaveError}</div>
-          )}
         </Section>
 
         <Separator />
@@ -1450,7 +1590,11 @@ function ContactPanelImpl({
           onKeyDown={onHandleKeyDown}
           className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none select-none outline-none lg:block"
         >
-          <span className="absolute inset-y-0 -left-1 -right-1 z-10 transition-colors group-hover:bg-primary/30 group-focus-visible:bg-primary/50" />
+          {/* Wide invisible grab zone so the thin indicator is still easy to grab. */}
+          <span className="absolute inset-y-0 -left-1.5 -right-1.5 z-10" />
+          {/* Thin, subtle resize indicator — transparent until hover / keyboard
+              focus, so it never reads as a big translucent green bar. */}
+          <span className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-transparent transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary" />
         </div>
       )}
     <aside
@@ -1512,6 +1656,7 @@ function ContactPanelImpl({
 export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
   if (prev.variant !== next.variant) return false;
   if (prev.initialCollapsed !== next.initialCollapsed) return false;
+  if (prev.initialDetailsWidth !== next.initialDetailsWidth) return false;
   if (prev.canManageFields !== next.canManageFields) return false;
   if (prev.currentUserName !== next.currentUserName) return false;
   if (prev.onGoToMessage !== next.onGoToMessage) return false;
@@ -1594,7 +1739,7 @@ function AssigneePicker({
           type="button"
           disabled={pending}
           className={cn(
-            "flex h-8 w-full items-center gap-2 rounded-md border border-input bg-background px-2.5 text-[13px] transition-colors hover:bg-accent hover:text-accent-foreground",
+            "flex h-8 w-full items-center gap-2 rounded-md border border-input bg-background px-2.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
             pending && "opacity-60",
           )}
         >

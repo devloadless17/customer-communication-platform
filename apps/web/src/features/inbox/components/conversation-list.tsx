@@ -8,14 +8,25 @@ import {
   useRef,
   useState,
 } from "react";
-import { CheckSquare, Loader2, Search, Trash2, X } from "lucide-react";
+import {
+  CheckSquare,
+  Inbox as InboxIcon,
+  Loader2,
+  PenSquare,
+  Search,
+  SearchX,
+  Trash2,
+  X,
+} from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { ContactSelectDialog } from "@/features/contacts/components/contact-select-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type {
@@ -91,6 +102,11 @@ function ConversationListImpl({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [deleting, setDeleting] = useState(false);
+  // "New conversation" picker — reuses the app-wide ContactSelectDialog. The
+  // dialog is multi-select; we take the first pick and hand it to
+  // onStartContactChat (get-or-create the thread, then open it). Single-select
+  // by convention, like the forward flow takes the first id.
+  const [newChatOpen, setNewChatOpen] = useState(false);
 
   useEffect(() => {
     if (selectionMode) return;
@@ -300,17 +316,32 @@ function ConversationListImpl({
           <p className="text-xs text-muted-foreground">
             {selectionMode && selectedIds.size > 0
               ? `${selectedIds.size} selected`
-              : `${visible.length} ${visible.length === 1 ? "conversation" : "conversations"}`}
+              : // `visible.length` is only the LOADED slice, not the true bucket
+                // total — the authoritative server count lives in the sub-sidebar's
+                // useConversationCounts (we don't mount a second one here). When
+                // more rows are paginated in (`hasMore`), the slice undercounts, so
+                // show "N+" rather than a wrong exact count; once everything's
+                // loaded the slice IS the bucket and the exact number is true.
+                `${visible.length}${hasMore ? "+" : ""} ${visible.length === 1 && !hasMore ? "conversation" : "conversations"}`}
           </p>
         </div>
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setNewChatOpen(true)}
+            title="New conversation"
+            className="flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            aria-label="New conversation"
+          >
+            <PenSquare className="size-4" />
+          </button>
           {canDeleteConversations && (
             <button
               type="button"
               onClick={() => setSelectionMode((v) => !v)}
               title={selectionMode ? "Exit selection mode" : "Select multiple"}
               className={cn(
-                "flex size-8 items-center justify-center rounded-md transition-colors",
+                "flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md transition-colors",
                 selectionMode
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -331,6 +362,7 @@ function ConversationListImpl({
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Search contacts, messages, comments…"
+            aria-label="Search contacts, messages, and comments"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
             className="h-9 pl-8 pr-8"
@@ -364,17 +396,19 @@ function ConversationListImpl({
           // preset, so an empty `active`/`all` view is the true first-run — guide
           // them instead of reading like a broken filter.
           filter.kind === "preset" && (filter.id === "active" || filter.id === "all") ? (
-            <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-14 text-center">
-              <div className="text-sm font-medium">No conversations yet</div>
-              <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
-                Messages from your connected WhatsApp number will appear here.
-                Make sure WhatsApp is connected in Settings.
-              </p>
-            </div>
+            <EmptyState
+              icon={InboxIcon}
+              title="No conversations yet"
+              description="Messages from your connected WhatsApp number will appear here. Make sure WhatsApp is connected in Settings."
+              className="m-3 border-0 bg-transparent py-14"
+            />
           ) : (
-            <div className="px-3 py-12 text-center text-xs text-muted-foreground">
-              No conversations match this view.
-            </div>
+            <EmptyState
+              icon={SearchX}
+              title="No conversations match this view"
+              description="Try a different filter or stage to see more chats."
+              className="m-3 border-0 bg-transparent py-12"
+            />
           )
         ) : (
           // Virtualized list. The outer div has the full estimated height
@@ -505,7 +539,7 @@ function ConversationListImpl({
             <button
               type="button"
               onClick={() => setSelectionMode(false)}
-              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+              className="inline-flex size-7 pointer-coarse:size-9 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
               aria-label="Cancel"
             >
               <X className="size-4" />
@@ -513,6 +547,24 @@ function ConversationListImpl({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* New-conversation picker. Multi-select dialog used single-select-style:
+          we open the first picked contact's thread. onStartContactChat does the
+          get-or-create + open (and toasts on failure). */}
+      <ContactSelectDialog
+        open={newChatOpen}
+        onClose={() => setNewChatOpen(false)}
+        onConfirm={(contactIds) => {
+          setNewChatOpen(false);
+          const first = contactIds[0];
+          if (first) onStartContactChat(first);
+        }}
+        stages={stages}
+        title="New conversation"
+        description="Pick a contact to start chatting with."
+        confirmLabel="Start chat"
+      />
+
       {confirmDialog}
     </div>
   );

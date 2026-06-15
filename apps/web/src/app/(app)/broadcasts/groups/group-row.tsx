@@ -60,7 +60,7 @@ export function GroupRow({ group, sampleTags }: { group: AudienceGroupDto; sampl
         </div>
       </td>
       <td className="px-4 py-3 text-right font-medium tabular-nums">{group.memberCount}</td>
-      <td className="px-4 py-3 text-[12px] text-muted-foreground">
+      <td className="px-4 py-3 text-xs text-muted-foreground">
         <LocalTime iso={group.updatedAt} format="listTime" />
       </td>
       <td className="px-4 py-3 text-right">

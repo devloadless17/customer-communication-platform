@@ -56,7 +56,7 @@ export function ChannelHeader({
         type="button"
         onClick={openMobileNav}
         aria-label="Browse channels"
-        className="-ml-1 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+        className="-ml-1 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden pointer-coarse:size-9"
       >
         <PanelLeft className="size-4" />
       </button>
@@ -84,7 +84,7 @@ export function ChannelHeader({
           <Button
             size="icon"
             variant="ghost"
-            className="size-8"
+            className="size-8 pointer-coarse:size-9"
             onClick={onOpenSearch}
             aria-label="Search this channel"
           >

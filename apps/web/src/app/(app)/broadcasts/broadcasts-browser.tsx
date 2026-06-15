@@ -188,7 +188,7 @@ export function BroadcastsBrowser({
   }, [refetch]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
       {/* Controls: filter rail + search + view toggle */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-1">
@@ -217,6 +217,7 @@ export function BroadcastsBrowser({
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search name or template…"
+              aria-label="Search broadcasts by name or template"
               className="w-56 rounded-md border border-border bg-background py-1.5 pl-8 pr-3 text-sm outline-none focus:border-primary"
             />
           </div>
@@ -306,10 +307,70 @@ function TableView({
   return (
     <div
       className={cn(
-        "overflow-x-auto rounded-xl border border-border bg-card transition-opacity",
+        "rounded-xl border border-border bg-card transition-opacity",
         loading && "opacity-60",
       )}
     >
+      {/* Stacked card list below sm — the wide table is a sideways-scroll
+          strip on phones, so collapse each row into a compact card. */}
+      <ul className="divide-y divide-border sm:hidden">
+        {rows.map((b) => (
+          <li key={b.id} className="flex flex-col gap-2 px-4 py-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <Link
+                  href={`/broadcasts/${b.id}`}
+                  className="block truncate font-medium text-foreground hover:text-primary"
+                >
+                  {b.name || b.templateName}
+                </Link>
+                <div className="truncate text-2xs text-muted-foreground">
+                  {b.name ? `${b.templateName} · ` : ""}
+                  {b.templateLanguage} ·{" "}
+                  {b.audienceMode === "all"
+                    ? `All (${b.totalCount})`
+                    : `${b.totalCount} selected`}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <BroadcastStatusBadge status={b.status} />
+                {canManage && (
+                  <Link
+                    href={`/broadcasts/new?from=${b.id}`}
+                    aria-label="Duplicate broadcast"
+                    title="Duplicate"
+                    className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
+                  >
+                    <Copy className="size-3.5" />
+                  </Link>
+                )}
+                {canManage && (
+                  <BroadcastDeleteButton
+                    broadcastId={b.id}
+                    templateName={b.name || b.templateName}
+                    status={b.status}
+                  />
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <ProgressBar sent={b.sentCount} failed={b.failedCount} total={b.totalCount} />
+              <span className="shrink-0 text-2xs text-muted-foreground">
+                {b.status === "scheduled" && b.scheduledAt ? (
+                  <span className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400">
+                    <CalendarDays className="size-3" />
+                    <LocalTime iso={b.scheduledAt} format="listTime" />
+                  </span>
+                ) : (
+                  <LocalTime iso={b.createdAt} format="listTime" />
+                )}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      <div className="hidden overflow-x-auto sm:block">
       <table className="w-full min-w-180 text-sm">
         <thead>
           <tr className="border-b border-border bg-muted/30 text-2xs uppercase tracking-wide text-muted-foreground">
@@ -350,7 +411,7 @@ function TableView({
               <td className="px-4 py-3">
                 <ProgressBar sent={b.sentCount} failed={b.failedCount} total={b.totalCount} />
               </td>
-              <td className="px-4 py-3 text-[12px] text-muted-foreground">
+              <td className="px-4 py-3 text-xs text-muted-foreground">
                 {b.status === "scheduled" && b.scheduledAt ? (
                   <span className="inline-flex items-center gap-1 text-indigo-600 dark:text-indigo-400">
                     <CalendarDays className="size-3.5" />
@@ -367,7 +428,7 @@ function TableView({
                       href={`/broadcasts/new?from=${b.id}`}
                       aria-label="Duplicate broadcast"
                       title="Duplicate"
-                      className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
                     >
                       <Copy className="size-3.5" />
                     </Link>
@@ -385,6 +446,7 @@ function TableView({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -444,7 +506,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
             type="button"
             aria-label="Previous month"
             onClick={() => setMonth(new Date(year, monthIdx - 1, 1))}
-            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           >
             <ChevronLeft className="size-4" />
           </button>
@@ -462,13 +524,16 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
             type="button"
             aria-label="Next month"
             onClick={() => setMonth(new Date(year, monthIdx + 1, 1))}
-            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           >
             <ChevronRight className="size-4" />
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border border-border bg-border text-xs">
+      {/* Sideways-scroll on phones — 7 columns crush below ~448px, so keep
+          each cell ≥64px (min-w-112 = 7 × 64px) and let the strip scroll. */}
+      <div className="overflow-x-auto">
+      <div className="grid min-w-112 grid-cols-7 gap-px overflow-hidden rounded-lg border border-border bg-border text-xs">
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
           <div
             key={d}
@@ -522,6 +587,7 @@ function CalendarView({ rows }: { rows: BroadcastListItem[] }) {
           );
         })}
       </div>
+      </div>
     </div>
   );
 }
@@ -536,7 +602,7 @@ function ProgressBar({
   total: number;
 }) {
   if (total === 0) {
-    return <span className="text-[12px] text-muted-foreground">—</span>;
+    return <span className="text-xs text-muted-foreground">—</span>;
   }
   const sentPct = Math.round((sent / total) * 100);
   const failedPct = Math.round((failed / total) * 100);
@@ -548,7 +614,7 @@ function ProgressBar({
           <div className="h-full bg-destructive" style={{ width: `${failedPct}%` }} />
         </div>
       </div>
-      <div className="tabular-nums text-[12px] text-muted-foreground">
+      <div className="tabular-nums text-xs text-muted-foreground">
         {sent + failed}/{total}
       </div>
     </div>

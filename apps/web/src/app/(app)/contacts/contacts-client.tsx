@@ -16,6 +16,7 @@ import {
   Send,
   Trash2,
   Upload,
+  Users,
   X,
   Tags as TagsIcon,
   MinusCircle,
@@ -23,6 +24,8 @@ import {
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { toast } from "@/lib/toast";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -340,7 +343,7 @@ export function ContactsClient({
   const showEmpty = !list.loading && items.length === 0;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 md:px-8 md:py-8">
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 md:px-8 md:py-8">
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">Contacts</h1>
@@ -410,7 +413,10 @@ export function ContactsClient({
       </div>
 
       {list.error && (
-        <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div
+          role="alert"
+          className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        >
           {list.error}
         </div>
       )}
@@ -419,16 +425,33 @@ export function ContactsClient({
         {list.loading && items.length === 0 ? (
           <ContactRowsSkeleton />
         ) : showEmpty ? (
-          <div className="px-6 py-16 text-center">
-            <p className="text-sm text-muted-foreground">
-              {list.search ||
+          (() => {
+            const filtered =
+              list.search ||
               list.fieldFilter ||
               list.windowFilter !== "any" ||
-              list.tagIds.length > 0
-                ? "No contacts match your filters."
-                : "No contacts yet. Click \"New contact\" to add one."}
-            </p>
-          </div>
+              list.tagIds.length > 0;
+            return (
+              <EmptyState
+                icon={Users}
+                className="border-0 bg-transparent py-16"
+                title={filtered ? "No contacts match your filters" : "No contacts yet"}
+                description={
+                  filtered
+                    ? "Try clearing a filter or adjusting your search."
+                    : "People who message your team show up here automatically — or add one manually."
+                }
+                action={
+                  filtered ? undefined : (
+                    <Button onClick={() => setCreating(true)}>
+                      <Plus className="size-4" />
+                      New contact
+                    </Button>
+                  )
+                }
+              />
+            );
+          })()
         ) : (
           <>
             <SelectAllRow
@@ -447,7 +470,11 @@ export function ContactsClient({
                 </span>
               }
             />
-            <ul className="divide-y divide-border">
+            {/* @container so each row's metadata lanes show/hide based on the
+                LIST's real width, not the viewport — the list narrows when the
+                section sub-sidebar is present (md+), and viewport breakpoints
+                couldn't see that, which squeezed the name to nothing. */}
+            <ul className="@container divide-y divide-border">
               {items.map((item) => (
                 <ContactRow
                   key={item.contact.id}
@@ -483,7 +510,7 @@ export function ContactsClient({
         {/* Cap reached — stop auto-loading and nudge toward filters. Matches
             the picker's behaviour so both contact surfaces stay responsive. */}
         {list.nextCursor && items.length >= CONTACTS_RENDER_CAP && (
-          <div className="border-t border-border p-3 text-center text-[12px] text-muted-foreground">
+          <div className="border-t border-border p-3 text-center text-xs text-muted-foreground">
             Showing {items.length.toLocaleString()} contacts. Refine the filters
             or search to see more — the list is capped to keep the page
             responsive.
@@ -522,7 +549,9 @@ export function ContactsClient({
             body: JSON.stringify({ action: "tag-add", contactIds: ids, tagId: tag.id }),
           });
           if (!res.ok) {
-            setError(await safeReadError(res));
+            const msg = await safeReadError(res);
+            setError(msg);
+            toast.error("Couldn't apply tag", { description: msg });
             return;
           }
           // Patch row tagIds the same way the existing tag-add path does.
@@ -551,7 +580,12 @@ export function ContactsClient({
             body: JSON.stringify({ action, contactIds: ids, tagId }),
           });
           if (!res.ok) {
-            setError(await safeReadError(res));
+            const msg = await safeReadError(res);
+            setError(msg);
+            toast.error(
+              action === "tag-add" ? "Couldn't add tag" : "Couldn't remove tag",
+              { description: msg },
+            );
             return;
           }
           // Patch each affected row's tagIds locally so the chips update
@@ -604,7 +638,9 @@ export function ContactsClient({
             body: JSON.stringify({ action: "delete", contactIds: ids }),
           });
           if (!res.ok) {
-            setError(await safeReadError(res));
+            const msg = await safeReadError(res);
+            setError(msg);
+            toast.error("Couldn't delete contacts", { description: msg });
             return;
           }
           setItems((prev) => prev.filter((row) => !ids.includes(row.contact.id)));
@@ -657,11 +693,12 @@ export function ContactsClient({
             // Splice to top so the new contact is visible without a refetch.
             // The server-side sort puts contacts with no messages by createdAt,
             // and this one was just created, so this matches the canonical
-            // order. router.refresh() also pulls a fresh server render in the
-            // background.
+            // order. No softRefresh() here — the optimistic splice already shows
+            // the row, and a refetch would churn the list (and reset selection)
+            // for a single create; the next catalog/socket sync converges it.
             setItems((prev) => [item, ...prev]);
             setCreating(false);
-            softRefresh();
+            toast.success("Contact added");
           }}
           onTeamWideFieldAdded={(def) => {
             setFieldDefinitions((prev) =>
@@ -765,6 +802,9 @@ const ContactRow = memo(function ContactRow({
     });
     if (!res.ok) {
       onStageChanged(contact.id, prev);
+      toast.error("Couldn't change stage", {
+        description: await safeReadError(res),
+      });
     }
   }
 
@@ -799,21 +839,27 @@ const ContactRow = memo(function ContactRow({
         </AvatarFallback>
       </Avatar>
 
-      {/* Name + phone — the keyboard-accessible "open contact" control. */}
+      {/* Name + phone — the keyboard-accessible "open contact" control. The two
+          STACK vertically so the name gets the column's full width instead of
+          competing inline with the (shrink-0) phone, which squeezed it down to
+          "A…" on narrow widths. The phone line is omitted when there's no name
+          (the name line already shows the phone then). */}
       <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
           onOpen(contact.id);
         }}
-        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
       >
-        <span className="truncate text-sm font-medium">
+        <span className="w-full truncate text-sm font-medium leading-tight">
           {contact.name || formatPhone(contact.phoneNumber)}
         </span>
-        <span className="hidden shrink-0 whitespace-nowrap font-mono text-2xs tabular-nums text-muted-foreground sm:inline">
-          {formatPhone(contact.phoneNumber)}
-        </span>
+        {contact.name && (
+          <span className="w-full truncate font-mono text-2xs tabular-nums leading-tight text-muted-foreground">
+            {formatPhone(contact.phoneNumber)}
+          </span>
+        )}
       </button>
 
       {/* Interactive right cluster — clicks here never open the drawer.
@@ -829,22 +875,32 @@ const ContactRow = memo(function ContactRow({
             popover, which is absolutely positioned inside this box). */}
         <div
           ref={tagBoxRef}
-          className="relative hidden w-[120px] shrink-0 items-center justify-end gap-1 md:flex"
+          className="relative hidden w-[120px] shrink-0 items-center justify-end @xl:flex"
         >
-          {shownTags.map((t) => (
-            <TagChip key={t.id} tag={t} size="xs" />
-          ))}
-          {extraTags > 0 && (
-            <span className="text-3xs text-muted-foreground">+{extraTags}</span>
-          )}
-          <TagAddButton
-            size="xs"
-            className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-            onClick={() => setTagPickerOpen((v) => !v)}
-          />
-          {tagSaveError && (
-            <span className="text-3xs text-destructive">{tagSaveError}</span>
-          )}
+          {/* Clipped inner row: tag chips can NEVER spill left out of the 120px
+              lane and overlap the phone/name. The picker popover below is a
+              SIBLING of this clip (still inside the `relative` lane) so it's not
+              cut off — that's why the lane itself stays un-clipped. */}
+          <div className="flex min-w-0 flex-1 items-center justify-end gap-1 overflow-hidden">
+            {shownTags.map((t) => (
+              <TagChip key={t.id} tag={t} size="xs" />
+            ))}
+            {extraTags > 0 && (
+              <span className="shrink-0 text-3xs text-muted-foreground">
+                +{extraTags}
+              </span>
+            )}
+            <TagAddButton
+              size="xs"
+              className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+              onClick={() => setTagPickerOpen((v) => !v)}
+            />
+            {tagSaveError && (
+              <span className="shrink-0 text-3xs text-destructive">
+                {tagSaveError}
+              </span>
+            )}
+          </div>
           {tagPickerOpen && (
             <div className="absolute right-0 top-full z-20 mt-1">
               <TagMultiPicker
@@ -862,7 +918,7 @@ const ContactRow = memo(function ContactRow({
 
         {/* Stage lane — hidden on phones so the name keeps its width; stage
             stays editable from the row's detail drawer. */}
-        <div className="hidden w-28 shrink-0 items-center justify-start sm:flex">
+        <div className="hidden w-28 shrink-0 items-center justify-start @md:flex">
           <ContactStagePicker
             stages={stageCatalog}
             currentStageId={contact.stageId}
@@ -874,12 +930,12 @@ const ContactRow = memo(function ContactRow({
 
         {/* Window lane — wide enough for the longest one-line badge
             ("Window closed · closed 24m ago") so it never wraps or clips. */}
-        <div className="hidden w-[210px] shrink-0 items-center justify-start lg:flex">
+        <div className="hidden w-[210px] shrink-0 items-center justify-start @3xl:flex">
           <WindowBadge lastInboundAt={lastInboundAt} size="xs" />
         </div>
 
         {/* Time lane */}
-        <div className="hidden w-12 shrink-0 items-center justify-end xl:flex">
+        <div className="hidden w-12 shrink-0 items-center justify-end @5xl:flex">
           {lastMessageAt && (
             <LocalTime
               iso={lastMessageAt}
@@ -892,15 +948,15 @@ const ContactRow = memo(function ContactRow({
         {/* Open-chat lane — hidden on phones (tap the row → detail drawer to
             open the chat); reclaims the reserved width so the name doesn't
             collapse on a 375px screen. */}
-        <div className="hidden w-[104px] shrink-0 items-center justify-end sm:flex">
+        <div className="hidden w-[104px] shrink-0 items-center justify-end @4xl:flex">
           {activeConversationId && (
             <Link
               href={`/inbox/${activeConversationId}`}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
               title="Open chat"
             >
               <MessageSquare className="size-3" />
-              <span className="hidden sm:inline">Open chat</span>
+              <span>Open chat</span>
             </Link>
           )}
         </div>
@@ -960,15 +1016,21 @@ function BulkActionBar({
     <div className="pointer-events-none fixed inset-x-0 bottom-6 z-40 flex justify-center px-4">
       <div
         ref={containerRef}
-        className="pointer-events-auto relative flex max-w-[calc(100vw-2rem)] items-center gap-2 overflow-x-auto rounded-full border border-border bg-popover px-3 py-2 shadow-2xl ring-1 ring-foreground/5 *:shrink-0"
+        className="pointer-events-auto relative flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-popover px-3 py-2 shadow-2xl ring-1 ring-foreground/5 *:shrink-0 sm:flex-nowrap sm:overflow-x-auto sm:rounded-full"
       >
         <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-primary/10 px-2.5 text-xs font-medium text-primary tabular-nums">
           {selectedCount} selected
         </span>
 
-        <Button size="sm" className="gap-1.5" onClick={onSendTemplate}>
+        <Button
+          size="sm"
+          className="gap-1.5"
+          onClick={onSendTemplate}
+          aria-label="Send template"
+          title="Send template"
+        >
           <Send className="size-3.5" />
-          Send template
+          <span className="hidden sm:inline">Send template</span>
         </Button>
 
         <Button
@@ -976,18 +1038,22 @@ function BulkActionBar({
           size="sm"
           className="gap-1.5"
           onClick={() => setOpenMenu(openMenu === "add" ? null : "add")}
+          aria-label="Add tag"
+          title="Add tag"
         >
           <TagsIcon className="size-3.5" />
-          Add tag
+          <span className="hidden sm:inline">Add tag</span>
         </Button>
         <Button
           variant="outline"
           size="sm"
           className="gap-1.5"
           onClick={() => setOpenMenu(openMenu === "remove" ? null : "remove")}
+          aria-label="Remove tag"
+          title="Remove tag"
         >
           <MinusCircle className="size-3.5" />
-          Remove tag
+          <span className="hidden sm:inline">Remove tag</span>
         </Button>
 
         {canDelete && (
@@ -996,16 +1062,18 @@ function BulkActionBar({
             size="sm"
             className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
             onClick={onDelete}
+            aria-label="Delete selected"
+            title="Delete selected"
           >
             <Trash2 className="size-3.5" />
-            Delete
+            <span className="hidden sm:inline">Delete</span>
           </Button>
         )}
 
         <button
           type="button"
           onClick={onClear}
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           aria-label="Clear selection"
         >
           <X className="size-4" />
@@ -1015,12 +1083,13 @@ function BulkActionBar({
           <BulkTagMenu
             tags={tags}
             action={openMenu === "add" ? "tag-add" : "tag-remove"}
+            // Keep the menu open after a pick/create so an agent can apply
+            // several tags in one pass — it closes on outside-click (the
+            // effect above) or the explicit Cancel button.
             onPick={async (tagId) => {
-              setOpenMenu(null);
               await onTagBulk(openMenu === "add" ? "tag-add" : "tag-remove", tagId);
             }}
             onCreated={async (tag) => {
-              setOpenMenu(null);
               await onTagCreatedAndApply(tag);
             }}
             onClose={() => setOpenMenu(null)}
@@ -1131,7 +1200,7 @@ function BulkTagMenu({
 
       <div className="max-h-56 overflow-y-auto py-1">
         {filtered.length === 0 && !canCreate ? (
-          <div className="px-3 py-3 text-center text-[12px] text-muted-foreground">
+          <div className="px-3 py-3 text-center text-xs text-muted-foreground">
             {action === "tag-remove"
               ? "No tags to remove."
               : "Type a name above to create your first tag."}

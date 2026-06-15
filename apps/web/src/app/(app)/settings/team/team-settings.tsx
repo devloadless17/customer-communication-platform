@@ -244,6 +244,9 @@ export function TeamSettings({
         "This permanently removes the organization and EVERYTHING in it — contacts, conversations, messages, broadcasts, automations, every teammate's account. The WhatsApp connection is dropped. This cannot be undone. You will be signed out immediately.",
       confirmLabel: "Delete organization",
       destructive: true,
+      // Highest blast-radius action in the product — require typing the exact
+      // org name so it can't be wiped by a misclick + Enter.
+      requireText: liveTeamName,
     });
     if (!ok) return;
     setDeletingOrg(true);
@@ -407,7 +410,7 @@ function DeletingOrgOverlay({ teamName }: { teamName: string }) {
         <Loader2 className="size-6 animate-spin text-primary" />
         <div className="space-y-1">
           <div className="text-sm font-medium">Deleting {teamName}…</div>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             Removing every conversation, contact, broadcast, and teammate. You'll
             be signed out as soon as this finishes.
           </p>
@@ -471,7 +474,7 @@ function UserRow({
         </div>
         <div className="truncate text-2xs text-muted-foreground">{user.email}</div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
         {editable && !isSelf ? (
           <select
             value={user.role}
@@ -562,7 +565,7 @@ function DangerZone({
   return (
     <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
       <div className="mb-1 text-sm font-medium text-destructive">Danger zone</div>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-xs text-muted-foreground">
         Deleting <span className="font-medium text-foreground">{teamName}</span>{" "}
         permanently removes the organization, every teammate account, every
         conversation, every contact, every broadcast, every automation, and
@@ -668,10 +671,17 @@ function InviteCard({
         <div className="text-sm font-medium">Invite a teammate</div>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px_140px]">
-        <Input name="email" type="email" placeholder="email@company.com" required />
+        <Input
+          name="email"
+          type="email"
+          placeholder="email@company.com"
+          aria-label="Teammate email"
+          required
+        />
         <select
           name="role"
           defaultValue="agent"
+          aria-label="Teammate role"
           className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         >
           {assignableRoles.map((r) => (

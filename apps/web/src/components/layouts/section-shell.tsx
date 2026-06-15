@@ -1,5 +1,6 @@
 import { getSession } from "@/lib/auth/current-user";
 import { getCurrentTeam } from "@/lib/api/queries";
+import { canManageUsers } from "@ccp/shared/auth/permissions";
 
 import { MobileShellChrome } from "@/components/layouts/mobile-shell-chrome";
 
@@ -42,10 +43,18 @@ export async function SectionShell({
         currentUser={user}
         team={{ id: team.id, name: team.name }}
         canManageAvailability={permissions["availability:manage"]}
+        canManageWorkflows={canManageUsers(user.role)}
         subSidebar={subSidebar}
       />
       {subSidebar}
-      <main className={`min-w-0 flex-1 ${mainClassName ?? "overflow-y-auto"}`}>
+      {/* id + tabIndex={-1} is the skip-link target (see the "Skip to content"
+          anchor in app/layout.tsx). focus:outline-none so programmatic focus
+          from the skip link doesn't paint a ring around the whole pane. */}
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className={`min-w-0 flex-1 focus:outline-none ${mainClassName ?? "overflow-y-auto"}`}
+      >
         {children}
       </main>
     </>

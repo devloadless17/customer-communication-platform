@@ -108,10 +108,10 @@ export function ChannelList({
         </div>
         <div className="flex items-center gap-1">
           <Button
-            size="icon"
+            size="icon-sm"
             variant="ghost"
             onClick={onOpenWorkspaceSearch}
-            className="size-7"
+            className="pointer-coarse:size-9"
             aria-label="Search messages across every channel"
             title="Search messages"
           >
@@ -119,10 +119,10 @@ export function ChannelList({
           </Button>
           {canCreateChannel(currentRole) && (
             <Button
-              size="icon"
+              size="icon-sm"
               variant="ghost"
               onClick={onCreate}
-              className="size-7"
+              className="pointer-coarse:size-9"
               aria-label="Create channel"
             >
               <Plus className="size-4" />
@@ -139,7 +139,7 @@ export function ChannelList({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter channels"
             aria-label="Filter channels"
-            className="h-7 pl-7 pr-7 text-[12px]"
+            className="h-7 pl-7 pr-7 text-xs"
           />
           {query && (
             <button

@@ -80,8 +80,17 @@ const PRIMARY_ITEMS: NavItem[] = [
     icon: Megaphone,
     match: ["/templates", "/broadcasts/groups"],
   },
-  { href: "/workflows", label: "Workflows", icon: Workflow },
 ];
+
+// Workflows is admin-only — same gate as the desktop AppRail (the page
+// redirects non-admins and GET /api/team/workflows is @RequireRole("admin")).
+// Hardcoding it for everyone made non-admins tap it and bounce; appended
+// conditionally below via the `canManageWorkflows` prop.
+const WORKFLOWS_ITEM: NavItem = {
+  href: "/workflows",
+  label: "Workflows",
+  icon: Workflow,
+};
 
 function sectionTitle(pathname: string): string {
   if (pathname.startsWith("/inbox")) return "Inbox";
@@ -98,6 +107,7 @@ export function MobileShellChrome({
   currentUser,
   team,
   canManageAvailability,
+  canManageWorkflows,
   subSidebar,
   /** Override the auto-derived section title (rare). */
   title,
@@ -110,6 +120,10 @@ export function MobileShellChrome({
    *  AvailabilityPicker in the drawer footer is interactive or read-only.
    *  The server endpoint @RequireCapability is the real enforcement. */
   canManageAvailability: boolean;
+  /** Whether to surface the admin-only Workflows nav item. Mirrors the
+   *  desktop AppRail gate — non-admins tapping it would bounce off the
+   *  redirect in workflows/page.tsx. */
+  canManageWorkflows: boolean;
   subSidebar?: ReactNode;
   title?: string;
   rightSlot?: ReactNode;
@@ -165,6 +179,9 @@ export function MobileShellChrome({
 
   const items = useMemo<NavItem[]>(() => {
     const out = [...PRIMARY_ITEMS];
+    // Workflows is admin-only — appended after the primary items (its prior
+    // position) so the order is unchanged for admins, hidden for everyone else.
+    if (canManageWorkflows) out.push(WORKFLOWS_ITEM);
     out.push({
       href: "/settings",
       label: "Settings",
@@ -175,7 +192,7 @@ export function MobileShellChrome({
     // shell entirely (→ /platform in the (app) layout), so they never render
     // this chrome. The old `/admin` push here was dead + unreachable.
     return out;
-  }, []);
+  }, [canManageWorkflows]);
 
   const resolvedTitle = title ?? sectionTitle(pathname);
 
@@ -186,6 +203,8 @@ export function MobileShellChrome({
           type="button"
           onClick={() => setOpen(true)}
           aria-label="Open navigation"
+          aria-expanded={open}
+          aria-controls="mobile-nav-drawer"
           className="inline-flex size-9 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <Menu className="size-5" />
@@ -199,9 +218,10 @@ export function MobileShellChrome({
         onOpenChange={setOpen}
         side="left"
         contentClassName="w-[280px] max-w-[85vw]"
+        labelledBy="mobile-nav-team-name"
         hideCloseButton
       >
-        <div className="flex h-full flex-col">
+        <div id="mobile-nav-drawer" className="flex h-full flex-col">
           {/* Team header */}
           <div className="flex items-center gap-3 border-b border-border px-4 py-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -210,7 +230,10 @@ export function MobileShellChrome({
               </span>
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{teamName}</div>
+              {/* id is the dialog's aria-labelledby target (Sheet labelledBy). */}
+              <div id="mobile-nav-team-name" className="truncate text-sm font-medium">
+                {teamName}
+              </div>
               <div className="truncate text-2xs text-muted-foreground">
                 {currentUser.name} · {roleLabel(currentUser.role)}
               </div>
@@ -218,7 +241,7 @@ export function MobileShellChrome({
           </div>
 
           {/* Primary nav */}
-          <nav className="flex flex-col gap-0.5 px-2 py-2">
+          <nav aria-label="Primary navigation" className="flex flex-col gap-0.5 px-2 py-2">
             {items.map((item) => (
               <MobileNavLink
                 key={item.href}
@@ -266,7 +289,7 @@ export function MobileShellChrome({
             <div className="mt-1 flex flex-col gap-0.5 border-t border-border pt-1">
               <Link
                 href="/settings/account"
-                className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex h-8 items-center gap-2 rounded-md px-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 <UserCircle2 className="size-4" />
                 Account
@@ -274,7 +297,7 @@ export function MobileShellChrome({
               <button
                 type="button"
                 onClick={signOut}
-                className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 <LogOut className="size-4" />
                 Sign out

@@ -200,6 +200,7 @@ export function MessageSearch({
             }
           }}
           placeholder="Search messages…"
+          aria-label="Search messages in this conversation"
           className="h-8 pl-8 pr-9 text-sm"
         />
         {query && (
@@ -243,7 +244,7 @@ export function MessageSearch({
           disabled={!canNav}
           aria-label="Older match"
           title="Older match (↑ or Enter)"
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          className="inline-flex size-7 pointer-coarse:size-9 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
         >
           <ChevronUp className="size-3.5" />
         </button>
@@ -253,7 +254,7 @@ export function MessageSearch({
           disabled={!canNav}
           aria-label="Newer match"
           title="Newer match (↓ or Shift+Enter)"
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          className="inline-flex size-7 pointer-coarse:size-9 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
         >
           <ChevronDown className="size-3.5" />
         </button>
@@ -263,7 +264,7 @@ export function MessageSearch({
         type="button"
         onClick={onClose}
         aria-label="Close search"
-        className="ml-1 inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className="ml-1 inline-flex size-7 pointer-coarse:size-9 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
         <X className="size-3.5" />
       </button>
@@ -292,7 +293,7 @@ export function highlightQuery(text: string, query: string): React.ReactNode {
         // highlight reads as "subtle fog over this text" rather than a
         // loud color swap. Backdrop-blur smooths the edge against any
         // bubble background.
-        className="rounded-[3px] bg-white/25 px-0.5 text-inherit backdrop-blur-[1px]"
+        className="rounded-xs bg-white/25 px-0.5 text-inherit backdrop-blur-[1px]"
       >
         {part}
       </mark>

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Languages,
+  Loader2,
   MessageSquare,
   MousePointerClick,
   Paperclip,
@@ -1306,9 +1307,19 @@ export function ReplyBox({
                   isNote && "bg-amber-700 text-white hover:bg-amber-800",
                 )}
               >
-                <Send className="size-3.5" />
+                {sendInFlight ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Send className="size-3.5" />
+                )}
                 <span className="@max-[26rem]:hidden">
-                  {isNote ? "Save note" : attachment ? "Send media" : "Send"}
+                  {sendInFlight
+                    ? "Sending…"
+                    : isNote
+                      ? "Save note"
+                      : attachment
+                        ? "Send media"
+                        : "Send"}
                 </span>
               </Button>
             </div>

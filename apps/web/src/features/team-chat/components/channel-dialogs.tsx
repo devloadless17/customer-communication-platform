@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
@@ -16,10 +17,9 @@ import {
 } from "@ccp/shared/team-chat/types";
 
 /**
- * Minimal modal dialogs for create + edit + delete channel. We don't use
- * Radix Dialog here because nothing else in this surface needs it — a
- * fixed-overlay div with a controlled close mirrors what the rest of the
- * settings pages do without taking a dep we'd only use here.
+ * Minimal modal dialogs for create + edit + delete channel. Wraps the shared
+ * <Dialog> primitive (canonical scrim + card chrome + scroll-lock + focus-trap
+ * + Escape) so this surface matches every other modal without a Radix dep.
  */
 
 function ModalShell({
@@ -32,17 +32,12 @@ function ModalShell({
   children: React.ReactNode;
 }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="w-full max-w-md rounded-xl border border-border bg-background p-5 shadow-2xl">
+    <Dialog open onClose={onClose}>
+      <DialogContent className="max-w-md p-5" ariaLabel={title}>
         <div className="mb-3 text-base font-semibold">{title}</div>
         {children}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

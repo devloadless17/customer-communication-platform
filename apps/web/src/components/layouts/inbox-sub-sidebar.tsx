@@ -126,8 +126,9 @@ export function InboxSubSidebar({
 
   // Per-bucket UNREAD counts (conversations with unread messages). Server truth
   // when loaded, else derived from the loaded slice for first paint. These drive
-  // the filter badges now — a green unread pill styled like the conversation-row
-  // badge (request: surface unread on the filters), no separate total count.
+  // the green unread pill on each filter — styled like the conversation-row
+  // badge — rendered alongside the muted TOTAL bucket count (`presetTotals`),
+  // so a bucket with chats but none unread still shows its depth.
   const unreadCounts = useMemo<Record<PresetFilterId, number>>(() => {
     // `?.unread` (not just `serverCounts`): a counts response from before this
     // field shipped (cached, or a version-skewed server mid-deploy) has no
@@ -145,6 +146,35 @@ export function InboxSubSidebar({
         (x) => x.status !== "closed" && x.assignedUserId === null && u(x),
       ).length,
       closed: c.filter((x) => x.status === "closed" && u(x)).length,
+    };
+  }, [serverCounts, conversations, currentUser.id]);
+
+  // Per-bucket TOTAL counts (every matching conversation, read or unread).
+  // Rendered as a muted number beside the green unread pill so a bucket that
+  // has chats but none unread still shows its depth (blank-when-no-unread hid
+  // triage volume). Server truth when loaded; loaded-slice derivation for the
+  // first paint, mirroring `unreadCounts` above.
+  const presetTotals = useMemo<Record<PresetFilterId, number>>(() => {
+    if (serverCounts) {
+      return {
+        active: serverCounts.active,
+        all: serverCounts.all,
+        mine: serverCounts.mine,
+        unassigned: serverCounts.unassigned,
+        closed: serverCounts.closed,
+      };
+    }
+    const c = conversations.map((x) => x.conversation);
+    return {
+      active: c.filter((x) => x.status !== "closed").length,
+      all: c.length,
+      mine: c.filter(
+        (x) => x.status !== "closed" && x.assignedUserId === currentUser.id,
+      ).length,
+      unassigned: c.filter(
+        (x) => x.status !== "closed" && x.assignedUserId === null,
+      ).length,
+      closed: c.filter((x) => x.status === "closed").length,
     };
   }, [serverCounts, conversations, currentUser.id]);
 
@@ -170,13 +200,15 @@ export function InboxSubSidebar({
         {PRESETS.map(({ id, label, icon: Icon }) => {
           const active = filter.kind === "preset" && filter.id === id;
           const unread = unreadCounts[id];
+          const total = presetTotals[id];
           return (
             <button
               key={id}
               type="button"
+              aria-pressed={active}
               onClick={() => onFilterChange({ kind: "preset", id })}
               className={cn(
-                "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
+                "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-sm transition-colors",
                 "hover:bg-accent hover:text-accent-foreground",
                 active
                   ? "bg-accent text-accent-foreground font-medium"
@@ -190,6 +222,18 @@ export function InboxSubSidebar({
                 )}
               />
               <span className="flex-1 text-left">{label}</span>
+              {/* Total bucket count — muted, mirrors the stage rows. Shows
+                  triage depth even when nothing's unread (was blank before). */}
+              {total > 0 && (
+                <span
+                  className={cn(
+                    "tabular-nums text-3xs",
+                    active ? "text-foreground" : "text-muted-foreground",
+                  )}
+                >
+                  {total > 999 ? "999+" : total}
+                </span>
+              )}
               {unread > 0 && (
                 <span
                   className="flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-3xs font-bold tabular-nums text-primary-foreground"
@@ -206,9 +250,10 @@ export function InboxSubSidebar({
             right under Closed. The live-calls count badge rides on the right. */}
         <button
           type="button"
+          aria-pressed={filter.kind === "calls"}
           onClick={() => onFilterChange({ kind: "calls" })}
           className={cn(
-            "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
+            "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-sm transition-colors",
             "hover:bg-accent hover:text-accent-foreground",
             filter.kind === "calls"
               ? "bg-accent text-accent-foreground font-medium"
@@ -268,6 +313,7 @@ export function InboxSubSidebar({
                   <button
                     key={stage.id}
                     type="button"
+                    aria-pressed={active}
                     onClick={() => onFilterChange({ kind: "stage", stageId: stage.id })}
                     title={
                       stage.isDefault
@@ -275,7 +321,7 @@ export function InboxSubSidebar({
                         : stage.name
                     }
                     className={cn(
-                      "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
+                      "group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2.5 text-sm transition-colors",
                       "hover:bg-accent hover:text-accent-foreground",
                       active
                         ? "bg-accent text-accent-foreground font-medium"
@@ -367,7 +413,7 @@ export function InboxSubSidebar({
                 return (
                   <div
                     key={u.id}
-                    className="flex min-h-8 items-center gap-2.5 rounded-md px-2.5 py-1 text-[13px] text-muted-foreground"
+                    className="flex min-h-8 items-center gap-2.5 rounded-md px-2.5 py-1 text-sm text-muted-foreground"
                     title={dotLabel}
                   >
                     <div className="relative shrink-0">

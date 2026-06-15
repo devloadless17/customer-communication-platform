@@ -2,8 +2,7 @@
 
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Camera, Check, Loader2, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { Camera, Loader2, Trash2 } from "lucide-react";
 
 import { initials } from "@ccp/shared/utils";
 
@@ -11,6 +10,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { toast } from "@/lib/toast";
 
 interface ProfileFormProps {
   user: {
@@ -36,15 +36,11 @@ export function ProfileForm({ user }: ProfileFormProps) {
   const [avatarUrl, setAvatarUrl] = useState<string | null>(user.avatarUrl);
   const [savingName, startNameSave] = useTransition();
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<"name" | "avatar" | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const nameChanged = name.trim().length > 0 && name.trim() !== user.name;
 
   const onSaveName = () => {
-    setError(null);
-    setDone(null);
     const next = name.trim();
     if (!next || next === user.name) return;
     startNameSave(async () => {
@@ -55,10 +51,10 @@ export function ProfileForm({ user }: ProfileFormProps) {
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Couldn't update name");
+        toast.error(data.error ?? "Couldn't update name");
         return;
       }
-      setDone("name");
+      toast.success("Name updated.");
       // No local socket dispatch: `dispatchLocalSocketEvent` only runs THIS
       // tab's listeners (and none subscribe to user:profile:updated), so it was
       // a pure no-op. Teammates get the change via the SERVER `user.profile_updated`
@@ -76,15 +72,13 @@ export function ProfileForm({ user }: ProfileFormProps) {
     const file = e.target.files?.[0] ?? null;
     e.target.value = "";
     if (!file) return;
-    setError(null);
-    setDone(null);
 
     if (file.size > 2 * 1024 * 1024) {
-      setError("Avatar must be 2 MiB or smaller.");
+      toast.error("Avatar must be 2 MiB or smaller.");
       return;
     }
     if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-      setError("Avatar must be a PNG, JPG, or WEBP image.");
+      toast.error("Avatar must be a PNG, JPG, or WEBP image.");
       return;
     }
 
@@ -102,23 +96,21 @@ export function ProfileForm({ user }: ProfileFormProps) {
         detail?: string;
       };
       if (!res.ok || !data.url) {
-        setError(data.detail ?? data.error ?? "Couldn't upload avatar");
+        toast.error(data.detail ?? data.error ?? "Couldn't upload avatar");
         return;
       }
       setAvatarUrl(data.url);
-      setDone("avatar");
+      toast.success("Avatar updated.");
       // See onSubmit: teammates get this via the server bus event; this tab via refresh.
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't upload avatar");
+      toast.error(err instanceof Error ? err.message : "Couldn't upload avatar");
     } finally {
       setUploadingAvatar(false);
     }
   };
 
   const onClearAvatar = async () => {
-    setError(null);
-    setDone(null);
     setUploadingAvatar(true);
     try {
       const res = await apiFetch("/api/users/me", {
@@ -128,11 +120,10 @@ export function ProfileForm({ user }: ProfileFormProps) {
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Couldn't remove avatar");
+        toast.error(data.error ?? "Couldn't remove avatar");
         return;
       }
       setAvatarUrl(null);
-      setDone("avatar");
       // See onSubmit: teammates get this via the server bus event; this tab via refresh.
       router.refresh();
       toast.success("Avatar removed");
@@ -156,7 +147,7 @@ export function ProfileForm({ user }: ProfileFormProps) {
             onClick={onPickFile}
             disabled={uploadingAvatar}
             aria-label="Upload new avatar"
-            className="absolute -bottom-1 -right-1 inline-flex size-7 items-center justify-center rounded-full border border-border bg-card text-foreground shadow-sm transition-colors hover:bg-accent disabled:opacity-50"
+            className="absolute -bottom-1 -right-1 inline-flex size-7 items-center justify-center rounded-full border border-border bg-card text-foreground shadow-sm transition-colors hover:bg-accent disabled:opacity-50 pointer-coarse:size-9"
           >
             {uploadingAvatar ? (
               <Loader2 className="size-3.5 animate-spin" />
@@ -214,21 +205,6 @@ export function ProfileForm({ user }: ProfileFormProps) {
           </Button>
         </div>
       </div>
-
-      {error ? (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-        >
-          {error}
-        </div>
-      ) : null}
-      {done ? (
-        <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
-          <Check className="size-3.5" />
-          {done === "name" ? "Name updated." : "Avatar updated."}
-        </div>
-      ) : null}
     </div>
   );
 }

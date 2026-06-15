@@ -11,7 +11,7 @@ export function WabaMissingState() {
         <SettingsIcon className="size-5" />
       </div>
       <div className="text-sm font-medium">WhatsApp Business Account ID needed</div>
-      <p className="max-w-md text-[12px] leading-relaxed text-muted-foreground">
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
         Templates live on your WABA, not your phone number. Paste your WABA ID
         in Settings → WhatsApp to load and send approved templates.
       </p>

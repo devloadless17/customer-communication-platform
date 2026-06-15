@@ -124,7 +124,7 @@ export function Sheet({
             type="button"
             onClick={() => onOpenChange(false)}
             aria-label="Close"
-            className="absolute right-2 top-2 z-10 inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="absolute right-2 top-2 z-10 inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           >
             <X className="size-4" />
           </button>

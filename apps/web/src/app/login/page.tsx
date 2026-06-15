@@ -1,5 +1,7 @@
+import { redirect } from "next/navigation";
 import { MessageSquareText } from "lucide-react";
 
+import { getCurrentSession } from "@/lib/auth";
 import { LoginForm } from "./login-form";
 
 export const metadata = {
@@ -11,6 +13,13 @@ interface PageProps {
 }
 
 export default async function LoginPage({ searchParams }: PageProps) {
+  // Already signed in? Bounce to the role-router ("/" routes superAdmin →
+  // /platform, pending org → /pending, else → /inbox) instead of re-showing
+  // the form on a bookmarked /login or a back-nav. getCurrentSession() READS
+  // the session without redirecting, so a stale/absent cookie can't loop —
+  // we only redirect when a real session exists.
+  const session = await getCurrentSession();
+  if (session?.user?.id) redirect("/");
   const { next } = await searchParams;
   // Normalize "/" up front — it's a server component that redirects to
   // /inbox, and chaining that RSC redirect after the action-response

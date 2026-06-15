@@ -136,13 +136,13 @@ export function ThreadHeader({
   onOpenContactDetails?: () => void;
 }) {
   return (
-    <header className="flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
+    <header className="@container flex h-15 shrink-0 items-center gap-2 border-b border-border px-3 md:gap-3 md:px-4">
       {onMobileBack && (
         <button
           type="button"
           onClick={onMobileBack}
           aria-label="Back to conversations"
-          className="-ml-1 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          className="-ml-1 inline-flex size-8 pointer-coarse:size-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
         >
           <ChevronLeft className="size-5" />
         </button>
@@ -165,7 +165,11 @@ export function ThreadHeader({
         </div>
       </div>
 
-      <div className="ml-3 hidden shrink-0 md:flex">
+      {/* Stage pill — contact metadata, lower priority than the customer's
+          name/phone. Container-query gated (@2xl ≈ 672px of HEADER width, not
+          viewport) so when the thread column is narrow it hides instead of
+          squeezing the name into "Ali …". Reappears once there's room. */}
+      <div className="ml-3 hidden shrink-0 @2xl:flex">
         {/* Just the clickable stage pill (opens the picker to jump to any
             stage). The prev/next stepper arrows were removed per design —
             the pill's dropdown covers the same moves. */}
@@ -185,7 +189,7 @@ export function ThreadHeader({
           onClick={onOpenSearch}
           aria-label="Search this conversation"
           title="Search this conversation (⌘F)"
-          className="size-8 text-muted-foreground hover:text-foreground"
+          className="size-8 pointer-coarse:size-9 text-muted-foreground hover:text-foreground"
         >
           <SearchIcon className="size-4" />
         </Button>
@@ -196,7 +200,7 @@ export function ThreadHeader({
             onClick={() => void onInitiateCall()}
             aria-label="Start a WhatsApp call with this contact"
             title="Call on WhatsApp"
-            className="size-8 text-muted-foreground hover:text-foreground"
+            className="size-8 pointer-coarse:size-9 text-muted-foreground hover:text-foreground"
           >
             <Phone className="size-4" />
           </Button>
@@ -246,7 +250,7 @@ export function ThreadHeader({
             onClick={onOpenContactDetails}
             aria-label="Contact details"
             title="Contact details"
-            className="size-8 text-muted-foreground hover:text-foreground lg:hidden"
+            className="size-8 pointer-coarse:size-9 text-muted-foreground hover:text-foreground lg:hidden"
           >
             <Info className="size-4" />
           </Button>

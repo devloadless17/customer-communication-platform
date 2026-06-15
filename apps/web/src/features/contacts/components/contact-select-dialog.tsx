@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Check, Users, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ContactBrowser } from "@/features/contacts/components/contact-browser";
 import type {
   ContactFieldDefinition,
@@ -58,10 +58,6 @@ export function ContactSelectDialog({
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSelectedIds));
   // Labels for every contact row the browser has rendered this session.
   const seenLabels = useRef<Map<string, ContactLabel>>(new Map());
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
-  useModalOverlay(dialogRef, open, onClose);
 
   // Reset the working set every time the dialog is (re)opened so it always
   // reflects the caller's current selection, not a stale one.
@@ -94,18 +90,12 @@ export function ContactSelectDialog({
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-12"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="flex max-h-[88vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-card text-card-foreground shadow-lg"
+    <Dialog open={open} onClose={onClose}>
+      {/* flex-col + inner scroll region keeps the header + confirm bar pinned;
+          override the card's default block-scroll with `overflow-hidden`. */}
+      <DialogContent
+        ariaLabel={title}
+        className="flex max-h-[88vh] max-w-2xl flex-col overflow-hidden"
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
@@ -118,7 +108,7 @@ export function ContactSelectDialog({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           >
             <X className="size-4" />
           </button>
@@ -165,7 +155,7 @@ export function ContactSelectDialog({
             </Button>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

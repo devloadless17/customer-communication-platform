@@ -4,7 +4,8 @@ import { AlertCircle, Check, CheckCheck, Clock } from "lucide-react";
 
 import { LocalTime } from "@/components/local-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { cn, initials } from "@ccp/shared/utils";
+import { useTimezone } from "@/providers/tz-provider";
+import { cn, formatLocaleString, initials } from "@ccp/shared/utils";
 import type { Message } from "@ccp/shared/types";
 
 export function BubbleMeta({
@@ -30,6 +31,11 @@ export function BubbleMeta({
       ? message.statusErrorDetail ?? message.statusErrorTitle ?? null
       : null;
 
+  // Full localized date+time for the time-hover tooltip — the meta row only
+  // shows "h:mm AM", so hovering surfaces the exact day/year without a click.
+  const tz = useTimezone();
+  const fullDateTime = formatLocaleString(message.timestamp, tz);
+
   return (
     <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
       <div
@@ -38,7 +44,9 @@ export function BubbleMeta({
           isOut ? "flex-row-reverse" : "flex-row",
         )}
       >
-        <LocalTime iso={message.timestamp} format="messageTime" />
+        <span title={fullDateTime}>
+          <LocalTime iso={message.timestamp} format="messageTime" />
+        </span>
         {isOut && senderName && (
           <>
             <span className="opacity-50">·</span>
@@ -107,8 +115,20 @@ function StatusTicks({
     case "sent":
       return <Check className="size-3 opacity-70" aria-label="Sent" />;
     case "delivered":
-      return <CheckCheck className="size-3 opacity-70" aria-label="Delivered" />;
+      // Thin, muted double-check. Differs from "read" by WEIGHT + opacity, not
+      // hue alone, so it stays distinguishable for color-blind agents.
+      return (
+        <CheckCheck className="size-3 opacity-70" strokeWidth={2} aria-label="Delivered" />
+      );
     case "read":
-      return <CheckCheck className="size-3 text-primary" aria-label="Read" />;
+      // Read = full-opacity primary AND a heavier stroke, so it reads as "more
+      // confirmed" than delivered even when the green/grey hue is imperceptible.
+      return (
+        <CheckCheck
+          className="size-3 text-primary opacity-100"
+          strokeWidth={3}
+          aria-label="Read"
+        />
+      );
   }
 }

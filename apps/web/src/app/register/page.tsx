@@ -1,6 +1,8 @@
+import { redirect } from "next/navigation";
 import Link from "next/link";
 import { MessageSquareText } from "lucide-react";
 
+import { getCurrentSession } from "@/lib/auth";
 import { RegisterForm } from "./register-form";
 
 export const metadata = {
@@ -8,6 +10,10 @@ export const metadata = {
 };
 
 export default async function RegisterPage() {
+  // Already signed in → role-router, not the create-workspace form (same
+  // non-redirecting session read as /login, so no loop on a stale cookie).
+  const session = await getCurrentSession();
+  if (session?.user?.id) redirect("/");
   return (
     <div className="grid min-h-svh place-items-center bg-background px-4">
       <div className="w-full max-w-sm">

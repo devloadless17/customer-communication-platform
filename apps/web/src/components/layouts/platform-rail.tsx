@@ -63,9 +63,19 @@ export function PlatformRail({
           <div className="truncate text-sm font-semibold leading-tight">Platform</div>
           <div className="truncate text-2xs text-muted-foreground">Super admin</div>
         </div>
+        {/* Mobile sign-out: below md the rail is a top bar and the desktop
+            footer (with avatar + sign-out) is hidden, so a superadmin on a
+            phone would otherwise have no way to sign out. Surface it here. */}
+        <a
+          href="/logout"
+          aria-label="Sign out"
+          className="ml-auto flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+        >
+          <LogOut className="size-4" />
+        </a>
       </header>
 
-      <nav className="flex gap-1 px-3 pb-3 md:flex-col md:pb-0">
+      <nav aria-label="Platform navigation" className="flex gap-1 px-3 pb-3 md:flex-col md:pb-0">
         {NAV.map((item) => {
           const active = item.isActive(pathname);
           const Icon = item.icon;
@@ -75,7 +85,7 @@ export function PlatformRail({
               href={item.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex h-9 items-center gap-2.5 rounded-md px-3 text-[13px] transition-colors",
+                "flex h-9 items-center gap-2.5 rounded-md px-3 text-sm transition-colors",
                 active
                   ? "bg-accent font-medium text-accent-foreground"
                   : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
@@ -97,7 +107,7 @@ export function PlatformRail({
           </AvatarFallback>
         </Avatar>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-medium">{user.name}</div>
+          <div className="truncate text-sm font-medium">{user.name}</div>
           <div className="truncate text-2xs text-muted-foreground">
             {roleLabel(user.role)}
           </div>
@@ -107,7 +117,7 @@ export function PlatformRail({
         <a
           href="/logout"
           aria-label="Sign out"
-          className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
         >
           <LogOut className="size-4" />
         </a>

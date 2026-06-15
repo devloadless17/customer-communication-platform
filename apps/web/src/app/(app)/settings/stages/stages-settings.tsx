@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   Loader2,
+  Milestone,
   Pencil,
   Plus,
   Star,
@@ -17,6 +18,7 @@ import {
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { TAG_COLORS, type ContactStage, type TagColor } from "@ccp/shared/types";
@@ -294,6 +296,7 @@ export function StagesSettings({
                     }
                   }}
                   placeholder="New stage name…"
+                  aria-label="New stage name"
                   className="h-8 max-w-xs text-sm"
                   disabled={busyId === "__new__"}
                 />
@@ -325,9 +328,18 @@ export function StagesSettings({
           )}
         </ul>
         {sortedStages.length === 0 && !creating && (
-          <div className="px-6 py-10 text-center text-sm text-muted-foreground">
-            No stages yet. Click <span className="font-medium">Add stage</span> to create one.
-          </div>
+          <EmptyState
+            icon={Milestone}
+            title="No stages yet"
+            description="Stages track where each contact sits in your customer lifecycle. Add one to start segmenting."
+            action={
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="size-4" />
+                Add stage
+              </Button>
+            }
+            className="rounded-none border-0 bg-transparent"
+          />
         )}
       </div>
 
@@ -416,7 +428,7 @@ function StageRow({
           onClick={onMoveUp}
           disabled={isFirst || busy}
           aria-label="Move up"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowUp className="size-3.5" />
         </button>
@@ -425,7 +437,7 @@ function StageRow({
           onClick={onMoveDown}
           disabled={isLast || busy}
           aria-label="Move down"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowDown className="size-3.5" />
         </button>
@@ -498,7 +510,7 @@ function StageRow({
         onClick={onDelete}
         disabled={busy}
         aria-label={`Delete ${stage.name}`}
-        className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+        className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 pointer-coarse:size-9"
       >
         {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
       </button>

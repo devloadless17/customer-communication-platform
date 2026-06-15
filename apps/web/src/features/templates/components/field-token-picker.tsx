@@ -114,7 +114,7 @@ export function FieldTokenPicker({
           <DropdownMenuItem
             key={t.token}
             onSelect={() => onInsert(t.token)}
-            className="flex items-center gap-2 text-[12px]"
+            className="flex items-center gap-2 text-xs"
           >
             {iconFor(t.token)}
             <span className="flex-1">{t.label}</span>
@@ -133,7 +133,7 @@ export function FieldTokenPicker({
               <DropdownMenuItem
                 key={t.token}
                 onSelect={() => onInsert(t.token)}
-                className="flex items-center gap-2 text-[12px]"
+                className="flex items-center gap-2 text-xs"
               >
                 <Hash className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
@@ -154,7 +154,7 @@ export function FieldTokenPicker({
               <DropdownMenuItem
                 key={t.token}
                 onSelect={() => onInsert(t.token)}
-                className="flex items-center gap-2 text-[12px]"
+                className="flex items-center gap-2 text-xs"
               >
                 <UserCircle className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
@@ -175,7 +175,7 @@ export function FieldTokenPicker({
               <DropdownMenuItem
                 key={t.token}
                 onSelect={() => onInsert(t.token)}
-                className="flex items-center gap-2 text-[12px]"
+                className="flex items-center gap-2 text-xs"
               >
                 <MessageSquare className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
@@ -196,7 +196,7 @@ export function FieldTokenPicker({
               <DropdownMenuItem
                 key={t.token}
                 onSelect={() => onInsert(t.token)}
-                className="flex items-center gap-2 text-[12px]"
+                className="flex items-center gap-2 text-xs"
               >
                 <Inbox className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
@@ -217,7 +217,7 @@ export function FieldTokenPicker({
               <DropdownMenuItem
                 key={t.token}
                 onSelect={() => onInsert(t.token)}
-                className="flex items-center gap-2 text-[12px]"
+                className="flex items-center gap-2 text-xs"
               >
                 <UserCircle className="size-3.5 text-muted-foreground" />
                 <span className="flex-1 truncate">{t.label}</span>
@@ -231,7 +231,7 @@ export function FieldTokenPicker({
         {hint && (
           <>
             <DropdownMenuSeparator />
-            <div className="px-2 py-1.5 text-[10.5px] leading-relaxed text-muted-foreground">
+            <div className="px-2 py-1.5 text-2xs leading-relaxed text-muted-foreground">
               {hint}
             </div>
           </>

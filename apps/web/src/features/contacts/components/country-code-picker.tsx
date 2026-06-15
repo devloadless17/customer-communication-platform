@@ -185,13 +185,14 @@ export function CountryCodePicker({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search country or code…"
+                aria-label="Search country or dial code"
                 className="h-8 pl-7 text-xs"
               />
             </div>
           </div>
           <div className="flex-1 overflow-y-auto">
             {filtered.length === 0 ? (
-              <div className="px-4 py-6 text-center text-[12px] text-muted-foreground">
+              <div className="px-4 py-6 text-center text-xs text-muted-foreground">
                 No matches.
               </div>
             ) : (

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Loader2, ShieldCheck } from "lucide-react";
+import { Loader2, ShieldCheck } from "lucide-react";
 
 import {
   ALL_CAPABILITIES,
@@ -12,7 +12,7 @@ import {
   type RolePermissionsConfig,
 } from "@ccp/shared/auth/permissions";
 import { roleLabel } from "@ccp/shared/auth/permissions";
-import { cn } from "@ccp/shared/utils";
+import { Switch } from "@/components/ui/switch";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
@@ -131,7 +131,9 @@ export function PermissionsSettings() {
           <table className="w-full min-w-130 text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/30 text-2xs uppercase tracking-wide text-muted-foreground">
-                <th className="px-4 py-2.5 text-left font-medium">Action</th>
+                <th className="sticky left-0 z-20 bg-muted px-4 py-2.5 text-left font-medium">
+                  Action
+                </th>
                 <th className="px-4 py-2.5 text-center font-medium">Admin</th>
                 {EDITABLE_ROLES.map((r) => (
                   <th key={r} className="px-4 py-2.5 text-center font-medium">
@@ -146,7 +148,7 @@ export function PermissionsSettings() {
                   key={cap}
                   className="border-b border-border last:border-b-0 hover:bg-accent/20"
                 >
-                  <td className="px-4 py-3 font-medium text-foreground">
+                  <td className="sticky left-0 z-10 bg-card px-4 py-3 font-medium text-foreground">
                     {CAPABILITY_LABELS[cap]}
                   </td>
                   <td className="px-4 py-3">
@@ -162,10 +164,10 @@ export function PermissionsSettings() {
                   {EDITABLE_ROLES.map((role) => (
                     <td key={role} className="px-4 py-3">
                       <div className="flex justify-center">
-                        <Toggle
-                          on={matrix[role][cap]}
-                          label={`${CAPABILITY_LABELS[cap]} for ${roleLabel(role)}`}
-                          onClick={() => toggle(role, cap)}
+                        <Switch
+                          checked={matrix[role][cap]}
+                          aria-label={`${CAPABILITY_LABELS[cap]} for ${roleLabel(role)}`}
+                          onCheckedChange={() => toggle(role, cap)}
                         />
                       </div>
                     </td>
@@ -180,35 +182,3 @@ export function PermissionsSettings() {
   );
 }
 
-function Toggle({
-  on,
-  label,
-  onClick,
-}: {
-  on: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={onClick}
-      className={cn(
-        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
-        on ? "bg-primary" : "bg-muted-foreground/30",
-      )}
-    >
-      <span
-        className={cn(
-          "inline-flex size-4 items-center justify-center rounded-full bg-white shadow transition-transform",
-          on ? "translate-x-4" : "translate-x-0.5",
-        )}
-      >
-        {on && <Check className="size-2.5 text-primary" />}
-      </span>
-    </button>
-  );
-}

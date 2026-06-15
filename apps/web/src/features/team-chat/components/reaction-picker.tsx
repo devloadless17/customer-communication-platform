@@ -30,7 +30,7 @@ export function ReactionPicker({
         <button
           key={emoji}
           type="button"
-          className="flex size-7 items-center justify-center rounded-full text-base transition-colors hover:bg-accent"
+          className="flex size-7 items-center justify-center rounded-full text-base transition-colors hover:bg-accent pointer-coarse:size-9"
           onClick={() => onPick(emoji)}
           aria-label={`React with ${emoji}`}
         >
@@ -39,7 +39,7 @@ export function ReactionPicker({
       ))}
       <button
         type="button"
-        className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
         aria-label="More reactions"
         title="More reactions — full picker coming soon"
         onClick={(e) => {

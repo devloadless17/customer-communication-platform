@@ -10,6 +10,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Tag as TagIcon,
   Trash2,
   Users,
   X,
@@ -25,6 +26,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { TAG_COLORS, type Tag, type TagColor } from "@ccp/shared/types";
@@ -244,6 +246,7 @@ export function TagsSettings({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search tags…"
+              aria-label="Search tags"
               className="h-9 pl-8 pr-8"
             />
             {query && (
@@ -307,6 +310,7 @@ export function TagsSettings({
                     }
                   }}
                   placeholder="New tag name…"
+                  aria-label="New tag name"
                   maxLength={40}
                   className="h-8 max-w-xs text-sm"
                   disabled={busyId === "__new__"}
@@ -350,9 +354,18 @@ export function TagsSettings({
           ))}
         </ul>
         {tags.length === 0 && !creating && (
-          <div className="px-6 py-10 text-center text-sm text-muted-foreground">
-            No tags yet. Click <span className="font-medium">Add tag</span> to create one.
-          </div>
+          <EmptyState
+            icon={TagIcon}
+            title="No tags yet"
+            description="Labels for segmenting contacts — filter the contacts list and target audience-based broadcasts."
+            action={
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="size-4" />
+                Add tag
+              </Button>
+            }
+            className="rounded-none border-0 bg-transparent"
+          />
         )}
         {tags.length > 0 && visibleTags.length === 0 && !creating && (
           <div className="px-6 py-10 text-center text-sm text-muted-foreground">
@@ -463,7 +476,7 @@ function TagRow({
         onClick={onDelete}
         disabled={busy}
         aria-label={`Delete ${tag.name}`}
-        className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+        className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 pointer-coarse:size-9"
       >
         {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
       </button>

@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Loader2, Trash2, X } from "lucide-react";
 
 import {
@@ -16,6 +15,7 @@ import {
   findCountry,
 } from "@/features/contacts/components/country-code-picker";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 import type {
@@ -78,12 +78,9 @@ export function NewContactDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const phoneRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Body-scroll-lock + focus-trap + Escape — shared with every other
-  // modal in the app. The dialog content root below carries `dialogRef`.
-  useModalOverlay(dialogRef, true, onClose);
-
+  // Focus the phone field (the first thing you fill) rather than the leading
+  // country-code picker that <Dialog>'s focus-trap would otherwise land on.
   useEffect(() => {
     phoneRef.current?.focus();
   }, []);
@@ -157,20 +154,8 @@ export function NewContactDialog({
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="new-contact-title"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-16"
-      onClick={(e) => {
-        // Backdrop click closes — but ignore clicks bubbling out of the panel.
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-lg"
-      >
+    <Dialog open onClose={onClose}>
+      <DialogContent className="max-w-md" labelledBy="new-contact-title">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 id="new-contact-title" className="text-base font-semibold">
             New contact
@@ -349,7 +334,10 @@ export function NewContactDialog({
           />
 
           {error && (
-            <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            <div
+              role="alert"
+              className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+            >
               {error}
             </div>
           )}
@@ -372,8 +360,8 @@ export function NewContactDialog({
             </Button>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

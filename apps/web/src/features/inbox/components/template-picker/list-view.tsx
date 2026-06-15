@@ -39,6 +39,7 @@ export function TemplateListView({
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             placeholder="Search by name, language, or body…"
+            aria-label="Search templates"
             className="h-9 pl-8"
             autoFocus
           />
@@ -86,7 +87,7 @@ export function TemplateListView({
                       </span>
                       {t.status !== "approved" && <StatusPill status={t.status} />}
                     </div>
-                    <p className="mt-1 line-clamp-2 text-[12px] leading-snug text-muted-foreground">
+                    <p className="mt-1 line-clamp-2 text-xs leading-snug text-muted-foreground">
                       {t.bodyText || "—"}
                     </p>
                   </div>
@@ -119,7 +120,7 @@ function EmptyState({ query }: { query: string }) {
     <div className="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center">
       <FileText className="size-5 text-muted-foreground" />
       <div className="text-sm font-medium">No templates yet</div>
-      <p className="max-w-md text-[12px] leading-relaxed text-muted-foreground">
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
         Create a template here and submit it to Meta for review. Once approved,
         click <span className="font-medium">Refresh</span> to load it.
       </p>
@@ -129,12 +130,12 @@ function EmptyState({ query }: { query: string }) {
             universal target. */}
         <Link
           href="/templates"
-          className="text-[12px] font-medium text-primary hover:underline"
+          className="text-xs font-medium text-primary hover:underline"
         >
           Create one in Templates →
         </Link>
         <a
-          className="text-[12px] font-medium text-muted-foreground hover:underline"
+          className="text-xs font-medium text-muted-foreground hover:underline"
           href="https://business.facebook.com/wa/manage/message-templates"
           target="_blank"
           rel="noreferrer"

@@ -175,7 +175,16 @@ export function AssignmentDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="h-8 min-w-0 gap-1.5" disabled={pending}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 min-w-0 gap-1.5"
+          disabled={pending}
+          // Full name is the label even when the text collapses below @2xl,
+          // so the avatar-only trigger stays self-describing for hover + SR.
+          title={currentName ? `Assigned to ${currentName}` : "Unassigned — assign this conversation"}
+          aria-label={currentName ? `Assigned to ${currentName}` : "Unassigned — assign this conversation"}
+        >
           {currentName ? (
             <>
               <Avatar className="size-4 shrink-0">
@@ -186,7 +195,11 @@ export function AssignmentDropdown({
                   {initials(currentName)}
                 </AvatarFallback>
               </Avatar>
-              <span className="truncate max-w-32 font-normal">{currentName.split(" ")[0]}</span>
+              {/* Name collapses below @2xl of HEADER width — same container-query
+                  breakpoint the Stage pill uses — leaving avatar + chevron. */}
+              <span className="hidden truncate max-w-32 font-normal @2xl:inline">
+                {currentName.split(" ")[0]}
+              </span>
             </>
           ) : (
             <span className="text-muted-foreground">Unassigned</span>

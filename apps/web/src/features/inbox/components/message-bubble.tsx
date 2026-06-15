@@ -64,6 +64,14 @@ interface MessageBubbleProps {
   /** See `showAvatar`. When false the meta row is omitted (a non-tail bubble in
    *  a group). Pending/failed rows always pass true so their status never hides. */
   showMeta?: boolean;
+  /**
+   * Last bubble of a same-sender group. Only the TAIL gets the flat "tail"
+   * corner (`rounded-br-xs` / `rounded-bl-xs`); earlier continuation bubbles
+   * keep all four corners fully rounded so a burst reads as one stacked unit
+   * instead of N independently-tailed bubbles. Defaults to true → a lone /
+   * ungrouped message keeps the tail exactly as before.
+   */
+  isTail?: boolean;
 }
 
 /**
@@ -142,6 +150,7 @@ function BubbleContent({
   isActiveSearchMatch,
   showAvatar = true,
   showMeta = true,
+  isTail = true,
 }: MessageBubbleProps) {
   const isOut = message.direction === "out";
   const media = message.media;
@@ -219,7 +228,7 @@ function BubbleContent({
       >
         <div
           className={cn(
-            "overflow-hidden rounded-2xl text-sm leading-relaxed shadow-xs ring-1 transition-[box-shadow,background-color]",
+            "overflow-hidden rounded-2xl text-sm leading-snug shadow-xs ring-1 transition-[box-shadow,background-color]",
             // Reduce horizontal padding when the leading element is a media
             // block — they look better edge-to-edge inside the bubble.
             media || reply ? "p-1" : "px-3.5 py-2",
@@ -229,8 +238,12 @@ function BubbleContent({
             // send feels instant rather than slightly-loading.
             message.failed && "opacity-80 ring-destructive/60",
             isOut
-              ? "rounded-br-xs bg-outbound-bg text-outbound-fg ring-transparent"
-              : "rounded-bl-xs bg-inbound-bg text-inbound-fg ring-border",
+              ? "bg-outbound-bg text-outbound-fg ring-transparent"
+              : "bg-inbound-bg text-inbound-fg ring-border",
+            // Flat tail corner ONLY on the group's last bubble; continuation
+            // bubbles keep all four corners rounded so a stack reads as one
+            // unit. (`rounded-2xl` above already rounds every corner.)
+            isTail && (isOut ? "rounded-br-xs" : "rounded-bl-xs"),
             // Active search match — a soft neutral ring that stays for as
             // long as the bubble is the selected match. Uses the
             // foreground color at low opacity so it adapts to light/dark
@@ -284,7 +297,7 @@ function BubbleContent({
               Client-only + derived, so it's consistent live AND on reload with
               no schema/event change. */}
           {!isOut && !media && !message.mediaPending && !message.body && (
-            <p className="flex items-center gap-1.5 px-2.5 py-1.5 text-[13px] italic text-muted-foreground">
+            <p className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm italic text-muted-foreground">
               <Paperclip className="size-3.5 shrink-0" />
               Attachment unavailable
             </p>

@@ -249,7 +249,7 @@ export function ChannelThread({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.15 }}
-              className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-primary px-3.5 py-1.5 text-[12px] font-medium text-primary-foreground shadow-lg ring-1 ring-border/40 transition-colors hover:bg-primary/90"
+              className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground shadow-lg ring-1 ring-border/40 transition-colors hover:bg-primary/90"
             >
               <ArrowDown className="size-3.5" />
               {pendingLiveCount > 0
@@ -266,7 +266,7 @@ export function ChannelThread({
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 8 }}
                 transition={{ duration: 0.15 }}
-                className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
+                className="pointer-events-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-xs font-medium text-background shadow-lg ring-1 ring-border/40 transition-colors hover:bg-foreground/90"
               >
                 <ArrowDown className="size-3.5" />
                 {unreadBelow} new {unreadBelow === 1 ? "message" : "messages"}

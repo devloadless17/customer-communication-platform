@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, Loader2 } from "lucide-react";
 
-import { cn } from "@ccp/shared/utils";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "@/lib/toast";
 import { apiFetch } from "@/lib/api/client-fetch";
 
@@ -55,28 +55,22 @@ export function AiAutopilotToggle({ initialEnabled }: { initialEnabled: boolean 
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold">AI Autopilot</h2>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={enabled}
-              onClick={() => void toggle()}
-              disabled={pending}
-              className={cn(
-                "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50",
-                enabled ? "bg-primary" : "bg-muted",
-              )}
-              title={enabled ? "AI Autopilot is on — click to disable" : "AI Autopilot is off — click to enable"}
-            >
-              <span
-                className={cn(
-                  "inline-block size-4 transform rounded-full bg-background shadow transition-transform",
-                  enabled ? "translate-x-4" : "translate-x-0.5",
-                )}
+            <span className="relative inline-flex shrink-0">
+              <Switch
+                checked={enabled}
+                onCheckedChange={() => void toggle()}
+                disabled={pending}
+                aria-label="AI Autopilot"
+                title={
+                  enabled
+                    ? "AI Autopilot is on — click to disable"
+                    : "AI Autopilot is off — click to enable"
+                }
               />
               {pending && (
-                <Loader2 className="absolute inset-0 m-auto size-3 animate-spin text-foreground/60" />
+                <Loader2 className="pointer-events-none absolute inset-0 m-auto size-3 animate-spin text-foreground/60" />
               )}
-            </button>
+            </span>
           </div>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             Let an external AI flow (e.g. n8n) auto-reply to customers. When on,

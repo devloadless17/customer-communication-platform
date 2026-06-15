@@ -23,8 +23,11 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.16 0.006 262);
 
-  /* Brand: a refined, modern green — WhatsApp-adjacent (hue 164) but distinct */
-  --primary: oklch(0.56 0.13 164);
+  /* Brand: a refined, modern green — WhatsApp-adjacent (hue 164), darkened to
+     L0.515 so WHITE text on it clears WCAG AA (~4.7:1) on buttons + outbound
+     bubbles, where the old L0.56 was 4.18:1 (fail). Chroma nudged 0.13→0.135 to
+     keep it vivid at the lower lightness. */
+  --primary: oklch(0.515 0.135 164);
   --primary-foreground: oklch(0.99 0 0);
 
   --secondary: oklch(0.962 0.006 256);
@@ -41,7 +44,7 @@
 
   --border: oklch(0.895 0.008 254);
   --input: oklch(0.915 0.007 254);
-  --ring: oklch(0.56 0.13 164);
+  --ring: oklch(0.515 0.135 164);
 
   /* Domain-specific tokens used by inbox components.
      inbound-bg sits a clear step BELOW --background (page is near-white at
@@ -49,13 +52,17 @@
      2px inter-bubble gap is visible instead of blending into the page. */
   --inbound-bg: oklch(0.967 0.004 256);
   --inbound-fg: oklch(0.18 0.006 262);
-  --outbound-bg: oklch(0.56 0.13 164);
+  --outbound-bg: oklch(0.515 0.135 164);
   --outbound-fg: oklch(0.99 0 0);
   /* Internal notes — a soft, low-chroma beige (warm but neutral, not loud
      yellow). The color alone signals "note", so no label is needed. */
   --note-bg: oklch(0.955 0.018 78);
   --note-border: oklch(0.87 0.028 75);
   --note-fg: oklch(0.42 0.045 68);
+  /* Search-match highlight — a soft, low-chroma amber wash that stands out
+     behind a search hit without shouting like a raw highlighter yellow.
+     Tuned so dark body text on top still clears WCAG AA. */
+  --highlight: oklch(0.92 0.085 92);
 
   --radius: 0.625rem;
 
@@ -116,6 +123,10 @@
   --note-bg: oklch(0.29 0.035 75);
   --note-border: oklch(0.42 0.045 75);
   --note-fg: oklch(0.92 0.04 85);
+  /* Search-match highlight (dark) — a muted amber wash with enough chroma to
+     register against the cool-slate surfaces while light foreground text on
+     top stays legible. */
+  --highlight: oklch(0.46 0.08 88);
 
   /* Sidebar is the deepest surface (chrome-rail effect) but no longer a black
      hole — 0.162 sits just below the page so the rail reads as recessed, not
@@ -153,6 +164,8 @@
   --color-note-bg: var(--note-bg);
   --color-note-border: var(--note-border);
   --color-note-fg: var(--note-fg);
+
+  --color-highlight: var(--highlight);
 
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);

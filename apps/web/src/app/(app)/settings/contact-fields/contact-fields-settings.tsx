@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -10,11 +10,13 @@ import {
   Loader2,
   Pencil,
   Plus,
+  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
@@ -54,6 +56,7 @@ export function ContactFieldsSettings({
   const [newLabel, setNewLabel] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const newInputRef = useRef<HTMLInputElement>(null);
+  const newFieldErrorId = useId();
 
   const sorted = useMemo(() => [...defs].sort(byOrder), [defs]);
 
@@ -411,9 +414,13 @@ export function ContactFieldsSettings({
                     }
                   }}
                   placeholder="New field name…"
+                  aria-label="New field name"
                   className="h-8 max-w-xs text-sm"
                   disabled={busyId === "__new__"}
                   aria-invalid={isReservedFieldKey(newLabel) || undefined}
+                  aria-describedby={
+                    isReservedFieldKey(newLabel) ? newFieldErrorId : undefined
+                  }
                 />
                 <div className="ml-auto flex items-center gap-2">
                   <Button
@@ -443,7 +450,7 @@ export function ContactFieldsSettings({
                 </div>
               </div>
               {isReservedFieldKey(newLabel) && (
-                <div className="mt-2 text-2xs text-destructive">
+                <div id={newFieldErrorId} role="alert" className="mt-2 text-2xs text-destructive">
                   &ldquo;{newLabel}&rdquo; is a built-in contact field — pick a
                   different name.
                 </div>
@@ -452,9 +459,18 @@ export function ContactFieldsSettings({
           )}
         </ul>
         {sorted.length === 0 && !creating && (
-          <div className="px-6 py-10 text-center text-sm text-muted-foreground">
-            No custom fields yet. Click <span className="font-medium">Add field</span> to create one.
-          </div>
+          <EmptyState
+            icon={SlidersHorizontal}
+            title="No custom fields yet"
+            description="Custom fields capture structured data on every contact — and show up in imports, exports, and the contact panel."
+            action={
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="size-4" />
+                Add field
+              </Button>
+            }
+            className="rounded-none border-0 bg-transparent"
+          />
         )}
       </div>
 
@@ -516,7 +532,7 @@ function FieldRow({
           onClick={onMoveUp}
           disabled={isFirst || busy}
           aria-label="Move up"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowUp className="size-3.5" />
         </button>
@@ -525,7 +541,7 @@ function FieldRow({
           onClick={onMoveDown}
           disabled={isLast || busy}
           aria-label="Move down"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent pointer-coarse:size-9"
         >
           <ArrowDown className="size-3.5" />
         </button>
@@ -578,7 +594,7 @@ function FieldRow({
           disabled={busy}
           aria-label={field.isVisible ? `Hide ${field.label}` : `Show ${field.label}`}
           title={field.isVisible ? "Hide from contact panel" : "Show on contact panel"}
-          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50 pointer-coarse:size-9"
         >
           {field.isVisible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
         </button>
@@ -587,7 +603,7 @@ function FieldRow({
           onClick={onDelete}
           disabled={busy}
           aria-label={`Delete ${field.label}`}
-          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+          className="inline-flex size-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50 pointer-coarse:size-9"
         >
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
         </button>
@@ -625,7 +641,7 @@ function BuiltinRow({
         onClick={onToggle}
         aria-label={visible ? `Hide ${label}` : `Show ${label}`}
         title={visible ? "Hide from contact panel" : "Show on contact panel"}
-        className="inline-flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
       >
         {visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
       </button>

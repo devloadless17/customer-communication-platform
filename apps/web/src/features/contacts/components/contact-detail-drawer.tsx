@@ -320,7 +320,7 @@ export function ContactDetailDrawer({
           <Separator />
 
           <Section title="Contact info">
-            <div className="flex min-w-0 items-center gap-2 px-1 py-1 text-[13px]">
+            <div className="flex min-w-0 items-center gap-2 px-1 py-1 text-sm">
               <Phone className="size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 truncate font-mono tabular-nums">{formatPhone(contact.phoneNumber)}</span>
             </div>

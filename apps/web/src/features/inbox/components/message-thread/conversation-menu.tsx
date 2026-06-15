@@ -67,7 +67,7 @@ export function ConversationMenu({
           <Button
             variant="ghost"
             size="icon"
-            className="size-8"
+            className="size-8 pointer-coarse:size-9"
             aria-label="Conversation actions"
             disabled={pending}
           >

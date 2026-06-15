@@ -1,14 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useId, useState } from "react";
 import { Check, Copy, Eye, EyeOff, KeyRound, Loader2, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { MIN_PASSWORD_LENGTH } from "@ccp/shared/auth/password-policy";
 
 /**
@@ -63,7 +62,6 @@ export function ResetPasswordDialog({
 }) {
   const open = target !== null;
   const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
 
   const [password, setPassword] = useState("");
   const [reveal, setReveal] = useState(false);
@@ -78,8 +76,6 @@ export function ResetPasswordDialog({
     onClose();
   }, [saving, onClose]);
 
-  useModalOverlay(dialogRef, open, close);
-
   // Reset all transient state whenever the dialog opens for a (new) target so
   // a previous attempt's password / error / success never leaks across rows.
   useEffect(() => {
@@ -92,7 +88,6 @@ export function ResetPasswordDialog({
   }, [open]);
 
   if (!open || !target) return null;
-  if (typeof document === "undefined") return null;
 
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
   const canSubmit = password.length >= MIN_PASSWORD_LENGTH && !saving;
@@ -132,18 +127,11 @@ export function ResetPasswordDialog({
     }
   }
 
-  return createPortal(
-    <div
-      ref={dialogRef}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={titleId}
-      className="fixed inset-0 z-60 flex items-center justify-center bg-black/50 p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) close();
-      }}
-    >
-      <div className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-xl">
+  // z-60 keeps this above any modal it can open from (e.g. the platform org
+  // detail roster). The shared <Dialog> portals to <body> + owns the chrome.
+  return (
+    <Dialog open={open} onClose={close} overlayClassName="z-60">
+      <DialogContent className="max-w-md" labelledBy={titleId}>
         <div className="flex items-start gap-3 p-5">
           <div className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
             <KeyRound className="size-4" />
@@ -197,6 +185,8 @@ export function ResetPasswordDialog({
                       }
                     }}
                     placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
+                    aria-invalid={error ? true : undefined}
+                    aria-describedby={error ? `${titleId}-err` : undefined}
                     className="pr-9 font-mono"
                   />
                   <button
@@ -248,6 +238,7 @@ export function ResetPasswordDialog({
 
           {error && (
             <div
+              id={`${titleId}-err`}
               role="alert"
               className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
             >
@@ -278,8 +269,7 @@ export function ResetPasswordDialog({
             </Button>
           )}
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogContent>
+    </Dialog>
   );
 }

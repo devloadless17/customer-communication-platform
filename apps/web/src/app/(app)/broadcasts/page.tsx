@@ -93,7 +93,7 @@ function EmptyState({ canManage }: { canManage: boolean }) {
         <Megaphone className="size-5" />
       </div>
       <div className="text-sm font-medium">No broadcasts yet</div>
-      <p className="max-w-md text-[12px] leading-relaxed text-muted-foreground">
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
         Reach out to many contacts at once with an approved WhatsApp template.
         Each broadcast tracks per-recipient delivery so you can spot failures.
       </p>

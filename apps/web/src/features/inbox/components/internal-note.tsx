@@ -41,7 +41,7 @@ function InternalNoteImpl({
             type="button"
             onClick={() => onDelete(note.id)}
             title="Delete this note"
-            className="mt-0.5 inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
+            className="mt-0.5 inline-flex size-7 pointer-coarse:size-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100"
             aria-label="Delete note"
           >
             <Trash2 className="size-3.5" />

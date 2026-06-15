@@ -110,7 +110,7 @@ export function SnippetPopup({
       // we want the caret to stay put so the replacement can find it.
       onMouseDown={(e) => e.preventDefault()}
     >
-      <div className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
         <Sparkles className="size-3 text-primary" />
         <span>Snippets</span>
         <span className="ml-auto font-mono text-3xs normal-case text-muted-foreground">
@@ -118,7 +118,7 @@ export function SnippetPopup({
         </span>
       </div>
       {matches.length === 0 ? (
-        <div className="px-3 py-3 text-[12px] text-muted-foreground">
+        <div className="px-3 py-3 text-xs text-muted-foreground">
           No snippets match{" "}
           <code className="rounded bg-muted px-1 font-mono">/{query}</code>.
         </div>
@@ -143,7 +143,7 @@ export function SnippetPopup({
                   <span className="block truncate text-[12.5px] font-medium">
                     {s.label}
                   </span>
-                  <span className="block truncate font-mono text-[10.5px] text-muted-foreground">
+                  <span className="block truncate font-mono text-2xs text-muted-foreground">
                     /{s.name} · {compact(s.body)}
                   </span>
                 </span>

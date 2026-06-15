@@ -49,6 +49,16 @@ function ConversationListItemImpl({
   // per-agent read state for the inbox — "read" means read for all.
   const unread = conversation.unreadCount > 0;
 
+  // Row 3 (status chip + assignment) only carries signal when there's a
+  // pending/closed chip OR an assignee. The common open + unassigned case had
+  // it spending a full line on the italic word "unassigned" — but the missing
+  // assignee avatar already conveys "unassigned", so we drop the row entirely
+  // there. The row's outer height stays a fixed h-20 (the virtualizer depends
+  // on it); the text column just vertically-centres its 2 rows instead of 3.
+  const hasStatusChip =
+    conversation.status === "pending" || conversation.status === "closed";
+  const showMeta = hasStatusChip || assignedUser !== null;
+
   return (
     <div
       className={cn(
@@ -82,12 +92,12 @@ function ConversationListItemImpl({
         </AvatarFallback>
       </Avatar>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
         {/* Row 1: name + timestamp */}
         <div className="flex items-center gap-1.5">
           <span
             className={cn(
-              "flex-1 truncate text-[13px] leading-snug",
+              "flex-1 truncate text-sm leading-snug",
               unread
                 ? "font-semibold text-foreground"
                 : "font-medium text-foreground/90",
@@ -112,7 +122,7 @@ function ConversationListItemImpl({
             // correct base direction (matches the thread bubble + WhatsApp Web).
             dir="auto"
             className={cn(
-              "min-w-0 flex-1 truncate text-[12px] leading-snug",
+              "min-w-0 flex-1 truncate text-xs leading-snug",
               unread ? "text-foreground/80" : "text-muted-foreground",
             )}
           >
@@ -135,36 +145,37 @@ function ConversationListItemImpl({
           ) : null}
         </div>
 
-        {/* Row 3: status chip + assignment */}
-        <div className="flex items-center gap-1.5">
-          {conversation.status === "pending" && (
-            <span className="inline-flex h-4.5 items-center rounded-sm bg-amber-500/12 px-1.5 text-3xs font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
-              pending
-            </span>
-          )}
-          {conversation.status === "closed" && (
-            <span className="inline-flex h-4.5 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
-              closed
-            </span>
-          )}
-          {assignedUser ? (
-            <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
-              <Avatar className="size-3.5">
-                <AvatarFallback
-                  seed={assignedUser.id}
-                  className="text-[7px] font-semibold"
-                >
-                  {initials(assignedUser.name)}
-                </AvatarFallback>
-              </Avatar>
-              <span className="truncate">{assignedUser.name.split(" ")[0]}</span>
-            </span>
-          ) : (
-            <span className="text-2xs italic text-muted-foreground/60">
-              unassigned
-            </span>
-          )}
-        </div>
+        {/* Row 3: status chip + assignment — rendered ONLY when it carries
+            signal (a pending/closed chip or an assignee). For the common
+            open + unassigned chat it's omitted entirely: the missing assignee
+            avatar already says "unassigned", so the line was pure noise. */}
+        {showMeta && (
+          <div className="flex items-center gap-1.5">
+            {conversation.status === "pending" && (
+              <span className="inline-flex h-4.5 items-center rounded-sm bg-amber-500/12 px-1.5 text-3xs font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                pending
+              </span>
+            )}
+            {conversation.status === "closed" && (
+              <span className="inline-flex h-4.5 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
+                closed
+              </span>
+            )}
+            {assignedUser && (
+              <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
+                <Avatar className="size-3.5">
+                  <AvatarFallback
+                    seed={assignedUser.id}
+                    className="text-[7px] font-semibold"
+                  >
+                    {initials(assignedUser.name)}
+                  </AvatarFallback>
+                </Avatar>
+                <span className="truncate">{assignedUser.name.split(" ")[0]}</span>
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

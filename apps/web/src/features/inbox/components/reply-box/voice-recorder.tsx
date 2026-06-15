@@ -326,9 +326,10 @@ export function RecordingBar({
         type="button"
         variant="ghost"
         size="icon"
-        className="size-8 text-destructive hover:bg-destructive/10"
+        className="size-8 pointer-coarse:size-9 text-destructive hover:bg-destructive/10"
         onClick={onCancel}
         title="Discard recording"
+        aria-label="Discard recording"
       >
         <Trash2 className="size-4" />
       </Button>
@@ -358,9 +359,10 @@ export function RecordingBar({
       <Button
         type="button"
         size="icon"
-        className="size-8 rounded-full"
+        className="size-8 pointer-coarse:size-9 rounded-full"
         onClick={onSend}
         title="Send voice message"
+        aria-label="Send voice message"
       >
         <Send className="size-4" />
       </Button>

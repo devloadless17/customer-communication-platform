@@ -490,6 +490,7 @@ export function ContactFilterBar({
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder}
             className="h-9 pl-8"
             data-contacts-search=""
           />
@@ -839,7 +840,7 @@ export function ContactBrowser({
             loading unbounded pages. (use-virtualizer pattern from
             conversation-list.tsx if this cap ever needs lifting.) */}
         {list.nextCursor && items.length >= 2000 && (
-          <div className="border-t border-border p-3 text-center text-[12px] text-muted-foreground">
+          <div className="border-t border-border p-3 text-center text-xs text-muted-foreground">
             Showing {items.length.toLocaleString()} contacts. Refine the filters
             or search to see more — the list is capped to keep the page
             responsive.

@@ -73,6 +73,19 @@ export function useFocusTrap<T extends HTMLElement>(
     overlayStack.push(token);
     const isTop = () => overlayStack[overlayStack.length - 1] === token;
 
+    // Move focus INTO the dialog on open. Without this, focus stays on the
+    // background trigger (WCAG 2.4.3 — focus order) and the Tab-cycle below
+    // never engages because nothing inside the container is focused yet.
+    // Prefer the first focusable; fall back to the container itself (callers
+    // give the root `tabIndex={-1}` so it can receive programmatic focus).
+    const container = ref.current;
+    if (container) {
+      const firstFocusable = container.querySelector<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      (firstFocusable ?? container).focus?.();
+    }
+
     function onKey(e: KeyboardEvent) {
       // Only the top-most overlay owns the keyboard — nested overlays stay
       // inert until they become top (their child closes).

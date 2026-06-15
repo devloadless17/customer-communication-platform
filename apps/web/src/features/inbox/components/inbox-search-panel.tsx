@@ -5,11 +5,13 @@ import {
   Loader2,
   MessageSquare,
   Phone,
+  SearchX,
   StickyNote,
   Users,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { EmptyState as EmptyStateCard } from "@/components/ui/empty-state";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
@@ -130,7 +132,12 @@ export function InboxSearchPanel({
           {current.loading && current.results.length === 0 ? (
             <EmptyState text="Searching…" spinner />
           ) : current.results.length === 0 ? (
-            <EmptyState text={`No ${scope} match “${query.trim()}”`} />
+            <EmptyStateCard
+              icon={SearchX}
+              title="No results"
+              description={`No ${scope} match “${query.trim()}”.`}
+              className="m-2 border-0 bg-transparent py-12"
+            />
           ) : (
             <ul className="flex flex-col gap-0.5">
               {scope === "contacts" &&
@@ -233,7 +240,7 @@ function highlight(text: string, query: string) {
     i % 2 === 1 ? (
       <mark
         key={i}
-        className="rounded-[3px] bg-primary/20 px-0.5 text-foreground"
+        className="rounded-xs bg-primary/20 px-0.5 text-foreground"
       >
         {part}
       </mark>

@@ -134,7 +134,7 @@ export function VariableBindingsEditor({
 
   if (bodyVarCount === 0 && !headerHasVar) {
     return (
-      <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-[12px] text-muted-foreground">
+      <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
         This template has no <code className="rounded bg-muted px-1 text-2xs">{"{{n}}"}</code> variables.
       </div>
     );
@@ -212,7 +212,7 @@ function BindingRow({
           value={binding.label}
           onChange={(e) => onLabelChange(e.target.value)}
           placeholder="label (e.g. first_name)"
-          className="h-7 max-w-45 text-[12px]"
+          className="h-7 max-w-45 text-xs"
         />
       </div>
 
@@ -254,7 +254,7 @@ function BindingRow({
             value={binding.defaultValue ?? ""}
             onChange={(e) => onDefaultChange(e.target.value)}
             placeholder="(optional)"
-            className="h-7 text-[12px]"
+            className="h-7 text-xs"
           />
         </label>
       )}

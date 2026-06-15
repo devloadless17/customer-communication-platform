@@ -114,7 +114,7 @@ export function ChannelSearch({
           type="button"
           onClick={onClose}
           aria-label="Close search"
-          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="inline-flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
         >
           <X className="size-4" />
         </button>
@@ -190,7 +190,7 @@ function SearchResultRow({
             <span className="truncate text-[12.5px] font-medium">
               {message.authorName ?? "Removed user"}
             </span>
-            <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground">
+            <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
               {stamp}
             </span>
           </span>

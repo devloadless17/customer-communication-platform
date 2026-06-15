@@ -97,7 +97,7 @@ export function ContactMultiSelectField({
   return (
     <div className="flex flex-col gap-2.5">
       {selectedIds.length === 0 ? (
-        <p className="text-[12px] text-muted-foreground">{emptyHint}</p>
+        <p className="text-xs text-muted-foreground">{emptyHint}</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {selectedIds.map((id) => {

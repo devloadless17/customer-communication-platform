@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
+import { useFocusTrap } from "@/hooks/use-modal-overlay";
 
 /**
  * Inbox-side composer for WhatsApp interactive messages (buttons).
@@ -65,24 +66,26 @@ export function InteractivePopover({
     }
   }, [open, initialBody]);
 
-  // Outside-click + Escape close. Same idiom as the template picker.
+  // Focus trap + Escape-to-close + focus enter/return. Replaces the prior
+  // hand-rolled Escape listener — useFocusTrap moves focus INTO the popover
+  // on open, traps Tab inside it, and returns focus to the opener on close
+  // (role="dialog" was a lie without this). Outside-click stays below.
+  useFocusTrap(wrapperRef, open, onClose);
+
+  // Outside-click close. Same idiom as the template picker. (Escape + Tab
+  // trapping now live in useFocusTrap above.)
   useEffect(() => {
     if (!open) return;
     function onDocClick(e: MouseEvent) {
       if (!wrapperRef.current) return;
       if (!wrapperRef.current.contains(e.target as Node)) onClose();
     }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
     const t = window.setTimeout(() => {
       window.addEventListener("mousedown", onDocClick);
     }, 0);
-    window.addEventListener("keydown", onKey);
     return () => {
       window.clearTimeout(t);
       window.removeEventListener("mousedown", onDocClick);
-      window.removeEventListener("keydown", onKey);
     };
   }, [open, onClose]);
 
@@ -182,8 +185,10 @@ export function InteractivePopover({
     <div
       ref={wrapperRef}
       role="dialog"
+      aria-modal="true"
       aria-label="Send buttons"
-      className="absolute bottom-[calc(100%+8px)] right-0 z-30 w-80 rounded-lg border border-border bg-popover p-3 shadow-xl"
+      tabIndex={-1}
+      className="absolute bottom-[calc(100%+8px)] right-0 z-30 w-80 rounded-lg border border-border bg-popover p-3 shadow-xl focus:outline-none"
     >
       <div className="mb-2 flex items-center gap-2">
         <MousePointerClick className="size-4 text-violet-600" />
@@ -230,14 +235,14 @@ export function InteractivePopover({
               onChange={(e) => setOption(idx, { title: e.target.value })}
               placeholder="Title (max 20)"
               maxLength={20}
-              className="flex-1 text-[12px]"
+              className="flex-1 text-xs"
               aria-label={`Button ${idx + 1} title`}
             />
             <button
               type="button"
               onClick={() => removeOption(idx)}
               disabled={options.length <= 1}
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-30"
+              className="inline-flex size-7 pointer-coarse:size-9 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-30"
               aria-label={`Remove button ${idx + 1}`}
             >
               ×

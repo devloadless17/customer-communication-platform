@@ -28,7 +28,7 @@ export function ReplyTargetPill({
         <div className="truncate text-2xs text-muted-foreground">
           Replying to <span className="font-medium text-foreground">{senderLabel}</span>
         </div>
-        <div className="truncate text-[12px] text-muted-foreground">{bodyLabel}</div>
+        <div className="truncate text-xs text-muted-foreground">{bodyLabel}</div>
       </div>
       <button
         type="button"

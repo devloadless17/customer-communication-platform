@@ -359,10 +359,10 @@ function ConditionRow({
       <Button
         type="button"
         variant="ghost"
-        size="icon"
+        size="icon-sm"
         onClick={onRemove}
         aria-label="Remove condition"
-        className="ml-auto size-7 text-muted-foreground hover:text-destructive"
+        className="ml-auto text-muted-foreground hover:text-destructive pointer-coarse:size-9"
       >
         <X className="size-4" />
       </Button>

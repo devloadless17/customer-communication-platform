@@ -188,7 +188,7 @@ function TargetSelector({
           className="size-3.5"
         />
         <span>Contact from the trigger</span>
-        <span className="text-[10.5px] text-muted-foreground">(default)</span>
+        <span className="text-2xs text-muted-foreground">(default)</span>
       </label>
       <label className="flex cursor-pointer items-center gap-2 text-sm">
         <input
@@ -210,7 +210,7 @@ function TargetSelector({
                 value={phone}
                 onChange={(e164) => onChange({ kind: "phone", phoneNumber: e164 })}
               />
-              <span className="text-[10.5px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 Any number — templates can reach contacts outside the 24h window.
               </span>
             </>
@@ -226,14 +226,14 @@ function TargetSelector({
                   )
                 }
               />
-              <span className="text-[10.5px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 Pick from contacts who messaged you in the last 24h. Cold reachout
                 (outside the window) requires a Send Template step.
               </span>
             </>
           )}
           {extraHint && (
-            <span className="text-[10.5px] text-amber-600 dark:text-amber-400">
+            <span className="text-2xs text-amber-600 dark:text-amber-400">
               {extraHint}
             </span>
           )}
@@ -1225,7 +1225,7 @@ export function AskQuestionEditor({
                   value={opt.id}
                   onChange={(e) => setOption(idx, { id: e.target.value })}
                   placeholder="id"
-                  className="max-w-25 font-mono text-[12px]"
+                  className="max-w-25 font-mono text-xs"
                   aria-label={`Option ${idx + 1} id`}
                 />
                 <Input
@@ -1242,14 +1242,14 @@ export function AskQuestionEditor({
                     onChange={(e) => setOption(idx, { description: e.target.value })}
                     placeholder="Description (optional)"
                     maxLength={72}
-                    className="flex-1 text-[12px]"
+                    className="flex-1 text-xs"
                     aria-label={`Option ${idx + 1} description`}
                   />
                 )}
                 <button
                   type="button"
                   onClick={() => removeOption(idx)}
-                  className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive pointer-coarse:size-9"
                   aria-label={`Remove option ${idx + 1}`}
                 >
                   ×

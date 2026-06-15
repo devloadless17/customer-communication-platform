@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
   AlertTriangle,
@@ -154,11 +154,11 @@ export function SnippetsSettings({
         <h1 className="text-xl font-semibold tracking-tight">Snippets</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Saved replies your team can paste into a conversation by typing{" "}
-          <code className="rounded bg-muted px-1 text-[12px]">/name</code> in
+          <code className="rounded bg-muted px-1 text-xs">/name</code> in
           the reply box. Use{" "}
-          <code className="rounded bg-muted px-1 text-[12px]">$var.contact.name</code>{" "}
+          <code className="rounded bg-muted px-1 text-xs">$var.contact.name</code>{" "}
           for per-recipient values, or{" "}
-          <code className="rounded bg-muted px-1 text-[12px]">$var.agent.name</code>{" "}
+          <code className="rounded bg-muted px-1 text-xs">$var.agent.name</code>{" "}
           for sign-offs that use whoever inserted the snippet.
         </p>
       </div>
@@ -180,6 +180,7 @@ export function SnippetsSettings({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search…"
+                aria-label="Search snippets"
                 className="h-9 pl-8"
               />
             </div>
@@ -195,13 +196,13 @@ export function SnippetsSettings({
           </div>
 
           {filtered.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border bg-card px-3 py-6 text-center text-[12px] text-muted-foreground">
+            <div className="rounded-xl border border-dashed border-border bg-card px-3 py-6 text-center text-xs text-muted-foreground">
               {snippets.length === 0
                 ? "No snippets yet. Create one to get started."
                 : `No snippets match "${query}".`}
             </div>
           ) : (
-            <ul className="flex flex-col gap-1 overflow-hidden rounded-lg border border-border bg-card">
+            <ul className="flex flex-col gap-1 overflow-hidden rounded-xl border border-border bg-card">
               {filtered.map((s) => (
                 <li key={s.id}>
                   <button
@@ -215,8 +216,8 @@ export function SnippetsSettings({
                   >
                     <Sparkles className="mt-0.5 size-3.5 shrink-0 text-primary" />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-medium">{s.label}</div>
-                      <div className="truncate font-mono text-[10.5px] text-muted-foreground">
+                      <div className="truncate text-sm font-medium">{s.label}</div>
+                      <div className="truncate font-mono text-2xs text-muted-foreground">
                         /{s.name}
                       </div>
                     </div>
@@ -243,7 +244,7 @@ export function SnippetsSettings({
               <div className="inline-flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary">
                 <Sparkles className="size-4" />
               </div>
-              <p className="max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
+              <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
                 Pick a snippet to edit, or create a new one. Snippets show up
                 in the reply box when an agent types{" "}
                 <code className="rounded bg-muted px-1 text-2xs">/</code>.
@@ -386,56 +387,67 @@ function SnippetEditor({
         hint="Agents type /{name} in the reply box to insert this snippet. Lowercase letters, digits, underscores only."
         error={name.length > 0 && !nameValid ? "Invalid characters or too long." : null}
       >
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-sm text-muted-foreground">/</span>
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value.toLowerCase())}
-            placeholder="welcome_new_user"
-            maxLength={64}
-            className="font-mono text-sm"
-          />
-        </div>
+        {(ids) => (
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-sm text-muted-foreground">/</span>
+            <Input
+              {...ids}
+              value={name}
+              onChange={(e) => setName(e.target.value.toLowerCase())}
+              placeholder="welcome_new_user"
+              maxLength={64}
+              className="font-mono text-sm"
+            />
+          </div>
+        )}
       </Field>
 
       <Field label="Label" hint="What the picker shows the agent.">
-        <Input
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          placeholder="Welcome a new customer"
-          maxLength={80}
-        />
+        {(ids) => (
+          <Input
+            {...ids}
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Welcome a new customer"
+            maxLength={80}
+          />
+        )}
       </Field>
 
       <Field
         label="Body"
         hint="The text agents paste. Use $var.contact.* tokens to personalize."
       >
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[10.5px] text-muted-foreground">{body.length}/4000</span>
-          <FieldTokenPicker
-            fieldDefinitions={fieldDefinitions}
-            onInsert={insertToken}
-            includeAgent
-            hint="Contact tokens resolve against the active conversation. Agent tokens resolve to whoever inserted the snippet — great for sign-offs."
-          />
-        </div>
-        <TokenHighlightTextarea
-          ref={bodyRef}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Hi $var.contact.name, welcome to our service! — $var.agent.name"
-          maxLength={4500}
-          rows={5}
-          className="font-mono text-[13px]"
-          fieldDefinitions={fieldDefinitions}
-          includeAgent
-        />
-        {unknown.length > 0 && (
-          <p className="text-[10.5px] text-amber-600 dark:text-amber-400">
-            Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
-            {unknown.join(", ")} — these will resolve to empty.
-          </p>
+        {(ids) => (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-2xs text-muted-foreground">{body.length}/4000</span>
+              <FieldTokenPicker
+                fieldDefinitions={fieldDefinitions}
+                onInsert={insertToken}
+                includeAgent
+                hint="Contact tokens resolve against the active conversation. Agent tokens resolve to whoever inserted the snippet — great for sign-offs."
+              />
+            </div>
+            <TokenHighlightTextarea
+              {...ids}
+              ref={bodyRef}
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder="Hi $var.contact.name, welcome to our service! — $var.agent.name"
+              maxLength={4500}
+              rows={5}
+              className="font-mono text-sm"
+              fieldDefinitions={fieldDefinitions}
+              includeAgent
+            />
+            {unknown.length > 0 && (
+              <p className="text-2xs text-amber-600 dark:text-amber-400">
+                Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
+                {unknown.join(", ")} — these will resolve to empty.
+              </p>
+            )}
+          </>
         )}
       </Field>
 
@@ -443,10 +455,10 @@ function SnippetEditor({
         <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
           Sample preview
         </div>
-        <div className="whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-[13px] leading-relaxed">
+        <div className="whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm leading-relaxed">
           {preview || <span className="text-muted-foreground italic">(empty)</span>}
         </div>
-        <p className="mt-1 text-[10.5px] text-muted-foreground">
+        <p className="mt-1 text-2xs text-muted-foreground">
           Rendered against a sample contact ({SAMPLE_CONTACT.name}) and a sample
           agent ({SAMPLE_AGENT.name}). In the inbox, those resolve to the live
           contact and the agent inserting the snippet.
@@ -498,14 +510,42 @@ function Field({
   label: string;
   hint?: string;
   error?: string | null;
-  children: React.ReactNode;
+  /**
+   * Render-prop so the label/hint/error can be associated with the control:
+   * callers spread the supplied ids onto their <Input> (`id`,
+   * `aria-describedby`, `aria-invalid`). The wrapping div is the labelled
+   * region for AT that walk the label → control relationship.
+   */
+  children: (ids: {
+    id: string;
+    "aria-describedby": string | undefined;
+    "aria-invalid": true | undefined;
+  }) => React.ReactNode;
 }) {
+  const controlId = useId();
+  const hintId = useId();
+  const errorId = useId();
+  const describedBy = error ? errorId : hint ? hintId : undefined;
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-[12px] font-medium">{label}</label>
-      {children}
-      {hint && !error && <span className="text-[10.5px] text-muted-foreground">{hint}</span>}
-      {error && <span className="text-[10.5px] text-destructive">{error}</span>}
+      <label htmlFor={controlId} className="text-xs font-medium">
+        {label}
+      </label>
+      {children({
+        id: controlId,
+        "aria-describedby": describedBy,
+        "aria-invalid": error ? true : undefined,
+      })}
+      {hint && !error && (
+        <span id={hintId} className="text-2xs text-muted-foreground">
+          {hint}
+        </span>
+      )}
+      {error && (
+        <span id={errorId} role="alert" className="text-2xs text-destructive">
+          {error}
+        </span>
+      )}
     </div>
   );
 }

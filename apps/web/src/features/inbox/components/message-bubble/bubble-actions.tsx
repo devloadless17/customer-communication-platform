@@ -37,7 +37,7 @@ export function BubbleActions({
   const hasMenu = (canForward && Boolean(onForward)) || (canSelect && Boolean(onStartSelect));
   if (!(canReply && onReply) && !hasMenu) return null;
   return (
-    <div className="flex items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+    <div className="flex items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
       {canReply && onReply && (
         <Button
           type="button"
@@ -46,7 +46,7 @@ export function BubbleActions({
           onClick={() => onReply(message)}
           title="Reply to this message"
           aria-label="Reply to this message"
-          className="size-7 text-muted-foreground hover:text-foreground"
+          className="size-7 pointer-coarse:size-9 text-muted-foreground hover:text-foreground"
         >
           <CornerUpLeft className="size-3.5" />
         </Button>
@@ -60,7 +60,7 @@ export function BubbleActions({
               size="icon"
               title="More actions"
               aria-label="More actions"
-              className="size-7 text-muted-foreground hover:text-foreground"
+              className="size-7 pointer-coarse:size-9 text-muted-foreground hover:text-foreground"
             >
               <MoreHorizontal className="size-3.5" />
             </Button>

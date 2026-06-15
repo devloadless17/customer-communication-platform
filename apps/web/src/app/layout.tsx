@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import { headers } from "next/headers";
+import { MotionConfig } from "framer-motion";
 
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TimezoneProvider } from "@/providers/tz-provider";
@@ -50,6 +51,16 @@ export default async function RootLayout({
       className={`${plusJakartaSans.variable} ${jetbrainsMono.variable}`}
     >
       <body className="font-sans">
+        {/* Skip-to-content link — first focusable in the DOM so a keyboard
+            user can jump past the nav rails straight to the page's <main>
+            (which carries id="main-content" + tabIndex={-1} in section-shell).
+            Visually hidden until focused (sr-only → focus:not-sr-only). */}
+        <a
+          href="#main-content"
+          className="sr-only rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-md focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+        >
+          Skip to content
+        </a>
         {/* One-shot unregister of any ghost service worker registered by a
             prior app on this origin. See ServiceWorkerKillSwitch for the
             full rationale. Client component (no inline-script-with-nonce
@@ -60,18 +71,23 @@ export default async function RootLayout({
             loading.tsx skeleton-swap (removed) with a hold-current-page +
             progress-bar feel — see components/nav-progress.tsx. */}
         <NavProgress />
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="light"
-          enableSystem
-          disableTransitionOnChange
-          nonce={nonce}
-        >
-          <TimezoneProvider tz={tz} serverNow={serverNow}>
-            <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
-            <Toaster />
-          </TimezoneProvider>
-        </ThemeProvider>
+        {/* Respect prefers-reduced-motion for ALL framer-motion surfaces in one
+            place (Sheet/pill/spring/toast slide animations). CSS keyframes and
+            the scroll hooks already honor it; this covers the JS-animated tree. */}
+        <MotionConfig reducedMotion="user">
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="light"
+            enableSystem
+            disableTransitionOnChange
+            nonce={nonce}
+          >
+            <TimezoneProvider tz={tz} serverNow={serverNow}>
+              <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
+              <Toaster />
+            </TimezoneProvider>
+          </ThemeProvider>
+        </MotionConfig>
       </body>
     </html>
   );

@@ -187,7 +187,7 @@ function IncomingCallCard({
         variant="destructive"
         onClick={onReject}
         aria-label="Decline call"
-        className="size-8"
+        className="size-8 pointer-coarse:size-9"
       >
         <PhoneOff className="size-4" />
       </Button>
@@ -195,7 +195,7 @@ function IncomingCallCard({
         size="icon"
         onClick={onAnswer}
         aria-label="Answer call"
-        className="size-8 bg-emerald-600 text-white hover:bg-emerald-700"
+        className="size-8 pointer-coarse:size-9"
       >
         <Phone className="size-4" />
       </Button>

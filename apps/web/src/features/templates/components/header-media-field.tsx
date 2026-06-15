@@ -61,8 +61,8 @@ export function HeaderMediaField({
         <Button
           type="button"
           variant="ghost"
-          size="icon"
-          className="size-7 shrink-0"
+          size="icon-sm"
+          className="shrink-0 pointer-coarse:size-9"
           onClick={onClear}
           aria-label="Remove media"
         >

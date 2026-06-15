@@ -188,7 +188,7 @@ function CollapsibleGroup({
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         <span className="font-medium">{title}</span>
-        {subtitle && <span className="text-[10.5px] opacity-70">· {subtitle}</span>}
+        {subtitle && <span className="text-2xs opacity-70">· {subtitle}</span>}
       </button>
       {open && <div className="mt-1.5">{children}</div>}
     </div>
@@ -279,7 +279,7 @@ function ShapeTree({
                     )}
                     title={readOnly ? leaf.description ?? leaf.type : `Insert ${token}`}
                   >
-                    <span className="truncate font-mono text-[10.5px]">{display}</span>
+                    <span className="truncate font-mono text-2xs">{display}</span>
                     <span className="ml-auto shrink-0 text-[9px] lowercase text-muted-foreground/50">
                       {leaf.type}
                     </span>

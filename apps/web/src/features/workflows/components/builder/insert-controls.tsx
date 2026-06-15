@@ -474,7 +474,7 @@ export function NodeActions({
           }}
           aria-label="Duplicate step"
           title="Duplicate"
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
         >
           <Copy className="size-3.5" />
         </button>
@@ -486,7 +486,7 @@ export function NodeActions({
           }}
           aria-label="Delete step"
           title="Delete"
-          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-destructive transition-colors hover:bg-destructive/10"
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded text-destructive transition-colors hover:bg-destructive/10 pointer-coarse:size-9"
         >
           <Trash2 className="size-3.5" />
         </button>
@@ -605,6 +605,7 @@ export function StepPickerPopover({
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search"
+            aria-label="Search steps"
             className="h-7 w-36 pl-7 text-xs"
           />
         </div>
@@ -631,7 +632,7 @@ export function StepPickerPopover({
                       "hover:bg-accent/60",
                     )}
                   >
-                    <span className="flex w-full items-center gap-1.5 text-[13px] font-medium leading-tight">
+                    <span className="flex w-full items-center gap-1.5 text-sm font-medium leading-tight">
                       {o.label}
                       {needsContact && (
                         <span

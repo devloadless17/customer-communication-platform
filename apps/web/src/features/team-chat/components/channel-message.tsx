@@ -378,7 +378,7 @@ function ChannelMessageImpl({
 
       {!editing && !message.pending && !message.failed && (
         <div
-          className="absolute -top-3 right-4 flex items-center gap-0.5 rounded-md border border-border bg-background opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+          className="absolute -top-3 right-4 flex items-center gap-0.5 rounded-md border border-border bg-background opacity-0 shadow-sm transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100"
           onMouseLeave={() => setShowReactions(false)}
         >
           {showReactions && (
@@ -392,7 +392,7 @@ function ChannelMessageImpl({
               <button
                 type="button"
                 onClick={() => setShowReactions((s) => !s)}
-                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
               >
                 <SmilePlus className="size-3.5" />
               </button>
@@ -405,7 +405,7 @@ function ChannelMessageImpl({
                 <button
                   type="button"
                   onClick={() => onOpenThread(message.id)}
-                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
                 >
                   <MessageSquareText className="size-3.5" />
                 </button>
@@ -417,7 +417,7 @@ function ChannelMessageImpl({
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground pointer-coarse:size-9"
               >
                 <MoreHorizontal className="size-3.5" />
               </button>

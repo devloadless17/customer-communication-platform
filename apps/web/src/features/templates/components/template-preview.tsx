@@ -97,7 +97,7 @@ function HeaderBlock({
   const Icon =
     fmt === "IMAGE" ? ImageIcon : fmt === "VIDEO" ? Video : FileTextIcon;
   return (
-    <div className="flex h-32 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-[12px] text-muted-foreground">
+    <div className="flex h-32 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-xs text-muted-foreground">
       <Icon className="size-5" />
       <span>{fmt} header</span>
     </div>
@@ -118,7 +118,7 @@ function HeaderImage({ url }: { url: string }) {
   }, [errored, url]);
   if (errored) {
     return (
-      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-[12px] text-muted-foreground">
+      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-xs text-muted-foreground">
         <ImageIcon className="size-5" />
         <span>Image unavailable</span>
       </div>
@@ -150,7 +150,7 @@ function HeaderVideo({ url }: { url: string }) {
   }, [errored, url]);
   if (errored) {
     return (
-      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-[12px] text-muted-foreground">
+      <div className="flex h-44 items-center justify-center gap-2 border-b border-emerald-500/10 bg-emerald-500/6 text-xs text-muted-foreground">
         <Video className="size-5" />
         <span>Video unavailable</span>
       </div>
@@ -179,7 +179,7 @@ function ButtonChip({
         ? Phone
         : Reply;
   return (
-    <div className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-2 py-2 text-center text-[13px] font-medium text-primary">
+    <div className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-background px-2 py-2 text-center text-sm font-medium text-primary">
       <Icon className="size-3.5" />
       {button.text}
     </div>

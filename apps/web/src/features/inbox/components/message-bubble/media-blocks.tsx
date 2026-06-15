@@ -1,7 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileText, FileAudio, Film, ImageOff, Loader2 } from "lucide-react";
+import {
+  Download,
+  FileText,
+  FileAudio,
+  FileX,
+  ImageOff,
+  Loader2,
+  Pause,
+  Play,
+  VideoOff,
+} from "lucide-react";
 
 import { cn } from "@ccp/shared/utils";
 import { openAttachment } from "@/features/inbox/lib/open-attachment";
@@ -80,11 +90,25 @@ export function StickerImage({ url }: { url: string }) {
 }
 
 function PendingMediaBlock({ kind, isOut }: { kind: MediaKind; isOut: boolean }) {
-  // Image/video share the same 4:3 slot as the final bubble — render a clean
-  // shimmer at the exact same dimensions so the swap is a pure visual
-  // replace with no layout shift and no chrome to read. WhatsApp Web /
+  // Render a clean shimmer at the SAME HEIGHT as the final bubble so the
+  // pending→ready swap is a pure visual replace with no vertical layout shift
+  // (the load-bearing dimension for useChatScroll's snap math). WhatsApp Web /
   // Telegram do this — quieter than a labelled "Downloading…" placeholder.
-  if (kind === "image" || kind === "video") {
+  //
+  // Image: the final bubble is FIXED HEIGHT (h-65) with photo-driven width, so
+  // the shimmer matches the height and picks a neutral w-80 placeholder width.
+  // Video: still the fixed 4:3 slot (w-80 → 240px tall), matching VideoBlock.
+  if (kind === "image") {
+    return (
+      <div
+        className={cn(
+          "h-65 w-80 max-w-full animate-pulse rounded-xl",
+          isOut ? "bg-white/10" : "bg-muted",
+        )}
+      />
+    );
+  }
+  if (kind === "video") {
     return (
       <div
         className={cn(
@@ -154,18 +178,22 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
   const [loaded, setLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
-  // The bubble's box stays at a fixed 4:3 slot for the lifetime of the
-  // message. The <img> inside is absolutely positioned to fill it, cropped
-  // via object-cover, and the user opens the full image in a lightbox by
-  // clicking. WhatsApp Web / Telegram Web do this — fixed-size thumbnails
-  // in chat, full-size on tap.
+  // The bubble's box stays at a FIXED HEIGHT (h-65 = 260px) for the lifetime
+  // of the message; only the WIDTH varies with the photo's aspect ratio. The
+  // <img> is an in-flow block element cropped via object-cover, so it's the
+  // width source AND fills the slot edge-to-edge with no letterbox bands
+  // (portrait/ultra-wide photos crop instead of showing black margins). The
+  // user opens the full, uncropped image in a lightbox by clicking. WhatsApp
+  // Web / Telegram Web do this — fixed-height thumbnails in chat, full-size on
+  // tap.
   //
-  // The reason it MUST be fixed-size (not "grow to natural ratio after
+  // The reason the HEIGHT MUST be fixed (not "grow to natural ratio after
   // load"): cached inbound images flip from placeholder to natural in a
   // re-render that happens after useChatScroll has snapped to bottom on
   // mount, and the ResizeObserver re-snap doesn't always win the timing
   // race. Stable bubble heights → snap math is exact, refresh + chat-change
-  // reliably land at the bottom.
+  // reliably land at the bottom. Width is free to vary — useChatScroll only
+  // depends on the deterministic HEIGHT.
   //
   // We still force-decode after mount: when the bubble's container was
   // visibility:hidden (briefly, until useChatScroll positions it), Chromium
@@ -199,70 +227,64 @@ function ImageBlock({ media, message }: { media: MediaAttachment; message: Messa
     }
   }, [errored, thumbSrc]);
 
+  if (errored) {
+    return <MediaUnavailable kind="image" isOut={false} />;
+  }
+
   return (
     <>
       <button
         type="button"
-        onClick={errored ? undefined : () => setOpen(true)}
-        disabled={errored}
-        // Fixed pixel width (w-80 = 320px) — without it the bubble's flex
-        // parent (items-end / items-start, shrink-to-fit) collapses the
-        // button to 0 width because the <img> below is absolute-positioned
-        // and contributes no intrinsic width source. With a definite width,
-        // aspect-4/3 computes a real height and the image actually paints.
-        // max-w-full keeps it polite on narrow viewports where the bubble's
-        // max-w-[70%] is smaller than 320px.
-        // bg-black gives portrait/ultra-wide images an intentional letterbox
-        // look since object-contain (below) preserves full content instead of
-        // cropping it, so non-4:3 photos show empty bands on the sides.
-        className="relative block aspect-4/3 max-h-65 w-80 max-w-full overflow-hidden rounded-xl bg-black/80"
+        onClick={() => setOpen(true)}
+        // FIXED HEIGHT (h-65 = 260px), WIDTH varies with the photo. min-w-40
+        // stops the shrink-to-fit bubble parent from collapsing the button to
+        // 0 while the in-flow <img> below is still establishing its intrinsic
+        // width (and gives a sane floor for very-narrow crops); max-w-full
+        // keeps it polite inside the bubble's max-w-[70%]. The <img> uses
+        // object-cover, so the slot is filled edge-to-edge with NO letterbox
+        // bands — non-4:3 photos crop rather than show black margins.
+        className="relative block h-65 min-w-40 max-w-full overflow-hidden rounded-xl bg-muted"
       >
-        {errored ? (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-muted-foreground">
-            <ImageOff className="size-5" />
-            <span className="text-2xs">Image unavailable</span>
-          </div>
-        ) : (
-          <>
-            {/* CALM static placeholder (NOT animate-pulse) fills the fixed slot
-                until the photo decodes. A PULSING shimmer was the visible
-                "flicker": with loading="lazy" a cached image isn't `complete`
-                at mount, so the instant-reveal effect can't fire and every
-                image sat in a ~1s opacity-pulsing box before fading in — that
-                pulse reads as flicker (measured via Playwright). A static fill
-                + a quick fade is invisible when the image is fast and calm when
-                it's slow. Hidden once loaded so it can't bleed through a
-                transparent PNG's edges. */}
-            {!loaded && (
-              <div className="absolute inset-0 bg-muted" />
-            )}
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              ref={imgRef}
-              src={thumbSrc}
-              alt={media.caption ?? "image"}
-              onLoad={() => setLoaded(true)}
-              onError={() => setErrored(true)}
-              // async-decode keeps the main thread free during paint. We do NOT
-              // set loading="lazy": it kept cached images from being `complete`
-              // at mount, defeating the instant-reveal path and forcing every
-              // image through the placeholder→fade window (the flicker). The
-              // thundering-herd risk lazy guarded against is bounded anyway —
-              // the thread loads a paged slice (~30 msgs), not the full history,
-              // so at most a handful of images request at once; async decode +
-              // the 302/CDN cache absorb that.
-              decoding="async"
-              // Fast cross-fade. Cached/SSR'd images get `loaded` set
-              // synchronously in the mount effect (img already `complete`), so
-              // they paint at opacity-100 with NO visible fade — instant on
-              // refresh. Only genuinely-loading images animate in.
-              className={cn(
-                "absolute inset-0 block h-full w-full object-contain transition-opacity duration-150 hover:opacity-95",
-                loaded ? "opacity-100" : "opacity-0",
-              )}
-            />
-          </>
-        )}
+        {/* CALM static placeholder (NOT animate-pulse) fills the fixed slot
+            until the photo decodes. A PULSING shimmer was the visible
+            "flicker": with loading="lazy" a cached image isn't `complete`
+            at mount, so the instant-reveal effect can't fire and every
+            image sat in a ~1s opacity-pulsing box before fading in — that
+            pulse reads as flicker (measured via Playwright). A static fill
+            + a quick fade is invisible when the image is fast and calm when
+            it's slow. It fills the button, whose width is held by min-w-40
+            while the <img> (w-auto, no intrinsic size yet) is still loading;
+            once the image loads it drives the real width. Hidden once loaded so
+            it can't bleed through a transparent PNG's edges. */}
+        {!loaded && <div className="absolute inset-0 bg-muted" />}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          ref={imgRef}
+          src={thumbSrc}
+          alt={media.caption ?? "image"}
+          onLoad={() => setLoaded(true)}
+          onError={() => setErrored(true)}
+          // async-decode keeps the main thread free during paint. We do NOT
+          // set loading="lazy": it kept cached images from being `complete`
+          // at mount, defeating the instant-reveal path and forcing every
+          // image through the placeholder→fade window (the flicker). The
+          // thundering-herd risk lazy guarded against is bounded anyway —
+          // the thread loads a paged slice (~30 msgs), not the full history,
+          // so at most a handful of images request at once; async decode +
+          // the 302/CDN cache absorb that.
+          decoding="async"
+          // FIXED HEIGHT + w-auto: the photo keeps its aspect ratio, the box's
+          // height is deterministic, and object-cover crops to fill so there
+          // are no black letterbox bands. The img is in-flow (NOT absolute) so
+          // it's the width source for the button. Fast cross-fade — cached/SSR'd
+          // images get `loaded` set synchronously in the mount effect (img
+          // already `complete`), so they paint at opacity-100 with NO visible
+          // fade. Only genuinely-loading images animate in.
+          className={cn(
+            "block h-65 w-auto max-w-full object-cover transition-opacity duration-150 hover:opacity-95",
+            loaded ? "opacity-100" : "opacity-0",
+          )}
+        />
       </button>
       {open && (
         // Same full-screen viewer as the contact-panel gallery, so an image
@@ -299,12 +321,7 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
   // metadata-driven resize. Native video controls overlay the bottom of
   // the frame; fullscreen is available via the controls bar.
   if (errored) {
-    return (
-      <div className="flex aspect-4/3 max-h-65 w-80 max-w-full flex-col items-center justify-center gap-1.5 rounded-xl bg-black/80 text-muted-foreground">
-        <Film className="size-5" />
-        <span className="text-2xs">Video unavailable</span>
-      </div>
-    );
+    return <MediaUnavailable kind="video" isOut={false} />;
   }
   return (
     <video
@@ -333,60 +350,166 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
 
 function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
   const [errored, setErrored] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  // Duration: prefer the server-provided value (shown before any fetch); fall
+  // back to the element's metadata once a play actually loads it.
+  const [duration, setDuration] = useState<number | null>(
+    media.durationMs != null ? media.durationMs / 1000 : null,
+  );
   const audioRef = useRef<HTMLAudioElement>(null);
-  // No mount-time check — see VideoBlock for why: with preload="none" the
-  // browser does no fetch on mount, so `networkState === NETWORK_NO_SOURCE`
-  // was a transient state that falsely flagged socket-delivered bubbles as
-  // errored. `onError` on the element below is the authoritative signal.
-  void audioRef;
 
   if (errored) {
-    return (
-      <div
-        className={cn(
-          "flex items-center gap-3 rounded-xl px-3 py-2.5",
-          isOut ? "bg-white/10" : "bg-background/60",
-        )}
-      >
-        <div
-          className={cn(
-            "flex size-9 shrink-0 items-center justify-center rounded-md",
-            isOut ? "bg-white/15" : "bg-muted",
-          )}
-        >
-          <FileAudio className="size-4" />
-        </div>
-        <div className="min-w-0 flex-1 text-xs text-muted-foreground">
-          Audio unavailable
-        </div>
-      </div>
-    );
+    return <MediaUnavailable kind="audio" isOut={isOut} />;
   }
+
+  const fraction = duration && duration > 0 ? Math.min(current / duration, 1) : 0;
+  const remaining = duration != null ? Math.max(duration - current, 0) : null;
+  // Show counting-down remaining once playing has started; otherwise the total.
+  const timeLabel =
+    playing && remaining != null
+      ? formatDuration(remaining * 1000)
+      : duration != null
+        ? formatDuration(duration * 1000)
+        : null;
+
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) {
+      void el.play().catch(() => setErrored(true));
+    } else {
+      el.pause();
+    }
+  };
+
+  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = audioRef.current;
+    if (!el || !duration || duration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+    el.currentTime = pct * duration;
+    setCurrent(el.currentTime);
+  };
+
   return (
-    <div className={cn("flex items-center gap-2 rounded-xl px-2.5 py-2")}>
-      {/* Native player — keeps it dependency-free. The container sets a
-          sensible width via flex so the bubble doesn't blow out. */}
+    // Custom player — replaces the native <audio controls> chrome (which
+    // renders OS-specific and clashes with the bubble palette). FIXED HEIGHT
+    // via the h-9 control + py-1.5 padding keeps useChatScroll's snap math
+    // deterministic; only width flexes. In/out-aware: outbound bubbles use
+    // white-alpha surfaces, inbound the muted/background tokens.
+    <div className="flex w-65 max-w-full items-center gap-2.5 rounded-xl px-2.5 py-1.5">
+      {/* Hidden <audio> stays in the DOM (a11y + the actual media element). */}
+      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <audio
         ref={audioRef}
         src={media.url}
-        controls
-        // `none` (was "metadata") — duration is shown after click. See the
-        // matching note on <video> above for why we don't pay the per-element
-        // metadata fetch upfront.
+        // `none` — no per-element metadata fetch on mount; bytes load on play.
+        // See the matching note on <video> above.
         preload="none"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => {
+          setPlaying(false);
+          setCurrent(0);
+        }}
+        onTimeUpdate={(e) => setCurrent(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          if (Number.isFinite(d) && d > 0) setDuration(d);
+        }}
         onError={() => setErrored(true)}
-        className={cn(
-          "h-9 max-w-65 flex-1",
-          isOut ? "[&::-webkit-media-controls-panel]:bg-white/10" : "",
-        )}
+        className="hidden"
       />
-      {media.durationMs != null && (
-        <span className="shrink-0 text-3xs opacity-70">
-          {formatDuration(media.durationMs)}
-        </span>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-label={playing ? "Pause" : "Play"}
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-full transition-colors",
+          isOut
+            ? "bg-white/15 text-current hover:bg-white/25"
+            : "bg-muted text-foreground hover:bg-muted/70",
+        )}
+      >
+        {playing ? (
+          <Pause className="size-4" />
+        ) : (
+          // Nudge the play triangle visually centered in the circle.
+          <Play className="size-4 translate-x-px" />
+        )}
+      </button>
+      {/* Thin click-to-seek progress bar. */}
+      <div
+        role="presentation"
+        onClick={seek}
+        className={cn(
+          "h-1.5 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full",
+          isOut ? "bg-white/20" : "bg-muted",
+        )}
+      >
+        <div
+          className={cn("h-full rounded-full", isOut ? "bg-white/70" : "bg-primary")}
+          style={{ width: `${fraction * 100}%` }}
+        />
+      </div>
+      {timeLabel != null && (
+        <span className="shrink-0 text-3xs tabular-nums opacity-70">{timeLabel}</span>
       )}
     </div>
   );
+}
+
+/**
+ * One unified "unavailable" treatment for image / video / audio (and document
+ * as a fallback). Previously image+video used a big bg-black box with a
+ * centered icon while audio used a grey row — three different shapes for the
+ * same "the blob is gone" state. This is a single COMPACT row (icon + label),
+ * in/out-bubble-color aware, with a deterministic single-line height so
+ * useChatScroll's snap math stays exact regardless of which media kind failed.
+ */
+function MediaUnavailable({
+  kind,
+  isOut,
+}: {
+  kind: "image" | "video" | "audio" | "document";
+  isOut: boolean;
+}) {
+  const { Icon, label } = unavailablePresentation(kind);
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-xl px-3 py-2.5",
+        isOut ? "bg-white/10" : "bg-background/60",
+      )}
+    >
+      <div
+        className={cn(
+          "flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+          isOut ? "bg-white/15" : "bg-muted",
+        )}
+      >
+        <Icon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1 text-xs text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function unavailablePresentation(kind: "image" | "video" | "audio" | "document"): {
+  Icon: typeof ImageOff;
+  label: string;
+} {
+  switch (kind) {
+    case "image":
+      return { Icon: ImageOff, label: "Image unavailable" };
+    case "video":
+      return { Icon: VideoOff, label: "Video unavailable" };
+    case "audio":
+      return { Icon: FileX, label: "Audio unavailable" };
+    case "document":
+      return { Icon: FileX, label: "File unavailable" };
+  }
 }
 
 function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {

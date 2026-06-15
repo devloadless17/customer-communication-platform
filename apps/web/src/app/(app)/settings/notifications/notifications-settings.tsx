@@ -3,7 +3,7 @@
 import type { ComponentType } from "react";
 import { MessageSquare, Phone } from "lucide-react";
 
-import { cn } from "@ccp/shared/utils";
+import { Switch } from "@/components/ui/switch";
 import { useNotificationSounds } from "@/providers/notification-sound-provider";
 import type { SoundCategory } from "@/lib/notifications/notification-sound";
 
@@ -59,10 +59,10 @@ export function NotificationsSettings() {
                 <div className="text-sm font-medium">{label}</div>
                 <div className="text-xs text-muted-foreground">{description}</div>
               </div>
-              <Toggle
-                on={enabled}
-                ariaLabel={`${label} sound`}
-                onChange={(next) => {
+              <Switch
+                checked={enabled}
+                aria-label={`${label} sound`}
+                onCheckedChange={(next) => {
                   setPref(key, next);
                   if (next) preview(key);
                 }}
@@ -84,10 +84,10 @@ export function NotificationsSettings() {
               you don&apos;t take calls.
             </div>
           </div>
-          <Toggle
-            on={receiveCalls}
-            ariaLabel="Receive calls on this device"
-            onChange={setReceiveCalls}
+          <Switch
+            checked={receiveCalls}
+            aria-label="Receive calls on this device"
+            onCheckedChange={setReceiveCalls}
           />
         </div>
       </div>
@@ -108,44 +108,3 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Toggle({
-  on,
-  ariaLabel,
-  onChange,
-}: {
-  on: boolean;
-  ariaLabel: string;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={ariaLabel}
-      onClick={() => onChange(!on)}
-      className="shrink-0 cursor-pointer rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-    >
-      <ToggleTrack on={on} />
-    </button>
-  );
-}
-
-function ToggleTrack({ on }: { on: boolean }) {
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "relative inline-flex h-5.5 w-9.5 shrink-0 items-center rounded-full transition-colors duration-200",
-        on ? "bg-emerald-600" : "bg-muted-foreground/30",
-      )}
-    >
-      <span
-        className={cn(
-          "inline-block size-4.5 rounded-full bg-white shadow-sm transition-transform duration-200",
-          on ? "translate-x-4.5" : "translate-x-0.5",
-        )}
-      />
-    </span>
-  );
-}

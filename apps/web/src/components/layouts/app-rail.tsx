@@ -248,6 +248,7 @@ export function AppRail({
 
   return (
     <aside
+      id="app-rail"
       className="hidden h-svh shrink-0 flex-col overflow-hidden border-r border-sidebar-border bg-sidebar py-3 text-sidebar-foreground md:flex"
       style={railStyle}
     >
@@ -297,7 +298,7 @@ export function AppRail({
       <div className={cn("my-2 h-px bg-sidebar-border", collapsed ? "mx-3" : "mx-4")} />
 
       {/* ── Primary nav ───────────────────────────────────────────────────── */}
-      <nav className="flex flex-1 flex-col gap-0.5 px-2">
+      <nav aria-label="Primary navigation" className="flex flex-1 flex-col gap-0.5 px-2">
         {items.map((item) => (
           <RailLink
             key={item.href}
@@ -327,6 +328,8 @@ export function AppRail({
                 collapsed ? "justify-center" : "gap-2.5 px-2.5",
               )}
               aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!collapsed}
+              aria-controls="app-rail"
             >
               {collapsed ? (
                 <ChevronRight className="size-4 shrink-0" />
@@ -335,7 +338,7 @@ export function AppRail({
                   <ChevronLeft className="size-4 shrink-0" />
                   {showLabels && (
                     <span
-                      className="whitespace-nowrap text-[13px]"
+                      className="whitespace-nowrap text-sm"
                       style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
                     >
                       Collapse
@@ -397,7 +400,7 @@ export function AppRail({
                 className="min-w-0 flex-1 overflow-hidden text-left"
                 style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
               >
-                <p className="truncate text-[13px] font-medium leading-tight text-sidebar-foreground whitespace-nowrap">
+                <p className="truncate text-sm font-medium leading-tight text-sidebar-foreground whitespace-nowrap">
                   {currentUser.name}
                 </p>
                 <p className="truncate text-2xs leading-tight text-muted-foreground whitespace-nowrap">
@@ -460,7 +463,7 @@ function RailLink({
       </span>
       {showLabels && (
         <span
-          className="truncate text-[13px] whitespace-nowrap"
+          className="truncate text-sm whitespace-nowrap"
           style={{ opacity: showLabels ? 1 : 0, transition: "opacity 120ms ease" }}
         >
           {label}

@@ -387,7 +387,7 @@ function VarField({
         />
       </div>
       {hasToken && (
-        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+        <div className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
           <span className="font-medium">Will send:</span>
           <span className="truncate font-mono text-foreground">
             {resolved || <span className="text-muted-foreground italic">(empty)</span>}
@@ -447,7 +447,7 @@ function PreviewBubble({
                 muted
               />
             ) : (
-              <div className="mb-2 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-foreground">
+              <div className="mb-2 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-foreground">
                 <FileText className="size-4 shrink-0 text-emerald-600" />
                 <span className="truncate">{headerMedia.filename ?? "Document"}</span>
               </div>
@@ -480,7 +480,7 @@ function PreviewBubble({
           {buttonsComp.buttons.map((b, i) => (
             <div
               key={i}
-              className="rounded-md border border-border bg-background px-2 py-1.5 text-center text-[12px] font-medium text-primary"
+              className="rounded-md border border-border bg-background px-2 py-1.5 text-center text-xs font-medium text-primary"
             >
               {b.text}
             </div>

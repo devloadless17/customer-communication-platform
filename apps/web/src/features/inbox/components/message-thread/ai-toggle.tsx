@@ -87,9 +87,19 @@ export function AiToggle({
     <Button
       variant="outline"
       size="sm"
-      className={cn("h-8 gap-1.5", aiEnabled ? "text-emerald-600" : "text-muted-foreground")}
+      // A toggle, not a menu — so it must NOT mimic the outline dropdown chrome
+      // next to it. ON = filled primary tint + border (reads "pressed/active");
+      // OFF = plain outline, muted. No chevron (nothing opens on click).
+      className={cn(
+        "h-8 gap-1.5",
+        aiEnabled
+          ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
+          : "text-muted-foreground",
+      )}
       disabled={pending}
       onClick={() => void toggle()}
+      aria-pressed={aiEnabled}
+      aria-label={aiEnabled ? "AI Autopilot is on — click to pause" : "AI Autopilot is off — click to resume"}
       title={
         aiEnabled
           ? "AI Autopilot is on — click to pause and handle this conversation yourself"
@@ -103,7 +113,10 @@ export function AiToggle({
       ) : (
         <BotOff className="size-3.5" />
       )}
-      <span className="font-normal">{aiEnabled ? "AI on" : "AI off"}</span>
+      {/* Label collapses below @2xl, same as the assignment + status triggers,
+          leaving the Bot/BotOff icon. The pressed tint carries the on/off
+          state when the text is hidden. */}
+      <span className="hidden font-normal @2xl:inline">{aiEnabled ? "AI on" : "AI off"}</span>
     </Button>
   );
 }

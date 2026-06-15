@@ -33,6 +33,7 @@ import {
 import { parseVariableBindings, type VariableBinding } from "@ccp/shared/template-bindings";
 
 import { apiFetch } from "@/lib/api/client-fetch";
+import { toast } from "@/lib/toast";
 import { AudiencePicker, type AudienceState } from "@/features/broadcasts/components/audience-picker";
 import { RecipientsPreviewDialog } from "@/features/broadcasts/components/recipients-preview-dialog";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
@@ -55,6 +56,7 @@ import { TokenHighlightInput } from "@/features/templates/components/token-highl
 export function NewBroadcastForm({
   totalContactCount,
   initialContactLabels,
+  initialTemplates = [],
   tags,
   fieldDefinitions,
   stages,
@@ -70,6 +72,10 @@ export function NewBroadcastForm({
 }: {
   totalContactCount: number;
   initialContactLabels: ContactLabel[];
+  /** SSR-seeded approved templates so the Template step isn't blank-then-spinner
+   *  on first paint. The form still re-fetches from the client (and offers a
+   *  manual Meta refresh) for freshness. */
+  initialTemplates?: TemplateDto[];
   tags: Tag[];
   fieldDefinitions: ContactFieldDefinition[];
   stages: ContactStage[];
@@ -127,8 +133,13 @@ export function NewBroadcastForm({
       selectedGroupId: null,
     };
   });
-  const [templates, setTemplates] = useState<TemplateDto[]>([]);
-  const [templatesLoading, setTemplatesLoading] = useState(true);
+  const [templates, setTemplates] = useState<TemplateDto[]>(initialTemplates);
+  // Only block the Template step on the very first fetch when nothing was
+  // SSR-seeded — a seeded list paints immediately and the background refresh
+  // below swaps in fresh data without a spinner flash.
+  const [templatesLoading, setTemplatesLoading] = useState(
+    initialTemplates.length === 0,
+  );
   const [templatesSyncing, setTemplatesSyncing] = useState(false);
   const [templatesError, setTemplatesError] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
@@ -201,31 +212,43 @@ export function NewBroadcastForm({
     }
   }, []);
 
-  const loadTemplates = useCallback(async () => {
-    setTemplatesError(null);
-    setTemplatesLoading(true);
-    try {
-      const res = await apiFetch("/api/team/whatsapp/templates");
-      if (!res.ok) throw new Error(await safeReadError(res));
-      const data = (await res.json()) as {
-        templates?: TemplateDto[];
-        hasWabaId?: boolean;
-      };
-      setTemplates(data.templates ?? []);
-      // Auto-sync from Meta if cache is empty and the WABA is set up — same
-      // behavior as the inbox picker so first-time users see something.
-      if ((data.templates ?? []).length === 0 && data.hasWabaId) {
-        void syncTemplates();
+  // `background` skips the loading spinner — used for the mount refresh when a
+  // server-seeded list is already on screen, so it freshens silently instead of
+  // flashing a spinner over a list the user can already read.
+  const loadTemplates = useCallback(
+    async (background = false) => {
+      setTemplatesError(null);
+      if (!background) setTemplatesLoading(true);
+      try {
+        const res = await apiFetch("/api/team/whatsapp/templates");
+        if (!res.ok) throw new Error(await safeReadError(res));
+        const data = (await res.json()) as {
+          templates?: TemplateDto[];
+          hasWabaId?: boolean;
+        };
+        setTemplates(data.templates ?? []);
+        // Auto-sync from Meta if cache is empty and the WABA is set up — same
+        // behavior as the inbox picker so first-time users see something.
+        if ((data.templates ?? []).length === 0 && data.hasWabaId) {
+          void syncTemplates();
+        }
+      } catch (err) {
+        // A background-refresh failure is silent — the seeded list stays usable
+        // and the manual Refresh button surfaces a hard error if the user asks.
+        if (!background) {
+          setTemplatesError(err instanceof Error ? err.message : "Failed to load");
+        }
+      } finally {
+        if (!background) setTemplatesLoading(false);
       }
-    } catch (err) {
-      setTemplatesError(err instanceof Error ? err.message : "Failed to load");
-    } finally {
-      setTemplatesLoading(false);
-    }
-  }, [syncTemplates]);
+    },
+    [syncTemplates],
+  );
 
   useEffect(() => {
-    void loadTemplates();
+    // Seeded → freshen in the background (no spinner). Cold → normal load.
+    void loadTemplates(initialTemplates.length > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadTemplates]);
 
   // Clone prefill (?from=<id>): once templates load, select the source's
@@ -476,6 +499,11 @@ export function NewBroadcastForm({
       }
       const data = (await res.json()) as { broadcastId?: string };
       if (!data.broadcastId) throw new Error("No broadcast id in response");
+      toast.success(
+        scheduledAtIso
+          ? `Broadcast scheduled for ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
+          : `Broadcast sending to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`,
+      );
       router.push(`/broadcasts/${data.broadcastId}`);
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to send");
@@ -569,7 +597,7 @@ export function NewBroadcastForm({
           done={variablesDone}
         >
           {bodyVarCount + headerVarCount === 0 && !headerMediaKind ? (
-            <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+            <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               This template has no variables — it&apos;ll send as-is to every
               recipient.
             </div>
@@ -594,9 +622,9 @@ export function NewBroadcastForm({
                 </div>
               )}
               {bodyVarCount + headerVarCount > 0 && (
-                <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                <p className="text-xs leading-relaxed text-muted-foreground">
                   Type a value or insert a{" "}
-                  <code className="rounded bg-muted px-1 text-[10.5px]">$var.contact.field</code>{" "}
+                  <code className="rounded bg-muted px-1 text-2xs">$var.contact.field</code>{" "}
                   token to fill each variable per recipient.
                 </p>
               )}
@@ -707,13 +735,16 @@ export function NewBroadcastForm({
 
       <div className="sticky bottom-0 -mx-6 mt-2 border-t border-border bg-background/95 px-6 py-3 backdrop-blur">
         {sendError && (
-          <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div
+            role="alert"
+            className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+          >
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
             <span className="wrap-break-word">{sendError}</span>
           </div>
         )}
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 text-[12px] text-muted-foreground">
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
             {readyToSend ? (
               <span className="inline-flex items-center gap-1.5">
                 <Send className="size-3.5" />
@@ -845,7 +876,7 @@ function TemplatePickerInline({
 }) {
   if (!hasWabaId) {
     return (
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-4 text-[12px]">
+      <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-4 text-xs">
         <div className="font-medium text-amber-700 dark:text-amber-300">
           WhatsApp Business Account ID needed
         </div>
@@ -869,6 +900,7 @@ function TemplatePickerInline({
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             placeholder="Search templates…"
+            aria-label="Search templates"
             className="h-9 pl-8"
           />
         </div>
@@ -890,7 +922,10 @@ function TemplatePickerInline({
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        >
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
           <span>{error}</span>
         </div>
@@ -902,7 +937,7 @@ function TemplatePickerInline({
           <span>Loading templates…</span>
         </div>
       ) : templates.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-[12px] text-muted-foreground">
+        <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
           {query.length > 0
             ? `No templates match "${query}".`
             : "No templates yet. Approve some in WhatsApp Manager and click Refresh."}
@@ -946,7 +981,7 @@ function TemplatePickerInline({
                         </span>
                       )}
                     </div>
-                    <p className="mt-0.5 line-clamp-2 text-[12px] text-muted-foreground">
+                    <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
                       {t.bodyText || "—"}
                     </p>
                   </div>
@@ -1032,7 +1067,7 @@ function VarField({
         />
       </div>
       {hasToken && (
-        <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
+        <div className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
           <span className="font-medium">Sample:</span>
           <span className="truncate font-mono text-foreground">
             {preview || <span className="text-muted-foreground italic">(empty)</span>}
@@ -1040,7 +1075,7 @@ function VarField({
         </div>
       )}
       {unknown.length > 0 && (
-        <div className="mt-0.5 text-[10.5px] text-amber-600 dark:text-amber-400">
+        <div className="mt-0.5 text-2xs text-amber-600 dark:text-amber-400">
           Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
           {unknown.join(", ")} — these will resolve to empty for every recipient.
         </div>
@@ -1120,7 +1155,7 @@ function PreviewBubble({
           {buttonsComp.buttons.map((b, i) => (
             <div
               key={i}
-              className="rounded-md border border-border bg-background px-2 py-1.5 text-center text-[12px] font-medium text-primary"
+              className="rounded-md border border-border bg-background px-2 py-1.5 text-center text-xs font-medium text-primary"
             >
               {b.text}
             </div>

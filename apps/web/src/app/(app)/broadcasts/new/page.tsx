@@ -10,6 +10,7 @@ import {
   listContactFieldDefinitions,
   listContactStages,
   listTags,
+  listWhatsappTemplates,
   lookupContacts,
 } from "@/lib/api/queries";
 
@@ -93,6 +94,7 @@ export default async function NewBroadcastPage({
     fieldDefinitions,
     stages,
     contactLabels,
+    templatesResult,
   ] = await Promise.all([
     getTeamWhatsappConfig(),
     countAllContacts(),
@@ -101,6 +103,10 @@ export default async function NewBroadcastPage({
     listContactFieldDefinitions(),
     listContactStages(),
     lookupContacts(preselectedContactIds),
+    // Seed the Template step server-side so it isn't blank-then-spinner on
+    // first paint. Best-effort: a Meta/connectivity hiccup falls through to an
+    // empty list and the form's "Refresh" button re-fetches from the client.
+    listWhatsappTemplates().catch(() => null),
   ]);
 
   // Pre-flight: if WhatsApp isn't even connected, bounce to the settings
@@ -113,6 +119,7 @@ export default async function NewBroadcastPage({
     <NewBroadcastForm
       totalContactCount={totalContactCount}
       initialContactLabels={contactLabels}
+      initialTemplates={templatesResult?.templates ?? []}
       tags={tags}
       fieldDefinitions={fieldDefinitions}
       stages={stages}

@@ -2,10 +2,10 @@
 
 import { useRef, useState } from "react";
 
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { Download, FileUp, Loader2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
 
 /**
@@ -30,10 +30,6 @@ export function ImportContactsDialog({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
-  useModalOverlay(dialogRef, true, onClose);
 
   async function submit() {
     if (!file) return;
@@ -93,19 +89,10 @@ export function ImportContactsDialog({
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="import-contacts-title"
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-16"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) close();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="w-full max-w-md rounded-lg border border-border bg-card text-card-foreground shadow-lg"
-      >
+    // Dismiss (Escape or backdrop) routes through `close()` so a completed
+    // import still triggers the parent reload, same as the X / Done buttons.
+    <Dialog open onClose={close}>
+      <DialogContent className="max-w-md" labelledBy="import-contacts-title">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 id="import-contacts-title" className="text-base font-semibold">
             Import contacts
@@ -196,7 +183,10 @@ export function ImportContactsDialog({
             />
 
             {error && (
-              <div className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+              <div
+                role="alert"
+                className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+              >
                 {error}
               </div>
             )}
@@ -214,8 +204,8 @@ export function ImportContactsDialog({
         ) : (
           <ImportResultView result={result} onClose={close} />
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -239,7 +229,7 @@ function ImportResultView({
   onClose: () => void;
 }) {
   return (
-    <div className="space-y-3 p-4">
+    <div role="status" className="space-y-3 p-4">
       <div className="rounded-md border border-border bg-background p-3 text-sm">
         <div className="font-medium">
           Imported {result.created} new contact{result.created === 1 ? "" : "s"}.

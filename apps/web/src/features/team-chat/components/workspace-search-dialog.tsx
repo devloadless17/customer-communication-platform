@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { useModalOverlay } from "@/hooks/use-modal-overlay";
 import { useRouter } from "next/navigation";
 import { Hash, Loader2, Search as SearchIcon, X } from "lucide-react";
 
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { initials } from "@ccp/shared/utils";
@@ -43,10 +43,6 @@ export function WorkspaceSearchDialog({
   const [results, setResults] = useState<WorkspaceSearchHit[] | null>(null);
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  // Body-scroll-lock + focus-trap + Escape — shared overlay primitives.
-  useModalOverlay(dialogRef, open, onClose);
 
   // Reset on open so a fresh visit doesn't show stale results, and autofocus
   // a frame later so the modal mount completes first.
@@ -104,15 +100,13 @@ export function WorkspaceSearchDialog({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 pt-[15vh]"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="w-full max-w-2xl overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
+    // Command-palette positioning — sit in the upper third (`items-start
+    // pt-[15vh]`) rather than vertically centered, overriding the canonical
+    // scrim's `items-center`. Chrome (scrim + card) is otherwise canonical.
+    <Dialog open={open} onClose={onClose} overlayClassName="items-start pt-[15vh]">
+      <DialogContent
+        ariaLabel="Search team chat"
+        className="max-w-2xl overflow-hidden"
       >
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <SearchIcon className="size-4 shrink-0 text-muted-foreground" />
@@ -129,7 +123,7 @@ export function WorkspaceSearchDialog({
             type="button"
             onClick={onClose}
             aria-label="Close search"
-            className="inline-flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="inline-flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground pointer-coarse:size-9"
           >
             <X className="size-4" />
           </button>
@@ -159,8 +153,8 @@ export function WorkspaceSearchDialog({
             </ul>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -203,7 +197,7 @@ function ResultRow({
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">
-            <span className="inline-flex min-w-0 max-w-40 items-center gap-0.5 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium text-primary">
+            <span className="inline-flex min-w-0 max-w-40 items-center gap-0.5 rounded-md bg-primary/10 px-1.5 py-0.5 text-2xs font-medium text-primary">
               <Hash className="size-3 shrink-0" />
               <span className="truncate">{hit.channelName}</span>
             </span>
@@ -214,7 +208,7 @@ function ResultRow({
               {stamp}
             </span>
           </span>
-          <span className="mt-1 block text-[13px] leading-relaxed text-foreground/80">
+          <span className="mt-1 block text-sm leading-relaxed text-foreground/80">
             <HighlightedExcerpt text={excerpt} query={query} />
           </span>
         </span>
@@ -245,10 +239,7 @@ function HighlightedExcerpt({ text, query }: { text: string; query: string }) {
     <>
       {parts.map((p, i) =>
         p.match ? (
-          <mark
-            key={i}
-            className="rounded bg-yellow-200/80 px-0.5 text-foreground dark:bg-yellow-500/30"
-          >
+          <mark key={i} className="rounded bg-highlight px-0.5 text-foreground">
             {p.text}
           </mark>
         ) : (

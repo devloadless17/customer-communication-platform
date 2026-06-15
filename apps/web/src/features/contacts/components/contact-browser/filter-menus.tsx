@@ -184,6 +184,7 @@ export function MoreFilterMenu({
                     onFieldChange(v ? { key: def.key, value: v } : null);
                   }}
                   placeholder={`${def.label} contains…`}
+                  aria-label={`Filter by ${def.label}`}
                   className="h-8 text-xs"
                 />
               );

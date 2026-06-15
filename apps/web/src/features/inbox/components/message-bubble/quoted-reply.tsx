@@ -44,7 +44,7 @@ export function QuotedReply({
     >
       <span
         className={cn(
-          "w-0.5 shrink-0 rounded-full",
+          "w-1 shrink-0 rounded-full",
           isOut ? "bg-white/70" : "bg-primary",
         )}
       />
@@ -52,7 +52,7 @@ export function QuotedReply({
         <span className="block truncate text-2xs font-medium opacity-90">
           {senderLabel}
         </span>
-        <span dir="auto" className="block truncate text-[12px] opacity-75">
+        <span dir="auto" className="block truncate text-2xs opacity-75">
           {bodyLabel}
         </span>
       </span>

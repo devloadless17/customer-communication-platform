@@ -210,7 +210,7 @@ function PickerPanel(props: PickerProps) {
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="inline-flex size-7 pointer-coarse:size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           aria-label="Close template picker"
         >
           <X className="size-4" />
