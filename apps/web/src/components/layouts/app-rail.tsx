@@ -15,7 +15,6 @@ import {
   Megaphone,
   MessageSquareText,
   Settings as SettingsIcon,
-  UserCircle2,
   Workflow,
 } from "lucide-react";
 
@@ -541,19 +540,13 @@ function UserMenu({
             seedMessage={liveMessage}
           />
           <DropdownMenuSeparator />
-          {/* Notification-sound toggles moved to Settings → Notifications
-              (sits with the other workspace settings; this menu is just
-              identity + availability + nav now). */}
-          <DropdownMenuItem asChild>
-            <Link href="/settings/workspace">
-              <UserCircle2 className="size-4 text-muted-foreground" />
-              Account settings
-            </Link>
-          </DropdownMenuItem>
+          {/* One Settings entry → the single grouped /settings landing. (Was
+              two items, "Account settings" + "Workspace settings", pointing at
+              two different landings — read as three separate settings areas.) */}
           <DropdownMenuItem asChild>
             <Link href="/settings">
               <SettingsIcon className="size-4 text-muted-foreground" />
-              Workspace settings
+              Settings
             </Link>
           </DropdownMenuItem>
           <DropdownMenuSeparator />

@@ -50,20 +50,33 @@ export function SettingsSubSidebar({
     pathname === href || pathname.startsWith(href + "/");
 
   return (
-    // One noun per page: each sidebar label matches the destination page's own
-    // h1 so "open Team" / "open Stages" resolve unambiguously. The sidebar
-    // title is the generic section name, not a page name.
+    // Groups mirror the single /settings landing exactly: My account / Team &
+    // roles / Channels & integrations / Conversation config. Each label matches
+    // the destination page's own h1 so "open Stages" resolves unambiguously.
     <SubSidebar title="Settings">
-      <SubSidebarSection label="User role settings">
+      <SubSidebarSection label="My account">
         <SubSidebarItem
-          href="/settings/workspace"
+          href="/settings/account"
           label="Account"
           leading={<UserCircle2 className="size-4" />}
-          active={isActive("/settings/workspace") || isActive("/settings/account")}
+          // /settings/workspace is the legacy account landing (now redirects
+          // to /settings) — keep it lit so the redirect hop still highlights.
+          active={isActive("/settings/account") || isActive("/settings/workspace")}
         />
+        {/* Notification sounds — personal + per-device, so NO capability gate
+            (everyone manages their own). */}
+        <SubSidebarItem
+          href="/settings/notifications"
+          label="Notifications"
+          leading={<Bell className="size-4" />}
+          active={isActive("/settings/notifications")}
+        />
+      </SubSidebarSection>
+
+      <SubSidebarSection label="Team & roles">
         <SubSidebarItem
           href="/settings/team"
-          label="Team"
+          label="Team members"
           leading={<Users className="size-4" />}
           active={isActive("/settings/team")}
         />
@@ -86,7 +99,7 @@ export function SettingsSubSidebar({
       </SubSidebarSection>
 
       {isAdmin && (
-        <SubSidebarSection label="Apps">
+        <SubSidebarSection label="Channels & integrations">
           <SubSidebarItem
             href="/settings/whatsapp"
             label="WhatsApp"
@@ -102,15 +115,7 @@ export function SettingsSubSidebar({
         </SubSidebarSection>
       )}
 
-      <SubSidebarSection label="Inbox settings">
-        {canStages && (
-          <SubSidebarItem
-            href="/settings/stages"
-            label="Stages"
-            leading={<Layers className="size-4" />}
-            active={isActive("/settings/stages")}
-          />
-        )}
+      <SubSidebarSection label="Conversation config">
         {canSnippets && (
           <SubSidebarItem
             href="/settings/snippets"
@@ -127,6 +132,14 @@ export function SettingsSubSidebar({
             active={isActive("/settings/tags")}
           />
         )}
+        {canStages && (
+          <SubSidebarItem
+            href="/settings/stages"
+            label="Stages"
+            leading={<Layers className="size-4" />}
+            active={isActive("/settings/stages")}
+          />
+        )}
         {canFields && (
           <SubSidebarItem
             href="/settings/contact-fields"
@@ -135,15 +148,6 @@ export function SettingsSubSidebar({
             active={isActive("/settings/contact-fields")}
           />
         )}
-        {/* Notification sounds — personal + per-device, so NO capability gate
-            (everyone manages their own). Moved here from the AppRail user
-            menu. */}
-        <SubSidebarItem
-          href="/settings/notifications"
-          label="Notifications"
-          leading={<Bell className="size-4" />}
-          active={isActive("/settings/notifications")}
-        />
       </SubSidebarSection>
     </SubSidebar>
   );

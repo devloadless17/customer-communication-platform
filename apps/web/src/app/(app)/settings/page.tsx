@@ -1,81 +1,181 @@
 import Link from "next/link";
 import {
   ArrowRight,
+  BarChart3,
+  Bell,
   Layers,
   ListChecks,
+  MessageSquare,
+  Plug,
+  ShieldCheck,
   Sparkles,
   Tag as TagIcon,
+  UserCircle2,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
+import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { AppearanceMode } from "./account/appearance-mode";
 
-export const metadata = { title: "Team settings" };
+export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
 
 /**
- * Team settings landing — shared conversation-flow config that affects how
- * everyone on the team replies and routes customers. Account / workspace
- * plumbing lives one level over at /settings/workspace.
+ * Single settings landing — one page, four permission-gated groups:
+ * My account / Team & roles / Channels & integrations / Conversation config.
+ *
+ * Replaces the old split between "/settings" (titled "Team settings" but
+ * holding conversation config) and "/settings/workspace" (titled "Account
+ * settings" but holding WhatsApp/integrations) — names that were inverted vs
+ * their contents and forced a double-hop to reach the profile form. The
+ * sub-sidebar mirrors these same groups; /settings/workspace now redirects here.
  */
-export default async function TeamSettingsIndex() {
-  const { permissions } = await getSession();
-  const canStages = permissions["stages:manage"];
-  const canFields = permissions["contactFields:manage"];
+export default async function SettingsIndex() {
+  const { user, permissions } = await getSession();
+  const isAdmin = canManageUsers(user.role);
 
-  const cards: Card[] = [
+  const groups: Group[] = [
     {
-      href: "/settings/snippets",
-      icon: Sparkles,
-      title: "Snippets",
-      description:
-        "Saved canned replies your team triggers with `/name` in the reply box.",
+      label: "My account",
+      cards: [
+        {
+          href: "/settings/account",
+          icon: UserCircle2,
+          title: "Account",
+          description: "Your name, email, and password.",
+        },
+        {
+          href: "/settings/notifications",
+          icon: Bell,
+          title: "Notifications",
+          description: "New-message sounds — personal, per device.",
+        },
+      ],
     },
     {
-      href: "/settings/tags",
-      icon: TagIcon,
-      title: "Tags",
-      description:
-        "Labels for segmenting contacts. Drives the contacts filter and tag-based broadcast audiences.",
+      label: "Team & roles",
+      cards: [
+        {
+          href: "/settings/team",
+          icon: Users,
+          title: "Team members",
+          description: isAdmin
+            ? "Invite teammates, change roles, deactivate accounts."
+            : "See who else is on this team.",
+        },
+        ...(isAdmin
+          ? [
+              {
+                href: "/settings/permissions",
+                icon: ShieldCheck,
+                title: "Role permissions",
+                description:
+                  "What each role (admin / manager / agent) is allowed to do.",
+              } satisfies Card,
+            ]
+          : []),
+        ...(permissions["teamActivity:view"]
+          ? [
+              {
+                href: "/settings/activity",
+                icon: BarChart3,
+                title: "Team activity",
+                description:
+                  "Per-member assigned / messages-sent / resolved counts.",
+              } satisfies Card,
+            ]
+          : []),
+      ],
     },
-    ...(canStages
+    ...(isAdmin
       ? [
           {
-            href: "/settings/stages",
-            icon: Layers,
-            title: "Stages",
-            description:
-              "Lifecycle buckets for contacts (New → Qualified → …). Drives filtering and stage-targeted broadcasts.",
-          } satisfies Card,
+            label: "Channels & integrations",
+            cards: [
+              {
+                href: "/settings/whatsapp",
+                icon: MessageSquare,
+                title: "WhatsApp",
+                description:
+                  "Meta Cloud API credentials, phone number, and template catalog.",
+              },
+              {
+                href: "/settings/integrations",
+                icon: Plug,
+                title: "Integrations",
+                description:
+                  "n8n, webhooks, Make, Zapier — connect external tools to this workspace.",
+              },
+            ],
+          } satisfies Group,
         ]
       : []),
-    ...(canFields
-      ? [
-          {
-            href: "/settings/contact-fields",
-            icon: ListChecks,
-            title: "Contact fields",
-            description:
-              "Custom fields shown on every contact (order ID, plan, company size…). Add or remove the field once for the whole team.",
-          } satisfies Card,
-        ]
-      : []),
-  ];
+    {
+      label: "Conversation config",
+      cards: [
+        ...(permissions["snippets:manage"]
+          ? [
+              {
+                href: "/settings/snippets",
+                icon: Sparkles,
+                title: "Snippets",
+                description:
+                  "Saved canned replies your team triggers with /name in the composer.",
+              } satisfies Card,
+            ]
+          : []),
+        ...(permissions["tags:manage"]
+          ? [
+              {
+                href: "/settings/tags",
+                icon: TagIcon,
+                title: "Tags",
+                description:
+                  "Labels for segmenting contacts — drives the contacts filter and broadcast audiences.",
+              } satisfies Card,
+            ]
+          : []),
+        ...(permissions["stages:manage"]
+          ? [
+              {
+                href: "/settings/stages",
+                icon: Layers,
+                title: "Stages",
+                description:
+                  "Lifecycle buckets (New → Qualified → …) for contacts — drives filtering and stage-targeted broadcasts.",
+              } satisfies Card,
+            ]
+          : []),
+        ...(permissions["contactFields:manage"]
+          ? [
+              {
+                href: "/settings/contact-fields",
+                icon: ListChecks,
+                title: "Contact fields",
+                description:
+                  "Custom fields shown on every contact (order ID, plan, company size…).",
+              } satisfies Card,
+            ]
+          : []),
+      ],
+    },
+  ].filter((g) => g.cards.length > 0);
 
   return (
     <div>
       <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Team settings</h1>
+        <h1 className="text-2xl font-semibold">Settings</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          How your team replies and routes customers — shared across everyone
-          in the workspace.
+          Your account, your team, the channels you connect, and how
+          conversations are configured.
         </p>
       </header>
 
       <section className="mb-8 rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
-          <div className="text-sm font-medium">Mode</div>
+          <div className="text-sm font-medium">Appearance</div>
           <div className="text-2xs text-muted-foreground">
             Light or dark mode. “System” follows your device. Applies to your
             account on this device.
@@ -84,7 +184,18 @@ export default async function TeamSettingsIndex() {
         <AppearanceMode />
       </section>
 
-      <CardGrid cards={cards} />
+      {groups.map((g) => (
+        <section key={g.label} className="mb-8">
+          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {g.label}
+          </h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {g.cards.map((c) => (
+              <SettingsCard key={c.href} {...c} />
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
@@ -95,15 +206,9 @@ interface Card {
   title: string;
   description: string;
 }
-
-function CardGrid({ cards }: { cards: Card[] }) {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {cards.map((c) => (
-        <SettingsCard key={c.href} {...c} />
-      ))}
-    </div>
-  );
+interface Group {
+  label: string;
+  cards: Card[];
 }
 
 function SettingsCard({ href, icon: Icon, title, description }: Card) {
