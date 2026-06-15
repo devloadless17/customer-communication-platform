@@ -141,8 +141,8 @@ export function OpenWindowContactCombobox({ value, onChange }: Props) {
                 <span
                   className={
                     status?.state === "open"
-                      ? "text-emerald-600 dark:text-emerald-400"
-                      : "text-amber-600 dark:text-amber-400"
+                      ? "text-success-fg"
+                      : "text-warning-fg"
                   }
                 >
                   {statusLabel}
@@ -248,8 +248,8 @@ function ContactRow({
           <span
             className={
               status.state === "open"
-                ? "text-emerald-600 dark:text-emerald-400"
-                : "text-amber-600 dark:text-amber-400"
+                ? "text-success-fg"
+                : "text-warning-fg"
             }
           >
             {remaining}

@@ -233,7 +233,7 @@ function TargetSelector({
             </>
           )}
           {extraHint && (
-            <span className="text-2xs text-amber-600 dark:text-amber-400">
+            <span className="text-2xs text-warning-fg">
               {extraHint}
             </span>
           )}

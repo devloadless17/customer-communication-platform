@@ -91,7 +91,7 @@ export default async function PlatformOverviewPage() {
           <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
             {a.pendingOrgs.map((o) => (
               <li key={o.id} className="flex items-center gap-3 px-4 py-3">
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-warning-bg text-warning-fg">
                   <Building2 className="size-4" />
                 </span>
                 <div className="min-w-0 flex-1">
@@ -168,15 +168,15 @@ function StatCard({
 }) {
   const toneClass = {
     default: "text-muted-foreground",
-    amber: "text-amber-600 dark:text-amber-400",
-    emerald: "text-emerald-600 dark:text-emerald-400",
+    amber: "text-warning-fg",
+    emerald: "text-success-fg",
     destructive: "text-destructive",
   }[tone];
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border bg-card px-4 py-3.5 transition-colors hover:bg-accent/30">
       <div className="flex items-center justify-between">
         <span className={toneClass}>{icon}</span>
-        {hint && <span className="text-2xs font-medium text-amber-600 dark:text-amber-400">{hint}</span>}
+        {hint && <span className="text-2xs font-medium text-warning-fg">{hint}</span>}
       </div>
       <div>
         <div className="tabular-nums text-2xl font-semibold">{value}</div>

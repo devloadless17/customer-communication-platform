@@ -278,8 +278,8 @@ function describe(row: CallRow): {
 
 const TONE_RING: Record<Tone, string> = {
   neutral: "bg-muted text-muted-foreground",
-  good: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  warn: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  good: "bg-success-bg text-success-fg",
+  warn: "bg-warning-bg text-warning-fg",
   danger: "bg-destructive/10 text-destructive",
 };
 

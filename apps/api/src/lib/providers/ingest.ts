@@ -746,6 +746,7 @@ async function ingestInboundMessage(
                 mediaCaption: evt.body || null,
                 mediaFilename: evt.media.filename ?? null,
                 mediaDurationMs: evt.media.durationMs ?? null,
+                mediaVoice: evt.media.voice ?? null,
                 ...(evt.media.storageKey && evt.media.storageUrl
                   ? {
                       mediaKey: evt.media.storageKey,
@@ -1106,6 +1107,7 @@ function buildMessageDomain(args: {
             ...(evt.body ? { caption: evt.body } : {}),
             ...(evt.media.filename ? { filename: evt.media.filename } : {}),
             ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+            ...(evt.media.voice ? { voice: true } : {}),
             // Video poster URL — served through the same /api/media/thumb/<id>
             // auth-redirect path so the team-ownership check still gates it.
             ...(evt.media.thumbnailStorageUrl

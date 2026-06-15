@@ -1190,6 +1190,9 @@ function ContactPanelImpl({
       <ScrollArea className="flex-1">
         <div className="flex flex-col items-center px-5 pt-6 pb-4">
           <Avatar className="size-16">
+            {contact.avatarUrl ? (
+              <AvatarImage src={contact.avatarUrl} alt="" />
+            ) : null}
             <AvatarFallback
               className="text-lg text-white"
               style={{ backgroundImage: avatarGradient(contact.id) }}
@@ -1290,6 +1293,12 @@ function ContactPanelImpl({
               label="Email"
               value={email}
               placeholder="—"
+              // Make the email actionable — opens the agent's mail client.
+              // Phone deliberately gets no tel: link (it's the WhatsApp
+              // identity, not a phone-to-dial number).
+              actionHref={email ? `mailto:${email.trim()}` : undefined}
+              actionLabel={`Email ${email.trim()}`}
+              ActionIcon={Mail}
               onSave={async (next) => {
                 const trimmed = next.trim();
                 if (trimmed === (email ?? "").trim()) return true;

@@ -313,6 +313,9 @@ export interface MediaAttachment {
   filename?: string;
   /** Audio + video only. */
   durationMs?: number;
+  /** Audio only: true for a WhatsApp voice note (push-to-talk) vs a shared
+   *  audio file. Drives the mic glyph + "Voice message" label on the bubble. */
+  voice?: boolean;
   /**
    * Video-only — server-generated first-frame JPEG used as the `poster`
    * attribute on `<video>`. Absent on outbound video (the agent's player

@@ -49,14 +49,14 @@ function mapStatus(status: string) {
     case "running":
       return {
         Icon: Loader2,
-        tone: "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+        tone: "border-info-border bg-info-bg text-info-fg",
         label: "Sending",
         spin: true,
       };
     case "completed":
       return {
         Icon: CheckCircle2,
-        tone: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+        tone: "border-success-border bg-success-bg text-success-fg",
         label: "Completed",
         spin: false,
       };
@@ -80,7 +80,7 @@ function mapStatus(status: string) {
       // waiting" without the alarm of red/failed.
       return {
         Icon: PauseCircle,
-        tone: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        tone: "border-warning-border bg-warning-bg text-warning-fg",
         label: "Paused (auto-resumes)",
         spin: false,
       };

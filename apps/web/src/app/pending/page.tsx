@@ -42,7 +42,7 @@ export default async function PendingPage() {
             className={
               suspended
                 ? "flex size-14 items-center justify-center rounded-full bg-destructive/10 text-destructive"
-                : "flex size-14 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                : "flex size-14 items-center justify-center rounded-full bg-warning-bg text-warning-fg"
             }
           >
             {suspended ? (

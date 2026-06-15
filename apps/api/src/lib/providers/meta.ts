@@ -758,6 +758,10 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
             ...(mediaPayload.duration
               ? { durationMs: mediaPayload.duration * 1000 }
               : {}),
+            // WhatsApp voice notes arrive as audio with `voice: true` — flag it
+            // so the bubble shows the mic / "Voice message" affordance instead
+            // of the generic audio-file player.
+            ...(mediaKind === "audio" && mediaPayload.voice ? { voice: true } : {}),
           };
 
           events.push({

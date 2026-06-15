@@ -9,7 +9,9 @@ import {
   useState,
 } from "react";
 import {
+  ArrowDownWideNarrow,
   CheckSquare,
+  Clock,
   Inbox as InboxIcon,
   Loader2,
   PenSquare,
@@ -202,7 +204,49 @@ function ConversationListImpl({
   // filter over the loaded slice (which could only ever find loaded rows).
   const searchActive = search.trim().length > 0;
   // The live list always renders the full server slice; no client filter.
-  const visible = conversations;
+  // Sort mode. "recent" = the server's lastMessageAt-desc order (default).
+  // "waiting" = longest-waiting first (oldest customer message at top) — the
+  // shared-inbox triage view ("answer who's waited longest"). Applied CLIENT-
+  // SIDE over the loaded rows (each carries lastInboundAt), so it needs zero
+  // changes to the server cursor / pagination / live-reorder — the realtime
+  // list keeps flowing through its existing reducers and this just re-sorts the
+  // result. Limitation: it orders the LOADED set; scrolling loads more, which
+  // sort in. Initial "recent" matches SSR (no hydration mismatch).
+  const [sortMode, setSortMode] = useState<"recent" | "waiting">("recent");
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("inbox:sort") === "waiting") {
+        setSortMode("waiting");
+      }
+    } catch {
+      // private mode — default sort, no persistence
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("inbox:sort", sortMode);
+    } catch {
+      // ignore quota / private-mode
+    }
+  }, [sortMode]);
+  const cycleSort = useCallback(() => {
+    setSortMode((m) => (m === "recent" ? "waiting" : "recent"));
+  }, []);
+
+  const visible = useMemo(() => {
+    if (sortMode === "recent") return conversations;
+    // Oldest inbound first; a conversation with no inbound yet (null) isn't
+    // "waiting on a reply", so it sorts last. Array.sort is stable, so equal
+    // keys keep the server's recency tiebreak.
+    return [...conversations].sort((a, b) => {
+      const ai = a.lastInboundAt;
+      const bi = b.lastInboundAt;
+      if (ai === bi) return 0;
+      if (ai === null) return 1;
+      if (bi === null) return -1;
+      return ai < bi ? -1 : 1;
+    });
+  }, [conversations, sortMode]);
 
   const headerTitle = useMemo(() => {
     if (filter.kind === "preset") {
@@ -353,6 +397,10 @@ function ConversationListImpl({
                   // wrong exact count; once everything's loaded the slice IS the
                   // bucket and the exact number is true.
                   `${visible.length}${hasMore ? "+" : ""} ${visible.length === 1 && !hasMore ? "conversation" : "conversations"}`}
+            {sortMode === "waiting" &&
+              !(selectionMode && selectedIds.size > 0) && (
+                <span className="text-primary"> · longest waiting</span>
+              )}
           </p>
         </div>
         <div className="flex items-center gap-1">
@@ -381,9 +429,29 @@ function ConversationListImpl({
               <CheckSquare className="size-4" />
             </button>
           )}
-          {/* Sort & filter — not yet implemented. Removed until it does
-              something; the current Filter chips below already cover most use
-              cases (All / Mine / Unassigned). */}
+          <button
+            type="button"
+            onClick={cycleSort}
+            title={
+              sortMode === "waiting"
+                ? "Sorted by longest waiting — click for latest activity"
+                : "Sorted by latest activity — click for longest waiting"
+            }
+            aria-label="Toggle sort order"
+            aria-pressed={sortMode === "waiting"}
+            className={cn(
+              "flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md transition-colors",
+              sortMode === "waiting"
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+          >
+            {sortMode === "waiting" ? (
+              <Clock className="size-4" />
+            ) : (
+              <ArrowDownWideNarrow className="size-4" />
+            )}
+          </button>
         </div>
       </header>
 

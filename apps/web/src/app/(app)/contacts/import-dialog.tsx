@@ -254,8 +254,8 @@ function ImportResultView({
       </div>
 
       {result.unknownColumns.length > 0 && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
-          <div className="font-medium text-amber-700 dark:text-amber-400">
+        <div className="rounded-md border border-warning-border bg-warning-bg p-3 text-xs">
+          <div className="font-medium text-warning-fg">
             Skipped these columns (not in your team fields):
           </div>
           <ul className="mt-1 list-disc pl-5 text-muted-foreground">
@@ -271,8 +271,8 @@ function ImportResultView({
       )}
 
       {result.unknownStages && result.unknownStages.length > 0 && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
-          <div className="font-medium text-amber-700 dark:text-amber-400">
+        <div className="rounded-md border border-warning-border bg-warning-bg p-3 text-xs">
+          <div className="font-medium text-warning-fg">
             Unknown stage name{result.unknownStages.length === 1 ? "" : "s"} — used your
             default stage instead:
           </div>

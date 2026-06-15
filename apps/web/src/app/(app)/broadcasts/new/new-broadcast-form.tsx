@@ -849,7 +849,7 @@ function StepCard({
           className={cn(
             "inline-flex size-7 items-center justify-center rounded-full text-xs font-semibold",
             done
-              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+              ? "bg-success-bg text-success-fg"
               : "bg-primary/10 text-primary",
           )}
         >
@@ -897,8 +897,8 @@ function TemplatePickerInline({
 }) {
   if (!hasWabaId) {
     return (
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-4 text-xs">
-        <div className="font-medium text-amber-700 dark:text-amber-300">
+      <div className="rounded-md border border-warning-border bg-warning-bg p-4 text-xs">
+        <div className="font-medium text-warning-fg">
           WhatsApp Business Account ID needed
         </div>
         <p className="mt-1 leading-relaxed text-muted-foreground">
@@ -997,7 +997,7 @@ function TemplatePickerInline({
                         {t.language}
                       </span>
                       {!sendable && (
-                        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-3xs uppercase text-amber-700 dark:text-amber-300">
+                        <span className="rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs uppercase text-warning-fg">
                           {t.status}
                         </span>
                       )}
@@ -1096,7 +1096,7 @@ function VarField({
         </div>
       )}
       {unknown.length > 0 && (
-        <div className="mt-0.5 text-2xs text-amber-600 dark:text-amber-400">
+        <div className="mt-0.5 text-2xs text-warning-fg">
           Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
           {unknown.join(", ")} — these will resolve to empty for every recipient.
         </div>
@@ -1155,12 +1155,12 @@ function PreviewBubble({
       : null;
   return (
     <div className="rounded-lg border border-border bg-card p-3 shadow-xs">
-      <div className="rounded-md bg-emerald-500/5 p-3 ring-1 ring-emerald-500/10">
+      <div className="rounded-md bg-success-bg p-3 ring-1 ring-emerald-500/10">
         {headerComp?.format === "TEXT" && renderedHeader && (
           <div className="mb-1 text-sm font-semibold text-foreground">{renderedHeader}</div>
         )}
         {headerComp && headerComp.format !== "TEXT" && (
-          <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-2xs text-muted-foreground">
+          <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-success-border bg-success-bg text-2xs text-muted-foreground">
             {headerComp.format ?? "MEDIA"} header
           </div>
         )}

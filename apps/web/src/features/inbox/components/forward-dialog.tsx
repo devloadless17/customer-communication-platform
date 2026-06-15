@@ -3,6 +3,7 @@
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import { ContactSelectDialog } from "@/features/contacts/components/contact-select-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
+import { toast } from "@/lib/toast";
 import type { ForwardResult } from "@ccp/shared/types";
 
 /**
@@ -85,7 +86,14 @@ async function runForward(
     // cached route stale → next click re-fetches with the new row.
     if (data.results.some((r) => r.sent > 0)) onAnySent();
     const failed = data.results.filter((r) => !r.ok);
-    if (failed.length === 0) return;
+    if (failed.length === 0) {
+      // All recipients succeeded — confirm so the agent knows it went out
+      // (the forward is otherwise silent; the messages just appear in the
+      // target threads via Socket.io).
+      const n = data.results.length;
+      toast.success(`Forwarded to ${n} contact${n === 1 ? "" : "s"}`);
+      return;
+    }
 
     const m = `${count} message${count === 1 ? "" : "s"}`;
     if (failed.length === data.results.length) {

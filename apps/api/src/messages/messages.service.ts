@@ -1543,6 +1543,10 @@ export class MessagesService {
             mediaKey: saved.key,
             mediaUrl: saved.url,
             mediaSizeBytes: saved.sizeBytes,
+            // The agent recorded a voice message → flag it so our own bubble
+            // shows the mic / "Voice message" affordance (Meta still receives a
+            // regular audio clip — see the transcode note above).
+            mediaVoice: isRecording || null,
           }
         : {}),
       ...(replyToMessageId ? { replyToMessageId } : {}),

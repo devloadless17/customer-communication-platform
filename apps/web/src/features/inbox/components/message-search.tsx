@@ -288,12 +288,11 @@ export function highlightQuery(text: string, query: string): React.ReactNode {
     i % 2 === 1 ? (
       <mark
         key={i}
-        // Soft translucent-white wash. `text-inherit` keeps the bubble's
-        // own foreground color (white on outbound, dark on inbound), so the
-        // highlight reads as "subtle fog over this text" rather than a
-        // loud color swap. Backdrop-blur smooths the edge against any
-        // bubble background.
-        className="rounded-xs bg-white/25 px-0.5 text-inherit backdrop-blur-[1px]"
+        // Unified token-based highlight — the SAME treatment the global
+        // inbox-search panel uses (inbox-search-panel.tsx `highlight`), so a
+        // match reads identically whether it's surfaced in the search list or
+        // highlighted in place inside a chat bubble.
+        className="rounded-[2px] bg-primary/20 px-0.5 text-foreground"
       >
         {part}
       </mark>

@@ -229,8 +229,9 @@ function HitAvatar({ name, url }: { name: string; url?: string }) {
 }
 
 /** Wraps the matched substring in a subtle accent mark. Escapes regex meta so
- *  a query like `a.b` matches literally. Local to the panel — the bubble-style
- *  highlight in message-search.tsx is tuned for colored bubbles, not list rows. */
+ *  a query like `a.b` matches literally. Uses the same token-based highlight
+ *  treatment as the in-thread search (message-search.tsx `highlightQuery`) so
+ *  matches read identically across the global panel and the chat bubbles. */
 function highlight(text: string, query: string) {
   const q = query.trim();
   if (!q) return text;
@@ -240,7 +241,7 @@ function highlight(text: string, query: string) {
     i % 2 === 1 ? (
       <mark
         key={i}
-        className="rounded-xs bg-primary/20 px-0.5 text-foreground"
+        className="rounded-[2px] bg-primary/20 px-0.5 text-foreground"
       >
         {part}
       </mark>

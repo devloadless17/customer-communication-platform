@@ -79,7 +79,7 @@ export default async function WorkflowsPage() {
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{r.name}</span>
                     {r.published ? (
-                      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-3xs font-medium uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                      <span className="rounded-full bg-success-bg px-2 py-0.5 text-3xs font-medium uppercase tracking-wide text-success-fg">
                         Live
                       </span>
                     ) : (

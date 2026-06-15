@@ -213,7 +213,7 @@ export function ConditionGroupEditor({
       </div>
 
       {isRoot && noContactTrigger && (
-        <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 text-2xs text-amber-700 dark:text-amber-400">
+        <div className="rounded-md border border-dashed border-warning-border bg-warning-bg px-3 py-2 text-2xs text-warning-fg">
           This trigger has no contact, so contact filters (phone / name / email
           / stage) aren&apos;t available — match on the webhook body inside a
           Branch step instead.

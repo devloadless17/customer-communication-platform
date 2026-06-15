@@ -181,7 +181,7 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold">Connect {preset.label}</h2>
             {connected && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide text-emerald-600">
+              <span className="inline-flex items-center gap-1 rounded-full bg-success-bg px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide text-success-fg">
                 <CheckCircle2 className="size-3" />
                 Connected
               </span>
@@ -237,11 +237,11 @@ export function IntegrationConnectPanel({ preset, initialKeys, instructions }: P
             // user who navigates away mid-flow still has it on their clipboard
             // (until they copy something else). The pulsing border + warning
             // colour make it unmissable.
-            <div className="mt-3 rounded-md border-2 border-amber-500/60 bg-amber-500/5 p-3 shadow-sm">
+            <div className="mt-3 rounded-md border-2 border-warning-border bg-warning-bg p-3 shadow-sm">
               <div className="flex items-start gap-2">
-                <KeyRound className="mt-0.5 size-4 shrink-0 text-amber-600" />
+                <KeyRound className="mt-0.5 size-4 shrink-0 text-warning-fg" />
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-semibold text-amber-700 dark:text-amber-400">
+                  <div className="text-xs font-semibold text-warning-fg">
                     Save your key now — this is the only time it'll be shown
                   </div>
                   <p className="mt-1 text-2xs text-muted-foreground">

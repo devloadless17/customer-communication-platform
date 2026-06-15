@@ -407,13 +407,13 @@ function GroupSelector({
 
 function AllContactsCard({ count }: { count: number }) {
   return (
-    <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+    <div className="rounded-xl border border-warning-border bg-warning-bg p-4">
       <div className="flex items-start gap-3">
-        <div className="inline-flex size-9 items-center justify-center rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-300">
+        <div className="inline-flex size-9 items-center justify-center rounded-full bg-warning-bg text-warning-fg">
           <Users className="size-4" />
         </div>
         <div className="flex-1">
-          <div className="text-sm font-medium text-amber-700 dark:text-amber-300">
+          <div className="text-sm font-medium text-warning-fg">
             Broadcast to <span className="tabular-nums">{count}</span> contact
             {count === 1 ? "" : "s"}
           </div>

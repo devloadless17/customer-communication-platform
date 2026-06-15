@@ -580,9 +580,9 @@ function SecretBanner({
     );
   }
   return (
-    <div className="rounded-md border border-emerald-500/40 bg-emerald-500/5 p-4">
+    <div className="rounded-md border border-success-border bg-success-bg p-4">
       <div className="flex items-start gap-3">
-        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" />
+        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success-fg" />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium">
             {flow === "created" ? "Copy your signing secret now" : "New signing secret"}
@@ -741,7 +741,7 @@ function WebhookRow({
             </span>
           ) : webhook.lastDeliveredAt ? (
             <span className="inline-flex items-center gap-1">
-              <CheckCircle2 className="size-3 text-emerald-600" /> Last delivered{" "}
+              <CheckCircle2 className="size-3 text-success-fg" /> Last delivered{" "}
               <LocalTime iso={webhook.lastDeliveredAt} format="localeString" />
             </span>
           ) : (
@@ -1017,7 +1017,7 @@ function DeliveryRow({
   const state = deliveryState(d);
   const toneClass =
     state.tone === "ok"
-      ? "bg-emerald-500/10 text-emerald-600"
+      ? "bg-success-bg text-success-fg"
       : state.tone === "fail"
         ? "bg-destructive/10 text-destructive"
         : "bg-muted text-muted-foreground";

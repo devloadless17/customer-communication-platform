@@ -304,15 +304,15 @@ export function ContactFieldsSettings({
         const shadowed = defs.filter((d) => isReservedFieldKey(d.label));
         if (shadowed.length === 0) return null;
         return (
-          <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs">
-            <div className="font-medium text-amber-700 dark:text-amber-400">
+          <div className="mb-3 rounded border border-warning-border bg-warning-bg px-3 py-2 text-xs">
+            <div className="font-medium text-warning-fg">
               {shadowed.length === 1 ? "A custom field" : `${shadowed.length} custom fields`} shadow built-in contact columns.
             </div>
             <div className="mt-1 text-muted-foreground">
               {shadowed.map((d) => (
                 <span
                   key={d.id}
-                  className="mr-1 inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5"
+                  className="mr-1 inline-flex items-center gap-1 rounded border border-warning-border bg-warning-bg px-1.5 py-0.5"
                 >
                   {d.label}
                 </span>
@@ -580,7 +580,7 @@ function FieldRow({
       </code>
 
       {!field.isVisible && (
-        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-3xs font-medium text-amber-700 dark:text-amber-400">
+        <span className="rounded bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
           Hidden
         </span>
       )}
@@ -627,7 +627,7 @@ function BuiltinRow({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{label}</span>
           {!visible && (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-3xs font-medium text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-warning-bg px-1.5 py-0.5 text-3xs font-medium text-warning-fg">
               Hidden
             </span>
           )}

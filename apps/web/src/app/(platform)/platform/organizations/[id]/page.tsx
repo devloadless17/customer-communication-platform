@@ -76,7 +76,7 @@ export default async function PlatformOrganizationDetailPage({
           </span>
           <span>·</span>
           {team.whatsappConnected ? (
-            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
+            <span className="inline-flex items-center gap-1 text-success-fg">
               <CheckCircle2 className="size-3.5" />
               {team.whatsappDisplayNumber
                 ? formatPhone(team.whatsappDisplayNumber)
@@ -172,7 +172,7 @@ export default async function PlatformOrganizationDetailPage({
                       {roleLabel(m.role)}
                     </span>
                     {m.deactivatedAt && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-3xs text-amber-700 dark:text-amber-300">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-warning-border bg-warning-bg px-1.5 py-0.5 text-3xs text-warning-fg">
                         <ShieldX className="size-2.5" />
                         Deactivated
                       </span>
@@ -200,7 +200,7 @@ export default async function PlatformOrganizationDetailPage({
         )}
       </section>
 
-      <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-2xs text-amber-700 dark:text-amber-300">
+      <div className="flex items-center gap-2 rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-2xs text-warning-fg">
         <Users className="size-3.5 shrink-0" />
         <span>
           Platform-admin view. Members and aggregate counts only — conversations

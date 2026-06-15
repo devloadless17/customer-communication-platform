@@ -477,8 +477,8 @@ export function TemplateForm({
             {(headerKind === "IMAGE" || headerKind === "VIDEO" || headerKind === "DOCUMENT") && (
               <div className="mt-3 flex flex-col gap-2">
                 {!hasAppId && (
-                  <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[12px]">
-                    <span className="font-medium text-amber-700 dark:text-amber-300">
+                  <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-[12px]">
+                    <span className="font-medium text-warning-fg">
                       Meta App ID required.
                     </span>{" "}
                     <span className="text-muted-foreground">
@@ -523,7 +523,7 @@ export function TemplateForm({
                     </span>
                   </div>
                   {headerHandle && (
-                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-3xs font-medium text-emerald-700 dark:text-emerald-400">
+                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-success-bg px-2 py-0.5 text-3xs font-medium text-success-fg">
                       <Check className="size-3" />
                       Uploaded
                     </span>
@@ -864,7 +864,7 @@ function Section({
           className={cn(
             "inline-flex size-7 items-center justify-center rounded-full text-xs font-semibold",
             done
-              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+              ? "bg-success-bg text-success-fg"
               : "bg-primary/10 text-primary",
           )}
         >

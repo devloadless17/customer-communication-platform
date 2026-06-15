@@ -14,13 +14,13 @@ const STYLES: Record<
   pending: {
     label: "Pending",
     className:
-      "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+      "border-warning-border bg-warning-bg text-warning-fg",
     Icon: Clock,
   },
   active: {
     label: "Active",
     className:
-      "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+      "border-success-border bg-success-bg text-success-fg",
     Icon: CheckCircle2,
   },
   suspended: {

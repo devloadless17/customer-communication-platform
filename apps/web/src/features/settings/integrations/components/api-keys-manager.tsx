@@ -256,11 +256,11 @@ export function ApiKeysManager({ initialKeys }: Props) {
 
           {/* Reveal-once token */}
           {revealed && (
-            <div className="mt-3 rounded-md border-2 border-amber-500/60 bg-amber-500/5 p-3 shadow-sm">
+            <div className="mt-3 rounded-md border-2 border-warning-border bg-warning-bg p-3 shadow-sm">
               <div className="flex items-start gap-2">
-                <KeyRound className="mt-0.5 size-4 shrink-0 text-amber-600" />
+                <KeyRound className="mt-0.5 size-4 shrink-0 text-warning-fg" />
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-semibold text-amber-700 dark:text-amber-400">
+                  <div className="text-xs font-semibold text-warning-fg">
                     Save your key now — this is the only time it&apos;ll be shown
                   </div>
                   <p className="mt-1 text-2xs text-muted-foreground">

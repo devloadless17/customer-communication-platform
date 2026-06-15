@@ -26,6 +26,10 @@ export interface NormalizedMediaRef {
   filename?: string;
   /** Audio + video duration if the provider includes it. */
   durationMs?: number;
+  /** Audio only: true for a WhatsApp voice note (Meta `audio.voice`) vs a
+   *  shared audio file. Persisted to Message.mediaVoice + surfaced on the
+   *  bubble as the mic / "Voice message" affordance. */
+  voice?: boolean;
   /** Blob-storage provider key — used later for delete. */
   storageKey?: string;
   /** Public CDN URL the browser fetches via /api/media/[id]. */

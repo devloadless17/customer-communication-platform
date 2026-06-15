@@ -997,6 +997,11 @@ model Message {
   mediaFilename   String?
   mediaSizeBytes  Int?
   mediaDurationMs Int?
+  // Audio only: true for a WhatsApp voice note (push-to-talk) vs a shared
+  // audio FILE. Drives the inbox mic-glyph + "Voice message" affordance.
+  // Inbound: from Meta's `audio.voice`. Outbound: from the recorder's `voice`
+  // flag. Null/false = a regular audio file.
+  mediaVoice      Boolean?
 
   // Optional first-frame thumbnail for video messages. Generated server-side
   // during inbound media ingest via @ffmpeg-installer/ffmpeg + fluent-ffmpeg;

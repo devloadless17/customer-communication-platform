@@ -257,7 +257,7 @@ export function GroupForm({
               >
                 <Send className="size-3.5" />
                 Send broadcast
-                {dirty && <span className="ml-1 text-3xs text-amber-600 dark:text-amber-400">• unsaved</span>}
+                {dirty && <span className="ml-1 text-3xs text-warning-fg">• unsaved</span>}
               </button>
             </>
           )}

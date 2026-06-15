@@ -761,6 +761,9 @@ export function ReplyBox({
             sizeBytes: file.size,
             ...(effectiveCaption ? { caption: effectiveCaption } : {}),
             ...(kind === "document" ? { filename: file.name } : {}),
+            // Voice recording → show the mic affordance on the optimistic
+            // bubble immediately (server confirms it via mediaVoice).
+            ...(overrideVoice ? { voice: true } : {}),
           },
         };
         // Caption-less media has an empty body — use the same media label the

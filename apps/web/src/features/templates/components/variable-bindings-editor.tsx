@@ -166,7 +166,7 @@ export function VariableBindingsEditor({
             <span className="mr-auto text-2xs text-destructive">{error}</span>
           )}
           {savedAt !== null && !saving && !error && (
-            <span className="mr-auto inline-flex items-center gap-1 text-2xs text-emerald-700 dark:text-emerald-400">
+            <span className="mr-auto inline-flex items-center gap-1 text-2xs text-success-fg">
               <Check className="size-3" />
               Saved
             </span>

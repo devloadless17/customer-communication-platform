@@ -474,7 +474,7 @@ function StageRow({
       {stage.isDefault ? (
         <span
           title="Default — new contacts land here"
-          className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-3xs font-medium text-amber-700 dark:text-amber-300"
+          className="inline-flex items-center gap-1 rounded-full border border-warning-border bg-warning-bg px-2 py-0.5 text-3xs font-medium text-warning-fg"
         >
           <Star className="size-3 fill-current" />
           Default
@@ -485,7 +485,7 @@ function StageRow({
           onClick={onPromote}
           disabled={busy}
           title="Make this the default stage"
-          className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2 py-0.5 text-3xs text-muted-foreground transition-colors hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-amber-700 disabled:opacity-50 dark:hover:text-amber-300"
+          className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2 py-0.5 text-3xs text-muted-foreground transition-colors hover:border-warning-border hover:bg-warning-bg hover:text-warning-fg disabled:opacity-50"
         >
           <Star className="size-3" />
           Set default

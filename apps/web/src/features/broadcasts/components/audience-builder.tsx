@@ -127,10 +127,10 @@ export function AudienceBuilder({
       </Section>
 
       {/* Resolved count + preview */}
-      <section className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3">
+      <section className="rounded-xl border border-success-border bg-success-bg px-4 py-3">
         <div className="flex items-center gap-2 text-sm">
-          <Users className="size-4 text-emerald-700 dark:text-emerald-300" />
-          <span className="flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-300">
+          <Users className="size-4 text-success-fg" />
+          <span className="flex items-center gap-1.5 font-medium text-success-fg">
             {loading ? (
               <>
                 <Loader2 className="size-3.5 animate-spin" />
@@ -146,7 +146,7 @@ export function AudienceBuilder({
             <button
               type="button"
               onClick={() => setPreviewOpen(true)}
-              className="ml-auto inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-background/60 px-2 py-0.5 text-2xs font-medium text-emerald-700 hover:bg-background dark:text-emerald-300"
+              className="ml-auto inline-flex items-center gap-1 rounded-md border border-success-border bg-background/60 px-2 py-0.5 text-2xs font-medium text-success-fg hover:bg-background"
             >
               <Users className="size-3" />
               Preview

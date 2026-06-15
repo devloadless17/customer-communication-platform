@@ -347,7 +347,7 @@ export function AvailabilityPicker({
                 Saving…
               </span>
             ) : noteState === "saved" ? (
-              <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-500">
+              <span className="flex items-center gap-1 text-success-fg">
                 <Check className="size-3" />
                 Saved
               </span>

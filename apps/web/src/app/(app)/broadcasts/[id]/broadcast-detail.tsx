@@ -458,7 +458,7 @@ export function BroadcastDetail({ initial }: { initial: BroadcastDetailDto }) {
           className={cn(
             "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
             data.status === "paused"
-              ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+              ? "border-warning-border bg-warning-bg text-warning-fg"
               : "border-destructive/30 bg-destructive/10 text-destructive",
           )}
         >
@@ -677,11 +677,11 @@ function Stat({
 }) {
   const toneClass =
     tone === "emerald"
-      ? "border-emerald-500/30 bg-emerald-500/5"
+      ? "border-success-border bg-success-bg"
       : tone === "destructive"
         ? "border-destructive/30 bg-destructive/5"
         : tone === "amber"
-          ? "border-amber-500/30 bg-amber-500/5"
+          ? "border-warning-border bg-warning-bg"
           : "border-border bg-muted/20";
   return (
     <div className={cn("flex flex-col gap-1 rounded-xl border px-4 py-3", toneClass)}>
@@ -700,7 +700,7 @@ function RecipientStatusPill({
 }) {
   if (recipient.status === "sent") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-300">
+      <span className="inline-flex items-center gap-1 text-xs text-success-fg">
         <CheckCircle2 className="size-3.5" />
         Sent
       </span>

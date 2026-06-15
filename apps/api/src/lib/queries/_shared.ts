@@ -291,6 +291,7 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
             ...(m.mediaCaption ? { caption: m.mediaCaption } : {}),
             ...(m.mediaFilename ? { filename: m.mediaFilename } : {}),
             ...(m.mediaDurationMs != null ? { durationMs: m.mediaDurationMs } : {}),
+            ...(m.mediaVoice ? { voice: true } : {}),
             // Video poster — only set when the inbound ingest extracted +
             // uploaded a first-frame JPEG via ffmpeg. Older rows + outbound
             // video sends leave mediaThumbnailUrl NULL; the VideoBlock

@@ -43,7 +43,7 @@ export default async function PlatformOrganizationsPage() {
           </p>
         </div>
         {pendingCount > 0 && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[13px] font-medium text-amber-700 dark:text-amber-300">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-warning-border bg-warning-bg px-3 py-1 text-[13px] font-medium text-warning-fg">
             <Clock className="size-3.5" />
             {pendingCount} awaiting approval
           </span>
@@ -96,7 +96,7 @@ export default async function PlatformOrganizationsPage() {
                   </td>
                   <td className="px-4 py-3">
                     {t.whatsappConnected ? (
-                      <span className="inline-flex items-center gap-1.5 text-[12px] text-emerald-700 dark:text-emerald-300">
+                      <span className="inline-flex items-center gap-1.5 text-[12px] text-success-fg">
                         <CheckCircle2 className="size-3.5" />
                         {t.whatsappDisplayNumber ? (
                           <span className="font-mono">

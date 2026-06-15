@@ -129,7 +129,7 @@ export function MaxMembersControl({
         </Button>
       </div>
       {willStrandExisting && (
-        <span className="text-3xs text-amber-600 dark:text-amber-400">
+        <span className="text-3xs text-warning-fg">
           {activeMembers} members already — existing stay, no new joins.
         </span>
       )}

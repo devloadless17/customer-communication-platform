@@ -409,7 +409,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
             className={
               "flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors disabled:opacity-50 " +
               (isLive
-                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                ? "border-success-border bg-success-bg text-success-fg"
                 : "border-border bg-muted text-muted-foreground")
             }
           >

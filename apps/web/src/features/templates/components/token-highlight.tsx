@@ -103,7 +103,7 @@ function renderTokenized(
           "rounded-xs",
           isKnown
             ? "bg-blue-500/10 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300"
-            : "bg-amber-500/10 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
+            : "bg-warning-bg text-warning-fg",
         )}
       >
         {m[0]}

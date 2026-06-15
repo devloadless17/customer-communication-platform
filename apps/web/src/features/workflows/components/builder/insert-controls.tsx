@@ -637,7 +637,7 @@ export function StepPickerPopover({
                       {needsContact && (
                         <span
                           title={NEEDS_CONTACT_TRIGGER_HINT}
-                          className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400"
+                          className="rounded-sm border border-warning-border bg-warning-bg px-1 py-px text-[9px] font-medium uppercase tracking-wide text-warning-fg"
                         >
                           {NEEDS_CONTACT_TRIGGER_HINT}
                         </span>

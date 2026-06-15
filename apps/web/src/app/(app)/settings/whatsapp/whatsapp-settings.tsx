@@ -280,8 +280,8 @@ function ConnectionStatus({
 }) {
   if (!current.connected) {
     return (
-      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs">
-        <div className="font-medium text-amber-700 dark:text-amber-400">
+      <div className="rounded-xl border border-warning-border bg-warning-bg p-4 text-xs">
+        <div className="font-medium text-warning-fg">
           Not connected
         </div>
         <div className="mt-0.5 text-muted-foreground">
@@ -291,10 +291,10 @@ function ConnectionStatus({
     );
   }
   return (
-    <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-xs">
+    <div className="rounded-xl border border-success-border bg-success-bg p-4 text-xs">
       <div className="flex items-center gap-2">
-        <Check className="size-3.5 text-emerald-600" />
-        <span className="font-medium text-emerald-700 dark:text-emerald-400">
+        <Check className="size-3.5 text-success-fg" />
+        <span className="font-medium text-success-fg">
           Connected
         </span>
       </div>
@@ -321,7 +321,7 @@ function ConnectionStatus({
         )}
       </dl>
       {showFinalStepHint && (
-        <p className="mt-3 border-t border-emerald-500/20 pt-2 text-2xs text-muted-foreground">
+        <p className="mt-3 border-t border-success-border pt-2 text-2xs text-muted-foreground">
           Final check: in Meta → WhatsApp → Configuration, confirm you&apos;ve subscribed
           to the <span className="font-mono">messages</span> field. Without it, no
           incoming messages will arrive.

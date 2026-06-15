@@ -91,7 +91,7 @@ export function NotificationsSettings() {
         </div>
       </div>
       {!receiveCalls && (
-        <p className="mt-2 max-w-xl text-xs text-amber-600 dark:text-amber-400">
+        <p className="mt-2 max-w-xl text-xs text-warning-fg">
           You won&apos;t be notified of incoming calls on this device.
         </p>
       )}

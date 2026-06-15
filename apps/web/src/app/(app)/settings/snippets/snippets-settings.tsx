@@ -440,7 +440,7 @@ function SnippetEditor({
               includeAgent
             />
             {unknown.length > 0 && (
-              <p className="text-2xs text-amber-600 dark:text-amber-400">
+              <p className="text-2xs text-warning-fg">
                 Unknown token{unknown.length === 1 ? "" : "s"}:{" "}
                 {unknown.join(", ")} — these will resolve to empty.
               </p>

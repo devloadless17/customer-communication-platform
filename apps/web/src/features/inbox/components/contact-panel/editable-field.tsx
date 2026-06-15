@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { ExternalLink, Trash2 } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -21,6 +21,9 @@ export function EditableField({
   displayValue,
   placeholder,
   mono,
+  actionHref,
+  actionLabel,
+  ActionIcon = ExternalLink,
   onSave,
   onDelete,
 }: {
@@ -32,6 +35,14 @@ export function EditableField({
   displayValue?: string;
   placeholder?: string;
   mono?: boolean;
+  /** When set (and a value exists, and not editing), renders a small action
+   *  link that makes the field actionable — e.g. a `mailto:` for email. The
+   *  read-view value stays a click-to-edit button; this is a sibling icon. */
+  actionHref?: string;
+  /** Accessible label for the action link (defaults to "Open"). */
+  actionLabel?: string;
+  /** Icon for the action link. Defaults to ExternalLink. */
+  ActionIcon?: React.ComponentType<{ className?: string }>;
   onSave: (next: string) => Promise<boolean>;
   onDelete?: () => Promise<void>;
 }) {
@@ -118,6 +129,17 @@ export function EditableField({
           disabled={busy}
           className={`h-6 min-w-0 flex-1 text-xs ${mono ? "font-mono" : ""}`}
         />
+      )}
+      {actionHref && value && !editing && (
+        <a
+          href={actionHref}
+          aria-label={actionLabel ?? "Open"}
+          // Match the delete button's hover-reveal affordance so the action
+          // doesn't add visual weight to the row at rest.
+          className="ml-0.5 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+        >
+          <ActionIcon className="size-3" />
+        </a>
       )}
       {onDelete && !editing && (
         <button

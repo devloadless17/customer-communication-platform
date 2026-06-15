@@ -400,11 +400,11 @@ function Endpoint({
 }) {
   const color =
     method === "GET"
-      ? "bg-emerald-500/10 text-emerald-600"
+      ? "bg-success-bg text-success-fg"
       : method === "POST"
         ? "bg-blue-500/10 text-blue-600"
         : method === "PATCH"
-          ? "bg-amber-500/10 text-amber-600"
+          ? "bg-warning-bg text-warning-fg"
           : method === "DELETE"
             ? "bg-destructive/10 text-destructive"
             : "bg-slate-500/10 text-slate-600";

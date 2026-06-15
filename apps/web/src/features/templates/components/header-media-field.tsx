@@ -51,8 +51,8 @@ export function HeaderMediaField({
         ) : media.kind === "video" ? (
           <video src={media.link} className="size-12 shrink-0 rounded object-cover" muted />
         ) : (
-          <div className="flex size-12 shrink-0 items-center justify-center rounded bg-emerald-500/10">
-            <FileText className="size-5 text-emerald-600 dark:text-emerald-400" />
+          <div className="flex size-12 shrink-0 items-center justify-center rounded bg-success-bg">
+            <FileText className="size-5 text-success-fg" />
           </div>
         )}
         <span className="flex-1 truncate text-xs text-foreground">

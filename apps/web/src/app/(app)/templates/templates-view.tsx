@@ -212,8 +212,8 @@ export function TemplatesView({
       </header>
 
       {!connected && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
-          <div className="font-medium text-amber-700 dark:text-amber-300">
+        <div className="rounded-lg border border-warning-border bg-warning-bg p-4 text-sm">
+          <div className="font-medium text-warning-fg">
             WhatsApp not connected
           </div>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
@@ -227,8 +227,8 @@ export function TemplatesView({
       )}
 
       {connected && !hasWabaId && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
-          <div className="font-medium text-amber-700 dark:text-amber-300">
+        <div className="rounded-lg border border-warning-border bg-warning-bg p-4 text-sm">
+          <div className="font-medium text-warning-fg">
             WhatsApp Business Account ID needed
           </div>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
@@ -450,9 +450,9 @@ function StatusFilterTabs({
 function StatusPill({ status }: { status: string }) {
   const tone =
     status === "approved"
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      ? "border-success-border bg-success-bg text-success-fg"
       : status === "pending"
-        ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+        ? "border-warning-border bg-warning-bg text-warning-fg"
         : status === "rejected"
           ? "border-destructive/30 bg-destructive/10 text-destructive"
           : "border-border bg-muted/40 text-muted-foreground";
