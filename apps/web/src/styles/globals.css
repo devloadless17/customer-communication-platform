@@ -23,8 +23,8 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.16 0.006 262);
 
-  /* Brand: a refined emerald — nods to WhatsApp without copying it */
-  --primary: oklch(0.55 0.13 160);
+  /* Brand: a refined teal */
+  --primary: oklch(0.55 0.12 190);
   --primary-foreground: oklch(0.99 0 0);
 
   --secondary: oklch(0.962 0.006 256);
@@ -33,7 +33,7 @@
   --muted: oklch(0.955 0.006 256);
   --muted-foreground: oklch(0.50 0.012 262);
 
-  --accent: oklch(0.948 0.014 160);
+  --accent: oklch(0.948 0.013 190);
   --accent-foreground: oklch(0.20 0.006 262);
 
   --destructive: oklch(0.62 0.21 25);
@@ -41,16 +41,18 @@
 
   --border: oklch(0.895 0.008 254);
   --input: oklch(0.915 0.007 254);
-  --ring: oklch(0.55 0.13 160);
+  --ring: oklch(0.55 0.12 190);
 
   /* Domain-specific tokens used by inbox components */
   --inbound-bg: oklch(0.974 0.004 258);
   --inbound-fg: oklch(0.18 0.006 262);
-  --outbound-bg: oklch(0.55 0.13 160);
+  --outbound-bg: oklch(0.55 0.12 190);
   --outbound-fg: oklch(0.99 0 0);
-  --note-bg: oklch(0.975 0.04 90);
-  --note-border: oklch(0.86 0.10 90);
-  --note-fg: oklch(0.32 0.07 70);
+  /* Internal notes — a soft, low-chroma beige (warm but neutral, not loud
+     yellow). The color alone signals "note", so no label is needed. */
+  --note-bg: oklch(0.955 0.018 78);
+  --note-border: oklch(0.87 0.028 75);
+  --note-fg: oklch(0.42 0.045 68);
 
   --radius: 0.625rem;
 
@@ -75,7 +77,7 @@
   --popover: oklch(0.18 0.014 254);
   --popover-foreground: oklch(0.96 0.005 260);
 
-  --primary: oklch(0.70 0.14 160);
+  --primary: oklch(0.70 0.12 190);
   --primary-foreground: oklch(0.14 0.018 252);
 
   --secondary: oklch(0.22 0.014 254);
@@ -84,7 +86,7 @@
   --muted: oklch(0.20 0.014 254);
   --muted-foreground: oklch(0.62 0.012 258);
 
-  --accent: oklch(0.24 0.025 160);
+  --accent: oklch(0.24 0.022 190);
   --accent-foreground: oklch(0.96 0.005 260);
 
   --destructive: oklch(0.62 0.21 25);
@@ -92,15 +94,15 @@
 
   --border: oklch(0.24 0.014 254);
   --input: oklch(0.25 0.014 254);
-  --ring: oklch(0.70 0.14 160);
+  --ring: oklch(0.70 0.12 190);
 
   --inbound-bg: oklch(0.21 0.015 254);
   --inbound-fg: oklch(0.95 0.005 260);
-  --outbound-bg: oklch(0.55 0.13 160);
+  --outbound-bg: oklch(0.55 0.12 190);
   --outbound-fg: oklch(0.99 0 0);
-  --note-bg: oklch(0.25 0.04 80);
-  --note-border: oklch(0.38 0.07 80);
-  --note-fg: oklch(0.92 0.06 90);
+  --note-bg: oklch(0.27 0.02 72);
+  --note-border: oklch(0.40 0.028 72);
+  --note-fg: oklch(0.88 0.03 82);
 
   /* Sidebar sits slightly darker than background for depth — creates the
      chrome-rail effect (VS Code / Linear dark mode pattern). */

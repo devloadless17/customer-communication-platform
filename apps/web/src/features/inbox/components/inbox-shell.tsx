@@ -33,6 +33,7 @@ import {
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
+import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 
 import dynamic from "next/dynamic";
 
@@ -126,6 +127,14 @@ const CACHE_MAX_ENTRIES = 40;
 // in fetchControllers forever. 30s is way past p99 for this endpoint and won't
 // false-trip on a normal slow network.
 const FETCH_TIMEOUT_MS = 30_000;
+// Minimum width (px) the message thread column must keep on desktop. Both
+// resizers (list + details) clamp against this at drag-time so neither can be
+// dragged wide enough to squish the thread header/composer out of bounds. Sized
+// so the composer header (Reply/Note toggle + Window badge + Send template) all
+// fit on one line with breathing room — that's the "nothing overlaps" cap.
+// Applied as a CSS min-width on the thread too (window-resize case). Keep the
+// JS constant and the Tailwind `lg:min-w-[560px]` (message-thread.tsx) in sync.
+const MIN_THREAD_WIDTH = 560;
 
 /**
  * Single-page inbox workspace.
@@ -1000,6 +1009,35 @@ export function InboxShell({
     }
   }, []);
 
+  // Desktop drag-to-resize for the conversation-list column. `width` is null
+  // until mount (CSS default applies, no hydration mismatch); after that it's
+  // the persisted px width, fed to the column via the `--inbox-lw` CSS var.
+  const {
+    width: listWidth,
+    onHandleDown,
+    onHandleKeyDown,
+  } = usePanelResize({
+    storageKey: "inbox-list-width",
+    min: 260,
+    max: 560,
+    def: 320,
+    // Don't let dragging the list so wide that the thread (inside <main>, which
+    // also holds the details panel) drops below a usable width. Measured live
+    // from the handle's siblings so it adapts to window size + details width.
+    getDragMax: (handle) => {
+      const listCol = handle.previousElementSibling as HTMLElement | null;
+      const main = handle.nextElementSibling as HTMLElement | null;
+      if (!listCol || !main) return Infinity;
+      const aside = main.querySelector("aside");
+      const detailsTotal = aside
+        ? aside.getBoundingClientRect().width + 4 /* details handle */
+        : 0;
+      const listW = listCol.getBoundingClientRect().width;
+      const mainW = main.getBoundingClientRect().width;
+      return listW + Math.max(0, mainW - detailsTotal - MIN_THREAD_WIDTH);
+    },
+  });
+
   return (
     <SnippetsProvider snippets={snippets}>
       {/* AppRail + the inbox sub-sidebar + mobile chrome all live in
@@ -1027,9 +1065,17 @@ export function InboxShell({
               as a fixed-width column. */}
           <div
             className={cn(
-              "flex min-h-0 flex-1 md:flex-none",
+              // Desktop: fixed-width column driven by the drag-resizable
+              // `--inbox-lw` var, clamped to the hook's [260, 560] bounds.
+              // Mobile: full-width (flex-1). The var is always set (320 until
+              // the persisted width loads), so server and client first paint
+              // agree — no hydration mismatch.
+              "flex min-h-0 flex-1 md:w-[var(--inbox-lw)] md:min-w-[260px] md:max-w-[560px] md:flex-initial",
               activeId ? "hidden md:flex" : "flex",
             )}
+            style={
+              { "--inbox-lw": `${listWidth ?? 320}px` } as React.CSSProperties
+            }
           >
             <ConversationList
               conversations={conversationList}
@@ -1049,11 +1095,30 @@ export function InboxShell({
               canDeleteConversations={canDeleteConversations}
             />
           </div>
+          {/* Drag-to-resize handle between the list and the thread. Desktop
+              only (mobile is single-pane). The 1px visual line sits inside a
+              wider hit area so it's easy to grab; arrows resize when focused. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize conversation list"
+            aria-valuemin={260}
+            aria-valuemax={560}
+            aria-valuenow={listWidth ?? 320}
+            tabIndex={0}
+            onPointerDown={onHandleDown}
+            onKeyDown={onHandleKeyDown}
+            className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none select-none border-l border-border outline-none md:block"
+          >
+            <span className="absolute inset-y-0 -left-1 -right-1 z-10 transition-colors group-hover:bg-primary/30 group-focus-visible:bg-primary/50" />
+          </div>
           {/* Mobile: main pane visible only when a thread is active.
               Desktop: always visible. */}
           <main
             className={cn(
-              "relative min-w-0 flex-1 border-border bg-background md:flex md:border-l",
+              // No md:border-l here — the resize handle (above) is the
+              // list/thread separator on desktop now.
+              "relative min-w-0 flex-1 bg-background md:flex",
               activeId ? "flex" : "hidden md:flex",
             )}
           >
@@ -1272,17 +1337,22 @@ function ThreadWorkspace({
         onMobileBack={onMobileBack}
         jumpToMessageId={jumpToMessageId}
         jumpNonce={jumpNonce}
-      />
-      <ContactPanel
-        data={thread.data}
-        fieldDefinitions={fieldDefinitions}
-        builtins={contactPanelBuiltins}
-        canManageFields={canManageContactFields}
-        tagCatalog={tags}
-        teamMembers={teamMembers}
-        currentUserName={currentUser.name}
-        initialCollapsed={initialContactPanelCollapsed}
-        onGoToMessage={onGoToMessage}
+        // Details panel rendered INSIDE the thread, to the right of the
+        // messages, so the thread header/action bar spans full-width above
+        // both columns (the details sits under the name/status bar).
+        rightPanel={
+          <ContactPanel
+            data={thread.data}
+            fieldDefinitions={fieldDefinitions}
+            builtins={contactPanelBuiltins}
+            canManageFields={canManageContactFields}
+            tagCatalog={tags}
+            teamMembers={teamMembers}
+            currentUserName={currentUser.name}
+            initialCollapsed={initialContactPanelCollapsed}
+            onGoToMessage={onGoToMessage}
+          />
+        }
       />
       {/* No SSR bottom-snap script anymore: the thread viewport is
           `flex-direction: column-reverse` (message-thread.tsx), so the browser

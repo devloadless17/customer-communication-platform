@@ -32,6 +32,23 @@ export interface AvatarUploadFile {
   originalFilename: string | null;
 }
 
+/** Per-member activity row for the team-activity settings page. */
+export interface MemberStat {
+  userId: string;
+  name: string;
+  email: string;
+  role: Role;
+  deactivated: boolean;
+  /** Chats CURRENTLY assigned to them (point-in-time — ignores the period). */
+  activeAssigned: number;
+  /** Assignment actions TO them within the period. */
+  assigned: number;
+  /** Outbound messages they authored within the period. */
+  messagesSent: number;
+  /** Close actions they performed within the period. */
+  closed: number;
+}
+
 @Injectable()
 export class UsersService {
   constructor(
@@ -190,6 +207,138 @@ export class UsersService {
       orderBy: { name: "asc" },
     });
     return rows.map((u) => mapUser(u));
+  }
+
+  /**
+   * Per-member activity for the team-activity settings page (admin-only).
+   *   - activeAssigned — chats CURRENTLY assigned (Conversation.assignedUserId);
+   *                      point-in-time, NOT windowed by `since`.
+   *   - assigned       — assignment actions TO them in the window. Sourced from
+   *                      the audit log (ConversationEvent kind=assigned,
+   *                      after.assignedUserId), because the denormalized
+   *                      Conversation columns can't tell us per-period counts.
+   *   - messagesSent   — outbound messages authored in the window (by timestamp).
+   *   - closed         — close actions in the window (audit kind=status_changed,
+   *                      after.status=closed, by the acting user). The audit is
+   *                      used (not Conversation.closedByUserId) because a reopen
+   *                      clears the denormalized field, undercounting the period.
+   *
+   * `since` null = all-time. Five reads in parallel, merged in memory; all
+   * team-scoped, all default to 0.
+   */
+  async getMemberStats(
+    teamId: string,
+    since: Date | null,
+  ): Promise<MemberStat[]> {
+    const atWindow = since ? { gte: since } : undefined;
+
+    const [users, activeAssigned, sent, assignedEvents, closed] =
+      await Promise.all([
+        this.db.user.findMany({
+          where: { teamId },
+          orderBy: { name: "asc" },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            deactivatedAt: true,
+          },
+        }),
+        // Currently assigned & OPEN (non-closed) — point-in-time, no window.
+        // Mirrors getActiveAssignments + the inbox "Mine" view: a closed chat
+        // isn't active work.
+        this.db.conversation.groupBy({
+          by: ["assignedUserId"],
+          where: {
+            teamId,
+            assignedUserId: { not: null },
+            status: { not: "closed" },
+          },
+          _count: { _all: true },
+        }),
+        // Outbound messages in window.
+        this.db.message.groupBy({
+          by: ["senderUserId"],
+          where: {
+            teamId,
+            direction: "out",
+            senderUserId: { not: null },
+            ...(atWindow ? { timestamp: atWindow } : {}),
+          },
+          _count: { _all: true },
+        }),
+        // Assignment actions in window — assignee lives in `after` JSON, which
+        // groupBy can't key on, so fetch + tally in memory.
+        this.db.conversationEvent.findMany({
+          where: { teamId, kind: "assigned", ...(atWindow ? { at: atWindow } : {}) },
+          select: { after: true },
+        }),
+        // Close actions in window — group by the acting user.
+        this.db.conversationEvent.groupBy({
+          by: ["userId"],
+          where: {
+            teamId,
+            kind: "status_changed",
+            userId: { not: null },
+            after: { path: ["status"], equals: "closed" },
+            ...(atWindow ? { at: atWindow } : {}),
+          },
+          _count: { _all: true },
+        }),
+      ]);
+
+    const activeBy = new Map(
+      activeAssigned.map((r) => [r.assignedUserId, r._count._all]),
+    );
+    const sentBy = new Map(sent.map((r) => [r.senderUserId, r._count._all]));
+    const closedBy = new Map(closed.map((r) => [r.userId, r._count._all]));
+
+    const assignedBy = new Map<string, number>();
+    for (const e of assignedEvents) {
+      const after = e.after;
+      if (after && typeof after === "object" && !Array.isArray(after)) {
+        const a = (after as Record<string, unknown>).assignedUserId;
+        if (typeof a === "string") {
+          assignedBy.set(a, (assignedBy.get(a) ?? 0) + 1);
+        }
+      }
+    }
+
+    return users.map((u) => ({
+      userId: u.id,
+      name: u.name,
+      email: u.email,
+      role: u.role as Role,
+      deactivated: u.deactivatedAt != null,
+      activeAssigned: activeBy.get(u.id) ?? 0,
+      assigned: assignedBy.get(u.id) ?? 0,
+      messagesSent: sentBy.get(u.id) ?? 0,
+      closed: closedBy.get(u.id) ?? 0,
+    }));
+  }
+
+  /**
+   * Just the live "current activity" numbers: open (non-closed) conversations
+   * assigned to each user, right now. A single grouped count — cheap enough to
+   * be re-polled on every assignment/status socket event. Keyed by userId;
+   * users with zero are simply absent (the client defaults them to 0).
+   */
+  async getActiveAssignments(teamId: string): Promise<Record<string, number>> {
+    const rows = await this.db.conversation.groupBy({
+      by: ["assignedUserId"],
+      where: {
+        teamId,
+        assignedUserId: { not: null },
+        status: { not: "closed" },
+      },
+      _count: { _all: true },
+    });
+    const out: Record<string, number> = {};
+    for (const r of rows) {
+      if (r.assignedUserId) out[r.assignedUserId] = r._count._all;
+    }
+    return out;
   }
 
   /**

@@ -26,11 +26,13 @@ import {
   SendMediaFormSchema,
   SendTemplateSchema,
   SendTextSchema,
+  TranslateSchema,
   type ForwardMessagesInput,
   type SendInteractiveInput,
   type SendMediaFormInput,
   type SendTemplateInput,
   type SendTextInput,
+  type TranslateInput,
 } from "./messages.schemas";
 
 /**
@@ -65,6 +67,20 @@ export class MessagesController {
     // returned a real messageId because the send was synchronous.
     const out = await this.messages.sendText(session.teamId, session.userId, body);
     return { ok: out.ok, queued: true, ...("clientTempId" in out ? { clientTempId: out.clientTempId } : {}) };
+  }
+
+  /**
+   * Translate composer text to a target language (DeepL). Session-authed only;
+   * doesn't touch a conversation, just transforms the draft text the agent
+   * passes in. Shares the controller's rate-limit bucket — fine, it's only hit
+   * on an explicit language pick.
+   */
+  @Post("translate")
+  async translate(
+    @CurrentSession() _session: ApiSession,
+    @Body(zBody(TranslateSchema)) body: TranslateInput,
+  ) {
+    return this.messages.translate(body);
   }
 
   /**

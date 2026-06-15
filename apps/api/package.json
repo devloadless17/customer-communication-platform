@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
     "@ccp/config": "workspace:*",
     "@ccp/shared": "workspace:*",
     "@nestjs/common": "^11.1.21",

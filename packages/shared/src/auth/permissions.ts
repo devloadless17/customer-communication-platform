@@ -104,7 +104,8 @@ export type Capability =
   | "snippets:manage"
   | "availability:manage"
   | "calls:make"
-  | "calls:receive";
+  | "calls:receive"
+  | "teamActivity:view";
 
 export const ALL_CAPABILITIES: Capability[] = [
   "conversations:delete",
@@ -119,6 +120,7 @@ export const ALL_CAPABILITIES: Capability[] = [
   "availability:manage",
   "calls:make",
   "calls:receive",
+  "teamActivity:view",
 ];
 
 /** Roles whose capabilities an admin may edit. admin/superAdmin are fixed. */
@@ -139,6 +141,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   "availability:manage": "Set own availability (busy / away / offline)",
   "calls:make": "Place outbound voice calls",
   "calls:receive": "Answer incoming voice calls",
+  "teamActivity:view": "View team activity report",
 };
 
 /**
@@ -178,6 +181,10 @@ export const DEFAULT_CAPABILITIES: Record<Role, Record<Capability, boolean>> = {
     // grid — same admin-configurable pattern as every other capability.
     "calls:make": true,
     "calls:receive": true,
+    // Team activity report is team-performance data — off for agents by
+    // default (admin/manager get it); an admin can grant it per role in
+    // Settings → Role permissions.
+    "teamActivity:view": false,
   },
 };
 
