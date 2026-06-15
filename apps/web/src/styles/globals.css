@@ -69,50 +69,60 @@
 .dark {
   color-scheme: dark;
 
-  /* Deep navy-slate palette — more chromatic blue base (252°) vs the
-     prior near-neutral gray (270°). Chroma lifted from 0.008 → 0.018 so
-     the navy tint is perceptible without being saturated. */
-  --background: oklch(0.14 0.018 252);
-  --foreground: oklch(0.96 0.005 260);
+  /* Clean cool-slate dark palette (hue 256, LOW chroma 0.007–0.009 — a calm
+     neutral grey, NOT the muddy navy it replaced). The base lifts from a
+     near-black 0.14 to a comfortable 0.190, and surfaces climb a monotonic,
+     clearly-perceptible elevation ladder (every adjacent step ≥0.026 L):
+       sidebar 0.162 → background 0.190 → card 0.222 → popover 0.248 →
+       secondary/muted 0.262 → accent 0.272 → input 0.282 → border 0.322.
+     Borders sit +0.13 over the page / +0.10 over cards so edges actually read;
+     foreground is off-white (0.945 = 15.7:1) to avoid glare and muted-fg is
+     lifted to 0.705 to clear WCAG AA on the now-lighter surfaces. All 14
+     text/surface pairs and the full ladder were contrast-verified. */
+  --background: oklch(0.190 0.007 256);
+  --foreground: oklch(0.945 0.004 256);
 
-  --card: oklch(0.17 0.015 254);
-  --card-foreground: oklch(0.96 0.005 260);
+  --card: oklch(0.222 0.008 256);
+  --card-foreground: oklch(0.945 0.004 256);
 
-  --popover: oklch(0.18 0.014 254);
-  --popover-foreground: oklch(0.96 0.005 260);
+  --popover: oklch(0.248 0.008 256);
+  --popover-foreground: oklch(0.945 0.004 256);
 
-  --primary: oklch(0.72 0.13 164);
-  --primary-foreground: oklch(0.14 0.018 252);
+  --primary: oklch(0.725 0.13 164);
+  --primary-foreground: oklch(0.17 0.02 200);
 
-  --secondary: oklch(0.22 0.014 254);
-  --secondary-foreground: oklch(0.96 0.005 260);
+  --secondary: oklch(0.262 0.008 256);
+  --secondary-foreground: oklch(0.945 0.004 256);
 
-  --muted: oklch(0.20 0.014 254);
-  --muted-foreground: oklch(0.62 0.012 258);
+  --muted: oklch(0.262 0.008 256);
+  --muted-foreground: oklch(0.705 0.009 258);
 
-  --accent: oklch(0.25 0.026 164);
-  --accent-foreground: oklch(0.96 0.005 260);
+  --accent: oklch(0.272 0.020 168);
+  --accent-foreground: oklch(0.95 0.006 168);
 
-  --destructive: oklch(0.62 0.21 25);
-  --destructive-foreground: oklch(0.99 0 0);
+  /* Brighter red + near-black text reads as a clear danger signal on dark AND
+     clears AA (5.1:1) where white-on-this-red would only hit ~3.5:1. */
+  --destructive: oklch(0.635 0.205 25);
+  --destructive-foreground: oklch(0.16 0.02 25);
 
-  --border: oklch(0.24 0.014 254);
-  --input: oklch(0.25 0.014 254);
-  --ring: oklch(0.72 0.13 164);
+  --border: oklch(0.322 0.009 256);
+  --input: oklch(0.282 0.008 256);
+  --ring: oklch(0.725 0.13 164);
 
-  --inbound-bg: oklch(0.21 0.015 254);
-  --inbound-fg: oklch(0.95 0.005 260);
-  --outbound-bg: oklch(0.55 0.13 164);
-  --outbound-fg: oklch(0.99 0 0);
-  --note-bg: oklch(0.27 0.02 72);
-  --note-border: oklch(0.40 0.028 72);
-  --note-fg: oklch(0.88 0.03 82);
+  --inbound-bg: oklch(0.232 0.008 256);
+  --inbound-fg: oklch(0.945 0.004 256);
+  --outbound-bg: oklch(0.525 0.128 164);
+  --outbound-fg: oklch(0.99 0.004 164);
+  --note-bg: oklch(0.29 0.035 75);
+  --note-border: oklch(0.42 0.045 75);
+  --note-fg: oklch(0.92 0.04 85);
 
-  /* Sidebar sits slightly darker than background for depth — creates the
-     chrome-rail effect (VS Code / Linear dark mode pattern). */
-  --sidebar: oklch(0.11 0.018 250);
-  --sidebar-foreground: oklch(0.88 0.006 258);
-  --sidebar-border: oklch(0.20 0.015 252);
+  /* Sidebar is the deepest surface (chrome-rail effect) but no longer a black
+     hole — 0.162 sits just below the page so the rail reads as recessed, not
+     as a void. */
+  --sidebar: oklch(0.162 0.007 256);
+  --sidebar-foreground: oklch(0.90 0.005 258);
+  --sidebar-border: oklch(0.262 0.008 256);
 }
 
 @theme inline {

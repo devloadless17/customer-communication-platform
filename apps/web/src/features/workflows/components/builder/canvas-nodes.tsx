@@ -112,7 +112,7 @@ export function TriggerNode({ data }: NodeProps) {
       }`}
     >
       <div className="flex items-center gap-2 border-b border-border bg-amber-500/10 px-3 py-2">
-        <Zap className="size-4 text-amber-600" />
+        <Zap className="size-4 text-amber-600 dark:text-amber-400" />
         <div className="flex-1">
           <div className="text-3xs font-medium uppercase tracking-wider text-amber-700 dark:text-amber-300">
             Trigger
@@ -210,7 +210,7 @@ export function BranchNode({ id, data }: NodeProps) {
         onDelete={() => d.onDelete?.()}
       />
       <div className="flex items-center gap-2 border-b border-border bg-indigo-500/10 px-3 py-2">
-        <Filter className="size-4 text-indigo-600" />
+        <Filter className="size-4 text-indigo-600 dark:text-indigo-400" />
         <div className="min-w-0 flex-1">
           <div className="text-3xs font-medium uppercase tracking-wider text-indigo-700 dark:text-indigo-300">
             Branch
@@ -292,7 +292,7 @@ export function AskQuestionNode({ id, data }: NodeProps) {
         onDelete={() => d.onDelete?.()}
       />
       <div className="flex items-center gap-2 border-b border-border bg-violet-500/10 px-3 py-2">
-        <HelpCircle className="size-4 text-violet-600" />
+        <HelpCircle className="size-4 text-violet-600 dark:text-violet-400" />
         <div className="min-w-0 flex-1">
           <div className="text-3xs font-medium uppercase tracking-wider text-violet-700 dark:text-violet-300">
             Ask a Question

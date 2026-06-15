@@ -252,8 +252,8 @@ function ChannelMessageImpl({
       data-message-id={message.id}
       className={cn(
         "group relative flex gap-3 px-4 py-1.5 transition-colors hover:bg-muted/40",
-        message.pinned && !isThreadReply && "bg-amber-50/40 dark:bg-amber-950/10",
-        message.failed && "bg-red-50 dark:bg-red-950/20",
+        message.pinned && !isThreadReply && "bg-amber-50/40 dark:bg-amber-500/10",
+        message.failed && "bg-red-50 dark:bg-red-500/15",
       )}
     >
       <Avatar className="mt-0.5 size-9 shrink-0">
@@ -369,7 +369,7 @@ function ChannelMessageImpl({
         )}
 
         {message.failed && (
-          <div className="mt-1 flex items-center gap-2 text-xs text-red-600">
+          <div className="mt-1 flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
             <X className="size-3" />
             Failed to send. Try again.
           </div>
@@ -448,7 +448,7 @@ function ChannelMessageImpl({
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    className="text-red-600 focus:text-red-600"
+                    className="text-red-600 focus:text-red-600 dark:text-red-400 dark:focus:text-red-400"
                     onClick={() => void submitDelete()}
                   >
                     <Trash2 className="size-4" />

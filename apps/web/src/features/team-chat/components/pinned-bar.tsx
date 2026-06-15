@@ -44,7 +44,7 @@ export function PinnedBar({
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-4 py-2 text-xs font-medium transition-colors hover:bg-amber-100/50 dark:hover:bg-amber-900/10"
       >
-        <Pin className="size-3.5 text-amber-600" />
+        <Pin className="size-3.5 text-amber-600 dark:text-amber-400" />
         <span>
           {pins.length} pinned {pins.length === 1 ? "message" : "messages"}
         </span>
