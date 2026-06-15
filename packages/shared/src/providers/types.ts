@@ -200,10 +200,33 @@ export interface NormalizedTemplateStatusUpdate {
   rawPayload: Record<string, unknown>;
 }
 
+/**
+ * A customer reacted to (or un-reacted from) one of our messages. WhatsApp
+ * delivers these as `m.type === "reaction"` with `m.reaction = { message_id,
+ * emoji }`; an empty `emoji` means the reaction was removed. Ingest finds the
+ * target Message by `targetExternalId` (the reacted-to wamid) and sets its
+ * `reaction` column, then fans out `message.reaction_changed` to the thread.
+ * Inbound-only — agent-side reacting is deferred.
+ */
+export interface NormalizedReaction {
+  kind: "reaction";
+  /** The reaction message's OWN provider id (for logging / future dedupe). */
+  externalId: string;
+  /** Provider id (wamid) of the message being reacted to — the match key. */
+  targetExternalId: string;
+  /** The emoji, or null when the customer REMOVED their reaction. */
+  emoji: string | null;
+  /** E.164 digits, no '+'. Same shape as messages. */
+  contactPhone: string;
+  timestamp: Date;
+  rawPayload: Record<string, unknown>;
+}
+
 export type NormalizedEvent =
   | NormalizedInboundMessage
   | NormalizedStatusUpdate
   | NormalizedCallEvent
+  | NormalizedReaction
   | NormalizedTemplateStatusUpdate;
 
 export interface SendTextArgs {

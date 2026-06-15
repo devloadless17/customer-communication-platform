@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import { headers } from "next/headers";
 import { MotionConfig } from "framer-motion";
@@ -30,6 +30,13 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Inbox · Loadless",
   description: "Shared inbox for WhatsApp customer conversations.",
+};
+
+// Lock the viewport to device width without disabling pinch-zoom — no
+// userScalable:false / maximumScale (accessibility).
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default async function RootLayout({

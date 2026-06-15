@@ -968,6 +968,12 @@ model Message {
   statusErrorCode   Int?
   statusErrorTitle  String?
   statusErrorDetail String?
+  // The customer's current emoji reaction to THIS message (WhatsApp lets a
+  // contact react to any message). A single value because a conversation has
+  // exactly one customer; a new reaction REPLACES it and an empty reaction
+  // payload CLEARS it (null). Inbound-only for now — agent-side reacting is
+  // deferred. Set by the ingest `reaction` path; null = no reaction.
+  reaction       String?
   // Original webhook payload kept verbatim for debugging.
   rawPayload     Json
   timestamp      DateTime         @default(now())

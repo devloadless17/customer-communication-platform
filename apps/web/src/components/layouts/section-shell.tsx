@@ -20,6 +20,7 @@ export async function SectionShell({
   subSidebar,
   children,
   mainClassName,
+  capContentWidth,
 }: {
   subSidebar?: React.ReactNode;
   children: React.ReactNode;
@@ -27,6 +28,14 @@ export async function SectionShell({
    *  `overflow-y-auto`. Pass `min-w-0` for sections that own internal
    *  scroll (e.g. team chat). */
   mainClassName?: string;
+  /** Opt-in for "centered content" sections (workflows, templates,
+   *  broadcasts list, etc.) whose pages don't manage their own width.
+   *  Wraps children in a centered `max-w-[1400px]` track so they don't
+   *  stretch edge-to-edge on ultrawide monitors. Default `false` —
+   *  full-bleed sections (inbox, team chat, contacts) keep today's
+   *  behavior and must NOT set this. Sections that already cap their
+   *  own children (settings wraps in `max-w-3xl`) don't need it either. */
+  capContentWidth?: boolean;
 }) {
   // Both are React.cached and almost always pre-warmed by the (app) parent
   // layout, so these are free cache hits — but parallelize anyway in case
@@ -55,7 +64,11 @@ export async function SectionShell({
         tabIndex={-1}
         className={`min-w-0 flex-1 focus:outline-none ${mainClassName ?? "overflow-y-auto"}`}
       >
-        {children}
+        {capContentWidth ? (
+          <div className="mx-auto w-full max-w-350">{children}</div>
+        ) : (
+          children
+        )}
       </main>
     </>
   );

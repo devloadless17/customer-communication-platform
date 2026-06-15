@@ -13,6 +13,7 @@ import {
 } from "@ccp/shared/auth/permissions";
 import { roleLabel } from "@ccp/shared/auth/permissions";
 import { Switch } from "@/components/ui/switch";
+import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 
@@ -100,22 +101,19 @@ export function PermissionsSettings() {
 
   return (
     <div>
-      <header className="mb-6 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Role permissions</h1>
-          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-            Choose what managers and agents are allowed to do. Admins always
-            have full access. Changes apply to everyone on the team within a few
-            seconds.
-          </p>
-        </div>
-        {saving && (
-          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Loader2 className="size-3.5 animate-spin" />
-            Saving…
-          </span>
-        )}
-      </header>
+      <PageHeader
+        title="Role permissions"
+        description="Choose what managers and agents are allowed to do. Admins always have full access. Changes apply to everyone on the team within a few seconds."
+        action={
+          saving ? (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              Saving…
+            </span>
+          ) : undefined
+        }
+        className="mb-6"
+      />
 
       {loadError ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">

@@ -11,5 +11,9 @@ export default async function TemplatesLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <SectionShell subSidebar={<BroadcastsSubSidebar />}>{children}</SectionShell>;
+  return (
+    <SectionShell subSidebar={<BroadcastsSubSidebar />} capContentWidth>
+      {children}
+    </SectionShell>
+  );
 }

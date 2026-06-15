@@ -105,6 +105,7 @@ const CONTACTS_RENDER_CAP = 2000;
 export function ContactsClient({
   initialItems,
   initialNextCursor,
+  initialTotalCount,
   fieldDefinitions: initialFieldDefinitions,
   contactPanelBuiltins,
   initialTags,
@@ -117,6 +118,9 @@ export function ContactsClient({
 }: {
   initialItems: ContactListItem[];
   initialNextCursor: string | null;
+  /** Server-computed total matching the SSR filter set. Drives "Showing N of
+   *  TOTAL"; `null` if the server didn't compute it. */
+  initialTotalCount: number | null;
   fieldDefinitions: ContactFieldDefinition[];
   /** Admin-controlled visibility for the built-in contact rows. Forwarded to
    *  the detail drawer so it honors the same hide toggles as the inbox panel. */
@@ -135,9 +139,11 @@ export function ContactsClient({
   const list = useContactList({
     initialItems,
     initialNextCursor,
+    initialTotalCount,
     initialStageFilter,
   });
-  const { items, setItems, setError, reconcileContactUpdate, refetch } = list;
+  const { items, setItems, setError, reconcileContactUpdate, refetch, adjustTotalCount } =
+    list;
   // Auto-load the next page as the sentinel nears the viewport. `loadMore`
   // self-guards while a page is already in flight.
   const loadMoreRef = useInfiniteScroll({
@@ -226,7 +232,16 @@ export function ContactsClient({
       reconcileContactUpdate(payload.contact);
     };
     const onContactDeleted = (payload: { contactId: string }) => {
-      setItems((prev) => prev.filter((row) => row.contact.id !== payload.contactId));
+      let wasPresent = false;
+      setItems((prev) => {
+        const next = prev.filter((row) => row.contact.id !== payload.contactId);
+        wasPresent = next.length !== prev.length;
+        return next;
+      });
+      // Only nudge the total when the row was actually present locally — a
+      // delete for a contact filtered out of this view shouldn't move the
+      // displayed total (the next page-1 fetch reconciles regardless).
+      if (wasPresent) adjustTotalCount(-1);
       setSelectedIds((prev) => {
         if (!prev.has(payload.contactId)) return prev;
         const copy = new Set(prev);
@@ -308,6 +323,7 @@ export function ContactsClient({
       return;
     }
     setItems((prev) => prev.filter((row) => row.contact.id !== contactId));
+    adjustTotalCount(-1);
     setSelectedIds((prev) => {
       if (!prev.has(contactId)) return prev;
       const copy = new Set(prev);
@@ -465,8 +481,12 @@ export function ContactsClient({
                 else setSelectedIds(new Set());
               }}
               rightSlot={
-                <span>
-                  {items.length} contact{items.length === 1 ? "" : "s"}
+                <span className="tabular-nums">
+                  {list.totalCount !== null && list.totalCount > items.length
+                    ? `Showing ${items.length.toLocaleString()} of ${list.totalCount.toLocaleString()}`
+                    : `${(list.totalCount ?? items.length).toLocaleString()} contact${
+                        (list.totalCount ?? items.length) === 1 ? "" : "s"
+                      }`}
                 </span>
               }
             />
@@ -511,9 +531,12 @@ export function ContactsClient({
             the picker's behaviour so both contact surfaces stay responsive. */}
         {list.nextCursor && items.length >= CONTACTS_RENDER_CAP && (
           <div className="border-t border-border p-3 text-center text-xs text-muted-foreground">
-            Showing {items.length.toLocaleString()} contacts. Refine the filters
-            or search to see more — the list is capped to keep the page
-            responsive.
+            Showing {items.length.toLocaleString()}
+            {list.totalCount !== null && list.totalCount > items.length
+              ? ` of ${list.totalCount.toLocaleString()}`
+              : ""}{" "}
+            contacts. Refine the filters or search to see more — the list is
+            capped to keep the page responsive.
           </div>
         )}
       </div>
@@ -644,6 +667,7 @@ export function ContactsClient({
             return;
           }
           setItems((prev) => prev.filter((row) => !ids.includes(row.contact.id)));
+          adjustTotalCount(-ids.length);
           setSelectedIds(new Set());
         }}
         canDelete={canDeleteContacts}
@@ -697,6 +721,7 @@ export function ContactsClient({
             // the row, and a refetch would churn the list (and reset selection)
             // for a single create; the next catalog/socket sync converges it.
             setItems((prev) => [item, ...prev]);
+            adjustTotalCount(1);
             setCreating(false);
             toast.success("Contact added");
           }}

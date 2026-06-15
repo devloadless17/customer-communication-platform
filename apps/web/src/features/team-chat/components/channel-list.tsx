@@ -124,6 +124,7 @@ export function ChannelList({
               onClick={onCreate}
               className="pointer-coarse:size-9"
               aria-label="Create channel"
+              title="Create channel"
             >
               <Plus className="size-4" />
             </Button>

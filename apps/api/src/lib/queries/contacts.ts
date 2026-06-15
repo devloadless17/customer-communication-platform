@@ -41,6 +41,72 @@ export async function listContacts(
   const stageFilter = opts.stageId;
   const tagIds = (opts.tagIds ?? []).filter((t) => t.length > 0);
 
+  // The filter predicates (everything except the keyset cursor + sort + limit)
+  // are factored out so the COUNT(*) below shares the EXACT same WHERE as the
+  // page query — the authoritative total can never drift from what the list
+  // would return. The cursor clause is intentionally NOT in here: the total
+  // is page-position-independent.
+  const filterWhere = Prisma.sql`
+    c."teamId" = ${teamId}
+    AND c."deletedAt" IS NULL
+    ${
+      search
+        ? Prisma.sql`AND (
+            c.name ILIKE ${"%" + search + "%"}
+            OR c."phoneNumber" ILIKE ${"%" + search + "%"}
+            OR COALESCE(c.email, '') ILIKE ${"%" + search + "%"}
+            -- KNOWN INDEX-MISS (acceptable at pilot scale): a
+            -- 'customFields::text ILIKE' substring match has NO index that
+            -- can serve it — no JSONB GIN serves substring (a jsonb_path_ops
+            -- GIN only serves @>/@?/@@ containment, which is why the old
+            -- Contact_customFields_gin_idx was dropped as dead write
+            -- overhead, migration 20260611130200). This branch seq-scans, but
+            -- ONLY over this team's LIVE rows (the teamId + deletedAt IS NULL
+            -- predicates above narrow first via Contact_teamId_active_idx), so
+            -- it's bounded by one tenant's contact count. Dropping the arm
+            -- would lose "find a contact by any custom-field value" from
+            -- quick-search — a real UX regression — so we keep it. TRIGGER to
+            -- revisit: a team crosses ~50k contacts AND EXPLAIN shows this as
+            -- the hot cost. Fix then: a generated tsvector/trgm column over
+            -- the flattened customFields values, or push custom-field search
+            -- to the explicit fieldKey+fieldValue filter only.
+            OR c."customFields"::text ILIKE ${"%" + search + "%"}
+          )`
+        : Prisma.empty
+    }
+    ${
+      fieldFilter
+        ? Prisma.sql`AND COALESCE(c."customFields" ->> ${fieldFilter.key}, '') ILIKE ${
+            "%" + fieldFilter.value + "%"
+          }`
+        : Prisma.empty
+    }
+    ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
+    ${
+      windowFilter === "open"
+        ? Prisma.sql`AND c."lastInboundAt" >= now() - interval '24 hours'`
+        : windowFilter === "closed"
+          ? Prisma.sql`AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" < now() - interval '24 hours')`
+          : Prisma.empty
+    }
+    ${
+      tagIds.length > 0
+        ? Prisma.sql`AND EXISTS (
+            SELECT 1 FROM "_ContactToTag" cttag
+            WHERE cttag."A" = c.id
+              AND cttag."B" = ANY(${tagIds}::text[])
+          )`
+        : Prisma.empty
+    }
+    ${
+      stageFilter === "none"
+        ? Prisma.sql`AND c."stageId" IS NULL`
+        : stageFilter
+          ? Prisma.sql`AND c."stageId" = ${stageFilter}`
+          : Prisma.empty
+    }
+  `;
+
   // Tag filter is now pushed down as `EXISTS (... _ContactToTag ...)` in
   // the raw query below. The previous approach pre-resolved every matching
   // contact id with a separate findMany and spliced it as `c.id IN (...)`,
@@ -111,64 +177,7 @@ export async function listContacts(
     -- Contact.lastInboundAt column maintained by the ingest path. The
     -- previous LEFT JOIN LATERAL scanned the contact's full message
     -- history once per row — fine in dev, ugly at scale.
-    WHERE c."teamId" = ${teamId}
-      AND c."deletedAt" IS NULL
-      ${
-        search
-          ? Prisma.sql`AND (
-              c.name ILIKE ${"%" + search + "%"}
-              OR c."phoneNumber" ILIKE ${"%" + search + "%"}
-              OR COALESCE(c.email, '') ILIKE ${"%" + search + "%"}
-              -- KNOWN INDEX-MISS (acceptable at pilot scale): a
-              -- 'customFields::text ILIKE' substring match has NO index that
-              -- can serve it — no JSONB GIN serves substring (a jsonb_path_ops
-              -- GIN only serves @>/@?/@@ containment, which is why the old
-              -- Contact_customFields_gin_idx was dropped as dead write
-              -- overhead, migration 20260611130200). This branch seq-scans, but
-              -- ONLY over this team's LIVE rows (the teamId + deletedAt IS NULL
-              -- predicates above narrow first via Contact_teamId_active_idx), so
-              -- it's bounded by one tenant's contact count. Dropping the arm
-              -- would lose "find a contact by any custom-field value" from
-              -- quick-search — a real UX regression — so we keep it. TRIGGER to
-              -- revisit: a team crosses ~50k contacts AND EXPLAIN shows this as
-              -- the hot cost. Fix then: a generated tsvector/trgm column over
-              -- the flattened customFields values, or push custom-field search
-              -- to the explicit fieldKey+fieldValue filter only.
-              OR c."customFields"::text ILIKE ${"%" + search + "%"}
-            )`
-          : Prisma.empty
-      }
-      ${
-        fieldFilter
-          ? Prisma.sql`AND COALESCE(c."customFields" ->> ${fieldFilter.key}, '') ILIKE ${
-              "%" + fieldFilter.value + "%"
-            }`
-          : Prisma.empty
-      }
-      ${source ? Prisma.sql`AND c.source = ${source}::"ContactSource"` : Prisma.empty}
-      ${
-        windowFilter === "open"
-          ? Prisma.sql`AND c."lastInboundAt" >= now() - interval '24 hours'`
-          : windowFilter === "closed"
-            ? Prisma.sql`AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" < now() - interval '24 hours')`
-            : Prisma.empty
-      }
-      ${
-        tagIds.length > 0
-          ? Prisma.sql`AND EXISTS (
-              SELECT 1 FROM "_ContactToTag" cttag
-              WHERE cttag."A" = c.id
-                AND cttag."B" = ANY(${tagIds}::text[])
-            )`
-          : Prisma.empty
-      }
-      ${
-        stageFilter === "none"
-          ? Prisma.sql`AND c."stageId" IS NULL`
-          : stageFilter
-            ? Prisma.sql`AND c."stageId" = ${stageFilter}`
-            : Prisma.empty
-      }
+    WHERE ${filterWhere}
       ${
         cursor
           ? Prisma.sql`AND (
@@ -210,6 +219,23 @@ export async function listContacts(
         })
       : null;
 
+  // Authoritative total matching the CURRENT filter set — the #1 CRM question
+  // ("how many contacts match this?"). Shares `filterWhere` verbatim with the
+  // page query above, so it can never drift from what the list returns. Only
+  // computed on page 1 (no cursor): scroll-pages reuse the client's first
+  // value, and a fresh COUNT per page would be wasted work. The COUNT skips
+  // the LEFT JOIN LATERAL entirely (it's only needed for the sort), so it's a
+  // cheaper plan than the page query — a single index-narrowed aggregate.
+  let totalCount: number | undefined;
+  if (!cursor) {
+    const countRows = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*)::bigint AS count
+      FROM "Contact" c
+      WHERE ${filterWhere}
+    `;
+    totalCount = Number(countRows[0]?.count ?? 0);
+  }
+
   // Fetch tag links for this page in one go. We don't need the tag rows
   // themselves here — the UI passes the catalog separately — so this is a
   // single Prisma query over the implicit join table. Empty page → no query.
@@ -246,7 +272,7 @@ export async function listContacts(
     lastInboundAt: r.lastInboundAt ? r.lastInboundAt.toISOString() : null,
   }));
 
-  return { items, nextCursor };
+  return { items, nextCursor, totalCount };
 }
 
 /**

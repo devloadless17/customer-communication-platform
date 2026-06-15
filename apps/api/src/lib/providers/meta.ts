@@ -25,6 +25,7 @@ import type {
   NormalizedEvent,
   NormalizedInboundMessage,
   NormalizedMediaRef,
+  NormalizedReaction,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
   ProviderTemplate,
@@ -321,6 +322,7 @@ interface MetaMessage {
   document?: MetaMediaPayload;
   sticker?: MetaMediaPayload;
   interactive?: MetaInteractivePayload;
+  reaction?: { message_id?: string; emoji?: string };
   context?: MetaContextRef;
   // Non-media customer content with no dedicated bubble yet — ingested as a
   // typed text placeholder (see placeholderForUnhandledType) so unread / window
@@ -701,13 +703,26 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           }
 
           // Inbound emoji reactions (m.type === "reaction", payload
-          // `m.reaction = { message_id, emoji }`) are a DEFERRED feature.
-          // Skip them EXPLICITLY here — otherwise they fall through to the
-          // media branch below, fail the META_MEDIA_TYPES check, and get
-          // silently dropped with no marker (indistinguishable from a parser
-          // bug). When reaction support is built, parse it into a dedicated
-          // normalized event instead of this early-continue.
-          if (m.type === "reaction") continue;
+          // `m.reaction = { message_id, emoji }`). The customer reacted to one
+          // of our messages; `message_id` is that message's wamid and `emoji`
+          // is the reaction (empty string ⇒ reaction REMOVED). Ingest resolves
+          // the target by wamid and patches its `reaction` column. We never
+          // create a Message row for the reaction itself.
+          if (m.type === "reaction") {
+            const targetExternalId = m.reaction?.message_id;
+            if (!targetExternalId) continue;
+            const rawEmoji = m.reaction?.emoji;
+            events.push({
+              kind: "reaction",
+              externalId,
+              targetExternalId,
+              emoji: rawEmoji && rawEmoji.length > 0 ? rawEmoji : null,
+              contactPhone: phone,
+              timestamp: ts,
+              rawPayload: payload as Record<string, unknown>,
+            } satisfies NormalizedReaction);
+            continue;
+          }
 
           // Media: image / video / audio / document / sticker. Each has its
           // own subobject with id, mime_type, optional caption + filename.

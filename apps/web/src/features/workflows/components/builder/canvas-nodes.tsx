@@ -230,7 +230,7 @@ export function BranchNode({ id, data }: NodeProps) {
         type="source"
         position={Position.Bottom}
         id="true"
-        style={{ left: "25%", background: "rgb(16 185 129)" }}
+        style={{ left: "25%", background: "var(--success-fg)" }}
       />
       <Handle
         type="source"
@@ -341,7 +341,7 @@ export function AskQuestionNode({ id, data }: NodeProps) {
                     id={opt.id}
                     style={{
                       left: `${((idx + 0.5) / slots) * 100}%`,
-                      background: "rgb(16 185 129)",
+                      background: "var(--success-fg)",
                     }}
                   />
                 ))}
@@ -351,7 +351,7 @@ export function AskQuestionNode({ id, data }: NodeProps) {
                   id="timeout"
                   style={{
                     left: `${((options.length + 0.5) / slots) * 100}%`,
-                    background: "rgb(245 158 11)",
+                    background: "var(--warning-fg)",
                   }}
                 />
               </>
@@ -363,13 +363,13 @@ export function AskQuestionNode({ id, data }: NodeProps) {
                 type="source"
                 position={Position.Bottom}
                 id="answered"
-                style={{ left: "25%", background: "rgb(16 185 129)" }}
+                style={{ left: "25%", background: "var(--success-fg)" }}
               />
               <Handle
                 type="source"
                 position={Position.Bottom}
                 id="timeout"
-                style={{ left: "75%", background: "rgb(245 158 11)" }}
+                style={{ left: "75%", background: "var(--warning-fg)" }}
               />
             </>
           )}

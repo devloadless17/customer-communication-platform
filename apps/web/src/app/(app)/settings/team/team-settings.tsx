@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { broadcastSignout } from "@/lib/auth/auth-broadcast";
 import { closeClientSocket, dispatchLocalSocketEvent } from "@/lib/socket-client";
@@ -274,14 +275,14 @@ export function TeamSettings({
 
   return (
     <div className="flex flex-col gap-8">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Team</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {canManage
+      <PageHeader
+        title="Team members"
+        description={
+          canManage
             ? "Generate an invite link for each teammate. They set their own password when they accept."
-            : "Read-only view. Only admins can invite users or change roles."}
-        </p>
-      </div>
+            : "Read-only view. Only admins can invite users or change roles."
+        }
+      />
 
       {error && (
         <div

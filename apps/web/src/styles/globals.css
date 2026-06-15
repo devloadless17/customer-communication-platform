@@ -59,6 +59,25 @@
   --note-bg: oklch(0.955 0.018 78);
   --note-border: oklch(0.87 0.028 75);
   --note-fg: oklch(0.42 0.045 68);
+  /* Semantic status trios (warning/success/info) — mirror the --note-* wiring
+     (opaque bg like note, no alpha) and are tuned to visually match the most
+     common raw Tailwind chips already in the codebase, so migrated pills look
+     unchanged:
+       warning ≈ amber  (fg=text-amber-700, bg≈amber-500/12, border≈amber-500/30)
+       success ≈ emerald (fg=text-emerald-700, bg≈emerald-500/10)
+       info    ≈ sky     (fg=text-sky-700,    bg≈sky-500/10)
+     bg values bake the alpha wash over the near-white page into an opaque oklch
+     so they sit in the same chroma/hue family as the existing note bg. */
+  --warning-bg: oklch(0.962 0.035 84);
+  --warning-fg: oklch(0.555 0.135 66);
+  --warning-border: oklch(0.86 0.075 80);
+  --success-bg: oklch(0.965 0.03 164);
+  --success-fg: oklch(0.508 0.118 165);
+  --success-border: oklch(0.875 0.055 164);
+  --info-bg: oklch(0.965 0.025 235);
+  --info-fg: oklch(0.50 0.118 240);
+  --info-border: oklch(0.88 0.045 235);
+
   /* Search-match highlight — a soft, low-chroma amber wash that stands out
      behind a search hit without shouting like a raw highlighter yellow.
      Tuned so dark body text on top still clears WCAG AA. */
@@ -123,6 +142,19 @@
   --note-bg: oklch(0.29 0.035 75);
   --note-border: oklch(0.42 0.045 75);
   --note-fg: oklch(0.92 0.04 85);
+  /* Semantic status trios (dark) — mirror --note-* (opaque, low-L tinted bg +
+     bright fg). fg matches text-{amber,emerald,sky}-400; bg ≈ the /15 wash over
+     the cool-slate surfaces, kept in the same hue family as the light trios. */
+  --warning-bg: oklch(0.30 0.04 80);
+  --warning-fg: oklch(0.828 0.155 84);
+  --warning-border: oklch(0.44 0.06 80);
+  --success-bg: oklch(0.30 0.035 164);
+  --success-fg: oklch(0.765 0.155 163);
+  --success-border: oklch(0.44 0.05 164);
+  --info-bg: oklch(0.30 0.035 235);
+  --info-fg: oklch(0.746 0.13 233);
+  --info-border: oklch(0.44 0.05 235);
+
   /* Search-match highlight (dark) — a muted amber wash with enough chroma to
      register against the cool-slate surfaces while light foreground text on
      top stays legible. */
@@ -164,6 +196,16 @@
   --color-note-bg: var(--note-bg);
   --color-note-border: var(--note-border);
   --color-note-fg: var(--note-fg);
+
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-fg: var(--warning-fg);
+  --color-warning-border: var(--warning-border);
+  --color-success-bg: var(--success-bg);
+  --color-success-fg: var(--success-fg);
+  --color-success-border: var(--success-border);
+  --color-info-bg: var(--info-bg);
+  --color-info-fg: var(--info-fg);
+  --color-info-border: var(--info-border);
 
   --color-highlight: var(--highlight);
 

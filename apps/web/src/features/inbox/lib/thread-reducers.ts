@@ -154,6 +154,25 @@ export function applyMessageStatus(
   return { ...prev, messages: nextMessages };
 }
 
+export function applyMessageReaction(
+  prev: ConversationWithRefs,
+  payload: { messageId: string; emoji: string | null },
+): ConversationWithRefs {
+  const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
+  if (idx === -1) return prev;
+  const existing = prev.messages[idx]!;
+  if ((existing.reaction ?? null) === payload.emoji) return prev;
+  const nextMessages = prev.messages.slice();
+  if (payload.emoji) {
+    nextMessages[idx] = { ...existing, reaction: payload.emoji };
+  } else {
+    // Reaction removed — drop the field so the bubble stops rendering the pill.
+    const { reaction: _reaction, ...rest } = existing;
+    nextMessages[idx] = rest;
+  }
+  return { ...prev, messages: nextMessages };
+}
+
 export function applyMessageMediaReady(
   prev: ConversationWithRefs,
   payload: { messageId: string; media?: MediaAttachment },
@@ -357,6 +376,7 @@ export const THREAD_REDUCER_EVENTS = [
   reducerEntry({ event: "conversation:assigned", apply: applyConversationAssignment }),
   reducerEntry({ event: "conversation:read", apply: applyConversationRead }),
   reducerEntry({ event: "message:status", apply: applyMessageStatus }),
+  reducerEntry({ event: "message:reaction", apply: applyMessageReaction }),
   reducerEntry({ event: "message:media:ready", apply: applyMessageMediaReady }),
   reducerEntry({ event: "note:deleted", apply: applyNoteDeleted }),
   reducerEntry({

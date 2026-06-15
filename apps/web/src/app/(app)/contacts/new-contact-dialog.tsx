@@ -240,7 +240,10 @@ export function NewContactDialog({
                 placeholder="en, ar…"
               />
             </Field>
-            <Field label="Country">
+            <Field
+              label="Country (for records)"
+              helper="Where the contact is based — separate from the phone's dial code."
+            >
               <Input
                 value={country}
                 onChange={(e) => setCountry(e.target.value)}
@@ -368,10 +371,13 @@ export function NewContactDialog({
 function Field({
   label,
   required,
+  helper,
   children,
 }: {
   label: string;
   required?: boolean;
+  /** Optional one-line hint rendered under the input in muted text. */
+  helper?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -381,6 +387,9 @@ function Field({
         {required && <span className="ml-0.5 text-destructive">*</span>}
       </span>
       {children}
+      {helper && (
+        <span className="mt-1 block text-3xs text-muted-foreground">{helper}</span>
+      )}
     </label>
   );
 }

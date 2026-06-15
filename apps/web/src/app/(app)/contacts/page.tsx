@@ -54,6 +54,7 @@ export default async function ContactsPage({
       key={resolvedStageFilter}
       initialItems={page.items}
       initialNextCursor={page.nextCursor}
+      initialTotalCount={page.totalCount ?? null}
       fieldDefinitions={fieldDefinitions}
       contactPanelBuiltins={contactPanelBuiltins}
       initialTags={tags}

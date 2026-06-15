@@ -6,6 +6,7 @@ import { getSession } from "@/lib/auth/current-user";
 import { listOutboundWebhooks } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { PUBLIC_EVENT_GROUPS } from "@ccp/shared/outbound-webhooks/public-events";
+import { PageHeader } from "@/components/layouts/page-header";
 
 import { OutboundWebhooksManager } from "@/features/settings/components/outbound-webhooks-manager";
 
@@ -29,15 +30,18 @@ export default async function WebhooksPage() {
         <ArrowLeft className="size-3" />
         Back to Integrations
       </Link>
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Webhooks</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Receive HMAC-signed POST deliveries when events happen in this
-          workspace. Each delivery carries an{" "}
-          <code className="rounded bg-muted px-1 text-xs">X-CCP-Signature</code>{" "}
-          header you verify against the secret shown once on creation.
-        </p>
-      </header>
+      <PageHeader
+        title="Webhooks"
+        description={
+          <>
+            Receive HMAC-signed POST deliveries when events happen in this
+            workspace. Each delivery carries an{" "}
+            <code className="rounded bg-muted px-1 text-xs">X-CCP-Signature</code>{" "}
+            header you verify against the secret shown once on creation.
+          </>
+        }
+        className="mb-8"
+      />
 
       <OutboundWebhooksManager
         initialWebhooks={webhooks}

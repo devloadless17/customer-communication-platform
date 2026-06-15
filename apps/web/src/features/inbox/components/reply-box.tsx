@@ -196,33 +196,67 @@ export function ReplyBox({
   // across chat switches. We persist to localStorage keyed by team+conv id so
   // the draft survives chat switches AND refreshes within the same browser.
   // Cleared on successful send + on explicit Cancel of the reply target.
-  const draftKey = `inbox:${currentUser.teamId}:draft:${conversationId}`;
+  // Draft keys are MODE-SCOPED: Reply and Note keep independent buffers so
+  // toggling between them never carries a half-written customer reply into
+  // the internal-note box — or, the dangerous direction, a sensitive internal
+  // note into the WhatsApp reply field where one Enter would send it to the
+  // customer (irreversible Meta send). `switchMode` handles the handoff.
+  const draftKeyFor = useCallback(
+    (m: Mode) => `inbox:${currentUser.teamId}:draft:${m}:${conversationId}`,
+    [currentUser.teamId, conversationId],
+  );
   // Initial value MUST match SSR (always ""), otherwise the submit button's
-  // `disabled` attribute hydrates mismatched when a draft exists. Load the
-  // saved draft post-mount.
+  // `disabled` attribute hydrates mismatched when a draft exists. Mount mode
+  // is always "reply", so restore that buffer post-mount.
   const [value, setValue] = useState("");
   useEffect(() => {
     try {
-      const saved = window.localStorage.getItem(draftKey);
+      const saved = window.localStorage.getItem(draftKeyFor("reply"));
       if (saved) setValue((cur) => (cur === "" ? saved : cur));
     } catch {
       // Privacy mode — no draft restore, composer still works.
     }
-  }, [draftKey]);
+  }, [draftKeyFor]);
+  // Persist the live draft under the CURRENT mode's key. `switchMode` already
+  // persists the outgoing buffer before flipping, so this only ever writes the
+  // value under the mode that owns it.
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      if (value) window.localStorage.setItem(draftKey, value);
-      else window.localStorage.removeItem(draftKey);
+      const key = draftKeyFor(mode);
+      if (value) window.localStorage.setItem(key, value);
+      else window.localStorage.removeItem(key);
     } catch {
       // Quota / privacy mode — draft just won't survive a refresh. The
       // composer still works fine.
     }
-  }, [draftKey, value]);
+  }, [draftKeyFor, mode, value]);
   // Latest-value mirror so async handlers can read the live input without
   // doing side effects inside a setValue updater (React 19 warns).
   const valueRef = useRef(value);
   valueRef.current = value;
+
+  // Toggle Reply↔Note while keeping each mode's draft independent: persist the
+  // outgoing buffer, then load the incoming one into the box. Done in the
+  // handler (not a setMode updater) so there's no setState-side-effect-in-
+  // updater warning, and so the outgoing text is saved BEFORE mode flips.
+  const switchMode = useCallback(
+    (next: Mode) => {
+      if (next === mode) return;
+      try {
+        const outKey = draftKeyFor(mode);
+        if (valueRef.current)
+          window.localStorage.setItem(outKey, valueRef.current);
+        else window.localStorage.removeItem(outKey);
+        setValue(window.localStorage.getItem(draftKeyFor(next)) ?? "");
+      } catch {
+        setValue("");
+      }
+      setMode(next);
+    },
+    [mode, draftKeyFor],
+  );
+
   const [error, setError] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -420,6 +454,27 @@ export function ReplyBox({
   // to be open — Meta would reject them with error 131047 otherwise.
   const canSend =
     (attachment !== null || value.trim().length > 0) && (isNote || !windowClosed);
+
+  // Single entry point for attaching a file — reused by the file-input,
+  // paste-to-attach, and drag-and-drop paths. Enforces the same Meta size cap
+  // up-front so a too-large file is rejected before a multi-minute upload.
+  const acceptFile = useCallback(
+    (file: File | null | undefined) => {
+      if (!file) return;
+      if (isNote || windowClosed) return; // notes + closed window can't attach
+      const limit = pickSizeLimit(file);
+      if (file.size > limit.bytes) {
+        setError(
+          `${limit.label} attachments can't exceed ${formatMb(limit.bytes)}. Try a smaller file.`,
+        );
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+      setError(null);
+      setAttachment(file);
+    },
+    [isNote, windowClosed],
+  );
 
   // -------------------------------------------------------------------------
   // Template picker state
@@ -919,8 +974,8 @@ export function ReplyBox({
             clamp the thread to MIN_THREAD_WIDTH so this is just a safety net. */}
         <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-2">
           <div className="inline-flex shrink-0 rounded-md border border-border bg-muted/40 p-0.5">
-            <ToggleButton active={mode === "reply"} onClick={() => setMode("reply")} icon={MessageSquare} label="Reply" />
-            <ToggleButton active={mode === "note"} onClick={() => setMode("note")} icon={StickyNote} label="Note" />
+            <ToggleButton active={mode === "reply"} onClick={() => switchMode("reply")} icon={MessageSquare} label="Reply" />
+            <ToggleButton active={mode === "note"} onClick={() => switchMode("note")} icon={StickyNote} label="Note" />
           </div>
           {!isNote && <WindowBadgeFromStatus status={windowStatus} size="sm" />}
           {!isNote && windowClosed && (
@@ -938,6 +993,20 @@ export function ReplyBox({
 
         <motion.div
           layout
+          // Drag-and-drop a file anywhere onto the composer card to attach it
+          // (mirrors the paste-to-attach path). No-op in note / closed-window
+          // mode where attachments aren't allowed.
+          onDragOver={(e) => {
+            if (!isNote && !windowClosed) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            if (isNote || windowClosed) return;
+            const f = e.dataTransfer?.files?.[0];
+            if (f) {
+              e.preventDefault();
+              acceptFile(f);
+            }
+          }}
           className={cn(
             "relative rounded-xl border transition-colors",
             isNote ? "border-note-border bg-note-bg/40" : "border-border bg-card",
@@ -993,7 +1062,22 @@ export function ReplyBox({
             // right-align with correct base direction, matching the bubble it
             // produces. Latin input stays LTR.
             dir="auto"
+            // Meta caps WhatsApp text bodies at 4096 chars. Cap the input in
+            // reply mode so a long paste can't sail through and 400 server-side
+            // after painting an optimistic bubble. Notes are DB-only (no cap).
+            maxLength={isNote ? undefined : 4096}
             value={value}
+            // Paste an image/file straight onto the composer to attach it —
+            // the single most common support gesture. Falls through to normal
+            // text paste when the clipboard carries no file.
+            onPaste={(e) => {
+              if (isNote || windowClosed) return;
+              const f = e.clipboardData?.files?.[0];
+              if (f) {
+                e.preventDefault();
+                acceptFile(f);
+              }
+            }}
             onChange={(e) => {
               setValue(e.target.value);
               if (!isNote && e.target.value.length > 0) {
@@ -1025,10 +1109,27 @@ export function ReplyBox({
                     : "Reply on WhatsApp…"
             }
             className={cn(
-              "min-h-22 resize-none border-0 bg-transparent px-3.5 py-3 text-sm shadow-none focus-visible:ring-0",
+              // field-sizing-content grows the box with the draft from the
+              // min-h floor up to max-h-48, then scrolls internally — so a
+              // multi-line reply is fully visible instead of trapped in a
+              // fixed 88px window.
+              "max-h-48 min-h-22 resize-none overflow-y-auto border-0 bg-transparent px-3.5 py-3 text-sm shadow-none field-sizing-content focus-visible:ring-0",
               !isNote && windowClosed && "cursor-not-allowed opacity-60",
             )}
             onKeyDown={(e) => {
+              // ⌘/Ctrl+Enter is an explicit "send now" — fires even when the
+              // slash picker is open or the agent has trained Enter=newline
+              // muscle memory in another tool.
+              if (
+                e.key === "Enter" &&
+                (e.metaKey || e.ctrlKey) &&
+                !e.nativeEvent.isComposing
+              ) {
+                e.preventDefault();
+                setSlashRange(null);
+                submit();
+                return;
+              }
               // Snippet picker has first dibs on Enter / Tab / Arrows / Esc
               // when it's open. Its global keydown listener calls
               // preventDefault on those keys, but React's synthetic event
@@ -1113,25 +1214,12 @@ export function ReplyBox({
               hidden
               // Wide accept list — server validates by mime type and size.
               accept="image/*,video/*,audio/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain"
-              onChange={(e) => {
-                const file = e.target.files?.[0] ?? null;
-                if (!file) return;
-                // Client-side guardrails against Meta's hard caps. Without
-                // these, a 12MB iPhone photo would upload for several minutes
-                // on 3G before the server rejected it — terrible UX. Caps are
-                // a hair under Meta's documented limits so we don't false-
-                // reject borderline files due to multipart envelope overhead.
-                // See https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
-                const limit = pickSizeLimit(file);
-                if (file.size > limit.bytes) {
-                  setError(
-                    `${limit.label} attachments can't exceed ${formatMb(limit.bytes)}. Try a smaller file.`,
-                  );
-                  if (fileInputRef.current) fileInputRef.current.value = "";
-                  return;
-                }
-                setAttachment(file);
-              }}
+              // Client-side guardrails against Meta's hard caps live in
+              // acceptFile (shared with the paste + drag-drop paths). Without
+              // them a 12MB iPhone photo would upload for minutes on 3G before
+              // the server rejected it. See
+              // https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
+              onChange={(e) => acceptFile(e.target.files?.[0])}
             />
             <Button
               variant="ghost"
@@ -1199,7 +1287,7 @@ export function ReplyBox({
                   // sendInteractiveInternal.
                   setValue("");
                   try {
-                    window.localStorage.removeItem(draftKey);
+                    window.localStorage.removeItem(draftKeyFor("reply"));
                   } catch {
                     // ignore quota / private-mode failures
                   }
@@ -1212,7 +1300,7 @@ export function ReplyBox({
                 size="icon"
                 className="size-7 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
-                disabled={isNote && false /* emojis valid in notes too */}
+                /* emojis are valid in notes too — always enabled */
                 aria-label="Insert emoji"
                 title="Insert emoji"
                 onClick={() => setEmojiOpen((v) => !v)}
@@ -1286,6 +1374,18 @@ export function ReplyBox({
                 drops first, then the Send button collapses to a round
                 icon-only button — driven by the @container on this row. */}
             <div className="ml-auto flex items-center gap-2">
+              {!isNote && value.length > 3500 && (
+                <span
+                  className={cn(
+                    "text-3xs tabular-nums",
+                    value.length >= 4096
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {value.length}/4096
+                </span>
+              )}
               <span className="hidden text-3xs text-muted-foreground @[34rem]:inline">
                 ↵ to send · ⇧↵ for newline
               </span>

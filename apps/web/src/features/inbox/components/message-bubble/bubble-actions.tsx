@@ -2,6 +2,7 @@
 
 import {
   AlertCircle,
+  Copy,
   CornerUpLeft,
   Forward,
   ListChecks,
@@ -15,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { toast } from "@/lib/toast";
 import type { Message } from "@ccp/shared/types";
 
 export function BubbleActions({
@@ -34,8 +36,20 @@ export function BubbleActions({
   onForward?: (message: Message) => void;
   onStartSelect?: (message: Message) => void;
 }) {
-  const hasMenu = (canForward && Boolean(onForward)) || (canSelect && Boolean(onStartSelect));
+  const copyText = message.body.trim();
+  const canCopy = copyText.length > 0;
+  const hasMenu =
+    canCopy ||
+    (canForward && Boolean(onForward)) ||
+    (canSelect && Boolean(onStartSelect));
   if (!(canReply && onReply) && !hasMenu) return null;
+
+  const handleCopy = () => {
+    void navigator.clipboard
+      .writeText(message.body)
+      .then(() => toast.success("Copied"))
+      .catch(() => toast.error("Couldn't copy message"));
+  };
   return (
     <div className="flex items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
       {canReply && onReply && (
@@ -66,6 +80,12 @@ export function BubbleActions({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
+            {canCopy && (
+              <DropdownMenuItem onSelect={handleCopy}>
+                <Copy className="size-3.5" />
+                Copy
+              </DropdownMenuItem>
+            )}
             {canForward && onForward && (
               <DropdownMenuItem onSelect={() => onForward(message)}>
                 <Forward className="size-3.5" />

@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { toast } from "@/lib/toast";
 import { formatPhone } from "@ccp/shared/utils";
@@ -121,13 +122,10 @@ export function WhatsappSettings({
 
   const header = (
     <>
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">WhatsApp connection</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Connect your WhatsApp Business number through Meta&apos;s Cloud API. Your team
-          can&apos;t send or receive messages until this is configured.
-        </p>
-      </div>
+      <PageHeader
+        title="WhatsApp"
+        description="Connect your WhatsApp Business number through Meta's Cloud API. Your team can't send or receive messages until this is configured."
+      />
 
       {error && (
         <div

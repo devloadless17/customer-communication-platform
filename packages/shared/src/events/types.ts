@@ -146,6 +146,20 @@ export interface MessageStatusChangedEvent {
 }
 
 /**
+ * A customer's emoji reaction to one of our messages changed (set, replaced,
+ * or removed). Published by ingest's `reaction` path. UI-only: only the socket
+ * fanout subscribes — no workflow/outbound-webhook reactions (a 👍 isn't a
+ * business event), so this carries just enough to patch the live thread.
+ */
+export interface MessageReactionChangedEvent {
+  teamId: string;
+  conversationId: string;
+  messageId: string;
+  /** The emoji, or null when the reaction was removed. */
+  emoji: string | null;
+}
+
+/**
  * Outbound send failed inside the background `message-sends` queue worker
  * (introduced for S1 — moving Meta sends off the HTTP critical path).
  * Used by socket-fanout to emit `message:failed` to the originating client
@@ -977,6 +991,7 @@ export interface DomainEventMap {
   "message.sent": MessageSentEvent;
   "message.send_failed": MessageSendFailedEvent;
   "message.status_changed": MessageStatusChangedEvent;
+  "message.reaction_changed": MessageReactionChangedEvent;
   "message.media_ready": MessageMediaReadyEvent;
   "conversation.assigned": ConversationAssignedEvent;
   "conversation.status_changed": ConversationStatusChangedEvent;

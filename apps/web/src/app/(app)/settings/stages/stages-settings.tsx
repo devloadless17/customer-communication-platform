@@ -19,6 +19,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/ui/empty-state";
+import { PageHeader } from "@/components/layouts/page-header";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { TAG_COLORS, type ContactStage, type TagColor } from "@ccp/shared/types";
@@ -239,20 +240,17 @@ export function StagesSettings({
 
   return (
     <div>
-      <header className="mb-6 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Customer stages</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Pipeline buckets for your contacts. New contacts land in the default
-            stage; agents move them as the relationship progresses. Use stages
-            to filter Contacts and target stage-specific broadcasts.
-          </p>
-        </div>
-        <Button onClick={openCreate} disabled={creating}>
-          <Plus className="size-4" />
-          Add stage
-        </Button>
-      </header>
+      <PageHeader
+        title="Stages"
+        description="Pipeline buckets for your contacts. New contacts land in the default stage; agents move them as the relationship progresses. Use stages to filter Contacts and target stage-specific broadcasts."
+        action={
+          <Button onClick={openCreate} disabled={creating}>
+            <Plus className="size-4" />
+            Add stage
+          </Button>
+        }
+        className="mb-6"
+      />
 
       {error && (
         <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">

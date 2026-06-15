@@ -214,6 +214,9 @@ const TimelineRows = memo(function TimelineRows({
         const isMessage = entry.kind === "message";
         const isContinuation = isMessage && continuationFlags[idx] === true;
         const isTail = isMessage && continuationFlags[idx + 1] !== true;
+        // Head = first bubble of a same-sender group. Drives the outbound
+        // sender-attribution chip (MessageBubble gates it on direction === out).
+        const isHead = isMessage && !isContinuation;
         // Direction drives how tight a continuation sits. Inbound bubbles are
         // light-grey + bordered on a near-white page (LOW edge contrast), so a
         // 2px gap reads as "touching"; outbound bubbles are solid/high-contrast,
@@ -324,6 +327,7 @@ const TimelineRows = memo(function TimelineRows({
                     showAvatar={isTail}
                     showMeta={showMeta}
                     isTail={isTail}
+                    showSenderHeader={isHead}
                     animateIn={animateIn}
                   />
                 ) : entry.kind === "note" ? (

@@ -17,6 +17,7 @@ import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { PageHeader } from "@/components/layouts/page-header";
 import { LocalTime } from "@/components/local-time";
 import { FieldTokenPicker } from "@/features/templates/components/field-token-picker";
 import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
@@ -150,18 +151,26 @@ export function SnippetsSettings({
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Snippets</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Saved replies your team can paste into a conversation by typing{" "}
-          <code className="rounded bg-muted px-1 text-xs">/name</code> in
-          the reply box. Use{" "}
-          <code className="rounded bg-muted px-1 text-xs">$var.contact.name</code>{" "}
-          for per-recipient values, or{" "}
-          <code className="rounded bg-muted px-1 text-xs">$var.agent.name</code>{" "}
-          for sign-offs that use whoever inserted the snippet.
-        </p>
-      </div>
+      <PageHeader
+        title="Snippets"
+        description={
+          <>
+            Saved replies your team can paste into a conversation by typing{" "}
+            <code className="rounded bg-muted px-1 text-xs">/name</code> in
+            the reply box. Use{" "}
+            <code className="rounded bg-muted px-1 text-xs">$var.contact.name</code>{" "}
+            for per-recipient values, or{" "}
+            <code className="rounded bg-muted px-1 text-xs">$var.agent.name</code>{" "}
+            for sign-offs that use whoever inserted the snippet.
+          </>
+        }
+        action={
+          <Button type="button" onClick={() => setEditingId("new")}>
+            <Plus className="size-4" />
+            New snippet
+          </Button>
+        }
+      />
 
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -173,26 +182,15 @@ export function SnippetsSettings({
       <div className="grid grid-cols-1 gap-6 md:grid-cols-[260px_1fr]">
         {/* ----- List ----- */}
         <div className="flex flex-col gap-3">
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search…"
-                aria-label="Search snippets"
-                className="h-9 pl-8"
-              />
-            </div>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setEditingId("new")}
-              className="h-9 gap-1.5"
-            >
-              <Plus className="size-3.5" />
-              New
-            </Button>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search…"
+              aria-label="Search snippets"
+              className="h-9 pl-8"
+            />
           </div>
 
           {filtered.length === 0 ? (

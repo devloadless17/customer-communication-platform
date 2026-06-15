@@ -74,6 +74,19 @@ export interface ServerToClientEvents {
   }) => void;
 
   /**
+   * A customer set / changed / removed their emoji reaction to one of our
+   * messages. Scoped to the conversation room (like `message:status`): only
+   * agents viewing the thread consume it, patching the reacted-to bubble.
+   * `emoji` is null when the reaction was removed.
+   */
+  "message:reaction": (payload: {
+    teamId: string;
+    conversationId: string;
+    messageId: string;
+    emoji: string | null;
+  }) => void;
+
+  /**
    * Outbound send failed inside the background `message-sends` queue worker.
    * Frontend reducer flips the optimistic bubble (matched by clientTempId)
    * from `pending` to `failed` so the user sees the same error UX as the

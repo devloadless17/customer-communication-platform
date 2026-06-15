@@ -10,5 +10,9 @@ export default async function BroadcastsLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <SectionShell subSidebar={<BroadcastsSubSidebar />}>{children}</SectionShell>;
+  return (
+    <SectionShell subSidebar={<BroadcastsSubSidebar />} capContentWidth>
+      {children}
+    </SectionShell>
+  );
 }

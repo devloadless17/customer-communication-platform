@@ -7,6 +7,7 @@ import { getMemberStats, type StatsPeriod } from "@/lib/api/queries";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { initials } from "@ccp/shared/utils";
 import { cn } from "@ccp/shared/utils";
+import { PageHeader } from "@/components/layouts/page-header";
 import { CurrentActivityPanel } from "./current-activity-panel";
 
 export const metadata = { title: "Team activity · Settings" };
@@ -67,13 +68,15 @@ export default async function TeamActivityPage({
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Team activity</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Live current activity, plus a per-member report of assignments,
-          messages sent, and chats closed over {WINDOW_NOTE[period]}.
-        </p>
-      </div>
+      <PageHeader
+        title="Team activity"
+        description={
+          <>
+            Live current activity, plus a per-member report of assignments,
+            messages sent, and chats closed over {WINDOW_NOTE[period]}.
+          </>
+        }
+      />
 
       <CurrentActivityPanel members={members} initial={initialActive} />
 

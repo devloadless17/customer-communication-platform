@@ -135,6 +135,19 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
+  // Customer reaction set / changed / removed. Conversation-room scoped, same
+  // reasoning as message.status_changed: only viewers of THIS thread patch the
+  // reacted-to bubble; the inbox LIST doesn't render reactions, so a team-wide
+  // blast would be pure waste. `emoji` is null when the reaction was removed.
+  "message.reaction_changed": (e, emitter) => {
+    emitter.emitToConversation(e.conversationId, "message:reaction", {
+      teamId: e.teamId,
+      conversationId: e.conversationId,
+      messageId: e.messageId,
+      emoji: e.emoji,
+    });
+  },
+
   // Background send worker failed. Emit team-wide (same shape as message:new
   // for cache-eviction symmetry): the inbox shell evicts the conv's cached
   // snapshot if it's not the displayed thread, and the active thread's

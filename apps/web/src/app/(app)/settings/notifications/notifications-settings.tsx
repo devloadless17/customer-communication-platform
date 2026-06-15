@@ -4,6 +4,7 @@ import type { ComponentType } from "react";
 import { MessageSquare, Phone } from "lucide-react";
 
 import { Switch } from "@/components/ui/switch";
+import { PageHeader } from "@/components/layouts/page-header";
 import { useNotificationSounds } from "@/providers/notification-sound-provider";
 import type { SoundCategory } from "@/lib/notifications/notification-sound";
 
@@ -40,13 +41,11 @@ export function NotificationsSettings() {
 
   return (
     <div>
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold">Notifications</h1>
-        <p className="mt-1 max-w-xl text-sm text-muted-foreground">
-          Settings for this device, saved per browser — each teammate sets their
-          own, and they don&apos;t affect anyone else on the team.
-        </p>
-      </header>
+      <PageHeader
+        title="Notifications"
+        description="Settings for this device, saved per browser — each teammate sets their own, and they don't affect anyone else on the team."
+        className="mb-6"
+      />
 
       <SectionLabel>Sounds</SectionLabel>
       <div className="mb-7 max-w-xl divide-y divide-border overflow-hidden rounded-lg border border-border">

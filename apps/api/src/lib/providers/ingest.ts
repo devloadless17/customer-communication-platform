@@ -25,6 +25,7 @@ import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound
 import type {
   NormalizedEvent,
   NormalizedInboundMessage,
+  NormalizedReaction,
   NormalizedStatusUpdate,
   NormalizedTemplateStatusUpdate,
 } from "@ccp/shared/providers/types";
@@ -77,6 +78,8 @@ export async function ingestEvents(
     try {
       if (evt.kind === "message") {
         await ingestInboundMessage(teamId, channel, evt);
+      } else if (evt.kind === "reaction") {
+        await ingestReaction(teamId, channel, evt);
       } else if (evt.kind === "template_status") {
         await ingestTemplateStatusUpdate(teamId, evt);
       } else if (evt.kind === "call") {
@@ -168,6 +171,50 @@ export function isTransientDbError(err: unknown): boolean {
   // DB unreachable at connect time surfaces as an init error, not a known
   // request error — also transient.
   return err instanceof Prisma.PrismaClientInitializationError;
+}
+
+/**
+ * A customer reacted to (or un-reacted from) one of our messages. Find the
+ * target message by its provider id and patch its `reaction` column, then fan
+ * out `message.reaction_changed` to the thread. Idempotent: re-delivery of the
+ * same reaction is a no-op (the value-equality guard), and a reaction to a
+ * message we don't have (we never stored it, or it predates us) is dropped —
+ * there's nothing to attach it to. UI-only: no workflow / outbound-webhook
+ * fanout (a 👍 isn't a business event).
+ */
+async function ingestReaction(
+  teamId: string,
+  channel: Channel,
+  evt: NormalizedReaction,
+): Promise<void> {
+  const target = await db.message.findUnique({
+    where: {
+      teamId_channel_externalId: {
+        teamId,
+        channel,
+        externalId: evt.targetExternalId,
+      },
+    },
+    select: { id: true, conversationId: true, reaction: true },
+  });
+  // Reaction to a message we don't have a row for — nothing to attach it to.
+  if (!target) return;
+  // No change (re-delivery, or a second identical reaction) — skip the write
+  // AND the fanout so we don't churn a no-op socket frame.
+  if (target.reaction === evt.emoji) return;
+
+  await db.message.update({
+    where: { id: target.id },
+    data: { reaction: evt.emoji },
+  });
+
+  await publish({
+    type: "message.reaction_changed",
+    teamId,
+    conversationId: target.conversationId,
+    messageId: target.id,
+    emoji: evt.emoji,
+  });
 }
 
 async function ingestStatusUpdate(

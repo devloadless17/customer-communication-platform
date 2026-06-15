@@ -10,17 +10,9 @@ import type { Message } from "@ccp/shared/types";
 
 export function BubbleMeta({
   message,
-  senderName,
-  senderAvatarUrl,
   isOut,
 }: {
   message: Message;
-  // Primitive — passing the whole User object made `MessageBubble`'s
-  // React.memo shallow-equality miss whenever the team's User map identity
-  // changed (e.g. a teammate's presence flipped). Now memo can short-circuit
-  // unchanged bubbles even on team-roster updates.
-  senderName: string | null;
-  senderAvatarUrl: string | null;
   isOut: boolean;
 }) {
   // Provider failure reason — only on a failed outbound send that carried a
@@ -47,12 +39,9 @@ export function BubbleMeta({
         <span title={fullDateTime}>
           <LocalTime iso={message.timestamp} format="messageTime" />
         </span>
-        {isOut && senderName && (
-          <>
-            <span className="opacity-50">·</span>
-            <SenderChip name={senderName} avatarUrl={senderAvatarUrl} />
-          </>
-        )}
+        {/* Sender attribution moved to the GROUP HEAD (see MessageBubble's
+            SenderChip header) so "which teammate" is answered at the top of a
+            burst, not buried under its last bubble. The tail keeps time + ticks. */}
         {isOut && <StatusTicks message={message} reason={failureReason} />}
       </div>
       {failureReason && (
@@ -70,7 +59,7 @@ export function BubbleMeta({
  * shared between multiple agents. Falls back to initials when no avatarUrl
  * is set so the slot doesn't collapse.
  */
-function SenderChip({
+export function SenderChip({
   name,
   avatarUrl,
 }: {

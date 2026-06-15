@@ -32,7 +32,9 @@ import { cn } from "@ccp/shared/utils";
 import type {
   ContactStage,
   ConversationWithRefs,
+  Tag,
 } from "@ccp/shared/types";
+import { useConversationCounts } from "@/features/inbox/hooks/use-conversation-counts";
 import { ConversationListItem } from "./conversation-list-item";
 import { InboxSearchPanel, type SearchResultTarget } from "./inbox-search-panel";
 import type { Filter, PresetFilterId } from "./inbox-controls";
@@ -61,9 +63,15 @@ function ConversationListImpl({
   onStartContactChat,
   onPrefetchConversation,
   canDeleteConversations,
+  tags,
+  currentUserId,
 }: {
   conversations: ConversationWithRefs[];
   stages: ContactStage[];
+  /** Team tag catalog — forwarded to each row for the tag chips. */
+  tags: Tag[];
+  /** Viewing agent's id — drives the row "You" assignee emphasis. */
+  currentUserId: string;
   filter: Filter;
   search: string;
   onSearchChange: (s: string) => void;
@@ -207,6 +215,26 @@ function ConversationListImpl({
     return stage ? `Stage · ${stage.name}` : "Stage";
   }, [filter, stages]);
 
+  // Authoritative bucket total for the CURRENT view. The loaded slice
+  // (`visible.length`) only counts paginated-in rows, so the header used to
+  // show "40+ conversations" while the sub-sidebar — fed by these same
+  // server counts — showed the true total right beside it. Reading the same
+  // source here makes the two agree.
+  //
+  // This is a SECOND `useConversationCounts` mount (the sub-sidebar owns the
+  // first). It's a read against an endpoint that already exists, coalesced
+  // and socket-refreshed, so the marginal cost is one extra GET + listener
+  // set per inbox mount — cheap, and worth killing the side-by-side
+  // disagreement. `null` until the first response lands; we fall back to the
+  // slice count (visually correct, just possibly short) until then.
+  const serverCounts = useConversationCounts();
+  const headerTotal = useMemo<number | null>(() => {
+    if (!serverCounts) return null;
+    if (filter.kind === "preset") return serverCounts[filter.id];
+    if (filter.kind === "stage") return serverCounts.byStage[filter.stageId] ?? 0;
+    return null; // calls view doesn't render this list
+  }, [serverCounts, filter]);
+
   // ---- Virtualization wiring ----------------------------------------------
   //
   // The Radix ScrollArea renders its actual scroll surface as a child
@@ -316,13 +344,15 @@ function ConversationListImpl({
           <p className="text-xs text-muted-foreground">
             {selectionMode && selectedIds.size > 0
               ? `${selectedIds.size} selected`
-              : // `visible.length` is only the LOADED slice, not the true bucket
-                // total — the authoritative server count lives in the sub-sidebar's
-                // useConversationCounts (we don't mount a second one here). When
-                // more rows are paginated in (`hasMore`), the slice undercounts, so
-                // show "N+" rather than a wrong exact count; once everything's
-                // loaded the slice IS the bucket and the exact number is true.
-                `${visible.length}${hasMore ? "+" : ""} ${visible.length === 1 && !hasMore ? "conversation" : "conversations"}`}
+              : headerTotal !== null
+                ? // Authoritative server total for this view (matches the
+                  // sub-sidebar badge). Exact — no misleading "+".
+                  `${headerTotal} ${headerTotal === 1 ? "conversation" : "conversations"}`
+                : // Server count not in yet — fall back to the LOADED slice.
+                  // It undercounts while `hasMore`, so show "N+" rather than a
+                  // wrong exact count; once everything's loaded the slice IS the
+                  // bucket and the exact number is true.
+                  `${visible.length}${hasMore ? "+" : ""} ${visible.length === 1 && !hasMore ? "conversation" : "conversations"}`}
           </p>
         </div>
         <div className="flex items-center gap-1">
@@ -460,6 +490,8 @@ function ConversationListImpl({
                           conversation={conversation}
                           contact={contact}
                           assignedUser={assignedUser}
+                          tags={tags}
+                          currentUserId={currentUserId}
                           active={false}
                           pending={false}
                         />
@@ -478,6 +510,8 @@ function ConversationListImpl({
                         conversation={conversation}
                         contact={contact}
                         assignedUser={assignedUser}
+                        tags={tags}
+                        currentUserId={currentUserId}
                         active={activeConversationId === conversation.id}
                         pending={pendingConversationId === conversation.id}
                       />

@@ -174,6 +174,17 @@ export interface UseContactListResult {
   /** Direct setter so callers can splice in optimistic edits (new contact,
    *  bulk delete, in-place tag patch) without a refetch. */
   setItems: React.Dispatch<React.SetStateAction<ContactListItem[]>>;
+  /**
+   * Authoritative total matching the current filter set (server-computed on
+   * page 1, not the loaded-row count). `null` until the first page lands.
+   * Use it to show "Showing N of TOTAL". Survives loadMore — only page-1
+   * fetches (initial / filter-change / refetch / reconcile) refresh it.
+   */
+  totalCount: number | null;
+  /** Nudge the displayed total by a delta after a local optimistic add/remove
+   *  (e.g. -ids.length on a bulk delete) so it doesn't lag a fetch. Clamped at
+   *  0; the next page-1 fetch makes the server authoritative again. */
+  adjustTotalCount: (delta: number) => void;
   nextCursor: string | null;
   search: string;
   setSearch: (v: string) => void;
@@ -214,12 +225,21 @@ export interface UseContactListResult {
 export function useContactList(opts?: {
   initialItems?: ContactListItem[];
   initialNextCursor?: string | null;
+  initialTotalCount?: number | null;
   initialStageFilter?: StageFilter;
 }): UseContactListResult {
   const [items, setItems] = useState<ContactListItem[]>(opts?.initialItems ?? []);
   const [nextCursor, setNextCursor] = useState<string | null>(
     opts?.initialNextCursor ?? null,
   );
+  const [totalCount, setTotalCount] = useState<number | null>(
+    opts?.initialTotalCount ?? null,
+  );
+  // Server is authoritative; this just smooths optimistic add/remove between
+  // fetches. Clamp at 0 so a double-delete can't drive it negative.
+  const adjustTotalCount = useCallback((delta: number) => {
+    setTotalCount((prev) => (prev === null ? prev : Math.max(0, prev + delta)));
+  }, []);
   const [search, setSearch] = useState("");
   const [fieldFilter, setFieldFilter] = useState<FieldFilter | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
@@ -263,6 +283,7 @@ export function useContactList(opts?: {
         if (reqId.current !== my) return;
         setItems(page.items);
         setNextCursor(page.nextCursor);
+        if (page.totalCount !== undefined) setTotalCount(page.totalCount);
       } catch {
         if (reqId.current === my) setError("Couldn't load contacts");
       } finally {
@@ -331,6 +352,7 @@ export function useContactList(opts?: {
         if (reqId.current !== my) return;
         setItems(page.items);
         setNextCursor(page.nextCursor);
+        if (page.totalCount !== undefined) setTotalCount(page.totalCount);
       } catch {
         // Silent — next filter change recovers.
       } finally {
@@ -386,6 +408,7 @@ export function useContactList(opts?: {
             if (reqId.current !== my) return;
             setItems(page.items);
             setNextCursor(page.nextCursor);
+            if (page.totalCount !== undefined) setTotalCount(page.totalCount);
           } catch {
             // Silent — next filter change or refresh recovers. A noisy
             // banner here for a background reconciliation would be worse.
@@ -398,6 +421,8 @@ export function useContactList(opts?: {
   return {
     items,
     setItems,
+    totalCount,
+    adjustTotalCount,
     nextCursor,
     search,
     setSearch,

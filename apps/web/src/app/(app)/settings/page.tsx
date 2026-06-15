@@ -17,6 +17,7 @@ import {
 
 import { getSession } from "@/lib/auth/current-user";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { PageHeader } from "@/components/layouts/page-header";
 import { AppearanceMode } from "./account/appearance-mode";
 
 export const metadata = { title: "Settings" };
@@ -165,13 +166,11 @@ export default async function SettingsIndex() {
 
   return (
     <div>
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Your account, your team, the channels you connect, and how
-          conversations are configured.
-        </p>
-      </header>
+      <PageHeader
+        title="Settings"
+        description="Your account, your team, the channels you connect, and how conversations are configured."
+        className="mb-8"
+      />
 
       <section className="mb-8 rounded-xl border border-border bg-card p-5">
         <div className="mb-4">

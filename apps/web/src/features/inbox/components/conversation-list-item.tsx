@@ -6,8 +6,9 @@ import { Loader2 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
 import { avatarGradient } from "@ccp/shared/utils/avatar-color";
+import { tagColorClasses } from "@ccp/shared/utils/tag-colors";
 import { cn, initials } from "@ccp/shared/utils";
-import type { Contact, Conversation, User } from "@ccp/shared/types";
+import type { Contact, Conversation, Tag, User } from "@ccp/shared/types";
 
 /**
  * One row in the inbox conversation list.
@@ -33,10 +34,17 @@ function ConversationListItemImpl({
   assignedUser,
   active,
   pending,
+  tags,
+  currentUserId,
 }: {
   conversation: Conversation;
   contact: Contact;
   assignedUser: User | null;
+  /** Team tag catalog — resolves the contact's tagIds to name + color chips
+   *  on row 3. Stable reference (passed straight through from the shell). */
+  tags: Tag[];
+  /** The viewing agent's id — drives the "You" assignee emphasis. */
+  currentUserId: string;
   /** This conversation is currently rendered in the workspace pane. */
   active: boolean;
   /** This conversation was just clicked but its data is still fetching.
@@ -57,7 +65,24 @@ function ConversationListItemImpl({
   // on it); the text column just vertically-centres its 2 rows instead of 3.
   const hasStatusChip =
     conversation.status === "pending" || conversation.status === "closed";
-  const showMeta = hasStatusChip || assignedUser !== null;
+
+  // Up to 2 contact tags surface on row 3 as a fast triage signal (VIP /
+  // billing / bug). Resolved against the team catalog for name + color;
+  // tagIds with no catalog match (a just-deleted tag) are dropped. Stays on
+  // the EXISTING third row — no new line — so the fixed h-20 row height (which
+  // the virtualizer depends on) is unchanged.
+  const resolvedTags =
+    contact.tagIds && contact.tagIds.length > 0 && tags.length > 0
+      ? contact.tagIds
+          .map((id) => tags.find((t) => t.id === id))
+          .filter((t): t is Tag => Boolean(t))
+      : [];
+  const shownTags = resolvedTags.slice(0, 2);
+  const extraTags = resolvedTags.length - shownTags.length;
+  const hasTags = shownTags.length > 0;
+  const assignedToMe = assignedUser?.id === currentUserId;
+
+  const showMeta = hasStatusChip || assignedUser !== null || hasTags;
 
   return (
     <div
@@ -77,10 +102,20 @@ function ConversationListItemImpl({
             : "hover:bg-accent/50",
       )}
     >
-      {/* Selected-row left accent bar */}
-      {active && (
+      {/* Left rail. Two distinct cues share the same 2px gutter:
+          - ACTIVE (selected) → `bg-primary` (the app green) — the existing
+            "this row is open in the workspace" accent.
+          - UNREAD but not active → `bg-info-fg` (saturated blue, a different
+            hue from the green active bar so the two never read as the same
+            state) — makes unread detectable in a fast peripheral scan without
+            relying on the badge/bold-text alone.
+          Active wins when a row is both: a row you're looking at is, by
+          definition, about to be read, so the "open" cue is the useful one. */}
+      {active ? (
         <span className="absolute left-0 top-1/2 h-7 w-0.5 -translate-y-1/2 rounded-r-full bg-primary" />
-      )}
+      ) : unread ? (
+        <span className="absolute left-0 top-1/2 h-7 w-0.5 -translate-y-1/2 rounded-r-full bg-info-fg" />
+      ) : null}
 
       {/* Avatar */}
       <Avatar className="mt-0.5 size-9 shrink-0">
@@ -152,17 +187,44 @@ function ConversationListItemImpl({
         {showMeta && (
           <div className="flex items-center gap-1.5">
             {conversation.status === "pending" && (
-              <span className="inline-flex h-4.5 items-center rounded-sm bg-amber-500/12 px-1.5 text-3xs font-semibold tracking-wide text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-warning-bg px-1.5 text-3xs font-semibold tracking-wide text-warning-fg">
                 pending
               </span>
             )}
             {conversation.status === "closed" && (
-              <span className="inline-flex h-4.5 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
+              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
                 closed
               </span>
             )}
+            {/* Tag lane doubles as the flex spacer so the assignee pins to the
+                right edge — a stable column the eye can scan down. */}
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+              {shownTags.map((t) => (
+                <span
+                  key={t.id}
+                  className={cn(
+                    "inline-flex h-4 max-w-24 shrink-0 items-center truncate rounded-sm border px-1 text-3xs font-medium",
+                    tagColorClasses(t.color).chip,
+                  )}
+                >
+                  {t.name}
+                </span>
+              ))}
+              {extraTags > 0 && (
+                <span className="shrink-0 text-3xs text-muted-foreground">
+                  +{extraTags}
+                </span>
+              )}
+            </div>
             {assignedUser && (
-              <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 text-2xs",
+                  assignedToMe
+                    ? "font-semibold text-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
                 <Avatar className="size-3.5">
                   <AvatarFallback
                     seed={assignedUser.id}
@@ -171,7 +233,9 @@ function ConversationListItemImpl({
                     {initials(assignedUser.name)}
                   </AvatarFallback>
                 </Avatar>
-                <span className="truncate">{assignedUser.name.split(" ")[0]}</span>
+                <span className="truncate">
+                  {assignedToMe ? "You" : assignedUser.name.split(" ")[0]}
+                </span>
               </span>
             )}
           </div>
@@ -186,6 +250,8 @@ export const ConversationListItem = memo(
   (prev, next) =>
     prev.active === next.active &&
     prev.pending === next.pending &&
+    prev.tags === next.tags &&
+    prev.currentUserId === next.currentUserId &&
     prev.assignedUser === next.assignedUser &&
     prev.contact === next.contact &&
     prev.conversation.id === next.conversation.id &&

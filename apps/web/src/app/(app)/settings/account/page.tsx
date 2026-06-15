@@ -1,4 +1,5 @@
 import { getSession } from "@/lib/auth/current-user";
+import { PageHeader } from "@/components/layouts/page-header";
 
 import { ChangePasswordForm } from "./change-password-form";
 import { ProfileForm } from "./profile-form";
@@ -10,12 +11,10 @@ export default async function AccountPage() {
 
   return (
     <div className="flex flex-col gap-8">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Account</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Update your name, avatar, and sign-in credentials.
-        </p>
-      </div>
+      <PageHeader
+        title="Account"
+        description="Update your name, avatar, and password. Email and role are managed by your admin."
+      />
 
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
@@ -37,6 +36,16 @@ export default async function AccountPage() {
 
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="mb-4">
+          <div className="text-sm font-medium">Change password</div>
+          <div className="text-2xs text-muted-foreground">
+            Use 8+ characters. Old sessions stay valid.
+          </div>
+        </div>
+        <ChangePasswordForm />
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="mb-4">
           <div className="text-sm font-medium">Email + role</div>
           <div className="text-2xs text-muted-foreground">
             Managed by your admin. Contact them to change either.
@@ -48,16 +57,6 @@ export default async function AccountPage() {
           <dt className="text-muted-foreground">Role</dt>
           <dd className="capitalize">{user.role}</dd>
         </dl>
-      </section>
-
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="mb-4">
-          <div className="text-sm font-medium">Change password</div>
-          <div className="text-2xs text-muted-foreground">
-            Use 8+ characters. Old sessions stay valid.
-          </div>
-        </div>
-        <ChangePasswordForm />
       </section>
     </div>
   );

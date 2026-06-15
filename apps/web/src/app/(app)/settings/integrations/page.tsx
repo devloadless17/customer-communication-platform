@@ -11,6 +11,7 @@ import {
 import { getSession } from "@/lib/auth/current-user";
 import { listApiKeys, getCurrentTeam } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
+import { PageHeader } from "@/components/layouts/page-header";
 
 import { AiAutopilotToggle } from "@/features/settings/integrations/components/ai-autopilot-toggle";
 import { ApiKeysManager } from "@/features/settings/integrations/components/api-keys-manager";
@@ -88,14 +89,11 @@ export default async function IntegrationsLanding() {
 
   return (
     <div>
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Integrations</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Connect this workspace to the tools your team already uses. API keys
-          let external systems drive the inbox; webhooks let the inbox push
-          events back out.
-        </p>
-      </header>
+      <PageHeader
+        title="Integrations"
+        description="Connect this workspace to the tools your team already uses. API keys let external systems drive the inbox; webhooks let the inbox push events back out."
+        className="mb-8"
+      />
 
       <div className="grid gap-3 sm:grid-cols-2">
         {tiles.map((t) => (

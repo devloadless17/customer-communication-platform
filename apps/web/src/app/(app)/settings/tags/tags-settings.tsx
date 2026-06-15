@@ -19,6 +19,7 @@ import {
 import { apiFetch } from "@/lib/api/client-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/layouts/page-header";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -222,21 +223,17 @@ export function TagsSettings({
 
   return (
     <div>
-      <header className="mb-6 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Tags</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Labels for segmenting contacts. Use tags to filter the contacts
-            list and to target audience-based broadcasts. Removing a tag from
-            a contact only unlinks it — the tag itself stays in the catalog
-            until you delete it here.
-          </p>
-        </div>
-        <Button onClick={openCreate} disabled={creating}>
-          <Plus className="size-4" />
-          Add tag
-        </Button>
-      </header>
+      <PageHeader
+        title="Tags"
+        description="Labels for segmenting contacts. Use tags to filter the contacts list and to target audience-based broadcasts. Removing a tag from a contact only unlinks it — the tag itself stays in the catalog until you delete it here."
+        action={
+          <Button onClick={openCreate} disabled={creating}>
+            <Plus className="size-4" />
+            Add tag
+          </Button>
+        }
+        className="mb-6"
+      />
 
       {tags.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-2">

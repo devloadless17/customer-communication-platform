@@ -8,6 +8,7 @@ import {
   FileX,
   ImageOff,
   Loader2,
+  Mic,
   Pause,
   Play,
   VideoOff,
@@ -348,16 +349,31 @@ function VideoBlock({ media }: { media: MediaAttachment }) {
   );
 }
 
+// Speed cycle: 1× → 1.5× → 2× → 1×. Kept as a const tuple so the button can
+// derive the next value without a switch and the label stays in lock-step.
+const AUDIO_SPEEDS = [1, 1.5, 2] as const;
+
 function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
   const [errored, setErrored] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
+  // Playback rate — local only, defaults to 1× (we persist nothing). Applied to
+  // the element imperatively (and re-applied on play, since loading new bytes
+  // can reset the rate on some browsers).
+  const [rate, setRate] = useState<(typeof AUDIO_SPEEDS)[number]>(1);
   // Duration: prefer the server-provided value (shown before any fetch); fall
   // back to the element's metadata once a play actually loads it.
   const [duration, setDuration] = useState<number | null>(
     media.durationMs != null ? media.durationMs / 1000 : null,
   );
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // `voice: true` marks a WhatsApp push-to-talk note (vs a shared audio file).
+  // The flag rides the inbound media payload but isn't on the read-model type
+  // yet, so read it defensively — truthy → voice-note treatment, otherwise the
+  // generic audio-file affordance. No height impact either way: it's a glyph +
+  // aria-label swap on the existing leading button.
+  const isVoice = (media as { voice?: boolean }).voice === true;
 
   if (errored) {
     return <MediaUnavailable kind="audio" isOut={isOut} />;
@@ -377,11 +393,27 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
     const el = audioRef.current;
     if (!el) return;
     if (el.paused) {
+      // Re-assert the chosen rate before play — loading bytes can reset it.
+      el.playbackRate = rate;
       void el.play().catch(() => setErrored(true));
     } else {
       el.pause();
     }
   };
+
+  const cycleSpeed = () => {
+    // `noUncheckedIndexedAccess` is on, so index access widens to `| undefined`;
+    // fall back to the first speed (always defined) to keep the type clean —
+    // the modulo already guarantees a real entry at runtime.
+    const nextIdx = (AUDIO_SPEEDS.indexOf(rate) + 1) % AUDIO_SPEEDS.length;
+    const next = AUDIO_SPEEDS[nextIdx] ?? 1;
+    setRate(next);
+    const el = audioRef.current;
+    if (el) el.playbackRate = next;
+  };
+
+  // "1×" / "1.5×" / "2×" — drop the trailing ".0" so 1× isn't "1.0×".
+  const speedLabel = `${rate}×`;
 
   const seek = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = audioRef.current;
@@ -424,7 +456,14 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
       <button
         type="button"
         onClick={toggle}
-        aria-label={playing ? "Pause" : "Play"}
+        aria-label={
+          playing
+            ? "Pause"
+            : isVoice
+              ? "Play voice message"
+              : "Play audio"
+        }
+        title={isVoice ? "Voice message" : "Audio file"}
         className={cn(
           "flex size-9 shrink-0 items-center justify-center rounded-full transition-colors",
           isOut
@@ -434,8 +473,14 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
       >
         {playing ? (
           <Pause className="size-4" />
+        ) : isVoice ? (
+          // Voice note: the leading glyph is a mic (WhatsApp push-to-talk
+          // affordance) instead of the generic play triangle. Pressing still
+          // plays — the aria-label/title carry the meaning. A glyph swap only,
+          // so the size-9 circle (and the row height) is unchanged.
+          <Mic className="size-4" />
         ) : (
-          // Nudge the play triangle visually centered in the circle.
+          // Generic audio file — nudge the play triangle visually centered.
           <Play className="size-4 translate-x-px" />
         )}
       </button>
@@ -456,6 +501,26 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
       {timeLabel != null && (
         <span className="shrink-0 text-3xs tabular-nums opacity-70">{timeLabel}</span>
       )}
+      {/* Playback-speed cycle (1× → 1.5× → 2×). A compact text pill that sits
+          at the end of the EXISTING row — its height (text-2xs + py-0.5) is well
+          under the size-9 play button that drives the row height, so the block's
+          fixed footprint (load-bearing for useChatScroll's snap) is unchanged.
+          tabular-nums keeps the 3-char "1.5×" from nudging the layout as it
+          cycles. */}
+      <button
+        type="button"
+        onClick={cycleSpeed}
+        aria-label={`Playback speed ${speedLabel}`}
+        title="Playback speed"
+        className={cn(
+          "shrink-0 rounded-full px-1.5 py-0.5 text-2xs font-medium tabular-nums leading-none transition-colors",
+          isOut
+            ? "bg-white/15 text-current hover:bg-white/25"
+            : "bg-muted text-foreground hover:bg-muted/70",
+        )}
+      >
+        {speedLabel}
+      </button>
     </div>
   );
 }
@@ -542,9 +607,13 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
         <div className="truncate text-xs font-medium">
           {media.filename ?? "Document"}
         </div>
-        <div className={cn("text-3xs opacity-70")}>
-          {formatBytes(media.sizeBytes)}
-        </div>
+        {/* Meta omits the size on many inbound docs (sizeBytes 0/undefined).
+            Drop the line entirely rather than render a misleading "0 B". */}
+        {media.sizeBytes != null && media.sizeBytes > 0 && (
+          <div className={cn("text-3xs opacity-70")}>
+            {formatBytes(media.sizeBytes)}
+          </div>
+        )}
       </div>
       <Download className={cn("size-4 shrink-0 opacity-70")} />
     </button>

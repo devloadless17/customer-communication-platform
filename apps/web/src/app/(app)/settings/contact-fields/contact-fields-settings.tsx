@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { PageHeader } from "@/components/layouts/page-header";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { isReservedFieldKey } from "@ccp/shared/contacts/reserved-fields";
 import type {
@@ -277,20 +278,17 @@ export function ContactFieldsSettings({
 
   return (
     <div>
-      <header className="mb-6 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Contact fields</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Custom fields that show up on every contact (order ID, plan, account
-            manager…). Add one here and it appears on every contact panel;
-            delete it and the value is removed from every contact at once.
-          </p>
-        </div>
-        <Button onClick={openCreate} disabled={creating}>
-          <Plus className="size-4" />
-          Add field
-        </Button>
-      </header>
+      <PageHeader
+        title="Contact fields"
+        description="Custom fields that show up on every contact (order ID, plan, account manager…). Add one here and it appears on every contact panel; delete it and the value is removed from every contact at once."
+        action={
+          <Button onClick={openCreate} disabled={creating}>
+            <Plus className="size-4" />
+            Add field
+          </Button>
+        }
+        className="mb-6"
+      />
 
       {error && (
         <div className="mb-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">

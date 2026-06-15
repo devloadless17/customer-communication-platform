@@ -11,7 +11,7 @@ import type { Message } from "@ccp/shared/types";
 import { highlightQuery } from "./message-search";
 
 import { BubbleActions, FailedRecovery } from "./message-bubble/bubble-actions";
-import { BubbleMeta } from "./message-bubble/bubble-meta";
+import { BubbleMeta, SenderChip } from "./message-bubble/bubble-meta";
 import { MediaBlock, StickerImage } from "./message-bubble/media-blocks";
 import { QuotedReply } from "./message-bubble/quoted-reply";
 
@@ -73,6 +73,10 @@ interface MessageBubbleProps {
    * ungrouped message keeps the tail exactly as before.
    */
   isTail?: boolean;
+  /** First bubble of a same-sender OUTBOUND group. When true (and there's a
+   *  senderName), a small "which teammate" chip renders ABOVE the bubble —
+   *  attribution at the head of a burst, not buried under its last bubble. */
+  showSenderHeader?: boolean;
   /** Fade+scale the bubble in on mount — ONLY for genuinely-new live messages
    *  (TimelineRows gates it; false on initial load / load-older / refetch).
    *  Transform + opacity only, so it never perturbs the column-reverse scroll. */
@@ -156,9 +160,18 @@ function BubbleContent({
   showAvatar = true,
   showMeta = true,
   isTail = true,
+  showSenderHeader = false,
   animateIn = false,
 }: MessageBubbleProps) {
   const isOut = message.direction === "out";
+  // Attribution chip at the head of an outbound burst (shared-inbox: "which
+  // teammate sent this"). Outbound + group-head + we know the sender.
+  const senderHeader =
+    showSenderHeader && message.direction === "out" && senderName ? (
+      <span className="px-1 pb-0.5 text-2xs font-medium text-muted-foreground">
+        <SenderChip name={senderName} avatarUrl={senderAvatarUrl ?? null} />
+      </span>
+    ) : null;
   const media = message.media;
   const reply = message.replyTo ?? null;
   // Don't offer Reply/Forward/Select on optimistic rows — the wamid isn't real
@@ -182,15 +195,9 @@ function BubbleContent({
           />
         )}
         <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
+          {senderHeader}
           <StickerImage url={media.url} />
-          {showMeta && (
-            <BubbleMeta
-              message={message}
-              senderName={senderName}
-              senderAvatarUrl={senderAvatarUrl ?? null}
-              isOut={isOut}
-            />
-          )}
+          {showMeta && <BubbleMeta message={message} isOut={isOut} />}
         </div>
       </div>
     );
@@ -242,6 +249,7 @@ function BubbleContent({
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
         style={{ transformOrigin: isOut ? "right bottom" : "left bottom" }}
       >
+        {senderHeader}
         <div
           className={cn(
             "overflow-hidden rounded-2xl text-sm leading-snug shadow-xs ring-1 transition-[box-shadow,background-color]",
@@ -320,14 +328,25 @@ function BubbleContent({
           )}
         </div>
 
-        {showMeta && (
-          <BubbleMeta
-            message={message}
-            senderName={senderName}
-            senderAvatarUrl={senderAvatarUrl ?? null}
-            isOut={isOut}
-          />
+        {message.reaction && (
+          // Customer's emoji reaction, tucked over the bubble's bottom edge
+          // (WhatsApp-style). Side-aligned by the column's items-end/start.
+          // A genuine content change (arrives live, after the message), so the
+          // small reflow it causes is fine — the stick-to-bottom observer keeps
+          // the thread pinned, same as any new content.
+          <span
+            className={cn(
+              "relative z-10 -mt-1.5 inline-flex items-center rounded-full border border-border bg-card px-1.5 py-px text-xs leading-none shadow-xs",
+              isOut ? "mr-1.5" : "ml-1.5",
+            )}
+            aria-label={`Customer reacted ${message.reaction}`}
+            title={`Customer reacted ${message.reaction}`}
+          >
+            {message.reaction}
+          </span>
         )}
+
+        {showMeta && <BubbleMeta message={message} isOut={isOut} />}
         {message.failed && (
           <FailedRecovery
             // Both text and media retries are supported. The composer caches

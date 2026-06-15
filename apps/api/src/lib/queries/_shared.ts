@@ -271,6 +271,9 @@ export function mapMessage(m: PrismaMessageWithReply): Message {
     ...(m.status === "failed" && m.statusErrorDetail != null
       ? { statusErrorDetail: m.statusErrorDetail }
       : {}),
+    // Customer's current emoji reaction (null/absent ⇒ none). Hydrated so a
+    // refresh stays consistent with the live `message:reaction` socket frame.
+    ...(m.reaction ? { reaction: m.reaction } : {}),
     ...(m.replyToMessageId
       ? {
           replyToMessageId: m.replyToMessageId,

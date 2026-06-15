@@ -1216,6 +1216,8 @@ export function InboxShell({
               onStartContactChat={onStartContactChat}
               onPrefetchConversation={fetchThread}
               canDeleteConversations={canDeleteConversations}
+              tags={tags}
+              currentUserId={currentUser.id}
             />
           </div>
           {/* Drag-to-resize handle between the list and the thread. Desktop

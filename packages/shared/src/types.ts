@@ -363,6 +363,13 @@ export interface Message {
   statusErrorTitle?: string | null;
   statusErrorDetail?: string | null;
   /**
+   * The customer's current emoji reaction to this message (WhatsApp lets a
+   * contact react to any message). Set / replaced / cleared by inbound
+   * reaction webhooks; null/absent = no reaction. Rendered as a small pill on
+   * the bubble. Inbound-only — agent-side reacting is deferred.
+   */
+  reaction?: string | null;
+  /**
    * Original webhook payload, kept verbatim in the DB for debugging
    * (CLAUDE.md rule #4). NOT hydrated on read paths — the column is `omit`ed
    * from every message query so a full JSONB blob per row never travels
@@ -658,5 +665,13 @@ export interface ContactListItem {
 export interface CursorPage<T> {
   items: T[];
   nextCursor: string | null;
+  /**
+   * Authoritative total matching the request's filter set (NOT just the loaded
+   * page). Populated only on the FIRST page (no cursor) — scroll-pages omit it
+   * and the client reuses the first value. Lets the UI show "Showing 200 of
+   * 3,418" instead of capping the displayed count at the loaded-row count.
+   * Optional because not every cursor-paged endpoint computes it.
+   */
+  totalCount?: number;
 }
 

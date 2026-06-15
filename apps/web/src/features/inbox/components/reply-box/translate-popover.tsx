@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Check, Loader2, X } from "lucide-react";
+import { Check, Loader2, Undo2, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
@@ -55,6 +55,14 @@ export function TranslatePopover({
   const [preview, setPreview] = useState<{ language: string; text: string } | null>(
     null,
   );
+  // After Apply, the popover stays open for a few seconds showing an Undo
+  // affordance. `applied.original` is the pre-translate draft we replaced;
+  // Undo re-sets the composer to it via onTranslated(original). Auto-closes
+  // on the timer so the popover never lingers.
+  const [applied, setApplied] = useState<{ language: string; original: string } | null>(
+    null,
+  );
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -77,8 +85,16 @@ export function TranslatePopover({
     if (open) {
       setError(null);
       setPreview(null);
+      setApplied(null);
     }
   }, [open]);
+
+  // Clear any pending undo timer on unmount / close so it can't fire after.
+  useEffect(() => {
+    return () => {
+      if (undoTimer.current) clearTimeout(undoTimer.current);
+    };
+  }, []);
 
   if (!open) return null;
 
@@ -86,8 +102,24 @@ export function TranslatePopover({
 
   function applyPreview() {
     if (!preview) return;
+    const original = text; // stash the draft we're about to overwrite (for Undo)
     onTranslated(preview.text); // the single point that overwrites the draft
-    setPreview(null); // clear before close so a re-open never flashes the old preview
+    // Keep the popover open briefly with an Undo affordance instead of
+    // closing immediately. A one-click Undo re-sets the composer to the
+    // original draft (the parent already drives the value from onTranslated).
+    setApplied({ language: preview.language, original });
+    setPreview(null); // clear before showing applied so a re-open never flashes it
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => {
+      setApplied(null);
+      onClose();
+    }, 5000);
+  }
+  function undoApply() {
+    if (!applied) return;
+    onTranslated(applied.original); // restore the pre-translate draft
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setApplied(null);
     onClose();
   }
   function cancelPreview() {
@@ -139,7 +171,27 @@ export function TranslatePopover({
       transition={{ duration: 0.12 }}
       className="absolute bottom-full left-0 z-30 mb-2 w-56 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
     >
-      {preview ? (
+      {applied ? (
+        <div>
+          <div className="flex items-center gap-1.5 border-b border-border px-3 py-2 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <span>Applied to</span>
+            <span className="normal-case">{applied.language}</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Check className="size-3.5 shrink-0 text-primary" />
+              <span>Draft replaced.</span>
+            </div>
+            <button
+              type="button"
+              onClick={undoApply}
+              className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+            >
+              <Undo2 className="size-3.5" /> Undo
+            </button>
+          </div>
+        </div>
+      ) : preview ? (
         <div>
           <div className="flex items-center gap-1.5 border-b border-border px-3 py-2 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
             <span>Translated to</span>

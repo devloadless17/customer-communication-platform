@@ -457,10 +457,23 @@ export function NewBroadcastForm({
     // already requires to delete a single contact. Scheduling stays one-click:
     // a scheduled broadcast can be canceled/deleted before it fires.
     if (!scheduledAtIso) {
+      // Resolve a one-line preview of the body the same way the live
+      // PreviewBubble does (renderPlaceholders + resolveFieldTokens over the
+      // sample contact) so the confirm shows exactly what the agent saw, then
+      // truncate it to keep the dialog body one line.
+      const resolvedBody = renderPlaceholders(
+        selectedTemplate.bodyText,
+        bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT)),
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const bodyPreview = truncate(resolvedBody, 90);
       const ok = await confirm({
         title: `Send to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"} now?`,
         description:
-          "This sends the template immediately over WhatsApp. It can't be undone once recipients start receiving it.",
+          `Sending «${selectedTemplate.name}» to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}` +
+          (bodyPreview ? `: “${bodyPreview}”` : "") +
+          ". This sends the template immediately over WhatsApp and can't be undone once recipients start receiving it.",
         confirmLabel: "Send now",
         destructive: true,
       });
@@ -528,6 +541,11 @@ export function NewBroadcastForm({
         <p className="text-sm text-muted-foreground">
           Send a pre-approved WhatsApp template to many recipients in one go.
           Same template + same variable values for everyone.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          Broadcasts go to people outside the 24-hour customer service window, so
+          Meta only allows pre-approved templates here — free-form text isn&apos;t
+          permitted for cold or post-24h outbound.
         </p>
       </header>
 
@@ -726,6 +744,9 @@ export function NewBroadcastForm({
                 type="datetime-local"
                 value={scheduledLocal}
                 onChange={(e) => setScheduledLocal(e.target.value)}
+                // Block past times in the native picker; the submit-time guard
+                // (when <= Date.now()) stays as the authoritative check.
+                min={localDatetimeNow()}
                 className="w-fit rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
               />
             )}
@@ -1194,6 +1215,23 @@ function countPlaceholders(text: string): number {
     if (Number.isFinite(n) && n > max) max = n;
   }
   return max;
+}
+
+/**
+ * Local wall-clock "now" as a datetime-local value (YYYY-MM-DDTHH:mm). Used as
+ * the `min` so the native picker rejects a past time. Built from local fields
+ * (NOT toISOString, which is UTC) to match the timezone-naive input.
+ */
+function localDatetimeNow(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Single-line, ellipsized clip for the confirm-dialog body preview. */
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1).trimEnd() + "…";
 }
 
 function renderPlaceholders(text: string, vars: string[]): string {
