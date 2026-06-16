@@ -274,8 +274,16 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       // `team_id` is stamped here (not inside toWirePayload's per-type cases)
       // so a multi-tenant partner pointing one URL at several teams can route
       // by team from the body — the flat shape otherwise omits it.
+      // Event occurred-at (epoch ms) — stamped for EVERY event so a partner can
+      // order/age events instead of relying on receipt time. Sourced from the
+      // envelope's occurred_at (previously internal-only, exposed to no one).
+      // Placed BEFORE the spread so message.status_changed's per-case `timestamp`
+      // (the precise transition time) still wins for that one event.
+      const occurredAtRaw = (envelope as { occurred_at?: string }).occurred_at;
+      const occurredAtMs = occurredAtRaw ? Date.parse(occurredAtRaw) : NaN;
       const payload = {
         team_id: event.teamId,
+        timestamp: Number.isNaN(occurredAtMs) ? null : occurredAtMs,
         ...toWirePayload(type, (envelope as { data: unknown }).data, {
           channelBase,
           teamAiAutopilotEnabled,

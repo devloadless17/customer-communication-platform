@@ -488,7 +488,8 @@ export interface PublicEnvelope<T extends PublicEventType, P> {
   /** Internal-only: the delivery row id the subscriber stamps before persisting. Echoed on the X-CCP-Delivery header; NOT in the wire body. */
   event_id: string;
   event_type: T;
-  /** Internal-only: when the envelope was generated. Not posted to partners. */
+  /** When the envelope was generated. Surfaced to partners as the top-level
+   *  wire `timestamp` (epoch ms) — stamped in the subscriber's payload. */
   occurred_at: string;
   team_id: string;
   /** Multi-channel forward-compat — populated by the subscriber from the team's Meta config. */
