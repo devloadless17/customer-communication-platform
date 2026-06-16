@@ -113,7 +113,7 @@ export function Sheet({
           positionClass,
           slideClass,
           // Sensible default width for side sheets; callers override via
-          // `contentClassName` (e.g. `w-80` for nav, `w-[320px]` for the
+          // `contentClassName` (e.g. `w-80` for nav, `w-80` for the
           // inbox contact panel on mobile).
           side !== "bottom" && "w-72",
           contentClassName,

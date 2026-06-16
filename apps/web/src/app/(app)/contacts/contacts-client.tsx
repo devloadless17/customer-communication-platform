@@ -1043,7 +1043,7 @@ const ContactRow = memo(function ContactRow({
             popover, which is absolutely positioned inside this box). */}
         <div
           ref={tagBoxRef}
-          className="relative hidden w-[120px] shrink-0 items-center justify-end @xl:flex"
+          className="relative hidden w-30 shrink-0 items-center justify-end @xl:flex"
         >
           {/* Clipped inner row: tag chips can NEVER spill left out of the 120px
               lane and overlap the phone/name. The picker popover below is a
@@ -1098,7 +1098,7 @@ const ContactRow = memo(function ContactRow({
 
         {/* Window lane — wide enough for the longest one-line badge
             ("Window closed · closed 24m ago") so it never wraps or clips. */}
-        <div className="hidden w-[210px] shrink-0 items-center justify-start @3xl:flex">
+        <div className="hidden w-52.5 shrink-0 items-center justify-start @3xl:flex">
           <WindowBadge lastInboundAt={lastInboundAt} size="xs" />
         </div>
 
@@ -1116,7 +1116,7 @@ const ContactRow = memo(function ContactRow({
         {/* Open-chat lane — hidden on phones (tap the row → detail drawer to
             open the chat); reclaims the reserved width so the name doesn't
             collapse on a 375px screen. */}
-        <div className="hidden w-[104px] shrink-0 items-center justify-end @4xl:flex">
+        <div className="hidden w-26 shrink-0 items-center justify-end @4xl:flex">
           {activeConversationId && (
             <Link
               href={`/inbox/${activeConversationId}`}

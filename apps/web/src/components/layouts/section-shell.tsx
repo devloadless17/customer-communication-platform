@@ -40,7 +40,7 @@ export async function SectionShell({
   mainClassName?: string;
   /** Opt-in for "centered content" sections (workflows, templates,
    *  broadcasts list, etc.) whose pages don't manage their own width.
-   *  Wraps children in a centered `max-w-[1400px]` track so they don't
+   *  Wraps children in a centered `max-w-350` track so they don't
    *  stretch edge-to-edge on ultrawide monitors. Default `false` —
    *  full-bleed sections (inbox, team chat, contacts) keep today's
    *  behavior and must NOT set this. Sections that already cap their

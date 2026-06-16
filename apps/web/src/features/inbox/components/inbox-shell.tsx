@@ -136,7 +136,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 // so the composer header (Reply/Note toggle + Window badge + Send template) all
 // fit on one line with breathing room — that's the "nothing overlaps" cap.
 // Applied as a CSS min-width on the thread too (window-resize case). Keep the
-// JS constant and the Tailwind `lg:min-w-[560px]` (message-thread.tsx) in sync.
+// JS constant and the Tailwind `lg:min-w-140` (message-thread.tsx) in sync.
 const MIN_THREAD_WIDTH = 560;
 
 /**
@@ -1197,7 +1197,7 @@ export function InboxShell({
               // clamped [260,560]). The var is always set (320 until the
               // persisted width loads) so first paint agrees — no hydration
               // mismatch.
-              "flex min-h-0 flex-1 lg:w-[var(--inbox-lw)] lg:min-w-[260px] lg:max-w-[560px] lg:flex-initial",
+              "flex min-h-0 flex-1 lg:w-(--inbox-lw) lg:min-w-65 lg:max-w-140 lg:flex-initial",
               activeId ? "hidden lg:flex" : "flex",
             )}
             style={
@@ -1519,7 +1519,7 @@ function ThreadWorkspace({
           // Hide the whole overlay at lg+ too (in case the viewport grows while
           // open) — at lg the desktop rail takes over.
           className="lg:hidden"
-          contentClassName="w-[320px] max-w-[88vw] bg-sidebar text-sidebar-foreground"
+          contentClassName="w-80 max-w-[88vw] bg-sidebar text-sidebar-foreground"
         >
           <ContactPanel
             data={thread.data}

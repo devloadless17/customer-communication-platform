@@ -264,7 +264,7 @@ export function ContactDetailDrawer({
         if (!o) onClose();
       }}
       side="right"
-      contentClassName="w-full max-w-[420px]"
+      contentClassName="w-full max-w-105"
       labelledBy="contact-drawer-name"
     >
       <div className="flex h-full flex-col">

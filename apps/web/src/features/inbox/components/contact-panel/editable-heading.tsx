@@ -73,7 +73,7 @@ export function EditableHeading({
           }
         }}
         disabled={busy}
-        className="h-7 max-w-[220px] text-center text-base font-semibold"
+        className="h-7 max-w-55 text-center text-base font-semibold"
       />
     </div>
   );

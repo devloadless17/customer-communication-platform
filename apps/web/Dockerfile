@@ -120,11 +120,13 @@ WORKDIR /tools
 # transitive deps with known HIGH CVEs get forced to fixed versions:
 #   - picomatch < 4.0.4: ReDoS via crafted extglob (CVE-2026-33671)
 #   - effect < 3.20.0: AsyncLocalStorage context contamination (CVE-2026-32887)
-# Both come in via tsx's runtime deps (chokidar → picomatch) and prisma's
-# config loader (@prisma/config → effect). npm reads overrides from this
-# package.json even though we pass --no-save (which only suppresses
-# writeback, not read).
-RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","effect":"^3.20.0","esbuild":"^0.28.0"}}' > package.json && \
+#   - esbuild < 0.28.1: missing Deno binary integrity check → RCE (GHSA-gv7w-rqvm-qjhr)
+# These come in via tsx's runtime deps (chokidar → picomatch, esbuild) and
+# prisma's config loader (@prisma/config → effect). npm reads overrides from
+# this package.json even though we pass --no-save (which only suppresses
+# writeback, not read). NOTE the ranges must EXCLUDE the bad version: `^0.28.1`
+# (not `^0.28.0`, which still permits the vulnerable 0.28.0).
+RUN echo '{"name":"cli-tools","private":true,"overrides":{"picomatch":"^4.0.4","effect":"^3.20.0","esbuild":"^0.28.1"}}' > package.json && \
     npm install --no-save --no-package-lock --omit=dev \
       prisma@7.8.0 \
       @prisma/client@7.8.0 \

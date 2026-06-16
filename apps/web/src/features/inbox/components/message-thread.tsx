@@ -1565,7 +1565,7 @@ function MessageThreadImpl({
             flex-1 min-w-0 and shrinks gracefully. The 2xl cap + mx-auto stop the
             column (list AND composer, both max-w-6xl inside) from sprawling with
             dead gutters on very wide displays (2xl = 1536px+). */}
-        <div className="relative flex min-w-0 flex-1 flex-col lg:min-w-[560px] 2xl:mx-auto 2xl:max-w-[1400px]">
+        <div className="relative flex min-w-0 flex-1 flex-col lg:min-w-140 2xl:mx-auto 2xl:max-w-350">
 
       {searchOpen && (
         <MessageSearch

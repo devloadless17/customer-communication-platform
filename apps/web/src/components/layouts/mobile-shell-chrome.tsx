@@ -218,7 +218,7 @@ export function MobileShellChrome({
         open={open}
         onOpenChange={setOpen}
         side="left"
-        contentClassName="w-[280px] max-w-[85vw]"
+        contentClassName="w-70 max-w-[85vw]"
         labelledBy="mobile-nav-team-name"
         hideCloseButton
       >

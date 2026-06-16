@@ -211,7 +211,7 @@ export function InteractivePopover({
           rows={2}
           maxLength={1024}
           placeholder="Want a callback?"
-          className="min-h-[60px] resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+          className="min-h-15 resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
         />
       </label>
 
@@ -227,7 +227,7 @@ export function InteractivePopover({
               value={opt.id}
               onChange={(e) => setOption(idx, { id: e.target.value })}
               placeholder="id"
-              className="max-w-[80px] font-mono text-2xs"
+              className="max-w-20 font-mono text-2xs"
               aria-label={`Button ${idx + 1} id`}
             />
             <Input

@@ -13,9 +13,11 @@ import { db, superadminTeam } from "../_helpers/db";
  * conversation + message under a unique phone and removes only those in
  * afterAll, so it can run safely against a dev DB with real data.
  *
- * Verifies the headline changes: the new "New conversation" affordance, the
- * Stage section wired into the contact panel, the signed-in /login bounce, and
- * that the swept surfaces (Switch/EmptyState/live-region/SSR-template work)
+ * Verifies the headline changes: the inbox list + contact panel mount clean
+ * (the New-conversation compose icon and the panel Assignee/Stage sections were
+ * later removed by request — those controls live in the thread header), the
+ * signed-in /login bounce, and that the swept surfaces
+ * (Switch/EmptyState/live-region/SSR-template work)
  * still mount with zero console/page/5xx errors in a real build.
  */
 
@@ -109,19 +111,20 @@ test("signed-in user hitting /login is bounced to /inbox", async ({ page }) => {
   expect(page.url()).toMatch(/\/inbox/);
 });
 
-test("inbox list exposes the New conversation button + mounts clean", async ({
+test("inbox list mounts clean — New-conversation compose icon removed", async ({
   page,
 }) => {
   const errs = track(page);
   await page.goto("/inbox", { waitUntil: "domcontentloaded" });
-  await expect(
-    page.getByRole("button", { name: "New conversation" }),
-  ).toBeVisible({ timeout: 15_000 });
+  // The list header renders (search box). The "New conversation" compose icon
+  // was intentionally removed (useless feature), so it must NOT be present.
+  await expect(page.getByPlaceholder(/Search contacts/i)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "New conversation" })).toHaveCount(0);
   await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => undefined);
   expect(errs, "/inbox console/page/5xx").toEqual([]);
 });
 
-test("contact panel renders the new Stage section + mounts clean", async ({
+test("contact panel mounts clean — Assignee/Stage sections removed (they live in the thread header)", async ({
   page,
 }) => {
   const errs = track(page);
@@ -129,10 +132,10 @@ test("contact panel renders the new Stage section + mounts clean", async ({
   await expect(page.locator("[data-entry-kind]").first()).toBeVisible({
     timeout: 15_000,
   });
-  // Stage section (title="Stage") is wired into the desktop contact panel.
-  await expect(page.getByText("Stage", { exact: true }).first()).toBeVisible({
-    timeout: 10_000,
-  });
+  // The redundant Assignee + Stage sections were removed from the right panel
+  // (those controls live in the thread header now). The panel still renders its
+  // remaining sections — assert the contact identity shows + the view is clean.
+  await expect(page.getByText("UI Polish E2E").first()).toBeVisible({ timeout: 10_000 });
   await page.waitForTimeout(400);
   expect(errs, "thread console/page/5xx").toEqual([]);
 });

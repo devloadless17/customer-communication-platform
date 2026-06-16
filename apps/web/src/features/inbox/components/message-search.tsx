@@ -292,7 +292,7 @@ export function highlightQuery(text: string, query: string): React.ReactNode {
         // inbox-search panel uses (inbox-search-panel.tsx `highlight`), so a
         // match reads identically whether it's surfaced in the search list or
         // highlighted in place inside a chat bubble.
-        className="rounded-[2px] bg-primary/20 px-0.5 text-foreground"
+        className="rounded-xs bg-primary/20 px-0.5 text-foreground"
       >
         {part}
       </mark>

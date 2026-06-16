@@ -31,7 +31,7 @@ export function TemplateListView({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="flex max-h-[480px] flex-col">
+    <div className="flex max-h-120 flex-col">
       <div className="border-b border-border px-3 py-2">
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
