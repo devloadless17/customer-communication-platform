@@ -60,6 +60,27 @@ export class TeamRootService {
     return { name: updated.name };
   }
 
+  /**
+   * DB-2: delete a team's Message rows in bounded batches so a huge tenant's
+   * hard-delete doesn't run as one multi-million-row transaction. FK-safe in any
+   * order (Message's only inbound FK is the self-referential replyTo SetNull).
+   */
+  private async batchDeleteMessagesByTeam(teamId: string): Promise<void> {
+    const BATCH = 5_000;
+    // Safety ceiling so a bug can't spin forever; 200k × 5k = 1B rows, far above
+    // any real tenant — the `< BATCH` break is the normal exit.
+    const MAX_BATCHES = 200_000;
+    for (let i = 0; i < MAX_BATCHES; i++) {
+      const deleted = await this.db.$executeRaw`
+        DELETE FROM "Message"
+        WHERE id IN (
+          SELECT id FROM "Message" WHERE "teamId" = ${teamId} LIMIT ${BATCH}
+        )
+      `;
+      if (Number(deleted) < BATCH) break;
+    }
+  }
+
   async destroy(teamId: string, label: string): Promise<void> {
     // Snapshot blob keys + member ids BEFORE the cascade nukes the rows.
     // Blob keys feed post-delete cleanup; member ids feed the explicit
@@ -77,6 +98,16 @@ export class TeamRootService {
       .filter((k): k is string => Boolean(k));
 
     try {
+      // DB-2: pre-drain the Message table in bounded batches BEFORE the cascade.
+      // Message is by far the heaviest table (can be MILLIONS of rows for a
+      // long-lived tenant); a single `team.delete` cascade would delete them all
+      // in ONE transaction — a lock storm + WAL blowup + statement-timeout risk
+      // that can wedge the DB. Batching is provably FK-safe here: the only
+      // inbound FK to Message is the self-referential `replyTo` (onDelete:
+      // SetNull, no Restrict referrers), so batches can run in any order. The
+      // final cascade then handles the now-small remainder + every other table +
+      // FK integrity. (blobKeys were snapshotted above, before this drains them.)
+      await this.batchDeleteMessagesByTeam(teamId);
       await this.db.team.delete({ where: { id: teamId } });
     } catch (err) {
       this.logger.error(`[${label}] cascade delete failed`, err);

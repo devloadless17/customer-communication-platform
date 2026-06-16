@@ -1,4 +1,4 @@
-import { Logger } from "@nestjs/common";
+import { Logger, type OnModuleDestroy } from "@nestjs/common";
 import {
   ConnectedSocket,
   MessageBody,
@@ -20,13 +20,25 @@ import type { Role } from "@ccp/shared/types";
 import { DbService } from "../db/db.service";
 import { PresenceService } from "./presence.service";
 import { RealtimeEmitter, type TypedIO } from "./emitter.service";
-import { channelRoom, conversationRoom, teamRoom } from "./rooms";
+import { channelRoom, conversationRoom, teamRoom, userRoom } from "./rooms";
 import { SocketAuthService } from "./socket-auth.service";
 import { TypingService } from "./typing.service";
 
 // Per-socket emit cap — see comment at the install site in handleConnection.
 const SOCKET_EMIT_CAP = 240;
 const SOCKET_EMIT_REFILL_PER_MS = 240 / 10_000;
+
+// realtime-added-1: outbound write-buffer reaper. `maxHttpBufferSize` (ws-adapter)
+// caps INBOUND frame size; the per-socket emit bucket above caps INBOUND rate.
+// Neither bounds the OUTBOUND engine.io writeBuffer — a slow-but-alive consumer
+// (throttled mobile link) keeps acking pings (so pingTimeout never reaps it) yet
+// can't drain a broadcast storm, so its pending-packet buffer grows unbounded and
+// pins server heap. A periodic sweep disconnects any socket whose writeBuffer
+// exceeds the threshold; the client reconnects + backfills (convergence re-syncs),
+// trading one bad socket's liveness for bounded server memory. Threshold is well
+// above any legitimate transient backlog.
+const WRITE_BUFFER_REAP_THRESHOLD = 2_000;
+const WRITE_BUFFER_REAP_INTERVAL_MS = 10_000;
 
 /**
  * Full Socket.io gateway. Owns room topology, handshake auth, idempotent
@@ -41,12 +53,23 @@ const SOCKET_EMIT_REFILL_PER_MS = 240 / 10_000;
  */
 @WebSocketGateway()
 export class RealtimeGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
+  onModuleDestroy(): void {
+    if (this.writeBufferReaper) {
+      clearInterval(this.writeBufferReaper);
+      this.writeBufferReaper = null;
+    }
+  }
+
   private readonly logger = new Logger(RealtimeGateway.name);
 
   @WebSocketServer()
   server!: TypedIO;
+
+  // realtime-added-1: handle for the outbound write-buffer reaper (cleared on
+  // shutdown so the interval doesn't keep the process alive / leak on HMR).
+  private writeBufferReaper: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly db: DbService,
@@ -78,6 +101,43 @@ export class RealtimeGateway
     this.emitter.bindConversationsViewedByUser((userId) =>
       this.presence.conversationsViewedBy(userId),
     );
+    // RT-1: resolve a channel's activity-badge audience. Default channel →
+    // whole team; membership-gated channel → just its members (their user
+    // rooms), so a private channel's activity never reaches non-members.
+    this.emitter.bindChannelActivityResolver(async (channelId, teamId) => {
+      const channel = await this.db.teamChannel.findFirst({
+        where: { id: channelId, teamId },
+        select: { isDefault: true, members: { select: { userId: true } } },
+      });
+      if (!channel) return { isDefault: false, memberUserIds: [] };
+      return {
+        isDefault: channel.isDefault,
+        memberUserIds: channel.members.map((m) => m.userId),
+      };
+    });
+
+    // realtime-added-1: start the outbound write-buffer reaper. Disconnects a
+    // slow consumer whose pending-packet buffer has blown past the threshold
+    // (it acks pings, so pingTimeout won't catch it) before it pins heap.
+    this.writeBufferReaper = setInterval(() => {
+      let reaped = 0;
+      for (const socket of server.sockets.sockets.values()) {
+        // engine.io types `writeBuffer` as private; reach it via unknown. It's
+        // the array of packets pending write to this socket's transport.
+        const buf = (socket.conn as unknown as { writeBuffer?: unknown[] })
+          ?.writeBuffer;
+        if (buf && buf.length > WRITE_BUFFER_REAP_THRESHOLD) {
+          socket.disconnect(true);
+          reaped += 1;
+        }
+      }
+      if (reaped > 0) {
+        this.logger.warn(
+          `[realtime] reaped ${reaped} socket(s) with outbound writeBuffer > ${WRITE_BUFFER_REAP_THRESHOLD} packets`,
+        );
+      }
+    }, WRITE_BUFFER_REAP_INTERVAL_MS);
+    this.writeBufferReaper.unref?.();
 
     // Handshake auth runs in middleware (not handleConnection) so an auth
     // failure delivers a typed `connect_error` to the client with a parseable
@@ -239,6 +299,10 @@ export class RealtimeGateway
     // round-trip needed — clients always belong to one team for the
     // lifetime of the connection.
     client.join(teamRoom(identity.teamId));
+    // Per-user room (RT-1) — lets the server target this user across all their
+    // tabs for membership-scoped fanout (private-channel activity badges)
+    // without a team-wide broadcast that leaks metadata to non-members.
+    client.join(userRoom(identity.userId));
 
     const cameOnline = this.presence.add(
       identity.teamId,

@@ -373,7 +373,7 @@ export const FANOUT_RULES: FanoutRuleMap = {
   // were excluded from. members_changed + catalog_changed stay on the
   // team room — they drive the sidebar channel list, which every team
   // member needs to refresh.
-  "team_channel.message_created": (e, emitter) => {
+  "team_channel.message_created": async (e, emitter) => {
     const threadRootId = e.message.threadRootId;
     emitter.emitToChannel(e.channelId, "team:channel:message", {
       teamId: e.teamId,
@@ -383,16 +383,16 @@ export const FANOUT_RULES: FanoutRuleMap = {
       lastMessageAt: e.lastMessageAt,
       ...(e.clientTempId ? { clientTempId: e.clientTempId } : {}),
     });
-    // Content-lean TEAM-room companion so the SIDEBAR list badges (unread dot +
-    // mention counter) update live for channels the viewer isn't currently
-    // subscribed to. The channel-room frame above only reaches the one channel
-    // a tab has open, so without this a teammate posting in another channel
-    // produced zero sidebar dot until reconnect/reload — the core "new activity
-    // elsewhere" awareness the sidebar exists for. Carries NO body/preview (a
-    // team frame reaches non-members of private channels); the list drops any
-    // channelId not in its membership-scoped state, and the preview text
-    // converges via the channel frame or the next list refetch.
-    emitter.emitToTeam(e.teamId, "team:channel:activity", {
+    // Content-lean SIDEBAR badge companion (unread dot + mention counter) for
+    // members NOT currently subscribed to this channel's room. The channel-room
+    // frame above only reaches a tab that has the channel open, so without this
+    // a member posting in another channel produced zero sidebar dot until
+    // reconnect/reload. RT-1: routed through `emitChannelActivity`, which sends
+    // it to the WHOLE TEAM only for the default channel; for a membership-gated
+    // channel it goes ONLY to the members' per-user rooms — so a non-member
+    // never receives a private channel's activity metadata (author, mentions,
+    // even the channelId) on the wire. Carries no body/preview regardless.
+    await emitter.emitChannelActivity(e.channelId, e.teamId, {
       teamId: e.teamId,
       channelId: e.channelId,
       authorUserId: e.message.authorUserId,
