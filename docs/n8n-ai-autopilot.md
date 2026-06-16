@@ -48,9 +48,17 @@ Relevant fields (camelCase; the message text is double-nested):
 ```jsonc
 {
   "event_type": "message.received",
+  "timestamp": 1718539200000,         // ← event time (epoch ms), on every event
   "ai_enabled": true,                 // ← the gate
   "contact":  { "id": "...", "phoneNumber": "961...", "name": "..." },
   "assignee": null,                   // a human assignee (or null)
+  "conversation": {                   // ← thread state, no callback needed
+    "id": "cmq...",                   //    same id as message.conversationId
+    "status": "open",
+    "unreadCount": 1,
+    "isNewConversation": false,
+    "reopened": false
+  },
   "message": {
     "messageId": "cmq...",            // ← use as Idempotency-Key
     "conversationId": "cmq...",       // ← reply target
@@ -58,6 +66,12 @@ Relevant fields (camelCase; the message text is double-nested):
   }
 }
 ```
+
+> The full payload also carries `channel`, `sender`, and (on media messages)
+> `message.media` with file links. Every event includes the top-level
+> `timestamp`; correlation ids appear as `conversation.id` + `message.conversationId`
+> (same value) and `contact.id`. Auth + dedup ride on headers: `X-CCP-Signature`
+> (HMAC-SHA256 of the body), `X-CCP-Delivery` (unique id), `X-CCP-Event`.
 
 > **n8n wraps the POST body under `json.body`.** So inside n8n you reference
 > these fields as `$json.body.ai_enabled`, `$('Webhook').item.json.body.message.

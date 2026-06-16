@@ -3,6 +3,9 @@
 Ready-to-use Postman collection for the per-organization External API (`/api/external/v1`).
 One API key per organization; it scopes every request to that org automatically.
 
+> Prefer copy-paste `curl`? See **[../organization-api.md](../organization-api.md)** — the
+> same endpoints plus the outbound-webhooks reference, each example paste-and-run.
+
 ## Files
 
 - `ccp-org-api.postman_collection.json` — all 35 endpoints, grouped into folders (incl. AI Autopilot toggle).
