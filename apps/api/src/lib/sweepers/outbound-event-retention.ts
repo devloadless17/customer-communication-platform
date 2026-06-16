@@ -80,6 +80,12 @@ async function sweepOnce(): Promise<void> {
       where: {
         publishedAt: { not: null, lt: cutoff },
         failedAt: null,
+        // EVT-2: only GC rows that FULLY dispatched. A row with publishedAt set
+        // but dispatchedAt NULL is the hard-crash-mid-dispatch loss-window
+        // signal (see the OutboundEvent.dispatchedAt doc) — keep it for operator
+        // forensics instead of silently reaping the very evidence of a lost
+        // fan-out after 7 days.
+        dispatchedAt: { not: null },
       },
       select: { id: true },
       take: MAX_PER_SWEEP,

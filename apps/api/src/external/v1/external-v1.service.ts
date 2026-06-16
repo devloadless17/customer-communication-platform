@@ -809,16 +809,35 @@ export class ExternalV1Service {
     // row create() hits P2002 and reviveSoftDeletedByPhone restores it (firing
     // contact.created), so re-upserting a removed contact behaves like a fresh
     // add rather than silently patching a hidden row.
-    if (!existing || existing.deletedAt) {
-      const contact = await this.createContact(teamId, apiKeyId, input);
-      return { contact, created: true };
+    let targetId = existing && !existing.deletedAt ? existing.id : null;
+    if (!targetId) {
+      try {
+        const contact = await this.createContact(teamId, apiKeyId, input);
+        return { contact, created: true };
+      } catch (err) {
+        // API-6: two concurrent FIRST-time upserts of the same phone — the
+        // loser's createContact P2002s, finds no soft-deleted row to revive,
+        // and throws `duplicate_phone` (409). Upsert must be idempotent under
+        // races: re-find the live winner and fall through to the update/merge
+        // path instead of surfacing the 409 to the partner.
+        if (err instanceof ConflictException) {
+          const winner = await this.db.contact.findFirst({
+            where: { teamId, phoneNumber: phone, deletedAt: null },
+            select: { id: true },
+          });
+          if (!winner) throw err;
+          targetId = winner.id;
+        } else {
+          throw err;
+        }
+      }
     }
     // Call the internal (un-wrapped) update — upsert's own idempotency is the
     // caller's concern at the /v1/contacts/upsert route, not a nested claim.
     // Forward EVERY directory field the update path supports (firstName /
     // lastName / language / countryCode included — they were silently dropped
     // before, so a CRM re-sync never refreshed them after the first create).
-    const contact = await this.updateContactInternal(teamId, apiKeyId, existing.id, {
+    const contact = await this.updateContactInternal(teamId, apiKeyId, targetId, {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
       ...(input.lastName !== undefined ? { lastName: input.lastName } : {}),
@@ -836,7 +855,7 @@ export class ExternalV1Service {
     // not a full replace; use DELETE /contacts/:id/tags/:tagId to unassign.
     if (input.tagIds && input.tagIds.length > 0) {
       return {
-        contact: await this.addContactTagsInternal(teamId, apiKeyId, existing.id, {
+        contact: await this.addContactTagsInternal(teamId, apiKeyId, targetId, {
           tagIds: input.tagIds,
         }),
         created: false,
@@ -1184,9 +1203,16 @@ export class ExternalV1Service {
           ON CONFLICT DO NOTHING
         `;
       } else {
+        // SEC-4: in-SQL teamId backstop mirroring the tag-add path's
+        // `Contact.teamId = ${teamId}` guard. `ownedIds`/`validTagIds` are
+        // already team-pre-filtered, so this is defense-in-depth — but it means
+        // the destructive DELETE can never touch a cross-team join row even if a
+        // future caller forgets the pre-filter.
         await this.db.$executeRaw`
           DELETE FROM "_ContactToTag"
           WHERE "A" = ANY(${ownedIds}::text[]) AND "B" = ${tagId}
+            AND "A" IN (SELECT id FROM "Contact" WHERE "teamId" = ${teamId})
+            AND "B" IN (SELECT id FROM "Tag" WHERE "teamId" = ${teamId})
         `;
       }
     }

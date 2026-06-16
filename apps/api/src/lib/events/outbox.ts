@@ -4,6 +4,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { getChainDepth, getCorrelationId } from "@/common/correlation";
 import type {
   DomainEventOf,
   DomainEventType,
@@ -27,6 +28,11 @@ interface OutboxRow {
   payload: Prisma.JsonValue;
   createdAt: Date;
   attempts: number;
+  // Captured at publish time (request scope) so the drainer can restore the
+  // ALS context before dispatch — keeps the cross-system loop counter honest
+  // across the async publish→dispatch boundary (EVT-1).
+  chainDepth: number;
+  correlationId: string | null;
 }
 
 /**
@@ -73,6 +79,13 @@ export async function publishInTx<K extends DomainEventType>(
       teamId,
       type,
       payload: rest as unknown as Prisma.InputJsonValue,
+      // Capture the request-scoped loop counter + correlation id NOW, while we
+      // are still inside the originating HTTP request's ALS scope. The drainer
+      // dispatches this row LATER (outside that scope) and restores them, so an
+      // outbound-webhook fired for this event stamps the correct X-CCP-Depth
+      // instead of resetting to 1 (EVT-1).
+      chainDepth: getChainDepth(),
+      correlationId: getCorrelationId() ?? null,
     },
   });
 }
@@ -110,6 +123,10 @@ export async function persistDispatchedRow<K extends DomainEventType>(
       payload: rest as unknown as Prisma.InputJsonValue,
       publishedAt: now,
       attempts: 1,
+      // Sync path already dispatched in request scope; store these for forensic
+      // consistency with the tx path (never re-dispatched, so not load-bearing).
+      chainDepth: getChainDepth(),
+      correlationId: getCorrelationId() ?? null,
       ...(truncatedError
         ? { failedAt: now, lastError: truncatedError }
         : {}),
@@ -242,6 +259,8 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       payload: Prisma.JsonValue;
       createdAt: Date;
       attempts: number;
+      chainDepth: number;
+      correlationId: string | null;
     }>
   >`
     WITH candidates AS (
@@ -274,7 +293,7 @@ export async function claimBatch(limit: number): Promise<OutboxRow[]> {
       ORDER BY team_rn, "createdAt"
       LIMIT ${limit}
     )
-    RETURNING "id", "teamId", "type", "payload", "createdAt", "attempts";
+    RETURNING "id", "teamId", "type", "payload", "createdAt", "attempts", "chainDepth", "correlationId";
   `;
   return rows;
 }

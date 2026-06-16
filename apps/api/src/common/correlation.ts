@@ -53,6 +53,21 @@ export function getCorrelationId(): string | undefined {
 }
 
 /**
+ * Re-establish a correlation context around a callback OUTSIDE an HTTP request —
+ * used by the outbox drainer to restore the `chainDepth` + `correlationId`
+ * captured on an OutboundEvent row at publish time. Without this, a deferred
+ * dispatch (e.g. a `message.sent` outbound webhook) runs with the ALS default
+ * `chainDepth = 0`, resetting the cross-system loop counter to 1 every hop and
+ * defeating the X-CCP-Depth guard (EVT-1).
+ */
+export function runWithCorrelationContext<T>(
+  ctx: { requestId: string; chainDepth: number },
+  fn: () => T,
+): T {
+  return als.run(ctx, fn);
+}
+
+/**
  * Inbound cross-system chain depth (X-CCP-Depth) for the current request, or
  * 0 outside any request / when the header is absent. Used by the outbound-
  * webhook subscriber to stamp depth+1 on deliveries, so a partner that bounces

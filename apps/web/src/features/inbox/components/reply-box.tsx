@@ -32,7 +32,10 @@ import type {
 } from "@ccp/shared/types";
 import type { ContactLike } from "@ccp/shared/field-tokens";
 import { mediaPreviewLabel } from "@ccp/shared/types";
-import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
+import {
+  emitOptimisticListBump,
+  emitOptimisticListBumpRevert,
+} from "@/features/inbox/lib/optimistic-list-bump";
 import { nextOptimisticSeq } from "@/features/inbox/lib/optimistic-seq";
 import {
   buildOptimisticAiChange,
@@ -984,6 +987,10 @@ export function ReplyBox({
           description: message,
         });
         if (!isNote) onOptimisticFail?.(clientTempId);
+        // FE-2: the optimistic list-bump painted a preview for this send; the
+        // send failed, so roll the row's preview back to its pre-bump value
+        // (no server message:new will arrive to overwrite it). Notes don't bump.
+        if (!isNote) emitOptimisticListBumpRevert(conversationId);
         // Roll back the optimistic AI-pause: the send failed, so the server
         // never auto-paused. Revert the header flip + drop the pill, and clear
         // the once-guard so the next (retry) send pauses again.

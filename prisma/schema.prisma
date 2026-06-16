@@ -908,6 +908,11 @@ model Conversation {
   // Without this, hard-deleting a teammate seq-scans the hot Conversation
   // table to null their assignments. Migration 20260611130100.
   @@index([assignedUserId])
+  // DB-5: contactId-leading index. The `@@unique([teamId, contactId])` below
+  // leads with teamId, so a contactId-only scan (a GDPR hard-purge reconciling
+  // every conversation for one contact across the team boundary, or a future
+  // cross-tenant contact tool) can't use it. Cheap btree for that path.
+  @@index([contactId])
   // Keyset-paginated inbox listing: WHERE teamId = $1 ORDER BY lastMessageAt
   // DESC, id DESC. The status-leading index above stays for filtered views
   // (open / pending / closed) but doesn't help the unfiltered list — the
@@ -980,8 +985,10 @@ model Message {
   // payload CLEARS it (null). Inbound-only for now — agent-side reacting is
   // deferred. Set by the ingest `reaction` path; null = no reaction.
   reaction       String?
-  // Original webhook payload kept verbatim for debugging.
-  rawPayload     Json
+  // Original webhook payload kept verbatim for debugging (CLAUDE.md rule #4).
+  // Nullable so the opt-in rawPayload-retention sweeper (DB-1) can NULL ancient
+  // payloads to bound table/dump bloat at scale; every WRITE still sets it.
+  rawPayload     Json?
   timestamp      DateTime         @default(now())
   createdAt      DateTime         @default(now())
 
@@ -2167,6 +2174,15 @@ model OutboundEvent {
   //   WHERE "publishedAt" < now() - interval '5 minutes'
   //     AND "dispatchedAt" IS NULL AND "failedAt" IS NULL;
   dispatchedAt DateTime?
+
+  // Cross-system loop counter (X-CCP-Depth) + correlation id captured at PUBLISH
+  // time, while still inside the originating request's ALS scope. The drainer
+  // dispatches this row later (outside that scope) and restores them so an
+  // outbound webhook fired for this event carries the correct depth instead of
+  // resetting to 1 — defeating the loop guard (EVT-1). Default 0 = a publish
+  // with no inbound chain depth (the common case).
+  chainDepth    Int     @default(0)
+  correlationId String?
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 

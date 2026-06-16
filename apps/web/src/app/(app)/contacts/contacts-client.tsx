@@ -273,13 +273,23 @@ export function ContactsClient({
     // (and future bulk-stage / bulk-field) paths instead of N per-contact
     // events. Just refresh the visible page; the same code path the filter
     // change effect uses, but triggered by a remote bulk write.
+    let bulkRefetchTimer: number | null = null;
     const onContactsBulkUpdated = () => {
-      refetch();
+      // Jitter the refetch (0–1500ms): a bulk op fans this one frame out to
+      // EVERY connected client at once, so an un-jittered refetch would fire a
+      // synchronized thundering-herd of full-page queries at the API in the same
+      // instant (frontend-state-added-1). Coalesce rapid frames too.
+      if (bulkRefetchTimer !== null) window.clearTimeout(bulkRefetchTimer);
+      bulkRefetchTimer = window.setTimeout(() => {
+        bulkRefetchTimer = null;
+        refetch();
+      }, Math.floor(Math.random() * 1500));
     };
     socket.on("contact:updated", onContactUpdated);
     socket.on("contact:deleted", onContactDeleted);
     socket.on("contacts:bulk_updated", onContactsBulkUpdated);
     return () => {
+      if (bulkRefetchTimer !== null) window.clearTimeout(bulkRefetchTimer);
       socket.off("contact:updated", onContactUpdated);
       socket.off("contact:deleted", onContactDeleted);
       socket.off("contacts:bulk_updated", onContactsBulkUpdated);

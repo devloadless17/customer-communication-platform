@@ -579,7 +579,10 @@ async function ingestInboundMessage(
   // violation from a parallel insert outracing predicate locking) is also
   // retried by the wrapper for the same reason. Two retries is a sensible
   // ceiling — by then the contention is real, not a fluke.
-  const { contact, conversation, isNewContact, wasRevived, isNewConversation, reopened } = await runWithSerializableRetry(
+  // `conversation` is reassigned in tx2 when a reopen flips closed→pending so
+  // all downstream snapshots see the post-reopen state — hence `let` (INB-1).
+  // eslint-disable-next-line prefer-const
+  let { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen } = await runWithSerializableRetry(
     async (tx) => {
       // Pre-existence check — the signal "did this inbound just create a
       // brand-new contact row?" We need it to publish `contact.created`
@@ -680,7 +683,15 @@ async function ingestInboundMessage(
       });
       const isNewConversation = !existingConvo;
       let conversation = existingConvo;
-      let reopened = false;
+      // INB-1: only DETECT a reopen here; do NOT flip closed→pending in this
+      // (separate) transaction. The actual CAS flip + the `status_changed`
+      // publish are co-committed with the message in tx2, so a tx2 failure
+      // rolls the flip back too — otherwise tx1's committed flip would make a
+      // redelivery see status='pending', skip `reopened`, and PERMANENTLY drop
+      // the reopen event (the workflow "conversation opened" trigger + partner
+      // webhook + list-splice). Mirrors ingest-call.ts's detect-in-tx1 /
+      // flip-and-publish-in-tx2 split.
+      let needsReopen = false;
       if (!conversation) {
         conversation = await tx.conversation.create({
           data: {
@@ -696,16 +707,11 @@ async function ingestInboundMessage(
           },
         });
       } else if (conversation.status === "closed") {
-        // Reopen. We bump to `pending` (matches the new-thread default) so
-        // the conversation re-enters the triage column instead of jumping
-        // straight to `open`, which would imply an agent has it.
-        conversation = await tx.conversation.update({
-          where: { id: conversation.id },
-          data: { status: "pending" },
-        });
-        reopened = true;
+        // Returning customer replying to a closed thread → mark for reopen in
+        // tx2 (do NOT mutate here).
+        needsReopen = true;
       }
-      return { contact, conversation, isNewContact, wasRevived, isNewConversation, reopened };
+      return { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen };
     },
   );
 
@@ -770,6 +776,26 @@ async function ingestInboundMessage(
             : {}),
         },
       });
+
+      // INB-1: perform the closed→pending reopen flip HERE (tx2), co-committed
+      // with the message + the `status_changed` outbox row. CAS on
+      // `status='closed'` so two racing inbound messages can't both "win" the
+      // reopen: the loser's updateMany matches 0 rows. We reassign the local
+      // `conversation` to the post-reopen shape whenever a reopen is needed (so
+      // every downstream snapshot — message.received, workflow — is consistent),
+      // but only the CAS WINNER (`reopened`) publishes status_changed / splices
+      // the list row, so the event fires exactly once.
+      let reopened = false;
+      if (needsReopen) {
+        const flip = await tx.conversation.updateMany({
+          where: { id: conversation.id, status: "closed" },
+          data: { status: "pending" },
+        });
+        reopened = flip.count > 0;
+        // Closed threads already have the assignee cleared (see the close path),
+        // so null is the correct post-reopen value.
+        conversation = { ...conversation, status: "pending", assignedUserId: null };
+      }
 
       // Run the two denorm updates SEQUENTIALLY, not via Promise.all. Prisma
       // does not serialise parallel queries inside a $transaction — they

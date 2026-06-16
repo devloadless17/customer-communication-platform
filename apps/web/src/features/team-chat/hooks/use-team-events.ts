@@ -4,7 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getClientSocket } from "@/lib/socket-client";
 import { fetchWithSessionGuard } from "@/lib/auth/client-session-guard";
-import { onOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
+import {
+  onOptimisticListBump,
+  onOptimisticListBumpRevert,
+} from "@/features/inbox/lib/optimistic-list-bump";
 import type { Contact, ConversationWithRefs, CursorPage } from "@ccp/shared/types";
 import type { Filter } from "@/features/inbox/components/inbox-controls";
 
@@ -274,12 +277,27 @@ export function useTeamEvents(
   // and re-sort. Bails when the row isn't in the loaded slice (idx === -1) —
   // the server frame will splice it in. The real frame that follows is
   // idempotent here (absolute overwrite, not a delta).
+  // FE-2: remember each row's pre-bump preview so a FAILED send can roll the
+  // optimistic preview back instead of leaving a phantom on the list.
+  const preBumpSnapshotRef = useRef<
+    Map<string, { lastMessageAt: string; lastMessagePreview: string; lastMessageDirection: "in" | "out" | null }>
+  >(new Map());
   useEffect(() => {
     return onOptimisticListBump(({ conversationId, preview, lastMessageAt }) => {
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
+        // Snapshot the CURRENT pre-bump preview/at/direction (FE-2). For
+        // sequential sends this is the prior CONFIRMED preview (the previous
+        // send's server frame already set it), so a revert restores the right
+        // text. Rapid-fire before confirmation snapshots an optimistic preview —
+        // a rare edge that self-corrects on the next authoritative frame.
+        preBumpSnapshotRef.current.set(conversationId, {
+          lastMessageAt: existing.conversation.lastMessageAt,
+          lastMessagePreview: existing.conversation.lastMessagePreview,
+          lastMessageDirection: existing.conversation.lastMessageDirection ?? null,
+        });
         const updated: ConversationWithRefs = {
           ...existing,
           conversation: {
@@ -293,6 +311,36 @@ export function useTeamEvents(
         const next = [...prev];
         next.splice(idx, 1);
         next.unshift(updated);
+        return next;
+      });
+    });
+  }, []);
+
+  // FE-2: a real server `message:new` confirms the send — drop the snapshot so a
+  // later unrelated failure can't wrongly revert. A send FAILURE fires the
+  // revert channel: restore the row's pre-bump preview (position self-corrects
+  // on the next authoritative frame).
+  useEffect(() => {
+    return onOptimisticListBumpRevert((conversationId) => {
+      const snap = preBumpSnapshotRef.current.get(conversationId);
+      preBumpSnapshotRef.current.delete(conversationId);
+      if (!snap) return;
+      setConversations((prev) => {
+        const idx = prev.findIndex((c) => c.conversation.id === conversationId);
+        if (idx === -1) return prev;
+        const existing = prev[idx]!;
+        // Only restore if the row still shows the optimistic (out) preview — a
+        // real inbound/outbound that landed meanwhile already replaced it.
+        const next = [...prev];
+        next[idx] = {
+          ...existing,
+          conversation: {
+            ...existing.conversation,
+            lastMessageAt: snap.lastMessageAt,
+            lastMessagePreview: snap.lastMessagePreview,
+            lastMessageDirection: snap.lastMessageDirection,
+          },
+        };
         return next;
       });
     });

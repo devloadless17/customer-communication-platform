@@ -5,7 +5,7 @@ import {
   type OnModuleInit,
 } from "@nestjs/common";
 
-import { withCorrelation } from "@/common/correlation";
+import { runWithCorrelationContext, withCorrelation } from "@/common/correlation";
 import { runWithConcurrency } from "@/common/concurrency";
 import {
   claimBatch,
@@ -93,8 +93,33 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
    */
   private static readonly DISPATCH_CONCURRENCY = 8;
 
+  /**
+   * Per-row dispatch ceiling (obs-1). A subscriber that awaits something that
+   * never resolves (a hung partner socket inside an outbound-webhook enqueue, a
+   * pool-starved write) would otherwise keep its lane's promise pending forever,
+   * so the tick's `runWithConcurrency` never resolves and `inflight` pins true —
+   * wedging the WHOLE event surface (realtime, audit, analytics, workflows,
+   * webhooks all ride this drainer) behind a green /health. Bounding each
+   * dispatch lets the tick complete; the timed-out row stays undispatched (the
+   * loss-window signal) + records `lastError`. Generous (30s) so a legitimately
+   * slow batch never trips it.
+   */
+  private static readonly DISPATCH_TIMEOUT_MS = 30_000;
+
+  /**
+   * Wedge watchdog (obs-1). If a tick runs longer than this — e.g. `claimBatch`
+   * itself hangs on a dead pool, outside the per-row timeout's reach — force the
+   * inflight latch off + reschedule so the drainer self-heals instead of going
+   * dark until a human notices. Safe: at-most-once is preserved by the
+   * `publishedAt`-before-dispatch mark, so a second concurrent tick can never
+   * re-claim the first's rows. Well above any legitimate tick (seconds).
+   */
+  private static readonly WATCHDOG_MS = 120_000;
+
   private timer: NodeJS.Timeout | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
   private inflight = false;
+  private tickStartedAt: number | null = null;
   private stopping = false;
 
   constructor(private readonly bus: EventBus) {}
@@ -105,6 +130,10 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     // the durable fallback (a missed/early kick is harmless — see kick()).
     setOutboxKickHandler(() => this.kick());
     this.schedule();
+    // Wedge watchdog: periodically check for a tick stuck past WATCHDOG_MS and
+    // force it to release so the drainer self-heals (obs-1).
+    this.watchdogTimer = setInterval(() => this.checkWedge(), 30_000);
+    this.watchdogTimer.unref?.();
     this.logger.log(
       `outbox drainer started — poll=${OutboxDrainerService.POLL_INTERVAL_MS}ms ` +
         `batch=${OutboxDrainerService.BATCH_SIZE} maxDrainsPerTick=${OutboxDrainerService.MAX_DRAINS_PER_TICK}`,
@@ -139,6 +168,10 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     // Best-effort flush of anything still in-flight before exit. Bounded
     // generously (25s) — the compose `stop_grace_period` on the api
     // service is 100s, and the BullMQ worker drain owns the lion's share
@@ -169,6 +202,26 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     }, OutboxDrainerService.POLL_INTERVAL_MS);
   }
 
+  /**
+   * Watchdog (obs-1): if a tick has been inflight past WATCHDOG_MS, the loop is
+   * wedged (e.g. claimBatch hung on a dead pool) — force the latch off and
+   * reschedule. At-most-once holds regardless (publishedAt-before-dispatch), so
+   * a transient double-tick can't re-fire any row.
+   */
+  private checkWedge(): void {
+    if (this.stopping || !this.inflight || this.tickStartedAt == null) return;
+    const elapsed = Date.now() - this.tickStartedAt;
+    if (elapsed < OutboxDrainerService.WATCHDOG_MS) return;
+    this.logger.error(
+      `[outbox-drainer] WEDGE DETECTED — tick inflight for ${Math.round(elapsed / 1000)}s ` +
+        `(> ${OutboxDrainerService.WATCHDOG_MS / 1000}s); force-releasing the latch and rescheduling. ` +
+        `Event fanout (realtime/audit/analytics/workflows/webhooks) was stalled.`,
+    );
+    this.inflight = false;
+    this.tickStartedAt = null;
+    this.schedule();
+  }
+
   private async tick(): Promise<void> {
     if (this.stopping) return;
     if (this.inflight) {
@@ -180,6 +233,7 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.inflight = true;
+    this.tickStartedAt = Date.now();
     try {
       let drains = 0;
       while (drains < OutboxDrainerService.MAX_DRAINS_PER_TICK) {
@@ -272,6 +326,7 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       );
     } finally {
       this.inflight = false;
+      this.tickStartedAt = null;
       this.schedule();
     }
   }
@@ -288,6 +343,31 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
    * silently routes every inbound socket emit to `team:undefined` and
    * the user has to refresh to see new conversations.
    */
+  /**
+   * Race a dispatch against DISPATCH_TIMEOUT_MS so a hung subscriber can't pin
+   * the tick forever (obs-1). On timeout the underlying promise keeps running
+   * (it can't be cancelled), but the tick moves on and the row is recorded as a
+   * dispatch error via the caller's catch — never silently re-dispatched.
+   */
+  private withDispatchTimeout<T>(p: Promise<T>, rowId: string): Promise<T> {
+    let timer: NodeJS.Timeout;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `outbox dispatch timed out after ${OutboxDrainerService.DISPATCH_TIMEOUT_MS}ms (row=${rowId})`,
+            ),
+          ),
+        OutboxDrainerService.DISPATCH_TIMEOUT_MS,
+      );
+    });
+    return Promise.race([
+      p.finally(() => clearTimeout(timer)),
+      timeout,
+    ]) as Promise<T>;
+  }
+
   private async dispatch(
     row: {
       id: string;
@@ -295,6 +375,8 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       type: string;
       payload: unknown;
       attempts: number;
+      chainDepth: number;
+      correlationId: string | null;
     },
     dispatched: string[],
   ): Promise<void> {
@@ -305,13 +387,19 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     } as DomainEvent;
 
     try {
-      // Returns aggregated subscriber-error message when any handler threw.
-      // The row STAYS marked-published (at-most-once dispatch), but we
-      // stamp `lastError` on it so the failure is queryable. Without this
-      // a subscriber bug only leaves a console.error trail and the row
-      // looks healthy forever.
-      const subscriberError = await this.bus.dispatchOutboxRow(
-        event as DomainEventOf<DomainEventType>,
+      // Restore the publish-time correlation context (EVT-1) so subscribers that
+      // read ALS — notably the outbound-webhook subscriber's getChainDepth() —
+      // see the ORIGINATING request's loop counter instead of the default 0.
+      // Without this every deferred `message.sent` webhook resets X-CCP-Depth to
+      // 1, defeating the cross-system loop guard. Bound each dispatch with a
+      // timeout (obs-1) so a hung subscriber can't wedge the tick.
+      const subscriberError = await runWithCorrelationContext(
+        { requestId: row.correlationId ?? row.id, chainDepth: row.chainDepth },
+        () =>
+          this.withDispatchTimeout(
+            this.bus.dispatchOutboxRow(event as DomainEventOf<DomainEventType>),
+            row.id,
+          ),
       );
       // dispatchOutboxRow RETURNED → all subscribers ran (a subscriberError
       // means one threw but the rest ran — still "dispatched", not lost).

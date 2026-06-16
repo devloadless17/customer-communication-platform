@@ -118,8 +118,12 @@ export async function resolveStepTarget(
 
   // Phone target — find or create the Contact, then the Conversation.
   const phone = target.phoneNumber; // already normalized in parseStepTarget
+  // `deletedAt: null` so we never target a SOFT-DELETED ghost (the user removed
+  // them on purpose) — identity-model-added-1. A soft-deleted contact still
+  // holds the (teamId, phoneNumber) unique slot, so the create below will P2002
+  // and the revive branch handles it.
   const existingContact = await db.contact.findFirst({
-    where: { teamId, phoneNumber: phone },
+    where: { teamId, phoneNumber: phone, deletedAt: null },
     select: { id: true },
   });
   let contactId: string;
@@ -127,24 +131,46 @@ export async function resolveStepTarget(
   if (existingContact) {
     contactId = existingContact.id;
   } else {
-    const created = await db.contact.create({
-      data: {
-        teamId,
-        // Workflow target with a phone number = WhatsApp by definition
-        // today. Stamped explicitly because identityChannel is NOT NULL.
-        identityChannel: "whatsapp",
-        phoneNumber: phone,
-        // Use the phone number as the placeholder name. The contact owner
-        // can rename later via the contact panel. Better than "Unknown"
-        // because it gives the agent something identifying in the inbox
-        // list before any real name is captured.
-        name: phone,
-        source: "manual",
-      },
-      select: { id: true },
-    });
-    contactId = created.id;
-    contactCreated = true;
+    try {
+      const created = await db.contact.create({
+        data: {
+          teamId,
+          // Workflow target with a phone number = WhatsApp by definition
+          // today. Stamped explicitly because identityChannel is NOT NULL.
+          identityChannel: "whatsapp",
+          phoneNumber: phone,
+          // Use the phone number as the placeholder name. The contact owner
+          // can rename later via the contact panel. Better than "Unknown"
+          // because it gives the agent something identifying in the inbox
+          // list before any real name is captured.
+          name: phone,
+          source: "manual",
+        },
+        select: { id: true },
+      });
+      contactId = created.id;
+      contactCreated = true;
+    } catch (err) {
+      // Lost the (teamId, phoneNumber) unique — either a CONCURRENT workflow
+      // run created the contact, or the slot is held by a SOFT-DELETED ghost.
+      // Re-find including deleted; revive a ghost (mirrors inbound ingest) so
+      // the workflow targets a live contact instead of throwing (CTI-1).
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const slotHolder = await db.contact.findFirstOrThrow({
+          where: { teamId, phoneNumber: phone },
+          select: { id: true, deletedAt: true },
+        });
+        if (slotHolder.deletedAt) {
+          await db.contact.update({
+            where: { id: slotHolder.id },
+            data: { deletedAt: null, source: "manual" },
+          });
+          // A revived ghost is a fresh directory appearance for downstream.
+          contactCreated = true;
+        }
+        contactId = slotHolder.id;
+      } else throw err;
+    }
   }
 
   if (!opts.createConversation) {
@@ -163,7 +189,10 @@ export async function resolveStepTarget(
   // row because `(teamId, contactId)` reads return the same id.
   const existingConv = await db.conversation.findFirst({
     where: { teamId, contactId },
-    orderBy: { createdAt: "desc" },
+    // One conversation per (teamId, contactId), so this returns the single row;
+    // order by lastMessageAt to match the codebase convention (ingest, list,
+    // /v1) rather than createdAt (CTI-4).
+    orderBy: { lastMessageAt: "desc" },
     select: { id: true },
   });
   if (existingConv) {
@@ -187,7 +216,7 @@ export async function resolveStepTarget(
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       newConv = await db.conversation.findFirstOrThrow({
         where: { teamId, contactId },
-        orderBy: { createdAt: "desc" },
+        orderBy: { lastMessageAt: "desc" },
         select: { id: true },
       });
     } else throw err;

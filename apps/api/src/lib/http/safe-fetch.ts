@@ -36,15 +36,40 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 // sees a network-style error, same as a timeout).
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Why a fetch was refused. All values EXCEPT `dns-failure` are PERMANENT (the
+ * URL is structurally unsafe / wrong and won't change on retry). `dns-failure`
+ * is TRANSIENT — a resolver hiccup (ETIMEOUT/ESERVFAIL/EAI_AGAIN) or a not-yet-
+ * propagated record on an otherwise-healthy public host — so callers should
+ * RETRY it rather than treat the delivery as permanently dead (owh-4).
+ */
+export type SsrfBlockReason =
+  | "dns-failure"
+  | "blocked-range"
+  | "internal-host"
+  | "bad-scheme"
+  | "embedded-creds"
+  | "invalid-url"
+  | "redirect";
+
 export class SsrfBlockedError extends Error {
   readonly code = "SSRF_BLOCKED" as const;
   readonly url: string;
   readonly reason: string;
-  constructor(url: string, reason: string) {
+  /** Discriminator for transient-vs-permanent classification. Defaults to a
+   *  PERMANENT kind so an untagged throw is never auto-retried toward a
+   *  possibly-malicious host — only an explicit `dns-failure` is retryable. */
+  readonly kind: SsrfBlockReason;
+  constructor(url: string, reason: string, kind: SsrfBlockReason = "blocked-range") {
     super(`refusing to fetch ${url}: ${reason}`);
     this.name = "SsrfBlockedError";
     this.url = url;
     this.reason = reason;
+    this.kind = kind;
+  }
+  /** True only for resolver hiccups — safe to retry; must NOT trip a breaker. */
+  get transient(): boolean {
+    return this.kind === "dns-failure";
   }
 }
 
@@ -314,10 +339,14 @@ export async function assertPublicHost(
   try {
     addrs = await dns.lookup(hostname, { all: true, verbatim: true });
   } catch (err) {
-    throw new SsrfBlockedError(url, `dns lookup failed: ${err instanceof Error ? err.message : err}`);
+    throw new SsrfBlockedError(
+      url,
+      `dns lookup failed: ${err instanceof Error ? err.message : err}`,
+      "dns-failure",
+    );
   }
   if (addrs.length === 0) {
-    throw new SsrfBlockedError(url, "dns returned no addresses");
+    throw new SsrfBlockedError(url, "dns returned no addresses", "dns-failure");
   }
   if (allowPrivate()) return null; // dev escape hatch — don't pin, don't block
   for (const a of addrs) {

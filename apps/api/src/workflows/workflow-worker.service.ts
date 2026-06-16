@@ -77,6 +77,10 @@ import {
   startConversationEventRetentionSweeper,
   stopConversationEventRetentionSweeper,
 } from "@/lib/sweepers/conversation-event-retention";
+import {
+  startMessageRawPayloadRetentionSweeper,
+  stopMessageRawPayloadRetentionSweeper,
+} from "@/lib/sweepers/message-rawpayload-retention";
 
 /**
  * BullMQ workflow worker + inbound-media sweeper bootstrap. The actual
@@ -111,6 +115,7 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
   private outboundSendAttemptRetentionStarted = false;
   private workflowRunRetentionStarted = false;
   private conversationEventRetentionStarted = false;
+  private messageRawPayloadRetentionStarted = false;
   private broadcastScheduleWorkerStarted = false;
   private broadcastScheduleDriftSweeperStarted = false;
 
@@ -271,6 +276,15 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
       this.logger.error("Failed to start conversation-event retention sweeper", err);
     }
     try {
+      // OPT-IN rawPayload bloat control (DB-1). No-ops unless
+      // MESSAGE_RAWPAYLOAD_RETENTION_DAYS is set, so the default keeps payloads
+      // forever (CLAUDE.md rule #4). Logs only when enabled + something is nulled.
+      startMessageRawPayloadRetentionSweeper();
+      this.messageRawPayloadRetentionStarted = true;
+    } catch (err) {
+      this.logger.error("Failed to start message-rawPayload retention sweeper", err);
+    }
+    try {
       // Fires SCHEDULED broadcasts at their scheduledAt (delayed BullMQ job →
       // CAS scheduled→queued → startBroadcast). Shares the inline-worker gate.
       startBroadcastScheduleWorker();
@@ -304,6 +318,8 @@ export class WorkflowWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       if (this.conversationEventRetentionStarted)
         stopConversationEventRetentionSweeper();
+      if (this.messageRawPayloadRetentionStarted)
+        stopMessageRawPayloadRetentionSweeper();
     } catch (err) {
       this.logger.warn(
         `stopConversationEventRetentionSweeper threw: ${err instanceof Error ? err.message : err}`,

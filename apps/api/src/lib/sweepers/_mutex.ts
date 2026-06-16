@@ -34,7 +34,8 @@ type SweeperName =
   | "inbound-media"
   | "stale-calls"
   | "conversation-analytics-drift"
-  | "outbound-webhook-delivery-cleanup";
+  | "outbound-webhook-delivery-cleanup"
+  | "message-rawpayload-retention";
 
 // Single in-process mutex; sweepers serialize through it. Boolean is enough
 // because Node's event loop is single-threaded — the only way two callers
@@ -60,7 +61,16 @@ const STALE_THRESHOLD_MS: Record<SweeperName, number> = {
   "stale-calls": 5 * 60 * 1000, // 60s cadence
   "conversation-analytics-drift": 25 * 60 * 60 * 1000, // 24h cadence
   "outbound-webhook-delivery-cleanup": 25 * 60 * 60 * 1000, // nightly cadence
+  "message-rawpayload-retention": 25 * 60 * 60 * 1000, // 24h cadence (opt-in)
 };
+
+// First time we ATTEMPTED each sweeper. Lets the stale-warn fire for a sweeper
+// that has NEVER once completed (always errors / always loses the mutex race) —
+// otherwise its `lastCompletion` stays undefined forever and it warns never
+// (failure-recovery-added-1). A generous boot grace avoids false positives
+// while daily sweepers cluster at startup.
+const firstAttempt = new Map<SweeperName, number>();
+const NEVER_COMPLETED_GRACE_MS = 60 * 60 * 1000;
 
 /**
  * Run `fn` under the global sweeper mutex. If the mutex is held, SKIP — do
@@ -75,6 +85,9 @@ export async function withSweeperMutex(
   name: SweeperName,
   fn: () => Promise<void>,
 ): Promise<void> {
+  // Record the first attempt so emitStaleWarnIfDue can fire for a sweeper that
+  // has NEVER completed (failure-recovery-added-1).
+  if (!firstAttempt.has(name)) firstAttempt.set(name, Date.now());
   // Always check stale-completion first so a perpetually-skipped sweeper
   // gets surfaced (otherwise a sweeper that loses the race every tick
   // would silently never warn).
@@ -96,9 +109,22 @@ export async function withSweeperMutex(
 
 function emitStaleWarnIfDue(name: SweeperName): void {
   const last = lastCompletion.get(name);
-  if (last === undefined) return; // never completed yet — normal during boot grace period
-  const sinceMs = Date.now() - last;
   const threshold = STALE_THRESHOLD_MS[name];
+  if (last === undefined) {
+    // Never completed. Warn once the time since the FIRST attempt exceeds the
+    // threshold + a boot grace — so a sweeper that always errors/skips surfaces
+    // instead of staying silent forever (failure-recovery-added-1).
+    const first = firstAttempt.get(name);
+    if (first === undefined) return; // not attempted yet
+    const sinceFirst = Date.now() - first;
+    if (sinceFirst > threshold + NEVER_COMPLETED_GRACE_MS) {
+      console.warn(
+        `[sweeper.health] sweeper_never_completed name=${name} since_first_attempt_ms=${sinceFirst} threshold_ms=${threshold}`,
+      );
+    }
+    return;
+  }
+  const sinceMs = Date.now() - last;
   if (sinceMs > threshold) {
     // Structured one-liner so `grep '"sweeper_stale"'` finds them. Operator
     // alerting plugs in here without a metrics backend.
@@ -112,4 +138,5 @@ function emitStaleWarnIfDue(name: SweeperName): void {
 export function _resetSweeperMutex(): void {
   mutexHeld = false;
   lastCompletion.clear();
+  firstAttempt.clear();
 }

@@ -11,7 +11,11 @@ import {
   createWorkerConnection,
   type WorkflowJobData,
 } from "@/lib/workflows/queue";
-import { failRunFromRetryExhaustion, runWorkflow } from "@/lib/workflows/runner";
+import {
+  failRunFromRetryExhaustion,
+  rollbackOncePerContactLedger,
+  runWorkflow,
+} from "@/lib/workflows/runner";
 import { MAX_STEP_TIMEOUT_MS } from "@/lib/workflows/steps/http-request";
 
 // BullMQ lock the worker holds for an in-flight job. MUST exceed any step's
@@ -127,7 +131,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
       // payload) would mean schema churn across every enqueue site.
       const run = await db.workflowRun.findUnique({
         where: { id: job.data.runId },
-        select: { teamId: true },
+        select: { teamId: true, workflowId: true, contactId: true },
       });
       if (!run) {
         // Run was deleted between enqueue and pickup. Skip silently —
@@ -145,7 +149,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
         throw new DelayedError();
       }
       try {
-        await runWorkflow({
+        const result = await runWorkflow({
           runId: job.data.runId,
           attempt: job.attemptsMade + 1,
           // `inbound-${runId}-${tag}` jobs are early ask_question replies — the
@@ -153,6 +157,14 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
           // waitUntil. See enqueueWorkflowInboundResume + RunWorkflowInput.
           isInboundResume: (job.id ?? "").startsWith("inbound-"),
         });
+        // WF-1: a PERMANENT failure return (loop guard, step ceiling, permanent
+        // step error — the runner wrote status=failed and did NOT throw, so
+        // BullMQ won't retry) must release the once-per-contact ledger so the
+        // contact isn't locked out forever. "waiting"/"completed"/"skipped" keep
+        // the ledger. The throw path is covered by failRunFromRetryExhaustion.
+        if (result?.status === "failed") {
+          await rollbackOncePerContactLedger(run.workflowId, run.contactId);
+        }
       } finally {
         releaseTeamSlot(run.teamId);
       }

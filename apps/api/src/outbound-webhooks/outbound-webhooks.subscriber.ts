@@ -21,6 +21,7 @@ import { DbService } from "../db/db.service";
 import { runWithConcurrency } from "../common/concurrency";
 import { getChainDepth, getCorrelationId } from "../common/correlation";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
+import { WEBHOOK_WIRE_VERSION } from "@/lib/outbound-webhooks/signing";
 import {
   EXTERNAL_CONVERSATION_INCLUDE,
   conversationRowToExternal,
@@ -202,28 +203,28 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     //      it matches message.received's context
     //   3. assignee + sender display names / emails wherever they're id-only
     try {
-      await this.enrichMessages(envelopes);
+      await this.enrichMessages(event.teamId, envelopes);
     } catch (err) {
       this.logger.warn(
         `enrichMessages failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
-      await this.enrichSentMessageContext(envelopes);
+      await this.enrichSentMessageContext(event.teamId, envelopes);
     } catch (err) {
       this.logger.warn(
         `enrichSentMessageContext failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
-      await this.hydrateUsers(envelopes);
+      await this.hydrateUsers(event.teamId, envelopes);
     } catch (err) {
       this.logger.warn(
         `hydrateUsers failed, delivering un-enriched: ${err instanceof Error ? err.message : err}`,
       );
     }
     try {
-      await this.enrichLeanContacts(envelopes);
+      await this.enrichLeanContacts(event.teamId, envelopes);
     } catch (err) {
       this.logger.warn(
         `enrichLeanContacts failed, delivering without contact: ${err instanceof Error ? err.message : err}`,
@@ -282,6 +283,10 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       const occurredAtRaw = (envelope as { occurred_at?: string }).occurred_at;
       const occurredAtMs = occurredAtRaw ? Date.parse(occurredAtRaw) : NaN;
       const payload = {
+        // Wire schema version — stamped in the BODY (not just the
+        // X-CCP-Webhook-Version header) so body-only consumers (n8n/Zapier)
+        // can branch on it. A future v2 envelope bumps this; v1 is frozen.
+        v: WEBHOOK_WIRE_VERSION,
         team_id: event.teamId,
         timestamp: Number.isNaN(occurredAtMs) ? null : occurredAtMs,
         ...toWirePayload(type, (envelope as { data: unknown }).data, {
@@ -366,6 +371,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * the documented nulls in place.
    */
   private async enrichMessages(
+    teamId: string,
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
     type MediaShape = { url: string | null; thumbnail_url: string | null };
@@ -392,7 +398,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     if (messagesById.size === 0) return;
 
     const rows = await this.db.message.findMany({
-      where: { id: { in: [...messagesById.keys()] } },
+      where: { teamId, id: { in: [...messagesById.keys()] } },
       select: {
         id: true,
         externalId: true,
@@ -424,7 +430,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // One batched load of the quoted rows. Mirrors the read-side reply snapshot:
     // body, direction, the authoring teammate's name (outbound only), mediaKind.
     const quotedRows = await this.db.message.findMany({
-      where: { id: { in: [...quotedIdToTargets.keys()] } },
+      where: { teamId, id: { in: [...quotedIdToTargets.keys()] } },
       select: {
         id: true,
         body: true,
@@ -458,6 +464,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * conversation in the batch (≤1 in practice).
    */
   private async enrichSentMessageContext(
+    teamId: string,
     envelopes: Array<{ type: PublicEventType; envelope: { data: unknown } }>,
   ): Promise<void> {
     type SentConversation = {
@@ -485,7 +492,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     if (byConversation.size === 0) return;
 
     const rows = await this.db.conversation.findMany({
-      where: { id: { in: [...byConversation.keys()] } },
+      where: { teamId, id: { in: [...byConversation.keys()] } },
       include: EXTERNAL_CONVERSATION_INCLUDE,
     });
     for (const row of rows) {
@@ -524,6 +531,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * which `enrichSentMessageContext` filled with name+email from the include).
    */
   private async hydrateUsers(
+    teamId: string,
     envelopes: Array<{ envelope: { data: unknown } }>,
   ): Promise<void> {
     type UserRef = {
@@ -577,7 +585,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
       ]),
     );
     const users = await this.db.user.findMany({
-      where: { id: { in: ids } },
+      where: { teamId, id: { in: ids } },
       select: { id: true, name: true, email: true, role: true, createdAt: true },
     });
     const byId = new Map(users.map((u) => [u.id, u]));
@@ -620,6 +628,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
    * contact lookup. Best-effort — a missing row just leaves `contact` absent.
    */
   private async enrichLeanContacts(
+    teamId: string,
     envelopes: Array<{ type: PublicEventType; envelope: { data: unknown } }>,
   ): Promise<void> {
     type LeanContact = { id: string; phoneNumber: string | null; name: string };
@@ -676,7 +685,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
 
     if (targetsByConversationId.size > 0) {
       const convs = await this.db.conversation.findMany({
-        where: { id: { in: [...targetsByConversationId.keys()] } },
+        where: { teamId, id: { in: [...targetsByConversationId.keys()] } },
         select: { id: true, contactId: true },
       });
       for (const c of convs) {
@@ -688,7 +697,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
 
     if (targetsByContactId.size === 0) return;
     const contacts = await this.db.contact.findMany({
-      where: { id: { in: [...targetsByContactId.keys()] } },
+      where: { teamId, id: { in: [...targetsByContactId.keys()] } },
       select: { id: true, phoneNumber: true, name: true },
     });
     for (const row of contacts) {

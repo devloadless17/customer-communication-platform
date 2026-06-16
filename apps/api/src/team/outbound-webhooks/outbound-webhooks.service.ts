@@ -4,7 +4,7 @@ import { BadRequestException, Injectable, NotFoundException } from "@nestjs/comm
 
 import { encryptSecret } from "@/lib/crypto/envelope";
 import { assertRegistrableHost, SsrfBlockedError } from "@/lib/http/safe-fetch";
-import { generateWebhookSecret } from "@/lib/outbound-webhooks/signing";
+import { generateWebhookSecret, WEBHOOK_WIRE_VERSION } from "@/lib/outbound-webhooks/signing";
 import { enqueueWebhookDelivery } from "@/lib/outbound-webhooks/queue";
 import {
   channelSourceFor,
@@ -279,6 +279,7 @@ export class OutboundWebhooksService {
     // team_id stamped first + `test: true` marker, then the type's real wire
     // shape — exactly what the production fanout produces (subscriber.ts:245).
     const payload = {
+      v: WEBHOOK_WIRE_VERSION,
       team_id: teamId,
       test: true,
       ...toWirePayload(eventType, samplePayloadFor(eventType), {

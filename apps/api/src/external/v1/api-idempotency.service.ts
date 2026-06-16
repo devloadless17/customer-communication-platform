@@ -89,6 +89,16 @@ export class ApiIdempotencyService {
     apiKeyId: string,
     key: string,
     requestHash: string,
+    /**
+     * For IRREVERSIBLE operations (Meta sends). A crashed handler can leave a
+     * pending row AFTER the provider already accepted the send — we record the
+     * wamid only after `sendText` returns, so a crash in that gap leaves no
+     * recovery breadcrumb. With this flag a stale-past-TTL pending row is NOT
+     * auto-cleared for a re-claim (which would re-send a billed message); the
+     * partner must use a FRESH key to deliberately resend (OUTBOUND-1). Safe
+     * non-send mutations (assign/tag/status) leave it false → clear + retry.
+     */
+    opts?: { refuseStaleOnAmbiguity?: boolean },
   ): Promise<IdempotencyClaim<T>> {
     const claimPending = () =>
       this.db.apiIdempotencyKey.create({
@@ -138,7 +148,21 @@ export class ApiIdempotencyService {
               "Retry in a few seconds.",
           });
         }
-        // Stale pending past TTL — clear and tell the partner to re-claim.
+        // Stale pending past TTL.
+        if (opts?.refuseStaleOnAmbiguity) {
+          // Irreversible send: the prior request may have ALREADY reached Meta
+          // (crash after `sendText` returned, before we recorded the wamid). Do
+          // NOT clear + allow a re-claim — that re-sends a billed message to a
+          // real customer. Leave the row so the operator can inspect it and the
+          // partner must use a FRESH key to deliberately resend (OUTBOUND-1).
+          throw new ConflictException({
+            error: "idempotency_ambiguous",
+            detail:
+              "A previous request with this Idempotency-Key did not confirm and " +
+              "may have already been sent. Use a NEW Idempotency-Key to send again.",
+          });
+        }
+        // Non-irreversible mutation — safe to clear + re-run.
         await this.db.apiIdempotencyKey.deleteMany({
           where: { teamId, apiKeyId, key },
         });

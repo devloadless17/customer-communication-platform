@@ -722,7 +722,14 @@ export class WorkflowsService {
       }
       payload = `${timestampHeader}.${rawBody}`;
     } else {
-      if (process.env.WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP === "1") {
+      // SEC-1: replay protection is REQUIRED by default in production (a missing
+      // timestamp makes a captured signed request replayable forever). Opt-in
+      // anywhere via `=1`; an operator can opt OUT in prod only with an explicit
+      // `=0` escape hatch while migrating a legacy caller.
+      const flag = process.env.WORKFLOW_WEBHOOK_REQUIRE_TIMESTAMP;
+      const requireTimestamp =
+        flag === "1" || (process.env.NODE_ENV === "production" && flag !== "0");
+      if (requireTimestamp) {
         throw new ForbiddenException({
           error: "X-Workflow-Timestamp header required",
         });

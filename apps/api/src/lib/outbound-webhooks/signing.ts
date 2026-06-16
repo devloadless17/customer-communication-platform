@@ -1,6 +1,14 @@
 import { createHmac, randomBytes } from "node:crypto";
 
 /**
+ * Outbound webhook wire-schema version. Stamped BOTH in the JSON body (as `v`)
+ * and the `X-CCP-Webhook-Version` header so a future v2 envelope can ship
+ * without silently breaking partners that parse v1. Bump ONLY on a breaking
+ * body-shape change; additive fields stay v1.
+ */
+export const WEBHOOK_WIRE_VERSION = 1;
+
+/**
  * Signing for outbound webhook deliveries — symmetric HMAC-SHA256 over the
  * raw JSON body. Receivers verify by recomputing the digest with the
  * shared secret and comparing in constant time.

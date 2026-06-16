@@ -18,7 +18,7 @@ import { decryptSecret } from "@/lib/crypto/envelope";
 import { publish } from "@/lib/events/bus";
 import { safeFetch, SsrfBlockedError, readLimitedBody } from "@/lib/http/safe-fetch";
 
-import { signWebhookBody } from "./signing";
+import { signWebhookBody, WEBHOOK_WIRE_VERSION } from "./signing";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -405,6 +405,7 @@ async function deliverOnce(
         "User-Agent": "CCP-Webhook/1.0",
         "X-CCP-Event": delivery.eventType,
         "X-CCP-Delivery": delivery.id,
+        "X-CCP-Webhook-Version": String(WEBHOOK_WIRE_VERSION),
         "X-CCP-Signature": signature,
         // Cross-system loop guard. This delivery is one hop beyond the request
         // that caused it (chainDepth), so stamp depth+1. A partner that bounces
@@ -430,12 +431,33 @@ async function deliverOnce(
     });
   } catch (err) {
     const isSsrf = err instanceof SsrfBlockedError;
+    // A TRANSIENT SSRF block (dns-failure: resolver hiccup / not-yet-propagated
+    // record on a healthy public host) must behave like any other transient
+    // network error — re-throw so BullMQ retries, and do NOT bump the breaker
+    // toward auto-disable. Only PERMANENT SSRF blocks (private range, bad
+    // scheme, embedded creds, redirect policy) are pointless to retry (owh-4).
+    const isTransientSsrf = isSsrf && (err as SsrfBlockedError).transient;
+    const isPermanentSsrf = isSsrf && !isTransientSsrf;
     const errorMessage = err instanceof Error ? err.message : String(err);
-    // SSRF rejections are permanent — treat as the final attempt for
-    // breaker-counter purposes (one bump on the delivery, then return)
-    // since BullMQ retries here are pointless: the URL won't resolve any
-    // differently next try.
-    const isFinal = isSsrf || attempt >= maxAttempts;
+    if (isTransientSsrf) {
+      // Let BullMQ's retry policy handle it; record non-final (no breaker bump).
+      // If the host is genuinely dead the retries exhaust and the final attempt
+      // records as final below on the last pass (attempt >= maxAttempts).
+      const isFinal = attempt >= maxAttempts;
+      await recordFailure(
+        delivery.id,
+        webhook.id,
+        attempt,
+        null,
+        null,
+        errorMessage,
+        isFinal,
+      );
+      throw err;
+    }
+    // Permanent SSRF rejections (or a genuinely-exhausted retry) are final —
+    // one breaker bump, then return (no BullMQ retry for permanent blocks).
+    const isFinal = isPermanentSsrf || attempt >= maxAttempts;
     await recordFailure(
       delivery.id,
       webhook.id,
@@ -445,7 +467,7 @@ async function deliverOnce(
       errorMessage,
       isFinal,
     );
-    if (isSsrf) return;
+    if (isPermanentSsrf) return;
     throw err;
   }
 

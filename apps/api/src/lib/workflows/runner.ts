@@ -985,7 +985,7 @@ export async function failRunFromRetryExhaustion(
   try {
     const run = await db.workflowRun.findUnique({
       where: { id: runId },
-      select: { id: true, teamId: true, workflowId: true, status: true },
+      select: { id: true, teamId: true, workflowId: true, contactId: true, status: true },
     });
     if (!run) return;
     if (
@@ -1003,9 +1003,37 @@ export async function failRunFromRetryExhaustion(
         finishedAt: new Date(),
       },
     });
+    // WF-1: a terminally-failed once-per-contact run must release its ledger
+    // row so the workflow can re-fire for this contact on a future trigger.
+    await rollbackOncePerContactLedger(run.workflowId, run.contactId);
   } catch (err) {
     console.warn(
       `[workflow-runner] failRunFromRetryExhaustion(${runId}) threw:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * WF-1: when a once-per-contact run terminally FAILS, drop its
+ * `WorkflowContactState` ledger row so the workflow can re-fire for that contact
+ * on a future trigger instead of being locked out forever. The ledger row is
+ * committed BEFORE execution (dispatcher.ts), so without this a run that fails
+ * on its first step (transient Meta outage, config typo, retry exhaustion)
+ * marks the contact "already fired" permanently + invisibly. Keyed on
+ * (workflowId, contactId) — a no-op for non-once-per-contact runs (no ledger
+ * row exists) and for runs with no contact. Best-effort; never throws.
+ */
+export async function rollbackOncePerContactLedger(
+  workflowId: string,
+  contactId: string | null,
+): Promise<void> {
+  if (!contactId) return;
+  try {
+    await db.workflowContactState.deleteMany({ where: { workflowId, contactId } });
+  } catch (err) {
+    console.warn(
+      `[workflow-runner] rollbackOncePerContactLedger(${workflowId}, ${contactId}) threw:`,
       err instanceof Error ? err.message : err,
     );
   }

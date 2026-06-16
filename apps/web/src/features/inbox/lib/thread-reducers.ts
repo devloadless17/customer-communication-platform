@@ -134,7 +134,22 @@ export function applyMessageStatus(
   const idx = prev.messages.findIndex((m) => m.id === payload.messageId);
   if (idx === -1) return prev;
   const existing = prev.messages[idx]!;
-  if (existing.status === payload.status) return prev;
+  // RT-4: monotonic guard — Meta delivers status webhooks at-least-once with NO
+  // ordering, so a stale `delivered` frame can arrive AFTER `read`. Only ADVANCE
+  // the rank (pending<sent<delivered<read), never regress; `failed` is terminal
+  // (highest) so it both wins over an earlier sent/delivered AND can't be
+  // overwritten. Subsumes the old equality check (equal rank ⇒ no-op). Mirrors
+  // the server-side rank guard so client + server agree.
+  const STATUS_RANK: Record<string, number> = {
+    pending: 0,
+    sent: 1,
+    delivered: 2,
+    read: 3,
+    failed: 4,
+  };
+  const curRank = STATUS_RANK[existing.status] ?? -1;
+  const nextRank = STATUS_RANK[payload.status] ?? -1;
+  if (nextRank <= curRank) return prev;
   const nextMessages = prev.messages.slice();
   nextMessages[idx] = {
     ...existing,

@@ -36,6 +36,7 @@ import {
   resolveContactChannel,
 } from "@/lib/providers/channel";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
+import { encodeConvoCursor, parseConvoCursor } from "@/lib/queries/_cursors";
 import { normalizeMetaSendError } from "@/lib/providers/meta";
 import type { Message, Channel } from "@ccp/shared/types";
 import { normalizePhoneE164 } from "@ccp/shared/utils/phone";
@@ -97,8 +98,9 @@ export class ExternalV1MessagingService {
     apiKeyId: string,
     key: string,
     requestHash: string,
+    opts?: { refuseStaleOnAmbiguity?: boolean },
   ): Promise<{ kind: "claimed" } | { kind: "replay"; result: T }> {
-    return this.idem.claim<T>(teamId, apiKeyId, key, requestHash);
+    return this.idem.claim<T>(teamId, apiKeyId, key, requestHash, opts);
   }
 
   private completeIdempotency<T>(
@@ -123,20 +125,40 @@ export class ExternalV1MessagingService {
   // ===========================================================================
 
   async listConversations(teamId: string, q: ListConversationsQueryInput) {
+    // API-1: keyset cursor over the COMPOSITE (lastMessageAt, id) sort, not a
+    // bare `cursor:{id}, skip:1`. `lastMessageAt` is mutable (every inbound /
+    // outbound bumps it), so the old id-cursor over a moving sort key silently
+    // SKIPPED or DUPLICATED rows during a partner's full export of a busy
+    // tenant. Mirrors the internal inbox list (lib/queries/conversations.ts).
+    // API-3: normalize the phone filter (same as /contacts) so "+1 555…" and
+    // "15550000" match the stored E.164 form.
+    const cursor = parseConvoCursor(q.cursor ?? null);
+    const phone = q.phone ? normalizePhoneE164(q.phone) ?? q.phone : null;
     const rows = await this.db.conversation.findMany({
       where: {
         teamId,
         ...(q.status ? { status: q.status } : {}),
-        ...(q.phone ? { contact: { phoneNumber: q.phone } } : {}),
+        ...(phone ? { contact: { phoneNumber: phone } } : {}),
+        ...(cursor
+          ? {
+              OR: [
+                { lastMessageAt: { lt: cursor.lastMessageAt } },
+                { lastMessageAt: cursor.lastMessageAt, id: { lt: cursor.id } },
+              ],
+            }
+          : {}),
       },
       include: EXTERNAL_CONVERSATION_INCLUDE,
       orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
       take: q.limit + 1,
-      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
-    const items = rows.slice(0, q.limit).map(conversationRowToExternal);
-    const lastItem = items[items.length - 1];
-    const nextCursor = rows.length > q.limit && lastItem ? lastItem.id : null;
+    const page = rows.slice(0, q.limit);
+    const items = page.map(conversationRowToExternal);
+    const lastRow = page[page.length - 1];
+    const nextCursor =
+      rows.length > q.limit && lastRow
+        ? encodeConvoCursor({ lastMessageAt: lastRow.lastMessageAt, id: lastRow.id })
+        : null;
     return { items, nextCursor };
   }
 
@@ -429,12 +451,27 @@ export class ExternalV1MessagingService {
         429,
       );
     }
+    // Idempotency-Key is MANDATORY on send routes (OUTBOUND-1): a Meta send is
+    // irreversible + billed, and a partner HTTP client retrying on a 5xx/timeout
+    // with no key would double-send (deduped only by externalId AFTER Meta
+    // already charged + delivered twice). n8n/Zapier omit it by default, so the
+    // contract must require it.
+    if (!idempotencyKey) {
+      throw new BadRequestException({
+        error: "idempotency_key_required",
+        detail:
+          "Send routes require an Idempotency-Key header (a unique id per distinct " +
+          "send) so a network retry can't double-send a billed message.",
+      });
+    }
     // Idempotency — CLAIM-then-execute via the shared `claimIdempotency`
     // helper (also used by the template path so the two can't drift). A
     // replay returns the prior response with zero side effects; a fresh
     // claim means we own the pending row and MUST resolve it below
     // (releaseIdempotency on any failure, completeIdempotency on success).
-    if (idempotencyKey) {
+    // `refuseStaleOnAmbiguity` so a crashed-mid-send pending row past TTL is
+    // NOT auto-cleared into a re-send (OUTBOUND-1).
+    {
       const claim = await this.claimIdempotency<{ message: ExternalMessage }>(
         teamId,
         apiKeyId,
@@ -445,6 +482,7 @@ export class ExternalV1MessagingService {
           replyToMessageId: input.replyToMessageId ?? null,
           onlyIfAiEnabled: input.onlyIfAiEnabled ?? false,
         }),
+        { refuseStaleOnAmbiguity: true },
       );
       if (claim.kind === "replay") return claim.result;
     }
@@ -467,7 +505,13 @@ export class ExternalV1MessagingService {
         },
       },
     });
-    if (!conversation) throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
+    if (!conversation) {
+      // Provably-not-sent validation failure — release the claim so it doesn't
+      // strand a pending row (which, with refuseStaleOnAmbiguity, would wrongly
+      // block a corrected retry after TTL) — API-2.
+      if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
+      throw new NotFoundException({ error: "conversation_not_found", detail: "conversation not found" });
+    }
 
     // No-interrupt guard. When the AI flow sets `onlyIfAiEnabled`, send ONLY if
     // AI Autopilot is still on for this conversation. This closes the race
@@ -487,6 +531,7 @@ export class ExternalV1MessagingService {
       channel = resolveContactChannel(conversation.contact);
     } catch (err) {
       if (err instanceof NoChannelDestinationError) {
+        if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
         throw new BadRequestException({
           error: "contact_has_no_phone",
           detail: "This contact has no reachable address.",
@@ -504,6 +549,7 @@ export class ExternalV1MessagingService {
       const lastInboundAt = conversation.contact.lastInboundAt?.toISOString() ?? null;
       const win = computeWindowStatus(lastInboundAt, Date.now(), windowMs);
       if (win.state === "closed" || win.state === "never") {
+        if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
         throw new UnprocessableEntityException({
           error: "outside_24h_window",
           detail:
@@ -525,6 +571,7 @@ export class ExternalV1MessagingService {
         // Previously silently dropped — partner thought their reply was
         // quoted but the message went out as a top-level send. Surface
         // the failure so they can see the bad id in their automation logs.
+        if (idempotencyKey) await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
         throw new BadRequestException({
           error: "reply_target_not_found",
           detail:
@@ -580,10 +627,18 @@ export class ExternalV1MessagingService {
         config,
       );
     } catch (err) {
-      // Send failed — release the idempotency claim so the partner can
-      // retry. Without this, the row stays in `pending` state for the full
-      // PENDING_TTL and every retry inside that window gets 409.
-      if (idempotencyKey) {
+      // OUTBOUND-1: release the idempotency claim ONLY when the send PROVABLY
+      // never reached Meta — never-configured (we never called Meta) or a Meta
+      // 4xx rejection (Meta refused, nothing sent). For an AMBIGUOUS failure (a
+      // 5xx, a timeout, a network drop — Meta may have accepted) we KEEP the
+      // pending claim so a same-key retry can't re-send a possibly-delivered
+      // billed message; the partner gets 409 (in-flight, then ambiguous) and
+      // must use a fresh key to deliberately resend.
+      const normalized = normalizeMetaSendError(err);
+      const provablyNotSent =
+        err instanceof ProviderNotConfiguredError ||
+        (normalized != null && normalized.httpStatus < 500);
+      if (idempotencyKey && provablyNotSent) {
         await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
       }
       if (err instanceof ProviderNotConfiguredError) {
@@ -592,7 +647,6 @@ export class ExternalV1MessagingService {
           detail: err.message,
         });
       }
-      const normalized = normalizeMetaSendError(err);
       if (normalized) {
         throw new UnprocessableEntityException({
           error: normalized.code,
@@ -818,6 +872,17 @@ export class ExternalV1MessagingService {
           "is on the roadmap.",
       });
     }
+    // Idempotency-Key is MANDATORY on send routes (OUTBOUND-1). A billed cold-
+    // outbound template is the most expensive duplicate; a keyless partner retry
+    // on a 5xx/timeout would double-send.
+    if (!idempotencyKey) {
+      throw new BadRequestException({
+        error: "idempotency_key_required",
+        detail:
+          "Send routes require an Idempotency-Key header (a unique id per distinct " +
+          "send) so a network retry can't double-send a billed message.",
+      });
+    }
 
     const contactId = await this.resolveContactIdentifier(teamId, input.contact);
 
@@ -900,7 +965,7 @@ export class ExternalV1MessagingService {
       // where the template branch ignored the Idempotency-Key entirely
       // (audit 2026-05-22). Claimed AFTER the template lookup so a bad
       // template name doesn't strand a pending row.
-      if (idempotencyKey) {
+      {
         const claim = await this.claimIdempotency<{
           ok: true;
           message: ExternalMessage;
@@ -913,6 +978,9 @@ export class ExternalV1MessagingService {
             contact: input.contact,
             template: input.template,
           }),
+          // Crashed-mid-send pending row past TTL must not auto-clear into a
+          // re-send of a billed template (OUTBOUND-1).
+          { refuseStaleOnAmbiguity: true },
         );
         if (claim.kind === "replay") return claim.result;
       }
@@ -950,8 +1018,10 @@ export class ExternalV1MessagingService {
         }
         const normalized = normalizeMetaSendError(err);
         if (normalized) {
-          // Meta rejected — nothing delivered. Release so a retry can re-claim.
-          if (idempotencyKey) {
+          // Release ONLY on a Meta 4xx (definitive rejection, nothing sent). A
+          // 5xx may have landed AFTER Meta accepted — treat as ambiguous + keep
+          // the claim so a retry can't double-send (OUTBOUND-1).
+          if (idempotencyKey && normalized.httpStatus < 500) {
             await this.releaseIdempotency(teamId, apiKeyId, idempotencyKey);
           }
           throw new UnprocessableEntityException({

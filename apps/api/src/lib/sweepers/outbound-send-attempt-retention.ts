@@ -74,19 +74,61 @@ async function sweepOnce(): Promise<void> {
   const cutoff = new Date(
     Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000,
   );
-  // Drop both terminal-state rows (completed or failed) AND stuck rows
-  // (attempted but never marked either way) past the retention window.
-  // Stuck rows past 7 days are functionally identical to dropped rows —
-  // BullMQ's removeOnFail (7d) has GC'd the corresponding job, so the
-  // attempt can never be retried.
-  const result = await db.outboundSendAttempt.deleteMany({
+
+  // ── 1) Non-broadcast rows (`msg-send-*` queue sends, `v1-send-*` external
+  // sends) ─────────────────────────────────────────────────────────────────
+  // These have a BOUNDED retry window: msg-send by BullMQ `removeOnFail` (7d),
+  // v1-send by the 5-min ApiIdempotencyKey TTL. Once past 7d there is no
+  // surviving retry path, so the row's double-send-guard purpose is moot.
+  // EXCLUDE `bc-recipient-*` — broadcasts have NO BullMQ layer and their
+  // resume path is the UNBOUNDED-in-time boot reconciler, so a time-based
+  // window would GC a still-load-bearing guard (BC-1).
+  const nonBroadcast = await db.outboundSendAttempt.deleteMany({
     where: {
       attemptStartedAt: { lt: cutoff },
+      NOT: { jobId: { startsWith: "bc-recipient-" } },
     },
   });
-  if (result.count > 0) {
+
+  // ── 2) Broadcast rows whose parent broadcast is TERMINAL ───────────────────
+  // A `bc-recipient-*` row is the per-recipient double-send guard consulted by
+  // the boot reconciler on resume. It is ONLY safe to drop once the parent
+  // broadcast can never resume — i.e. status ∈ {completed, failed, canceled}
+  // (the reconciler resumes only queued/running/paused). A paused broadcast
+  // sitting >7d on a rotated credential keeps ALL its guard rows (it is not
+  // terminal) so an auto-resume can't re-send a billed template. We still apply
+  // the cutoff so a just-finished broadcast keeps its reconcile breadcrumbs
+  // briefly. `status::text` avoids enum-literal casting issues.
+  const terminalBroadcast = await db.$executeRaw`
+    DELETE FROM "OutboundSendAttempt" osa
+    USING "BroadcastRecipient" br, "Broadcast" b
+    WHERE osa."jobId" = ('bc-recipient-' || br.id)
+      AND br."broadcastId" = b.id
+      AND b.status::text IN ('completed', 'failed', 'canceled')
+      AND osa."attemptStartedAt" < ${cutoff}
+  `;
+
+  // ── 3) Orphaned broadcast rows ─────────────────────────────────────────────
+  // OutboundSendAttempt has no FK to BroadcastRecipient, so a hard-deleted
+  // broadcast (cascades its recipients) leaves dangling `bc-recipient-*` rows.
+  // With the recipient gone no resume can ever consult them → safe to drop.
+  const orphanBroadcast = await db.$executeRaw`
+    DELETE FROM "OutboundSendAttempt" osa
+    WHERE osa."jobId" LIKE 'bc-recipient-%'
+      AND osa."attemptStartedAt" < ${cutoff}
+      AND NOT EXISTS (
+        SELECT 1 FROM "BroadcastRecipient" br
+        WHERE osa."jobId" = ('bc-recipient-' || br.id)
+      )
+  `;
+
+  const total =
+    nonBroadcast.count + Number(terminalBroadcast) + Number(orphanBroadcast);
+  if (total > 0) {
     console.warn(
-      `[sweeper.outbound-send-attempt] pruned ${result.count} row(s) older than ${RETENTION_DAYS} days`,
+      `[sweeper.outbound-send-attempt] pruned ${total} row(s) ` +
+        `(${nonBroadcast.count} send, ${Number(terminalBroadcast)} terminal-broadcast, ` +
+        `${Number(orphanBroadcast)} orphan-broadcast) older than ${RETENTION_DAYS} days`,
     );
   }
 }

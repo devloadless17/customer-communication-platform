@@ -46,6 +46,29 @@ export function onOptimisticListBump(cb: Listener): () => void {
   };
 }
 
+// FE-2: revert channel. An optimistic bump paints the list row with a preview
+// for a message that hasn't been confirmed yet. If the send ultimately FAILS,
+// no server `message:new` ever arrives to overwrite that preview, so the row
+// would show a phantom preview until the next real message. The send-failure
+// path fires this so useTeamEvents can restore the row's pre-bump preview.
+type RevertListener = (conversationId: string) => void;
+const revertListeners = new Set<RevertListener>();
+export function onOptimisticListBumpRevert(cb: RevertListener): () => void {
+  revertListeners.add(cb);
+  return () => {
+    revertListeners.delete(cb);
+  };
+}
+export function emitOptimisticListBumpRevert(conversationId: string): void {
+  for (const cb of [...revertListeners]) {
+    try {
+      cb(conversationId);
+    } catch (err) {
+      console.error("[optimistic-list-bump] revert subscriber threw", err);
+    }
+  }
+}
+
 /**
  * Fire an optimistic list bump from a send site. Wrapped in `flushSync` for the
  * same reason `dispatchLocalSocketEvent` is: without it React 18/19's concurrent

@@ -31,6 +31,17 @@ interface HealthReport {
    *  Does NOT affect ok/503 (a failed backlog must not pull the api from
    *  rotation) — purely operator visibility. */
   jobFailures: Record<string, JobFailureReport>;
+  /** Transactional-outbox backlog (obs-1). The whole event surface (realtime,
+   *  audit, analytics, workflows, webhooks) rides the single in-process drainer;
+   *  a wedge leaves rows `publishedAt IS NULL` accumulating behind a green
+   *  /health. Surfaced here so an external monitor can alarm on it. `stale` =
+   *  oldest pending row older than the WARN threshold. Does NOT 503 (same
+   *  posture as jobFailures). `pendingCount: -1` = the probe itself failed. */
+  outboxLag: {
+    pendingCount: number;
+    oldestPendingSec: number | null;
+    stale: boolean;
+  };
 }
 
 /**
@@ -57,9 +68,18 @@ interface HealthReport {
 export class HealthController {
   constructor(private readonly db: DbService) {}
 
+  /** Oldest pending outbox row past this → `stale: true` (operator alarm). The
+   *  drainer polls every 100ms, so anything older than a few seconds means it is
+   *  not keeping up or is wedged. */
+  private static readonly OUTBOX_STALE_SEC = 30;
+
   @Get()
   async check(): Promise<HealthReport> {
-    const [dbOk, redisOk] = await Promise.all([this.pingDb(), this.pingRedis()]);
+    const [dbOk, redisOk, outboxLag] = await Promise.all([
+      this.pingDb(),
+      this.pingRedis(),
+      this.probeOutboxLag(),
+    ]);
     const poolStats = this.db.getPoolStats();
     const saturationPercent =
       poolStats.max > 0
@@ -78,6 +98,7 @@ export class HealthController {
         saturationPercent,
       },
       jobFailures: getJobFailureMetrics(),
+      outboxLag,
     };
     if (!dbOk) {
       // 503 ONLY when Postgres — the routing-critical dependency — is down. A
@@ -126,6 +147,43 @@ export class HealthController {
         }
       })(),
     );
+  }
+
+  private async probeOutboxLag(): Promise<HealthReport["outboxLag"]> {
+    const failed = { pendingCount: -1, oldestPendingSec: null, stale: false };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<HealthReport["outboxLag"]>((resolve) => {
+      timer = setTimeout(() => resolve(failed), HealthController.PROBE_TIMEOUT_MS);
+    });
+    const probe = (async (): Promise<HealthReport["outboxLag"]> => {
+      try {
+        // Served by the partial drainer-pending index, so count is cheap.
+        const rows = await this.db.$queryRaw<
+          Array<{ pending: number; oldest: number | null }>
+        >`
+          SELECT count(*)::int AS pending,
+                 EXTRACT(EPOCH FROM (now() - MIN("createdAt")))::int AS oldest
+          FROM   "OutboundEvent"
+          WHERE  "publishedAt" IS NULL AND "failedAt" IS NULL
+        `;
+        const row = rows[0] ?? { pending: 0, oldest: null };
+        const oldestPendingSec = row.oldest ?? null;
+        return {
+          pendingCount: row.pending,
+          oldestPendingSec,
+          stale:
+            oldestPendingSec != null &&
+            oldestPendingSec > HealthController.OUTBOX_STALE_SEC,
+        };
+      } catch {
+        return failed;
+      }
+    })();
+    try {
+      return await Promise.race([probe, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async pingRedis(): Promise<boolean> {
