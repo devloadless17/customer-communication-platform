@@ -159,7 +159,6 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       return;
     }
     createDirtyRef.current = true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
   useEffect(() => {
     if (mode === "edit") return;

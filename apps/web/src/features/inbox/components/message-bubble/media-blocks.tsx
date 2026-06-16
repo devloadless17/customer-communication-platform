@@ -440,7 +440,6 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
     // white-alpha surfaces, inbound the muted/background tokens.
     <div className="flex w-65 max-w-full items-center gap-2.5 rounded-xl px-2.5 py-1.5">
       {/* Hidden <audio> stays in the DOM (a11y + the actual media element). */}
-      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <audio
         ref={audioRef}
         src={media.url}

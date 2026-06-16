@@ -42,7 +42,6 @@ let teamId: string;
 let userId: string;
 let conv1: string;
 let conv2: string;
-let inboundTextId: string;
 
 test.beforeAll(async () => {
   ({ teamId, userId } = await appAdmin());
@@ -66,7 +65,6 @@ test.beforeAll(async () => {
   const inText = await db().message.create({
     data: { teamId, conversationId: conv1, externalId: `fe2e-in-${now}`, direction: "in", channel: "whatsapp", status: "delivered", body: "hello, I need help with my order", timestamp: new Date(now - 26 * 3600_000), rawPayload: {} },
   });
-  inboundTextId = inText.id;
   await db().message.createMany({
     data: [
       { teamId, conversationId: conv1, externalId: `fe2e-out-${now}`, direction: "out", channel: "whatsapp", status: "read", senderUserId: userId, body: "Hi! Happy to help — what's the order number?", timestamp: new Date(now - 25 * 3600_000), rawPayload: {}, reaction: "👍" },
@@ -230,9 +228,9 @@ test("broadcasts: new-broadcast form renders audience picker (no submit)", async
   const errs = track(page);
   await page.goto("/broadcasts/new", { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
-  // the audience mode toggle (Everyone / Saved group / Custom) is part of the flow
-  const everyone = page.getByRole("button", { name: /everyone/i }).first();
-  // it may be behind a first step; assert the page is the broadcast composer (not crashed)
+  // the audience mode toggle (Everyone / Saved group / Custom) is part of the
+  // flow — it may be behind a first step, so just assert the broadcast composer
+  // rendered (not crashed) rather than drilling into the wizard.
   const body = (await page.locator("body").innerText()).toLowerCase();
   expect(body).toMatch(/broadcast|audience|template|recipients/);
   expect(errs, "broadcast new errors").toEqual([]);

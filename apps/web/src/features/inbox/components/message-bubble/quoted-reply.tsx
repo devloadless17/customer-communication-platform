@@ -57,8 +57,9 @@ export function QuotedReply({
         </span>
       </span>
       {reply.thumbnailUrl && (
-        // eslint-disable-next-line @next/next/no-img-element -- authenticated
-        // media stream, not a static asset; next/image can't carry the cookie.
+        // Authenticated media stream (not a static asset); next/image can't
+        // carry the auth cookie, so a plain <img> is correct here.
+        // eslint-disable-next-line @next/next/no-img-element
         <img
           src={reply.thumbnailUrl}
           alt=""
