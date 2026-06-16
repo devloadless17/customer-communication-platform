@@ -1,6 +1,7 @@
 "use client";
 
 import { dispatchLocalSocketEvent } from "@/lib/socket-client";
+import { nextOptimisticSeq } from "@/features/inbox/lib/optimistic-seq";
 import type {
   ConversationActivityEvent,
   ConversationStatus,
@@ -62,6 +63,10 @@ function base(
     // confirmed log settles and sorts by real server time (see the field's doc
     // on ConversationActivityEvent).
     optimisticPending: true,
+    // Clock-independent order within the pinned tail (shared counter with
+    // optimistic message bubbles), so a pill orders after the send that
+    // triggered it instead of racing on wall-clock timestamps.
+    optimisticSeq: nextOptimisticSeq(),
   };
 }
 

@@ -192,10 +192,10 @@ export function InteractivePopover({
       // icon, so right-0 anchored the 320px panel to the button's right edge and
       // it spilled off-screen to the LEFT. max-w cap keeps it inside a narrow
       // viewport. bottom-… opens it above the toolbar.
-      className="absolute bottom-[calc(100%+8px)] left-0 z-30 w-80 max-w-[calc(100vw-1.5rem)] rounded-lg border border-border bg-popover p-3 shadow-xl focus:outline-none"
+      className="absolute bottom-[calc(100%+8px)] left-0 z-40 w-80 max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-popover p-3 shadow-xl focus:outline-none animate-slide-up"
     >
       <div className="mb-2 flex items-center gap-2">
-        <MousePointerClick className="size-4 text-violet-600" />
+        <MousePointerClick className="size-4 text-info-fg" />
         <div className="text-sm font-semibold">Send with buttons</div>
         <button
           type="button"
@@ -249,7 +249,7 @@ export function InteractivePopover({
               className="inline-flex size-7 pointer-coarse:size-9 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-30"
               aria-label={`Remove button ${idx + 1}`}
             >
-              ×
+              <X className="size-3.5" />
             </button>
           </div>
         ))}

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { isChunkLoadError, reloadForStaleChunk } from "@/lib/chunk-error";
+import { Button } from "@/components/ui/button";
 
 /**
  * Shared per-segment error boundary. Mirrors the existing inbox/error.tsx
@@ -65,18 +66,10 @@ export function SegmentError({
           </p>
         ) : null}
         <div className="mt-2 flex gap-2">
-          <button
-            onClick={reset}
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
-          >
-            Try again
-          </button>
-          <a
-            href="/inbox"
-            className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
-          >
-            Back to inbox
-          </a>
+          <Button onClick={reset}>Try again</Button>
+          <Button variant="outline" asChild>
+            <a href="/inbox">Back to inbox</a>
+          </Button>
         </div>
       </div>
     </div>

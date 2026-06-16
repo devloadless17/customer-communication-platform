@@ -298,7 +298,7 @@ export function TemplateFillView({
 
       <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-4 py-3">
         <div className="text-2xs text-muted-foreground">
-          <Check className="mr-1 inline size-3 text-emerald-500" />
+          <Check className="mr-1 inline size-3 text-success-fg" />
           Sending opens a fresh 24h window after the customer replies.
         </div>
         <Button
@@ -423,7 +423,7 @@ function PreviewBubble({
 
   return (
     <div className="rounded-lg border border-border bg-card p-3 shadow-xs">
-      <div className="rounded-md bg-emerald-500/5 p-3 ring-1 ring-emerald-500/10">
+      <div className="rounded-md bg-success-bg/50 p-3 ring-1 ring-success-border">
         {/* Header */}
         {headerComp?.format === "TEXT" && renderedHeader && (
           <div className="mb-1 text-sm font-semibold text-foreground">
@@ -447,13 +447,13 @@ function PreviewBubble({
                 muted
               />
             ) : (
-              <div className="mb-2 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-foreground">
-                <FileText className="size-4 shrink-0 text-emerald-600" />
+              <div className="mb-2 flex items-center gap-2 rounded-md border border-success-border bg-success-bg/50 px-3 py-2 text-xs text-foreground">
+                <FileText className="size-4 shrink-0 text-success-fg" />
                 <span className="truncate">{headerMedia.filename ?? "Document"}</span>
               </div>
             )
           ) : (
-            <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-emerald-500/30 bg-emerald-500/5 text-2xs text-muted-foreground">
+            <div className="mb-2 flex h-20 items-center justify-center rounded-md border border-dashed border-success-border bg-success-bg/50 text-2xs text-muted-foreground">
               {headerComp.format ?? "MEDIA"} header
             </div>
           )

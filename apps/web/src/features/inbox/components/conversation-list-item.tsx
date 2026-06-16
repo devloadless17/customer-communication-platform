@@ -1,7 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { Loader2 } from "lucide-react";
+import { CornerUpLeft, Loader2 } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LocalTime } from "@/components/local-time";
@@ -122,9 +122,9 @@ function ConversationListItemImpl({
           Active wins when a row is both: a row you're looking at is, by
           definition, about to be read, so the "open" cue is the useful one. */}
       {active ? (
-        <span className="absolute left-0 top-1/2 h-7 w-0.5 -translate-y-1/2 rounded-r-full bg-primary" />
+        <span className="absolute inset-y-2 left-0 w-[3px] rounded-r-full bg-primary" />
       ) : unread ? (
-        <span className="absolute left-0 top-1/2 h-7 w-0.5 -translate-y-1/2 rounded-r-full bg-info-fg" />
+        <span className="absolute inset-y-2 left-0 w-[3px] rounded-r-full bg-info-fg" />
       ) : null}
 
       {/* Avatar */}
@@ -164,6 +164,16 @@ function ConversationListItemImpl({
 
         {/* Row 2: message preview + unread badge */}
         <div className="flex items-center gap-1.5">
+          {/* Direction cue: a muted reply-arrow when WE sent the last message
+              ("handled / we replied"). Absent = a customer message is the latest
+              — the highest-value triage scan signal. Null/undefined (legacy rows)
+              renders nothing. */}
+          {conversation.lastMessageDirection === "out" && (
+            <CornerUpLeft
+              className="size-3 shrink-0 text-muted-foreground/60"
+              aria-label="You replied"
+            />
+          )}
           <p
             // dir="auto" so an Arabic/Hebrew preview reads right-aligned with
             // correct base direction (matches the thread bubble + WhatsApp Web).
@@ -199,13 +209,13 @@ function ConversationListItemImpl({
         {showMeta && (
           <div className="flex items-center gap-1.5">
             {conversation.status === "pending" && (
-              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-warning-bg px-1.5 text-3xs font-semibold tracking-wide text-warning-fg">
-                pending
+              <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-warning-bg px-1.5 text-3xs font-semibold text-warning-fg">
+                Pending
               </span>
             )}
             {conversation.status === "closed" && (
               <span className="inline-flex h-4.5 shrink-0 items-center rounded-sm bg-muted px-1.5 text-3xs font-medium text-muted-foreground">
-                closed
+                Closed
               </span>
             )}
             {/* Tag lane doubles as the flex spacer so the assignee pins to the
@@ -215,7 +225,7 @@ function ConversationListItemImpl({
                 <span
                   key={t.id}
                   className={cn(
-                    "inline-flex h-4 max-w-24 shrink-0 items-center truncate rounded-sm border px-1 text-3xs font-medium",
+                    "inline-flex h-4.5 max-w-24 shrink-0 items-center truncate rounded-sm border px-1 text-3xs font-medium",
                     tagColorClasses(t.color).chip,
                   )}
                 >
@@ -230,6 +240,7 @@ function ConversationListItemImpl({
             </div>
             {assignedUser && (
               <span
+                title={assignedUser.name}
                 className={cn(
                   "inline-flex shrink-0 items-center gap-1 text-2xs",
                   assignedToMe

@@ -169,7 +169,7 @@ export function TranslatePopover({
       initial={{ opacity: 0, y: 6, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.12 }}
-      className="absolute bottom-full left-0 z-30 mb-2 w-56 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
+      className="absolute bottom-full left-0 z-40 mb-2 w-56 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
     >
       {applied ? (
         <div>

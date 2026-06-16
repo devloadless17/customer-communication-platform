@@ -105,7 +105,7 @@ export function SnippetPopup({
   return (
     <div
       ref={listRef}
-      className="absolute bottom-full left-3 mb-2 z-30 w-72 overflow-hidden rounded-lg border border-border bg-card shadow-lg"
+      className="absolute bottom-full left-3 mb-2 z-40 w-72 overflow-hidden rounded-xl border border-border bg-popover shadow-xl animate-slide-up"
       // Stop the textarea from losing focus when the user clicks an entry —
       // we want the caret to stay put so the replacement can find it.
       onMouseDown={(e) => e.preventDefault()}

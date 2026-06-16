@@ -47,6 +47,17 @@ export function Popover({
   const [rect, setRect] = useState<{ top: number; left: number; right: number } | null>(
     null,
   );
+  // Keep the panel mounted briefly after close so the exit animation plays,
+  // then unmount. Mirrors the Dialog/Radix overlay enter+exit feel.
+  const [rendered, setRendered] = useState(open);
+  useEffect(() => {
+    if (open) {
+      setRendered(true);
+      return;
+    }
+    const t = setTimeout(() => setRendered(false), 120);
+    return () => clearTimeout(t);
+  }, [open]);
 
   const reposition = useCallback(() => {
     const el = anchorRef.current;
@@ -95,7 +106,7 @@ export function Popover({
       <div ref={anchorRef} className="inline-flex">
         {children}
       </div>
-      {open && rect && typeof document !== "undefined"
+      {(open || rendered) && rect && typeof document !== "undefined"
         ? createPortal(
             <div
               ref={contentRef}
@@ -106,7 +117,9 @@ export function Popover({
               }}
               className={cn(
                 "z-60 rounded-lg border border-border bg-popover text-popover-foreground shadow-lg",
-                "animate-in fade-in-0 zoom-in-95",
+                open
+                  ? "animate-in fade-in-0 zoom-in-95 duration-150"
+                  : "animate-out fade-out-0 zoom-out-95 duration-100",
                 className,
               )}
             >

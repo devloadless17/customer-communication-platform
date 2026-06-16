@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { FileText, Film, Loader2, Music, Paperclip, StickyNote } from "lucide-react";
+import { Film, Loader2, Paperclip, StickyNote } from "lucide-react";
 
 import {
   type AttachmentKind,
@@ -9,6 +9,7 @@ import {
 } from "@/features/inbox/hooks/use-conversation-attachments";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { openAttachment } from "@/features/inbox/lib/open-attachment";
+import { fileIconForName } from "@/features/inbox/lib/file-icon";
 import { cn, formatLocaleString } from "@ccp/shared/utils";
 import { LocalTime } from "@/components/local-time";
 import { useTimezone } from "@/providers/tz-provider";
@@ -250,7 +251,7 @@ function FileRow({
   const media = message.media;
   if (!media) return null;
   const isAudio = media.kind === "audio";
-  const Icon = isAudio ? Music : FileText;
+  const Icon = fileIconForName(media.filename ?? media.caption, isAudio ? "audio" : undefined);
   const label = media.filename ?? media.caption ?? (isAudio ? "Audio message" : "Document");
   return (
     <li className="flex items-center gap-3 py-2.5">

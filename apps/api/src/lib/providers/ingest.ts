@@ -809,7 +809,11 @@ async function ingestInboundMessage(
         where: { id: conversation.id },
         data: {
           ...(advancesSummary
-            ? { lastMessageAt: evt.timestamp, lastMessagePreview: preview }
+            ? {
+                lastMessageAt: evt.timestamp,
+                lastMessagePreview: preview,
+                lastMessageDirection: "in" as const,
+              }
             : {}),
           unreadCount: { increment: 1 },
           incomingMessagesCount: { increment: 1 },
@@ -871,6 +875,7 @@ async function ingestInboundMessage(
                 ...(reopened ? { status: "pending", assignedUserId: null } : {}),
                 lastMessageAt: evt.timestamp,
                 lastMessagePreview: preview,
+                lastMessageDirection: "in",
                 unreadCount: reopened ? bumped.unreadCount : 1,
               }),
               contact: toContactWire(contact),
@@ -1356,6 +1361,7 @@ function toDomainConversation(c: {
   unreadCount: number;
   lastMessageAt: Date;
   lastMessagePreview: string;
+  lastMessageDirection?: "in" | "out" | null;
 }): Conversation {
   return {
     id: c.id,
@@ -1366,6 +1372,7 @@ function toDomainConversation(c: {
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
+    lastMessageDirection: c.lastMessageDirection ?? null,
   };
 }
 

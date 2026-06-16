@@ -249,6 +249,7 @@ export function mapConversation(c: PrismaConversation): Conversation {
     unreadCount: c.unreadCount,
     lastMessageAt: c.lastMessageAt.toISOString(),
     lastMessagePreview: c.lastMessagePreview,
+    lastMessageDirection: c.lastMessageDirection,
   };
 }
 

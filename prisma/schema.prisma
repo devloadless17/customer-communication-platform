@@ -845,6 +845,12 @@ model Conversation {
   unreadCount        Int                @default(0)
   lastMessageAt      DateTime           @default(now())
   lastMessagePreview String             @default("")
+  // Direction of the message behind `lastMessagePreview` — drives the inbox
+  // row's triage cue ("we replied" vs "customer waiting"). Nullable: legacy
+  // rows + freshly-created conversations have no real last message yet, which
+  // the UI renders as no cue. Written alongside lastMessagePreview at every
+  // bump site (ingest=in, outbound send/broadcast=out).
+  lastMessageDirection MessageDirection?
   createdAt          DateTime           @default(now())
 
   // ---- Workflow analytics ----

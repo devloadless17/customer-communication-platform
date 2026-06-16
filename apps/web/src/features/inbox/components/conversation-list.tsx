@@ -211,7 +211,10 @@ function ConversationListImpl({
   // search panel (InboxSearchPanel). The live list is no longer client-side
   // filtered — search is a true server query across the WHOLE team now, not a
   // filter over the loaded slice (which could only ever find loaded rows).
-  const searchActive = search.trim().length > 0;
+  // A single character keeps the live list visible (the global search panel's
+  // own server query needs ≥2 chars to return anything useful anyway) — only a
+  // ≥2-char query swaps to the tabbed search panel.
+  const searchActive = search.trim().length >= 2;
   // The live list always renders the full server slice; no client filter.
   // Sort mode. "recent" = the server's lastMessageAt-desc order (default).
   // "waiting" = longest-waiting first (oldest customer message at top) — the

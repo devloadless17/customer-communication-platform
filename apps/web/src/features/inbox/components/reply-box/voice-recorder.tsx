@@ -429,7 +429,7 @@ export function RecordingBar({
             <span
               key={i}
               className={cn(
-                "w-.75 rounded-full bg-foreground/70",
+                "w-[3px] rounded-full bg-foreground/70",
                 "transition-[height] duration-75",
               )}
               style={{ height: `${Math.max(8, v * 100)}%` }}
@@ -473,7 +473,7 @@ export function MicButton({
     <Button
       variant="ghost"
       size="icon"
-      className="size-7 pointer-coarse:size-9 text-muted-foreground"
+      className="size-8 pointer-coarse:size-9 text-muted-foreground"
       type="button"
       disabled={disabled}
       aria-label={ariaLabel ?? title}

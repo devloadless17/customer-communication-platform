@@ -1250,7 +1250,11 @@ async function processOneRecipient(
       // newer summary with the broadcast's outbound timestamp.
       await db.conversation.updateMany({
         where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
-        data: { lastMessageAt: send.timestamp, lastMessagePreview: preview },
+        data: {
+          lastMessageAt: send.timestamp,
+          lastMessagePreview: preview,
+          lastMessageDirection: "out",
+        },
       });
 
       // Re-read so the event payload reflects DB state. If the CAS above

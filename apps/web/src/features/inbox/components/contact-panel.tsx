@@ -14,7 +14,6 @@ import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LocalTime } from "@/components/local-time";
@@ -170,9 +169,31 @@ function ContactPanelImpl({
       ?.slice("contact-panel-collapsed=".length);
     if (fromCookie === "true" || fromCookie === "false") {
       setCollapsed(fromCookie === "true");
+    } else {
+      // No explicit preference yet: default COLLAPSED below the xl breakpoint
+      // (1280px). On a 1024–1279px laptop an expanded panel forces the list +
+      // thread to their min-width floors (the "density cliff"); a fresh user
+      // there gets the calm rail instead. Expand still works + persists. The
+      // transition is still gated off on first mount, so this paints at the
+      // right width without an animated open→close.
+      setCollapsed(window.matchMedia("(max-width: 1279px)").matches);
     }
     const raf = requestAnimationFrame(() => setTransitionEnabled(true));
     return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // Keep the no-preference default in sync when the window crosses the xl
+  // boundary (e.g. a laptop user docks/undocks an external monitor). Once the
+  // user has explicitly toggled (cookie present), their choice wins and this
+  // no-ops.
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 1279px)");
+    function onChange() {
+      const hasPref = document.cookie.includes("contact-panel-collapsed=");
+      if (!hasPref) setCollapsed(mql.matches);
+    }
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
   }, []);
 
   function toggleCollapsed() {
@@ -916,19 +937,22 @@ function ContactPanelImpl({
         </ScrollArea>
       ) : (
       <ScrollArea className="flex-1">
-        <div className="flex flex-col items-center px-5 pt-6 pb-4">
-          <Avatar className="size-16">
+        {/* Attio-style header: avatar + name share one left axis with the value
+            rows below, so the eye scans a single column edge (was a centered
+            block over left-aligned rows). */}
+        <div className="flex items-center gap-3 px-5 pt-5 pb-3">
+          <Avatar className="size-11 shrink-0">
             {contact.avatarUrl ? (
               <AvatarImage src={contact.avatarUrl} alt="" />
             ) : null}
             <AvatarFallback
-              className="text-lg text-white"
+              className="text-base text-white"
               style={{ backgroundImage: avatarGradient(contact.id) }}
             >
               {initials(name || contact.name)}
             </AvatarFallback>
           </Avatar>
-          <div className="mt-3 w-full text-center">
+          <div className="min-w-0 flex-1">
             <EditableHeading
               value={name}
               onSave={async (next) => {
@@ -944,21 +968,19 @@ function ContactPanelImpl({
               {formatPhone(contact.phoneNumber)}
             </div>
           </div>
-          <div className="mt-3 flex flex-wrap justify-center gap-1.5">
-            <Badge variant="muted">WhatsApp</Badge>
-            {/* Distinguishes contacts an agent created (e.g. via the New
-                Contact dialog or CSV import) from contacts we got because a
-                customer messaged us. The list page filters by this too. Kept
-                MUTED (provenance, not status) — the removed always-green
-                "Active" badge was hardcoded and contradicted closed chats; live
-                status is shown in the Status row below. */}
-            <Badge variant="muted">
-              {contact.source === "manual" ? "Added by you" : "Messaged you"}
-            </Badge>
-          </div>
         </div>
-
-        <Separator />
+        <div className="flex flex-wrap gap-1.5 px-5 pb-4">
+          <Badge variant="muted">WhatsApp</Badge>
+          {/* Distinguishes contacts an agent created (e.g. via the New
+              Contact dialog or CSV import) from contacts we got because a
+              customer messaged us. The list page filters by this too. Kept
+              MUTED (provenance, not status) — the removed always-green
+              "Active" badge was hardcoded and contradicted closed chats; live
+              status is shown in the Status row below. */}
+          <Badge variant="muted">
+            {contact.source === "manual" ? "Added by you" : "Messaged you"}
+          </Badge>
+        </div>
 
         <Section
           title="Contact info"
@@ -1205,8 +1227,6 @@ function ContactPanelImpl({
             so duplicating them in this rail was redundant. The contacts-page
             ContactDetailDrawer still owns the stage UI for off-inbox editing. */}
 
-        <Separator />
-
         <Section title="Tags">
           <div ref={tagBoxRef} className="relative flex flex-wrap items-center gap-1.5">
             {appliedTags.map((t) => (
@@ -1235,8 +1255,6 @@ function ContactPanelImpl({
             )}
           </div>
         </Section>
-
-        <Separator />
 
         <Section title="Conversation">
           <ReadOnlyRow

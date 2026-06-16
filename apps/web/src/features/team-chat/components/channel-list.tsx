@@ -229,7 +229,7 @@ const ChannelRow = memo(function ChannelRow({
       {c.unreadMentionCount > 0 && (
         <Badge
           variant="default"
-          className="h-4 min-w-4 rounded-full bg-red-500 px-1 text-3xs"
+          className="h-4 min-w-4 rounded-full bg-destructive px-1 text-3xs text-destructive-foreground"
         >
           {c.unreadMentionCount}
         </Badge>

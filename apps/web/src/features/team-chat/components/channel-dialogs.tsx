@@ -107,7 +107,7 @@ export function NewChannelDialog({
             placeholder="What's this channel about?"
           />
         </div>
-        {error && <div className="text-xs text-red-600">{error}</div>}
+        {error && <div className="text-xs text-destructive">{error}</div>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>
             Cancel
@@ -182,7 +182,7 @@ export function EditChannelDialog({
             rows={2}
           />
         </div>
-        {error && <div className="text-xs text-red-600">{error}</div>}
+        {error && <div className="text-xs text-destructive">{error}</div>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>
             Cancel

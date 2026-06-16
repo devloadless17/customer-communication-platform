@@ -44,6 +44,7 @@ import { SnippetsProvider } from "./snippets-context";
 import { MessageThread } from "./message-thread";
 import { ContactPanel } from "./contact-panel";
 import { Sheet } from "@/components/ui/sheet";
+import { Button } from "@/components/ui/button";
 import { CallsHistory } from "@/app/(app)/calls/calls-history";
 import { useCallApi } from "@/features/calls/call-provider";
 import { isBicAllowed } from "@ccp/shared/providers/calling-regions";
@@ -1519,7 +1520,7 @@ function ThreadWorkspace({
           // Hide the whole overlay at lg+ too (in case the viewport grows while
           // open) — at lg the desktop rail takes over.
           className="lg:hidden"
-          contentClassName="w-80 max-w-[88vw] bg-sidebar text-sidebar-foreground"
+          contentClassName="w-80 max-w-[85vw] bg-sidebar text-sidebar-foreground"
         >
           <ContactPanel
             data={thread.data}
@@ -1635,13 +1636,9 @@ function ThreadError({ onRetry }: { onRetry: () => void }) {
             try again, or click a different chat.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onRetry}
-          className="rounded-md bg-foreground px-3 py-1.5 text-sm font-medium text-background hover:bg-foreground/90"
-        >
+        <Button size="sm" onClick={onRetry}>
           Try again
-        </button>
+        </Button>
       </div>
     </div>
   );

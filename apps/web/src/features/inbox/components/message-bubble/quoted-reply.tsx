@@ -63,7 +63,7 @@ export function QuotedReply({
         <img
           src={reply.thumbnailUrl}
           alt=""
-          className="size-8 shrink-0 self-center rounded object-cover"
+          className="size-8 shrink-0 self-center rounded-md object-cover"
         />
       )}
     </button>

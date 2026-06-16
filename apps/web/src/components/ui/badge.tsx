@@ -12,8 +12,12 @@ const badgeVariants = cva(
         secondary: "border-transparent bg-secondary text-secondary-foreground",
         outline: "border-border text-foreground",
         muted: "border-transparent bg-muted text-muted-foreground",
-        success: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
-        warning: "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400",
+        // Semantic variants route through the canonical token trios (same source
+        // as StatusPill) so success/warning/info render ONE hue app-wide and
+        // track the OKLCH dark-mode shifts — no raw emerald/amber literals.
+        success: "border-success-border bg-success-bg text-success-fg",
+        warning: "border-warning-border bg-warning-bg text-warning-fg",
+        info: "border-info-border bg-info-bg text-info-fg",
         destructive: "border-transparent bg-destructive/15 text-destructive",
       },
     },

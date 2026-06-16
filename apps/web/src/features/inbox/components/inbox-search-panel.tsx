@@ -256,7 +256,7 @@ function HitAvatar({ name, url }: { name: string; url?: string }) {
     <Avatar className="size-9 shrink-0">
       {url ? <AvatarImage src={url} alt="" /> : null}
       <AvatarFallback
-        className="text-2xs font-medium text-white"
+        className="text-xs font-medium text-white"
         style={{ background: avatarGradient(name) }}
       >
         {initials(name)}
@@ -386,7 +386,7 @@ function NoteRow({
   return (
     <li>
       <button type="button" onClick={onOpen} className={rowBase}>
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-note-bg text-note-fg">
           <StickyNote className="size-4" />
         </div>
         <div className="min-w-0 flex-1">

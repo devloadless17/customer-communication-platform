@@ -33,6 +33,15 @@ import type {
 import type { ContactLike } from "@ccp/shared/field-tokens";
 import { mediaPreviewLabel } from "@ccp/shared/types";
 import { emitOptimisticListBump } from "@/features/inbox/lib/optimistic-list-bump";
+import { nextOptimisticSeq } from "@/features/inbox/lib/optimistic-seq";
+import {
+  buildOptimisticAiChange,
+  rollbackOptimisticActivity,
+} from "@/features/inbox/lib/optimistic-activity";
+import {
+  dispatchLocalSocketEvent,
+  dispatchLocalSocketEvents,
+} from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
@@ -117,6 +126,8 @@ export function ReplyBox({
   fieldDefinitions,
   lastInboundAt,
   replyTarget,
+  aiEnabled,
+  aiAutopilotEnabled,
   onCancelReply,
   onTyping,
   onStopTyping,
@@ -146,6 +157,16 @@ export function ReplyBox({
    * Cloud API constraint; only pre-approved templates can be sent).
    */
   lastInboundAt: string | null;
+  /**
+   * Live AI-autopilot state for this conversation. A human reply auto-pauses
+   * the AI server-side; when `aiAutopilotEnabled` (team opt-in) AND `aiEnabled`
+   * (currently on) are both true, the composer optimistically emits the same
+   * `conversation:ai` flip + `ai_paused` activity pill the server will write, so
+   * the pill lands pinned right after the just-sent bubble instead of floating
+   * in a beat later (above the still-pending send) via the authoritative GET.
+   */
+  aiEnabled?: boolean;
+  aiAutopilotEnabled?: boolean;
   /**
    * When set, the next send is a quoted reply to this message. Snapshot is
    * built by the parent (it has the team-members map for sender names).
@@ -326,6 +347,16 @@ export function ReplyBox({
   // gets the same message twice.
   const sendInFlightRef = useRef(false);
   const [sendInFlight, setSendInFlight] = useState(false);
+
+  // Tracks whether THIS tab already emitted the optimistic AI-pause for the
+  // current "AI on" stretch, so a rapid burst of replies fires exactly one
+  // optimistic `ai_paused` pill (the server only writes one — it's idempotent
+  // on the conversation's current value). Reset whenever AI flips back on
+  // (explicit resume), so the next reply after a resume pauses again.
+  const aiPauseEmittedRef = useRef(false);
+  useEffect(() => {
+    if (aiEnabled) aiPauseEmittedRef.current = false;
+  }, [aiEnabled]);
   // Active post-send stuck-watchdogs (timer + window-listener pairs). Tracked
   // so a chat-switch (this reply-box unmounts) before a send confirms can't
   // leave a 30s timer that later fires `onOptimisticFail` for the PREVIOUS
@@ -710,6 +741,9 @@ export function ReplyBox({
 
     const clientTempId = newClientTempId();
     const snapshotValue = value;
+    // Set when this send optimistically pauses AI (see the block after the
+    // optimistic paint); the catch path rolls it back if the send fails.
+    let aiPauseOptimisticId: string | null = null;
     // For voice-only sends the caption is the empty string (we don't want
     // the textarea contents leaking into a voice message — they'll get sent
     // separately on the next submit). Otherwise the trimmed value rides
@@ -753,6 +787,10 @@ export function ReplyBox({
           timestamp: ts,
           clientTempId,
           pending: true,
+          // Send-order stamp; assigned here (synchronously, before the
+          // auto-pause pill dispatch below) so the message orders before the
+          // pill it triggers. See optimistic-seq.ts.
+          optimisticSeq: nextOptimisticSeq(),
           ...(reply ? { replyToMessageId: reply.id, replyTo: reply } : {}),
           media: {
             kind,
@@ -784,6 +822,8 @@ export function ReplyBox({
           timestamp: ts,
           clientTempId,
           pending: true,
+          // Send-order stamp; see the media branch above + optimistic-seq.ts.
+          optimisticSeq: nextOptimisticSeq(),
           ...(reply ? { replyToMessageId: reply.id, replyTo: reply } : {}),
         };
         listPreview = trimmed.slice(0, 200);
@@ -801,6 +841,37 @@ export function ReplyBox({
         // note. The list-only channel avoids the other `message:new`
         // subscribers (notably the contact panel's un-deduped message tally).
         emitOptimisticListBump({ conversationId, preview: listPreview, lastMessageAt: ts });
+
+        // Mirror the server's auto-pause-on-human-reply (messages.service.ts
+        // autoAssignOnAgentSend). The server flips aiEnabled→false and writes an
+        // `ai_paused` log; that log otherwise arrives a round-trip later via the
+        // authoritative events GET as a server-clocked, NON-pinned row — which
+        // floats ABOVE the still-pending send, then snaps below it once the send
+        // reconciles (the "paused jumps up then down" glitch). Emitting it here
+        // pins the pill in send order right after the bubble (shared
+        // optimisticSeq), so it's correct from the first paint. Only when the
+        // team has AI autopilot AND it's currently on, and once per on-stretch.
+        if (
+          aiAutopilotEnabled &&
+          aiEnabled &&
+          !aiPauseEmittedRef.current
+        ) {
+          aiPauseEmittedRef.current = true;
+          const aiActivity = buildOptimisticAiChange({
+            teamId: currentUser.teamId,
+            conversationId,
+            actorName: currentUser.name,
+            aiEnabled: false,
+          });
+          aiPauseOptimisticId = aiActivity.id;
+          dispatchLocalSocketEvents([
+            [
+              "conversation:ai",
+              { teamId: currentUser.teamId, conversationId, aiEnabled: false, optimistic: true },
+            ],
+            aiActivity.frame,
+          ]);
+        }
       }
     }
 
@@ -913,6 +984,18 @@ export function ReplyBox({
           description: message,
         });
         if (!isNote) onOptimisticFail?.(clientTempId);
+        // Roll back the optimistic AI-pause: the send failed, so the server
+        // never auto-paused. Revert the header flip + drop the pill, and clear
+        // the once-guard so the next (retry) send pauses again.
+        if (aiPauseOptimisticId) {
+          dispatchLocalSocketEvent("conversation:ai", {
+            teamId: currentUser.teamId,
+            conversationId,
+            aiEnabled: true,
+          });
+          rollbackOptimisticActivity(currentUser.teamId, conversationId, aiPauseOptimisticId);
+          aiPauseEmittedRef.current = false;
+        }
         // Restore the user's text (only if they haven't started typing again).
         // Read the live value via ref instead of a setValue updater — putting
         // the onOptimisticRetry side effect inside a state updater triggers
@@ -1227,7 +1310,7 @@ export function ReplyBox({
             <Button
               variant="ghost"
               size="icon"
-              className="size-7 pointer-coarse:size-9 text-muted-foreground"
+              className="size-8 pointer-coarse:size-9 text-muted-foreground"
               type="button"
               disabled={isNote || windowClosed}
               aria-label="Attach file"
@@ -1245,7 +1328,7 @@ export function ReplyBox({
             <Button
               variant="ghost"
               size="icon"
-              className="size-7 pointer-coarse:size-9 text-muted-foreground"
+              className="size-8 pointer-coarse:size-9 text-muted-foreground"
               type="button"
               disabled={isNote}
               aria-label="Send a template"
@@ -1262,7 +1345,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 pointer-coarse:size-9 text-muted-foreground"
+                className="size-8 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
                 disabled={isNote || windowClosed}
                 aria-label="Send buttons"
@@ -1301,7 +1384,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 pointer-coarse:size-9 text-muted-foreground"
+                className="size-8 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
                 /* emojis are valid in notes too — always enabled */
                 aria-label="Insert emoji"
@@ -1339,7 +1422,7 @@ export function ReplyBox({
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 pointer-coarse:size-9 text-muted-foreground"
+                className="size-8 pointer-coarse:size-9 text-muted-foreground"
                 type="button"
                 title="Translate this message"
                 aria-label="Translate this message"
@@ -1407,7 +1490,7 @@ export function ReplyBox({
                   // Note mode: a warm caramel that complements the beige note
                   // palette (not the dark `note-fg`, which is the note TEXT
                   // color and reads as muddy on a button).
-                  isNote && "bg-amber-700 text-white hover:bg-amber-800",
+                  isNote && "bg-note-accent text-white hover:bg-note-accent-hover",
                 )}
               >
                 {sendInFlight ? (

@@ -235,7 +235,10 @@ function BubbleContent({
 
       <motion.div
         className={cn(
-          "flex max-w-[70%] flex-col gap-0.5",
+          // Cap reading width on large displays so a long message doesn't run to
+          // ~60+ chars/line. Char-based cap on the BUBBLE (not the thread
+          // container, which stays max-w-6xl to keep list/composer edges aligned).
+          "flex max-w-[70%] flex-col gap-0.5 lg:max-w-[34rem] xl:max-w-[40rem]",
           isOut ? "items-end" : "items-start",
         )}
         // Entrance for genuinely-new live messages. Transform + opacity ONLY

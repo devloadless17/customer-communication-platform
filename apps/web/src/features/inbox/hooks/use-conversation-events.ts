@@ -1184,6 +1184,7 @@ export function useConversationEvents(
             ...prev.conversation,
             lastMessageAt: payload.lastMessageAt,
             lastMessagePreview: payload.preview,
+            lastMessageDirection: payload.message.direction,
           },
           messages: reconciled,
           lastInboundAt: nextLastInbound,
@@ -1567,6 +1568,7 @@ export function useConversationEvents(
         lastMessagePreview: (
           stamped.body || (stamped.media ? mediaPreviewLabel(stamped.media.kind) : "")
         ).slice(0, 200),
+        lastMessageDirection: stamped.direction,
       },
       // Sort pins pending bubbles at the bottom (sortKey = ∞) regardless of
       // their local-clock timestamp, so a slow-system-clock or rapid-fire

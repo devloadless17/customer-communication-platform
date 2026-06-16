@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Download,
   FileText,
@@ -16,6 +16,7 @@ import {
 
 import { cn } from "@ccp/shared/utils";
 import { openAttachment } from "@/features/inbox/lib/open-attachment";
+import { fileIconForName } from "@/features/inbox/lib/file-icon";
 import { MediaLightbox } from "@/features/inbox/components/attachments/media-lightbox";
 import type { MediaAttachment, MediaKind, Message } from "@ccp/shared/types";
 
@@ -361,6 +362,23 @@ function VideoBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
 // derive the next value without a switch and the label stays in lock-step.
 const AUDIO_SPEEDS = [1, 1.5, 2] as const;
 
+// Deterministic pseudo-waveform for voice notes. Meta gives us no amplitude
+// data, so we derive ~40 bar heights (0.2–1.0) from a hash of the media URL —
+// stable across renders + reloads, but varied per message so every voice note
+// looks distinct (the recognizable WhatsApp/Telegram affordance).
+const VOICE_BAR_COUNT = 40;
+function voiceWaveformBars(seed: string): number[] {
+  let h = 2166136261;
+  const bars: number[] = [];
+  const src = seed.length > 0 ? seed : "voice";
+  for (let i = 0; i < VOICE_BAR_COUNT; i++) {
+    h ^= src.charCodeAt(i % src.length) + i + 1;
+    h = Math.imul(h, 16777619);
+    bars.push(0.2 + (((h >>> 0) % 1000) / 1000) * 0.8);
+  }
+  return bars;
+}
+
 function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
   const [errored, setErrored] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -382,6 +400,12 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
   // generic audio-file affordance. No height impact either way: it's a glyph +
   // aria-label swap on the existing leading button.
   const isVoice = (media as { voice?: boolean }).voice === true;
+
+  // Memoized so the ~40-bar hash isn't recomputed on every onTimeUpdate tick.
+  const bars = useMemo(
+    () => (isVoice ? voiceWaveformBars(media.url) : []),
+    [isVoice, media.url],
+  );
 
   if (errored) {
     return <MediaUnavailable kind="audio" isOut={isOut} />;
@@ -438,7 +462,14 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
     // via the h-9 control + py-1.5 padding keeps useChatScroll's snap math
     // deterministic; only width flexes. In/out-aware: outbound bubbles use
     // white-alpha surfaces, inbound the muted/background tokens.
-    <div className="flex w-65 max-w-full items-center gap-2.5 rounded-xl px-2.5 py-1.5">
+    <div
+      className={cn(
+        "flex w-65 max-w-full items-center gap-2.5 rounded-xl px-2.5 py-1.5",
+        // Surface tint so the live player matches its pending/unavailable
+        // siblings instead of floating unframed on the bubble.
+        isOut ? "bg-white/10" : "bg-background/60",
+      )}
+    >
       {/* Hidden <audio> stays in the DOM (a11y + the actual media element). */}
       <audio
         ref={audioRef}
@@ -491,20 +522,51 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
           <Play className="size-4 translate-x-px" />
         )}
       </button>
-      {/* Thin click-to-seek progress bar. */}
-      <div
-        role="presentation"
-        onClick={seek}
-        className={cn(
-          "h-1.5 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full",
-          isOut ? "bg-white/20" : "bg-muted",
-        )}
-      >
+      {isVoice ? (
+        // Voice note: a played-bar waveform (the recognizable push-to-talk
+        // affordance). Bars left of the playhead fill with the accent; click
+        // anywhere to seek (same handler as the bar — uses the row geometry).
         <div
-          className={cn("h-full rounded-full", isOut ? "bg-white/70" : "bg-primary")}
-          style={{ width: `${fraction * 100}%` }}
-        />
-      </div>
+          role="presentation"
+          onClick={seek}
+          className="flex h-6 min-w-0 flex-1 cursor-pointer items-center gap-[1.5px]"
+        >
+          {bars.map((hgt, i) => {
+            const played = (i + 0.5) / bars.length <= fraction;
+            return (
+              <span
+                key={i}
+                className={cn(
+                  "min-w-px flex-1 rounded-full transition-colors",
+                  played
+                    ? isOut
+                      ? "bg-white/90"
+                      : "bg-primary"
+                    : isOut
+                      ? "bg-white/35"
+                      : "bg-muted-foreground/30",
+                )}
+                style={{ height: `${Math.round(hgt * 100)}%` }}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        // Generic audio file: a thin click-to-seek progress bar.
+        <div
+          role="presentation"
+          onClick={seek}
+          className={cn(
+            "h-1.5 min-w-0 flex-1 cursor-pointer overflow-hidden rounded-full",
+            isOut ? "bg-white/20" : "bg-muted",
+          )}
+        >
+          <div
+            className={cn("h-full rounded-full", isOut ? "bg-white/70" : "bg-primary")}
+            style={{ width: `${fraction * 100}%` }}
+          />
+        </div>
+      )}
       {timeLabel != null && (
         <span className="shrink-0 text-3xs tabular-nums opacity-70">{timeLabel}</span>
       )}
@@ -585,6 +647,7 @@ function unavailablePresentation(kind: "image" | "video" | "audio" | "document")
 }
 
 function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }) {
+  const DocIcon = fileIconForName(media.filename, media.kind);
   // Open via the probe-aware helper instead of a raw <a target="_blank">.
   // Without the probe a missing blob (upstream 404 / orphan-swept / never
   // uploaded) yanks the user to the provider's branded 404 page; the helper
@@ -608,7 +671,7 @@ function DocumentBlock({ media, isOut }: { media: MediaAttachment; isOut: boolea
           isOut ? "bg-white/15" : "bg-muted",
         )}
       >
-        <FileText className="size-4" />
+        <DocIcon className="size-4" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">

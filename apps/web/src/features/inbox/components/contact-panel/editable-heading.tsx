@@ -34,7 +34,7 @@ export function EditableHeading({
       <button
         type="button"
         onClick={() => setEditing(true)}
-        className="group inline-flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-base font-semibold hover:bg-accent"
+        className="group -ml-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-base font-semibold hover:bg-accent/50"
       >
         <span className="truncate">{value}</span>
         <Pencil className="size-3 opacity-0 transition group-hover:opacity-60" />
@@ -56,7 +56,7 @@ export function EditableHeading({
   }
 
   return (
-    <div className="flex items-center justify-center gap-1">
+    <div className="flex items-center gap-1">
       <Input
         ref={inputRef}
         value={draft}
@@ -73,7 +73,7 @@ export function EditableHeading({
           }
         }}
         disabled={busy}
-        className="h-7 max-w-55 text-center text-base font-semibold"
+        className="h-7 w-full text-base font-semibold"
       />
     </div>
   );

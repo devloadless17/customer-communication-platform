@@ -94,8 +94,17 @@ export function WindowBadgeFromStatus({
       title={title}
     >
       <Icon className={cn("shrink-0", size === "xs" ? "size-3" : "size-3.5")} />
-      <span className="shrink-0 font-medium">{windowStateLabel(state)}</span>
-      <span className="truncate opacity-80">· {formatWindowRemaining(status)}</span>
+      {/* At the dense xs size (contact row) the tone + icon already encode the
+          state and the full label lives in the title tooltip — so drop the word
+          and the middot, keeping just icon + remaining time. */}
+      {size === "xs" ? (
+        <span className="truncate opacity-80">{formatWindowRemaining(status)}</span>
+      ) : (
+        <>
+          <span className="shrink-0 font-medium">{windowStateLabel(state)}</span>
+          <span className="truncate opacity-80">· {formatWindowRemaining(status)}</span>
+        </>
+      )}
     </span>
   );
 }

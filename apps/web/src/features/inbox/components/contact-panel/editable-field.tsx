@@ -105,7 +105,7 @@ export function EditableField({
         <button
           type="button"
           onClick={() => setEditing(true)}
-          className={`min-w-0 flex-1 truncate rounded px-1 py-0.5 text-left hover:bg-accent ${
+          className={`min-w-0 flex-1 truncate rounded-md px-1 py-0.5 text-left hover:bg-accent/50 ${
             value ? "" : "text-muted-foreground"
           } ${mono ? "font-mono" : ""}`}
         >

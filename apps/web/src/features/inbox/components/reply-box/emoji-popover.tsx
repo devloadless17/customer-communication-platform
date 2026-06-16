@@ -364,7 +364,7 @@ export function EmojiPopover({
       animate={{ opacity: 1 }}
       transition={{ duration: 0.1, ease: "easeOut" }}
       className={cn(
-        "absolute bottom-full left-0 z-50 mb-2 w-72 rounded-xl border border-border bg-popover shadow-xl",
+        "absolute bottom-full left-0 z-40 mb-2 w-72 rounded-xl border border-border bg-popover shadow-xl",
         className,
       )}
     >
@@ -411,7 +411,7 @@ export function EmojiPopover({
           <>
             {recents.length > 0 && (
               <div className="mb-2">
-                <p className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                <p className="px-1 pb-1 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                   Recent
                 </p>
                 {renderGrid(recents, "recent")}

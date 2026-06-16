@@ -174,6 +174,7 @@ export class DevEmitController {
       data: {
         lastMessageAt: now,
         lastMessagePreview: body,
+        lastMessageDirection: "in",
         unreadCount: { increment: 1 },
       },
       select: { unreadCount: true },

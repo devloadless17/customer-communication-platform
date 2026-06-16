@@ -59,6 +59,11 @@
   --note-bg: oklch(0.955 0.018 78);
   --note-border: oklch(0.87 0.028 75);
   --note-fg: oklch(0.42 0.045 68);
+  /* Saturated "warm caramel" accent for the note Send button — the one place a
+     note needs a filled CTA. Tuned to the old raw bg-amber-700 it replaces, but
+     as a token so dark mode tracks it. White text on it clears WCAG AA. */
+  --note-accent: oklch(0.52 0.115 70);
+  --note-accent-hover: oklch(0.47 0.115 70);
   /* Semantic status trios (warning/success/info) — mirror the --note-* wiring
      (opaque bg like note, no alpha) and are tuned to visually match the most
      common raw Tailwind chips already in the codebase, so migrated pills look
@@ -142,6 +147,10 @@
   --note-bg: oklch(0.29 0.035 75);
   --note-border: oklch(0.42 0.045 75);
   --note-fg: oklch(0.92 0.04 85);
+  /* Note Send accent (dark) — a touch brighter than light so it reads as a CTA
+     on the cool-slate surfaces; white text still clears AA. */
+  --note-accent: oklch(0.56 0.115 70);
+  --note-accent-hover: oklch(0.51 0.115 70);
   /* Semantic status trios (dark) — mirror --note-* (opaque, low-L tinted bg +
      bright fg). fg matches text-{amber,emerald,sky}-400; bg ≈ the /15 wash over
      the cool-slate surfaces, kept in the same hue family as the light trios. */
@@ -196,6 +205,8 @@
   --color-note-bg: var(--note-bg);
   --color-note-border: var(--note-border);
   --color-note-fg: var(--note-fg);
+  --color-note-accent: var(--note-accent);
+  --color-note-accent-hover: var(--note-accent-hover);
 
   --color-warning-bg: var(--warning-bg);
   --color-warning-fg: var(--warning-fg);
@@ -228,6 +239,7 @@
      already cascades, exactly as text-[11px] behaved. */
   --text-2xs: 0.6875rem; /* 11px */
   --text-3xs: 0.625rem; /* 10px */
+  --text-4xs: 0.5625rem; /* 9px — uppercase micro-labels (was ad-hoc text-[9px]) */
 }
 
 @layer base {
@@ -254,13 +266,6 @@
     outline: 2px solid var(--ring);
     outline-offset: 2px;
     border-radius: var(--radius-sm);
-  }
-
-  /* Override for elements that have their own ring (inputs, buttons) */
-  [data-slot="input"]:focus-visible,
-  [data-slot="select-trigger"]:focus-visible,
-  [data-slot="textarea"]:focus-visible {
-    outline: none;
   }
 
   ::selection {

@@ -49,7 +49,11 @@ export async function commitOutboundSend(args: {
         : args.bumpTimestamp;
     await tx.conversation.update({
       where: { id: args.conversationId },
-      data: { lastMessageAt: effectiveBump, lastMessagePreview: args.preview },
+      data: {
+        lastMessageAt: effectiveBump,
+        lastMessagePreview: args.preview,
+        lastMessageDirection: "out",
+      },
     });
     await publishInTx(tx, {
       ...args.event,

@@ -135,7 +135,7 @@ export function ChannelHeader({
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
-                  className="text-red-600 focus:text-red-600"
+                  className="text-destructive focus:text-destructive"
                   onClick={onDelete}
                 >
                   <Trash2 className="size-4" />

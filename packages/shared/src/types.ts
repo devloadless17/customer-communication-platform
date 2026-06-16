@@ -420,6 +420,19 @@ export interface Message {
   pending?: boolean;
   /** True when the optimistic send hit a network / 4xx error. */
   failed?: boolean;
+  /**
+   * CLIENT-ONLY monotonic send-order stamp, assigned when the agent creates an
+   * optimistic own-send and PRESERVED across the `message:new` reconcile (like
+   * `clientTempId`). The timeline uses it for two things: (1) tail-membership
+   * stickiness — a reconciled own-send keeps pinned to the bottom while an
+   * EARLIER-seq sibling is still pending, so an out-of-order `message:new` can't
+   * let a later send's confirmed row jump above a still-pending earlier one; and
+   * (2) tail ordering — pinned rows sort by this clock-independent seq instead of
+   * by mixed client/server timestamps. Shared counter with the optimistic
+   * activity pills (see ConversationActivityEvent.optimisticSeq) so a send and
+   * the auto-pause pill it triggers order deterministically.
+   */
+  optimisticSeq?: number;
 }
 
 /**
@@ -516,6 +529,15 @@ export interface ConversationActivityEvent {
    * rows tie-broke against client-clocked fresh stubs.
    */
   optimisticPending?: boolean;
+  /**
+   * CLIENT-ONLY monotonic stamp shared with optimistic messages
+   * (Message.optimisticSeq). Used to order this pill within the pinned tail
+   * relative to the send that triggered it — e.g. an agent reply (lower seq)
+   * then the auto-pause pill it causes (higher seq) render in that order
+   * instead of fighting on client-vs-server clocks. Dropped on reconcile along
+   * with `optimisticPending`.
+   */
+  optimisticSeq?: number;
 }
 
 export interface Conversation {
@@ -541,6 +563,14 @@ export interface Conversation {
   unreadCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
+  /**
+   * Direction of the message behind `lastMessagePreview` — drives the inbox
+   * row's triage cue ("we replied" arrow vs a customer message waiting). Set
+   * everywhere `lastMessagePreview` is set so the two never disagree. Optional
+   * + nullable: legacy rows / brand-new conversations have no real last message
+   * yet, which the row renders as no cue.
+   */
+  lastMessageDirection?: MessageDirection | null;
   /**
    * Channel this thread lives on. Drives channel-aware UI affordances —
    * today the Phone button (whatsapp-only). Optional for source-compat;

@@ -286,6 +286,8 @@ export function useTeamEvents(
             ...existing.conversation,
             lastMessageAt,
             lastMessagePreview: preview,
+            // Optimistic bumps are always the agent's own outbound send.
+            lastMessageDirection: "out",
           },
         };
         const next = [...prev];
@@ -871,7 +873,13 @@ export function useTeamEvents(
           ...existing,
           conversation: {
             ...existing.conversation,
-            ...(advances ? { lastMessageAt, lastMessagePreview: preview } : {}),
+            ...(advances
+              ? {
+                  lastMessageAt,
+                  lastMessagePreview: preview,
+                  lastMessageDirection: message.direction,
+                }
+              : {}),
             unreadCount: nextUnread,
           },
           // Inbound messages reset the 24h customer-service window. The

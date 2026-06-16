@@ -47,7 +47,7 @@ export function TypingIndicator({
             animate={{ opacity: 1, y: 0, height: "auto" }}
             exit={{ opacity: 0, y: 4, height: 0 }}
             transition={{ duration: 0.14 }}
-            className="border-t border-border bg-background"
+            className="bg-background"
           >
             <div className="mx-auto flex w-full max-w-6xl items-center gap-2 px-6 py-1.5 text-2xs text-muted-foreground">
               <TypingDots />

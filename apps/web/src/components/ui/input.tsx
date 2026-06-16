@@ -10,9 +10,13 @@ export function Input({ className, type, ...props }: InputProps) {
     <input
       type={type}
       className={cn(
-        "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors",
+        "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow,border-color]",
         "placeholder:text-muted-foreground",
-        "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+        // Form-control focus recipe (shared verbatim by Input/Textarea/Select):
+        // border shifts to the ring color + a soft same-color halo hugs the
+        // field. No offset ring (that's the button/switch category) — this is
+        // the modern Linear/Stripe input treatment.
+        "focus-visible:outline-hidden focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
         "file:border-0 file:bg-transparent file:text-sm file:font-medium",
         "disabled:cursor-not-allowed disabled:opacity-50",
         className,

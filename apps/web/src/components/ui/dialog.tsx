@@ -1,6 +1,13 @@
 "use client";
 
-import { createContext, useContext, useRef, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@ccp/shared/utils";
@@ -41,9 +48,17 @@ import { useModalOverlay } from "@/hooks/use-modal-overlay";
 const SCRIM_CLASS =
   "fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs";
 
+// Enter/exit fade+scale duration — matches the Radix dropdown/popover motion so
+// every overlay in the app opens and closes with one feel. Kept just under the
+// .animate-scale-in window; reduced-motion users get an instant swap (tw-animate
+// honors prefers-reduced-motion).
+const ANIM_MS = 150;
+
 interface DialogCtx {
   /** Focus-trap container ref — must land on the card (`DialogContent`). */
   ref: React.RefObject<HTMLDivElement | null>;
+  /** True during the exit animation window (open just flipped false). */
+  closing: boolean;
 }
 const DialogContext = createContext<DialogCtx | null>(null);
 
@@ -67,16 +82,38 @@ export function Dialog({
 
   // Body-scroll-lock + focus-trap + Escape — shared with every other modal.
   // The card (`DialogContent`) carries `ref`; it's the focus-trap container.
+  // Pass the REAL `open` so scroll-lock/focus behavior is unchanged; the
+  // delayed unmount below is purely the exit-animation window.
   useModalOverlay(ref, open, onClose);
 
-  if (!open) return null;
+  // Keep the overlay mounted for ANIM_MS after `open` flips false so the
+  // exit animation can play, then unmount. `closing` drives the animate-out.
+  const [rendered, setRendered] = useState(open);
+  useEffect(() => {
+    if (open) {
+      setRendered(true);
+      return;
+    }
+    const t = setTimeout(() => setRendered(false), ANIM_MS);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  if (!open && !rendered) return null;
   // SSR / pre-hydration guard — the portal target is the live DOM body.
   if (typeof document === "undefined") return null;
 
+  const closing = !open;
+
   return createPortal(
-    <DialogContext.Provider value={{ ref }}>
+    <DialogContext.Provider value={{ ref, closing }}>
       <div
-        className={cn(SCRIM_CLASS, overlayClassName)}
+        className={cn(
+          SCRIM_CLASS,
+          closing
+            ? "animate-out fade-out-0 duration-150"
+            : "animate-in fade-in-0 duration-150",
+          overlayClassName,
+        )}
         onClick={(e) => {
           if (dismissOnBackdrop && e.target === e.currentTarget) onClose();
         }}
@@ -124,6 +161,10 @@ export function DialogContent({
       tabIndex={-1}
       className={cn(
         "w-full max-w-md max-h-[calc(100svh-2rem)] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-xl outline-none",
+        // Fade+scale enter/exit (matches the scrim + Radix overlays).
+        ctx?.closing
+          ? "animate-out fade-out-0 zoom-out-95 duration-150"
+          : "animate-in fade-in-0 zoom-in-95 duration-150",
         className,
       )}
     >

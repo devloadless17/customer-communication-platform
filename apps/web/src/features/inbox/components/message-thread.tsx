@@ -260,7 +260,7 @@ const TimelineRows = memo(function TimelineRows({
               // detach and OVERLAP messages/activity rows (the dividers piled
               // up). A plain in-flow opaque pill flows cleanly between days.
               <div className="my-3 flex justify-center">
-                <span className="rounded-full border border-border bg-card px-2.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-muted-foreground shadow-xs">
+                <span className="rounded-full bg-card px-2.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-muted-foreground">
                   {dayLabel}
                 </span>
               </div>
@@ -1353,9 +1353,35 @@ function MessageThreadImpl({
     // client-clocked fresh stubs. Settled rows are all server-clocked (mutually
     // consistent); pinned rows are all client-clocked (mutually consistent);
     // the boundary between the two groups is clean.
+    // Earliest still-in-flight own-send (by send-order seq). A reconciled
+    // own-send whose seq is >= this stays pinned to the bottom until the earlier
+    // sibling also confirms — without it, an out-of-order `message:new` (send #3
+    // confirming before #1/#2) un-pins #3 to its server time and flashes it
+    // ABOVE the still-pending #1/#2, then snaps back when they land. Keeping it
+    // pinned (and ordering the tail by seq below) holds send order throughout.
+    let minPendingSeq = Number.POSITIVE_INFINITY;
+    for (const m of messages) {
+      if (
+        m.pending === true &&
+        typeof m.optimisticSeq === "number" &&
+        m.optimisticSeq < minPendingSeq
+      ) {
+        minPendingSeq = m.optimisticSeq;
+      }
+    }
     const pinsToBottom = (e: TimelineEntry) =>
-      (e.kind === "message" && e.data.pending === true) ||
-      (e.kind === "activity" && e.data.optimisticPending === true);
+      (e.kind === "message" &&
+        (e.data.pending === true ||
+          (typeof e.data.optimisticSeq === "number" &&
+            e.data.optimisticSeq >= minPendingSeq))) ||
+      (e.kind === "activity" &&
+        (e.data.optimisticPending === true ||
+          // A settled auto-pause pill keeps its seq while its triggering send is
+          // still pending, so it stays pinned below the reply instead of floating
+          // above it (the conversation:ai-beats-message:new race). Un-pins the
+          // moment no send is in flight (minPendingSeq → ∞).
+          (typeof e.data.optimisticSeq === "number" &&
+            e.data.optimisticSeq >= minPendingSeq)));
     // Decorate-sort: parse each entry's timestamp ONCE here, not twice per
     // comparison. This memo rebuilds on EVERY message mutation — including a
     // status-only sent→delivered→read burst that changes no ordering — and a
@@ -1378,9 +1404,20 @@ function MessageThreadImpl({
       entry,
       pin: pinsToBottom(entry),
       t: new Date(entryTimestamp(entry)).getTime(),
+      // Send-order stamp for tail ordering (clock-independent). Present on
+      // optimistic messages + optimistic activity pills; undefined elsewhere.
+      seq:
+        entry.kind === "message" || entry.kind === "activity"
+          ? entry.data.optimisticSeq
+          : undefined,
     }));
     decorated.sort((a, b) => {
       if (a.pin !== b.pin) return a.pin ? 1 : -1;
+      // Within the pinned tail, order by send-order seq when both carry it
+      // (mixed client/server clocks can't be compared safely here — that's the
+      // whole reason these rows are pinned). Fall back to time when a tail row
+      // has no seq (defensive; in practice every pinned row carries one).
+      if (a.pin && a.seq != null && b.seq != null) return a.seq - b.seq;
       return a.t - b.t;
     });
     return decorated.map((d) => d.entry);
@@ -1781,6 +1818,8 @@ function MessageThreadImpl({
             tags={tags}
             fieldDefinitions={fieldDefinitions}
             lastInboundAt={lastInboundAt}
+            aiEnabled={conversation.aiEnabled ?? true}
+            aiAutopilotEnabled={aiAutopilotEnabled}
             replyTarget={replyTarget}
             onCancelReply={cancelReply}
             onTyping={notifyTyping}
