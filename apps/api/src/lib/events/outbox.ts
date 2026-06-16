@@ -165,6 +165,24 @@ export async function markPublishedWithError(
 }
 
 /**
+ * Stamp `dispatchedAt` AFTER every subscriber for these rows finished
+ * dispatching (success path). publishedAt is set BEFORE dispatch (at-most-once);
+ * dispatchedAt closes the bracket. A row stuck published-but-undispatched for
+ * minutes = the rare hard-crash-mid-dispatch loss window — see the column doc
+ * in schema.prisma for the ad-hoc detection query. One batched UPDATE per
+ * drain claim (cheap); never re-dispatches (that would double-fire side
+ * effects — the no-duplicates posture). Best-effort: a failure here only loses
+ * the bracket stamp, not the dispatch itself.
+ */
+export async function markDispatched(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await db.outboundEvent.updateMany({
+    where: { id: { in: ids }, dispatchedAt: null },
+    data: { dispatchedAt: new Date() },
+  });
+}
+
+/**
  * Drainer-side batch fetch. Picks the oldest pending rows up to `limit` and
  * atomically marks them attempted via a single UPDATE…RETURNING so two
  * drainer instances in a hypothetical multi-process future would not pick

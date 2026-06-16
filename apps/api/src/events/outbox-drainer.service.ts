@@ -9,6 +9,7 @@ import { withCorrelation } from "@/common/correlation";
 import { runWithConcurrency } from "@/common/concurrency";
 import {
   claimBatch,
+  markDispatched,
   markPublishedWithError,
   setOutboxKickHandler,
 } from "@/lib/events/outbox";
@@ -229,16 +230,28 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         // per-stream FIFO (partition by conversationId → sequential within a
         // partition, parallel across) is deferred until that race is observed.
         rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        // Collect rows that actually finished dispatch (subscribers ran, even
+        // if one errored) so we can stamp `dispatchedAt` — closing the bracket
+        // opened by claimBatch's pre-dispatch `publishedAt`. Rows that crash /
+        // throw at the envelope level stay undispatched (the loss-window signal).
+        const dispatched: string[] = [];
         await runWithConcurrency(
           rows,
           OutboxDrainerService.DISPATCH_CONCURRENCY,
           (row) =>
-            this.dispatch(row).catch((err) => {
+            this.dispatch(row, dispatched).catch((err) => {
               this.logger.error(
                 withCorrelation(`[outbox-drainer] dispatch row=${row.id} failed`),
                 err instanceof Error ? err.message : String(err),
               );
             }),
+        );
+        // One batched UPDATE — best-effort (a miss only loses the bracket
+        // stamp, never re-dispatches). Never throws into the tick.
+        await markDispatched(dispatched).catch((err) =>
+          this.logger.warn(
+            withCorrelation(`[outbox-drainer] markDispatched failed: ${err instanceof Error ? err.message : String(err)}`),
+          ),
         );
         drains += 1;
         // Keep draining within this tick while ANY rows came back — do NOT
@@ -275,13 +288,16 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
    * silently routes every inbound socket emit to `team:undefined` and
    * the user has to refresh to see new conversations.
    */
-  private async dispatch(row: {
-    id: string;
-    teamId: string;
-    type: string;
-    payload: unknown;
-    attempts: number;
-  }): Promise<void> {
+  private async dispatch(
+    row: {
+      id: string;
+      teamId: string;
+      type: string;
+      payload: unknown;
+      attempts: number;
+    },
+    dispatched: string[],
+  ): Promise<void> {
     const event = {
       type: row.type as DomainEventType,
       teamId: row.teamId,
@@ -297,6 +313,11 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
       const subscriberError = await this.bus.dispatchOutboxRow(
         event as DomainEventOf<DomainEventType>,
       );
+      // dispatchOutboxRow RETURNED → all subscribers ran (a subscriberError
+      // means one threw but the rest ran — still "dispatched", not lost).
+      // Record for the batched dispatchedAt stamp. The envelope-throw path
+      // below does NOT record → that row stays the loss-window signal.
+      dispatched.push(row.id);
       if (subscriberError) {
         try {
           await markPublishedWithError(row.id, subscriberError);

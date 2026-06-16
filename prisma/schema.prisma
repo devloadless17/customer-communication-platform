@@ -2151,6 +2151,16 @@ model OutboundEvent {
   // Reserved for future at-least-once mode. Today the drainer increments
   // once on pickup and never retries — so this is always 0 or 1.
   attempts    Int       @default(0)
+  // Stamped AFTER the drainer finished dispatching ALL subscribers for this
+  // row. publishedAt is set BEFORE dispatch (at-most-once, so a crash can never
+  // re-dispatch + double-fire — that's the deliberate no-duplicates posture).
+  // A row with publishedAt set + dispatchedAt NULL + failedAt NULL for minutes
+  // is the rare "process hard-crashed mid-dispatch" loss window. Detect ad-hoc
+  // (no always-on sweeper — keeps the hot path lean):
+  //   SELECT count(*) FROM "OutboundEvent"
+  //   WHERE "publishedAt" < now() - interval '5 minutes'
+  //     AND "dispatchedAt" IS NULL AND "failedAt" IS NULL;
+  dispatchedAt DateTime?
 
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
