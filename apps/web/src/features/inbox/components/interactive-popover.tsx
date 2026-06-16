@@ -188,7 +188,11 @@ export function InteractivePopover({
       aria-modal="true"
       aria-label="Send buttons"
       tabIndex={-1}
-      className="absolute bottom-[calc(100%+8px)] right-0 z-30 w-80 rounded-lg border border-border bg-popover p-3 shadow-xl focus:outline-none"
+      // left-0 (opens to the RIGHT): the trigger is a LEFT-side composer-toolbar
+      // icon, so right-0 anchored the 320px panel to the button's right edge and
+      // it spilled off-screen to the LEFT. max-w cap keeps it inside a narrow
+      // viewport. bottom-… opens it above the toolbar.
+      className="absolute bottom-[calc(100%+8px)] left-0 z-30 w-80 max-w-[calc(100vw-1.5rem)] rounded-lg border border-border bg-popover p-3 shadow-xl focus:outline-none"
     >
       <div className="mb-2 flex items-center gap-2">
         <MousePointerClick className="size-4 text-violet-600" />

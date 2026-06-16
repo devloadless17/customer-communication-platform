@@ -1043,12 +1043,14 @@ const ContactRow = memo(function ContactRow({
             popover, which is absolutely positioned inside this box). */}
         <div
           ref={tagBoxRef}
-          className="relative hidden w-30 shrink-0 items-center justify-end @xl:flex"
+          className="relative hidden w-44 shrink-0 items-center justify-end @xl:flex"
         >
-          {/* Clipped inner row: tag chips can NEVER spill left out of the 120px
+          {/* Clipped inner row: tag chips can NEVER spill left out of the 176px
               lane and overlap the phone/name. The picker popover below is a
               SIBLING of this clip (still inside the `relative` lane) so it's not
-              cut off — that's why the lane itself stays un-clipped. */}
+              cut off — that's why the lane itself stays un-clipped. The add
+              button is icon-only here so chip NAMES (not just their color dots)
+              have room. */}
           <div className="flex min-w-0 flex-1 items-center justify-end gap-1 overflow-hidden">
             {shownTags.map((t) => (
               <TagChip key={t.id} tag={t} size="xs" />
@@ -1060,6 +1062,7 @@ const ContactRow = memo(function ContactRow({
             )}
             <TagAddButton
               size="xs"
+              iconOnly
               className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
               onClick={() => setTagPickerOpen((v) => !v)}
             />

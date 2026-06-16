@@ -76,25 +76,36 @@ export function TagAddButton({
   onClick,
   size = "sm",
   className,
+  iconOnly = false,
 }: {
   onClick: () => void;
   size?: "xs" | "sm";
   className?: string;
+  /** Compact: render just the tag icon (no "Add tag" label) so it fits a
+   *  dense row lane without crowding out the tag-chip names. */
+  iconOnly?: boolean;
 }) {
-  const sizing =
-    size === "xs" ? "h-5 px-1.5 text-3xs" : "h-6 px-2 text-2xs";
+  const sizing = iconOnly
+    ? size === "xs"
+      ? "size-5 justify-center"
+      : "size-6 justify-center"
+    : size === "xs"
+      ? "h-5 px-1.5 text-3xs"
+      : "h-6 px-2 text-2xs";
   return (
     <button
       type="button"
       onClick={onClick}
+      aria-label={iconOnly ? "Add tag" : undefined}
+      title={iconOnly ? "Add tag" : undefined}
       className={cn(
-        "inline-flex cursor-pointer items-center gap-1 rounded-full border border-dashed border-border bg-transparent font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground",
+        "inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-dashed border-border bg-transparent font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground",
         sizing,
         className,
       )}
     >
       <TagIcon className="size-2.5" />
-      Add tag
+      {!iconOnly && "Add tag"}
     </button>
   );
 }

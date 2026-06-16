@@ -167,13 +167,16 @@ test("inbox: composer accepts input + Reply/Note drafts stay separate (no send)"
   expect(await page.getByPlaceholder(/Reply on WhatsApp/i).inputValue()).toBe("DRAFT_REPLY_XYZ");
 });
 
-test("inbox: sticky day pill renders (position:sticky)", async ({ page }) => {
+test("inbox: day-divider pill renders and is NOT sticky (no overlap)", async ({ page }) => {
   await page.goto(`/inbox?c=${conv1}`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
   const thread = page.locator('section[aria-label="Conversation"]');
-  const pills = thread.locator("div.sticky");
-  expect(await pills.count()).toBeGreaterThanOrEqual(1);
-  expect(await pills.first().evaluate((el) => getComputedStyle(el).position)).toBe("sticky");
+  // The thread spans >1 day, so a day label renders. It must be a plain
+  // in-flow pill — `position: sticky` in the column-reverse thread caused the
+  // dividers to detach and overlap, so it was reverted to static.
+  const label = thread.getByText(/^(TODAY|YESTERDAY)$/i).first();
+  await expect(label).toBeVisible();
+  expect(await label.evaluate((el) => getComputedStyle(el.parentElement).position)).not.toBe("sticky");
 });
 
 test("inbox: list sort toggle (latest <-> longest waiting)", async ({ page }) => {
