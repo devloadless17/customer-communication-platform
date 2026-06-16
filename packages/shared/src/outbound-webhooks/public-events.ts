@@ -1358,6 +1358,10 @@ export function toWirePayload(
         // status/unread WITHOUT a callback to /v1/conversations/:id. The data is
         // already on the envelope (computed at ingest); only the wire dropped it.
         conversation: {
+          // Conversation id — partners need it to correlate the thread and to
+          // call /v1/conversations/:id. It's already on the enriched envelope
+          // (build() sets conversation.id); the wire block just dropped it.
+          id: d.conversation?.id ?? null,
           status: d.conversation?.status ?? null,
           unreadCount: d.conversation?.unread_count ?? null,
           isNewConversation: d.is_new_conversation ?? false,
@@ -1377,6 +1381,8 @@ export function toWirePayload(
         // Thread state (status/unread), stamped by the subscriber's DB enrich —
         // symmetric with message.received so one partner branch reads both.
         conversation: {
+          // Symmetric with message.received — partners correlate the thread by id.
+          id: d.conversation?.id ?? null,
           status: d.conversation?.status ?? null,
           unreadCount: d.conversation?.unread_count ?? null,
         },
