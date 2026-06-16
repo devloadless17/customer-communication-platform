@@ -129,6 +129,15 @@ function statusTrigger(page: Page) {
 async function changeStatus(page: Page, to: "Open" | "Pending" | "Closed") {
   await statusTrigger(page).click();
   await page.getByRole("menuitem", { name: new RegExp(`^${to}$`) }).click();
+  // Closing pops a confirm dialog (close also unassigns + drops the thread out
+  // of the Active view, so it guards against a mis-click). open/pending are
+  // one-click. Confirm it — otherwise the change never lands AND the modal
+  // overlay intercepts the next interaction. The confirm action is labelled
+  // "Close" (confirmLabel); this custom Dialog has no built-in X, so the name
+  // is unambiguous.
+  if (to === "Closed") {
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+  }
 }
 
 const ACTIVITY_GET = "**/api/conversations/*/events";
