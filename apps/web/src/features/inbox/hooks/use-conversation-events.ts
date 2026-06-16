@@ -16,7 +16,6 @@ import {
   THREAD_REDUCER_EVENTS,
 } from "@/features/inbox/lib/thread-reducers";
 import { isOptimisticActivityId } from "@/features/inbox/lib/optimistic-activity";
-import { nextOptimisticSeq } from "@/features/inbox/lib/optimistic-seq";
 import type {
   ConversationActivityEvent,
   ConversationWithRefs,
@@ -304,17 +303,7 @@ function mergeAuthoritativeEvents(
     }
     if (best) {
       consumed.add(best.id);
-      // Carry the send-order seq from the stub onto the settled row. The pill
-      // sheds `optimisticPending` here (settles), but if the agent's triggering
-      // send is still pending the timeline keeps it pinned via the seq (so a
-      // settled auto-pause pill can't float ABOVE a still-pending reply when the
-      // server's conversation:ai frame beats message:new). Cleared from the pin
-      // once no send is in flight. See message-thread.tsx pin logic.
-      return {
-        ...row,
-        id: best.id,
-        ...(best.optimisticSeq != null ? { optimisticSeq: best.optimisticSeq } : {}),
-      };
+      return { ...row, id: best.id };
     }
     return row;
   });
@@ -1137,12 +1126,6 @@ export function useConversationEvents(
               return {
                 ...payload.message,
                 clientTempId: tempId,
-                // Preserve the send-order seq across reconcile (like
-                // clientTempId): the timeline keeps this confirmed row pinned in
-                // send order until earlier-seq siblings also confirm, so an
-                // out-of-order message:new can't flash it above a still-pending
-                // earlier send. Cleared naturally once no sibling is pending.
-                ...(m.optimisticSeq != null ? { optimisticSeq: m.optimisticSeq } : {}),
                 ...(media ? { media } : {}),
               };
             })
@@ -1184,6 +1167,7 @@ export function useConversationEvents(
             ...prev.conversation,
             lastMessageAt: payload.lastMessageAt,
             lastMessagePreview: payload.preview,
+            lastMessageDirection: payload.message.direction,
           },
           messages: reconciled,
           lastInboundAt: nextLastInbound,
@@ -1548,30 +1532,24 @@ export function useConversationEvents(
   // -------------------------------------------------------------------------
 
   const addOptimistic = useCallback((message: Message) => {
-    // Stamp a send-order seq if the caller didn't (reply-box assigns it
-    // synchronously so it orders before the auto-pause pill it dispatches next;
-    // this fallback covers any other optimistic-add path). See optimistic-seq.ts.
-    const stamped =
-      message.optimisticSeq != null
-        ? message
-        : { ...message, optimisticSeq: nextOptimisticSeq() };
     setData((prev) => ({
       ...prev,
       conversation: {
         ...prev.conversation,
-        lastMessageAt: stamped.timestamp,
+        lastMessageAt: message.timestamp,
         // Media-only sends (notably caption-less voice notes) have an empty
         // body — fall back to the same "🎤 Voice message" / "📷 Photo" label
         // the server writes, so the snapshot this thread leaves in the LRU
         // cache doesn't carry a blank preview that would flash a stale row.
         lastMessagePreview: (
-          stamped.body || (stamped.media ? mediaPreviewLabel(stamped.media.kind) : "")
+          message.body || (message.media ? mediaPreviewLabel(message.media.kind) : "")
         ).slice(0, 200),
+        lastMessageDirection: message.direction,
       },
       // Sort pins pending bubbles at the bottom (sortKey = ∞) regardless of
       // their local-clock timestamp, so a slow-system-clock or rapid-fire
       // send doesn't shove the new bubble above an earlier real message.
-      messages: sortByTimestamp([...prev.messages, stamped]),
+      messages: sortByTimestamp([...prev.messages, message]),
     }));
   }, []);
 
