@@ -14,6 +14,7 @@ import { Worker, type Job } from "bullmq";
 import type IORedis from "ioredis";
 
 import { db } from "@/lib/db";
+import { recordJobFailure } from "@/common/job-failure-metrics";
 import { publish } from "@/lib/events/bus";
 import { startBroadcast } from "@/lib/broadcast-runner";
 import {
@@ -118,6 +119,9 @@ export function startBroadcastScheduleWorker(): void {
       `[broadcast-schedule] job ${job?.id} (broadcast ${job?.data.broadcastId}) failed`,
       err,
     );
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      recordJobFailure("broadcast-schedule", job.id, err.message);
+    }
   });
 
   state.worker.on("error", (err) => {

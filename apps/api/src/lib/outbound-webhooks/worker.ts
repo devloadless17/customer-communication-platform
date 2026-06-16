@@ -13,6 +13,7 @@ import {
   type WebhookDeliverJobData,
 } from "./queue";
 import { db } from "@/lib/db";
+import { recordJobFailure } from "@/common/job-failure-metrics";
 import { decryptSecret } from "@/lib/crypto/envelope";
 import { publish } from "@/lib/events/bus";
 import { safeFetch, SsrfBlockedError, readLimitedBody } from "@/lib/http/safe-fetch";
@@ -242,6 +243,9 @@ export function startWebhookDeliverWorker(): Worker<WebhookDeliverJobData> {
         job?.opts.attempts ?? 1
       }): ${err.message}`,
     );
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      recordJobFailure("webhook-deliver", job.id, err.message);
+    }
   });
 
   worker.on("error", (err) => {

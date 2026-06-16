@@ -7,6 +7,8 @@ import {
   Inject,
 } from "@nestjs/common";
 import { UnrecoverableError, Worker } from "bullmq";
+
+import { recordJobFailure } from "@/common/job-failure-metrics";
 import type IORedis from "ioredis";
 
 import { publish } from "@/lib/events/bus";
@@ -147,6 +149,12 @@ export class SendWorkerService implements OnModuleInit, OnModuleDestroy {
           err instanceof Error ? err.message : err
         }`,
       );
+      // Terminal-failure metric (retries exhausted OR unrecoverable) for /health
+      // visibility. Recorded BEFORE the UnrecoverableError early-return so a
+      // permanent 4xx still counts as a job that gave up.
+      if (job && (err instanceof UnrecoverableError || job.attemptsMade >= (job.opts?.attempts ?? 1))) {
+        recordJobFailure("message-sends", job.id, err instanceof Error ? err.message : String(err));
+      }
       if (!job || err instanceof UnrecoverableError) return;
       // Guard against per-attempt 'failed' firing (BullMQ version-dependent):
       // only publish once no more retries are coming. `< attempts` skips

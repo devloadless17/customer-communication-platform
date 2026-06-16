@@ -5,6 +5,7 @@ import { DelayedError, Worker, type Job } from "bullmq";
 import type IORedis from "ioredis";
 
 import { db } from "@/lib/db";
+import { recordJobFailure } from "@/common/job-failure-metrics";
 import {
   WORKFLOW_QUEUE_NAME,
   createWorkerConnection,
@@ -193,6 +194,7 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
     // runs) so calling it from this listener is safe even when the runner
     // already wrote `failed` via the StepConfigError path.
     if (job && attemptsMade >= maxAttempts) {
+      recordJobFailure("workflows", job.id, err.message);
       void failRunFromRetryExhaustion(
         job.data.runId,
         `retry budget exhausted after ${attemptsMade} attempt(s): ${err.message}`,

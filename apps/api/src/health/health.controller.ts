@@ -5,6 +5,10 @@ import {
 } from "@nestjs/common";
 
 import { DbService } from "../db/db.service";
+import {
+  getJobFailureMetrics,
+  type JobFailureReport,
+} from "../common/job-failure-metrics";
 import { getRedisConnection } from "../lib/workflows/queue";
 
 interface PgPoolReport {
@@ -22,6 +26,11 @@ interface HealthReport {
   redis: boolean;
   uptimeSec: number;
   pgPool: PgPoolReport;
+  /** Per-queue terminal (retries-exhausted) job-failure counters — the soft
+   *  DLQ signal. In-process, resets on restart. Empty when nothing has failed.
+   *  Does NOT affect ok/503 (a failed backlog must not pull the api from
+   *  rotation) — purely operator visibility. */
+  jobFailures: Record<string, JobFailureReport>;
 }
 
 /**
@@ -68,6 +77,7 @@ export class HealthController {
         waiting: poolStats.waiting,
         saturationPercent,
       },
+      jobFailures: getJobFailureMetrics(),
     };
     if (!dbOk) {
       // 503 ONLY when Postgres — the routing-critical dependency — is down. A
