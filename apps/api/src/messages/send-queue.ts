@@ -1,7 +1,28 @@
+import { ServiceUnavailableException } from "@nestjs/common";
 import { Queue } from "bullmq";
 
 import { connectionOptions } from "@/lib/workflows/queue";
 import type { Channel } from "@ccp/shared/types";
+
+// Bound the enqueue so a Redis outage fails FAST instead of hanging on the
+// ioredis connect-retry loop (~tens of seconds → opaque 500). 2.5s is well
+// under any human-perceptible-as-frozen threshold and leaves headroom over a
+// healthy enqueue (~5ms).
+const ENQUEUE_TIMEOUT_MS = 2_500;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("enqueue_timeout")), ms);
+    // Attaching handlers to `p` means a late settle after the timeout is
+    // consumed here (no unhandledRejection); it just no-ops on the already-
+    // settled outer promise. If Redis recovers and the late add succeeds, the
+    // clientTempId jobId dedupes it against the user's retry.
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e as Error); },
+    );
+  });
+}
 
 /**
  * Outbound text/template send queue.
@@ -112,11 +133,24 @@ export function getMessageSendQueue(): Queue<MessageSendJobData> {
  */
 export async function enqueueMessageSend(data: MessageSendJobData): Promise<void> {
   const q = getMessageSendQueue();
-  await q.add(
-    `${data.kind}:${data.conversationId}`,
-    data,
-    data.clientTempId ? { jobId: `msg-send-${data.clientTempId}` } : undefined,
-  );
+  try {
+    await withTimeout(
+      q.add(
+        `${data.kind}:${data.conversationId}`,
+        data,
+        data.clientTempId ? { jobId: `msg-send-${data.clientTempId}` } : undefined,
+      ),
+      ENQUEUE_TIMEOUT_MS,
+    );
+  } catch {
+    // Redis down / slow. Surface a clear, RETRYABLE 503 (not an opaque 500 after
+    // a 30s hang). The send-idempotency wrapper drops this 503 from its cache so
+    // the agent's immediate retry isn't stuck on a stale failure for 5 minutes.
+    throw new ServiceUnavailableException({
+      error: "queue_unavailable",
+      detail: "Message queue is temporarily unavailable — please retry.",
+    });
+  }
 }
 
 /**

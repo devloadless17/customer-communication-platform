@@ -192,6 +192,13 @@ export const httpRequestStepHandler: StepHandler<HttpRequestStepConfig> = {
           "User-Agent": "ccp-workflows/1",
           ...(resolvedToken ? { Authorization: `Bearer ${resolvedToken}` } : {}),
           ...(resolvedHeaders ?? {}),
+          // Idempotency key STABLE across BullMQ retries (runId + stepId don't
+          // change on retry; only `attempt` does). This step is sideEffect:"pure"
+          // — the runner does NOT journal it, so a transient failure / slow
+          // (>timeout) response re-runs the job and re-POSTs. Without a stable
+          // key the partner has no way to dedupe → double charge/ticket. Set
+          // AFTER the custom-header spread so a partner can't override it.
+          "X-CCP-Delivery": `${ctx.runId}:${ctx.stepId}`,
           "X-CCP-Depth": String(nextDepth),
         },
         body: serializedBody,

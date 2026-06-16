@@ -22,8 +22,23 @@
  * SETNX (the API-key path already uses the DB `ApiIdempotencyKey` table
  * for cross-process idempotency).
  */
+import { HttpException } from "@nestjs/common";
+
 const IDEMPOTENCY_TTL_MS = 5 * 60_000;
 const IDEMPOTENCY_MAX = 5_000;
+
+/**
+ * A 503-class failure (queue/Redis unavailable, provider temporarily down) is
+ * TRANSIENT — the send didn't deterministically fail, the infra was down. Such
+ * a failure must be retryable IMMEDIATELY, so we must NOT cache it for the TTL
+ * (otherwise a retry of the same clientTempId gets the stale cached failure for
+ * 5 minutes, even after the infra recovers). Deterministic 4xx errors
+ * (outside_24h_window, template rejected, …) DO stay cached — re-failing a
+ * same-key retry is the correct behavior there.
+ */
+function isTransientError(err: unknown): boolean {
+  return err instanceof HttpException && err.getStatus() === 503;
+}
 
 interface Entry<T> {
   promise: Promise<T>;
@@ -87,9 +102,14 @@ export async function runWithSendIdempotency<T>(
   // map so concurrent callers can await the same value. On settle we keep
   // the cached result around for the full TTL (covers the "double-click +
   // network blip causes a 2nd POST after the 1st returned" pattern).
-  promise.catch(() => {
-    // Errors are cached too — re-throwing the same error to all racers is
-    // the correct behavior. The TTL eviction will clear it.
+  promise.catch((err) => {
+    // Deterministic errors stay cached (re-failing a same-key retry is correct).
+    // A TRANSIENT 503 (queue/Redis down) must be retryable immediately, so drop
+    // it the moment it settles — but only if THIS promise is still the cached
+    // entry (a newer attempt may have already replaced it).
+    if (isTransientError(err) && inflight.get(key)?.promise === promise) {
+      inflight.delete(key);
+    }
   });
 
   return promise;
