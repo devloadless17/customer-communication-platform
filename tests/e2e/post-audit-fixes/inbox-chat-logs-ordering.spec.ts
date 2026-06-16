@@ -117,9 +117,13 @@ function header(page: Page) {
   return page.locator("header.h-15");
 }
 
-/** Status dropdown trigger shows the current status word; re-locate each time. */
+/**
+ * Status dropdown trigger. Its accessible name is the descriptive aria-label
+ * ("Status: Open — change conversation status") — the bare status word is
+ * container-query-hidden below @2xl — so match the aria-label, not the word.
+ */
 function statusTrigger(page: Page) {
-  return header(page).getByRole("button", { name: /^(Open|Pending|Closed)$/ });
+  return header(page).getByRole("button", { name: /change conversation status/i });
 }
 
 async function changeStatus(page: Page, to: "Open" | "Pending" | "Closed") {
@@ -441,7 +445,12 @@ test.describe("Inbox chat + activity-log smoothness", () => {
     await box.fill("react ");
 
     await page.getByRole("button", { name: "Insert emoji" }).click();
-    const option = page.locator('button[aria-label^="Insert "]').first();
+    // Exclude the picker TOGGLE (aria-label="Insert emoji"); the emoji OPTIONS
+    // are aria-label="Insert <emoji>". Without the :not(), .first() re-clicks
+    // the toggle, closes the popover, and inserts nothing.
+    const option = page
+      .locator('button[aria-label^="Insert "]:not([aria-label="Insert emoji"])')
+      .first();
     await expect(option).toBeVisible();
     const label = (await option.getAttribute("aria-label"))!;
     const emoji = label.replace(/^Insert /, "");
@@ -457,9 +466,11 @@ test.describe("Inbox chat + activity-log smoothness", () => {
     const before = await snapshot(page);
     const beforeIds = new Set(before.map((e) => e.id));
 
-    // Open the assignment dropdown in the header (shows "Unassigned") + pick self.
+    // Open the assignment dropdown in the header + pick self. The trigger's
+    // accessible name is the descriptive aria-label ("Unassigned — assign this
+    // conversation"), not the bare word, so match by prefix (not exact).
     await header(page)
-      .getByRole("button", { name: "Unassigned", exact: true })
+      .getByRole("button", { name: /^Unassigned/ })
       .click();
     await page
       .getByRole("menuitem", { name: new RegExp(escapeRe(adminName)) })

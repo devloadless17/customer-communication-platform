@@ -651,6 +651,12 @@ export class ExternalV1Controller {
     @Headers("idempotency-key") idempotencyKey?: string,
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    // Cross-system loop guard FIRST — before idempotency/body checks. A
+    // partner looping our outbound webhook back into /v1 may not send an
+    // Idempotency-Key; if we evaluated `idemKeyRequired` first we'd 400 on the
+    // missing key and never cap the chain. The contact-mutation routes already
+    // guard depth first; the send routes must too.
+    this.guardChainDepth(xCcpDepth);
     return this.api.sendTopLevelMessage(
       auth.teamId,
       auth.apiKeyId,
@@ -697,6 +703,8 @@ export class ExternalV1Controller {
     // from a partner that never receives our webhooks parse as depth=0.
     @Headers("x-ccp-depth") xCcpDepth?: string,
   ) {
+    // Loop guard before idempotency/body checks — see sendTopLevelMessage.
+    this.guardChainDepth(xCcpDepth);
     const out = await this.api.sendMessage(
       auth.teamId,
       auth.apiKeyId,

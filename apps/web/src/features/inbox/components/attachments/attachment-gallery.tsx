@@ -182,6 +182,7 @@ function ThumbTile({ message, onOpen }: { message: Message; onOpen: () => void }
   const media = message.media;
   if (!media) return null;
   const isVideo = media.kind === "video";
+  const hasPoster = Boolean(media.thumbnailUrl);
   // Prefer the server-generated thumbnail for BOTH images and videos so we
   // don't download a full-res original to paint a square tile — videos get a
   // poster JPEG, images get a downscaled JPEG (~640px). Falls back to the
@@ -195,20 +196,39 @@ function ThumbTile({ message, onOpen }: { message: Message; onOpen: () => void }
       className="group relative aspect-square overflow-hidden rounded-md bg-muted ring-1 ring-border transition-shadow hover:ring-foreground/30"
       title={media.caption ?? media.filename ?? formatLocaleString(message.timestamp, tz)}
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={thumbSrc}
-        alt={media.caption ?? ""}
-        className="size-full object-cover transition-transform duration-200 group-hover:scale-105"
-        // Off-screen tiles in a scrollable gallery panel: lazy keeps non-visible
-        // thumbnails out of the initial fetch wave on first paint; async decode
-        // keeps the main thread free as visible tiles paginate in. Safe to lazy
-        // here (unlike the inbox bubble) — gallery uses a SkeletonGrid while
-        // loading and has no instant-reveal-on-mount effect that would be
-        // defeated by `complete` being false.
-        loading="lazy"
-        decoding="async"
-      />
+      {isVideo && !hasPoster ? (
+        // A video with NO server-extracted poster: outbound sends never
+        // generate one (only the inbound webhook path runs ffmpeg), and inbound
+        // extraction can also fail. Pointing an <img> at the raw .mp4 fails to
+        // decode and paints a broken tile that reads as "unavailable" — even
+        // though the clip plays fine in the lightbox. Render the <video> first
+        // frame instead (#t=0.5 skips a common leading black frame) so the tile
+        // shows a real preview, matching inbound videos. preload="metadata" is
+        // acceptable here (unlike the thread bubble's preload="none" across N
+        // videos) because the gallery is lazy + bounded to visible tiles.
+        <video
+          src={`${media.url}#t=0.5`}
+          muted
+          playsInline
+          preload="metadata"
+          className="size-full object-cover transition-transform duration-200 group-hover:scale-105"
+        />
+      ) : (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          src={thumbSrc}
+          alt={media.caption ?? ""}
+          className="size-full object-cover transition-transform duration-200 group-hover:scale-105"
+          // Off-screen tiles in a scrollable gallery panel: lazy keeps non-visible
+          // thumbnails out of the initial fetch wave on first paint; async decode
+          // keeps the main thread free as visible tiles paginate in. Safe to lazy
+          // here (unlike the inbox bubble) — gallery uses a SkeletonGrid while
+          // loading and has no instant-reveal-on-mount effect that would be
+          // defeated by `complete` being false.
+          loading="lazy"
+          decoding="async"
+        />
+      )}
       {isVideo && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/30">
           <div className="rounded-full bg-black/60 p-2">

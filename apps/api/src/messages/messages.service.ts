@@ -17,6 +17,7 @@ import {
 } from "@nestjs/common";
 
 import { blobStorage } from "@/lib/blob-storage";
+import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { publish } from "@/lib/events/bus";
 import { publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
@@ -1152,6 +1153,58 @@ export class MessagesService {
     }
   }
 
+  /**
+   * Best-effort outbound video poster. Mirrors the inbound ingest path
+   * (meta.controller.ts): extract a JPEG first frame, store it, and stamp
+   * `mediaThumbnailUrl` so the gallery + quoted-reply render a lightweight
+   * poster instead of pointing an <img> at the raw video. Runs AFTER the send
+   * is persisted and is fire-and-forget: it must never block the agent's
+   * response nor throw — a post-send throw would bubble as a 5xx the UI
+   * retries → a duplicate Meta send. ffmpeg failure / corrupt video simply
+   * leaves the field null and the client falls back to the <video> first frame.
+   */
+  private async storeOutboundVideoPoster(
+    messageId: string,
+    teamId: string,
+    bytes: Uint8Array,
+    toPhone: string,
+    toName: string | null,
+    label: string,
+  ): Promise<void> {
+    try {
+      const poster = await extractVideoPosterFrame(bytes);
+      if (!poster || poster.length === 0) return;
+      const team = await this.db.team
+        .findUnique({ where: { id: teamId }, select: { name: true } })
+        .catch(() => null);
+      const thumb = await blobStorage.upload({
+        bytes: poster,
+        mimeType: "image/jpeg",
+        kind: "image",
+        context: {
+          teamId,
+          teamSlug: team?.name,
+          direction: "out",
+          contactPhone: toPhone,
+          contactName: toName ?? undefined,
+          // Suffix so the dashboard filename is distinct from the video blob.
+          externalId: `${label}_thumb`,
+          originalFilename: null,
+        },
+      });
+      await this.db.message.update({
+        where: { id: messageId },
+        data: { mediaThumbnailUrl: thumb.url },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[${teamId}] outbound video poster generation failed for message ${messageId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   private async sendMediaWithTempFile(
     teamId: string,
     userId: string,
@@ -1566,6 +1619,24 @@ export class MessagesService {
       };
     }
     const createdId = created.id;
+
+    // Outbound video poster (parity with inbound ingest): the gallery + quoted
+    // reply render a lightweight JPEG from `mediaThumbnailUrl`. Outbound sends
+    // never set it, so without this the gallery falls back to the raw <video>
+    // first frame. Generate + store async — NEVER block the agent's response
+    // nor throw (post-send a throw bubbles as a 5xx → UI retry → duplicate Meta
+    // send). The poster lands on the row for the next gallery load; the live
+    // view already renders the <video> first frame meanwhile.
+    if (kind === "video" && saved) {
+      void this.storeOutboundVideoPoster(
+        createdId,
+        teamId,
+        bytes,
+        toPhone,
+        toName,
+        blobLabelId,
+      );
+    }
 
     const media: MediaAttachment | undefined = saved
       ? {
