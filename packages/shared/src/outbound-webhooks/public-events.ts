@@ -245,6 +245,8 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         samplePayload: {
           conversation_id: "cmpconv_01",
           contact_id: "cmpcnt_01",
+          status: "open",
+          unread_count: 0,
           previous_assignee: null,
           assignee: { type: "user", id: "cmpusr_01", name: "Ali", email: "ali@example.com" },
           changed_by_user_id: "cmpusr_02",
@@ -776,6 +778,11 @@ export function toPublicEnvelopes(
         envelope: build(e.teamId, occurredAt, "conversation.assigned", {
           conversation_id: e.conversationId,
           contact_id: e.contact.id,
+          // Post-mutation thread state from the event snapshot, so a partner
+          // reacting to an assignment knows the current status/unread without a
+          // /v1/conversations/:id callback (symmetric with message.received).
+          status: e.conversation.status,
+          unread_count: e.conversation.unreadCount,
           previous_assignee: e.previousAssignedUserId ? assigneeRef(e.previousAssignedUserId) : null,
           assignee: e.assignedUser
             ? { type: "user" as const, id: e.assignedUser.id, name: e.assignedUser.name, email: e.assignedUser.email }
@@ -1423,6 +1430,10 @@ export function toWirePayload(
         conversationId: d.conversation_id,
         contactId: d.contact_id,
         contact: wireContactLean(d.contact),
+        // Current thread state at assign time — lets a partner route on
+        // status/unread without a callback (same data message.received carries).
+        status: d.status ?? null,
+        unreadCount: d.unread_count ?? null,
         assignee: wireAssignee(d.assignee),
         previousAssignee: wireAssignee(d.previous_assignee),
         changedByUserId: d.changed_by_user_id ?? null,
