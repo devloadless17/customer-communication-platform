@@ -16,9 +16,16 @@
  *   compatibility tarpit — every internal refactor would break their
  *   parsers. The public shape is intentionally narrow.
  *
- * Envelope is **snake_case throughout** to match respond.io / Stripe /
- * GitHub webhook conventions — n8n users come over with snake_case
- * muscle memory and our delivery payloads should not surprise them.
+ * CASING — read carefully, the two layers differ:
+ *   - The INTERNAL PublicEnvelope shapes in THIS file (the `build()` / sample
+ *     payloads below) are snake_case.
+ *   - What PARTNERS ACTUALLY RECEIVE is the flat wire produced by
+ *     `toWirePayload` (further down): the envelope wrapper keys are snake_case
+ *     (`event_type`, `team_id`, `timestamp`), but the block FIELDS are
+ *     camelCase (`conversationId`, `unreadCount`, `changedByUserId`,
+ *     `closedCategory`, …). Document partner-facing fields from `toWirePayload`,
+ *     NOT from the snake_case shapes here. (Canonical partner reference:
+ *     docs/organization-api.md.)
  *
  * `sender` and `assignee` are structured `{ type, id, ... }` objects on
  * purpose: when AI agents start authoring messages and being assigned to
@@ -340,7 +347,9 @@ export const PUBLIC_EVENT_GROUPS: Array<{
         description: "Any field on a contact changed (name, email, custom fields).",
         samplePayload: {
           contact: { id: "cmpcnt_01", name: "Jane D.", email: "jane@example.com" },
-          field_changes: { name: { before: "Jane Doe", after: "Jane D." } },
+          // Array of per-field diffs — matches the ContactFieldChange[] the wire
+          // actually delivers (key/previous/next), NOT an object-map of before/after.
+          field_changes: [{ key: "name", previous: "Jane Doe", next: "Jane D." }],
           tag_changes: null,
           previous_stage_id: null,
           changed_by_user_id: "cmpusr_01",
