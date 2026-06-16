@@ -19,7 +19,7 @@ import {
 import { blobStorage } from "@/lib/blob-storage";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { publish } from "@/lib/events/bus";
-import { publishInTx } from "@/lib/events/outbox";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
 import { MEDIA_SIZE_CAPS, META_DOCUMENT_MIME_ALLOWED, kindFromMime } from "@/lib/media-storage";
 import { transcodeToOggOpus, VOICE_IOS_PROFILE } from "@/lib/media/audio-transcode";
@@ -491,6 +491,12 @@ export class MessagesService {
         this.logger.debug(
           `autoAssignOnAgentSend failed for ${conversationId}: ${String(err)}`,
         );
+      } finally {
+        // Auto-claim/status side-effects publish via publishInTx — kick the
+        // drainer so the conversation.assigned/status_changed webhooks dispatch
+        // instantly too. finally covers both branches + the CAS-race no-op
+        // (a kick with nothing to drain is a harmless cheap poll).
+        kickOutbox();
       }
     })();
   }
