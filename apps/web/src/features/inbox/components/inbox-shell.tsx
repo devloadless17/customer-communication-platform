@@ -1188,13 +1188,17 @@ export function InboxShell({
               as a fixed-width column. */}
           <div
             className={cn(
-              // Desktop: fixed-width column driven by the drag-resizable
-              // `--inbox-lw` var, clamped to the hook's [260, 560] bounds.
-              // Mobile: full-width (flex-1). The var is always set (320 until
-              // the persisted width loads), so server and client first paint
-              // agree — no hydration mismatch.
-              "flex min-h-0 flex-1 md:w-[var(--inbox-lw)] md:min-w-[260px] md:max-w-[560px] md:flex-initial",
-              activeId ? "hidden md:flex" : "flex",
+              // Multi-pane (list + thread side-by-side) starts at lg, NOT md.
+              // The 768–1023 (md) band is single-pane — the list OR the active
+              // thread, full-width — because at md the AppRail + a 260px list +
+              // the thread left the thread column too cramped (~115px worst
+              // case, expanded rail). Below lg the list is full-width (flex-1);
+              // at lg+ it's the fixed-width drag-resizable column (--inbox-lw,
+              // clamped [260,560]). The var is always set (320 until the
+              // persisted width loads) so first paint agrees — no hydration
+              // mismatch.
+              "flex min-h-0 flex-1 lg:w-[var(--inbox-lw)] lg:min-w-[260px] lg:max-w-[560px] lg:flex-initial",
+              activeId ? "hidden lg:flex" : "flex",
             )}
             style={
               { "--inbox-lw": `${listWidth ?? 320}px` } as React.CSSProperties
@@ -1220,9 +1224,10 @@ export function InboxShell({
               currentUserId={currentUser.id}
             />
           </div>
-          {/* Drag-to-resize handle between the list and the thread. Desktop
-              only (mobile is single-pane). The 1px visual line sits inside a
-              wider hit area so it's easy to grab; arrows resize when focused. */}
+          {/* Drag-to-resize handle between the list and the thread. Only in the
+              lg+ multi-pane layout (md and below are single-pane). The 1px
+              visual line sits inside a wider hit area so it's easy to grab;
+              arrows resize when focused. */}
           <div
             role="separator"
             aria-orientation="vertical"
@@ -1233,7 +1238,7 @@ export function InboxShell({
             tabIndex={0}
             onPointerDown={onHandleDown}
             onKeyDown={onHandleKeyDown}
-            className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none select-none border-l border-border outline-none md:block"
+            className="group relative hidden w-1 shrink-0 cursor-col-resize touch-none select-none border-l border-border outline-none lg:block"
           >
             {/* Wide invisible grab zone so the thin indicator is still easy to grab. */}
             <span className="absolute inset-y-0 -left-1.5 -right-1.5 z-10" />
@@ -1241,18 +1246,18 @@ export function InboxShell({
                 focus, so it never reads as a big translucent green bar. */}
             <span className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-transparent transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary" />
           </div>
-          {/* Mobile: thread pane visible only when a thread is active.
-              Desktop: always visible. This is a <section> (NOT <main>) — the
-              layout's SectionShell already renders the page-level <main>, and
-              two nested <main> landmarks is an a11y violation. The aria-label
-              names the region for screen-reader landmark navigation. */}
+          {/* Single-pane (md and below): thread visible only when a thread is
+              active. Multi-pane (lg+): always visible beside the list. This is a
+              <section> (NOT <main>) — the layout's SectionShell already renders
+              the page-level <main>, and two nested <main> landmarks is an a11y
+              violation. The aria-label names the region for SR landmark nav. */}
           <section
             aria-label="Conversation"
             className={cn(
-              // No md:border-l here — the resize handle (above) is the
-              // list/thread separator on desktop now.
-              "relative min-w-0 flex-1 bg-background md:flex",
-              activeId ? "flex" : "hidden md:flex",
+              // No lg:border-l here — the resize handle (above) is the
+              // list/thread separator in the lg+ multi-pane layout now.
+              "relative min-w-0 flex-1 bg-background lg:flex",
+              activeId ? "flex" : "hidden lg:flex",
             )}
           >
             {/* Delay-gated loading bar for the conversation pane only. A thread
@@ -1496,8 +1501,6 @@ function ThreadWorkspace({
             tagCatalog={tags}
             teamMembers={teamMembers}
             currentUserName={currentUser.name}
-            stageCatalog={stageCatalog}
-            canManageStages={canManageStages}
             initialCollapsed={initialContactPanelCollapsed}
             initialDetailsWidth={initialDetailsWidth}
             onGoToMessage={onGoToMessage}
@@ -1526,8 +1529,6 @@ function ThreadWorkspace({
             tagCatalog={tags}
             teamMembers={teamMembers}
             currentUserName={currentUser.name}
-            stageCatalog={stageCatalog}
-            canManageStages={canManageStages}
             initialCollapsed={false}
             initialDetailsWidth={initialDetailsWidth}
             onGoToMessage={(id) => {
@@ -1579,7 +1580,7 @@ function ChatSkeleton({
             type="button"
             onClick={onMobileBack}
             aria-label="Back to conversations"
-            className="-ml-1 inline-flex size-8 pointer-coarse:size-9 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+            className="-ml-1 inline-flex size-8 pointer-coarse:size-9 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:hidden"
           >
             <ChevronLeft className="size-5" />
           </button>

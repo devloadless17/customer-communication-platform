@@ -68,7 +68,7 @@ export default async function PlatformOrganizationDetailPage({
           <h1 className="text-2xl font-semibold tracking-tight">{team.name}</h1>
           <TeamStatusBadge status={team.status} />
         </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span className="font-mono">{team.id}</span>
           <span>·</span>
           <span>
@@ -95,7 +95,7 @@ export default async function PlatformOrganizationDetailPage({
       <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-col gap-1">
           <div className="text-sm font-semibold">Access</div>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             {team.status === "pending" &&
               "This organization is waiting for approval — its members can't use the app yet."}
             {team.status === "active" &&
@@ -104,7 +104,7 @@ export default async function PlatformOrganizationDetailPage({
               "This organization is suspended — its members are locked out until reactivated."}
           </p>
           {team.statusReason && (
-            <p className="mt-1 text-[12px] text-muted-foreground">
+            <p className="mt-1 text-xs text-muted-foreground">
               <span className="font-medium text-foreground">Reason:</span>{" "}
               {team.statusReason}
             </p>
@@ -147,7 +147,7 @@ export default async function PlatformOrganizationDetailPage({
           />
         </header>
         {members.length === 0 ? (
-          <div className="px-6 py-8 text-center text-[12px] text-muted-foreground">
+          <div className="px-6 py-8 text-center text-xs text-muted-foreground">
             No members yet.
           </div>
         ) : (

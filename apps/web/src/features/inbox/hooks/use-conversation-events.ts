@@ -97,6 +97,20 @@ function sortKey(m: Message): number {
  * signal present on both sides. Empty bodies (media without caption) are skipped
  * so distinct attachments aren't collapsed.
  */
+// A recovery refetch (runBackfill / runFullRefetch) reconciling an own optimistic
+// send IS confirmation — fire the SAME cancel signal the live `message:new` frame
+// fires (see onMessageNew) so the 30s send-watchdog (reply-box.tsx) can't LATER
+// phantom-fail an already-delivered row and bait a Retry double-send (the exact
+// trap the body/media branches below guard against). Idempotent: the watchdog
+// listener is `{ once: true }` and self-removes, so a strict-mode updater re-run
+// just no-ops. A benign window event (no setState), safe to fire from inside the
+// setData updater where reconcileOptimisticAgainst runs.
+function confirmOptimistic(m: Message): void {
+  if (m.clientTempId && typeof window !== "undefined") {
+    window.dispatchEvent(new Event(`ccp:optimistic-confirmed:${m.clientTempId}`));
+  }
+}
+
 function reconcileOptimisticAgainst(
   existing: Message[],
   fresh: Message[],
@@ -150,6 +164,7 @@ function reconcileOptimisticAgainst(
       const remaining = freshBodyCounts.get(m.body) ?? 0;
       if (remaining > 0) {
         freshBodyCounts.set(m.body, remaining - 1);
+        confirmOptimistic(m);
         return false;
       }
     }
@@ -159,6 +174,7 @@ function reconcileOptimisticAgainst(
       const remaining = freshMediaByKind.get(localKind) ?? 0;
       if (remaining > 0) {
         freshMediaByKind.set(localKind, remaining - 1);
+        confirmOptimistic(m);
         return false;
       }
     }

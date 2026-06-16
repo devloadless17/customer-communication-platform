@@ -16,6 +16,14 @@ export default function GlobalError({
   return (
     <html>
       <body className="min-h-svh bg-background text-foreground">
+        {/* Mirror next-themes' FOUC script: this standalone document renders its
+            own <html>/<body> outside the ThemeProvider, so it would otherwise
+            paint light-themed (white flash) for dark-mode users. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem("theme");var d=t==="dark"||((!t||t==="system")&&window.matchMedia("(prefers-color-scheme: dark)").matches);if(d)document.documentElement.classList.add("dark");}catch(e){}})();`,
+          }}
+        />
         <div className="mx-auto flex min-h-svh max-w-md flex-col items-center justify-center gap-4 px-6 text-center">
           <h1 className="text-xl font-semibold">Something broke.</h1>
           <p className="text-sm text-muted-foreground">

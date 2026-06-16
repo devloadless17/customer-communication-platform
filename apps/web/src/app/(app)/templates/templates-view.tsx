@@ -216,7 +216,7 @@ export function TemplatesView({
           <div className="font-medium text-warning-fg">
             WhatsApp not connected
           </div>
-          <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             Connect your number in{" "}
             <Link href="/settings/whatsapp?expand=advanced" className="text-primary hover:underline">
               Settings → WhatsApp
@@ -231,7 +231,7 @@ export function TemplatesView({
           <div className="font-medium text-warning-fg">
             WhatsApp Business Account ID needed
           </div>
-          <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             Templates live at the WABA level. Add your ID in{" "}
             <Link href="/settings/whatsapp?expand=advanced" className="text-primary hover:underline">
               Settings → WhatsApp
@@ -430,7 +430,7 @@ function StatusFilterTabs({
             type="button"
             onClick={() => onChange(t.key)}
             className={cn(
-              "rounded px-2.5 py-1 text-[12px] font-medium transition-colors",
+              "rounded px-2.5 py-1 text-xs font-medium transition-colors",
               active
                 ? "bg-primary/10 text-primary"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -570,7 +570,7 @@ function DetailDrawer({
 
                 <section>
                   <SectionLabel>Variable bindings</SectionLabel>
-                  <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                     Pull each <code className="rounded bg-muted px-1 text-2xs">{"{{n}}"}</code> from a contact
                     field, or leave it as a manual value the agent fills at
                     broadcast time. Default values cover contacts whose field
@@ -592,7 +592,7 @@ function DetailDrawer({
                         onSaved={(bindings) => onBindingsSaved(template.id, bindings)}
                       />
                     ) : (
-                      <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+                      <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                         You don&apos;t have permission to edit template bindings.
                       </p>
                     )}
@@ -602,7 +602,7 @@ function DetailDrawer({
                 {template.status === "rejected" && (
                   <section>
                     <SectionLabel>Rejection details</SectionLabel>
-                    <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-[12px] text-destructive">
+                    <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
                       Meta rejected this template. WhatsApp Manager has the
                       specific reason — once fixed, delete this and submit a
                       new one with the corrected content.
@@ -684,7 +684,7 @@ function EmptyState({ canCreate }: { canCreate: boolean }) {
         <Check className="size-5" />
       </div>
       <div className="text-sm font-medium">No templates yet</div>
-      <p className="max-w-md text-[12px] leading-relaxed text-muted-foreground">
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
         Create a template here or refresh from Meta to pull in templates you
         approved in WhatsApp Manager. Templates are required to message
         contacts outside the 24-hour window.

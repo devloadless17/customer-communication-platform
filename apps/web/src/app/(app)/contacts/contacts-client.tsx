@@ -551,6 +551,8 @@ export function ContactsClient({
               list.search ||
               list.fieldFilter ||
               list.windowFilter !== "any" ||
+              list.stageFilter !== "any" ||
+              list.sourceFilter !== "all" ||
               list.tagIds.length > 0;
             return (
               <EmptyState

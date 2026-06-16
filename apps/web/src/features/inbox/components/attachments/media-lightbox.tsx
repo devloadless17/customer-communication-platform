@@ -5,7 +5,8 @@ import { ArrowDownToLine, ArrowLeft, ArrowRight, ImageOff, MessageSquare, X, Zoo
 
 import { Button } from "@/components/ui/button";
 import { useFocusTrap } from "@/hooks/use-modal-overlay";
-import { cn } from "@ccp/shared/utils";
+import { useTimezone } from "@/providers/tz-provider";
+import { cn, formatLocaleString } from "@ccp/shared/utils";
 import type { Message } from "@ccp/shared/types";
 
 /**
@@ -42,6 +43,7 @@ export function MediaLightbox({
   onGoToMessage?: (messageId: string) => void;
 }) {
   const current = items[index];
+  const tz = useTimezone();
   const dialogRef = useRef<HTMLDivElement>(null);
   const [zoomed, setZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState<{ x: number; y: number }>({ x: 50, y: 50 });
@@ -150,7 +152,7 @@ export function MediaLightbox({
           <div className="text-2xs text-white/60">
             {items.length > 1 && `${index + 1} of ${items.length} · `}
             {current.media.sizeBytes > 0 && `${formatBytes(current.media.sizeBytes)} · `}
-            {new Date(current.timestamp).toLocaleString()}
+            {formatLocaleString(current.timestamp, tz)}
           </div>
         </div>
         <div className="flex items-center gap-1">

@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 
 import { StepEditorDrawer } from "./step-editor-drawer";
+import { TestRunDrawer } from "./test-run-drawer";
 import { TriggerEditorDrawer } from "./trigger-editor-drawer";
 // Pure graph helpers — import from the standalone module so this shell does
 // not pull in `@xyflow/react` (the canvas's heavy dep) at module-eval time.
@@ -111,7 +112,10 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   const [stepErrors, setStepErrors] = useState<Record<string, string>>({});
   const [topErrors, setTopErrors] = useState<string[]>([]);
   const [pending, startTransition] = useTransition();
-  const [testStatus, setTestStatus] = useState<string | null>(null);
+  // Enqueue-failure banner only (the success path opens the result drawer).
+  const [testError, setTestError] = useState<string | null>(null);
+  // Open test-run result drawer is keyed by runId; null = closed.
+  const [testRunId, setTestRunId] = useState<string | null>(null);
 
   // In-flight save AbortController. Aborted on unmount + before each
   // fresh save so a slow PATCH from a few keystrokes ago can't land
@@ -268,7 +272,12 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
 
   async function handleTest() {
     if (!workflow) return;
-    setTestStatus("Running…");
+    setTestError(null);
+    setTestRunId(null);
+    // Persist the on-screen canvas first so /test runs what the author sees,
+    // not the last auto-saved snapshot (debounced ~1.5s behind).
+    const saved = await persist({ silent: true });
+    if (!saved) return;
     const res = await apiFetch(`/api/team/workflows/${workflow.id}/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -276,10 +285,13 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     });
     if (res.ok) {
       const json = (await res.json()) as { runId: string };
-      setTestStatus(`Test enqueued — runId ${json.runId}. Refresh runs in a couple of seconds.`);
+      // Open the result drawer; it polls GET :id/runs/:runId to completion.
+      setSelectedStepId(null);
+      setTriggerOpen(false);
+      setTestRunId(json.runId);
     } else {
       const txt = await res.text();
-      setTestStatus(`Failed: ${txt}`);
+      setTestError(`Couldn't start test run: ${txt || res.status}`);
     }
   }
 
@@ -458,8 +470,10 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         </div>
       )}
 
-      {testStatus && (
-        <div className="border-b border-border bg-muted/40 px-4 py-2 text-xs">{testStatus}</div>
+      {testError && (
+        <div className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-xs text-destructive">
+          {testError}
+        </div>
       )}
 
       {/* Main: canvas + (optional) drawer. Steps are added inline via the
@@ -517,6 +531,18 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
             onChangeName={updateSelectedName}
             onDelete={deleteSelected}
             onClose={() => setSelectedStepId(null)}
+          />
+        )}
+
+        {/* Test-run result. Opens after Test; mutually exclusive with the
+            editor drawers (handleTest clears both). Selecting a node /
+            trigger doesn't auto-close it — the author closes it via the X. */}
+        {testRunId && workflow && !selectedNode && !triggerOpen && (
+          <TestRunDrawer
+            workflowId={workflow.id}
+            runId={testRunId}
+            graph={graph}
+            onClose={() => setTestRunId(null)}
           />
         )}
       </div>

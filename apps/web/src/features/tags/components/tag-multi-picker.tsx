@@ -128,7 +128,7 @@ export function TagMultiPicker({
 
       <div className="flex-1 overflow-y-auto">
         {filtered.length === 0 && !canCreate ? (
-          <div className="px-4 py-6 text-center text-[12px] text-muted-foreground">
+          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
             No tags yet. Type a name to create one.
           </div>
         ) : (

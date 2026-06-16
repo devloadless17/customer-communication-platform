@@ -49,7 +49,7 @@ export class ErrorBoundary extends Component<Props, State> {
         return this.props.fallback({ error: this.state.error, reset: this.reset });
       }
       return (
-        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-[12px] text-destructive">
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
           Couldn&apos;t render {this.props.label ?? "this item"}.{" "}
           <button
             type="button"

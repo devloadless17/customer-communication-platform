@@ -52,11 +52,12 @@ export function openMobileNav() {
  *   - A left-slide Sheet containing the primary section nav AND the
  *     section's contextual sub-sidebar (passed in via `subSidebar`).
  *
- * NOTE: this is `md:hidden` (full-width top bar only below md). It can't be
- * widened to `lg:hidden` for the 768–1023 tablet band — the (app) shell wraps
- * the section in `md:flex-row`, so a header visible at md becomes a narrow
- * vertical strip instead of a top bar. Making the section sub-nav reachable in
- * the tablet band needs a shell restructure (deferred).
+ * NOTE: this is `md:hidden` (full-width top bar only below md) by design. In
+ * the 768–1023 tablet band the section sub-nav is already reachable: the (app)
+ * shell wraps the section in `md:flex-row` and the SubSidebar shows as a
+ * `md:flex` desktop column there, so this top bar (which a `md:flex-row` parent
+ * would otherwise squeeze into a narrow vertical strip) is intentionally hidden
+ * once the md+ column takes over.
  *
  * Section title is derived from the pathname so we don't have to thread
  * it from every layout. The trigger lives inside the same component so

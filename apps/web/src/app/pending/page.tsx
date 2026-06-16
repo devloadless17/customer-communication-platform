@@ -91,7 +91,7 @@ export default async function PendingPage() {
           <PendingActions />
         </div>
 
-        <p className="mt-4 text-center text-[12px] text-muted-foreground">
+        <p className="mt-4 text-center text-xs text-muted-foreground">
           Signed in as {user.email}
         </p>
       </div>

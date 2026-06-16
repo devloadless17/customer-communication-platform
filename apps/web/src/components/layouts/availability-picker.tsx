@@ -327,7 +327,7 @@ export function AvailabilityPicker({
           onBlur={() => void saveNote()}
           placeholder="Add a status note (optional)"
           className={cn(
-            "h-8 w-full rounded-md border border-border/60 bg-muted/30 px-2.5 text-[12px] outline-none transition-colors",
+            "h-8 w-full rounded-md border border-border/60 bg-muted/30 px-2.5 text-xs outline-none transition-colors",
             "placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:bg-background",
             disabled && "cursor-not-allowed opacity-60",
           )}

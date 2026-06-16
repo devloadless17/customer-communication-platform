@@ -54,7 +54,7 @@ export default async function PlatformOrganizationsPage() {
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-card px-6 py-16 text-center">
           <Building2 className="size-6 text-muted-foreground" />
           <div className="text-sm font-medium">No organizations yet</div>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             They appear here as soon as the first team gets created.
           </p>
         </div>
@@ -96,7 +96,7 @@ export default async function PlatformOrganizationsPage() {
                   </td>
                   <td className="px-4 py-3">
                     {t.whatsappConnected ? (
-                      <span className="inline-flex items-center gap-1.5 text-[12px] text-success-fg">
+                      <span className="inline-flex items-center gap-1.5 text-xs text-success-fg">
                         <CheckCircle2 className="size-3.5" />
                         {t.whatsappDisplayNumber ? (
                           <span className="font-mono">
@@ -107,7 +107,7 @@ export default async function PlatformOrganizationsPage() {
                         )}
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                         <X className="size-3.5" />
                         Not connected
                       </span>
@@ -123,7 +123,7 @@ export default async function PlatformOrganizationsPage() {
                   <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
                     {t.messageCount}
                   </td>
-                  <td className="px-4 py-3 text-[12px] text-muted-foreground">
+                  <td className="px-4 py-3 text-xs text-muted-foreground">
                     <LocalTime iso={t.createdAt} format="listTime" />
                   </td>
                   <td className="px-4 py-3">

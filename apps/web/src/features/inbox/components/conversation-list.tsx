@@ -16,7 +16,6 @@ import {
   Clock,
   Inbox as InboxIcon,
   Loader2,
-  PenSquare,
   Search,
   SearchX,
   Trash2,
@@ -30,7 +29,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { ContactSelectDialog } from "@/features/contacts/components/contact-select-dialog";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { cn } from "@ccp/shared/utils";
 import type {
@@ -114,11 +112,6 @@ function ConversationListImpl({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [deleting, setDeleting] = useState(false);
-  // "New conversation" picker — reuses the app-wide ContactSelectDialog. The
-  // dialog is multi-select; we take the first pick and hand it to
-  // onStartContactChat (get-or-create the thread, then open it). Single-select
-  // by convention, like the forward flow takes the first id.
-  const [newChatOpen, setNewChatOpen] = useState(false);
   // Roving keyboard focus through the loaded rows (j/k or arrows; Enter opens).
   // -1 = no row highlighted (the default; the highlight is opt-in via a keypress
   // so it never competes with the active/unread cues on first paint). Distinct
@@ -507,15 +500,6 @@ function ConversationListImpl({
           </p>
         </div>
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setNewChatOpen(true)}
-            title="New conversation"
-            className="flex size-8 pointer-coarse:size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            aria-label="New conversation"
-          >
-            <PenSquare className="size-4" />
-          </button>
           {canDeleteConversations && (
             <button
               type="button"
@@ -673,9 +657,11 @@ function ConversationListImpl({
                     // <label> wrapping the checkbox is the canonical way to
                     // make the whole row a toggle target — valid HTML, native
                     // keyboard support, no onClick+stopPropagation dance. The
-                    // checkbox lives in a fixed-width LEAD COLUMN (`w-6`) that
-                    // is also reserved (empty) in normal mode below, so toggling
-                    // selection mode never shifts the row content sideways.
+                    // checkbox sits in a w-6 lead column that appears only in
+                    // selection mode; normal rows are flush-left (no reserved
+                    // gutter — an empty gutter looked like wasted indent). A
+                    // ~24px content shift on entering selection mode (a rare,
+                    // deliberate action) is the accepted trade for clean rows.
                     <label
                       className={cn(
                         "flex w-full cursor-pointer items-center",
@@ -711,28 +697,21 @@ function ConversationListImpl({
                       onMouseLeave={cancelHoverPrefetch}
                       onFocus={() => onPrefetchConversation(conversation.id)}
                       className={cn(
-                        "flex w-full items-center rounded-lg text-left",
+                        "block w-full rounded-lg text-left",
                         highlighted &&
                           "bg-accent/30 ring-1 ring-inset ring-primary/40",
                       )}
                       aria-current={highlighted ? "true" : undefined}
                     >
-                      {/* Empty lead column matching the selection-mode checkbox
-                          gutter (`w-6`) so entering/leaving selection mode keeps
-                          the avatar/name/preview at the SAME x-position — no
-                          horizontal jump on toggle. */}
-                      <span className="w-6 shrink-0" aria-hidden="true" />
-                      <div className="min-w-0 flex-1">
-                        <ConversationListItem
-                          conversation={conversation}
-                          contact={contact}
-                          assignedUser={assignedUser}
-                          tags={tags}
-                          currentUserId={currentUserId}
-                          active={activeConversationId === conversation.id}
-                          pending={pendingConversationId === conversation.id}
-                        />
-                      </div>
+                      <ConversationListItem
+                        conversation={conversation}
+                        contact={contact}
+                        assignedUser={assignedUser}
+                        tags={tags}
+                        currentUserId={currentUserId}
+                        active={activeConversationId === conversation.id}
+                        pending={pendingConversationId === conversation.id}
+                      />
                     </button>
                   )}
                 </div>
@@ -799,23 +778,6 @@ function ConversationListImpl({
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* New-conversation picker. Multi-select dialog used single-select-style:
-          we open the first picked contact's thread. onStartContactChat does the
-          get-or-create + open (and toasts on failure). */}
-      <ContactSelectDialog
-        open={newChatOpen}
-        onClose={() => setNewChatOpen(false)}
-        onConfirm={(contactIds) => {
-          setNewChatOpen(false);
-          const first = contactIds[0];
-          if (first) onStartContactChat(first);
-        }}
-        stages={stages}
-        title="New conversation"
-        description="Pick a contact to start chatting with."
-        confirmLabel="Start chat"
-      />
 
       {confirmDialog}
     </div>

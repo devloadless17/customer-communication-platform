@@ -9,8 +9,9 @@ import {
 } from "@/features/inbox/hooks/use-conversation-attachments";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { openAttachment } from "@/features/inbox/lib/open-attachment";
-import { cn } from "@ccp/shared/utils";
+import { cn, formatLocaleString } from "@ccp/shared/utils";
 import { LocalTime } from "@/components/local-time";
+import { useTimezone } from "@/providers/tz-provider";
 import type { InternalNote, Message, User } from "@ccp/shared/types";
 
 import { MediaLightbox } from "./media-lightbox";
@@ -177,6 +178,7 @@ export function AttachmentGallery({
 }
 
 function ThumbTile({ message, onOpen }: { message: Message; onOpen: () => void }) {
+  const tz = useTimezone();
   const media = message.media;
   if (!media) return null;
   const isVideo = media.kind === "video";
@@ -191,7 +193,7 @@ function ThumbTile({ message, onOpen }: { message: Message; onOpen: () => void }
       type="button"
       onClick={onOpen}
       className="group relative aspect-square overflow-hidden rounded-md bg-muted ring-1 ring-border transition-shadow hover:ring-foreground/30"
-      title={media.caption ?? media.filename ?? new Date(message.timestamp).toLocaleString()}
+      title={media.caption ?? media.filename ?? formatLocaleString(message.timestamp, tz)}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
@@ -238,7 +240,7 @@ function FileRow({
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{label}</div>
         <div className="text-2xs text-muted-foreground">
-          {new Date(message.timestamp).toLocaleString()}
+          <LocalTime iso={message.timestamp} format="listTime" />
           {media.sizeBytes > 0 && ` · ${formatBytes(media.sizeBytes)}`}
         </div>
       </div>

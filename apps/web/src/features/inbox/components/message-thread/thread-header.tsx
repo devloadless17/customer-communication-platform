@@ -33,7 +33,7 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
       : `${viewers.map((v) => v.name).join(", ")} are also viewing this chat`;
   return (
     <div
-      className="ml-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-amber-300/50 bg-amber-50 px-2 py-0.5 text-2xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
+      className="ml-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-warning-border bg-warning-bg px-2 py-0.5 text-2xs text-warning-fg"
       title={title}
       aria-label={title}
     >
@@ -41,7 +41,7 @@ function ConversationViewersPill({ viewers }: { viewers: User[] }) {
         {shown.map((u) => (
           <Avatar
             key={u.id}
-            className="size-4 ring-1 ring-amber-50 dark:ring-amber-900/20"
+            className="size-4 ring-1 ring-warning-bg"
           >
             <AvatarFallback
               className="text-[8px] text-white"
@@ -142,7 +142,7 @@ export function ThreadHeader({
           type="button"
           onClick={onMobileBack}
           aria-label="Back to conversations"
-          className="-ml-1 inline-flex size-8 pointer-coarse:size-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          className="-ml-1 inline-flex size-8 pointer-coarse:size-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:hidden"
         >
           <ChevronLeft className="size-5" />
         </button>

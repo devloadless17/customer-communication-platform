@@ -86,7 +86,7 @@ export function TeamStatusControls({
 
   if (isOwnTeam) {
     return (
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-xs text-muted-foreground">
         This is your own organization.
       </p>
     );
@@ -130,7 +130,7 @@ export function TeamStatusControls({
 
       {suspendOpen && status === "active" && (
         <div className="flex w-full max-w-sm flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3">
-          <label htmlFor="suspend-reason" className="text-[12px] font-medium">
+          <label htmlFor="suspend-reason" className="text-xs font-medium">
             Reason (optional — shown to the organization)
           </label>
           <textarea

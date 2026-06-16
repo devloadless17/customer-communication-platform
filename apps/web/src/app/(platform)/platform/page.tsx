@@ -82,7 +82,7 @@ export default async function PlatformOverviewPage() {
             {a.orgs.pending > a.pendingOrgs.length && (
               <Link
                 href="/platform/organizations"
-                className="text-[12px] text-muted-foreground hover:text-foreground"
+                className="text-xs text-muted-foreground hover:text-foreground"
               >
                 View all {a.orgs.pending} →
               </Link>
@@ -180,7 +180,7 @@ function StatCard({
       </div>
       <div>
         <div className="tabular-nums text-2xl font-semibold">{value}</div>
-        <div className="text-[12px] text-muted-foreground">{label}</div>
+        <div className="text-xs text-muted-foreground">{label}</div>
       </div>
     </div>
   );

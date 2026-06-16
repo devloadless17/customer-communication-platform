@@ -477,7 +477,7 @@ export function TemplateForm({
             {(headerKind === "IMAGE" || headerKind === "VIDEO" || headerKind === "DOCUMENT") && (
               <div className="mt-3 flex flex-col gap-2">
                 {!hasAppId && (
-                  <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-[12px]">
+                  <div className="rounded-md border border-warning-border bg-warning-bg px-3 py-2 text-xs">
                     <span className="font-medium text-warning-fg">
                       Meta App ID required.
                     </span>{" "}
@@ -596,7 +596,7 @@ export function TemplateForm({
                   : undefined
               }
             >
-              <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+              <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
                 Pull each variable from a contact field at broadcast time, or
                 leave it as a manual value the agent fills in once. Defaults
                 cover contacts whose field is blank.
@@ -683,7 +683,7 @@ function ButtonsEditor({
   return (
     <div className="flex flex-col gap-2">
       {buttons.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-[12px] text-muted-foreground">
+        <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
           No buttons. Add up to 10 — replies, links or phone calls.
         </div>
       ) : (
@@ -807,7 +807,7 @@ function HeaderKindPill({
       type="button"
       onClick={onClick}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] font-medium transition-colors",
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors",
         active
           ? "border-primary bg-primary/10 text-primary"
           : "border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground",
@@ -894,7 +894,7 @@ function Field({
 }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[12px] font-medium">{label}</span>
+      <span className="text-xs font-medium">{label}</span>
       {children}
       {hint && !error && <span className="text-[10.5px] text-muted-foreground">{hint}</span>}
       {error && <span className="text-[10.5px] text-destructive">{error}</span>}

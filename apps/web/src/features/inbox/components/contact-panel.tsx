@@ -3,7 +3,7 @@
 import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
-import { Check, ChevronDown, ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, UserRound, User as UserIcon, Globe, Flag } from "lucide-react";
+import { ChevronLeft, Mail, Paperclip, Phone, MapPin, Clock, FileText, Loader2, PanelRightClose, User as UserIcon, Globe, Flag } from "lucide-react";
 
 import {
   AddFieldRow,
@@ -12,17 +12,8 @@ import {
 } from "@/features/contacts/components/field-controls";
 import { TagChip, TagAddButton } from "@/features/tags/components/tag-chip";
 import { TagMultiPicker } from "@/features/tags/components/tag-multi-picker";
-import { ContactStagePicker } from "@/features/contacts/components/contact-stage-picker";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -35,28 +26,18 @@ import {
   getClientSocket,
 } from "@/lib/socket-client";
 import {
-  buildOptimisticAssignment,
-  buildOptimisticStageChange,
-  buildOptimisticStatusChange,
   buildOptimisticTagAdded,
   buildOptimisticTagRemoved,
   rollbackOptimisticActivity,
 } from "@/features/inbox/lib/optimistic-activity";
 import { toast } from "@/lib/toast";
-import { predictAssignmentStatus } from "@/features/inbox/lib/predict-status";
 import { STATUS_META } from "@/features/inbox/lib/status-meta";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
-import {
-  AVAILABILITY_DOT_CLASSES,
-  AVAILABILITY_LABELS,
-} from "@ccp/shared/presence";
-import { usePresence } from "@/hooks/use-presence";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
 import type {
   ContactFieldDefinition,
   ContactPanelBuiltins,
-  ContactStage,
   ConversationStatus,
   ConversationWithRefs,
   Tag,
@@ -117,14 +98,8 @@ interface PanelProps {
   canManageFields: boolean;
   /** Team-wide tag catalog. Used by the tag picker for select/create. */
   tagCatalog: Tag[];
-  /** Team-wide stage catalog. Drives the Stage section's picker. Optional so
-   *  the panel still renders if a caller hasn't wired it yet — the Stage
-   *  section simply hides until a catalog is supplied. */
-  stageCatalog?: ContactStage[];
-  /** Whether the current user can manage (not just move between) stages —
-   *  gates the picker's "Manage stages…" footer link. */
-  canManageStages?: boolean;
-  /** Team roster used to render the assignee picker. */
+  /** Team roster — forwarded to the Files tab's attachment gallery for
+   *  per-message author avatars. */
   teamMembers: User[];
   /** Current agent's display name — actor on optimistic activity pills
    *  (stage / tag changes made from this panel). */
@@ -157,8 +132,6 @@ function ContactPanelImpl({
   builtins,
   canManageFields,
   tagCatalog,
-  stageCatalog,
-  canManageStages = false,
   teamMembers,
   currentUserName,
   initialCollapsed,
@@ -315,25 +288,17 @@ function ContactPanelImpl({
       seenNoteDelRef.current.add(payload.noteId);
       setLiveNoteCount((n) => Math.max(0, n - 1));
     };
-    const onAssigned: Parameters<typeof socket.on<"conversation:assigned">>[1] = (
-      payload,
-    ) => {
-      if (payload.conversationId !== conversationId) return;
-      setAssigneeId(payload.assignedUser?.id ?? null);
-    };
 
     socket.on("conversation:status", onStatus);
     socket.on("message:new", onMessageNew);
     socket.on("note:new", onNoteNew);
     socket.on("note:deleted", onNoteDeleted);
-    socket.on("conversation:assigned", onAssigned);
 
     return () => {
       socket.off("conversation:status", onStatus);
       socket.off("message:new", onMessageNew);
       socket.off("note:new", onNoteNew);
       socket.off("note:deleted", onNoteDeleted);
-      socket.off("conversation:assigned", onAssigned);
     };
   }, [conversation.id]);
 
@@ -360,29 +325,6 @@ function ContactPanelImpl({
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
   const tagBoxRef = useRef<HTMLDivElement>(null);
 
-  // Assignee — mirrors the thread header's AssignmentDropdown. Reads/writes
-  // Conversation.assignedUserId so changes from above the chat reflect here
-  // (and vice versa). No optimistic update — same single round-trip as the
-  // header picker; the `conversation:assigned` socket echo keeps every open
-  // tab in sync.
-  const [assigneeId, setAssigneeId] = useState<string | null>(
-    data.assignedUser?.id ?? null,
-  );
-  const [assigneePending, setAssigneePending] = useState(false);
-  const [assigneeError, setAssigneeError] = useState<string | null>(null);
-
-  // Stage — mirrors the thread header's ContactStagePicker. Reads/writes
-  // Contact.stageId; persistStage below fires the SAME optimistic frames the
-  // header's persistStageId does (contact:updated + stage-changed pill +
-  // byStage delta) so the header pill, sidebar badge, and this panel stay in
-  // lockstep. NOT part of the EditableState dirty-check set — stage is a
-  // single-tap pick with no in-progress text the conflict banner needs to
-  // guard, so it lives in its own state (the contact:updated listener above
-  // re-seeds it via the contact-prop re-sync effect, same as assigneeId).
-  const [stageId, setStageId] = useState<string | null>(
-    contact.stageId ?? null,
-  );
-
   // Re-sync when navigating to a different conversation. Without this the
   // panel would render the previous contact's edits against the new contact.
   useEffect(() => {
@@ -395,9 +337,6 @@ function ContactPanelImpl({
     setCountry(contact.countryCode ?? "");
     setCustomFields(contact.customFields ?? {});
     setTagIds(contact.tagIds ?? []);
-    setStageId(contact.stageId ?? null);
-    setAssigneeId(data.assignedUser?.id ?? null);
-    setAssigneeError(null);
     setTagPickerOpen(false);
   }, [
     contact.id,
@@ -410,8 +349,6 @@ function ContactPanelImpl({
     contact.countryCode,
     contact.customFields,
     contact.tagIds,
-    contact.stageId,
-    data.assignedUser?.id,
   ]);
 
   // Keep our local tag catalog in sync with the server-fetched one (changes
@@ -532,11 +469,6 @@ function ContactPanelImpl({
       payload,
     ) => {
       if (payload.contact.id !== contactId) return;
-      // Stage isn't part of the EditableState conflict guard (it's a single
-      // pick, no in-progress text to clobber) — converge it eagerly on every
-      // frame, exactly like assigneeId does in onAssigned. Covers a teammate's
-      // header/drawer stage change AND our own optimistic echo.
-      setStageId(payload.contact.stageId ?? null);
       const incoming = {
         name: payload.contact.name,
         firstName: payload.contact.firstName ?? "",
@@ -773,210 +705,6 @@ function ContactPanelImpl({
     return true;
   }
 
-  /**
-   * Assignee picker. POSTs to the same `/conversations/:id/assign` endpoint
-   * as the thread header's AssignmentDropdown, so changes from either place
-   * write to the same row and the `conversation:assigned` socket echo syncs
-   * the other UI surface within a beat.
-   */
-  async function persistAssignee(nextId: string | null) {
-    if (assigneePending) return;
-    // Predict the status side-effect via the SHARED predictAssignmentStatus —
-    // the same function the thread-header AssignmentDropdown uses, mirroring the
-    // server rule (assignment NEVER sets "open"; assign+closed → pending,
-    // unassign+open → pending, else unchanged). Driven off `liveStatus` (the
-    // panel's local mirror) so a teammate's concurrent close/reopen is already
-    // reflected. (This inline ternary previously resurrected the removed
-    // "assign → open" rule — single-sourcing it closes that drift for good.)
-    const predictedNextStatus = predictAssignmentStatus(liveStatus, nextId);
-    const statusWillChange = predictedNextStatus !== liveStatus;
-    // Re-picking the CURRENT assignee is a no-op UNLESS it would still flip
-    // status (claim an assigned-but-pending chat → open).
-    if (nextId === assigneeId && !statusWillChange) return;
-    setAssigneePending(true);
-    setAssigneeError(null);
-    const prevId = assigneeId;
-    const prevUser = prevId ? teamMembers.find((u) => u.id === prevId) ?? null : null;
-    const nextUser = nextId ? teamMembers.find((u) => u.id === nextId) ?? null : null;
-    // Optimistic: paint locally + fan the same socket frames the server
-    // will broadcast so every surface flips instantly. Order matches the
-    // server publish order: assigned first, then status.
-    setAssigneeId(nextId);
-    // Bundle every optimistic frame (assigned + activity + maybe status +
-    // status-activity) into ONE flushSync so chip + pill commit in a single
-    // paint. See status-dropdown.tsx for the full rationale on why splitting
-    // into two flushSync calls produces a visible "log lags everything" gap.
-    // `optimistic: true` skips inbox-list resync + counts refetch during the
-    // in-flight PATCH; the authoritative server frame drives convergence.
-    const assignActivity = buildOptimisticAssignment({
-      teamId: conversation.teamId,
-      conversationId: conversation.id,
-      actorName: currentUserName,
-      assignedToName: nextUser?.name ?? null,
-    });
-    const assignActivityId = assignActivity.id;
-    let statusActivityId: string | null = null;
-    const frames: Parameters<typeof dispatchLocalSocketEvents>[0] = [
-      [
-        "conversation:assigned",
-        {
-          teamId: conversation.teamId,
-          conversationId: conversation.id,
-          assignedUser: nextUser,
-          optimistic: true,
-        },
-      ],
-      assignActivity.frame,
-    ];
-    if (statusWillChange) {
-      const statusActivity = buildOptimisticStatusChange({
-        teamId: conversation.teamId,
-        conversationId: conversation.id,
-        actorName: currentUserName,
-        status: predictedNextStatus,
-      });
-      statusActivityId = statusActivity.id;
-      frames.push([
-        "conversation:status",
-        {
-          teamId: conversation.teamId,
-          conversationId: conversation.id,
-          status: predictedNextStatus,
-          optimistic: true,
-        },
-      ]);
-      frames.push(statusActivity.frame);
-    }
-    dispatchLocalSocketEvents(frames);
-    const rollbackActivity = () => {
-      rollbackOptimisticActivity(conversation.teamId, conversation.id, assignActivityId);
-      if (statusActivityId) {
-        rollbackOptimisticActivity(conversation.teamId, conversation.id, statusActivityId);
-      }
-    };
-    try {
-      const res = await apiFetch(`/api/conversations/${conversation.id}/assign`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assignedUserId: nextId }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        setAssigneeError(body.error ?? "Couldn't update");
-        setAssigneeId(prevId);
-        dispatchLocalSocketEvent("conversation:assigned", {
-          teamId: conversation.teamId,
-          conversationId: conversation.id,
-          assignedUser: prevUser,
-        });
-        if (statusWillChange) {
-          dispatchLocalSocketEvent("conversation:status", {
-            teamId: conversation.teamId,
-            conversationId: conversation.id,
-            status: liveStatus,
-          });
-        }
-        rollbackActivity();
-        return;
-      }
-      // No router.refresh(): the optimistic conversation:assigned (+ status)
-      // dispatches already flip every live surface, and the server frame
-      // converges. A refresh would re-SSR the whole inbox page (now heavy —
-      // `?c=<id>` in the URL makes it re-fetch the full open thread).
-    } catch (err) {
-      setAssigneeError(err instanceof Error ? err.message : "Network error");
-      setAssigneeId(prevId);
-      dispatchLocalSocketEvent("conversation:assigned", {
-        teamId: conversation.teamId,
-        conversationId: conversation.id,
-        assignedUser: prevUser,
-      });
-      if (statusWillChange) {
-        dispatchLocalSocketEvent("conversation:status", {
-          teamId: conversation.teamId,
-          conversationId: conversation.id,
-          status: liveStatus,
-        });
-      }
-      rollbackActivity();
-    } finally {
-      setAssigneePending(false);
-    }
-  }
-
-  /**
-   * Stage picker. Byte-for-byte mirrors the thread header's `persistStageId`
-   * (message-thread.tsx) so a stage change from EITHER surface fans the same
-   * optimistic frames and converges identically:
-   *   1. `contact:updated` (optimistic) — flips the header pill, sidebar chip,
-   *      LRU cache, and this panel in one paint.
-   *   2. the `stage_changed` activity pill — keeps the timeline log in sync.
-   *   3. a `ccp:contact-stage-delta` window event — lets useConversationCounts
-   *      patch its byStage map locally so the sidebar badge flips in the same
-   *      frame instead of lagging a 50-300ms refetch.
-   * Bundled into ONE dispatchLocalSocketEvents so the chip + pill commit in a
-   * single paint. Rollback restores stageId + reverses every frame on failure;
-   * the error surfaces via toast (consistent with field/tag failures below).
-   */
-  async function persistStage(next: string) {
-    const prev = stageId;
-    if (next === prev) return;
-    setStageId(next);
-    const stageActivity = buildOptimisticStageChange({
-      teamId: contact.teamId,
-      conversationId: conversation.id,
-      actorName: currentUserName,
-      fromStageName: stageCatalog?.find((s) => s.id === prev)?.name ?? null,
-      toStageName: stageCatalog?.find((s) => s.id === next)?.name ?? null,
-    });
-    const stageActivityId = stageActivity.id;
-    dispatchLocalSocketEvents([
-      [
-        "contact:updated",
-        {
-          teamId: contact.teamId,
-          contact: { ...contact, stageId: next },
-          optimistic: true,
-        },
-      ],
-      stageActivity.frame,
-    ]);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(
-        new CustomEvent("ccp:contact-stage-delta", {
-          detail: { contactId: contact.id, prevStageId: prev, nextStageId: next },
-        }),
-      );
-    }
-    const res = await apiFetch(`/api/contacts/${contact.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ stageId: next }),
-    });
-    if (!res.ok) {
-      setStageId(prev);
-      dispatchLocalSocketEvent("contact:updated", {
-        teamId: contact.teamId,
-        contact: { ...contact, stageId: prev },
-        optimistic: true,
-      });
-      rollbackOptimisticActivity(contact.teamId, conversation.id, stageActivityId);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(
-          new CustomEvent("ccp:contact-stage-delta", {
-            detail: { contactId: contact.id, prevStageId: next, nextStageId: prev },
-          }),
-        );
-      }
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      toast.error("Couldn't change stage", {
-        description: body.error ?? "Please try again.",
-      });
-    }
-    // No router.refresh(): the optimistic frames + byStage delta already flip
-    // every live surface and the server frame converges. See persistStageId.
-  }
-
   // PUT replaces the whole set (server semantics), so we hand it the full
   // next array. Optimistic: paint locally first, rollback on error.
   async function persistTagIds(nextIds: string[]) {
@@ -1150,8 +878,8 @@ function ContactPanelImpl({
         </button>
       </div>
       {pendingRemote && view === "details" ? (
-        <div className="flex items-start gap-2 border-b border-amber-300/40 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200">
-          <span className="mt-px inline-block size-1.5 shrink-0 rounded-full bg-amber-500" />
+        <div className="flex items-start gap-2 border-b border-warning-border bg-warning-bg px-4 py-2 text-xs text-warning-fg">
+          <span className="mt-px inline-block size-1.5 shrink-0 rounded-full bg-warning-fg" />
           <div className="min-w-0 flex-1">
             <div className="font-medium">A teammate just updated this contact</div>
             <div className="opacity-80">
@@ -1162,14 +890,14 @@ function ContactPanelImpl({
               <button
                 type="button"
                 onClick={acceptPendingRemote}
-                className="rounded-md bg-amber-600 px-2 py-0.5 text-2xs font-medium text-white hover:bg-amber-700"
+                className="rounded-md bg-warning-fg px-2 py-0.5 text-2xs font-medium text-white hover:opacity-90"
               >
                 Reload
               </button>
               <button
                 type="button"
                 onClick={dismissPendingRemote}
-                className="rounded-md border border-amber-400/60 px-2 py-0.5 text-2xs font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-800/30"
+                className="rounded-md border border-warning-border px-2 py-0.5 text-2xs font-medium text-warning-fg hover:bg-warning-bg"
               >
                 Keep mine
               </button>
@@ -1472,57 +1200,10 @@ function ContactPanelImpl({
           )}
         </Section>
 
-        <Separator />
-
-        <Section title="Assignee">
-          <AssigneePicker
-            teamId={conversation.teamId}
-            currentId={assigneeId}
-            // ACTIVE members for the dropdown — assigning a NEW conversation
-            // to a deactivated agent has no defensible UX. The picker
-            // resolves the CURRENT id's label from this same list, so
-            // splice the current assignee back in even if they're
-            // deactivated (otherwise the picker shows "no assignee" until
-            // the operator picks someone else, which is misleading — the
-            // thread IS still assigned). Pre-existing UX gap from the
-            // 2026-05-26 cross-cutting audit (D6).
-            teamMembers={(() => {
-              const active = teamMembers.filter((u) => u.isActive);
-              if (assigneeId && !active.some((u) => u.id === assigneeId)) {
-                const current = teamMembers.find((u) => u.id === assigneeId);
-                if (current) return [current, ...active];
-              }
-              return active;
-            })()}
-            pending={assigneePending}
-            onChange={(next) => void persistAssignee(next)}
-          />
-          {assigneeError && (
-            <div className="mt-2 text-2xs text-destructive">
-              {assigneeError}
-            </div>
-          )}
-        </Section>
-
-        {/* Stage — the highest-value CRM attribute, previously reachable only
-            from the @2xl-gated header pill. Mirrors contact-detail-drawer's
-            Stage section. Only rendered when a catalog is wired in (the prop is
-            optional); the picker itself shows an empty state when the team has
-            no stages defined yet. */}
-        {stageCatalog && (
-          <>
-            <Separator />
-            <Section title="Stage">
-              <ContactStagePicker
-                stages={stageCatalog}
-                currentStageId={stageId}
-                onChange={persistStage}
-                canManage={canManageStages}
-                size="md"
-              />
-            </Section>
-          </>
-        )}
+        {/* Assignee + Stage are NOT rendered here on purpose — both controls
+            live in the thread header (AssignmentDropdown + ContactStagePicker),
+            so duplicating them in this rail was redundant. The contacts-page
+            ContactDetailDrawer still owns the stage UI for off-inbox editing. */}
 
         <Separator />
 
@@ -1714,123 +1395,3 @@ export const ContactPanel = memo(ContactPanelImpl, (prev, next) => {
   if (a.messageCount !== b.messageCount) return false;
   return true;
 });
-
-/**
- * Sidebar assignee picker. Mirrors the conversation header's
- * `AssignmentDropdown` shape and writes to the same `Conversation.assignedUserId`
- * — the two pickers are intentionally the same control rendered in two places
- * so changes in one reflect in the other via the `conversation:assigned`
- * socket echo.
- */
-function AssigneePicker({
-  teamId,
-  currentId,
-  teamMembers,
-  pending,
-  onChange,
-}: {
-  teamId: string;
-  currentId: string | null;
-  teamMembers: User[];
-  pending: boolean;
-  onChange: (next: string | null) => void;
-}) {
-  const current = currentId ? teamMembers.find((u) => u.id === currentId) ?? null : null;
-  // Subscribe to the team's online + availability state inline. usePresence is
-  // cheap (shared socket; two listeners) and only this picker reads the
-  // result, so threading availabilityByUserId through ContactPanel for one
-  // dropdown isn't worth the prop-drilling.
-  const { onlineUserIds, availabilityByUserId } = usePresence(teamId, "");
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          disabled={pending}
-          className={cn(
-            "flex h-8 w-full items-center gap-2 rounded-md border border-input bg-background px-2.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-            pending && "opacity-60",
-          )}
-        >
-          {current ? (
-            <>
-              <Avatar className="size-5">
-                {current.avatarUrl ? (
-                  <AvatarImage src={current.avatarUrl} alt={current.name} />
-                ) : null}
-                <AvatarFallback seed={current.id} className="text-3xs">{initials(current.name)}</AvatarFallback>
-              </Avatar>
-              <span className="truncate font-normal">{current.name}</span>
-            </>
-          ) : (
-            <>
-              <UserRound className="size-4 text-muted-foreground" />
-              <span className="text-muted-foreground">Unassigned</span>
-            </>
-          )}
-          <ChevronDown className="ml-auto size-3.5 text-muted-foreground" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        className="w-56"
-        // Suppress Radix focus-return so the trigger doesn't keep the
-        // `:focus-visible` ring after a mouse pick. See status-dropdown.tsx
-        // for the full rationale.
-        onCloseAutoFocus={(e) => e.preventDefault()}
-      >
-        <DropdownMenuLabel>Assigned agent</DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => onChange(null)}>
-          {currentId === null && <Check className="size-3.5" />}
-          <span className={cn("text-muted-foreground", currentId === null && "ml-1")}>
-            Unassigned
-          </span>
-        </DropdownMenuItem>
-        {teamMembers.map((u) => {
-          const online = onlineUserIds.has(u.id);
-          const availability = availabilityByUserId[u.id];
-          const dotClass = online
-            ? (availability
-                ? AVAILABILITY_DOT_CLASSES[availability.status]
-                : AVAILABILITY_DOT_CLASSES.available)
-            : AVAILABILITY_DOT_CLASSES.offline;
-          const cue = !online
-            ? "Offline"
-            : availability && availability.status !== "available"
-              ? AVAILABILITY_LABELS[availability.status]
-              : null;
-          return (
-            <DropdownMenuItem
-              key={u.id}
-              onSelect={() => onChange(u.id)}
-              title={availability?.message ?? undefined}
-            >
-              {currentId === u.id ? (
-                <Check className="size-3.5" />
-              ) : (
-                <div className="relative">
-                  <Avatar className="size-5">
-                    {u.avatarUrl ? <AvatarImage src={u.avatarUrl} alt={u.name} /> : null}
-                    <AvatarFallback seed={u.id} className="text-3xs">{initials(u.name)}</AvatarFallback>
-                  </Avatar>
-                  <span
-                    className={cn(
-                      "absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-1 ring-popover",
-                      dotClass,
-                    )}
-                    aria-hidden
-                  />
-                </div>
-              )}
-              <span className="flex-1 truncate">{u.name}</span>
-              {cue && (
-                <span className="shrink-0 text-3xs text-muted-foreground">{cue}</span>
-              )}
-            </DropdownMenuItem>
-          );
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
