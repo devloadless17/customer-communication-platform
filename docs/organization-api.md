@@ -304,7 +304,16 @@ pick the events. We generate a signing secret (`ccp_whsec_…`) shown once.
 | `X-CCP-Event` | the event type (e.g. `message.received`) |
 | `X-CCP-Delivery` | unique id for this delivery — **use it to dedupe** (we deliver at-least-once) |
 | `X-CCP-Signature` | `t=<unix-seconds>,v1=<hmac>` — verify it (below) |
-| `X-CCP-Depth` | loop-guard hop count; forward it if you call our API back |
+| `X-CCP-Depth` | loop-guard hop count — see "Loop safety" below |
+
+> **Loop safety (required if your automation calls our API back).** If a webhook
+> handler turns around and calls the `/v1` API (e.g. auto-reply, tag, status),
+> you **must forward the `X-CCP-Depth` header verbatim** on that call. We
+> increment it each hop and reject at depth 8 (`429 chain_depth_exceeded`), which
+> is what breaks an accidental webhook → API → webhook loop. Without forwarding,
+> the only backstop is the per-conversation send rate limit (30/min) — bounded,
+> but it can burn real WhatsApp sends before it trips. Set `"silent": true` on
+> the mutating call to also suppress the echo webhook for that write.
 
 **Events:** `message.received`, `message.sent`, `message.status_changed`,
 `conversation.assigned`, `conversation.opened`, `conversation.closed`,

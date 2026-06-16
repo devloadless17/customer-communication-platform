@@ -232,3 +232,8 @@ testing, disable/mock that last node or watch the branch it takes.)
   *outbound* `message.sent`, which n8n is not subscribed to — no loop.
 - `X-CCP-Depth` chain guard caps relayed chains; `silent: true` on the `…/ai`
   call skips the webhook echo of the AI's own pause.
+- **Forward `X-CCP-Depth` verbatim** on every `/v1` call your flow makes from a
+  webhook (the reply send, the `…/ai` toggle, tag/status writes). Copy it from
+  the inbound request headers to the HTTP node's headers. We increment it per
+  hop and reject at depth 8 — that's what stops an accidental loop cheaply.
+  Without it, only the 30/min per-conversation rate limit guards you.
