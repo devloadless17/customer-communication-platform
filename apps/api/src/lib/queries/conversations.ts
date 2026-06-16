@@ -355,11 +355,15 @@ export async function getConversationWithRefs(
           durationSeconds: true,
         },
       },
-      // Totals computed in the SAME round-trip via a relation aggregate —
-      // replaces two separate count() queries (one per message + note) that
-      // ran on every thread open (a hot path: chat-switch cache-miss + reconnect
-      // refetch). Same numbers, two fewer round-trips.
-      _count: { select: { messages: true, notes: true } },
+      // database-added-1: only COUNT the bounded `notes` relation here. The
+      // message total now reads the denormalized `incoming+outgoingMessagesCount`
+      // columns (auto-returned by this `include`) instead of an UNCAPPED
+      // COUNT(messages) that scanned every message of the conversation on every
+      // thread open (a hot path: chat-switch cache-miss + reconnect refetch) —
+      // O(thread length) per open at scale. The denorm is maintained by ingest
+      // (inbound) + the analytics subscriber (outbound) and reconciled by the
+      // conversation-analytics-drift sweeper, so a rare drift self-heals.
+      _count: { select: { notes: true } },
     },
   });
   if (!row) return null;
@@ -377,7 +381,7 @@ export async function getConversationWithRefs(
   // `Contact.lastInboundAt` column maintained by the ingest path — the
   // previous Message scan with a join through Conversation seq-scanned
   // a heavy contact's entire history on every thread open.
-  const messageCount = row._count.messages;
+  const messageCount = row.incomingMessagesCount + row.outgoingMessagesCount;
   const noteCount = row._count.notes;
   const lastInboundAtIso = row.contact.lastInboundAt
     ? row.contact.lastInboundAt.toISOString()

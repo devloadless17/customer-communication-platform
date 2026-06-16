@@ -87,6 +87,9 @@ export async function ingestCallEvent(
   const defaultStageId = await ensureDefaultStage(teamId);
   const { contact, conversation, needsReopen } = await runWithSerializableRetry(
     async (tx) => {
+      // TODO(multi-channel / INB-5): by-phone lookup, no channel filter. Correct
+      // today (WhatsApp only); BEFORE channel #2 switch to the channel-aware
+      // identity — see the canonical note at providers/ingest.ts (existingContact).
       const existingContact = await tx.contact.findFirst({
         where: { teamId, phoneNumber: evt.contactPhone },
         select: { id: true },
@@ -491,6 +494,8 @@ async function handlePermissionEvent(
   teamId: string,
   evt: NormalizedCallEvent,
 ): Promise<void> {
+  // TODO(multi-channel / INB-5): by-phone lookup, no channel filter — see the
+  // canonical note at providers/ingest.ts. Switch to channel-aware before channel #2.
   const contact = await db.contact.findFirst({
     where: { teamId, phoneNumber: evt.contactPhone },
     select: { id: true },

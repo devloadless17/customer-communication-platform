@@ -70,39 +70,49 @@ export function stopContactDriftSweeper(): void {
 }
 
 async function sweepOnce(): Promise<void> {
-  // One-pass: join Contact against the per-contact MAX(timestamp) of
-  // inbound messages, update only where the denorm disagrees. Treats
-  // both "actual was NULL but contact has a stale value" and "contact
-  // is missing a value that should be present" as drift.
+  // bjadded-1: page PER-TEAM rather than one cross-tenant full-table UPDATE.
+  // The old single statement joined the ENTIRE Contact table against the ENTIRE
+  // Message table's per-contact MAX(timestamp) — at scale (many teams × millions
+  // of messages) that's a long-running, high-lock, whole-table scan in one
+  // transaction. Scoping each statement to a single team (via the indexed
+  // Message.teamId / Contact.teamId) bounds the footprint and lets unrelated
+  // tenants' writes proceed between iterations.
   //
-  // Message has no contactId column — it joins to Contact through
-  // Conversation. Group by Conversation.contactId to land per-contact maxes.
-  //
-  // IS DISTINCT FROM treats NULL as comparable so the WHERE clause
-  // catches both directions of drift symmetrically.
-  const drifted = await db.$executeRaw`
-    UPDATE "Contact" c
-    SET "lastInboundAt" = sub.last_inbound
-    FROM (
-      SELECT
-        c2.id as contact_id,
-        actual.max_ts as last_inbound
-      FROM "Contact" c2
-      LEFT JOIN (
-        SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
-        FROM "Message" m
-        JOIN "Conversation" co ON co.id = m."conversationId"
-        WHERE m.direction = 'in'
-        GROUP BY co."contactId"
-      ) actual ON actual.contact_id = c2.id
-    ) sub
-    WHERE c.id = sub.contact_id
-      AND c."lastInboundAt" IS DISTINCT FROM sub.last_inbound
-  `;
+  // Per team: join Contact against the per-contact MAX(timestamp) of inbound
+  // messages, update only where the denorm disagrees. `IS DISTINCT FROM` treats
+  // NULL as comparable so both drift directions (stale value vs missing value)
+  // are caught symmetrically. Message has no contactId — it joins through
+  // Conversation.
+  const teams = await db.team.findMany({ select: { id: true } });
+  let totalDrifted = 0;
+  for (const { id: teamId } of teams) {
+    const drifted = await db.$executeRaw`
+      UPDATE "Contact" c
+      SET "lastInboundAt" = sub.last_inbound
+      FROM (
+        SELECT
+          c2.id as contact_id,
+          actual.max_ts as last_inbound
+        FROM "Contact" c2
+        LEFT JOIN (
+          SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
+          FROM "Message" m
+          JOIN "Conversation" co ON co.id = m."conversationId"
+          WHERE m.direction = 'in' AND m."teamId" = ${teamId}
+          GROUP BY co."contactId"
+        ) actual ON actual.contact_id = c2.id
+        WHERE c2."teamId" = ${teamId}
+      ) sub
+      WHERE c.id = sub.contact_id
+        AND c."teamId" = ${teamId}
+        AND c."lastInboundAt" IS DISTINCT FROM sub.last_inbound
+    `;
+    totalDrifted += Number(drifted);
+  }
 
-  if (drifted > 0) {
+  if (totalDrifted > 0) {
     console.warn(
-      `[sweeper.contact-drift] reconciled ${drifted} contact(s) with stale lastInboundAt`,
+      `[sweeper.contact-drift] reconciled ${totalDrifted} contact(s) with stale lastInboundAt across ${teams.length} team(s)`,
     );
   }
 }
