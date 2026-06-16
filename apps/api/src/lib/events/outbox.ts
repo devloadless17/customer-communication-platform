@@ -30,6 +30,27 @@ interface OutboxRow {
 }
 
 /**
+ * Immediate-drain signal. The OutboxDrainerService registers a `kick` fn on
+ * boot; a commit site calls `kickOutbox()` right AFTER its transaction commits
+ * so the event dispatches in ~1ms instead of waiting out the drainer's poll.
+ * Decoupled via a module-level hook because framework-agnostic lib code can't
+ * import the NestJS drainer (layering) — same pattern as `setSharedDb`.
+ *
+ * MUST be called AFTER commit, never inside the tx: the drainer's claim uses
+ * SKIP LOCKED and can't see an uncommitted row, so a pre-commit kick is wasted.
+ * It is a pure latency optimization — never a correctness dependency. If the
+ * kick is skipped (no handler, or called too early), the poll still drains the
+ * row ≤POLL_INTERVAL_MS later.
+ */
+let outboxKick: (() => void) | null = null;
+export function setOutboxKickHandler(fn: (() => void) | null): void {
+  outboxKick = fn;
+}
+export function kickOutbox(): void {
+  outboxKick?.();
+}
+
+/**
  * Persist a domain event INSIDE the caller's transaction so the outbox
  * INSERT commits atomically with the entity write. The drainer
  * (OutboxDrainerService) picks it up on next poll and runs subscribers.

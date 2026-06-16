@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 import { publish } from "@/lib/events/bus";
-import { publishInTx } from "@/lib/events/outbox";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import { ingestCallEvent } from "@/lib/providers/ingest-call";
 import { ensureDefaultStage } from "@/lib/queries";
 import {
@@ -148,6 +148,12 @@ export async function ingestEvents(
     }
   });
   await Promise.all(runners);
+  // All inbound rows + their outbox events are now committed. Kick the drainer
+  // to dispatch realtime + outbound-webhook fan-out NOW (~1ms) instead of
+  // waiting out its poll — this is the inbound message → webhook/realtime path.
+  // Pure latency win: if the drainer is mid-tick or unregistered, the poll
+  // still drains these rows on its next cycle.
+  kickOutbox();
 }
 
 /**

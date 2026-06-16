@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { publishInTx } from "@/lib/events/outbox";
+import { kickOutbox, publishInTx } from "@/lib/events/outbox";
 import type { DomainEventOf } from "@ccp/shared/events/types";
 
 /**
@@ -57,4 +57,8 @@ export async function commitOutboundSend(args: {
       unreadCount: current.unreadCount,
     });
   });
+  // Outbox row is committed — dispatch the message.sent fan-out NOW (~1ms)
+  // rather than waiting out the drainer poll. Pure latency win (poll is the
+  // fallback). See kickOutbox()'s contract in lib/events/outbox.ts.
+  kickOutbox();
 }

@@ -10,6 +10,7 @@ import { runWithConcurrency } from "@/common/concurrency";
 import {
   claimBatch,
   markPublishedWithError,
+  setOutboxKickHandler,
 } from "@/lib/events/outbox";
 import type {
   DomainEvent,
@@ -98,6 +99,10 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly bus: EventBus) {}
 
   onModuleInit(): void {
+    // Register the immediate-drain hook so a tx-context publish dispatches the
+    // instant it commits, instead of waiting out the poll. The poll stays as
+    // the durable fallback (a missed/early kick is harmless — see kick()).
+    setOutboxKickHandler(() => this.kick());
     this.schedule();
     this.logger.log(
       `outbox drainer started — poll=${OutboxDrainerService.POLL_INTERVAL_MS}ms ` +
@@ -105,8 +110,30 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * Drain NOW instead of waiting for the next poll. Called right after an
+   * outbox row commits (via `kickOutbox()`), so realtime + outbound-webhook
+   * fan-out for inbound messages goes out in ~1ms, not up to POLL_INTERVAL_MS.
+   *
+   * Safe under the existing single-timer model: it only RE-SCHEDULES the one
+   * poll timer to fire immediately (0ms) — it never starts a second timer
+   * chain or calls tick() directly. If a tick is already running, it's a
+   * no-op: that tick drains the table empty and its finally reschedules the
+   * steady poll. Rapid kicks (a 30-message batch) coalesce into one 0ms tick.
+   */
+  kick(): void {
+    if (this.stopping || this.inflight) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      void this.tick();
+    }, 0);
+  }
+
   async onModuleDestroy(): Promise<void> {
     this.stopping = true;
+    // Drop the kick hook so a late post-commit kick during shutdown can't
+    // reschedule a tick after we've started draining to exit.
+    setOutboxKickHandler(null);
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
