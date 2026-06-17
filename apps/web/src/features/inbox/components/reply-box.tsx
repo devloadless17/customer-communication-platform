@@ -936,12 +936,24 @@ export function ReplyBox({
         // pins each pill in send order right after the bubble (shared
         // optimisticSeq), correct from the first paint.
         //
-        // Build order = server publish order (ai → assigned → reopen) so the
-        // ascending optimisticSeq holds message < ai < assigned < reopen. Every
-        // header flip + pill goes into ONE dispatch so they commit in a single
-        // paint (separate dispatches each flushSync → multiple paints → the
-        // "log lags everything else" gap). Each is gated once-per-stretch (see
-        // the *EmittedRef guards) so a rapid burst before the props catch up
+        // Build order = ai → REOPEN → self-assign. The ascending optimisticSeq
+        // assigned here is the order these pills KEEP after the send confirms,
+        // because all three share a `sendGroupId` (this send's clientTempId) and
+        // the timeline sorts pills WITHIN one group by seq — NOT by the racy
+        // server audit `at`, which the server writes near-simultaneously and so
+        // can come back in either order (see message-thread.tsx pin/sort). So
+        // this IS the final settled order: "reopened" then "self-assigned". The
+        // old build order (ai → assigned → reopen) flashed the self-assign pill
+        // ABOVE reopen optimistically, then it dropped below once the server
+        // pills un-pinned and re-sorted by `at` — the upper-thread "vibration" on
+        // an auto-claim into a pending/closed + unassigned + AI-on chat. The
+        // group key is what keeps this NARROW: only these same-send pills are
+        // seq-ordered; every independent log (dropdown status/assign, teammate
+        // actions, stage/tag, history) has no group and still sorts purely by
+        // `at`. Every header flip + pill goes into ONE dispatch so they commit in
+        // a single paint (separate dispatches each flushSync → multiple paints →
+        // the "log lags everything else" gap). Each is gated once-per-stretch
+        // (see the *EmittedRef guards) so a rapid burst before the props catch up
         // doesn't double-emit.
         const sendFrames: Parameters<typeof dispatchLocalSocketEvents>[0] = [];
         if (aiAutopilotEnabled && aiEnabled && !aiPauseEmittedRef.current) {
@@ -951,6 +963,7 @@ export function ReplyBox({
             conversationId,
             actorName: currentUser.name,
             aiEnabled: false,
+            sendGroupId: clientTempId,
           });
           aiPauseOptimisticId = aiActivity.id;
           sendFrames.push(
@@ -961,26 +974,10 @@ export function ReplyBox({
             aiActivity.frame,
           );
         }
-        // Auto-claim: the server self-assigns an UNASSIGNED conversation on send.
-        if (assignedUserId == null && !selfAssignEmittedRef.current) {
-          selfAssignEmittedRef.current = true;
-          const assignActivity = buildOptimisticAssignment({
-            teamId: currentUser.teamId,
-            conversationId,
-            actorName: currentUser.name,
-            assignedToName: currentUser.name,
-          });
-          assignOptimisticId = assignActivity.id;
-          sendFrames.push(
-            [
-              "conversation:assigned",
-              { teamId: currentUser.teamId, conversationId, assignedUser: currentUser, optimistic: true },
-            ],
-            assignActivity.frame,
-          );
-        }
         // Auto-reopen: the server promotes a non-`open` conversation to open on
         // send (covers both the unassigned-claim and the already-assigned paths).
+        // Emitted BEFORE the self-assign so the pills settle "reopened" then
+        // "self-assigned" (see the build-order note above).
         if (status != null && status !== "open" && !reopenEmittedRef.current) {
           reopenEmittedRef.current = true;
           const statusActivity = buildOptimisticStatusChange({
@@ -988,6 +985,7 @@ export function ReplyBox({
             conversationId,
             actorName: currentUser.name,
             status: "open",
+            sendGroupId: clientTempId,
           });
           statusOptimisticId = statusActivity.id;
           sendFrames.push(
@@ -996,6 +994,25 @@ export function ReplyBox({
               { teamId: currentUser.teamId, conversationId, status: "open", optimistic: true },
             ],
             statusActivity.frame,
+          );
+        }
+        // Auto-claim: the server self-assigns an UNASSIGNED conversation on send.
+        if (assignedUserId == null && !selfAssignEmittedRef.current) {
+          selfAssignEmittedRef.current = true;
+          const assignActivity = buildOptimisticAssignment({
+            teamId: currentUser.teamId,
+            conversationId,
+            actorName: currentUser.name,
+            assignedToName: currentUser.name,
+            sendGroupId: clientTempId,
+          });
+          assignOptimisticId = assignActivity.id;
+          sendFrames.push(
+            [
+              "conversation:assigned",
+              { teamId: currentUser.teamId, conversationId, assignedUser: currentUser, optimistic: true },
+            ],
+            assignActivity.frame,
           );
         }
         if (sendFrames.length > 0) dispatchLocalSocketEvents(sendFrames);

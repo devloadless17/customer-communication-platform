@@ -47,6 +47,11 @@ function base(
   conversationId: string,
   actorName: string,
   kind: ConversationActivityEvent["kind"],
+  // Set ONLY when this stub is part of a single send's auto-claim trio (the
+  // reply-box path passes the send's clientTempId). Keeps the trio ordered by
+  // seq across reconcile so its racy server `at` can't swap the pills. Undefined
+  // for independent actions (dropdown / stage / tag) — they sort purely by `at`.
+  sendGroupId?: string,
 ): ConversationActivityEvent {
   return {
     id: newOptimisticId(),
@@ -67,6 +72,7 @@ function base(
     // optimistic message bubbles), so a pill orders after the send that
     // triggered it instead of racing on wall-clock timestamps.
     optimisticSeq: nextOptimisticSeq(),
+    ...(sendGroupId ? { optimisticGroupId: sendGroupId } : {}),
   };
 }
 
@@ -122,8 +128,10 @@ export function buildOptimisticStatusChange(args: {
   conversationId: string;
   actorName: string;
   status: ConversationStatus;
+  /** Set by the reply-box auto-claim path only — see `base()`'s sendGroupId. */
+  sendGroupId?: string;
 }): OptimisticActivityBuild {
-  const e = base(args.conversationId, args.actorName, "status_changed");
+  const e = base(args.conversationId, args.actorName, "status_changed", args.sendGroupId);
   e.after = { status: args.status };
   return build(args.teamId, args.conversationId, e);
 }
@@ -133,11 +141,14 @@ export function buildOptimisticAiChange(args: {
   conversationId: string;
   actorName: string;
   aiEnabled: boolean;
+  /** Set by the reply-box auto-claim path only — see `base()`'s sendGroupId. */
+  sendGroupId?: string;
 }): OptimisticActivityBuild {
   const e = base(
     args.conversationId,
     args.actorName,
     args.aiEnabled ? "ai_resumed" : "ai_paused",
+    args.sendGroupId,
   );
   e.after = { aiEnabled: args.aiEnabled };
   return build(args.teamId, args.conversationId, e);
@@ -148,8 +159,10 @@ export function buildOptimisticAssignment(args: {
   conversationId: string;
   actorName: string;
   assignedToName: string | null;
+  /** Set by the reply-box auto-claim path only — see `base()`'s sendGroupId. */
+  sendGroupId?: string;
 }): OptimisticActivityBuild {
-  const e = base(args.conversationId, args.actorName, "assigned");
+  const e = base(args.conversationId, args.actorName, "assigned", args.sendGroupId);
   e.assignedToName = args.assignedToName;
   return build(args.teamId, args.conversationId, e);
 }

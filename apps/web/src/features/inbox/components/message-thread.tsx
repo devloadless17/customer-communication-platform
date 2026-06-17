@@ -1443,6 +1443,11 @@ function MessageThreadImpl({
         entry.kind === "message" || entry.kind === "activity"
           ? entry.data.optimisticSeq
           : undefined,
+      // Group key for the auto-claim trio (ai_paused + reopened + self-assigned)
+      // a single send fans out. Set ONLY on those pills (reply-box passes the
+      // send's clientTempId); undefined on every other row. See the un-pinned
+      // tiebreak below + ConversationActivityEvent.optimisticGroupId.
+      groupId: entry.kind === "activity" ? entry.data.optimisticGroupId : undefined,
     }));
     decorated.sort((a, b) => {
       if (a.pin !== b.pin) return a.pin ? 1 : -1;
@@ -1451,6 +1456,29 @@ function MessageThreadImpl({
       // whole reason these rows are pinned). Fall back to time when a tail row
       // has no seq (defensive; in practice every pinned row carries one).
       if (a.pin && a.seq != null && b.seq != null) return a.seq - b.seq;
+      // Two un-pinned ACTIVITY pills from the SAME send's auto-claim trio
+      // (ai_paused + reopened + self-assigned) — matched by a shared
+      // optimisticGroupId the reconcile carried over. The server writes these
+      // rows near-simultaneously, so their audit `at` is racy; the moment the
+      // triggering send confirms and un-pins them, sorting by `at` lets
+      // "self-assigned" jump above "reopened" — the upper-thread VIBRATION on a
+      // pending/closed + unassigned + AI-on send. Keep same-group pills in send
+      // order (seq) instead. NARROW BY DESIGN: the group id is set ONLY on the
+      // reply-box trio, so independent logs (dropdown status/assign, teammate
+      // actions, stage/tag/note rows, all history, stale stubs) have no group —
+      // or a DIFFERENT one — and still sort purely by `at`, unchanged. (An
+      // earlier version keyed this on optimisticSeq alone, which also reordered
+      // unrelated seq-carrying pills and scrambled rapid independent changes.)
+      if (
+        a.entry.kind === "activity" &&
+        b.entry.kind === "activity" &&
+        a.groupId != null &&
+        a.groupId === b.groupId &&
+        a.seq != null &&
+        b.seq != null
+      ) {
+        return a.seq - b.seq;
+      }
       return a.t - b.t;
     });
     return decorated.map((d) => d.entry);

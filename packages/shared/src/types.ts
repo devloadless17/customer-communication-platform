@@ -538,6 +538,20 @@ export interface ConversationActivityEvent {
    * with `optimisticPending`.
    */
   optimisticSeq?: number;
+  /**
+   * CLIENT-ONLY group key identifying pills emitted by ONE triggering action —
+   * specifically the auto-claim trio (ai_paused + reopened + self-assigned) a
+   * single human reply fans out together, keyed by that send's `clientTempId`.
+   * The server writes these rows near-simultaneously, so their audit `at` is
+   * racy and would let "self-assigned" swap above "reopened" the moment the
+   * triggering send confirms and un-pins them. The timeline keeps pills that
+   * share this id ordered by `optimisticSeq` even after they settle, so the trio
+   * holds its send order. NARROW BY DESIGN: only the reply-box send path sets
+   * it; independent actions (dropdown status/assign, stage, tag) leave it
+   * undefined and sort purely by `at`. Carried across reconcile with
+   * `optimisticSeq`; absent on every server-origin row.
+   */
+  optimisticGroupId?: string;
 }
 
 export interface Conversation {

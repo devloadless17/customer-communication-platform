@@ -322,10 +322,20 @@ function mergeAuthoritativeEvents(
       // settled auto-pause pill can't float ABOVE a still-pending reply when the
       // server's conversation:ai frame beats message:new). Cleared from the pin
       // once no send is in flight. See message-thread.tsx pin logic.
+      //
+      // Carry the send GROUP id too: it's what keeps the auto-claim trio
+      // (ai_paused + reopened + self-assigned) ordered by seq AFTER they un-pin,
+      // so their racy server `at` can't swap them. Without carrying it the
+      // settled rows would lose the grouping and re-sort by `at` — the exact
+      // vibration. Only same-send pills carry it, so every other log is
+      // untouched (see message-thread.tsx sort).
       return {
         ...row,
         id: best.id,
         ...(best.optimisticSeq != null ? { optimisticSeq: best.optimisticSeq } : {}),
+        ...(best.optimisticGroupId != null
+          ? { optimisticGroupId: best.optimisticGroupId }
+          : {}),
       };
     }
     return row;

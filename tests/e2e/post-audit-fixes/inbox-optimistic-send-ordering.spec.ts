@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 
-import { db, superadminTeam, wipeTestData } from "../_helpers/db";
+import { appAdmin, db, wipeTestData } from "../_helpers/db";
 
 /**
  * Outbound-send ordering: the two glitches reported 2026-06-16.
@@ -174,6 +174,41 @@ async function injectOutboundSent(opts: {
   });
 }
 
+/**
+ * Inject the authoritative conversation activity event the server's
+ * autoAssignOnAgentSend writes on a human reply (assigned / status_changed) — an
+ * OutboundEvent the real drainer publishes, so the AUDIT subscriber writes the
+ * ConversationEvent row AND the fanout emits the conversation:assigned/status
+ * frame. That frame makes the open thread run GET /events and reconcile its
+ * optimistic pill IN PLACE (mergeAuthoritativeEvents pairs stub→row by semantic
+ * signature, carries the stub's optimisticSeq onto the settled row). Inject
+ * `assigned` BEFORE `status_changed` so the audit-row `at` lands assigned <
+ * reopened — the OPPOSITE of the optimistic send-order seq (reopen < assign),
+ * i.e. the exact racy clock order that pre-fix made the two pills SWAP (vibrate)
+ * the instant they un-pinned. `silent`/`skipOutboundWebhook` keep workflow +
+ * outbound-webhook subscribers out; audit + realtime fanout ignore those flags
+ * and still run (per the bus tiering).
+ */
+async function injectConversationEvent(
+  type: "conversation.assigned" | "conversation.status_changed",
+  extra: Record<string, unknown>,
+): Promise<void> {
+  await db().outboundEvent.create({
+    data: {
+      teamId,
+      type,
+      payload: {
+        teamId,
+        conversationId,
+        changedByUserId: userId,
+        silent: true,
+        skipOutboundWebhook: true,
+        ...extra,
+      },
+    },
+  });
+}
+
 async function sendText(page: Page, text: string): Promise<void> {
   const box = page.getByPlaceholder(/Reply on WhatsApp/i);
   await expect(box).toBeVisible({ timeout: 8_000 });
@@ -252,9 +287,15 @@ async function freshConversation(): Promise<void> {
 }
 
 test.beforeAll(async () => {
-  const su = await superadminTeam();
-  teamId = su.teamId;
-  userId = su.userId;
+  // The browser logs in via the app-admin storageState, so the ACTING user is
+  // the app-admin — not the platform super-admin. Optimistic own-action pills
+  // are authored as `currentUser` (the app-admin), so any reconcile that pairs a
+  // stub to a server audit row (symptom 4) needs the injected actor to match.
+  // appAdmin().teamId === superadminTeam().teamId (same seeded team), so this
+  // doesn't move the team the fixtures live in.
+  const admin = await appAdmin();
+  teamId = admin.teamId;
+  userId = admin.userId;
   await wipeTestData();
 });
 
@@ -448,5 +489,122 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
         .filter((e) => e.kind === "activity");
       expect(pillsAbove, "no takeover pill above the reply").toEqual([]);
     }
+  });
+
+  // Symptom 4 (2026-06-17) — the upper-thread "vibration" the user still felt on
+  // an auto-claim into a PENDING + UNASSIGNED + AI-on chat. Symptom 3 proved the
+  // pills paint BELOW the send OPTIMISTICALLY; it never reconciles them, so it
+  // can't catch this: the lag happens LATER, when the optimistic pills settle to
+  // the real server audit rows AND the send confirms (un-pinning them). Pre-fix,
+  // the un-pinned pills re-sorted by the racy audit `at` — assigned was written
+  // before reopened, so "self-assigned" jumped ABOVE "reopened" for a beat, then
+  // dropped back. That swap is the whole top of the inbox twitching. The fix
+  // keeps same-send own-action pills (the only rows carrying an optimisticSeq)
+  // sorted by their send-order seq even AFTER they un-pin — so they never swap.
+  //
+  // AI is off here to isolate the assign↔reopen pair, which is the swap the user
+  // described ("self assigned coming before reopened then after"). The AI-pause
+  // pill is orthogonal: it sorts first by its own occurredAt and has its own
+  // coverage (symptom 1); adding it back doesn't change this pair's behaviour.
+  test("auto-claim pills (self-assign + reopen) don't vibrate on reconcile+confirm (symptom 4)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: false }, // isolate assign↔reopen (no AI pill)
+    });
+    // The exact reported trigger: unassigned + pending (non-open) → a human reply
+    // self-assigns AND reopens, emitting both takeover pills.
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: null, status: "pending", aiEnabled: false },
+    });
+    const byBody = await interceptSends(page);
+    await openThread(page);
+
+    const base = Date.now();
+    await sendText(page, "on it now");
+
+    // Both optimistic takeover pills paint, pending (pinned in send order).
+    await expect
+      .poll(async () => {
+        const o = await snapshot(page);
+        return o.filter((e) => e.kind === "activity" && e.pending).length;
+      }, { timeout: 8_000 })
+      .toBe(2);
+
+    const sig = (s: Entry[]) => ({
+      reopen: s.findIndex((e) => e.kind === "activity" && /reopen/i.test(e.label)),
+      assign: s.findIndex((e) => e.kind === "activity" && /self-assign|assigned/i.test(e.label)),
+      reply: s.findIndex((e) => e.kind === "message" && e.label.includes("on it now")),
+    });
+    {
+      const i = sig(await snapshot(page));
+      expect(i.reopen, "reopen pill present").toBeGreaterThanOrEqual(0);
+      expect(i.assign, "self-assign pill present").toBeGreaterThanOrEqual(0);
+      // Optimistic settled order is reply → reopened → self-assigned from paint 1.
+      expect(i.reply).toBeLessThan(i.reopen);
+      expect(i.reopen).toBeLessThan(i.assign);
+    }
+
+    const tid = await waitForClientTempId(byBody, "on it now");
+
+    // Sample across the WHOLE reconcile+confirm transition. The pills keep their
+    // stub id through reconcile, so any index change of any tracked entry = a jump.
+    const sampling = sampleOver(page, 4000, 40);
+
+    // Reconcile: write the real audit rows + fanout. assigned FIRST so its audit
+    // `at` is EARLIER than reopened's — the worst-case clock order that pre-fix
+    // made the pills swap the moment they un-pinned.
+    await injectConversationEvent("conversation.assigned", {
+      previousAssignedUserId: null,
+      newAssignedUserId: userId,
+      assignedUser: {
+        id: userId,
+        teamId,
+        name: "E2E Admin",
+        email: "e2e@example.io",
+        role: "admin",
+        isActive: true,
+      },
+    });
+    await page.waitForTimeout(250);
+    await injectConversationEvent("conversation.status_changed", {
+      previousStatus: "pending",
+      newStatus: "open",
+    });
+
+    // Wait for both pills to SETTLE (shed optimisticPending → data-pending absent)
+    // via the trailing /events GET, WHILE the send is still pending (so they stay
+    // pinned by seq — the un-pin, and any swap, happens only on confirm below).
+    await expect
+      .poll(async () => {
+        const o = await snapshot(page);
+        const acts = o.filter((e) => e.kind === "activity");
+        return acts.length === 2 && acts.every((e) => !e.pending);
+      }, { timeout: 8_000 })
+      .toBe(true);
+
+    // Confirm the send → un-pin the (already-reconciled) pills. The message `at`
+    // sits between the seeded inbound and the audit rows, so the reply keeps its
+    // index and ONLY the two pills could move — which, with the fix, they don't.
+    await injectOutboundSent({ body: "on it now", clientTempId: tid, atMs: base - 1000 });
+
+    const samples = await sampling;
+    expect(findReorder(samples)).toBeNull();
+
+    // Final settled state: still reply → reopened → self-assigned, both confirmed.
+    const finalSnap = await snapshot(page);
+    const fi = sig(finalSnap);
+    expect(fi.reply).toBeLessThan(fi.reopen);
+    expect(
+      fi.reopen,
+      "reopened stays above self-assigned after un-pin (no swap)",
+    ).toBeLessThan(fi.assign);
+    expect(
+      finalSnap.filter((e) => e.kind === "activity").every((e) => !e.pending),
+      "both pills settled",
+    ).toBe(true);
   });
 });
