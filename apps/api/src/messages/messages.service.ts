@@ -342,14 +342,6 @@ export class MessagesService {
         });
         if (!convo) return;
 
-        // One action time stamped on BOTH the assigned + status_changed events
-        // this claim publishes, so the audit subscriber writes their pills with
-        // an identical `at`. The timeline then orders the same-`at` pair by a
-        // deterministic kind tiebreak (assigned before status) that matches the
-        // composer's optimistic order — instead of letting two async audit
-        // writes race into an order that flips on reconcile.
-        const occurredAt = new Date().toISOString();
-
         // Human reply = takeover → pause AI Autopilot so the external AI flow
         // stops auto-replying over the human. Idempotent (no-op if already
         // paused) + independent fire-and-forget so it can't affect the claim
@@ -403,7 +395,6 @@ export class MessagesService {
               changedByUserId: userId,
               contact: workflowContactSnapshot(convo.contact),
               conversation: statusSnapshot,
-              occurredAt,
             });
           });
           return;
@@ -477,7 +468,6 @@ export class MessagesService {
             changedByUserId: userId,
             contact: workflowContactSnapshot(convo.contact),
             conversation: assignedSnapshot,
-            occurredAt,
           });
 
           if (statusChanged) {
@@ -494,7 +484,6 @@ export class MessagesService {
               changedByUserId: userId,
               contact: workflowContactSnapshot(convo.contact),
               conversation: statusSnapshot,
-              occurredAt,
             });
           }
         });
