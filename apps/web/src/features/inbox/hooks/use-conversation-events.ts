@@ -274,6 +274,13 @@ function sameEventSequence(
 // could still collide — rare, and self-corrects on the trailing GET.)
 const STUB_MATCH_WINDOW_MS = 8_000;
 
+// How far BEFORE a stub its authoritative row may sit and still be considered
+// "this stub's row". A fresh stub's real row is written now (at/after it), so
+// this is purely a clock-skew cushion — small on purpose, because anything older
+// is a PAST identical-signature pill we must NOT pair with. See the matching
+// loop in mergeAuthoritativeEvents.
+const STUB_BACK_TOLERANCE_MS = 2_000;
+
 /**
  * Fold an authoritative server activity-log window over the current events,
  * reconciling any optimistic stub the agent already sees.
@@ -320,8 +327,20 @@ function mergeAuthoritativeEvents(
     for (const s of stubs) {
       if (consumed.has(s.id)) continue;
       if (activitySignature(s) !== rowSig) continue;
-      const gap = Math.abs(new Date(s.at).getTime() - rowAt);
-      if (gap < bestGap && gap <= STUB_MATCH_WINDOW_MS) {
+      // The authoritative row for a JUST-created optimistic stub is written NOW
+      // (at/after the stub's clock) — never in the past. So a candidate row that
+      // is materially OLDER than the stub is NOT this stub's row; it's a stale
+      // identical-signature pill (a prior ai_paused/ai_resumed — those carry no
+      // distinguishing value, so every past one looks the same). Rejecting it is
+      // what stops "turn AI on, send, and the pause/resume logs scramble after a
+      // refresh loaded the old ones." The 2s back-tolerance only absorbs
+      // client→server clock skew; the forward window absorbs the audit write lag
+      // + the server's message-anchored occurredAt.
+      const delta = rowAt - new Date(s.at).getTime();
+      if (delta < -STUB_BACK_TOLERANCE_MS) continue;
+      if (delta > STUB_MATCH_WINDOW_MS) continue;
+      const gap = Math.abs(delta);
+      if (gap < bestGap) {
         best = s;
         bestGap = gap;
       }

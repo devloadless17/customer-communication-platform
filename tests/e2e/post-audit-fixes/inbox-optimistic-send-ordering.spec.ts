@@ -972,7 +972,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
   // (pre-fix, 120s window) pairs with an OLD pause row up to 2min back, which
   // then adopts the new send's group and jumps to the new message before the
   // trailing GET corrects it. We reproduce that race DETERMINISTICALLY: seed a
-  // 60s-old send's pause row, then on the new send inject reopen+assign (which
+  // prior send's pause row, then on the new send inject reopen+assign (which
   // triggers the GET) while the new pause row is still absent. The OLD pause row
   // must NEVER move. Frames captured at 25ms so any one-frame jump is caught.
   test("repeated send doesn't transiently mis-place an OLD ai-pause log (symptom 8)", async ({
@@ -984,7 +984,10 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       data: { aiAutopilotEnabled: true },
     });
     const T = Date.now();
-    const OLD = T - 60_000; // a prior send, 60s ago
+    // A prior send only 5s ago — INSIDE the 8s match window on purpose, so this
+    // exercises the back-tolerance (reject rows older than the stub), not just
+    // the window. The 8s window alone would still mis-pair a 5s-old row.
+    const OLD = T - 5_000;
     await db().message.create({
       data: {
         teamId,
@@ -999,7 +1002,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
         rawPayload: {},
       },
     });
-    // The 60s-old send's settled trio (server rows, no group).
+    // The prior send's settled trio (server rows, no group).
     await seedConversationEvent("ai_paused", OLD + 1, { aiEnabled: false });
     await seedConversationEvent("status_changed", OLD + 2, { status: "open" });
     await seedConversationEvent("assigned", OLD + 3, { assignedUserId: userId });
@@ -1069,7 +1072,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     const frames = await sampling;
 
     // The OLD pause row must stay put across EVERY frame (never jump to the new
-    // message). Track it by its 60s-old timestamp.
+    // message). Track it by its now-5s-old timestamp.
     const oldMsgIdx = (snap: Entry[]) =>
       snap.findIndex((e) => e.kind === "message" && e.label.includes("oldsend"));
     let worst: string | null = null;
@@ -1218,5 +1221,130 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       "act:reopened",
       "act:self-assigned",
     ]);
+  });
+
+  // Symptom 10 (2026-06-17) — the user's EXACT minimal repro: a conversation that
+  // is UNASSIGNED + AI OFF + CLOSED/PENDING, REFRESH the page, then SEND. After
+  // the refresh the page holds only server rows (no optimistic group), and the
+  // PRIOR claim cycle's self-assigned + reopened rows sit in history. The new
+  // send's optimistic self-assign + reopen pills (AI off → no pause pill) must
+  // pair with their OWN fresh rows — never the older identical-signature ones.
+  // The back-tolerance (reject a row OLDER than the stub) is what guarantees it.
+  test("after refresh into unassigned+AI-off+closed, a send never mis-places the OLD claim logs (symptom 10)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: false },
+    });
+    const T = Date.now();
+    const OLD = T - 5_000; // a prior claim cycle, only 5s ago (inside the window)
+    await db().message.create({
+      data: {
+        teamId,
+        conversationId,
+        externalId: `e2e-old10-${OLD}`,
+        direction: "out",
+        channel: "whatsapp",
+        status: "sent",
+        body: "oldsend",
+        timestamp: new Date(OLD),
+        senderUserId: userId,
+        rawPayload: {},
+      },
+    });
+    // Prior cycle: reopened + self-assigned, then reset back to unassigned+closed.
+    await seedConversationEvent("status_changed", OLD + 1, { status: "open" });
+    await seedConversationEvent("assigned", OLD + 2, { assignedUserId: userId });
+    await seedConversationEvent("assigned", OLD + 3, { assignedUserId: null });
+    await seedConversationEvent("status_changed", OLD + 4, { status: "pending" });
+    // Current resting state (the exact trigger conditions).
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: null, status: "pending", aiEnabled: false },
+    });
+    const byBody = await interceptSends(page);
+    await openThread(page); // = the user's refresh
+
+    const oldSelfAssign = (s: Entry[]) =>
+      s.findIndex(
+        (e) =>
+          e.kind === "activity" &&
+          /self-assign/i.test(e.label) &&
+          e.ts != null &&
+          Math.abs(new Date(e.ts).getTime() - (OLD + 2)) < 1500,
+      );
+    const oldReopen = (s: Entry[]) =>
+      s.findIndex(
+        (e) =>
+          e.kind === "activity" &&
+          /reopen/i.test(e.label) &&
+          e.ts != null &&
+          Math.abs(new Date(e.ts).getTime() - (OLD + 1)) < 1500,
+      );
+
+    await sendText(page, "newsend");
+    // AI off → only self-assign + reopen pills (no pause).
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity" && e.pending)
+            .length,
+        { timeout: 8_000 },
+      )
+      .toBe(2);
+    const tid = await waitForClientTempId(byBody, "newsend");
+    const sampling = sampleOver(page, 4500, 25);
+    const now = Date.now();
+    // Reopen FIRST — its fanout triggers the reconcile GET while the new
+    // self-assign row is still ABSENT. That's the leading-GET race: the new
+    // self-assign STUB looks for an "assigned:E2E Admin" row and the only one
+    // present is the 5s-OLD claim. Pre-fix it pairs with that old row (gap 5s <
+    // 8s window) and drags it down to the new message; the back-tolerance rejects
+    // it (the row is older than the stub).
+    await injectConversationEvent("conversation.status_changed", {
+      previousStatus: "pending",
+      newStatus: "open",
+      occurredAt: new Date(now + 2).toISOString(),
+    });
+    await page.waitForTimeout(450); // race window — old self-assign is the only candidate
+    await injectConversationEvent("conversation.assigned", {
+      previousAssignedUserId: null,
+      newAssignedUserId: userId,
+      assignedUser: {
+        id: userId,
+        teamId,
+        name: "E2E Admin",
+        email: "e2e@example.io",
+        role: "admin",
+        isActive: true,
+      },
+      occurredAt: new Date(now + 3).toISOString(),
+    });
+    await page.waitForTimeout(400);
+    await injectOutboundSent({ body: "newsend", clientTempId: tid, atMs: now });
+    const frames = await sampling;
+
+    expect(findReorder(frames), "no reorder").toBeNull();
+    const newReply = (s: Entry[]) =>
+      s.findIndex((e) => e.kind === "message" && e.label.includes("newsend"));
+    let worst: string | null = null;
+    for (let i = 0; i < frames.length; i++) {
+      const s = frames[i]!;
+      const nr = newReply(s);
+      if (nr === -1) continue;
+      const osa = oldSelfAssign(s);
+      const ore = oldReopen(s);
+      if (osa !== -1 && osa > nr) {
+        worst = `frame ${i}: OLD self-assign (idx ${osa}) jumped BELOW the new reply (idx ${nr})`;
+        break;
+      }
+      if (ore !== -1 && ore > nr) {
+        worst = `frame ${i}: OLD reopen (idx ${ore}) jumped BELOW the new reply (idx ${nr})`;
+        break;
+      }
+    }
+    expect(worst, "old claim logs never mis-place below the new send").toBeNull();
   });
 });
