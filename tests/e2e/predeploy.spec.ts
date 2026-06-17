@@ -53,19 +53,22 @@ function shouldIgnore(text: string): boolean {
   return KNOWN_NOISE.some((noise) => text.includes(noise));
 }
 
-function trackHealth(page: Page) {
+function trackHealth(page: Page, extraNoise: string[] = []) {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   const serverErrors: string[] = [];
 
+  const tolerated = (text: string) =>
+    shouldIgnore(text) || extraNoise.some((n) => text.includes(n));
+
   page.on("console", (msg: ConsoleMessage) => {
     if (msg.type() !== "error") return;
     const text = msg.text();
-    if (shouldIgnore(text)) return;
+    if (tolerated(text)) return;
     consoleErrors.push(text);
   });
   page.on("pageerror", (err) => {
-    if (shouldIgnore(err.message)) return;
+    if (tolerated(err.message)) return;
     pageErrors.push(err.message);
   });
   page.on("response", (resp) => {
@@ -212,6 +215,22 @@ test("multi-route navigation stays clean", async ({ page }) => {
 test.describe("logout flow", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
+  // Logging out the instant /inbox mounts means /inbox's initial authed fetches
+  // are often still in flight when the session cookie is cleared, so they land
+  // as the browser surfacing a "Failed to load resource: <status>" console
+  // error. Two land in this race, both the CORRECT refusal of an authed request
+  // with no session — exactly the expected-during-logout class as the
+  // net::ERR_ABORTED documented below:
+  //   - 401  GET /api/conversations/counts  (in-flight inbox fetch)
+  //   - 404  GET /api/auth/get-session       (Better Auth's no-session response,
+  //                                           i.e. the desired post-logout state)
+  // Tolerate ONLY in this flow (where an authed request being refused IS the
+  // success condition), never suite-wide.
+  const LOGOUT_NOISE = [
+    "status of 401 (Unauthorized)",
+    "status of 404 (Not Found)",
+  ];
+
   async function login(page: Page) {
     await page.goto("/login");
     await page.fill('input[name="email"]', LOGIN_EMAIL);
@@ -223,7 +242,7 @@ test.describe("logout flow", () => {
   }
 
   test("logout clears session and lands on /login", async ({ page, context }) => {
-    const health = trackHealth(page);
+    const health = trackHealth(page, LOGOUT_NOISE);
     await login(page);
     // /logout clears the session then redirects to /login; that redirect can
     // abort the in-flight navigation (net::ERR_ABORTED), which is expected —
@@ -239,7 +258,7 @@ test.describe("logout flow", () => {
   });
 
   test("post-logout /inbox redirects to /login", async ({ page }) => {
-    const health = trackHealth(page);
+    const health = trackHealth(page, LOGOUT_NOISE);
     await login(page);
     // /logout clears the session then redirects to /login; that redirect can
     // abort the in-flight navigation (net::ERR_ABORTED), which is expected —
