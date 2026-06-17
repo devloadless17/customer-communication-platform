@@ -9,6 +9,7 @@ import {
 } from "@nestjs/common";
 
 import { refundApiKeyBucket } from "../../auth/api-key.guard";
+import { markIdempotentReplay } from "../../common/correlation";
 import { DbService } from "../../db/db.service";
 
 // Idempotency claim sentinels — shared by EVERY /v1 mutation (sends + assign +
@@ -100,6 +101,15 @@ export class ApiIdempotencyService {
      */
     opts?: { refuseStaleOnAmbiguity?: boolean },
   ): Promise<IdempotencyClaim<T>> {
+    // I-6: an ambiguity-protected (irreversible-send) claim must OUTLIVE its
+    // in-flight window so the "use a fresh Idempotency-Key" verdict survives the
+    // hourly idempotency sweeper. The sweeper GCs on expiresAt, so we set
+    // expiresAt to the COMPLETED TTL (24h) for these rows and track the shorter
+    // in-flight deadline separately in `_inflightUntil`. Without this, once the
+    // sweeper deleted the stale pending row (5min), a retry of the SAME key found
+    // nothing and silently re-sent — defeating the guarantee. Safe (clearable)
+    // claims keep the short PENDING TTL so they GC + allow a clean retry at 5min.
+    const ambiguityProtected = opts?.refuseStaleOnAmbiguity === true;
     const claimPending = () =>
       this.db.apiIdempotencyKey.create({
         data: {
@@ -107,9 +117,16 @@ export class ApiIdempotencyService {
           apiKeyId,
           key,
           requestHash,
-          responseBody: { _pending: true } as Prisma.InputJsonValue,
+          responseBody: (ambiguityProtected
+            ? { _pending: true, _inflightUntil: Date.now() + IDEMPOTENCY_PENDING_TTL_MS }
+            : { _pending: true }) as Prisma.InputJsonValue,
           responseStatus: IDEMPOTENCY_PENDING_STATUS,
-          expiresAt: new Date(Date.now() + IDEMPOTENCY_PENDING_TTL_MS),
+          expiresAt: new Date(
+            Date.now() +
+              (ambiguityProtected
+                ? IDEMPOTENCY_COMPLETED_TTL_MS
+                : IDEMPOTENCY_PENDING_TTL_MS),
+          ),
         },
       });
     try {
@@ -140,7 +157,16 @@ export class ApiIdempotencyService {
         });
       }
       if (cached.responseStatus === IDEMPOTENCY_PENDING_STATUS) {
-        if (cached.expiresAt > new Date()) {
+        // Drive in-flight-vs-stale off the ROW's own marker, not the current
+        // request's opts: an ambiguity-protected row stores its short in-flight
+        // deadline in `_inflightUntil` and is RETAINED (expiresAt = 24h) past it
+        // so the verdict survives the sweeper (I-6). Safe rows use expiresAt.
+        const body = cached.responseBody as { _inflightUntil?: number } | null;
+        const ambiguityProtectedRow = typeof body?._inflightUntil === "number";
+        const inflightUntil = ambiguityProtectedRow
+          ? new Date(body!._inflightUntil!)
+          : cached.expiresAt;
+        if (inflightUntil > new Date()) {
           throw new ConflictException({
             error: "idempotency_in_progress",
             detail:
@@ -148,13 +174,14 @@ export class ApiIdempotencyService {
               "Retry in a few seconds.",
           });
         }
-        // Stale pending past TTL.
-        if (opts?.refuseStaleOnAmbiguity) {
+        // Past the in-flight window.
+        if (ambiguityProtectedRow) {
           // Irreversible send: the prior request may have ALREADY reached Meta
           // (crash after `sendText` returned, before we recorded the wamid). Do
           // NOT clear + allow a re-claim — that re-sends a billed message to a
-          // real customer. Leave the row so the operator can inspect it and the
-          // partner must use a FRESH key to deliberately resend (OUTBOUND-1).
+          // real customer. The row is RETAINED until its 24h expiresAt, so EVERY
+          // retry of this key within that window gets this same verdict instead
+          // of silently re-sending once the sweeper deleted it (OUTBOUND-1 / I-6).
           throw new ConflictException({
             error: "idempotency_ambiguous",
             detail:
@@ -185,8 +212,12 @@ export class ApiIdempotencyService {
           });
         }
         // Completed + still fresh — replay. Refund the API-key token: the
-        // request did zero real work, so it shouldn't burn quota.
+        // request did zero real work, so it shouldn't burn quota. minor#9: also
+        // flag the request so the rate-limit interceptor refunds the tighter
+        // per-route bucket it consumed (the api-key guard bucket alone wasn't
+        // enough — a same-key crash-retry loop still burned the per-route quota).
         refundApiKeyBucket(apiKeyId);
+        markIdempotentReplay();
         return { kind: "replay", result: cached.responseBody as unknown as T };
       }
       // Expired completed row — delete + re-claim, then proceed.

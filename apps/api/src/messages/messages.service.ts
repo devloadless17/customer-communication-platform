@@ -1743,7 +1743,33 @@ export class MessagesService {
    *     customer already has the message; a 5xx here would lie to the
    *     agent AND tempt a UI retry → duplicate send.
    */
+  /**
+   * I-1: forward was the ONLY outbound send path with no idempotency guard, so a
+   * transport retry or a re-confirmed picker re-delivered up to 40 irreversible
+   * messages to customers (the externalId dedupe can't catch it — each re-send
+   * gets a fresh Meta wamid). Wrap it like every other send path. Forward fans
+   * out across many contacts/conversations, so there's no single conversationId
+   * to key on — use a stable scope tag; the client-unique clientTempId provides
+   * the dedup identity. A same-key retry returns the original results without
+   * re-hitting Meta.
+   */
   async forward(
+    teamId: string,
+    userId: string,
+    input: ForwardMessagesInput,
+  ): Promise<{ results: ForwardResult[] }> {
+    return runWithSendIdempotency(
+      {
+        teamId,
+        userId,
+        conversationId: "forward",
+        clientTempId: input.clientTempId,
+      },
+      () => this.forwardImpl(teamId, userId, input),
+    );
+  }
+
+  private async forwardImpl(
     teamId: string,
     userId: string,
     input: ForwardMessagesInput,

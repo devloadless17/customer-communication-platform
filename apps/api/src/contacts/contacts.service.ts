@@ -1054,6 +1054,7 @@ export class ContactsService {
     // republish `contact.created` — same contract as reviveSoftDeletedByPhone
     // (to every subscriber a revived contact is a new one). Tags are linked in
     // the shared block below, which keys off phone for both created + revived.
+    const revivedIds: string[] = [];
     for (const p of toRevive) {
       const id = tombstonedIdByPhone.get(p.phoneNumber);
       if (!id) continue;
@@ -1090,11 +1091,25 @@ export class ContactsService {
           // count, don't re-publish. The contact exists and is live either way.
           continue;
         }
-        const updated = await this.db.contact.findUniqueOrThrow({
-          where: { id },
-          include: { tags: { select: { id: true } } },
-        });
-        revived += 1;
+        revivedIds.push(id);
+      } catch {
+        // A concurrent inbound may have revived this phone already (the row is
+        // no longer tombstoned). Skip — the contact exists either way.
+      }
+    }
+    // minor#15: batch the read-back + publish. The prior shape ran a
+    // findUniqueOrThrow PER revived row (2 queries/contact in a serial loop);
+    // one findMany over all revived ids replaces N reads. Ordering + semantics
+    // are unchanged — still published here (before the create/tag blocks), and
+    // `revived` counts rows actually read back (a row deleted in the race
+    // between the flip and this read is simply omitted, as before).
+    if (revivedIds.length > 0) {
+      const revivedRows = await this.db.contact.findMany({
+        where: { id: { in: revivedIds }, teamId },
+        include: { tags: { select: { id: true } } },
+      });
+      revived += revivedRows.length;
+      for (const updated of revivedRows) {
         await this.bus.publish({
           type: "contact.created",
           teamId,
@@ -1104,9 +1119,6 @@ export class ContactsService {
           source: "manual",
           createdByUserId: userId,
         });
-      } catch {
-        // A concurrent inbound may have revived this phone already (the row is
-        // no longer tombstoned). Skip — the contact exists either way.
       }
     }
 

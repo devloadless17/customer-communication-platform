@@ -48,8 +48,15 @@ export class InboxSearchController {
       case "contacts":
         return this.conversations.globalSearchContacts(session.teamId, opts);
       case "messages":
+        // minor#14: the heavy scopes are team-wide trigram/ILIKE scans over the
+        // Message table — a 1-char query matches half the team and seq-scans.
+        // The web client already gates these at >=2 chars (the search panel only
+        // mounts at length>=2); enforce the same floor server-side so a direct
+        // API call (or a future client) can't trigger the scan on 1-char input.
+        if (q.length < 2) return { items: [], nextCursor: null };
         return this.conversations.globalSearchMessages(session.teamId, opts);
       case "notes":
+        if (q.length < 2) return { items: [], nextCursor: null };
         return this.conversations.globalSearchNotes(session.teamId, opts);
     }
   }

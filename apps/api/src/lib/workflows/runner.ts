@@ -387,6 +387,92 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
         ),
     );
     if (orphanInProgress && hasSideEffect(node.type)) {
+      // WF-2 (I-5): an await_reply-producing step (ask_question) whose side
+      // effect — the question SEND — fired, but whose await state wasn't
+      // persisted before the crash, must NOT advance down an arbitrary edge.
+      // That strands the contact (they reply, but the run already moved on).
+      // Instead RE-ARM the await so the reply (or the timeout) drives the
+      // resume. The send already happened, so we do NOT re-run the handler
+      // (no resend). Falls through to the advance path below only when we
+      // can't re-arm (no contact, unparseable config, or — see below — this is a
+      // RESUME-phase orphan).
+      //
+      // resumeOrphan: a prior `waiting` entry for this step means the await was
+      // ALREADY armed once and the contact's answer may have already been
+      // consumed (run.pendingAnswer set + the awaiting row deleted). Re-arming
+      // would null that pendingAnswer and re-wait, silently DISCARDING the
+      // answer. So only re-arm a FIRST-send orphan; let a resume-phase crash fall
+      // through to the advance path (its prior, non-answer-destroying behavior).
+      const resumeOrphan = stepLog.some(
+        (e) => e.stepId === node.id && e.status === "waiting",
+      );
+      if (producesAwaitReply(node.type) && run.contactId && !resumeOrphan) {
+        let timeoutMs: number | null = null;
+        try {
+          const cfg = getStepHandler(node.type).parseConfig(node.config) as {
+            timeoutHours?: number;
+          };
+          if (typeof cfg.timeoutHours === "number" && Number.isFinite(cfg.timeoutHours)) {
+            timeoutMs = cfg.timeoutHours * 60 * 60 * 1000;
+          }
+        } catch {
+          // Unparseable config on a running step shouldn't happen — fall
+          // through to the advance path below as the safe default.
+        }
+        if (timeoutMs !== null) {
+          const resumeAt = new Date(Date.now() + timeoutMs);
+          // Reconciliation breadcrumb (matches the advance path's marker).
+          stepLog.push({
+            stepId: node.id,
+            type: node.type,
+            status: "skipped_after_crash",
+            attempt: input.attempt,
+            startedAt: startedAt.toISOString(),
+            finishedAt: new Date().toISOString(),
+            errorMessage:
+              "Previous attempt died after the await-reply send but before the " +
+              "await was persisted. Re-arming the await instead of advancing " +
+              "(question already sent; NOT re-sending).",
+          });
+          // `waiting` entry so the next pickup sees isResume=true (mirrors the
+          // normal await_reply path) and the handler picks an outgoing edge.
+          stepLog.push({
+            stepId: node.id,
+            type: node.type,
+            status: "waiting",
+            startedAt: startedAt.toISOString(),
+            finishedAt: new Date().toISOString(),
+          });
+          // Same upsert + run-update + resume enqueue as the normal await_reply
+          // result handler — KEEP currentStepId so the step re-runs on resume.
+          await db.$transaction([
+            db.workflowAwaitingReply.upsert({
+              where: { runId: run.id },
+              create: {
+                teamId: wf.teamId,
+                contactId: run.contactId,
+                runId: run.id,
+                workflowId: wf.id,
+                stepId: node.id,
+                expiresAt: resumeAt,
+              },
+              update: { stepId: node.id, expiresAt: resumeAt },
+            }),
+            db.workflowRun.update({
+              where: { id: run.id },
+              data: {
+                status: "waiting",
+                waitUntil: resumeAt,
+                stepLog: stepLog as unknown as Prisma.InputJsonValue,
+                jumpsUsed,
+                pendingAnswer: Prisma.DbNull,
+              },
+            }),
+          ]);
+          await enqueueWorkflowResume(run.id, timeoutMs, stepLog.length);
+          return { runId: run.id, status: "waiting" };
+        }
+      }
       stepLog.push({
         stepId: node.id,
         type: node.type,
@@ -853,6 +939,16 @@ function hasSideEffect(type: WorkflowStepType): boolean {
   // rule #3 (idempotent Meta sends) exists to prevent.
   const handler = getStepHandler(type);
   return handler.sideEffect === "irreversible";
+}
+
+// WF-2: a step that PAUSES for a contact reply (ask_question). Drives the
+// runner's crash-recovery RE-ARM branch — see the orphan-detect path.
+function producesAwaitReply(type: WorkflowStepType): boolean {
+  try {
+    return getStepHandler(type).awaitReply === true;
+  } catch {
+    return false;
+  }
 }
 
 function buildEnvelope(

@@ -1051,7 +1051,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
   // Media: fetch (inbound), upload (outbound staging), send (outbound).
   // -------------------------------------------------------------------------
 
-  async fetchMedia(externalMediaId: string, config: MetaSendConfig): Promise<FetchedMedia> {
+  async fetchMedia(
+    externalMediaId: string,
+    config: MetaSendConfig,
+    maxBytes?: number,
+  ): Promise<FetchedMedia> {
     // Step 1: GET /{media-id} → { url, mime_type, ... }. The signed URL is
     // valid for ~5 minutes — we MUST hit it immediately. Don't store it.
     const metaUrl = `https://graph.facebook.com/${config.graphVersion}/${encodeURIComponent(externalMediaId)}`;
@@ -1087,6 +1091,20 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
         binRes.status,
         t,
       );
+    }
+    // minor#3: reject via Content-Length BEFORE buffering the whole binary into
+    // heap. A 4-wide inbound batch each buffering up to ~100MB could transiently
+    // spike ~400MB of api heap before the caller's post-buffer cap fired. The
+    // caller still enforces the authoritative per-kind cap on the returned bytes
+    // (a CDN can omit/understate Content-Length), so this is purely a RAM guard.
+    if (maxBytes !== undefined) {
+      const lenHeader = binRes.headers.get("content-length");
+      const declared = lenHeader ? Number.parseInt(lenHeader, 10) : NaN;
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        // Drain the unread body so the connection is released, then bail.
+        await binRes.body?.cancel().catch(() => undefined);
+        throw new MediaTooLargeError(declared, maxBytes);
+      }
     }
     const ab = await binRes.arrayBuffer();
     return { bytes: new Uint8Array(ab), mimeType: meta.mime_type };
@@ -1809,6 +1827,23 @@ export class MetaSendError extends Error {
     this.name = "MetaSendError";
     this.httpStatus = httpStatus;
     this.body = body;
+  }
+}
+
+/**
+ * minor#3: thrown by `fetchMedia` when the response Content-Length already
+ * exceeds the caller's cap, BEFORE the binary is buffered into heap. Distinct
+ * type so the caller maps it to a NON-retriable drop (re-downloading yields the
+ * same over-cap bytes) instead of parking it for the sweeper to retry forever.
+ */
+export class MediaTooLargeError extends Error {
+  readonly declaredBytes: number;
+  readonly maxBytes: number;
+  constructor(declaredBytes: number, maxBytes: number) {
+    super(`inbound media over cap before download: ${declaredBytes} > ${maxBytes}`);
+    this.name = "MediaTooLargeError";
+    this.declaredBytes = declaredBytes;
+    this.maxBytes = maxBytes;
   }
 }
 

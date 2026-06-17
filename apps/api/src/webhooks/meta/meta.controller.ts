@@ -25,6 +25,7 @@ import { publish } from "@/lib/events/bus";
 import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import { getMetaProvider } from "@/lib/providers";
+import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig, getMetaWebhookConfig } from "@/lib/providers/config";
 import { ingestEvents, isTransientDbError } from "@/lib/providers/ingest";
 import type { NormalizedEvent } from "@ccp/shared/providers/types";
@@ -516,11 +517,17 @@ export class MetaWebhookController implements OnModuleDestroy {
         // permanently strands the media (the row commits text-only and
         // there's no second chance). Three attempts × ~250-1000ms back-off
         // keeps total wall-time well inside Meta's webhook retry window.
+        const cap = MEDIA_SIZE_CAPS[mediaKind];
+        // minor#3: hand the per-kind cap to fetchMedia so it can reject via
+        // Content-Length BEFORE buffering the binary into heap (RAM guard for a
+        // 4-wide batch of large docs). The post-buffer check below stays as the
+        // authoritative cap for the case where the CDN omits/understates the
+        // header.
         const fetched = await retry(
-          () => getMetaProvider().fetchMedia!(evt.media!.externalMediaId, sendConfig),
+          () =>
+            getMetaProvider().fetchMedia!(evt.media!.externalMediaId, sendConfig, cap),
           { attempts: 3, baseMs: 250 },
         );
-        const cap = MEDIA_SIZE_CAPS[mediaKind];
         if (fetched.bytes.length > cap) {
           this.logger.warn(
             `[${teamId}] dropping ${mediaKind} over cap (${fetched.bytes.length} > ${cap})`,
@@ -605,6 +612,17 @@ export class MetaWebhookController implements OnModuleDestroy {
             : {}),
         });
       } catch (err) {
+        // minor#3: an over-cap file (rejected pre-buffer via Content-Length) is
+        // a DETERMINISTIC failure — re-downloading yields the same over-cap
+        // bytes — so drop it non-retriably, exactly like the post-buffer cap
+        // check above. Parking it for the sweeper would loop forever.
+        if (err instanceof MediaTooLargeError) {
+          this.logger.warn(
+            `[${teamId}] dropping ${mediaKind} over cap before download (${err.declaredBytes} > ${err.maxBytes})`,
+          );
+          outcomes.set(evt.externalId, { ok: false, retriable: false });
+          return;
+        }
         this.logger.error(
           `[${teamId}] media download failed for ${evt.externalId} after retries`,
           err,

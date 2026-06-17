@@ -3,6 +3,7 @@ import { publish } from "@/lib/events/bus";
 import { blobStorage } from "@/lib/blob-storage";
 import { MEDIA_SIZE_CAPS } from "@/lib/media-storage";
 import { getMetaProvider } from "@/lib/providers";
+import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig } from "@/lib/providers/config";
 import { withSweeperMutex } from "@/lib/sweepers/_mutex";
 import type { MediaKind } from "@ccp/shared/types";
@@ -213,9 +214,21 @@ async function retryDownload(row: ParkedRow): Promise<void> {
   }
 
   const sendConfig = await getMetaSendConfig(row.teamId);
-  const fetched = await getMetaProvider().fetchMedia!(externalMediaId, sendConfig);
-
   const cap = MEDIA_SIZE_CAPS[mediaKind];
+  // minor#3: pass the cap so fetchMedia rejects via Content-Length BEFORE
+  // buffering the binary into heap (RAM guard), same as the webhook path.
+  let fetched;
+  try {
+    fetched = await getMetaProvider().fetchMedia!(externalMediaId, sendConfig, cap);
+  } catch (err) {
+    if (err instanceof MediaTooLargeError) {
+      // Deterministically over cap — clear now rather than re-fetching forever.
+      await clearOne(row);
+      return;
+    }
+    throw err;
+  }
+
   if (fetched.bytes.length > cap) {
     // Deterministically over cap — clear now rather than re-fetching forever.
     await clearOne(row);

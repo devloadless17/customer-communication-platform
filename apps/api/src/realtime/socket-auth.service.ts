@@ -63,6 +63,17 @@ export class SocketAuthService {
     // every connected agent gets logged out. This is the CR1 cascade.
     const cachedFromCookie = sessionCacheGetByCookie(cookieHeader);
     if (cachedFromCookie) {
+      // I-10: re-check the org-approval gate on the fast path too. The cached
+      // entry carries teamStatus (refreshed at least every 15s), so a
+      // suspended/pending org's reconnect is cut over here instead of slipping
+      // through because the cookie cache was warm — matching the slow path below
+      // and the HTTP SessionGuard, which re-checks teamStatus on every request.
+      if (
+        cachedFromCookie.role !== "superAdmin" &&
+        cachedFromCookie.teamStatus !== "active"
+      ) {
+        return { kind: "unauthenticated" };
+      }
       return {
         kind: "ok",
         identity: {
@@ -101,6 +112,11 @@ export class SocketAuthService {
     // handshakes get the same single-DB-hit-per-window economics.
     const cached = sessionCacheGet(userId);
     if (cached) {
+      // I-10: same org-approval re-check on this fast path (see the cookie-cache
+      // branch above) so a warm per-userId cache can't bypass the gate.
+      if (cached.role !== "superAdmin" && cached.teamStatus !== "active") {
+        return { kind: "unauthenticated" };
+      }
       sessionCacheSetByCookie(cookieHeader, userId, sessionId);
       return {
         kind: "ok",

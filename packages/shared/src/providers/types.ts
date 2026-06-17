@@ -557,8 +557,21 @@ export interface MessagingProvider<SendConfig = unknown> {
    * separate resumable upload endpoint scoped to the app id for templates.
    */
   uploadHeaderMedia?(args: UploadHeaderMediaArgs, config: SendConfig): Promise<UploadHeaderMediaResult>;
-  /** Inbound media: download a file by provider-side id. */
-  fetchMedia?(externalMediaId: string, config: SendConfig): Promise<FetchedMedia>;
+  /**
+   * Inbound media: download a file by provider-side id.
+   *
+   * `maxBytes` (optional): a pre-buffer ceiling. The impl SHOULD reject via the
+   * response Content-Length BEFORE reading the whole binary into heap, so an
+   * over-cap download doesn't transiently spike RAM (minor#3) — a 4-wide inbound
+   * batch each buffering ~100MB could otherwise momentarily hold ~400MB. The
+   * caller still enforces the authoritative per-kind cap on the returned bytes
+   * (a CDN may omit or understate Content-Length).
+   */
+  fetchMedia?(
+    externalMediaId: string,
+    config: SendConfig,
+    maxBytes?: number,
+  ): Promise<FetchedMedia>;
   /**
    * Acknowledge an inbound message as read on the provider so the customer
    * sees blue ticks. Optional — providers that don't support read receipts

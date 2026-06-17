@@ -119,6 +119,14 @@ export interface StepHandler<C = unknown> {
   type: WorkflowStepType;
   /** See StepSideEffect. */
   sideEffect: StepSideEffect;
+  /**
+   * True for steps that PAUSE the run waiting for a contact reply (today only
+   * ask_question — returns an `await_reply` StepResult). The runner uses this to
+   * RE-ARM the await on crash-recovery instead of advancing down an arbitrary
+   * edge (WF-2): such a step's side effect (the question send) may have fired
+   * before the await state was persisted, so advancing would strand the contact.
+   */
+  awaitReply?: boolean;
   /** Throws on garbage; message surfaces back to the admin via the API. */
   parseConfig(raw: unknown): C;
   redactConfig?(config: C): unknown;

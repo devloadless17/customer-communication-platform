@@ -326,6 +326,10 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
                 webhookId: w.id,
                 eventType: type,
                 correlationId,
+                // minor#8: persist the chain depth on the row so the orphan
+                // sweeper's re-enqueue preserves the loop-guard counter (it only
+                // has the row, not the original BullMQ job arg).
+                chainDepth,
                 payload: payload as unknown as Parameters<
                   typeof this.db.outboundWebhookDelivery.create
                 >[0]["data"]["payload"],

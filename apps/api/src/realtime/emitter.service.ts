@@ -89,51 +89,62 @@ export class RealtimeEmitter {
   }
 
   /**
-   * Emit the SIDEBAR `team:channel:activity` badge frame to the right audience
-   * (RT-1). For the default channel (everyone is a member) it goes team-wide as
-   * before. For a membership-gated channel it goes ONLY to the members' per-user
-   * rooms — so a non-member never receives a private channel's activity metadata
-   * (author id, mentioned ids, channelId) on the wire, instead of relying on a
-   * client-side drop of a team-wide blast.
+   * RT-1 / minor#10: emit a channel-scoped event to the RIGHT audience. For the
+   * default channel (everyone is a member) it goes team-wide. For a
+   * membership-gated channel it goes ONLY to the members' per-user rooms — so a
+   * non-member never receives a private channel's metadata (channelId, author /
+   * reader id, mentioned ids, …) on the wire, instead of relying on a
+   * client-side drop of a team-wide blast. On boot-order / resolver failure it
+   * falls back to the team room (availability beats the metadata-leak fix).
    */
-  async emitChannelActivity(
+  async emitChannelScoped<E extends keyof ServerToClientEvents>(
     channelId: string,
     teamId: string,
-    payload: Parameters<ServerToClientEvents["team:channel:activity"]>[0],
+    event: E,
+    ...args: Parameters<ServerToClientEvents[E]>
   ): Promise<void> {
     const io = this.server;
     if (!io) {
-      this.logger.warn("emitChannelActivity dropped — IO not ready yet");
+      this.logger.warn(`emitChannelScoped("${String(event)}") dropped — IO not ready yet`);
       return;
     }
     const resolver = this.channelActivityResolver;
     if (!resolver) {
-      // Boot-order fallback: team-wide (prior behavior) so a badge is never
-      // dropped if the resolver wasn't bound yet.
-      io.to(teamRoom(teamId)).emit("team:channel:activity", payload);
+      // Boot-order fallback: team-wide so a frame is never dropped if the
+      // resolver wasn't bound yet.
+      io.to(teamRoom(teamId)).emit(event, ...args);
       return;
     }
     let audience: { isDefault: boolean; memberUserIds: string[] };
     try {
       audience = await resolver(channelId, teamId);
     } catch (err) {
-      // On a resolver failure, fall back to team-wide rather than silently
-      // dropping the badge — availability beats the metadata-leak fix here.
       this.logger.warn(
-        `emitChannelActivity resolver failed for channel=${channelId}; falling back to team room: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `emitChannelScoped("${String(event)}") resolver failed for channel=${channelId}; ` +
+          `falling back to team room: ${err instanceof Error ? err.message : String(err)}`,
       );
-      io.to(teamRoom(teamId)).emit("team:channel:activity", payload);
+      io.to(teamRoom(teamId)).emit(event, ...args);
       return;
     }
     if (audience.isDefault) {
-      io.to(teamRoom(teamId)).emit("team:channel:activity", payload);
+      io.to(teamRoom(teamId)).emit(event, ...args);
       return;
     }
     for (const uid of audience.memberUserIds) {
-      io.to(userRoom(uid)).emit("team:channel:activity", payload);
+      io.to(userRoom(uid)).emit(event, ...args);
     }
+  }
+
+  /**
+   * Emit the SIDEBAR `team:channel:activity` badge frame to the right audience
+   * (RT-1). Thin wrapper over emitChannelScoped.
+   */
+  async emitChannelActivity(
+    channelId: string,
+    teamId: string,
+    payload: Parameters<ServerToClientEvents["team:channel:activity"]>[0],
+  ): Promise<void> {
+    await this.emitChannelScoped(channelId, teamId, "team:channel:activity", payload);
   }
 
   /**

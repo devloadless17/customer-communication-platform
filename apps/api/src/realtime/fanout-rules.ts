@@ -450,22 +450,21 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  "team_channel.read": (e, emitter) => {
-    // EXCEPTION to the channel-scoped fanout rule: read receipts go to the
-    // TEAM room, not the channel room. Two reasons:
-    //   (1) Sidebar badge clearing — the team-channels-list hook (which
-    //       holds the sidebar's `unreadForMe` per channel) subscribes to
-    //       the team room, not per-channel rooms. Scoping reads to the
-    //       channel room left the badge stuck in the reader's OTHER tabs
-    //       that weren't currently viewing that channel.
-    //   (2) Read receipts are PER-USER, not per-message — only the reader's
-    //       own tabs filter to them (everyone else's onRead handler bails
-    //       on userId mismatch). Putting them on the team room means the
-    //       reader's whole device cohort sees the clear; everyone else
-    //       gets a single frame they ignore. Net cost is tiny.
+  "team_channel.read": async (e, emitter) => {
+    // Read receipts must reach the reader's OTHER tabs to clear the sidebar
+    // badge (the team-channels-list hook holds `unreadForMe` per channel). They
+    // are PER-USER — everyone else's onRead handler bails on a userId mismatch.
+    //
+    // minor#10: route like RT-1 instead of an unconditional team-wide blast. For
+    // the DEFAULT channel (everyone is a member) → team room (cheap, no leak).
+    // For a membership-gated channel → ONLY the members' per-user rooms, so a
+    // non-member never receives the private channel's id / reader id / timestamp
+    // on the wire (the exact metadata-on-the-wire leak RT-1 was built to close).
+    // The reader is a member (they just read it) and joins their own user-room,
+    // so their whole device cohort still gets the badge-clear.
     // Messages / edits / deletes / reactions / pins / thread-replies stay
     // channel-scoped — those carry confidential content.
-    emitter.emitToTeam(e.teamId, "team:channel:read", {
+    await emitter.emitChannelScoped(e.channelId, e.teamId, "team:channel:read", {
       teamId: e.teamId,
       channelId: e.channelId,
       readByUserId: e.readByUserId,

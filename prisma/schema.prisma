@@ -1763,6 +1763,12 @@ model OutboundWebhookDelivery {
   /// reconciler) have no correlation scope. F6 in
   /// docs/audit-guide.md.
   correlationId  String?
+  /// minor#8: cross-system loop-guard depth (inbound X-CCP-Depth) of the action
+  /// that caused this delivery, captured at row creation. The worker stamps
+  /// depth+1 on the outbound X-CCP-Depth header. Persisted (not just passed as a
+  /// BullMQ job arg) so the orphan-delivery sweeper's re-enqueue preserves it
+  /// instead of resetting the counter to 1 on recovered deliveries.
+  chainDepth     Int      @default(0)
   createdAt      DateTime @default(now())
 
   webhook OutboundWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)

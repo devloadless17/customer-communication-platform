@@ -166,7 +166,14 @@ function releaseTeamSlot(teamId: string): void {
   const entry = teamSlots.get(teamId);
   if (!entry) return;
   entry.active = Math.max(0, entry.active - 1);
-  if (entry.active === 0 && entry.consecutiveDefers === 0) {
+  // minor#7: GC once NO deliveries are in flight, regardless of the defer
+  // counter. consecutiveDefers only matters during active contention (it's reset
+  // to 0 on every successful acquire); once active hits 0 there's no starvation
+  // to track and the next delivery acquires immediately. The old `&&
+  // consecutiveDefers === 0` guard leaked a grow-only map entry for any team
+  // that went idle right after a defer (active drained to 0 while the counter
+  // was still > 0). A later acquire re-creates the entry fresh.
+  if (entry.active === 0) {
     teamSlots.delete(teamId);
   }
 }
@@ -347,7 +354,14 @@ async function deliverOnce(
   }
 
   const { webhook } = delivery;
-  if (!webhook.enabled) {
+  // minor#6: a manual TEST fire must POST even when the breaker auto-disabled
+  // the webhook — that's exactly when the operator clicks "Test" (after fixing
+  // their endpoint, to verify before re-enabling). Skipping it left the Test a
+  // silent no-op. A passing test resets consecutiveFailures (success path below)
+  // but does NOT re-enable — the operator still flips that explicitly. Real
+  // (non-test) deliveries to a disabled webhook still no-op as before.
+  const isTest = (delivery.payload as { test?: boolean } | null)?.test === true;
+  if (!webhook.enabled && !isTest) {
     // Webhook was disabled between enqueue and pickup. Mark this attempt
     // as a no-op so the delivery log carries an explicit reason.
     await db.outboundWebhookDelivery.update({
@@ -482,6 +496,13 @@ async function deliverOnce(
     // (the disabled flow has both a log + a socket event; recovery was
     // silent).
     const priorFailures = webhook.consecutiveFailures;
+    // minor#6 follow-up: a Test on a still-DISABLED webhook records ONLY its own
+    // delivery outcome — it must NOT reset the breaker or publish
+    // subscription_recovered. Doing so flipped the settings UI to
+    // enabled/"recovered" (the client's onRecovered handler) while the DB row
+    // stayed disabled and real deliveries kept no-op'ing. The operator
+    // re-enables explicitly.
+    const isDisabledTest = isTest && !webhook.enabled;
     await db.$transaction([
       db.outboundWebhookDelivery.update({
         where: { id: deliveryId },
@@ -499,17 +520,22 @@ async function deliverOnce(
           >[0]["data"]["payload"],
         },
       }),
-      db.outboundWebhook.update({
-        where: { id: webhook.id },
-        data: {
-          lastDeliveredAt: new Date(),
-          lastErrorAt: null,
-          lastErrorMessage: null,
-          consecutiveFailures: 0,
-        },
-      }),
+      // Breaker reset skipped for a disabled Test (isDisabledTest) — see above.
+      ...(isDisabledTest
+        ? []
+        : [
+            db.outboundWebhook.update({
+              where: { id: webhook.id },
+              data: {
+                lastDeliveredAt: new Date(),
+                lastErrorAt: null,
+                lastErrorMessage: null,
+                consecutiveFailures: 0,
+              },
+            }),
+          ]),
     ]);
-    if (priorFailures > 0) {
+    if (!isDisabledTest && priorFailures > 0) {
       try {
         await publish({
           type: "webhook.subscription_recovered",

@@ -687,9 +687,15 @@ async function runBroadcast(broadcastId: string): Promise<void> {
   // independently, each lane re-issues conversation.findFirst for that
   // contact. Cache the resolved conversation (id + status + unreadCount) per
   // contactId; cleared automatically when this runBroadcast returns (function
-  // scope, not module-global). Race-safe: if the first hit was `closed` and
-  // we reopened, the cached status flips to `pending` so the SECOND hit
-  // doesn't double-publish `broadcast.conversation_reopened`.
+  // scope, not module-global). Double-publish safety (post I-3): the closed→
+  // pending flip + `broadcast.conversation_reopened` publish are now DEFERRED to
+  // after a successful send and guarded by a DB CAS (`updateMany where status:
+  // "closed"` → publishes only when count>0). So even if two lanes both read a
+  // cached `closed` status and both set `needsReopen`, exactly ONE CAS flips the
+  // row and publishes; the loser's CAS returns 0 and stays silent. The cache
+  // holds the pre-reopen status between resolve and post-send (then flips to
+  // `pending` on the successful reopen) — a stale `closed` cache is expected and
+  // harmless; the DB CAS, not the cache flip, is what dedupes the publish.
   const conversationCache = new Map<
     string,
     { id: string; status: string; unreadCount: number }
@@ -957,6 +963,12 @@ async function processOneRecipient(
     // Broadcast outbound doesn't change unread, so the pre-send value
     // remains accurate at publish time.
     let conversationUnreadCount = 0;
+    // I-3: whether the resolved conversation was CLOSED at resolve time. The
+    // actual closed→pending flip + `conversation_reopened` publish are deferred
+    // to AFTER a successful send (post-send bookkeeping below), so a failed
+    // broadcast send can't resurrect a deliberately-closed thread with nothing
+    // delivered to the customer.
+    let needsReopen = false;
     try {
       // Strict invariant: one contact = one conversation. Reuse the existing
       // row regardless of status; a closed conversation just reopens
@@ -1003,23 +1015,16 @@ async function processOneRecipient(
           } else throw err;
         }
       } else if (conversation.status === "closed") {
-        conversation = await db.conversation.update({
-          where: { id: conversation.id },
-          data: { status: "pending" },
-          select: { id: true, status: true, unreadCount: true },
-        });
-        await publish({
-          type: "broadcast.conversation_reopened",
-          teamId: broadcast.teamId,
-          broadcastId: broadcast.id,
-          conversationId: conversation.id,
-        });
+        // I-3: DON'T flip closed→pending or publish `conversation_reopened`
+        // here — defer until the send actually succeeds. Flipping pre-send meant
+        // a failed send (missing phone, Meta rejection) silently resurrected a
+        // deliberately-closed thread in the triage queue with nothing delivered.
+        needsReopen = true;
       }
       conversationId = conversation.id;
       conversationUnreadCount = conversation.unreadCount;
-      // M5 — record / refresh the cache. Cache the POST-reopen state so the
-      // next recipient sharing this contactId doesn't re-fire the
-      // `broadcast.conversation_reopened` publish.
+      // M5 — record / refresh the cache with the resolved (pre-reopen) state.
+      // The post-send reopen updates it to `pending` once the send lands.
       conversationCache.set(recipient.contactId, {
         id: conversation.id,
         status: conversation.status,
@@ -1214,6 +1219,40 @@ async function processOneRecipient(
     }
     bumpCountersFireAndForget(broadcast.id, broadcast.teamId, { sent: 1 }, pendingBumps);
 
+    // I-3: the send DEFINITIVELY succeeded (recipient locked `sent`) — NOW
+    // perform the deferred closed→pending reopen + publish. CAS-guarded on
+    // status=closed AND teamId-scoped so a concurrent inbound that already
+    // reopened it doesn't double-publish; wrapped so a reopen wobble can't undo
+    // the already-committed send. A FAILED send returns earlier and never
+    // reaches here, so a deliberately-closed thread is only resurrected when a
+    // message actually landed.
+    if (needsReopen) {
+      try {
+        const reopened = await db.conversation.updateMany({
+          where: { id: conversationId, teamId: broadcast.teamId, status: "closed" },
+          data: { status: "pending" },
+        });
+        if (reopened.count > 0) {
+          conversationCache.set(recipient.contactId, {
+            id: conversationId,
+            status: "pending",
+            unreadCount: conversationUnreadCount,
+          });
+          await publish({
+            type: "broadcast.conversation_reopened",
+            teamId: broadcast.teamId,
+            broadcastId: broadcast.id,
+            conversationId,
+          });
+        }
+      } catch (err) {
+        console.error(
+          `[broadcast ${broadcast.id}] deferred reopen failed for conversation ${conversationId} (message was sent)`,
+          err,
+        );
+      }
+    }
+
     // Best-effort post-send bookkeeping. A failure here is a real bug worth
     // logging, but it must NEVER flip the recipient back to `failed`: the
     // message went out and Meta's already charged us. Worst case the inbox
@@ -1249,7 +1288,11 @@ async function processOneRecipient(
       // inbound from the same contact must not overwrite the inbound's
       // newer summary with the broadcast's outbound timestamp.
       await db.conversation.updateMany({
-        where: { id: conversationId, lastMessageAt: { lte: send.timestamp } },
+        // minor#2: teamId-scope the CAS for defense-in-depth consistency with
+        // every other conversation write (conversationId is a globally-unique
+        // cuid so this isn't exploitable today, but the codebase scopes every
+        // tenant-owned write by teamId).
+        where: { id: conversationId, teamId: broadcast.teamId, lastMessageAt: { lte: send.timestamp } },
         data: {
           lastMessageAt: send.timestamp,
           lastMessagePreview: preview,

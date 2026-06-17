@@ -366,9 +366,23 @@ export function ReplyBox({
   // conversation's bubble (the parent inbox-shell stays mounted, so a stale
   // timer would mark a possibly-delivered message failed in the cached thread).
   const watchdogCleanupsRef = useRef<Set<() => void>>(new Set());
+  // minor#13: a send registers its stuck-watchdog AFTER an awaited fetch. If this
+  // reply-box unmounts (chat switch) DURING that await, the unmount drain below
+  // has already run, so a watchdog registered afterward would never be drained —
+  // it would fire onOptimisticFail for the PREVIOUS conversation 30s later. Track
+  // mounted state so the post-await registration can skip once unmounted.
+  const mountedRef = useRef(true);
   useEffect(() => {
+    // Set true in the effect BODY (not just the useRef initializer): under React
+    // StrictMode (dev) the component mounts → unmounts → remounts on the SAME
+    // refs, and the simulated unmount's cleanup flips this to false. Without
+    // resetting here, mountedRef stays false for the rest of the dev lifetime and
+    // the post-send stuck-watchdog below would never register (safety net off in
+    // dev). Prod (single mount) is unaffected either way.
+    mountedRef.current = true;
     const cleanups = watchdogCleanupsRef.current;
     return () => {
+      mountedRef.current = false;
       for (const c of cleanups) c();
       cleanups.clear();
     };
@@ -1033,7 +1047,11 @@ export function ReplyBox({
       // failed so the user sees a Retry affordance. The matching reducer
       // dispatches `ccp:optimistic-confirmed` when the frame DOES arrive,
       // which cancels this watchdog.
-      if (!isNote) {
+      // minor#13: skip if the reply-box unmounted during the awaited send — the
+      // unmount drain already ran, so a watchdog registered now would leak and
+      // fire for the previous conversation. No await between this check and the
+      // synchronous registration below, so the guard can't go stale mid-block.
+      if (!isNote && mountedRef.current) {
         const STUCK_WATCHDOG_MS = 30_000;
         const ev = `ccp:optimistic-confirmed:${clientTempId}`;
         let cleanup = () => {};

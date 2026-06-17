@@ -129,7 +129,18 @@ export async function persistDispatchedRow<K extends DomainEventType>(
       correlationId: getCorrelationId() ?? null,
       ...(truncatedError
         ? { failedAt: now, lastError: truncatedError }
-        : {}),
+        : // I-2: the synchronous publish() path already finished dispatching every
+          // in-process subscriber BEFORE this row is written, so close the
+          // published→dispatched bracket immediately. Without it, EVERY successful
+          // publish() row (the bulk of events) kept dispatchedAt NULL forever:
+          //   1) the retention sweeper requires `dispatchedAt: { not: null }`, so
+          //      it could never GC them → OutboundEvent grows unbounded; and
+          //   2) they permanently matched the "hard-crash loss-window" detection
+          //      query (publishedAt old + dispatchedAt NULL + failedAt NULL),
+          //      burying the rare genuine signal.
+          // The error branch above intentionally leaves dispatchedAt NULL: failedAt
+          // is set, so the sweeper KEEPS the row for operator triage.
+          { dispatchedAt: now }),
     },
     select: { id: true },
   });

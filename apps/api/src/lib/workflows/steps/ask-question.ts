@@ -121,17 +121,17 @@ const DEFAULT_TIMEOUT_HOURS = 24;
 
 export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
   type: "ask_question",
-  // KNOWN EDGE (WF-2, documented-not-yet-fixed): this step is `irreversible`, so
-  // a crash AFTER the question send but BEFORE the runner persists the
-  // await_reply state causes the runner's skip-after-crash path to mark the step
-  // `skipped_after_crash` and ADVANCE down an arbitrary outgoing edge — instead
-  // of re-establishing the await + pausing for the contact's reply. The question
-  // was sent, so re-running (resend) is wrong too; the correct fix is a runner
-  // change: a skipped `await_reply`-producing step must re-arm the await rather
-  // than advance. Deferred to a dedicated runner PR + test harness because it
-  // touches crash-recovery shared by every workflow. Narrow window (crash in the
-  // ms gap between send and await persist).
+  // WF-2 (fixed): this step is `irreversible` (the question SEND), AND it pauses
+  // for a reply. A crash AFTER the send but BEFORE the runner persists the
+  // await_reply state used to make the runner's skip-after-crash path ADVANCE
+  // down an arbitrary edge, stranding the contact (they reply, but the run moved
+  // on). The `awaitReply: true` flag now makes the runner's orphan-recovery path
+  // RE-ARM the await (re-establish WorkflowAwaitingReply + pause) instead of
+  // advancing — the send already happened, so it does NOT resend. See the
+  // `producesAwaitReply` branch in runner.ts. Narrow window (crash in the ms gap
+  // between send and await persist), but no longer mishandled.
   sideEffect: "irreversible",
+  awaitReply: true,
   parseConfig(raw) {
     if (!raw || typeof raw !== "object") {
       throw new StepConfigError("ask_question config must be an object");

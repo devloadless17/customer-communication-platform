@@ -86,7 +86,9 @@ async function sweepOnce(): Promise<void> {
       failedAt: null,
       createdAt: { lt: cutoff },
     },
-    select: { id: true },
+    // minor#8: pull the persisted chainDepth so the re-enqueue preserves the
+    // cross-system loop-guard counter instead of resetting it to 1 on recovery.
+    select: { id: true, chainDepth: true },
     take: MAX_PER_SWEEP,
     orderBy: { createdAt: "asc" },
   });
@@ -96,7 +98,7 @@ async function sweepOnce(): Promise<void> {
   // queue's own idempotency (we never see the same row twice with attempt=0
   // after the worker picks it up) keeps this safe under double-runs.
   const results = await Promise.allSettled(
-    orphans.map((o) => enqueueWebhookDelivery(o.id)),
+    orphans.map((o) => enqueueWebhookDelivery(o.id, o.chainDepth)),
   );
   const recovered = results.filter((r) => r.status === "fulfilled").length;
   const failed = results.length - recovered;

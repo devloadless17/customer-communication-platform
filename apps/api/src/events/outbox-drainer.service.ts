@@ -120,6 +120,12 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
   private watchdogTimer: NodeJS.Timeout | null = null;
   private inflight = false;
   private tickStartedAt: number | null = null;
+  // Monotonic ownership token for the inflight latch. Each tick claims the latch
+  // with a fresh token; only the holder of the CURRENT token may release it in
+  // its finally. The watchdog (checkWedge) bumps this when it force-releases a
+  // wedged tick, so that tick's eventual finally becomes a no-op instead of
+  // clobbering a freshly-started tick's latch / spawning a second timer (minor#5).
+  private tickToken = 0;
   private stopping = false;
 
   constructor(private readonly bus: EventBus) {}
@@ -217,6 +223,10 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         `(> ${OutboxDrainerService.WATCHDOG_MS / 1000}s); force-releasing the latch and rescheduling. ` +
         `Event fanout (realtime/audit/analytics/workflows/webhooks) was stalled.`,
     );
+    // Bump the ownership token so the wedged tick's eventual finally sees a
+    // mismatch and no-ops, instead of releasing the latch / rescheduling on
+    // top of the tick we're about to start (minor#5).
+    this.tickToken += 1;
     this.inflight = false;
     this.tickStartedAt = null;
     this.schedule();
@@ -234,6 +244,7 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
     }
     this.inflight = true;
     this.tickStartedAt = Date.now();
+    const myToken = ++this.tickToken;
     try {
       let drains = 0;
       while (drains < OutboxDrainerService.MAX_DRAINS_PER_TICK) {
@@ -325,9 +336,16 @@ export class OutboxDrainerService implements OnModuleInit, OnModuleDestroy {
         err instanceof Error ? err.message : String(err),
       );
     } finally {
-      this.inflight = false;
-      this.tickStartedAt = null;
-      this.schedule();
+      // Only release + reschedule if we still own the latch. If checkWedge
+      // force-released this (wedged) tick — or a newer tick has since taken
+      // over — tickToken has moved past ours, so skip: releasing here would
+      // clobber the current owner's latch and start a second timer chain
+      // (minor#5).
+      if (this.tickToken === myToken) {
+        this.inflight = false;
+        this.tickStartedAt = null;
+        this.schedule();
+      }
     }
   }
 

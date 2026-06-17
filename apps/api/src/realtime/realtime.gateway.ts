@@ -170,11 +170,17 @@ export class RealtimeGateway
     const HANDSHAKE_REFILL_PER_MS = 200 / 10_000; // 200 per 10s
     const HANDSHAKE_CAP = 200;
     server.use((socket, next) => {
+      // I-7: key on the TRUSTED client IP. The leftmost X-Forwarded-For entry is
+      // client-PREPENDABLE — an attacker can send a fresh random first value per
+      // handshake to land in a brand-new bucket every time and never trip the
+      // cap. Prod Caddy sets `header_up X-Real-IP {remote_host}` (it OVERWRITES
+      // any client-supplied value with the real peer), so X-Real-IP is
+      // unspoofable behind the proxy. Fall back to the direct socket peer address
+      // for the no-proxy (host dev) case. We deliberately do NOT consult
+      // X-Forwarded-For here — its first entry is the spoofable one.
       const ip =
-        (socket.handshake.headers["x-forwarded-for"] as string | undefined)
-          ?.split(",")[0]
-          ?.trim() ??
-        socket.handshake.address ??
+        (socket.handshake.headers["x-real-ip"] as string | undefined)?.trim() ||
+        socket.handshake.address ||
         "unknown";
       const now = Date.now();
       let bucket = handshakeBuckets.get(ip);

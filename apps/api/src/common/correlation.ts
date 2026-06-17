@@ -29,6 +29,13 @@ interface RequestContext {
    *  depth+1 on deliveries it enqueues for events caused by THIS request,
    *  without threading it through every publish() call. */
   chainDepth: number;
+  /** minor#9: mutable per-request flags. `idempotentReplay` is set by the /v1
+   *  idempotency service when a request short-circuits to a cached replay (zero
+   *  real work); the rate-limit interceptor reads it post-handler and refunds
+   *  the per-route token it consumed — so a partner's crash-retry loop on one
+   *  Idempotency-Key doesn't burn the tighter per-route bucket (the api-key
+   *  guard bucket is already refunded on replay). */
+  flags: { idempotentReplay: boolean };
 }
 
 const als = new AsyncLocalStorage<RequestContext>();
@@ -52,6 +59,19 @@ export function getCorrelationId(): string | undefined {
   return als.getStore()?.requestId;
 }
 
+/** minor#9: mark the current request as an idempotent replay (set by the /v1
+ *  idempotency service on a cache-hit). No-op outside a request scope. */
+export function markIdempotentReplay(): void {
+  const store = als.getStore();
+  if (store) store.flags.idempotentReplay = true;
+}
+
+/** minor#9: was the current request an idempotent replay? Read post-handler by
+ *  the rate-limit interceptor to refund the per-route token. */
+export function wasIdempotentReplay(): boolean {
+  return als.getStore()?.flags.idempotentReplay === true;
+}
+
 /**
  * Re-establish a correlation context around a callback OUTSIDE an HTTP request —
  * used by the outbox drainer to restore the `chainDepth` + `correlationId`
@@ -64,7 +84,7 @@ export function runWithCorrelationContext<T>(
   ctx: { requestId: string; chainDepth: number },
   fn: () => T,
 ): T {
-  return als.run(ctx, fn);
+  return als.run({ ...ctx, flags: { idempotentReplay: false } }, fn);
 }
 
 /**
@@ -108,7 +128,10 @@ export function correlationMiddleware() {
     const depthStr = Array.isArray(rawDepth) ? rawDepth[0] : rawDepth;
     const parsedDepth = depthStr ? Number.parseInt(depthStr, 10) : NaN;
     const chainDepth = Number.isFinite(parsedDepth) && parsedDepth > 0 ? parsedDepth : 0;
-    als.run({ requestId: id, chainDepth }, () => next());
+    als.run(
+      { requestId: id, chainDepth, flags: { idempotentReplay: false } },
+      () => next(),
+    );
   };
 }
 

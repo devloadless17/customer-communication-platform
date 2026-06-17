@@ -9,6 +9,9 @@ import {
 import { Reflector } from "@nestjs/core";
 import type { Request } from "express";
 import type { Observable } from "rxjs";
+import { tap } from "rxjs/operators";
+
+import { wasIdempotentReplay } from "./correlation";
 
 /**
  * Per-user / per-api-key token-bucket rate limit. Mirrors the API-key bucket
@@ -53,6 +56,16 @@ const BUCKET_SWEEP_INTERVAL_MS = 5 * 60_000;
 export interface RateLimitOptions {
   /** Token-bucket capacity AND refill-per-minute. Bucket fills at perMinute/60s. */
   perMinute: number;
+  /**
+   * I-8: bucket SCOPE. Two unrelated controllers that happen to share the same
+   * `perMinute` (e.g. Messages 60/min and Calls 60/min) must NOT share a bucket,
+   * or sending 60 messages 429s a voice call. Defaults to the controller class
+   * name so a controller's routes share one bucket (the documented intent —
+   * text/media/template/forward share a cap) while different controllers don't.
+   * Set explicitly to deliberately share a bucket ACROSS controllers, or to
+   * give one route its own.
+   */
+  bucket?: string;
 }
 
 const RATE_LIMIT_METADATA = "rate-limit:options";
@@ -70,9 +83,15 @@ interface Bucket {
   lastRefill: number;
 }
 
-// Key shape: `${principal}:${perMinute}` — different per-route limits live in
-// separate buckets so a hot read-endpoint can't starve mutation budget.
+// Key shape: `${principal}:${scope}:${perMinute}` (I-8). `scope` keeps two
+// controllers that share a perMinute value in separate buckets; different
+// per-route limits still live in separate buckets (perMinute in the key) so a
+// hot read-endpoint can't starve mutation budget.
 const buckets = new Map<string, Bucket>();
+
+function bucketKey(principal: string, scope: string, perMinute: number): string {
+  return `${principal}:${scope}:${perMinute}`;
+}
 
 const sweeper = setInterval(() => {
   const cutoff = Date.now() - BUCKET_IDLE_SWEEP_MS;
@@ -104,9 +123,10 @@ function logEviction(): void {
 
 function consume(
   principal: string,
+  scope: string,
   perMinute: number,
 ): { ok: true } | { ok: false; retryAfter: number } {
-  const key = `${principal}:${perMinute}`;
+  const key = bucketKey(principal, scope, perMinute);
   const now = Date.now();
   const refillPerMs = perMinute / WINDOW_MS;
   const bucket = buckets.get(key);
@@ -134,6 +154,16 @@ function consume(
   return { ok: true };
 }
 
+/**
+ * minor#9: hand a token back to a bucket. Called when a request did zero real
+ * work (an idempotent /v1 replay), so it shouldn't burn the per-route quota.
+ * No-op if the bucket was evicted in the meantime (it would refill anyway).
+ */
+function refund(principal: string, scope: string, perMinute: number): void {
+  const bucket = buckets.get(bucketKey(principal, scope, perMinute));
+  if (bucket) bucket.tokens = Math.min(bucket.capacity, bucket.tokens + 1);
+}
+
 @Injectable()
 export class RateLimitInterceptor implements NestInterceptor {
   constructor(private readonly reflector: Reflector) {}
@@ -154,13 +184,21 @@ export class RateLimitInterceptor implements NestInterceptor {
     const key = userId ? `u:${userId}` : apiKeyId ? `k:${apiKeyId}` : null;
     if (!key) return next.handle();
 
-    const opts =
-      this.reflector.getAllAndOverride<RateLimitOptions | undefined>(
-        RATE_LIMIT_METADATA,
-        [context.getHandler(), context.getClass()],
-      ) ?? { perMinute: DEFAULT_PER_MIN };
+    const decoratorOpts = this.reflector.getAllAndOverride<
+      RateLimitOptions | undefined
+    >(RATE_LIMIT_METADATA, [context.getHandler(), context.getClass()]);
+    const opts = decoratorOpts ?? { perMinute: DEFAULT_PER_MIN };
 
-    const r = consume(key, opts.perMinute);
+    // I-8: explicit per-route limits get a per-CONTROLLER (or per-decorator-
+    // bucket) scope so two controllers sharing a perMinute don't collide. The
+    // DEFAULT ceiling stays GLOBAL per-user (one bucket across all controllers)
+    // — scoping it per-controller would let a user do 300/min PER controller and
+    // defeat the global DoS ceiling.
+    const scope = decoratorOpts
+      ? (decoratorOpts.bucket ?? context.getClass().name)
+      : "__default__";
+
+    const r = consume(key, scope, opts.perMinute);
     if (!r.ok) {
       throw new HttpException(
         {
@@ -171,6 +209,12 @@ export class RateLimitInterceptor implements NestInterceptor {
         429,
       );
     }
-    return next.handle();
+    // minor#9: refund the token if the handler short-circuited to an idempotent
+    // /v1 replay (zero real work). Mirrors the api-key guard bucket refund.
+    return next.handle().pipe(
+      tap(() => {
+        if (wasIdempotentReplay()) refund(key, scope, opts.perMinute);
+      }),
+    );
   }
 }

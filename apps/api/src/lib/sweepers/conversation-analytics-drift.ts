@@ -96,7 +96,20 @@ async function sweepOnce(): Promise<void> {
         SELECT
           m."conversationId" AS conversation_id,
           COUNT(*) FILTER (WHERE m.direction = 'in') AS in_count,
-          COUNT(*) FILTER (WHERE m.direction = 'out') AS out_count
+          -- minor#1: EXCLUDE broadcast messages from out_count so the reconcile
+          -- matches the incremental definition. The live counter
+          -- (trackOnOutboundMessage) is driven by the message.sent event;
+          -- broadcasts publish broadcast.recipient_message_sent, which is
+          -- structurally excluded from the analytics subscriber (a 1k-recipient
+          -- broadcast must not bump per-conversation counters). Without this
+          -- filter the daily reconcile re-added broadcast rows and the counter
+          -- drifted upward every sweep relative to the incremental source of
+          -- truth. Broadcast rows are stamped rawPayload.sentVia = broadcast by
+          -- the runner (createOutboundMessageIdempotent).
+          COUNT(*) FILTER (
+            WHERE m.direction = 'out'
+              AND (m."rawPayload"->>'sentVia') IS DISTINCT FROM 'broadcast'
+          ) AS out_count
         FROM "Message" m
         GROUP BY m."conversationId"
       ) cnt ON cnt.conversation_id = c2.id

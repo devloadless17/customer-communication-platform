@@ -280,7 +280,18 @@ export function useTeamEvents(
   // FE-2: remember each row's pre-bump preview so a FAILED send can roll the
   // optimistic preview back instead of leaving a phantom on the list.
   const preBumpSnapshotRef = useRef<
-    Map<string, { lastMessageAt: string; lastMessagePreview: string; lastMessageDirection: "in" | "out" | null }>
+    Map<
+      string,
+      {
+        lastMessageAt: string;
+        lastMessagePreview: string;
+        lastMessageDirection: "in" | "out" | null;
+        // minor#12: the optimistic bump values, so the revert can detect whether
+        // a newer authoritative frame replaced our bump before clobbering it.
+        bumpedLastMessageAt: string;
+        bumpedPreview: string;
+      }
+    >
   >(new Map());
   useEffect(() => {
     return onOptimisticListBump(({ conversationId, preview, lastMessageAt }) => {
@@ -297,6 +308,10 @@ export function useTeamEvents(
           lastMessageAt: existing.conversation.lastMessageAt,
           lastMessagePreview: existing.conversation.lastMessagePreview,
           lastMessageDirection: existing.conversation.lastMessageDirection ?? null,
+          // minor#12: remember what WE bumped the row to, so a later revert only
+          // fires if the row still shows exactly this (i.e. nothing newer landed).
+          bumpedLastMessageAt: lastMessageAt,
+          bumpedPreview: preview,
         });
         const updated: ConversationWithRefs = {
           ...existing,
@@ -329,8 +344,18 @@ export function useTeamEvents(
         const idx = prev.findIndex((c) => c.conversation.id === conversationId);
         if (idx === -1) return prev;
         const existing = prev[idx]!;
-        // Only restore if the row still shows the optimistic (out) preview — a
-        // real inbound/outbound that landed meanwhile already replaced it.
+        // minor#12: only restore if the row STILL shows our optimistic bump. If a
+        // genuine newer message (inbound, or another outbound) landed during the
+        // send window it already overwrote the preview/at — reverting here would
+        // clobber that newer preview with the stale pre-bump snapshot. (The
+        // surrounding comment always claimed this guard; it was never actually
+        // implemented until now.)
+        if (
+          existing.conversation.lastMessageAt !== snap.bumpedLastMessageAt ||
+          existing.conversation.lastMessagePreview !== snap.bumpedPreview
+        ) {
+          return prev;
+        }
         const next = [...prev];
         next[idx] = {
           ...existing,
@@ -1218,10 +1243,20 @@ export function useTeamEvents(
               const fresh = byId.get(c.contact.id);
               if (!fresh) return c;
               changed = true;
-              return { ...c, contact: fresh };
+              // I-4: MERGE the fresh fields, don't REPLACE the embedded contact.
+              // /api/contacts/lookup returns only {id,name,phoneNumber}, so a
+              // replace wiped stageId/tags/customFields from every affected list
+              // row — rowMatchesFilterFor's stage branch then dropped the row from
+              // stage-filtered views (and per-stage counts) until a manual refetch.
+              return { ...c, contact: { ...c.contact, ...fresh } };
             });
             return changed ? next : prev;
           });
+          // I-4: the lightweight lookup can't carry the actually-changed fields
+          // (the coalesced bulk path is tag add/remove), so converge to server
+          // truth — resyncOnce refetches full conversation rows (incl. tags /
+          // stageId / customFields) and self-heals filtered views.
+          scheduleFilterResync();
         })
         .catch(() => {
           // Swallow — stale embedded contact is recoverable on next chat

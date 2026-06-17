@@ -37,7 +37,14 @@ export function ForwardDialog({
   function submit(contactIds: string[]) {
     if (contactIds.length === 0 || messageIds.length === 0) return;
     onClose();
-    void runForward(messageIds, contactIds, count, onError, softRefresh);
+    // I-1: stable per-action idempotency id. A transport-level retry of this
+    // request reuses the same body (same id) and is deduped server-side, so a
+    // network blip can't re-deliver the forwarded messages to customers.
+    const clientTempId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `fwd-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    void runForward(messageIds, contactIds, count, onError, softRefresh, clientTempId);
   }
 
   if (!open) return null;
@@ -60,12 +67,13 @@ async function runForward(
   count: number,
   onError: (summary: string) => void,
   onAnySent: () => void,
+  clientTempId: string,
 ) {
   try {
     const res = await apiFetch("/api/messages/forward", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageIds, contactIds }),
+      body: JSON.stringify({ messageIds, contactIds, clientTempId }),
     });
     const data = (await res.json().catch(() => null)) as
       | { results?: ForwardResult[]; error?: string; detail?: string }

@@ -89,6 +89,12 @@
 	}
 	handle @apiBackend {
 		reverse_proxy api:4000 {
+			# Real client IP for the gateway's Socket.io handshake rate-limiter
+			# (the handshake rides /api/socket/*, matched here). Mirrors the prod
+			# Caddyfile.template. Without it, x-real-ip is unset and the limiter
+			# falls back to the socket peer = this container's IP, collapsing every
+			# client into ONE handshake bucket (minor#4).
+			header_up X-Real-IP {remote_host}
 			transport http {
 				read_timeout 5m
 				write_timeout 5m

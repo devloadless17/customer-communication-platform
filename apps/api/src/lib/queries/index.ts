@@ -14,8 +14,6 @@ export {
   listOlderMessages,
 } from "./conversations";
 
-export { listTeamMembers } from "./team-members";
-
 export {
   CONTACTS_PAGE,
   buildContactFilterWhere,
@@ -46,9 +44,6 @@ export {
   resolveAudienceGroupMembers,
 } from "./audience-groups";
 export type { AudienceGroupDto } from "./audience-groups";
-
-export { listTags } from "./tags";
-export { listSnippets } from "./snippets";
 
 export {
   loadMessageContextWindow,

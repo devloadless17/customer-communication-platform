@@ -22,6 +22,22 @@ import { toast } from "@/lib/toast";
  * working link.
  */
 export async function openAttachment(url: string, filename?: string | null): Promise<void> {
+  // I-9: open the tab SYNCHRONOUSLY, inside the user-gesture call stack. Browsers
+  // (Safari, strict Firefox) only permit window.open during a gesture; after the
+  // awaited probe below the gesture context is gone and a deferred window.open is
+  // popup-blocked (returns null) — the agent clicks an attachment and nothing
+  // happens. So open a blank tab now and navigate (or close) it once the probe
+  // resolves. The `noopener` flag would null the returned handle we need to
+  // navigate later, so sever `opener` manually to keep reverse-tabnabbing safety.
+  const tab = window.open("about:blank", "_blank");
+  if (tab) {
+    try {
+      tab.opener = null;
+    } catch {
+      // opener is read-only in some browsers — best-effort.
+    }
+  }
+
   const probeUrl = buildProbeUrl(url);
   let available = true;
   try {
@@ -40,6 +56,7 @@ export async function openAttachment(url: string, filename?: string | null): Pro
   }
 
   if (!available) {
+    tab?.close();
     toast.error("Attachment unavailable", {
       description: filename
         ? `"${filename}" is no longer available — it may have been removed.`
@@ -48,7 +65,13 @@ export async function openAttachment(url: string, filename?: string | null): Pro
     return;
   }
 
-  window.open(url, "_blank", "noopener,noreferrer");
+  if (tab) {
+    tab.location.href = url;
+  } else {
+    // The synchronous open was blocked anyway (very strict settings) — last-ditch
+    // direct open with the full security flags.
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
 }
 
 function buildProbeUrl(url: string): string {

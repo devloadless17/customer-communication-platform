@@ -139,6 +139,10 @@ export const ForwardMessagesSchema = z
   .object({
     messageIds: z.array(z.string().min(1)).min(1).max(MAX_FORWARD_MESSAGES),
     contactIds: z.array(z.string().min(1)).min(1).max(MAX_FORWARD_CONTACTS),
+    // I-1: idempotency identity for the forward action. The client sends a
+    // stable id per forward so a transport retry / re-confirmed picker dedupes
+    // server-side instead of re-delivering up to 40 messages to customers.
+    clientTempId: z.string().min(1).optional(),
   })
   .refine(
     (b) => b.messageIds.length * b.contactIds.length <= MAX_FORWARD_TOTAL,

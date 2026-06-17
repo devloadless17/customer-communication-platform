@@ -62,10 +62,32 @@ export async function enqueueScheduledBroadcast(
   delayMs: number,
 ): Promise<void> {
   const q = getBroadcastScheduleQueue();
+  const jobId = scheduleJobId(broadcastId);
+  // I-11: BullMQ's add() with a duplicate jobId is a SILENT no-op while ANY job
+  // with that id still exists — including a COMPLETED job retained by
+  // removeOnComplete (24h) or a FAILED one retained by removeOnFail (7d). So a
+  // re-enqueue from the drift sweeper for a broadcast that stranded AFTER its
+  // fire job already ran would be silently discarded while the caller logs
+  // "re-enqueued". If a TERMINAL job with this id lingers, remove it first so
+  // the re-add actually arms a fresh delayed job. A still-pending job
+  // (delayed/waiting/active) is left alone — re-enqueueing onto a live one-shot
+  // is correctly a no-op.
+  const existing = await q.getJob(jobId);
+  if (existing) {
+    const jobState = await existing.getState();
+    if (jobState === "completed" || jobState === "failed") {
+      try {
+        await existing.remove();
+      } catch {
+        // Raced into a re-run between getState and remove — the worker's CAS
+        // (scheduled → queued) keeps a double-fire a no-op, so this is safe.
+      }
+    }
+  }
   await q.add(
     "fire",
     { broadcastId },
-    { delay: Math.max(1, delayMs), jobId: scheduleJobId(broadcastId) },
+    { delay: Math.max(1, delayMs), jobId },
   );
 }
 
