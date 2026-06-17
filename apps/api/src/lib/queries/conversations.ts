@@ -315,7 +315,14 @@ export async function getConversationWithRefs(
       // Call row), so carrying them would only waste the ACTIVITY_WINDOW budget.
       events: {
         where: { kind: { notIn: NON_PILL_EVENT_KINDS } },
-        orderBy: { at: "desc" },
+        // `id` breaks ties so two rows with the SAME `at` (audit rows written on
+        // the same DB clock tick — a dropdown unassign+status in one gesture, the
+        // auto-claim assigned+reopened, rapid teammate actions) come back in a
+        // DETERMINISTIC order. Without it, Postgres returns same-`at` rows in
+        // physical order, which differs between this hydration and the events-only
+        // refetch below — so the timeline flipped them on every coalesced re-sort
+        // (the same-`at` flicker). Matches the messages/calls orderings here.
+        orderBy: [{ at: "desc" }, { id: "desc" }],
         take: ACTIVITY_WINDOW,
         // `workflowId` rides along (no FK to join — denormalized actor style),
         // batch-resolved to a name in mapActivityEventRows so a workflow-driven
@@ -501,7 +508,9 @@ export async function listConversationEvents(
     // Mirror the hydration's exclusion so the events-only refetch never
     // surfaces a call_* row the timeline can't render (CallBubble owns calls).
     where: { conversationId, teamId, kind: { notIn: NON_PILL_EVENT_KINDS } },
-    orderBy: { at: "desc" },
+    // Deterministic same-`at` tiebreak — must match the hydration orderBy above
+    // so the optimistic→authoritative reconcile sees a stable order (see there).
+    orderBy: [{ at: "desc" }, { id: "desc" }],
     take: ACTIVITY_WINDOW,
     // Same explicit select as the hydration so `workflowId` rides along and the
     // "by workflow «name»" attribution converges on the post-frame refetch too.

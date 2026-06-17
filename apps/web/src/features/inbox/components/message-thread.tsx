@@ -1452,6 +1452,8 @@ function MessageThreadImpl({
         entry.kind === "activity" || entry.kind === "message"
           ? entry.data.optimisticGroupId
           : undefined,
+      // Stable, render-independent identity for the final sort tiebreak below.
+      id: entry.data.id,
     }));
     // Anchor time per group = the `t` of the group's LOWEST-seq member, i.e. the
     // triggering send's own message bubble (the message is stamped a seq BEFORE
@@ -1491,7 +1493,21 @@ function MessageThreadImpl({
       const at = a.groupId != null ? groupAnchorT.get(a.groupId) ?? a.t : a.t;
       const bt = b.groupId != null ? groupAnchorT.get(b.groupId) ?? b.t : b.t;
       if (at !== bt) return at - bt;
-      return (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER);
+      const seqDiff =
+        (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER);
+      if (seqDiff !== 0) return seqDiff;
+      // FINAL stable tiebreak. Two rows with the same sort time AND no seq —
+      // audit rows written in the same millisecond (a dropdown unassign + status
+      // change in one gesture, a teammate's back-to-back actions, the auto-claim
+      // assigned + reopened landing on the same DB clock tick) — otherwise have an
+      // undefined relative order that the `/events` query (ORDER BY at DESC, no
+      // tiebreak) returns inconsistently, so they FLIP on every coalesced re-sort:
+      // the same-`at` flicker the upper inbox shows. Order by id (a stable server
+      // id, or a stub id KEPT across reconcile) so the order is deterministic and
+      // never changes between renders.
+      const aid = a.id ?? "";
+      const bid = b.id ?? "";
+      return aid < bid ? -1 : aid > bid ? 1 : 0;
     });
     return decorated.map((d) => d.entry);
   }, [messages, notes, events, hasMoreOlder, data.calls]);

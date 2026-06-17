@@ -40,6 +40,7 @@ interface Entry {
   id: string | null;
   pending: boolean;
   label: string;
+  ts: string | null;
 }
 
 async function snapshot(page: Page): Promise<Entry[]> {
@@ -49,6 +50,7 @@ async function snapshot(page: Page): Promise<Entry[]> {
       id: el.getAttribute("data-entry-id"),
       pending: el.getAttribute("data-pending") === "1",
       label: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 60),
+      ts: el.getAttribute("data-entry-ts"),
     })),
   );
 }
@@ -190,7 +192,10 @@ async function injectOutboundSent(opts: {
  * and still run (per the bus tiering).
  */
 async function injectConversationEvent(
-  type: "conversation.assigned" | "conversation.status_changed",
+  type:
+    | "conversation.assigned"
+    | "conversation.status_changed"
+    | "conversation.ai_changed",
   extra: Record<string, unknown>,
 ): Promise<void> {
   await db().outboundEvent.create({
@@ -206,6 +211,39 @@ async function injectConversationEvent(
         ...extra,
       },
     },
+  });
+}
+
+/**
+ * Inject the FULL auto-claim trio's authoritative audit rows the way
+ * autoAssignOnAgentSend writes them on a human reply into an unassigned + non-open
+ * + AI-on chat: ai_paused, then assigned, then status_changed (reopened). The
+ * inject ORDER controls the audit `at` ordering — assigned before status_changed
+ * is the real server order (messages.service.ts:461 then 478), which lands
+ * assigned.at < reopened.at, i.e. the racy order that pre-fix swapped the pills.
+ * ai_changed carries occurredAt so its `at` is action-time (matches the server).
+ */
+async function injectAutoClaimTrio(occurredAtIso: string): Promise<void> {
+  await injectConversationEvent("conversation.ai_changed", {
+    previousAiEnabled: true,
+    newAiEnabled: false,
+    occurredAt: occurredAtIso,
+  });
+  await injectConversationEvent("conversation.assigned", {
+    previousAssignedUserId: null,
+    newAssignedUserId: userId,
+    assignedUser: {
+      id: userId,
+      teamId,
+      name: "E2E Admin",
+      email: "e2e@example.io",
+      role: "admin",
+      isActive: true,
+    },
+  });
+  await injectConversationEvent("conversation.status_changed", {
+    previousStatus: "pending",
+    newStatus: "open",
   });
 }
 
@@ -615,5 +653,215 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       finalSnap.filter((e) => e.kind === "activity").every((e) => !e.pending),
       "both pills settled",
     ).toBe(true);
+  });
+
+  // Symptom 5 (2026-06-17) — the EXACT reported scenario: UNASSIGNED + AI ON +
+  // PENDING, send a message → the server fans out the FULL trio (ai_paused +
+  // reopened + self-assigned). All three must reconcile, stay docked UNDER the
+  // reply in send order, with the message timestamp landing AFTER the audit rows
+  // (late ack / clock skew), and there must be exactly three pills (no
+  // duplicates). symptom 4 only covered AI-off (2 pills); this is the 3-pill case.
+  test("full trio (ai-pause + reopen + self-assign) anchors under the reply, no scramble (symptom 5)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: true },
+    });
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: null, status: "pending", aiEnabled: true },
+    });
+    const byBody = await interceptSends(page);
+    await openThread(page);
+
+    const base = Date.now();
+    await sendText(page, "hello there");
+
+    // Three optimistic pills paint, pending.
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity" && e.pending)
+            .length,
+        { timeout: 8_000 },
+      )
+      .toBe(3);
+
+    const tid = await waitForClientTempId(byBody, "hello there");
+    const sampling = sampleOver(page, 4500, 40);
+
+    // Reconcile the full trio (ai_paused, assigned, reopened).
+    await injectAutoClaimTrio(new Date(base).toISOString());
+
+    // All three settle while the send is still pending.
+    await expect
+      .poll(
+        async () => {
+          const acts = (await snapshot(page)).filter((e) => e.kind === "activity");
+          return acts.length === 3 && acts.every((e) => !e.pending);
+        },
+        { timeout: 8_000 },
+      )
+      .toBe(true);
+
+    // Confirm with the message ts AFTER the audit rows.
+    await injectOutboundSent({
+      body: "hello there",
+      clientTempId: tid,
+      atMs: base + 30000,
+    });
+    const samples = await sampling;
+
+    expect(findReorder(samples)).toBeNull();
+
+    const finalSnap = await snapshot(page);
+    const acts = finalSnap.filter((e) => e.kind === "activity");
+    expect(acts.length, "exactly three pills, no duplicates").toBe(3);
+    const idx = (re: RegExp) =>
+      finalSnap.findIndex((e) => e.kind === "activity" && re.test(e.label));
+    const reply = finalSnap.findIndex(
+      (e) => e.kind === "message" && e.label.includes("hello there"),
+    );
+    const ai = idx(/paused ai|paused.*autopilot/i);
+    const reopen = idx(/reopen/i);
+    const assign = idx(/self-assign/i);
+    expect(reply, "reply painted").toBeGreaterThanOrEqual(0);
+    expect(reply, "reply above all pills").toBeLessThan(ai);
+    expect(ai, "ai-pause above reopen").toBeLessThan(reopen);
+    expect(reopen, "reopen above self-assign").toBeLessThan(assign);
+    expect(acts.every((e) => !e.pending), "all settled").toBe(true);
+  });
+
+  // Symptom 6 (2026-06-17) — REPEATED sends, the "too many duplicate logs + the
+  // upper inbox vibrates, fixed by refresh" report. Send into unassigned+pending+
+  // AI-on, RESET (resume AI + pending + unassign), send again. Each send is its
+  // own group; a groupless "resumed AI" pill sits between two trios. The first
+  // fix's per-PAIR seq/at tiebreak is NON-TRANSITIVE in this shape (a groupless
+  // row whose `at` falls between two groups), so JS sort produced an undefined,
+  // flickering order that cleared only on refresh. The message-anchored SINGLE
+  // sort key is transitive, so the two cycles stay separated with no duplicates.
+  test("repeated sends + AI-resume between them: no duplicate or scrambled logs (symptom 6)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: true },
+    });
+    const resetPendingUnassigned = () =>
+      db().conversation.update({
+        where: { id: conversationId },
+        data: { assignedUserId: null, status: "pending", aiEnabled: true },
+      });
+    await resetPendingUnassigned();
+    const byBody = await interceptSends(page);
+    await openThread(page);
+
+    const base = Date.now();
+
+    // ---- cycle 1 ----
+    await sendText(page, "first");
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity" && e.pending)
+            .length,
+        { timeout: 8_000 },
+      )
+      .toBe(3);
+    const t1 = await waitForClientTempId(byBody, "first");
+    await injectAutoClaimTrio(new Date(base).toISOString());
+    await expect
+      .poll(
+        async () => {
+          const acts = (await snapshot(page)).filter((e) => e.kind === "activity");
+          return acts.length === 3 && acts.every((e) => !e.pending);
+        },
+        { timeout: 8_000 },
+      )
+      .toBe(true);
+    await injectOutboundSent({ body: "first", clientTempId: t1, atMs: base + 1000 });
+
+    // ---- reset: resume AI + back to pending + unassign ----
+    // Reset the DB AND drive the client state back via authoritative frames (the
+    // UI does this through the dropdowns/toggle). The frames flip the client props
+    // (assignedUserId→null, status→pending, aiEnabled→true), which is what resets
+    // reply-box's once-per-stretch *EmittedRef guards so cycle 2 re-emits its
+    // trio. Each also writes one reset pill (unassigned / marked-pending / resumed
+    // AI) — groupless, so they sort between the two send groups by `at`.
+    await resetPendingUnassigned();
+    await injectConversationEvent("conversation.assigned", {
+      previousAssignedUserId: userId,
+      newAssignedUserId: null,
+      assignedUser: null,
+    });
+    await injectConversationEvent("conversation.status_changed", {
+      previousStatus: "open",
+      newStatus: "pending",
+    });
+    await injectConversationEvent("conversation.ai_changed", {
+      previousAiEnabled: false,
+      newAiEnabled: true,
+      occurredAt: new Date(base + 5000).toISOString(),
+    });
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity").length,
+        { timeout: 8_000 },
+      )
+      .toBe(6); // 3 trio + 3 reset (unassigned / pending / resumed)
+
+    // ---- cycle 2 (sampled — this is where the scramble showed) ----
+    const sampling = sampleOver(page, 5000, 40);
+    await sendText(page, "second");
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity" && e.pending)
+            .length,
+        { timeout: 8_000 },
+      )
+      .toBe(3);
+    const t2 = await waitForClientTempId(byBody, "second");
+    await injectAutoClaimTrio(new Date(base + 10000).toISOString());
+    await expect
+      .poll(
+        async () => {
+          const acts = (await snapshot(page)).filter((e) => e.kind === "activity");
+          return acts.length === 9 && acts.every((e) => !e.pending);
+        },
+        { timeout: 8_000 },
+      )
+      .toBe(true);
+    await injectOutboundSent({ body: "second", clientTempId: t2, atMs: base + 30000 });
+    const samples = await sampling;
+
+    expect(findReorder(samples), "no reorder across cycle 2").toBeNull();
+
+    const finalSnap = await snapshot(page);
+    const acts = finalSnap.filter((e) => e.kind === "activity");
+    expect(acts.length, "9 pills total, no duplicates").toBe(9);
+    const count = (re: RegExp) => acts.filter((e) => re.test(e.label)).length;
+    expect(count(/paused ai|paused.*autopilot/i), "2 paused").toBe(2);
+    expect(count(/reopen/i), "2 reopened").toBe(2);
+    expect(count(/self-assign/i), "2 self-assigned").toBe(2);
+    expect(count(/resumed ai|resumed.*autopilot/i), "1 resumed").toBe(1);
+    expect(count(/unassigned the conversation/i), "1 unassigned").toBe(1);
+    expect(count(/marked the conversation pending|marked.*pending/i), "1 pending").toBe(1);
+    // Order: cycle-1 block (under "first") < resume < cycle-2 block (under "second").
+    const firstMsg = finalSnap.findIndex(
+      (e) => e.kind === "message" && e.label.includes("first"),
+    );
+    const secondMsg = finalSnap.findIndex(
+      (e) => e.kind === "message" && e.label.includes("second"),
+    );
+    const resumeIdx = finalSnap.findIndex(
+      (e) => e.kind === "activity" && /resumed/i.test(e.label),
+    );
+    expect(firstMsg, "first send above resume").toBeLessThan(resumeIdx);
+    expect(resumeIdx, "resume above second send").toBeLessThan(secondMsg);
   });
 });
