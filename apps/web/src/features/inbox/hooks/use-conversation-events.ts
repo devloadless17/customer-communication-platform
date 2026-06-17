@@ -258,9 +258,21 @@ function sameEventSequence(
 }
 
 // A stub and its authoritative row land within a few hundred ms (the
-// leading/trailing GET); a generous window still pairs them while never
-// matching a much-older identical row (e.g. assign→unassign→re-assign).
-const STUB_MATCH_WINDOW_MS = 120_000;
+// leading/trailing GET fire ≤350ms apart, the audit write is ms behind the
+// frame). The window must be wide enough to pair them through a load spike, yet
+// TIGHT enough to never pair a fresh optimistic pill with a much-OLDER identical
+// row. That second half is load-bearing for the generic-signature kinds
+// (ai_paused / ai_resumed have NO distinguishing value in `activitySignature`,
+// so EVERY past pause looks identical): at 120s, sending again within 2 minutes
+// of a prior pause let the new send's optimistic pause pill pair with the OLD
+// pause row, which then adopted the new send's group and jumped to the new
+// message before the trailing GET corrected it — the "a 5:50 log shows at the
+// bottom then settles" flicker. 8s is ~20× the real pairing latency but far
+// below the multi-second cadence of distinct human actions, and well under the
+// 5s stub TTL so a stub never lingers to mis-pair. (assign/status/stage/tag
+// carry a value in the signature, so only an identical-value repeat within 8s
+// could still collide — rare, and self-corrects on the trailing GET.)
+const STUB_MATCH_WINDOW_MS = 8_000;
 
 /**
  * Fold an authoritative server activity-log window over the current events,

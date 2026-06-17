@@ -223,20 +223,23 @@ async function injectConversationEvent(
  * assigned.at < reopened.at, i.e. the racy order that pre-fix swapped the pills.
  * ai_changed carries occurredAt so its `at` is action-time (matches the server).
  */
-async function injectAutoClaimTrio(baseMs: number): Promise<void> {
+async function injectAutoClaimTrio(): Promise<void> {
   // Mirror the FIXED server (autoAssignOnAgentSend): ai_paused / reopened /
-  // self-assigned get ORDERED occurredAt = baseMs + 1/2/3, where baseMs clears
-  // the triggering message's timestamp. So they sort under the reply in
-  // [ai, reopen, assign] order — including on a refreshed page (no anchor).
+  // self-assigned get ORDERED occurredAt = now + 1/2/3. Anchored to `now` (the
+  // optimistic stub's real clock) so the reconcile pairs within the tight
+  // stub-match window regardless of how slow the suite runs; the [ai, reopen,
+  // assign] order + the dock-under-the-reply behaviour come from the anchor /
+  // the message timestamp, not these absolute values.
+  const base = Date.now();
   await injectConversationEvent("conversation.ai_changed", {
     previousAiEnabled: true,
     newAiEnabled: false,
-    occurredAt: new Date(baseMs + 1).toISOString(),
+    occurredAt: new Date(base + 1).toISOString(),
   });
   await injectConversationEvent("conversation.status_changed", {
     previousStatus: "pending",
     newStatus: "open",
-    occurredAt: new Date(baseMs + 2).toISOString(),
+    occurredAt: new Date(base + 2).toISOString(),
   });
   await injectConversationEvent("conversation.assigned", {
     previousAssignedUserId: null,
@@ -249,7 +252,7 @@ async function injectAutoClaimTrio(baseMs: number): Promise<void> {
       role: "admin",
       isActive: true,
     },
-    occurredAt: new Date(baseMs + 3).toISOString(),
+    occurredAt: new Date(base + 3).toISOString(),
   });
 }
 
@@ -715,7 +718,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     const sampling = sampleOver(page, 4500, 40);
 
     // Reconcile the full trio (ai_paused, assigned, reopened).
-    await injectAutoClaimTrio(base);
+    await injectAutoClaimTrio();
 
     // All three settle while the send is still pending.
     await expect
@@ -794,7 +797,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       )
       .toBe(3);
     const t1 = await waitForClientTempId(byBody, "first");
-    await injectAutoClaimTrio(base);
+    await injectAutoClaimTrio();
     await expect
       .poll(
         async () => {
@@ -848,7 +851,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       )
       .toBe(3);
     const t2 = await waitForClientTempId(byBody, "second");
-    await injectAutoClaimTrio(base + 10000);
+    await injectAutoClaimTrio();
     await expect
       .poll(
         async () => {
@@ -959,5 +962,261 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     });
     await page.waitForTimeout(600);
     await verify("after reload");
+  });
+
+  // Symptom 8 (2026-06-17) — the residual "a 5:50 log shows at the bottom then
+  // settles" flicker on REPEATED sends. ai_paused/ai_resumed carry NO value in
+  // activitySignature, so every past pause is identical. When the agent sends
+  // again, the new send's optimistic pause pill reconciles via the LEADING
+  // /events GET — which can fire BEFORE the new pause audit row is written — and
+  // (pre-fix, 120s window) pairs with an OLD pause row up to 2min back, which
+  // then adopts the new send's group and jumps to the new message before the
+  // trailing GET corrects it. We reproduce that race DETERMINISTICALLY: seed a
+  // 60s-old send's pause row, then on the new send inject reopen+assign (which
+  // triggers the GET) while the new pause row is still absent. The OLD pause row
+  // must NEVER move. Frames captured at 25ms so any one-frame jump is caught.
+  test("repeated send doesn't transiently mis-place an OLD ai-pause log (symptom 8)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: true },
+    });
+    const T = Date.now();
+    const OLD = T - 60_000; // a prior send, 60s ago
+    await db().message.create({
+      data: {
+        teamId,
+        conversationId,
+        externalId: `e2e-old-${OLD}`,
+        direction: "out",
+        channel: "whatsapp",
+        status: "sent",
+        body: "oldsend",
+        timestamp: new Date(OLD),
+        senderUserId: userId,
+        rawPayload: {},
+      },
+    });
+    // The 60s-old send's settled trio (server rows, no group).
+    await seedConversationEvent("ai_paused", OLD + 1, { aiEnabled: false });
+    await seedConversationEvent("status_changed", OLD + 2, { status: "open" });
+    await seedConversationEvent("assigned", OLD + 3, { assignedUserId: userId });
+    // Reset to pending + unassigned (the agent re-testing) so the new send
+    // re-triggers the full trio.
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: null, status: "pending", aiEnabled: true },
+    });
+    const byBody = await interceptSends(page);
+    await openThread(page);
+
+    // The OLD pause row's index at rest — it must hold this all the way through.
+    const oldPauseIndex = (snap: Entry[]) =>
+      snap.findIndex(
+        (e) =>
+          e.kind === "activity" &&
+          /paused ai|paused.*autopilot/i.test(e.label) &&
+          e.ts != null &&
+          Math.abs(new Date(e.ts).getTime() - (OLD + 1)) < 1500,
+      );
+
+    await sendText(page, "newsend");
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity" && e.pending)
+            .length,
+        { timeout: 8_000 },
+      )
+      .toBe(3);
+
+    const tid = await waitForClientTempId(byBody, "newsend");
+    const sampling = sampleOver(page, 4000, 25); // 25ms = ~160 frames
+
+    // Trigger the reconcile GET via reopen+assign WHILE the new pause row is
+    // still absent — the exact window the old pause row could be mis-paired in.
+    const now = Date.now();
+    await injectConversationEvent("conversation.status_changed", {
+      previousStatus: "pending",
+      newStatus: "open",
+      occurredAt: new Date(now + 2).toISOString(),
+    });
+    await injectConversationEvent("conversation.assigned", {
+      previousAssignedUserId: null,
+      newAssignedUserId: userId,
+      assignedUser: {
+        id: userId,
+        teamId,
+        name: "E2E Admin",
+        email: "e2e@example.io",
+        role: "admin",
+        isActive: true,
+      },
+      occurredAt: new Date(now + 3).toISOString(),
+    });
+    await page.waitForTimeout(500); // let the leading GET fire + (pre-fix) mis-pair
+    // Now the new pause row lands.
+    await injectConversationEvent("conversation.ai_changed", {
+      previousAiEnabled: true,
+      newAiEnabled: false,
+      occurredAt: new Date(now + 1).toISOString(),
+    });
+    await page.waitForTimeout(400);
+    await injectOutboundSent({ body: "newsend", clientTempId: tid, atMs: now });
+
+    const frames = await sampling;
+
+    // The OLD pause row must stay put across EVERY frame (never jump to the new
+    // message). Track it by its 60s-old timestamp.
+    const oldMsgIdx = (snap: Entry[]) =>
+      snap.findIndex((e) => e.kind === "message" && e.label.includes("oldsend"));
+    let worst: string | null = null;
+    for (let s = 0; s < frames.length; s++) {
+      const snap = frames[s]!;
+      const oi = oldPauseIndex(snap);
+      const omi = oldMsgIdx(snap);
+      if (oi === -1 || omi === -1) continue;
+      // The old pause log sits just under the OLD message — never below the
+      // newsend reply (which is much further down).
+      const newReply = snap.findIndex(
+        (e) => e.kind === "message" && e.label.includes("newsend"),
+      );
+      if (newReply !== -1 && oi > newReply) {
+        worst = `frame ${s}: old pause log (idx ${oi}) jumped BELOW the new reply (idx ${newReply})`;
+        break;
+      }
+    }
+    expect(worst, "old ai-pause log never mis-places").toBeNull();
+    // And no global reorder of any tracked id either.
+    expect(findReorder(frames)).toBeNull();
+  });
+
+  // Symptom 9 (2026-06-17) — the DENSE same-second case (the "everything at
+  // 6:00 PM, two different orders" screenshots): 2 send+reset cycles packed into
+  // ONE second. With the fixed server every row has a distinct, ordered `at`
+  // (auto-claim = message-ts + 1/2/3; the reset dropdowns are sequential ms
+  // apart), so even at second-display-precision the timeline is chronological and
+  // STABLE — no tiebreak lottery. Frames at 25ms catch any transient scramble.
+  test("dense same-second: 2 send+reset cycles stay chronological + stable (symptom 9)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: true },
+    });
+    const reset = () =>
+      db().conversation.update({
+        where: { id: conversationId },
+        data: { assignedUserId: null, status: "pending", aiEnabled: true },
+      });
+    await reset();
+    const byBody = await interceptSends(page);
+    await openThread(page);
+
+    const T = Date.now();
+    const settled3 = (n: number) =>
+      expect
+        .poll(
+          async () => {
+            const a = (await snapshot(page)).filter((e) => e.kind === "activity");
+            return a.length === n && a.every((e) => !e.pending);
+          },
+          { timeout: 8_000 },
+        )
+        .toBe(true);
+    const pending3 = () =>
+      expect
+        .poll(
+          async () =>
+            (await snapshot(page)).filter((e) => e.kind === "activity" && e.pending)
+              .length,
+          { timeout: 8_000 },
+        )
+        .toBe(3);
+
+    const sampling = sampleOver(page, 7000, 25); // dense capture over the WHOLE flow
+
+    // ---- cycle 1 (message @T, trio @T+1/2/3) ----
+    await sendText(page, "first");
+    await pending3();
+    const t1 = await waitForClientTempId(byBody, "first");
+    await injectAutoClaimTrio();
+    await injectOutboundSent({ body: "first", clientTempId: t1, atMs: T });
+    await settled3(3);
+
+    // ---- reset (resumed @T+10, pending @T+11, unassigned @T+12) ----
+    await reset();
+    await injectConversationEvent("conversation.ai_changed", {
+      previousAiEnabled: false,
+      newAiEnabled: true,
+      occurredAt: new Date(T + 10).toISOString(),
+    });
+    await injectConversationEvent("conversation.status_changed", {
+      previousStatus: "open",
+      newStatus: "pending",
+      occurredAt: new Date(T + 11).toISOString(),
+    });
+    await injectConversationEvent("conversation.assigned", {
+      previousAssignedUserId: userId,
+      newAssignedUserId: null,
+      assignedUser: null,
+      occurredAt: new Date(T + 12).toISOString(),
+    });
+    await expect
+      .poll(
+        async () =>
+          (await snapshot(page)).filter((e) => e.kind === "activity").length,
+        { timeout: 8_000 },
+      )
+      .toBe(6);
+
+    // ---- cycle 2 (message @T+20, trio @T+21/22/23) ----
+    await sendText(page, "second");
+    await pending3();
+    const t2 = await waitForClientTempId(byBody, "second");
+    await injectAutoClaimTrio();
+    await injectOutboundSent({ body: "second", clientTempId: t2, atMs: T + 20 });
+    await settled3(9);
+
+    const frames = await sampling;
+
+    // (1) No reorder anywhere across the whole dense flow.
+    expect(findReorder(frames), "no reorder across the dense same-second flow").toBeNull();
+
+    // (2) Final order is EXACTLY the action order.
+    const token = (e: Entry): string | null => {
+      if (e.kind === "message") {
+        if (e.label.includes("first")) return "msg:first";
+        if (e.label.includes("second")) return "msg:second";
+        return null; // seeded inbound — ignore
+      }
+      if (e.kind !== "activity") return null;
+      if (/paused ai|paused.*autopilot/i.test(e.label)) return "act:paused";
+      if (/resumed ai|resumed.*autopilot/i.test(e.label)) return "act:resumed";
+      if (/reopen/i.test(e.label)) return "act:reopened";
+      if (/unassigned the conversation/i.test(e.label)) return "act:unassigned";
+      if (/self-assign/i.test(e.label)) return "act:self-assigned";
+      if (/marked.*pending|pending/i.test(e.label)) return "act:pending";
+      return null;
+    };
+    const finalTokens = frames[frames.length - 1]!
+      .map(token)
+      .filter((t): t is string => t != null);
+    expect(finalTokens).toEqual([
+      "msg:first",
+      "act:paused",
+      "act:reopened",
+      "act:self-assigned",
+      "act:resumed",
+      "act:pending",
+      "act:unassigned",
+      "msg:second",
+      "act:paused",
+      "act:reopened",
+      "act:self-assigned",
+    ]);
   });
 });
