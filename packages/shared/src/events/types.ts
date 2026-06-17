@@ -235,6 +235,13 @@ export interface ConversationAssignedEvent {
    * See lib/workflows/steps/* and outbound-webhooks.subscriber.ts.
    */
   silent?: boolean;
+  /** Optional action time (ISO) the audit subscriber writes as the
+   *  ConversationEvent `at`. The auto-claim-on-send path stamps the SAME value
+   *  on the assigned + status_changed events it publishes together, so their
+   *  pills share an `at` and the timeline orders them by a deterministic kind
+   *  tiebreak instead of by whichever async audit write won the race. Omitted
+   *  on standalone assigns → falls back to write-time (unchanged). */
+  occurredAt?: string;
 }
 
 export interface ConversationStatusChangedEvent {
@@ -270,6 +277,10 @@ export interface ConversationStatusChangedEvent {
   closedSummary?: string | null;
   /** Workflow steps set this to skip chain-trigger dispatch. See ConversationAssignedEvent.silent. */
   silent?: boolean;
+  /** Optional action time — see ConversationAssignedEvent.occurredAt. The
+   *  auto-claim-on-send path stamps the same value here as on the paired
+   *  assigned event so the reopen + self-assign pills share an `at`. */
+  occurredAt?: string;
 }
 
 /**

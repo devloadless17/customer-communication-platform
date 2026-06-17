@@ -71,6 +71,13 @@ export function registerAuditSubscribers(): () => void {
       kind: "assigned",
       before: { assignedUserId: e.previousAssignedUserId },
       after: { assignedUserId: e.newAssignedUserId },
+      // Action time, not async-write time (same rationale as ai_changed below).
+      // Also makes the auto-assign-on-send pair (assigned + status_changed,
+      // published in one tx) share the SAME `at` instead of two racy write
+      // times — so the timeline's kind-priority tiebreak orders them
+      // deterministically (ai → assigned → status) and the optimistic pills
+      // don't flash into a different order on reconcile.
+      at: e.occurredAt,
     });
   });
 
@@ -85,6 +92,10 @@ export function registerAuditSubscribers(): () => void {
       kind: "status_changed",
       before: { status: e.previousStatus },
       after: { status: e.newStatus },
+      // Action time (see the assigned handler above) — keeps the reopen pill's
+      // `at` in lockstep with the assign pill on an auto-claim, so they tiebreak
+      // by kind deterministically instead of by whichever async write won.
+      at: e.occurredAt,
     });
   });
 

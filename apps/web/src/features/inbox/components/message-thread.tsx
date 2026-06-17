@@ -95,6 +95,25 @@ function entryTimestamp(entry: TimelineEntry): string {
 // visual group (one avatar + one meta row at the tail), like WhatsApp/Slack.
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
+// Deterministic order for ACTIVITY pills that share an `at`. The auto-claim
+// trio (ai_paused + assigned + status_changed) is written in ONE server tx and
+// stamped with the same action time, so the two/three pills tie on `at`. A bare
+// `at` sort is unstable for ties, so an optimistic pill — which orders by
+// `optimisticSeq` while pinned (ai < assign < reopen) — could flash into a
+// different order the instant it reconciles to its server row (which has no seq
+// and sorts by `at`). This priority breaks the tie deterministically and MUST
+// match the reply-box optimistic build order (buildOptimisticAiChange →
+// Assignment → StatusChange). Unlisted kinds tie → keep their input order.
+const ACTIVITY_TIE_ORDER: Partial<Record<ConversationActivityEvent["kind"], number>> = {
+  ai_paused: 0,
+  ai_resumed: 0,
+  assigned: 1,
+  status_changed: 2,
+};
+function activityTieOrder(kind: ConversationActivityEvent["kind"]): number {
+  return ACTIVITY_TIE_ORDER[kind] ?? 99;
+}
+
 // Short, human label for a media-only inbound, used by the screen-reader
 // announcement when there's no text body to read.
 const MEDIA_ANNOUNCE_LABEL: Partial<Record<MediaKind, string>> = {
@@ -1451,7 +1470,16 @@ function MessageThreadImpl({
       // whole reason these rows are pinned). Fall back to time when a tail row
       // has no seq (defensive; in practice every pinned row carries one).
       if (a.pin && a.seq != null && b.seq != null) return a.seq - b.seq;
-      return a.t - b.t;
+      if (a.t !== b.t) return a.t - b.t;
+      // Equal timestamp: deterministically order simultaneous ACTIVITY pills
+      // (the same-`at` auto-claim trio) by kind so they match the optimistic
+      // seq order and don't shuffle on reconcile. Only activity-vs-activity —
+      // a message tying a pill on `at` keeps input order (messages are decorated
+      // first), so the send still sits above its own takeover pills.
+      if (a.entry.kind === "activity" && b.entry.kind === "activity") {
+        return activityTieOrder(a.entry.data.kind) - activityTieOrder(b.entry.data.kind);
+      }
+      return 0;
     });
     return decorated.map((d) => d.entry);
   }, [messages, notes, events, hasMoreOlder, data.calls]);
