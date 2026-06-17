@@ -343,6 +343,12 @@ export class MetaWebhookController implements OnModuleDestroy {
             ...(evt.body ? { caption: evt.body } : {}),
             ...(evt.media.filename ? { filename: evt.media.filename } : {}),
             ...(evt.media.durationMs != null ? { durationMs: evt.media.durationMs } : {}),
+            // Carry the WhatsApp push-to-talk flag so the just-arrived voice note
+            // renders with the mic glyph + waveform LIVE — applyMessageMediaReady
+            // replaces `media` wholesale, so a voice-less frame would otherwise
+            // overwrite the placeholder's voice:true and the bubble would read as
+            // a generic audio file until the next SSR/refetch.
+            ...(evt.media.voice ? { voice: true } : {}),
             ...(outcome.thumbnailStorageUrl
               ? { thumbnailUrl: `/api/media/${row.id}/thumb` }
               : {}),

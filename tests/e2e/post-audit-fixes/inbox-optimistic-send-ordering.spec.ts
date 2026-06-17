@@ -275,6 +275,14 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       where: { id: teamId },
       data: { aiAutopilotEnabled: false }, // no pause pills — isolate the message ordering
     });
+    // Pre-assign so the send doesn't trigger the optimistic auto-assign pill
+    // (a human reply self-assigns an UNASSIGNED chat — see reply-box.tsx). Like
+    // the aiAutopilot-off above, this isolates the MESSAGE-ordering invariant
+    // from the orthogonal takeover pills (which have their own coverage below).
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: userId },
+    });
     const byBody = await interceptSends(page);
     await openThread(page);
 
@@ -380,6 +388,65 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       const p = pill(s);
       if (r === -1 || p === -1) continue;
       expect(p, "pill below the reply").toBeGreaterThan(r);
+    }
+  });
+
+  // Symptom 3 (2026-06-17) — the reported "three logs flash above then snap
+  // below the send" glitch: replying into an UNASSIGNED + AI-on + non-open chat
+  // makes the server write ai_paused + assigned + reopened logs. Pre-fix those
+  // arrived a round-trip late, server-clocked + unpinned, floating ABOVE the
+  // still-pending send before snapping below. reply-box now mirrors all three
+  // optimistically in send-order seq (next to the AI-pause), so every pill is
+  // BELOW the reply from the first paint and never jumps.
+  test("takeover pills (ai-pause + self-assign + reopen) land BELOW the send, no flash (symptom 3)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    // Unassigned + closed + AI on → the send triggers all three takeover logs.
+    await db().team.update({
+      where: { id: teamId },
+      data: { aiAutopilotEnabled: true },
+    });
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: null, status: "closed" },
+    });
+    const byBody = await interceptSends(page);
+    await openThread(page);
+
+    await sendText(page, "on it now");
+
+    // All three optimistic pills paint (kinds: ai_paused / assigned / status_changed).
+    await expect
+      .poll(async () => {
+        const o = await snapshot(page);
+        return o.filter((e) => e.kind === "activity").length;
+      }, { timeout: 8_000 })
+      .toBeGreaterThanOrEqual(3);
+
+    const replyIdx = (s: Entry[]) =>
+      s.findIndex((e) => e.kind === "message" && e.label.includes("on it now"));
+
+    // Reconcile the send mid-stream; every activity pill must stay BELOW the
+    // reply across the whole window (never index-above it, even for one frame).
+    const sampling = sampleOver(page, 2500, 50);
+    await page.waitForTimeout(300);
+    const tid = await waitForClientTempId(byBody, "on it now");
+    await injectOutboundSent({
+      body: "on it now",
+      clientTempId: tid,
+      atMs: Date.now() + 1000,
+    });
+    const samples = await sampling;
+
+    expect(findReorder(samples)).toBeNull();
+    for (const s of samples) {
+      const r = replyIdx(s);
+      if (r === -1) continue;
+      const pillsAbove = s
+        .slice(0, r)
+        .filter((e) => e.kind === "activity");
+      expect(pillsAbove, "no takeover pill above the reply").toEqual([]);
     }
   });
 });

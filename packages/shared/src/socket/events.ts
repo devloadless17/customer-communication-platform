@@ -128,6 +128,11 @@ export interface ServerToClientEvents {
     teamId: string;
     conversationId: string;
     noteId: string;
+    /** Client-only flag on the deleter's optimistic dispatch: removes the card
+     *  instantly but skips the leading /events GET (which would race ahead of
+     *  the server's audit row). The authoritative team-room frame drives the
+     *  "deleted a note" pill. See `conversation:assigned.optimistic`. */
+    optimistic?: boolean;
   }) => void;
 
   /** Assignment was changed (or cleared). */

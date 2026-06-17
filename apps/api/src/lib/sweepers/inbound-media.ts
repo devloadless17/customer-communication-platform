@@ -114,6 +114,7 @@ async function sweepOnce(): Promise<void> {
       mediaMimeType: true,
       mediaFilename: true,
       mediaDurationMs: true,
+      mediaVoice: true,
       body: true,
       createdAt: true,
       rawPayload: true,
@@ -190,6 +191,7 @@ type ParkedRow = {
   mediaMimeType: string | null;
   mediaFilename: string | null;
   mediaDurationMs: number | null;
+  mediaVoice: boolean | null;
   body: string;
   rawPayload: unknown;
   externalId: string;
@@ -272,6 +274,10 @@ async function retryDownload(row: ParkedRow): Promise<void> {
       ...(row.body ? { caption: row.body } : {}),
       ...(row.mediaFilename ? { filename: row.mediaFilename } : {}),
       ...(row.mediaDurationMs != null ? { durationMs: row.mediaDurationMs } : {}),
+      // Keep the voice-note affordance when the sweeper recovers a parked voice
+      // note (applyMessageMediaReady replaces media wholesale — see the inbound
+      // live path in meta.controller.ts).
+      ...(row.mediaVoice ? { voice: true } : {}),
     },
   });
 }

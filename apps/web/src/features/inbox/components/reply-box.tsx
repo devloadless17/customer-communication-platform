@@ -22,6 +22,7 @@ import type {
   Contact,
   ContactFieldDefinition,
   ContactStage,
+  ConversationStatus,
   MediaKind,
   Message,
   ReplySnapshot,
@@ -39,12 +40,10 @@ import {
 import { nextOptimisticSeq } from "@/features/inbox/lib/optimistic-seq";
 import {
   buildOptimisticAiChange,
-  rollbackOptimisticActivity,
+  buildOptimisticAssignment,
+  buildOptimisticStatusChange,
 } from "@/features/inbox/lib/optimistic-activity";
-import {
-  dispatchLocalSocketEvent,
-  dispatchLocalSocketEvents,
-} from "@/lib/socket-client";
+import { dispatchLocalSocketEvents } from "@/lib/socket-client";
 import { apiFetch } from "@/lib/api/client-fetch";
 import { computeWindowStatus } from "@ccp/shared/utils/window";
 import { resolveFieldTokens } from "@ccp/shared/field-tokens";
@@ -131,6 +130,8 @@ export function ReplyBox({
   replyTarget,
   aiEnabled,
   aiAutopilotEnabled,
+  status,
+  assignedUserId,
   onCancelReply,
   onTyping,
   onStopTyping,
@@ -170,6 +171,16 @@ export function ReplyBox({
    */
   aiEnabled?: boolean;
   aiAutopilotEnabled?: boolean;
+  /**
+   * Live conversation status + assignee. A human send mirrors the server's
+   * `autoAssignOnAgentSend`: an UNASSIGNED conversation is self-assigned, and a
+   * non-`open` one is reopened. The composer emits those optimistic pills (in
+   * send order, pinned right after the bubble) so "self-assigned" / "reopened"
+   * don't float in a beat late ABOVE the still-pending send via the
+   * authoritative GET — same treatment as the AI-pause pill above.
+   */
+  status?: ConversationStatus;
+  assignedUserId?: string | null;
   /**
    * When set, the next send is a quoted reply to this message. Snapshot is
    * built by the parent (it has the team-members map for sender names).
@@ -360,6 +371,43 @@ export function ReplyBox({
   useEffect(() => {
     if (aiEnabled) aiPauseEmittedRef.current = false;
   }, [aiEnabled]);
+  // Same once-per-stretch guards for the auto-assign + reopen pills. Without
+  // them a rapid second send — fired before the parent re-passes the updated
+  // `assignedUserId`/`status` props (the optimistic flip is only a local socket
+  // frame, the props lag a render) — would emit a duplicate "self-assigned" /
+  // "reopened" pill. Reset when the conversation actually becomes unassigned /
+  // non-open again (a teammate unassigns, the chat closes), mirroring the
+  // aiEnabled-keyed reset above.
+  // Reset the once-guards only when the conversation GENUINELY becomes
+  // unassigned / non-open AND no send is in flight. The props mirror live
+  // socket state, so during an in-flight send they can transiently flip (a
+  // stale authoritative frame, the optimistic dispatch settling, a rollback) —
+  // resetting on that transient would let a rapid second send emit a DUPLICATE
+  // assign/reopen pill. Gating on `!sendInFlightRef.current` ignores the
+  // in-flight churn; a real teammate change (no send active) still re-arms.
+  const selfAssignEmittedRef = useRef(false);
+  useEffect(() => {
+    if (assignedUserId == null && !sendInFlightRef.current) {
+      selfAssignEmittedRef.current = false;
+    }
+  }, [assignedUserId]);
+  const reopenEmittedRef = useRef(false);
+  useEffect(() => {
+    if (status != null && status !== "open" && !sendInFlightRef.current) {
+      reopenEmittedRef.current = false;
+    }
+  }, [status]);
+  // Live mirrors of the conversation fields the send-failure rollback compares
+  // against. The handleSend closure captured the PRE-SEND prop values; the catch
+  // runs seconds later and must read the CURRENT state (after this tab's
+  // optimistic flip AND any teammate/server change that landed in the in-flight
+  // window) to decide whether a revert would clobber a legitimate change.
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const assignedUserIdRef = useRef(assignedUserId);
+  assignedUserIdRef.current = assignedUserId;
+  const aiEnabledLiveRef = useRef(aiEnabled);
+  aiEnabledLiveRef.current = aiEnabled;
   // Active post-send stuck-watchdogs (timer + window-listener pairs). Tracked
   // so a chat-switch (this reply-box unmounts) before a send confirms can't
   // leave a 30s timer that later fires `onOptimisticFail` for the PREVIOUS
@@ -758,9 +806,28 @@ export function ReplyBox({
 
     const clientTempId = newClientTempId();
     const snapshotValue = value;
-    // Set when this send optimistically pauses AI (see the block after the
-    // optimistic paint); the catch path rolls it back if the send fails.
+    // Set when this send optimistically pauses AI / self-assigns / reopens (see
+    // the block after the optimistic paint); the catch path rolls each back if
+    // the send fails.
     let aiPauseOptimisticId: string | null = null;
+    let assignOptimisticId: string | null = null;
+    let statusOptimisticId: string | null = null;
+    // Did this send's bubble get CONFIRMED by message:new before the HTTP
+    // settled? If so the send actually reached the server — even when the HTTP
+    // response was then lost (502 / mobile timeout AFTER delivery) — so the
+    // auto-assign/reopen/AI-pause genuinely persisted and the authoritative
+    // frames + pills already landed. Reverting them in the catch (and deleting
+    // the now-confirmed pills) would leave the header/timeline wrong until a
+    // reconnect refetch. The reconcile dispatches `ccp:optimistic-confirmed:
+    // <clientTempId>` (same signal the stuck-watchdog below uses); we latch it
+    // so the rollback can no-op, mirroring how markOptimisticFailed /
+    // removeOptimistic only ever touch a STILL-pending bubble.
+    let sendConfirmed = false;
+    const confirmEv = `ccp:optimistic-confirmed:${clientTempId}`;
+    const onSendConfirmed = () => {
+      sendConfirmed = true;
+    };
+    if (!isNote) window.addEventListener(confirmEv, onSendConfirmed);
     // For voice-only sends the caption is the empty string (we don't want
     // the textarea contents leaking into a voice message — they'll get sent
     // separately on the next submit). Otherwise the trimmed value rides
@@ -859,20 +926,25 @@ export function ReplyBox({
         // subscribers (notably the contact panel's un-deduped message tally).
         emitOptimisticListBump({ conversationId, preview: listPreview, lastMessageAt: ts });
 
-        // Mirror the server's auto-pause-on-human-reply (messages.service.ts
-        // autoAssignOnAgentSend). The server flips aiEnabled→false and writes an
-        // `ai_paused` log; that log otherwise arrives a round-trip later via the
-        // authoritative events GET as a server-clocked, NON-pinned row — which
-        // floats ABOVE the still-pending send, then snaps below it once the send
-        // reconciles (the "paused jumps up then down" glitch). Emitting it here
-        // pins the pill in send order right after the bubble (shared
-        // optimisticSeq), so it's correct from the first paint. Only when the
-        // team has AI autopilot AND it's currently on, and once per on-stretch.
-        if (
-          aiAutopilotEnabled &&
-          aiEnabled &&
-          !aiPauseEmittedRef.current
-        ) {
+        // Mirror EVERY side-effect the server's autoAssignOnAgentSend writes on
+        // a human reply (messages.service.ts): pause AI, self-assign an
+        // unassigned chat, and reopen a non-`open` one. Each writes an activity
+        // log that otherwise arrives a round-trip later via the authoritative
+        // events GET as a server-clocked, NON-pinned row — which floats ABOVE
+        // the still-pending send, then snaps BELOW once the send reconciles (the
+        // "logs jump up then down" glitch the user sees). Emitting them here
+        // pins each pill in send order right after the bubble (shared
+        // optimisticSeq), correct from the first paint.
+        //
+        // Build order = server publish order (ai → assigned → reopen) so the
+        // ascending optimisticSeq holds message < ai < assigned < reopen. Every
+        // header flip + pill goes into ONE dispatch so they commit in a single
+        // paint (separate dispatches each flushSync → multiple paints → the
+        // "log lags everything else" gap). Each is gated once-per-stretch (see
+        // the *EmittedRef guards) so a rapid burst before the props catch up
+        // doesn't double-emit.
+        const sendFrames: Parameters<typeof dispatchLocalSocketEvents>[0] = [];
+        if (aiAutopilotEnabled && aiEnabled && !aiPauseEmittedRef.current) {
           aiPauseEmittedRef.current = true;
           const aiActivity = buildOptimisticAiChange({
             teamId: currentUser.teamId,
@@ -881,14 +953,52 @@ export function ReplyBox({
             aiEnabled: false,
           });
           aiPauseOptimisticId = aiActivity.id;
-          dispatchLocalSocketEvents([
+          sendFrames.push(
             [
               "conversation:ai",
               { teamId: currentUser.teamId, conversationId, aiEnabled: false, optimistic: true },
             ],
             aiActivity.frame,
-          ]);
+          );
         }
+        // Auto-claim: the server self-assigns an UNASSIGNED conversation on send.
+        if (assignedUserId == null && !selfAssignEmittedRef.current) {
+          selfAssignEmittedRef.current = true;
+          const assignActivity = buildOptimisticAssignment({
+            teamId: currentUser.teamId,
+            conversationId,
+            actorName: currentUser.name,
+            assignedToName: currentUser.name,
+          });
+          assignOptimisticId = assignActivity.id;
+          sendFrames.push(
+            [
+              "conversation:assigned",
+              { teamId: currentUser.teamId, conversationId, assignedUser: currentUser, optimistic: true },
+            ],
+            assignActivity.frame,
+          );
+        }
+        // Auto-reopen: the server promotes a non-`open` conversation to open on
+        // send (covers both the unassigned-claim and the already-assigned paths).
+        if (status != null && status !== "open" && !reopenEmittedRef.current) {
+          reopenEmittedRef.current = true;
+          const statusActivity = buildOptimisticStatusChange({
+            teamId: currentUser.teamId,
+            conversationId,
+            actorName: currentUser.name,
+            status: "open",
+          });
+          statusOptimisticId = statusActivity.id;
+          sendFrames.push(
+            [
+              "conversation:status",
+              { teamId: currentUser.teamId, conversationId, status: "open", optimistic: true },
+            ],
+            statusActivity.frame,
+          );
+        }
+        if (sendFrames.length > 0) dispatchLocalSocketEvents(sendFrames);
       }
     }
 
@@ -1005,17 +1115,49 @@ export function ReplyBox({
         // send failed, so roll the row's preview back to its pre-bump value
         // (no server message:new will arrive to overwrite it). Notes don't bump.
         if (!isNote) emitOptimisticListBumpRevert(conversationId);
-        // Roll back the optimistic AI-pause: the send failed, so the server
-        // never auto-paused. Revert the header flip + drop the pill, and clear
-        // the once-guard so the next (retry) send pauses again.
-        if (aiPauseOptimisticId) {
-          dispatchLocalSocketEvent("conversation:ai", {
-            teamId: currentUser.teamId,
-            conversationId,
-            aiEnabled: true,
-          });
-          rollbackOptimisticActivity(currentUser.teamId, conversationId, aiPauseOptimisticId);
-          aiPauseEmittedRef.current = false;
+        // Roll back the optimistic takeover (AI-pause / self-assign / reopen),
+        // but ONLY when this is a genuine failure that left the field as THIS
+        // send wrote it. Two guards:
+        //   1. `!sendConfirmed` — skip everything if the bubble already
+        //      reconciled (the send WAS delivered; its side-effects persisted +
+        //      their authoritative frames/pills landed — reverting would wrongly
+        //      revert them AND delete the confirmed pills).
+        //   2. still-mine — revert a field only if it STILL holds this send's
+        //      optimistic value (read live via refs, since the closure captured
+        //      pre-send props). A teammate/dropdown change during the in-flight
+        //      window must not be clobbered.
+        if (!sendConfirmed) {
+          // Collect every header revert + its pill removal into ONE dispatch so
+          // they commit in a single paint — separate dispatchLocalSocketEvent
+          // calls each wrap their own flushSync, which on a 3-pill rollback was
+          // up to 6 back-to-back paints (a visible cascade). Mirrors the batched
+          // SEND path.
+          const tid = currentUser.teamId;
+          const rollbackFrames: Parameters<typeof dispatchLocalSocketEvents>[0] = [];
+          if (aiPauseOptimisticId && aiEnabledLiveRef.current === false) {
+            rollbackFrames.push(
+              ["conversation:ai", { teamId: tid, conversationId, aiEnabled: true }],
+              ["conversation:activity", { teamId: tid, conversationId, event: null, removeId: aiPauseOptimisticId }],
+            );
+            aiPauseEmittedRef.current = false;
+          }
+          if (assignOptimisticId && assignedUserIdRef.current === currentUser.id) {
+            rollbackFrames.push(
+              ["conversation:assigned", { teamId: tid, conversationId, assignedUser: null }],
+              ["conversation:activity", { teamId: tid, conversationId, event: null, removeId: assignOptimisticId }],
+            );
+            selfAssignEmittedRef.current = false;
+          }
+          // `status` is the pre-send value captured in this closure; revert to it
+          // only if the live status is still the "open" we optimistically set.
+          if (statusOptimisticId && status != null && statusRef.current === "open") {
+            rollbackFrames.push(
+              ["conversation:status", { teamId: tid, conversationId, status }],
+              ["conversation:activity", { teamId: tid, conversationId, event: null, removeId: statusOptimisticId }],
+            );
+            reopenEmittedRef.current = false;
+          }
+          if (rollbackFrames.length > 0) dispatchLocalSocketEvents(rollbackFrames);
         }
         // Restore the user's text (only if they haven't started typing again).
         // Read the live value via ref instead of a setValue updater — putting
@@ -1031,6 +1173,10 @@ export function ReplyBox({
         // aborted; either way the timer would otherwise leak until it
         // fires harmlessly later.
         window.clearTimeout(timeoutId);
+        // Drop the confirm latch listener — the rollback decision (catch, above)
+        // already read `sendConfirmed`. The post-HTTP stuck-watchdog below keeps
+        // its own (separate) confirm listener for the success path.
+        if (!isNote) window.removeEventListener(confirmEv, onSendConfirmed);
         // Release the idempotency lock — the next Enter / click can now
         // start a fresh send. Doing this in finally (not after setValue)
         // makes sure a thrown setError or unexpected error path can't

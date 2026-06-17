@@ -162,14 +162,19 @@ export const FANOUT_RULES: FanoutRuleMap = {
     });
   },
 
-  // SCOPED TO THE CONVERSATION ROOM, not the team room — matches the
-  // `message.status_changed` rule above. Only viewers of THIS thread consume
-  // `message:media:ready` (the live thread hook swaps the shimmer for the
-  // hydrated media bubble); the inbox LIST does not. Team-wide blast would
-  // make every agent receive + parse a frame they immediately discard, and
-  // duplicates the storm pattern fixed for status ticks in audit 2026-05-25 R1.
+  // TEAM ROOM (was conversation-scoped). A thread's cached LRU snapshot also
+  // needs the hydrated-media patch, not just the live-displayed thread: an
+  // agent who sends a video (or whose customer sends media) and switches chats
+  // before the ~1-2s download/poster completes left the conversation room — a
+  // conversation-scoped frame would never reach their cached snapshot, so on
+  // switch-back the bubble was a bare black/shimmer box until a hard reload.
+  // The inbox-shell `media:ready` reducer (thread-reducers.ts) patches the LRU
+  // cache off the team room. Unlike the status-tick storm this was once scoped
+  // against (3 frames/message, every message), media_ready is ~1 frame per
+  // MEDIA message — well within the same budget as `message:new` (also team-
+  // wide); a non-caching recipient drops it with one cheap find-by-id miss.
   "message.media_ready": (e, emitter) => {
-    emitter.emitToConversation(e.conversationId, "message:media:ready", {
+    emitter.emitToTeam(e.teamId, "message:media:ready", {
       teamId: e.teamId,
       conversationId: e.conversationId,
       messageId: e.messageId,

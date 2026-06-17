@@ -105,8 +105,13 @@ interface MessageBubbleProps {
 function MessageBubbleImpl(props: MessageBubbleProps) {
   const { message, selecting, selected, onToggleSelect } = props;
 
+  // Failed = optimistic client failure (`failed`) OR Meta async-rejection
+  // (`status === "failed"`). Both must block selection (a never-delivered row
+  // isn't a normal message). See BubbleContent for the matching render gates.
+  const isFailed = message.failed || message.status === "failed";
+
   if (selecting) {
-    const selectable = !message.pending && !message.failed;
+    const selectable = !message.pending && !isFailed;
     const toggle = () => {
       if (selectable) onToggleSelect?.(message.id);
     };
@@ -164,6 +169,11 @@ function BubbleContent({
   animateIn = false,
 }: MessageBubbleProps) {
   const isOut = message.direction === "out";
+  // Failed = optimistic client-side failure (`failed`) OR an authoritative Meta
+  // async-rejection (`status === "failed"`). Both drive the red ring, the
+  // Retry/Dismiss row, and the not-a-normal-send gates below — see the matching
+  // derivation in MessageBubbleImpl's selection branch.
+  const isFailed = message.failed || message.status === "failed";
   // Attribution chip at the head of an outbound burst (shared-inbox: "which
   // teammate sent this"). Outbound + group-head + we know the sender.
   const senderHeader =
@@ -177,7 +187,7 @@ function BubbleContent({
   // Don't offer Reply/Forward/Select on optimistic rows — the wamid isn't real
   // yet, so Meta would reject `context.message_id`, and there's nothing to
   // forward until the send lands.
-  const live = !message.pending && !message.failed;
+  const live = !message.pending && !isFailed;
   const canReply = Boolean(onReply) && live;
   const canForward = Boolean(onForward) && live;
   const canSelect = Boolean(onStartSelect) && live;
@@ -196,7 +206,7 @@ function BubbleContent({
         )}
         <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
           {senderHeader}
-          <StickerImage url={media.url} />
+          <StickerImage url={media.url} isOut={isOut} />
           {showMeta && <BubbleMeta message={message} isOut={isOut} />}
         </div>
       </div>
@@ -263,7 +273,7 @@ function BubbleContent({
             // longer dims — the clock icon in the meta row conveys "in
             // flight" without making the bubble look unfinished, so a fast
             // send feels instant rather than slightly-loading.
-            message.failed && "opacity-80 ring-destructive/60",
+            isFailed && "opacity-80 ring-destructive/60",
             isOut
               ? "bg-outbound-bg text-outbound-fg ring-transparent"
               : "bg-inbound-bg text-inbound-fg ring-border",
@@ -350,7 +360,7 @@ function BubbleContent({
         )}
 
         {showMeta && <BubbleMeta message={message} isOut={isOut} />}
-        {message.failed && (
+        {isFailed && (
           <FailedRecovery
             // Both text and media retries are supported. The composer caches
             // the File for each in-flight media send keyed by clientTempId,
@@ -358,7 +368,15 @@ function BubbleContent({
             // forcing a re-pick from disk. See pendingFilesRef in reply-box.
             canRetry={Boolean(onRetryFailed)}
             onRetry={onRetryFailed ? () => onRetryFailed(message) : undefined}
-            onDismiss={onDismissFailed ? () => onDismissFailed(message) : undefined}
+            // Dismiss only drops a still-optimistic bubble (it removes by
+            // clientTempId). A server-rejected message is a real persisted row
+            // with no clientTempId, so removeOptimistic would no-op — hide
+            // Dismiss there and offer Retry (resend) only.
+            onDismiss={
+              onDismissFailed && message.clientTempId
+                ? () => onDismissFailed(message)
+                : undefined
+            }
           />
         )}
       </motion.div>

@@ -62,14 +62,30 @@ export function MediaBlock({
  * transparent PNGs, so the slot is left chrome-less (no bg) — only the shimmer
  * shows through until decode.
  */
-export function StickerImage({ url }: { url: string }) {
+export function StickerImage({ url, isOut = false }: { url: string; isOut?: boolean }) {
   const [loaded, setLoaded] = useState(false);
+  const [errored, setErrored] = useState(false);
   const ref = useRef<HTMLImageElement>(null);
+  // Clear the latch on URL change (orphan-swept blob re-points), same as the
+  // other media blocks.
+  useEffect(() => {
+    setErrored(false);
+  }, [url]);
   useEffect(() => {
     const img = ref.current;
-    if (!img || !img.complete) return;
+    if (!img || errored) return;
+    if (!img.complete) return;
+    // Cross-browser "load finished with no pixels" signal — catches a failure
+    // that fired before React attached onError (SSR/hydration), mirroring
+    // ImageBlock. `complete` is false while in flight, so this never trips a
+    // still-loading sticker.
     if (img.naturalWidth > 0) setLoaded(true);
-  }, [url]);
+    else setErrored(true);
+  }, [url, errored]);
+  // Broken sticker (orphan-swept / upstream 404) → the same compact
+  // "unavailable" treatment image/video/audio/document already use, instead of
+  // a permanent empty grey square.
+  if (errored) return <MediaUnavailable kind="image" isOut={isOut} />;
   return (
     <div className="relative size-32 overflow-hidden rounded-md">
       {/* Calm static placeholder (not pulsing) — same flicker reasoning as
@@ -82,6 +98,7 @@ export function StickerImage({ url }: { url: string }) {
         alt="sticker"
         decoding="async"
         onLoad={() => setLoaded(true)}
+        onError={() => setErrored(true)}
         className={cn(
           "absolute inset-0 size-full object-contain transition-opacity duration-150",
           loaded ? "opacity-100" : "opacity-0",
@@ -187,6 +204,15 @@ function ImageBlock({
   // shift — the box was always 4:3; only the CONTENT transitions smoothly.
   const [loaded, setLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
+
+  // Clear a stale error latch when the source changes (optimistic blob: →
+  // server `/api/media/<id>` on reconcile, no remount). Runs before the
+  // decode/`complete` effect below so a URL change re-checks from a clean
+  // slate; a genuinely-broken server URL re-latches via that effect's
+  // naturalWidth===0 branch or the <img> onError.
+  useEffect(() => {
+    setErrored(false);
+  }, [thumbSrc]);
 
   // The bubble's box stays at a FIXED HEIGHT (h-65 = 260px) for the lifetime
   // of the message; only the WIDTH varies with the photo's aspect ratio. The
@@ -326,6 +352,14 @@ function VideoBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
   // clicks play and the load actually fails.
   void videoRef;
 
+  // Clear a stale "unavailable" latch when the source URL changes — same
+  // reconcile race as AudioBlock: the optimistic blob: URL swaps for the
+  // server `/api/media/<id>` without a remount, so an onError fired against the
+  // not-yet-ready URL would otherwise stick "Video unavailable" until refresh.
+  useEffect(() => {
+    setErrored(false);
+  }, [media.url]);
+
   // Same fixed 4:3 slot as ImageBlock for the same reason: stable bubble
   // height means useChatScroll's snap-to-bottom isn't fighting a late
   // metadata-driven resize. Native video controls overlay the bottom of
@@ -393,6 +427,18 @@ function AudioBlock({ media, isOut }: { media: MediaAttachment; isOut: boolean }
     media.durationMs != null ? media.durationMs / 1000 : null,
   );
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Clear a stale "unavailable" latch when the source URL changes. An agent's
+  // own send first carries the optimistic blob: URL, which swaps for the server
+  // `/api/media/<id>` once message:new reconciles. The bubble is keyed by
+  // clientTempId (no remount on that swap — message-thread.tsx), so an onError
+  // that fired against the not-yet-resolvable URL (CDN propagation right after
+  // send) would otherwise stick "Audio unavailable" forever until a manual
+  // refresh. Reset on every URL change; if the new URL is genuinely broken,
+  // onError re-fires and re-latches on the next play.
+  useEffect(() => {
+    setErrored(false);
+  }, [media.url]);
 
   // `voice: true` marks a WhatsApp push-to-talk note (vs a shared audio file).
   // The flag rides the inbound media payload but isn't on the read-model type

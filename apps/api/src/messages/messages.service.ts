@@ -1198,10 +1198,41 @@ export class MessagesService {
           originalFilename: null,
         },
       });
-      await this.db.message.update({
+      const updated = await this.db.message.update({
         where: { id: messageId },
         data: { mediaThumbnailUrl: thumb.url },
+        select: {
+          conversationId: true,
+          mediaMimeType: true,
+          mediaSizeBytes: true,
+          mediaCaption: true,
+        },
       });
+      // Patch the LIVE thread so the just-sent video gains its poster without a
+      // page refresh — the same `message:media:ready` frame the inbound 2-phase
+      // path uses. Without this the agent's own outbound video sits as a bare
+      // bg-black box (preload="none" → no first frame) until they reload, while
+      // the customer's inbound video shows a poster: the asymmetry the user
+      // reported. `applyMessageMediaReady` (thread-reducers) REPLACES the whole
+      // media block, so carry every field the bubble needs PLUS the new
+      // thumbnailUrl. Best-effort: a publish failure must never bubble (this
+      // runs post-send; a throw here → 5xx → UI retry → duplicate Meta send).
+      await this.bus
+        .publish({
+          type: "message.media_ready",
+          teamId,
+          conversationId: updated.conversationId,
+          messageId,
+          media: {
+            kind: "video",
+            url: `/api/media/${messageId}`,
+            thumbnailUrl: `/api/media/${messageId}/thumb`,
+            mimeType: updated.mediaMimeType ?? "video/mp4",
+            sizeBytes: updated.mediaSizeBytes ?? 0,
+            ...(updated.mediaCaption ? { caption: updated.mediaCaption } : {}),
+          },
+        })
+        .catch(() => {});
     } catch (err) {
       this.logger.warn(
         `[${teamId}] outbound video poster generation failed for message ${messageId}: ${
@@ -1652,6 +1683,13 @@ export class MessagesService {
           sizeBytes: saved.sizeBytes,
           ...(caption ? { caption } : {}),
           ...(kind === "document" ? { filename } : {}),
+          // Carry the voice-note flag on the LIVE message.sent frame (it's
+          // persisted to mediaVoice above). Without it the agent's own voice
+          // note reconciles to a generic audio bubble — losing the mic glyph +
+          // waveform the optimistic bubble showed — and other agents' tabs never
+          // get the affordance until a refetch. The SSR/refetch path already
+          // emits it (lib/queries/_shared.ts).
+          ...(isRecording ? { voice: true } : {}),
         }
       : undefined;
 

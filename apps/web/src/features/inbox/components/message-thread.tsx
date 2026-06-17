@@ -756,6 +756,13 @@ function MessageThreadImpl({
   const jumpToOriginal = useCallback(
     (originalId: string) => {
       const flash = (el: HTMLElement) => {
+        // Hand scroll control off from useChatScroll first — if the user was at
+        // the bottom (sticky), a later reflow (media decode, framer entrance,
+        // live inbound, the 60s `now` tick) would otherwise re-snap to the
+        // bottom and yank the view off the jumped-to message (reads as "jump did
+        // nothing"). Mirrors scrollMatchIntoView. Sticky re-arms on the next
+        // scroll-to-bottom; no manual re-enable needed.
+        releaseStickToBottomRef.current();
         el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
         // Subtle blue flash for reply-jumps. Search-match jumps use a
         // PERSISTENT amber ring on the bubble itself (see MessageBubble's
@@ -806,7 +813,17 @@ function MessageThreadImpl({
           `[data-entry-kind="note"][data-entry-id="${detail.noteId}"]`,
         );
         if (el) {
-          el.scrollIntoView({ behavior: jumpScrollBehavior(), block: "center" });
+          // Instant placement (NOT smooth) to match the Files / "Go to message"
+          // jump, which lands the target directly without a visible scroll
+          // animation. A smooth scroll here read as inconsistent — and a long
+          // smooth glide across the loaded thread is exactly what the file jump
+          // avoids by re-centering on a context window. `block: "center"` keeps
+          // the note mid-viewport like the other jumps.
+          // Release stick-to-bottom first (see jumpToOriginal / scrollMatchIntoView)
+          // — otherwise a reflow re-snaps to the bottom and the instant jump
+          // reads as a no-op.
+          releaseStickToBottomRef.current();
+          el.scrollIntoView({ behavior: "auto", block: "center" });
           el.classList.add("ring-2", "ring-primary/60", "ring-offset-2");
           window.setTimeout(
             () => el.classList.remove("ring-2", "ring-primary/60", "ring-offset-2"),
@@ -1228,10 +1245,19 @@ function MessageThreadImpl({
       // instantly + the panel's note count ticks down without waiting on
       // the server round-trip. Reducers self-bail on missing rows, so the
       // real server event arriving moments later is a no-op.
+      //
+      // `optimistic: true` so this local dispatch does NOT fire the leading
+      // /events GET — that would race AHEAD of the server's audit row (written
+      // after the PATCH) and return a window with no "deleted a note" pill yet,
+      // making the pill lag the card. The authoritative team-room `note:deleted`
+      // frame (notes.service publishes it after the row is written) drives the
+      // GET instead, so the pill lands with the card. Same guard status/assign/
+      // ai/contact use (see use-conversation-events ACTIVITY_REFRESH_EVENTS).
       dispatchLocalSocketEvent("note:deleted", {
         teamId: conversation.teamId,
         conversationId: conversation.id,
         noteId,
+        optimistic: true,
       });
       const res = await apiFetch(`/api/notes/${noteId}`, { method: "DELETE" });
       if (!res.ok) {
@@ -1372,6 +1398,13 @@ function MessageThreadImpl({
     const pinsToBottom = (e: TimelineEntry) =>
       (e.kind === "message" &&
         (e.data.pending === true ||
+          // A FAILED own-send anchors at the bottom too — it's the message the
+          // agent just tried to send, and its Retry/Dismiss row must stay at the
+          // tail (not get buried under a later inbound). Matches the messages-
+          // array sortKey (use-conversation-events.ts: pending||failed → ∞), so
+          // the two sort layers agree. (`status==="failed"` from an OLD Meta
+          // rejection is intentionally NOT pinned — it's history, sorts by time.)
+          e.data.failed === true ||
           (typeof e.data.optimisticSeq === "number" &&
             e.data.optimisticSeq >= minPendingSeq))) ||
       (e.kind === "activity" &&
@@ -1481,20 +1514,40 @@ function MessageThreadImpl({
       const prev = timeline[i - 1]!;
       if (cur.kind !== "message" || prev.kind !== "message") continue;
       if (dayLabels[i] !== null) continue; // a day separator opens a fresh group
-      // An in-flight / failed row (optimistic flags OR a server-confirmed
-      // `status === "failed"`) stands alone, on BOTH sides: it never tightens
-      // under its predecessor and nothing groups under it — so its status
-      // affordance (clock / red AlertCircle + reason / retry) is always visible.
-      if (prev.data.pending || prev.data.failed || prev.data.status === "failed")
-        continue;
-      if (cur.data.pending || cur.data.failed || cur.data.status === "failed")
-        continue;
+      // A FAILED row (optimistic flag OR a server-confirmed `status ===
+      // "failed"`) stands alone, on BOTH sides: it never tightens under its
+      // predecessor and nothing groups under it — so its error affordance (red
+      // AlertCircle + reason + Retry) is always visible.
+      //
+      // A merely-PENDING (in-flight) row does NOT break grouping. It still
+      // groups under a same-sender predecessor like its eventual confirmed
+      // form — `showMeta` (render) force-shows the "Sending…" clock for any
+      // pending row independent of grouping, so the status stays visible. Were
+      // pending to break grouping, a freshly-sent bubble would render as a
+      // group HEAD (sender-name chip shown) for the optimistic beat, then
+      // collapse into the group (chip hidden) the instant it confirmed — the
+      // visible "name flashes above each consecutive own-send" glitch.
+      if (prev.data.failed || prev.data.status === "failed") continue;
+      if (cur.data.failed || cur.data.status === "failed") continue;
       if (cur.data.direction !== prev.data.direction) continue;
       if (cur.data.senderUserId !== prev.data.senderUserId) continue;
       const dt =
         new Date(cur.data.timestamp).getTime() -
         new Date(prev.data.timestamp).getTime();
-      if (dt < 0 || dt > GROUP_WINDOW_MS) continue;
+      if (dt > GROUP_WINDOW_MS) continue;
+      // `dt < 0` (cur older than prev) normally opens a fresh group — but for a
+      // pair of own-sends it's pure CLIENT↔SERVER clock skew, not real
+      // out-of-order: a just-confirmed send #1 now carries a SERVER timestamp
+      // while a still-pending #2 carries a CLIENT one, so `#2 - #1` can briefly
+      // go negative and ungroup #2 (the name-chip flash returns for rapid
+      // multi-sends). Own-sends carry a monotonic `optimisticSeq` that already
+      // governs their order; trust it and skip the cross-clock lower bound when
+      // both rows are own-sends (either still pending, or reconciled but keeping
+      // their seq). Confirmed server rows (no seq, not pending) keep the guard.
+      const bothOwnSends =
+        (cur.data.pending || cur.data.optimisticSeq != null) &&
+        (prev.data.pending || prev.data.optimisticSeq != null);
+      if (dt < 0 && !bothOwnSends) continue;
       flags[i] = true;
     }
     return flags;
@@ -1820,6 +1873,8 @@ function MessageThreadImpl({
             lastInboundAt={lastInboundAt}
             aiEnabled={conversation.aiEnabled ?? true}
             aiAutopilotEnabled={aiAutopilotEnabled}
+            status={conversation.status}
+            assignedUserId={assignedUser?.id ?? null}
             replyTarget={replyTarget}
             onCancelReply={cancelReply}
             onTyping={notifyTyping}
