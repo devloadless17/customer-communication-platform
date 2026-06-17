@@ -1443,12 +1443,36 @@ function MessageThreadImpl({
         entry.kind === "message" || entry.kind === "activity"
           ? entry.data.optimisticSeq
           : undefined,
-      // Group key for the auto-claim trio (ai_paused + reopened + self-assigned)
-      // a single send fans out. Set ONLY on those pills (reply-box passes the
-      // send's clientTempId); undefined on every other row. See the un-pinned
-      // tiebreak below + ConversationActivityEvent.optimisticGroupId.
-      groupId: entry.kind === "activity" ? entry.data.optimisticGroupId : undefined,
+      // Group key (= the triggering send's clientTempId) shared by an optimistic
+      // own-MESSAGE and the auto-claim pills (ai_paused + reopened +
+      // self-assigned) that same send fans out. Carried across reconcile onto the
+      // server rows. Set ONLY on those same-send rows; undefined everywhere else.
+      // Drives the anchor sort below.
+      groupId:
+        entry.kind === "activity" || entry.kind === "message"
+          ? entry.data.optimisticGroupId
+          : undefined,
     }));
+    // Anchor time per group = the `t` of the group's LOWEST-seq member, i.e. the
+    // triggering send's own message bubble (the message is stamped a seq BEFORE
+    // its pills). Every group member then sorts AT that one time, in send order —
+    // so the auto-claim pills dock directly UNDER their reply instead of at their
+    // own racy/late server audit `at`. THIS is what stops a "reopened" /
+    // "self-assigned" pill floating ABOVE the reply the instant the send confirms
+    // with a server/Meta timestamp (the upper-thread vibration). NARROW: only
+    // same-send rows carry a groupId, so every independent log (dropdown
+    // status/assign, teammate actions, stage/tag/note, all history) is anchorless
+    // and keeps sorting purely by its own `at`.
+    const groupAnchorT = new Map<string, number>();
+    const groupAnchorSeq = new Map<string, number>();
+    for (const d of decorated) {
+      if (d.groupId == null || d.seq == null) continue;
+      const prevSeq = groupAnchorSeq.get(d.groupId);
+      if (prevSeq === undefined || d.seq < prevSeq) {
+        groupAnchorSeq.set(d.groupId, d.seq);
+        groupAnchorT.set(d.groupId, d.t);
+      }
+    }
     decorated.sort((a, b) => {
       if (a.pin !== b.pin) return a.pin ? 1 : -1;
       // Within the pinned tail, order by send-order seq when both carry it
@@ -1456,30 +1480,18 @@ function MessageThreadImpl({
       // whole reason these rows are pinned). Fall back to time when a tail row
       // has no seq (defensive; in practice every pinned row carries one).
       if (a.pin && a.seq != null && b.seq != null) return a.seq - b.seq;
-      // Two un-pinned ACTIVITY pills from the SAME send's auto-claim trio
-      // (ai_paused + reopened + self-assigned) — matched by a shared
-      // optimisticGroupId the reconcile carried over. The server writes these
-      // rows near-simultaneously, so their audit `at` is racy; the moment the
-      // triggering send confirms and un-pins them, sorting by `at` lets
-      // "self-assigned" jump above "reopened" — the upper-thread VIBRATION on a
-      // pending/closed + unassigned + AI-on send. Keep same-group pills in send
-      // order (seq) instead. NARROW BY DESIGN: the group id is set ONLY on the
-      // reply-box trio, so independent logs (dropdown status/assign, teammate
-      // actions, stage/tag/note rows, all history, stale stubs) have no group —
-      // or a DIFFERENT one — and still sort purely by `at`, unchanged. (An
-      // earlier version keyed this on optimisticSeq alone, which also reordered
-      // unrelated seq-carrying pills and scrambled rapid independent changes.)
-      if (
-        a.entry.kind === "activity" &&
-        b.entry.kind === "activity" &&
-        a.groupId != null &&
-        a.groupId === b.groupId &&
-        a.seq != null &&
-        b.seq != null
-      ) {
-        return a.seq - b.seq;
-      }
-      return a.t - b.t;
+      // Un-pinned: a SINGLE comparison-independent key per row → a transitive
+      // total order. (A per-PAIR tiebreak that switched between seq and `at`
+      // would be non-transitive the moment a groupless row's `at` landed between
+      // a group's anchor time and a member's own `at`, and JS sort would then
+      // render an undefined — itself flickering — order.) Key = (anchored time,
+      // send-order seq): same group → identical anchor time → members fall into
+      // seq order (message first, then its pills); groupless rows use their own
+      // time, so all other logs are unaffected.
+      const at = a.groupId != null ? groupAnchorT.get(a.groupId) ?? a.t : a.t;
+      const bt = b.groupId != null ? groupAnchorT.get(b.groupId) ?? b.t : b.t;
+      if (at !== bt) return at - bt;
+      return (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER);
     });
     return decorated.map((d) => d.entry);
   }, [messages, notes, events, hasMoreOlder, data.calls]);

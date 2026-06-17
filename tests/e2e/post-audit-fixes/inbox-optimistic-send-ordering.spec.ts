@@ -492,14 +492,22 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
   });
 
   // Symptom 4 (2026-06-17) — the upper-thread "vibration" the user still felt on
-  // an auto-claim into a PENDING + UNASSIGNED + AI-on chat. Symptom 3 proved the
-  // pills paint BELOW the send OPTIMISTICALLY; it never reconciles them, so it
-  // can't catch this: the lag happens LATER, when the optimistic pills settle to
-  // the real server audit rows AND the send confirms (un-pinning them). Pre-fix,
-  // the un-pinned pills re-sorted by the racy audit `at` — assigned was written
-  // before reopened, so "self-assigned" jumped ABOVE "reopened" for a beat, then
-  // dropped back. That swap is the whole top of the inbox twitching. The fix
-  // keeps same-send own-action pills (the only rows carrying an optimisticSeq)
+  // an auto-claim into a PENDING + UNASSIGNED chat. Symptom 3 proved the pills
+  // paint BELOW the send OPTIMISTICALLY; it never reconciles them, so it can't
+  // catch this: the lag happens LATER, when the optimistic pills settle to the
+  // real server audit rows AND the send confirms (un-pinning them).
+  //
+  // The DECISIVE axis (and why the owner saw it as "the reopened log" + cache-
+  // dependent): the MESSAGE's server timestamp races the reopen pill's audit `at`,
+  // which come from two different clocks (worker `receivedAt` vs Postgres now()).
+  // We inject the message timestamp AFTER the audit rows (`base + 30000`) — the
+  // real-world "late ack / clock skew" condition. Pre-fix the un-pinned reopen
+  // pill then sorted by its own audit `at`, which is EARLIER than the message, so
+  // it floated ABOVE the reply (the "reopened" log jumping up). The fix anchors
+  // the pills to their MESSAGE's slot by a shared optimisticGroupId, so they sit
+  // in send order directly under the reply no matter how the timestamps fall —
+  // clock-independent, which is why it cures the "cached-vs-fresh" flakiness too.
+  // It also keeps same-send own-action pills (the only rows carrying a group id)
   // sorted by their send-order seq even AFTER they un-pin — so they never swap.
   //
   // AI is off here to isolate the assign↔reopen pair, which is the swap the user
@@ -587,9 +595,10 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       .toBe(true);
 
     // Confirm the send → un-pin the (already-reconciled) pills. The message `at`
-    // sits between the seeded inbound and the audit rows, so the reply keeps its
-    // index and ONLY the two pills could move — which, with the fix, they don't.
-    await injectOutboundSent({ body: "on it now", clientTempId: tid, atMs: base - 1000 });
+    // lands AFTER the audit rows (`base + 30000` — the late-ack / clock-skew case
+    // that exposed the real bug). Pre-fix the reopen pill, sorting by its earlier
+    // audit `at`, floated ABOVE this reply; the message-anchor fix keeps it below.
+    await injectOutboundSent({ body: "on it now", clientTempId: tid, atMs: base + 30000 });
 
     const samples = await sampling;
     expect(findReorder(samples)).toBeNull();

@@ -875,6 +875,11 @@ export function ReplyBox({
           // auto-pause pill dispatch below) so the message orders before the
           // pill it triggers. See optimistic-seq.ts.
           optimisticSeq: nextOptimisticSeq(),
+          // Anchor the auto-claim pills (below) to THIS message's timeline slot
+          // by sharing its clientTempId as the group key — so "reopened" /
+          // "self-assigned" stay docked under the reply regardless of their
+          // racy/late server audit `at`. See message-thread.tsx anchor sort.
+          optimisticGroupId: clientTempId,
           ...(reply ? { replyToMessageId: reply.id, replyTo: reply } : {}),
           media: {
             kind,
@@ -908,6 +913,8 @@ export function ReplyBox({
           pending: true,
           // Send-order stamp; see the media branch above + optimistic-seq.ts.
           optimisticSeq: nextOptimisticSeq(),
+          // Anchor the auto-claim pills to this message — see the media branch.
+          optimisticGroupId: clientTempId,
           ...(reply ? { replyToMessageId: reply.id, replyTo: reply } : {}),
         };
         listPreview = trimmed.slice(0, 200);

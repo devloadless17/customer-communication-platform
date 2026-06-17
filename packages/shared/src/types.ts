@@ -433,6 +433,18 @@ export interface Message {
    * the auto-pause pill it triggers order deterministically.
    */
   optimisticSeq?: number;
+  /**
+   * CLIENT-ONLY group key (= this send's `clientTempId`), set on an optimistic
+   * own-send and PRESERVED across the `message:new` reconcile. It ties the
+   * message to the auto-claim activity pills the same send fans out
+   * (ConversationActivityEvent.optimisticGroupId). The timeline ANCHORS those
+   * pills to this message's timeline position (sorting them in send order
+   * directly under it) instead of their own racy/late server audit `at` — so a
+   * "reopened"/"self-assigned" pill can never float ABOVE the reply once the
+   * send confirms with a server/Meta timestamp. Absent on non-own messages and
+   * on every server-origin row, which sort purely by `timestamp`.
+   */
+  optimisticGroupId?: string;
 }
 
 /**

@@ -1165,6 +1165,13 @@ export function useConversationEvents(
                 // out-of-order message:new can't flash it above a still-pending
                 // earlier send. Cleared naturally once no sibling is pending.
                 ...(m.optimisticSeq != null ? { optimisticSeq: m.optimisticSeq } : {}),
+                // Preserve the send's group key too, so the auto-claim pills keep
+                // anchoring to this confirmed message (sorting under it in send
+                // order) instead of floating up to their own audit `at`. See
+                // message-thread.tsx anchor sort + Message.optimisticGroupId.
+                ...(m.optimisticGroupId != null
+                  ? { optimisticGroupId: m.optimisticGroupId }
+                  : {}),
                 ...(media ? { media } : {}),
               };
             })
