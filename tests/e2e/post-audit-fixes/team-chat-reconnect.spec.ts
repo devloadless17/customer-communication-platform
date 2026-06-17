@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-import { db } from "../_helpers/db";
+import { db, APP_ADMIN_EMAIL } from "../_helpers/db";
 
 const AUTH = "tests/e2e/.auth/app-admin.json";
 
@@ -18,21 +18,38 @@ test.describe("Team-chat reconnect convergence (state-management-1)", () => {
     browser,
   }) => {
     const prisma = db();
+    // Look up the BROWSING identity (the app-admin the AUTH storageState points
+    // at), NOT the superadmin — it must be a member of the channel under test.
     const user = await prisma.user.findFirst({
-      where: { email: "ali@loadless.ai" },
+      where: { email: APP_ADMIN_EMAIL },
       select: { teamId: true, id: true },
     });
-    if (!user) throw new Error("superadmin not seeded");
-    const channel = await prisma.teamChannel.findFirst({
-      where: { teamId: user.teamId },
-      orderBy: { createdAt: "asc" },
-      select: { id: true },
-    });
-    if (!channel) throw new Error("no channel for superadmin team");
+    if (!user) throw new Error("e2e app-admin not seeded");
 
     const stamp = Date.now();
     const OLD = `E2E-reconnect-OLD-${stamp}`;
     const NEW = `E2E-reconnect-NEW-${stamp}`;
+
+    // Use a DEDICATED channel, NOT the shared default "general". Other suites
+    // post MEDIA to general; in dev those media URLs 404 and render as fixed-
+    // height skeletons that throw off the feed's scroll-to-bottom, so a freshly
+    // appended tail message may never paint — making this spec's PRECONDITION
+    // (the OLD body is loaded) flaky. An isolated, empty channel keeps it
+    // deterministic. Reconnect convergence itself is channel-agnostic.
+    const channel = await prisma.teamChannel.create({
+      data: {
+        teamId: user.teamId,
+        name: `e2e-reconnect-${stamp}`,
+        isDefault: false,
+        createdById: user.id,
+      },
+      select: { id: true },
+    });
+    // Non-default channels are members-only (listChannelsForUser filters on
+    // membership) — the browsing user must be a member to load the feed.
+    await prisma.teamChannelMember.create({
+      data: { channelId: channel.id, userId: user.id, addedById: user.id },
+    });
     const msg = await prisma.teamChannelMessage.create({
       data: {
         channelId: channel.id,
@@ -86,8 +103,10 @@ test.describe("Team-chat reconnect convergence (state-management-1)", () => {
       await expect(pageB.locator(`text=${OLD}`)).toHaveCount(0);
     } finally {
       await ctxB.close();
-      await prisma.teamChannelMessage
-        .delete({ where: { id: msg.id } })
+      // Deleting the channel cascades its messages + memberships (onDelete:
+      // Cascade on both relations), fully cleaning up the isolated fixture.
+      await prisma.teamChannel
+        .delete({ where: { id: channel.id } })
         .catch(() => undefined);
     }
   });

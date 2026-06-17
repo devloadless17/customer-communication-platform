@@ -225,7 +225,10 @@ test.describe("logout flow", () => {
   test("logout clears session and lands on /login", async ({ page, context }) => {
     const health = trackHealth(page);
     await login(page);
-    await page.goto("/logout");
+    // /logout clears the session then redirects to /login; that redirect can
+    // abort the in-flight navigation (net::ERR_ABORTED), which is expected —
+    // the waitForURL below is the real proof that logout landed on /login.
+    await page.goto("/logout").catch(() => {});
     await page.waitForURL(/\/login/, { timeout: 10_000 });
     const cookies = await context.cookies();
     const session = cookies.find((c) => c.name.toLowerCase().includes("session"));
@@ -238,7 +241,10 @@ test.describe("logout flow", () => {
   test("post-logout /inbox redirects to /login", async ({ page }) => {
     const health = trackHealth(page);
     await login(page);
-    await page.goto("/logout");
+    // /logout clears the session then redirects to /login; that redirect can
+    // abort the in-flight navigation (net::ERR_ABORTED), which is expected —
+    // the waitForURL below is the real proof that logout landed on /login.
+    await page.goto("/logout").catch(() => {});
     await page.waitForURL(/\/login/, { timeout: 10_000 });
     const resp = await page.goto("/inbox", { waitUntil: "domcontentloaded" });
     expect(page.url()).toMatch(/\/login/);

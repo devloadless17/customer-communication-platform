@@ -193,10 +193,20 @@ test("inbox: list sort toggle (latest <-> longest waiting)", async ({ page }) =>
 test("inbox: search 2-char gate on heavy scopes", async ({ page }) => {
   await page.goto("/inbox", { waitUntil: "networkidle" });
   await page.waitForTimeout(1200);
-  await page.getByPlaceholder(/Search contacts/i).fill("a");
-  await page.getByRole("tab", { name: /Messages/i }).click();
+  const box = page.getByPlaceholder(/Search contacts/i);
+  // 1 char is BELOW the 2-char gate (`searchActive = query.trim().length >= 2`
+  // in conversation-list.tsx). The tabbed global-search panel must NOT open —
+  // the live conversation list stays, so no team-wide heavy search ever fires
+  // for a single character (which would match half the team).
+  await box.fill("a");
   await page.waitForTimeout(400);
-  await expect(page.getByText(/keep typing/i).first()).toBeVisible();
+  await expect(
+    page.getByRole("tablist", { name: /search scope/i }),
+  ).toHaveCount(0);
+  // 2 chars satisfies the gate — the panel opens with the heavy Messages scope
+  // available as a tab.
+  await box.fill("an");
+  await expect(page.getByRole("tab", { name: /Messages/i })).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
