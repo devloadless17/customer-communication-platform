@@ -71,6 +71,10 @@ export function registerAuditSubscribers(): () => void {
       kind: "assigned",
       before: { assignedUserId: e.previousAssignedUserId },
       after: { assignedUserId: e.newAssignedUserId },
+      // Action-time override when the caller supplies one (auto-claim-on-send
+      // sets it strictly after the message). Omitted elsewhere → write-time
+      // now(). See ConversationAssignedEvent.occurredAt + the ai_changed handler.
+      ...(e.occurredAt ? { at: e.occurredAt } : {}),
     });
   });
 
@@ -85,6 +89,8 @@ export function registerAuditSubscribers(): () => void {
       kind: "status_changed",
       before: { status: e.previousStatus },
       after: { status: e.newStatus },
+      // Action-time override (auto-claim-on-send reopened pill) — see above.
+      ...(e.occurredAt ? { at: e.occurredAt } : {}),
     });
   });
 

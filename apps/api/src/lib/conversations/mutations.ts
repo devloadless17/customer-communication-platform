@@ -464,6 +464,10 @@ export async function setConversationAiEnabled(args: {
   /** Set by a workflow step to the running workflow's id — carried on the
    *  published event so the audit row attributes the toggle to the automation. */
   changedByWorkflowId?: string | null;
+  /** Audit-row `at` override. The auto-claim-on-send path passes a time strictly
+   *  after the message so the "paused AI" pill sorts under the reply even on a
+   *  refreshed page. Defaults to now() (the inbox toggle / manual paths). */
+  occurredAt?: string;
   silent?: boolean;
 }): Promise<
   ConversationMutationOutcome<{ changed: boolean; previousAiEnabled: boolean }>
@@ -477,6 +481,7 @@ export async function setConversationAiEnabled(args: {
     changedByUserId,
     changedByApiKeyId,
     changedByWorkflowId,
+    occurredAt,
     silent,
   } = args;
 
@@ -512,7 +517,7 @@ export async function setConversationAiEnabled(args: {
     ...(changedByApiKeyId !== undefined ? { changedByApiKeyId } : {}),
     ...(changedByWorkflowId !== undefined ? { changedByWorkflowId } : {}),
     contact,
-    occurredAt: new Date().toISOString(),
+    occurredAt: occurredAt ?? new Date().toISOString(),
     silent: silent === true,
   });
 

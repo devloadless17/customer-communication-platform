@@ -342,6 +342,28 @@ export class MessagesService {
         });
         if (!convo) return;
 
+        // Action-time `at` for the auto-claim pills (ai_paused → reopened →
+        // self-assigned), stamped strictly AFTER the just-sent message so the
+        // pills sort directly UNDER the reply in a fixed order on EVERY client —
+        // including a refreshed page or a teammate's view, which have no
+        // optimistic group to anchor them. Without this the audit rows take
+        // async write-time now(), which RACES the message timestamp: sometimes
+        // the pills landed above the reply, sometimes below (the intermittent
+        // post-refresh "vibration"). The base clears the message's own timestamp:
+        // a send computes `max(receivedAt, lastMessageAt+1)` (monotonicity
+        // guard), and `lastMessageAt+1` here matches that ceiling whether or not
+        // this auto-claim read raced ahead of the message row's own write. The
+        // +1/+2/+3 offsets are sub-perceptible but give the trio a deterministic,
+        // collision-free order. (Manual dropdown/toggle paths pass no occurredAt
+        // → write-time now(), since there's no message to order against.)
+        const claimBase = Math.max(
+          Date.now(),
+          convo.lastMessageAt ? convo.lastMessageAt.getTime() + 1 : 0,
+        );
+        const aiPausedAt = new Date(claimBase + 1).toISOString();
+        const reopenedAt = new Date(claimBase + 2).toISOString();
+        const selfAssignedAt = new Date(claimBase + 3).toISOString();
+
         // Human reply = takeover → pause AI Autopilot so the external AI flow
         // stops auto-replying over the human. Idempotent (no-op if already
         // paused) + independent fire-and-forget so it can't affect the claim
@@ -356,6 +378,7 @@ export class MessagesService {
             conversationId,
             aiEnabled: false,
             changedByUserId: userId,
+            occurredAt: aiPausedAt,
           }).catch(() => {});
         }
 
@@ -393,6 +416,7 @@ export class MessagesService {
               previousStatus,
               newStatus: "open",
               changedByUserId: userId,
+              occurredAt: reopenedAt,
               contact: workflowContactSnapshot(convo.contact),
               conversation: statusSnapshot,
             });
@@ -466,6 +490,7 @@ export class MessagesService {
             previousAssignedUserId: null,
             newAssignedUserId: userId,
             changedByUserId: userId,
+            occurredAt: selfAssignedAt,
             contact: workflowContactSnapshot(convo.contact),
             conversation: assignedSnapshot,
           });
@@ -482,6 +507,7 @@ export class MessagesService {
               previousStatus,
               newStatus: nextStatus,
               changedByUserId: userId,
+              occurredAt: reopenedAt,
               contact: workflowContactSnapshot(convo.contact),
               conversation: statusSnapshot,
             });

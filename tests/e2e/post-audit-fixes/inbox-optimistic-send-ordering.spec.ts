@@ -223,11 +223,20 @@ async function injectConversationEvent(
  * assigned.at < reopened.at, i.e. the racy order that pre-fix swapped the pills.
  * ai_changed carries occurredAt so its `at` is action-time (matches the server).
  */
-async function injectAutoClaimTrio(occurredAtIso: string): Promise<void> {
+async function injectAutoClaimTrio(baseMs: number): Promise<void> {
+  // Mirror the FIXED server (autoAssignOnAgentSend): ai_paused / reopened /
+  // self-assigned get ORDERED occurredAt = baseMs + 1/2/3, where baseMs clears
+  // the triggering message's timestamp. So they sort under the reply in
+  // [ai, reopen, assign] order — including on a refreshed page (no anchor).
   await injectConversationEvent("conversation.ai_changed", {
     previousAiEnabled: true,
     newAiEnabled: false,
-    occurredAt: occurredAtIso,
+    occurredAt: new Date(baseMs + 1).toISOString(),
+  });
+  await injectConversationEvent("conversation.status_changed", {
+    previousStatus: "pending",
+    newStatus: "open",
+    occurredAt: new Date(baseMs + 2).toISOString(),
   });
   await injectConversationEvent("conversation.assigned", {
     previousAssignedUserId: null,
@@ -240,10 +249,23 @@ async function injectAutoClaimTrio(occurredAtIso: string): Promise<void> {
       role: "admin",
       isActive: true,
     },
+    occurredAt: new Date(baseMs + 3).toISOString(),
   });
-  await injectConversationEvent("conversation.status_changed", {
-    previousStatus: "pending",
-    newStatus: "open",
+}
+
+/**
+ * Seed a server-authoritative ConversationEvent row directly (no optimistic
+ * stub) — i.e. exactly what a REFRESHED page loads. Used to assert the
+ * post-refresh order comes out right purely from the server `at` values the
+ * fixed autoAssignOnAgentSend writes (message-ts + 1/2/3).
+ */
+async function seedConversationEvent(
+  kind: "ai_paused" | "status_changed" | "assigned",
+  atMs: number,
+  after: Record<string, unknown>,
+): Promise<void> {
+  await db().conversationEvent.create({
+    data: { teamId, conversationId, userId, kind, after, at: new Date(atMs) },
   });
 }
 
@@ -693,7 +715,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     const sampling = sampleOver(page, 4500, 40);
 
     // Reconcile the full trio (ai_paused, assigned, reopened).
-    await injectAutoClaimTrio(new Date(base).toISOString());
+    await injectAutoClaimTrio(base);
 
     // All three settle while the send is still pending.
     await expect
@@ -772,7 +794,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       )
       .toBe(3);
     const t1 = await waitForClientTempId(byBody, "first");
-    await injectAutoClaimTrio(new Date(base).toISOString());
+    await injectAutoClaimTrio(base);
     await expect
       .poll(
         async () => {
@@ -826,7 +848,7 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
       )
       .toBe(3);
     const t2 = await waitForClientTempId(byBody, "second");
-    await injectAutoClaimTrio(new Date(base + 10000).toISOString());
+    await injectAutoClaimTrio(base + 10000);
     await expect
       .poll(
         async () => {
@@ -863,5 +885,79 @@ test.describe("Inbox outbound-send ordering (2026-06-16 fix)", () => {
     );
     expect(firstMsg, "first send above resume").toBeLessThan(resumeIdx);
     expect(resumeIdx, "resume above second send").toBeLessThan(secondMsg);
+  });
+
+  // Symptom 7 (2026-06-17) — the AFTER-REFRESH case, the one that stayed broken
+  // ("perfect without refresh; refresh + reset + send → message above logs, and
+  // only SOMETIMES"). On a reloaded page there is NO optimistic group to anchor
+  // the auto-claim pills, so the order is decided purely by the server audit
+  // `at`, which used to RACE the message timestamp (hence "sometimes"). The
+  // server fix stamps ai_paused/reopened/self-assigned at message-ts + 1/2/3, so
+  // they sort directly UNDER the reply in a fixed order, identically on every
+  // load. This seeds the server rows exactly as the fixed server writes them and
+  // asserts the order is correct AND stable across a real page.reload().
+  test("after refresh: auto-claim pills sort UNDER the reply, stable, no vibration (symptom 7)", async ({
+    page,
+  }) => {
+    await freshConversation();
+    // Post-claim resting state (what the conversation looks like after a reply
+    // auto-claimed it): assigned + open + AI paused.
+    await db().conversation.update({
+      where: { id: conversationId },
+      data: { assignedUserId: userId, status: "open", aiEnabled: false },
+    });
+    const T = Date.now();
+    // The triggering reply (server row) at T, then the trio at T+1/2/3 — exactly
+    // what the fixed autoAssignOnAgentSend persists.
+    await db().message.create({
+      data: {
+        teamId,
+        conversationId,
+        externalId: `e2e-refresh-${T}`,
+        direction: "out",
+        channel: "whatsapp",
+        status: "sent",
+        body: "on it now",
+        timestamp: new Date(T),
+        senderUserId: userId,
+        rawPayload: {},
+      },
+    });
+    await seedConversationEvent("ai_paused", T + 1, { aiEnabled: false });
+    await seedConversationEvent("status_changed", T + 2, { status: "open" });
+    await seedConversationEvent("assigned", T + 3, { assignedUserId: userId });
+
+    await openThread(page);
+
+    const verify = async (label: string) => {
+      // Sample over a window (forces several renders) → catch any flicker.
+      const samples = await sampleOver(page, 1500, 60);
+      expect(findReorder(samples), `${label}: no vibration`).toBeNull();
+      const snap = samples[samples.length - 1]!;
+      const acts = snap.filter((e) => e.kind === "activity");
+      expect(acts.length, `${label}: exactly 3 pills, no duplicates`).toBe(3);
+      const idx = (re: RegExp) =>
+        snap.findIndex((e) => e.kind === "activity" && re.test(e.label));
+      const reply = snap.findIndex(
+        (e) => e.kind === "message" && e.label.includes("on it now"),
+      );
+      const ai = idx(/paused ai|paused.*autopilot/i);
+      const reopen = idx(/reopen/i);
+      const assign = idx(/self-assign/i);
+      expect(reply, `${label}: reply present`).toBeGreaterThanOrEqual(0);
+      expect(ai, `${label}: ai pill present`).toBeGreaterThanOrEqual(0);
+      expect(reply, `${label}: reply ABOVE the pills`).toBeLessThan(ai);
+      expect(ai, `${label}: ai above reopen`).toBeLessThan(reopen);
+      expect(reopen, `${label}: reopen above self-assign`).toBeLessThan(assign);
+    };
+
+    await verify("first load");
+    // A real refresh — the exact action the user said re-broke it.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator("[data-entry-kind]").first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.waitForTimeout(600);
+    await verify("after reload");
   });
 });

@@ -208,6 +208,16 @@ export interface ConversationAssignedEvent {
    *  so the audit row attributes the change to the automation (not an opaque
    *  null actor). Mutually exclusive in practice with user/api-key actors. */
   changedByWorkflowId?: string | null;
+  /**
+   * Audit-row `at` override (action time, not async write time). The
+   * auto-claim-on-send path sets this to a value strictly AFTER the triggering
+   * message's timestamp, so the "self-assigned" pill sorts directly UNDER the
+   * reply on EVERY client — including a refreshed page or a teammate's view,
+   * neither of which has the optimistic group to anchor it. Omitted on the
+   * dropdown/manual paths (no message to order against) → audit falls back to
+   * write-time now(). Mirrors ConversationAiChangedEvent.occurredAt.
+   */
+  occurredAt?: string;
   /** Contact attached to the conversation, for workflow snapshot. */
   contact: WorkflowContactSnapshot;
   /**
@@ -249,6 +259,12 @@ export interface ConversationStatusChangedEvent {
   /** Set when a workflow step drove this mutation — the running workflow's id,
    *  so the audit row attributes the change to the automation. */
   changedByWorkflowId?: string | null;
+  /**
+   * Audit-row `at` override — see ConversationAssignedEvent.occurredAt. The
+   * auto-claim-on-send "reopened" pill sets this strictly after the message so
+   * it sorts under the reply even on a refreshed page.
+   */
+  occurredAt?: string;
   contact: WorkflowContactSnapshot;
   /**
    * Post-mutation conversation snapshot captured at publish time, with the
