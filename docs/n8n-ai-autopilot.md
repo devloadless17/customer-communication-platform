@@ -192,18 +192,24 @@ After this, every new inbound for that conversation arrives with
 
 ## First-touch greeting & `session_kind`
 
+- **A session is bounded by conversation CLOSE.** Closing a conversation ends
+  the session; the customer's next message reopens the thread and starts a new
+  one. That's the only boundary — there is no time-gap setting.
+- **`session_kind`** (`first_ever` | `returning_session` | `continued`) marks
+  where an inbound sits:
+  - `first_ever` — brand-new conversation (first contact ever).
+  - `returning_session` — first message after the conversation was closed.
+  - `continued` — any later message in the same open session.
+  It rides every `message.received` webhook, and in-app workflows match it via
+  the `Session` condition on the *Message Received* trigger — e.g. "Welcome!" on
+  `first_ever`, "Welcome back!" on `returning_session`, nothing on `continued`.
 - **First-touch greeter** (Settings → Integrations → AI Autopilot): if set to
-  *Workflow greets*, the platform forces `ai_enabled: false` on a brand-new
-  conversation's FIRST inbound (with `ai_suppressed_reason: "first_touch_workflow"`)
-  so your in-app welcome workflow greets and the AI doesn't double-text. The 2nd
-  message onward arrives with `ai_enabled: true`. Existing flows need NO change —
-  they already gate on `ai_enabled`. Default *AI greets* = no suppression.
-- **`session_kind`** (`first_ever` | `returning_session` | `continued`) lets you
-  branch the greeting: e.g. "Welcome!" on `first_ever`, "Welcome back!" on
-  `returning_session`, and skip the greeting on `continued`. A new session starts
-  after the org's configured inbound-silence gap (default 6h) or a reopen. In-app
-  workflows can match the same value via the `Session` condition on the
-  *Message Received* trigger.
+  *Workflow greets*, the platform forces `ai_enabled: false` on the FIRST inbound
+  of a session (`first_ever` OR `returning_session`) with
+  `ai_suppressed_reason: "first_touch_workflow"`, so your in-app welcome workflow
+  greets and the AI doesn't double-text. The rest of the session arrives with
+  `ai_enabled: true`. Existing flows need NO change — they already gate on
+  `ai_enabled`. Default *AI greets* = no suppression.
 
 ## Sample Google Sheet data (to test with)
 

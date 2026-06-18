@@ -1369,10 +1369,14 @@ export function toWirePayload(
   switch (type) {
     case "message.received": {
       // First-touch suppression: when the org lets a welcome workflow greet,
-      // mute the AI on the very first inbound only. The stored aiEnabled stays
-      // true, so the 2nd+ messages report ai_enabled:true and the AI resumes.
+      // mute the AI on the FIRST inbound of a session (first_ever OR the reopen
+      // after a close = returning_session) so the workflow greets alone. The
+      // stored aiEnabled stays true, so the rest of the session reports
+      // ai_enabled:true and the AI resumes. `continued` messages are never
+      // suppressed.
       const suppressFirstTouch =
-        ctx.firstTouchGreeter === "workflow" && d.is_new_conversation === true;
+        ctx.firstTouchGreeter === "workflow" &&
+        (d.session_kind === "first_ever" || d.session_kind === "returning_session");
       return {
         event_type: type,
         // The customer who sent the message — first-class block (their full

@@ -86,7 +86,6 @@ export interface CurrentTeam {
   aiHandoffAction: "none" | "unassign" | "assign_fixed" | "round_robin";
   aiHandoffAssigneeId: string | null;
   firstTouchGreeter: "ai" | "workflow";
-  sessionGapMinutes: number;
 }
 
 export const getCurrentTeam = cache(async (): Promise<CurrentTeam> => {

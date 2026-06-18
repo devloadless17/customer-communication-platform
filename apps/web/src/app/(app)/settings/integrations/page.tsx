@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import {
   ArrowDown,
   ArrowRight,
+  Bot,
   ExternalLink,
   Plug,
   Webhook,
@@ -10,11 +11,10 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import { listApiKeys, getCurrentTeam, listTeamMembers } from "@/lib/api/queries";
+import { listApiKeys, getCurrentTeam } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { PageHeader } from "@/components/layouts/page-header";
 
-import { AiAutopilotToggle } from "@/features/settings/integrations/components/ai-autopilot-toggle";
 import { ApiKeysManager } from "@/features/settings/integrations/components/api-keys-manager";
 import { IntegrationConnectPanel } from "@/features/settings/integrations/components/integration-connect-panel";
 import { N8N_PRESET } from "@/features/settings/integrations/presets";
@@ -39,16 +39,21 @@ export default async function IntegrationsLanding() {
   // One round-trip serves both the "Connect" status on tiles AND the
   // connect panel's already-connected detection. Cheap (single SELECT,
   // never returns plaintext) and the page is `force-dynamic` anyway.
-  const [keys, team, members] = await Promise.all([
-    listApiKeys(),
-    getCurrentTeam(),
-    listTeamMembers(),
-  ]);
+  const [keys, team] = await Promise.all([listApiKeys(), getCurrentTeam()]);
   const n8nConnected = keys.some(
     (k) => !k.revokedAt && k.name === N8N_PRESET.defaultName,
   );
 
   const tiles: Tile[] = [
+    {
+      href: "/settings/integrations/ai-autopilot",
+      icon: Bot,
+      title: "AI Autopilot",
+      description:
+        "Let an AI flow auto-reply, with auto-pause on agent reply, configurable human-handoff routing, and welcome-message coordination.",
+      cta: team.aiAutopilotEnabled ? "On" : "Off",
+      connected: team.aiAutopilotEnabled,
+    },
     {
       href: "/settings/integrations/webhooks",
       icon: Webhook,
@@ -104,21 +109,6 @@ export default async function IntegrationsLanding() {
         {tiles.map((t) => (
           <IntegrationTile key={t.title} {...t} />
         ))}
-      </div>
-
-      <div className="mt-12">
-        <AiAutopilotToggle
-          initial={{
-            enabled: team.aiAutopilotEnabled,
-            handoffAction: team.aiHandoffAction,
-            handoffAssigneeId: team.aiHandoffAssigneeId,
-            firstTouchGreeter: team.firstTouchGreeter,
-            sessionGapMinutes: team.sessionGapMinutes,
-          }}
-          members={members
-            .filter((m) => m.isActive)
-            .map((m) => ({ id: m.id, name: m.name, email: m.email }))}
-        />
       </div>
 
       <div className="mt-6">

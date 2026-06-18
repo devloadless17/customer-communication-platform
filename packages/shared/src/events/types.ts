@@ -33,16 +33,30 @@ import type {
 } from "../workflows/events";
 
 /**
- * Where an inbound message sits in the contact's chatting "session", computed
- * server-side at ingest (workflow conditions are string-equality only, so the
- * gap decision can't be a raw timestamp the client compares):
- *   - `first_ever`         — brand-new conversation / no prior inbound.
- *   - `returning_session`  — chatted before, but this starts a fresh session
- *                            (reopened from closed, OR a long inbound-silence
- *                            gap exceeding Team.sessionGapMinutes).
- *   - `continued`          — another message inside the current session.
+ * Where an inbound message sits in the contact's chatting "session". A session
+ * is bounded by conversation CLOSE: closing ends the session, and the next
+ * inbound (which reopens the thread) starts a new one. Computed server-side at
+ * ingest so workflows can match on it (conditions are string-equality only):
+ *   - `first_ever`         — brand-new conversation (first contact ever).
+ *   - `returning_session`  — first message after the conversation was closed
+ *                            (the reopen) — i.e. the start of a new session.
+ *   - `continued`          — another message inside the current open session.
  */
 export type SessionKind = "first_ever" | "returning_session" | "continued";
+
+/**
+ * The session-kind rule, in one place. New conversation → first_ever; an
+ * inbound that reopened a closed thread → returning_session; everything else
+ * (a message within an already-open session) → continued.
+ */
+export function sessionKindFromFlags(
+  isNewConversation: boolean,
+  reopened: boolean,
+): SessionKind {
+  if (isNewConversation) return "first_ever";
+  if (reopened) return "returning_session";
+  return "continued";
+}
 
 // ---------------------------------------------------------------------------
 // Per-event payloads. Each is a fact about a state mutation that just

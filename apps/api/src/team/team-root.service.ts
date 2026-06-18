@@ -74,13 +74,11 @@ export class TeamRootService {
       aiHandoffAction?: AiHandoffAction;
       aiHandoffAssigneeId?: string | null;
       firstTouchGreeter?: FirstTouchGreeter;
-      sessionGapMinutes?: number;
     },
   ): Promise<{
     aiHandoffAction: AiHandoffAction;
     aiHandoffAssigneeId: string | null;
     firstTouchGreeter: FirstTouchGreeter;
-    sessionGapMinutes: number;
   }> {
     const current = await this.db.team.findUnique({
       where: { id: teamId },
@@ -122,7 +120,6 @@ export class TeamRootService {
         : { disconnect: true };
     }
     if (input.firstTouchGreeter !== undefined) data.firstTouchGreeter = input.firstTouchGreeter;
-    if (input.sessionGapMinutes !== undefined) data.sessionGapMinutes = input.sessionGapMinutes;
 
     const updated = await this.db.team.update({
       where: { id: teamId },
@@ -131,7 +128,6 @@ export class TeamRootService {
         aiHandoffAction: true,
         aiHandoffAssigneeId: true,
         firstTouchGreeter: true,
-        sessionGapMinutes: true,
       },
     });
     return updated;

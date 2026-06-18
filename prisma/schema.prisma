@@ -391,14 +391,10 @@ model Team {
   // round_robin AND the workflow assign_to round_robin mode — both read/write
   // this same cursor via pickRoundRobinAssignee. Nullable = start of rotation.
   aiRoundRobinCursorUserId String?
-  // Who greets on a brand-new conversation. `workflow` suppresses the AI on
-  // the FIRST inbound only (the welcome workflow handles it); 2nd+ messages
-  // still get the AI. See FirstTouchGreeter.
+  // Who greets at the start of a session. `workflow` suppresses the AI on the
+  // first inbound of a session (the welcome workflow handles it); the rest of
+  // the session still gets the AI. See FirstTouchGreeter.
   firstTouchGreeter      FirstTouchGreeter @default(ai)
-  // A "chatting session" ends after this many minutes of inbound silence.
-  // Drives the server-computed `session_kind` on every inbound (first_ever /
-  // returning_session / continued) that workflows match on. Default 6h.
-  sessionGapMinutes      Int               @default(360)
 
   users                   User[]
   contacts                Contact[]

@@ -39,7 +39,6 @@ const SetAiSettingsSchema = z.object({
     .optional(),
   aiHandoffAssigneeId: z.string().min(1).nullable().optional(),
   firstTouchGreeter: z.enum(["ai", "workflow"]).optional(),
-  sessionGapMinutes: z.number().int().min(1).max(43_200).optional(),
 });
 type SetAiSettingsInput = z.infer<typeof SetAiSettingsSchema>;
 
@@ -62,7 +61,6 @@ export class TeamRootController {
         aiHandoffAction: true,
         aiHandoffAssigneeId: true,
         firstTouchGreeter: true,
-        sessionGapMinutes: true,
       },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
