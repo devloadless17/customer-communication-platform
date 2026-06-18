@@ -1,5 +1,7 @@
 import { Injectable } from "@nestjs/common";
 
+import { setOnlinePresenceResolver } from "@/lib/conversations/presence-bridge";
+
 /**
  * Per-(team, user) socket-id tracker. The same agent commonly has two tabs
  * open; closing one shouldn't flip them offline. The tracker returns a
@@ -11,6 +13,13 @@ import { Injectable } from "@nestjs/common";
 @Injectable()
 export class PresenceService {
   private readonly byTeam = new Map<string, Map<string, Set<string>>>();
+
+  constructor() {
+    // Expose the live online set to framework-agnostic lib code (the
+    // round-robin picker) so it can prefer truly-connected agents — not just
+    // whoever's flagged "available" in the DB. See presence-bridge.ts.
+    setOnlinePresenceResolver((teamId) => new Set(this.snapshot(teamId)));
+  }
 
   // Per-conversation viewer set: conversationId → userId → socketIds.
   // Same shape as the team map; the extra layer lets us count tabs per
