@@ -1477,11 +1477,17 @@ function MessageThreadImpl({
     }
     decorated.sort((a, b) => {
       if (a.pin !== b.pin) return a.pin ? 1 : -1;
-      // Within the pinned tail, order by send-order seq when both carry it
-      // (mixed client/server clocks can't be compared safely here — that's the
-      // whole reason these rows are pinned). Fall back to time when a tail row
-      // has no seq (defensive; in practice every pinned row carries one).
-      if (a.pin && a.seq != null && b.seq != null) return a.seq - b.seq;
+      // Within the pinned tail, order by send-order seq (mixed client/server
+      // clocks can't be compared safely here — that's the whole reason these rows
+      // are pinned). Every pinnable row carries a seq today (pending/failed
+      // own-sends + every optimistic stub), so the `?? MAX` is a defensive single
+      // key: it keeps this branch TRANSITIVE even if a seq-less row were ever
+      // pinned (a per-pair seq-vs-time mix inside one partition is the classic
+      // non-transitive shape). Zero behavior change for current data.
+      if (a.pin)
+        return (
+          (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER)
+        );
       // Un-pinned: a SINGLE comparison-independent key per row → a transitive
       // total order. (A per-PAIR tiebreak that switched between seq and `at`
       // would be non-transitive the moment a groupless row's `at` landed between

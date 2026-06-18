@@ -252,13 +252,18 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
     // flag. Resolved fresh (not cached) so an admin toggling the setting in
     // Settings takes effect on the very next inbound. Cheap indexed PK lookup;
     // degrade-to-false on error (fail safe — don't let the AI run if unknown).
+    // `firstTouchGreeter` rides the same lookup — it drives suppressing the AI
+    // on a brand-new conversation's first inbound (see toWirePayload). Default
+    // "ai" (no suppression) on any error so a lookup hiccup can't silence the AI.
     let teamAiAutopilotEnabled = false;
+    let firstTouchGreeter: "ai" | "workflow" = "ai";
     try {
       const t = await this.db.team.findUnique({
         where: { id: event.teamId },
-        select: { aiAutopilotEnabled: true },
+        select: { aiAutopilotEnabled: true, firstTouchGreeter: true },
       });
       teamAiAutopilotEnabled = t?.aiAutopilotEnabled ?? false;
+      firstTouchGreeter = t?.firstTouchGreeter ?? "ai";
     } catch (err) {
       this.logger.warn(
         `resolve team aiAutopilot failed, treating as off: ${err instanceof Error ? err.message : err}`,
@@ -292,6 +297,7 @@ export class OutboundWebhooksSubscriber implements OnModuleInit, OnModuleDestroy
         ...toWirePayload(type, (envelope as { data: unknown }).data, {
           channelBase,
           teamAiAutopilotEnabled,
+          firstTouchGreeter,
         }),
       };
 

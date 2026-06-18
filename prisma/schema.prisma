@@ -291,6 +291,24 @@ enum WorkflowRunStatus {
   skipped
 }
 
+// What happens to a conversation when the CUSTOMER hands off to a human
+// (the n8n flow detects the word "human" and calls /v1/.../ai with
+// applyHandoffPolicy:true). Only the customer-initiated path runs this —
+// an agent's manual AI toggle / auto-pause-on-reply already has a human.
+enum AiHandoffAction {
+  none // just pause AI (legacy behavior)
+  unassign // pause + clear assignee (lands in the Unassigned queue)
+  assign_fixed // pause + assign to Team.aiHandoffAssigneeId
+  round_robin // pause + rotate across eligible agents
+}
+
+// Who sends the very first greeting on a brand-new conversation, so the AI
+// and a welcome workflow don't both reply to the first inbound.
+enum FirstTouchGreeter {
+  ai // AI greets (default); admin should NOT also run a welcome workflow
+  workflow // a welcome workflow greets; the AI is suppressed on the first inbound only
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -361,6 +379,27 @@ model Team {
   // (default true) but is only meaningful when this team flag is on.
   aiAutopilotEnabled     Boolean @default(false)
 
+  // What to do with a conversation when the CUSTOMER hands off to a human
+  // (the AI flow calls /v1/.../ai with applyHandoffPolicy:true). Only that
+  // path applies this — pausing the AI is the critical action; the assignment
+  // side-effect is best-effort and never fails the pause. See AiHandoffAction.
+  aiHandoffAction        AiHandoffAction   @default(none)
+  // Fixed assignee for aiHandoffAction = assign_fixed. SetNull on user delete
+  // so removing that member degrades to "leave unassigned", not a broken FK.
+  aiHandoffAssigneeId    String?
+  // Round-robin rotation cursor (last user picked) for aiHandoffAction =
+  // round_robin AND the workflow assign_to round_robin mode — both read/write
+  // this same cursor via pickRoundRobinAssignee. Nullable = start of rotation.
+  aiRoundRobinCursorUserId String?
+  // Who greets on a brand-new conversation. `workflow` suppresses the AI on
+  // the FIRST inbound only (the welcome workflow handles it); 2nd+ messages
+  // still get the AI. See FirstTouchGreeter.
+  firstTouchGreeter      FirstTouchGreeter @default(ai)
+  // A "chatting session" ends after this many minutes of inbound silence.
+  // Drives the server-computed `session_kind` on every inbound (first_ever /
+  // returning_session / continued) that workflows match on. Default 6h.
+  sessionGapMinutes      Int               @default(360)
+
   users                   User[]
   contacts                Contact[]
   conversations           Conversation[]
@@ -388,6 +427,7 @@ model Team {
   channelConnections      ChannelConnection[]
   calls                   Call[]
   callPermissionRequests  CallPermissionRequest[]
+  aiHandoffAssignee       User?                     @relation("AiHandoffAssignee", fields: [aiHandoffAssigneeId], references: [id], onDelete: SetNull)
 }
 
 // Per-(team, channel) connection: credentials + settings for one provider.
@@ -471,6 +511,10 @@ model User {
   answeredCalls           Call[]                    @relation("AnsweredCalls")
   sessions                Session[]
   accounts                Account[]
+  // Teams that route customer-initiated AI handoffs to this user (assign_fixed
+  // mode). SetNull on delete so removing the member degrades the team setting
+  // to "leave unassigned" rather than orphaning the FK.
+  aiHandoffForTeams       Team[]                    @relation("AiHandoffAssignee")
 
   @@index([teamId])
 }

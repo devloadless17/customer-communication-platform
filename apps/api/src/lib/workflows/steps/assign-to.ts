@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
 import { assignConversation } from "@/lib/conversations/mutations";
+import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
 
 import {
   type StepHandler,
@@ -16,9 +17,10 @@ import {
  *
  *   { mode: "user",       userId: string }   — specific teammate
  *   { mode: "unassign" }                     — remove current assignee
+ *   { mode: "round_robin" }                  — next eligible agent (shared
+ *                                              rotation; see round-robin.ts)
  *
  * Reserved for Round 2c:
- *   { mode: "round_robin" }       — pick the next active agent
  *   { mode: "ai", agentId: string } — assign to a configured AI agent
  *
  * Idempotency: no-op short-circuit if the target equals the current
@@ -32,7 +34,8 @@ import {
 
 export type AssignToStepConfig =
   | { mode: "user"; userId: string }
-  | { mode: "unassign" };
+  | { mode: "unassign" }
+  | { mode: "round_robin" };
 
 export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
   type: "assign_to",
@@ -43,22 +46,37 @@ export const assignToStepHandler: StepHandler<AssignToStepConfig> = {
     }
     const r = raw as Record<string, unknown>;
     if (r.mode === "unassign") return { mode: "unassign" };
+    if (r.mode === "round_robin") return { mode: "round_robin" };
     if (r.mode === "user") {
       if (typeof r.userId !== "string" || !r.userId) {
         throw new StepConfigError("assign_to.userId required when mode=user");
       }
       return { mode: "user", userId: r.userId };
     }
-    throw new StepConfigError("assign_to.mode must be 'user' or 'unassign'");
+    throw new StepConfigError(
+      "assign_to.mode must be 'user', 'unassign', or 'round_robin'",
+    );
   },
   describeConfig(config) {
-    return config.mode === "unassign" ? "Unassign" : `Assign to ${config.userId}`;
+    if (config.mode === "unassign") return "Unassign";
+    if (config.mode === "round_robin") return "Assign (round-robin)";
+    return `Assign to ${config.userId}`;
   },
   async run(envelope, config, ctx): Promise<StepResult> {
     const conv = envelopeConversation(envelope);
     if (!conv) return advanceWithError(400, "envelope missing conversation");
     const conversationId = conv.id;
-    const targetUserId = config.mode === "user" ? config.userId : null;
+
+    let targetUserId: string | null = null;
+    if (config.mode === "user") {
+      targetUserId = config.userId;
+    } else if (config.mode === "round_robin") {
+      // Shared rotation primitive (also used by the customer-handoff policy).
+      targetUserId = await pickRoundRobinAssignee({ db, teamId: ctx.teamId });
+      if (!targetUserId) {
+        return advance({ skipped: "no_eligible_agent" });
+      }
+    }
 
     // Shared business rule (member validation, CAS, status-flip on
     // assign-to-closed → pending, event publishing) lives in

@@ -94,6 +94,7 @@ export function registerWorkflowDispatchSubscribers(): () => void {
       conversation: e.conversation,
       contact: e.contact,
       recentMessages: e.recentMessages,
+      sessionKind: e.sessionKind,
     });
   });
 

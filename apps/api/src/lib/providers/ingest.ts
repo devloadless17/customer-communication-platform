@@ -22,6 +22,7 @@ import type {
 } from "@/lib/workflows/events";
 import { workflowConversationSnapshotAfterStatusChange } from "@/lib/workflows/events";
 import { findAndConsumeAwaitingReplies } from "@/lib/workflows/resume-on-inbound";
+import type { SessionKind } from "@ccp/shared/events/types";
 import type {
   NormalizedEvent,
   NormalizedInboundMessage,
@@ -582,7 +583,7 @@ async function ingestInboundMessage(
   // `conversation` is reassigned in tx2 when a reopen flips closed→pending so
   // all downstream snapshots see the post-reopen state — hence `let` (INB-1).
   // eslint-disable-next-line prefer-const
-  let { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen } = await runWithSerializableRetry(
+  let { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen, priorLastInboundAt } = await runWithSerializableRetry(
     async (tx) => {
       // Pre-existence check — the signal "did this inbound just create a
       // brand-new contact row?" We need it to publish `contact.created`
@@ -614,9 +615,15 @@ async function ingestInboundMessage(
       // without it.
       const existingContact = await tx.contact.findFirst({
         where: { teamId, phoneNumber: evt.contactPhone },
-        select: { id: true, deletedAt: true },
+        // `lastInboundAt` is captured HERE, before the monotonic bump in tx2
+        // (which overwrites it), so we can measure the gap since the contact's
+        // previous inbound for the `session_kind` computation below.
+        select: { id: true, deletedAt: true, lastInboundAt: true },
       });
       const isNewContact = !existingContact;
+      // The contact's previous inbound timestamp (null for a brand-new or
+      // never-messaged contact). Drives session_kind; read before tx2 bumps it.
+      const priorLastInboundAt = existingContact?.lastInboundAt ?? null;
       // A soft-deleted row being revived (deletedAt → null just below) is a
       // fresh directory appearance to every subscriber, exactly like the
       // manual + /v1 revive paths (which both republish contact.created).
@@ -711,7 +718,7 @@ async function ingestInboundMessage(
         // tx2 (do NOT mutate here).
         needsReopen = true;
       }
-      return { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen };
+      return { contact, conversation, isNewContact, wasRevived, isNewConversation, needsReopen, priorLastInboundAt };
     },
   );
 
@@ -725,6 +732,14 @@ async function ingestInboundMessage(
   const mediaPending = Boolean(
     evt.media && !(evt.media.storageKey && evt.media.storageUrl),
   );
+
+  // Session-window threshold for the `session_kind` computation. Cheap indexed
+  // PK read; defaults to 360min if the row/column is somehow absent.
+  const teamConfig = await db.team.findUnique({
+    where: { id: teamId },
+    select: { sessionGapMinutes: true },
+  });
+  const sessionGapMinutes = teamConfig?.sessionGapMinutes ?? 360;
 
   // Atomic landing for the inbound: message + conversation summary +
   // contact.lastInboundAt + the `message.received` outbox row all commit
@@ -985,6 +1000,17 @@ async function ingestInboundMessage(
         });
       }
 
+      // Where this inbound sits in the contact's chatting session. `reopened`
+      // is known here (post-CAS), so this is the right place to decide it.
+      const sessionKind: SessionKind =
+        isNewConversation || priorLastInboundAt == null
+          ? "first_ever"
+          : reopened ||
+              evt.timestamp.getTime() - priorLastInboundAt.getTime() >=
+                sessionGapMinutes * 60_000
+            ? "returning_session"
+            : "continued";
+
       await publishInTx(tx, {
         type: "message.received",
         teamId,
@@ -995,6 +1021,7 @@ async function ingestInboundMessage(
         workflowMessage,
         isNewConversation,
         reopened,
+        sessionKind,
         ...(newConversation ? { newConversation } : {}),
         preview: effectivePreview,
         lastMessageAt: effectiveLastMessageAt.toISOString(),

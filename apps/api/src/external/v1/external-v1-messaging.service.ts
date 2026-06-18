@@ -46,6 +46,7 @@ import {
   setConversationStatus,
   setConversationAiEnabled,
 } from "@/lib/conversations/mutations";
+import { pickRoundRobinAssignee } from "@/lib/conversations/round-robin";
 
 import { EventBus } from "../../events/event-bus.module";
 import { DbService } from "../../db/db.service";
@@ -370,7 +371,78 @@ export class ExternalV1MessagingService {
         detail: "conversation ai setting changed by someone else",
       });
     }
+
+    // Customer-initiated handoff: run the team's configured assignment action
+    // ONLY when the pause actually flipped true→false (gate on `changed` so a
+    // retry / already-paused thread is a no-op and we don't churn assignment).
+    // Best-effort — the critical action (AI off) already succeeded, so a failure
+    // here degrades to "paused but unassigned", never an error to the partner.
+    if (input.applyHandoffPolicy && result.changed && input.aiEnabled === false) {
+      await this.runHandoffPolicy(teamId, apiKeyId, conversationId).catch((err) => {
+        this.logger.warn(
+          `handoff policy failed for conversation ${conversationId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      });
+    }
     return { ok: true };
+  }
+
+  /**
+   * Apply the team's configured customer-handoff action after the AI was paused
+   * by the customer. Routes every action through the shared `assignConversation`
+   * mutation so `conversation.assigned` fires and the inbox updates live (same
+   * realtime/audit/analytics path as a manual assign). System actor
+   * (changedByUserId null), attributed to the calling API key.
+   */
+  private async runHandoffPolicy(
+    teamId: string,
+    apiKeyId: string,
+    conversationId: string,
+  ): Promise<void> {
+    const team = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { aiHandoffAction: true, aiHandoffAssigneeId: true },
+    });
+    if (!team || team.aiHandoffAction === "none") return;
+
+    let targetUserId: string | null = null;
+    if (team.aiHandoffAction === "assign_fixed") {
+      targetUserId = team.aiHandoffAssigneeId;
+      if (!targetUserId) return; // misconfigured (no member set) → leave as-is
+    } else if (team.aiHandoffAction === "round_robin") {
+      targetUserId = await pickRoundRobinAssignee({ db: this.db, teamId });
+      if (!targetUserId) return; // no eligible agent → leave unassigned
+    }
+    // "unassign" falls through with targetUserId = null.
+
+    const assigned = await assignConversation({
+      db: this.db,
+      publish: (e) => this.bus.publish(e),
+      teamId,
+      conversationId,
+      targetUserId,
+      changedByUserId: null,
+      changedByApiKeyId: apiKeyId,
+    });
+
+    // A configured fixed assignee who's been deactivated/removed → don't fail
+    // the handoff; fall back to leaving the thread unassigned for triage.
+    if (!assigned.ok && "reason" in assigned && assigned.reason === "invalid_user") {
+      this.logger.warn(
+        `handoff assign_fixed target ${targetUserId} invalid for team ${teamId}; leaving unassigned`,
+      );
+      await assignConversation({
+        db: this.db,
+        publish: (e) => this.bus.publish(e),
+        teamId,
+        conversationId,
+        targetUserId: null,
+        changedByUserId: null,
+        changedByApiKeyId: apiKeyId,
+      });
+    }
   }
 
   // ===========================================================================

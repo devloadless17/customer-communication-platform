@@ -48,7 +48,7 @@ export interface WorkflowGraph {
 export type GroupOp = "AND" | "OR";
 
 export type ConditionField =
-  | "body" | "body_lower" | "direction" | "option_id"
+  | "body" | "body_lower" | "direction" | "option_id" | "session_kind"
   | "status_from" | "status_to" | "assigned_user_id" | "conversation_status"
   | "contact_phone" | "contact_name" | "contact_email" | "contact_stage_id"
   | "tag_id" | "tag_change_kind"
@@ -244,7 +244,7 @@ export function emptyConfigFor(type: StepType): Record<string, unknown> {
 
 export const FIELDS_BY_TRIGGER: Record<Trigger, ConditionField[]> = {
   message_received: [
-    "body", "body_lower", "direction", "option_id",
+    "body", "body_lower", "direction", "option_id", "session_kind",
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
     "conversation_status", "assigned_user_id",
   ],
@@ -265,6 +265,7 @@ export const FIELD_LABELS: Record<ConditionField, string> = {
   body_lower: "Message body (lowercased)",
   direction: "Direction",
   option_id: "Button/List option id",
+  session_kind: "Session (first/returning/continued)",
   status_from: "Previous status",
   status_to: "New status",
   assigned_user_id: "Assigned user",
@@ -296,6 +297,7 @@ export type FieldValueKind =
   | "status"
   | "direction"
   | "tag_change_kind"
+  | "session_kind"
   | "field_key";
 
 export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
@@ -303,6 +305,7 @@ export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
   body_lower: "text",
   direction: "direction",
   option_id: "text",
+  session_kind: "session_kind",
   status_from: "status",
   status_to: "status",
   conversation_status: "status",
@@ -322,6 +325,11 @@ export const FIELD_VALUE_KIND: Record<ConditionField, FieldValueKind> = {
 export const STATUS_VALUES = ["open", "pending", "closed"] as const;
 export const DIRECTION_VALUES = ["in", "out"] as const;
 export const TAG_CHANGE_KIND_VALUES = ["added", "removed"] as const;
+export const SESSION_KIND_VALUES = [
+  "first_ever",
+  "returning_session",
+  "continued",
+] as const;
 
 export const OP_OPTIONS: Array<{ value: ConditionOp; label: string; needsValue: boolean }> = [
   { value: "equals", label: "is equal to", needsValue: true },

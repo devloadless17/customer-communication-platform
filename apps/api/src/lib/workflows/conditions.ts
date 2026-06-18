@@ -24,6 +24,10 @@ export type ConditionField =
   | "direction"
   // Stable id of an interactive button/list reply tap (message_received)
   | "option_id"
+  // Session position of the inbound (message_received): first_ever |
+  // returning_session | continued. Lets a flow greet only the first message
+  // of a session, or skip the greeting on continued messages.
+  | "session_kind"
   // Conversation fields (most triggers carry a conversation snapshot)
   | "status_from"
   | "status_to"
@@ -78,7 +82,7 @@ export interface ConditionGroup {
  */
 export const FIELDS_BY_TRIGGER: Record<WorkflowTriggerEvent, ConditionField[]> = {
   message_received: [
-    "body", "body_lower", "direction", "option_id",
+    "body", "body_lower", "direction", "option_id", "session_kind",
     "contact_phone", "contact_name", "contact_email", "contact_stage_id",
     "conversation_status", "assigned_user_id",
   ],
@@ -295,6 +299,7 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
     newValue?: string | null;
     previousStageId?: string | null;
     newStageId?: string | null;
+    sessionKind?: string;
   };
   switch (field) {
     case "body":
@@ -305,6 +310,8 @@ function readField(field: ConditionField, payload: EventPayload): string | null 
       return p.message?.direction ?? null;
     case "option_id":
       return p.message?.interactive?.id ?? null;
+    case "session_kind":
+      return p.sessionKind ?? null;
     case "status_from":
       return p.previousStatus ?? null;
     case "status_to":

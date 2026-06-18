@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,28 +57,15 @@ export function StatusDropdown({
   onAlert: (title: string, description?: string) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
-  const { confirm, confirmDialog } = useConfirm();
 
   const Icon = STATUS_META[current].icon;
 
   const setStatus = async (status: ConversationStatus) => {
     if (status === current || pending) return;
     // Closing a conversation also UNASSIGNS it and drops it out of the Active
-    // view (server side-effects) — confirm + disclose before doing it so a
-    // mis-click on "Closed" can't silently pull a conversation out of triage.
-    // open/pending are reversible + low blast-radius, so they stay one-click.
-    if (status === "closed") {
-      const ok = await confirm({
-        title: "Close this conversation?",
-        description:
-          assignedUserId !== null
-            ? "It'll be unassigned and moved to Closed. It reopens automatically when the customer messages again."
-            : "It'll move out of the Active view into Closed. It reopens automatically when the customer messages again.",
-        confirmLabel: "Close",
-        destructive: true,
-      });
-      if (!ok) return;
-    }
+    // view (server side-effects), but it's fully reversible (it reopens when the
+    // customer messages again) so it's a one-click action like open/pending —
+    // no confirm, by design, so agents under heavy load aren't slowed down.
     setPending(true);
     // Closing UNASSIGNS server-side (conversations.service setStatus). Mirror
     // that optimistically so the assignee chip clears in the SAME frame as the
@@ -189,7 +175,6 @@ export function StatusDropdown({
   const items: ConversationStatus[] = ["open", "pending", "closed"];
 
   return (
-    <>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
@@ -241,7 +226,5 @@ export function StatusDropdown({
         })}
       </DropdownMenuContent>
     </DropdownMenu>
-    {confirmDialog}
-    </>
   );
 }

@@ -795,7 +795,13 @@ function describeNode(n: WorkflowNode): string | undefined {
     case "send_template":
       return typeof c.templateId === "string" ? `Template ${c.templateId}` : undefined;
     case "assign_to":
-      return c.mode === "unassign" ? "Unassign" : c.userId ? `→ ${c.userId}` : undefined;
+      return c.mode === "unassign"
+        ? "Unassign"
+        : c.mode === "round_robin"
+          ? "Round-robin"
+          : c.userId
+            ? `→ ${c.userId}`
+            : undefined;
     case "set_status":
       return c.status ? `→ ${c.status}` : undefined;
     case "close_conversation":

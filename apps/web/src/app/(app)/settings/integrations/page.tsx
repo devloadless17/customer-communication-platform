@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { getSession } from "@/lib/auth/current-user";
-import { listApiKeys, getCurrentTeam } from "@/lib/api/queries";
+import { listApiKeys, getCurrentTeam, listTeamMembers } from "@/lib/api/queries";
 import { canManageUsers } from "@ccp/shared/auth/permissions";
 import { PageHeader } from "@/components/layouts/page-header";
 
@@ -39,7 +39,11 @@ export default async function IntegrationsLanding() {
   // One round-trip serves both the "Connect" status on tiles AND the
   // connect panel's already-connected detection. Cheap (single SELECT,
   // never returns plaintext) and the page is `force-dynamic` anyway.
-  const [keys, team] = await Promise.all([listApiKeys(), getCurrentTeam()]);
+  const [keys, team, members] = await Promise.all([
+    listApiKeys(),
+    getCurrentTeam(),
+    listTeamMembers(),
+  ]);
   const n8nConnected = keys.some(
     (k) => !k.revokedAt && k.name === N8N_PRESET.defaultName,
   );
@@ -103,7 +107,18 @@ export default async function IntegrationsLanding() {
       </div>
 
       <div className="mt-12">
-        <AiAutopilotToggle initialEnabled={team.aiAutopilotEnabled} />
+        <AiAutopilotToggle
+          initial={{
+            enabled: team.aiAutopilotEnabled,
+            handoffAction: team.aiHandoffAction,
+            handoffAssigneeId: team.aiHandoffAssigneeId,
+            firstTouchGreeter: team.firstTouchGreeter,
+            sessionGapMinutes: team.sessionGapMinutes,
+          }}
+          members={members
+            .filter((m) => m.isActive)
+            .map((m) => ({ id: m.id, name: m.name, email: m.email }))}
+        />
       </div>
 
       <div className="mt-6">

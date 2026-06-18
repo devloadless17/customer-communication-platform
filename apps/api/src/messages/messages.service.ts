@@ -351,11 +351,23 @@ export class MessagesService {
         // the pills landed above the reply, sometimes below (the intermittent
         // post-refresh "vibration"). The base clears the message's own timestamp:
         // a send computes `max(receivedAt, lastMessageAt+1)` (monotonicity
-        // guard), and `lastMessageAt+1` here matches that ceiling whether or not
-        // this auto-claim read raced ahead of the message row's own write. The
-        // +1/+2/+3 offsets are sub-perceptible but give the trio a deterministic,
+        // guard), so basing the trio on `max(now, lastMessageAt+1)` puts it after
+        // the message in the common case (no concurrent inbound). The +1/+2/+3
+        // offsets are sub-perceptible but give the trio a deterministic,
         // collision-free order. (Manual dropdown/toggle paths pass no occurredAt
         // → write-time now(), since there's no message to order against.)
+        //
+        // KNOWN NARROW RESIDUAL: this runs fire-and-forget from the SYNC send
+        // method, BEFORE the async worker commits the message (commit-outbound-
+        // send.ts computes the real `effectiveBump` from a FRESH in-tx read). If
+        // a customer INBOUND lands in that gap with a future-skewed Meta
+        // timestamp, the committed message ts can exceed claimBase+3 and the trio
+        // floats above the reply — but ONLY on a refreshed / teammate view (the
+        // originating client's optimistic group anchors them regardless). The
+        // airtight fix is to drive this off the committed message ts (a
+        // message.sent subscriber, or commitOutboundSend's effectiveBump) — a
+        // core-send-flow change deferred on purpose; the back-tolerance +
+        // id-tiebreak in mergeAuthoritativeEvents already absorb the common case.
         const claimBase = Math.max(
           Date.now(),
           convo.lastMessageAt ? convo.lastMessageAt.getTime() + 1 : 0,

@@ -32,6 +32,18 @@ import type {
   WorkflowMessageSnapshot,
 } from "../workflows/events";
 
+/**
+ * Where an inbound message sits in the contact's chatting "session", computed
+ * server-side at ingest (workflow conditions are string-equality only, so the
+ * gap decision can't be a raw timestamp the client compares):
+ *   - `first_ever`         — brand-new conversation / no prior inbound.
+ *   - `returning_session`  — chatted before, but this starts a fresh session
+ *                            (reopened from closed, OR a long inbound-silence
+ *                            gap exceeding Team.sessionGapMinutes).
+ *   - `continued`          — another message inside the current session.
+ */
+export type SessionKind = "first_ever" | "returning_session" | "continued";
+
 // ---------------------------------------------------------------------------
 // Per-event payloads. Each is a fact about a state mutation that just
 // happened. Payloads carry enough data for every subscriber to react without
@@ -53,6 +65,9 @@ export interface MessageReceivedEvent {
   isNewConversation: boolean;
   /** True when this inbound reopened a previously-closed conversation. */
   reopened: boolean;
+  /** Position of this inbound in the contact's chatting session — drives the
+   *  `session_kind` wire field + the `message_received` workflow condition. */
+  sessionKind: SessionKind;
   /** Pre-built socket payload for new-conversation splice (live splice without refetch). */
   newConversation?: ConversationWithRefs;
   preview: string;

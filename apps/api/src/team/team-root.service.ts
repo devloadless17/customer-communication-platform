@@ -1,4 +1,5 @@
-import { Injectable, InternalServerErrorException, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException } from "@nestjs/common";
+import type { AiHandoffAction, FirstTouchGreeter, Prisma } from "@prisma/client";
 
 import { blobStorage } from "@/lib/blob-storage";
 import { invalidateProviderConfig } from "@/lib/providers/config";
@@ -58,6 +59,82 @@ export class TeamRootService {
     });
 
     return { name: updated.name };
+  }
+
+  /**
+   * Update the org's AI behavior settings (handoff action, first-touch greeter,
+   * session window). Each field is optional — the UI can save one at a time.
+   * Rule that lives here so it can't drift: `assign_fixed` requires a real,
+   * active member of THIS team; clearing/removing the assignee is allowed for
+   * other actions (it's just ignored unless the action is assign_fixed).
+   */
+  async updateAiSettings(
+    teamId: string,
+    input: {
+      aiHandoffAction?: AiHandoffAction;
+      aiHandoffAssigneeId?: string | null;
+      firstTouchGreeter?: FirstTouchGreeter;
+      sessionGapMinutes?: number;
+    },
+  ): Promise<{
+    aiHandoffAction: AiHandoffAction;
+    aiHandoffAssigneeId: string | null;
+    firstTouchGreeter: FirstTouchGreeter;
+    sessionGapMinutes: number;
+  }> {
+    const current = await this.db.team.findUnique({
+      where: { id: teamId },
+      select: { aiHandoffAction: true, aiHandoffAssigneeId: true },
+    });
+    if (!current) throw new NotFoundException({ error: "team not found" });
+
+    const nextAction = input.aiHandoffAction ?? current.aiHandoffAction;
+    // The assignee after this write (explicit value wins, else keep current).
+    const nextAssignee =
+      input.aiHandoffAssigneeId !== undefined
+        ? input.aiHandoffAssigneeId
+        : current.aiHandoffAssigneeId;
+
+    if (nextAction === "assign_fixed") {
+      if (!nextAssignee) {
+        throw new BadRequestException({
+          error: "assignee_required",
+          detail: "assign_fixed requires aiHandoffAssigneeId",
+        });
+      }
+      const member = await this.db.user.findFirst({
+        where: { id: nextAssignee, teamId, deactivatedAt: null },
+        select: { id: true },
+      });
+      if (!member) {
+        throw new BadRequestException({
+          error: "invalid_assignee",
+          detail: "aiHandoffAssigneeId must be an active member of this team",
+        });
+      }
+    }
+
+    const data: Prisma.TeamUpdateInput = {};
+    if (input.aiHandoffAction !== undefined) data.aiHandoffAction = input.aiHandoffAction;
+    if (input.aiHandoffAssigneeId !== undefined) {
+      data.aiHandoffAssignee = input.aiHandoffAssigneeId
+        ? { connect: { id: input.aiHandoffAssigneeId } }
+        : { disconnect: true };
+    }
+    if (input.firstTouchGreeter !== undefined) data.firstTouchGreeter = input.firstTouchGreeter;
+    if (input.sessionGapMinutes !== undefined) data.sessionGapMinutes = input.sessionGapMinutes;
+
+    const updated = await this.db.team.update({
+      where: { id: teamId },
+      data,
+      select: {
+        aiHandoffAction: true,
+        aiHandoffAssigneeId: true,
+        firstTouchGreeter: true,
+        sessionGapMinutes: true,
+      },
+    });
+    return updated;
   }
 
   /**

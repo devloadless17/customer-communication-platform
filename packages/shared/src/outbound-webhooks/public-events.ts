@@ -167,6 +167,7 @@ export const PUBLIC_EVENT_GROUPS: Array<{
           },
           is_new_conversation: false,
           reopened: false,
+          session_kind: "continued",
         },
       },
       {
@@ -723,6 +724,7 @@ export function toPublicEnvelopes(
           } satisfies PublicConversation,
           is_new_conversation: e.isNewConversation,
           reopened: e.reopened,
+          session_kind: e.sessionKind,
         }),
       });
       break;
@@ -1350,6 +1352,12 @@ export function toWirePayload(
      *  Absent = true (assume on) for synthetic/test callers; the real
      *  subscriber always supplies it. */
     teamAiAutopilotEnabled?: boolean;
+    /** Org first-touch greeting policy. When "workflow", the AI is suppressed
+     *  on the FIRST inbound of a brand-new conversation (a welcome workflow
+     *  greets instead) — we force `ai_enabled:false` on that one delivery so
+     *  existing partner flows that gate on `ai_enabled` skip it with no change.
+     *  Absent / "ai" = no suppression. */
+    firstTouchGreeter?: "ai" | "workflow";
   },
 ): Record<string, unknown> {
   const d = data as Record<string, any>;
@@ -1359,7 +1367,12 @@ export function toWirePayload(
     (ctx.teamAiAutopilotEnabled ?? true) && (d.conversation?.aiEnabled ?? true);
 
   switch (type) {
-    case "message.received":
+    case "message.received": {
+      // First-touch suppression: when the org lets a welcome workflow greet,
+      // mute the AI on the very first inbound only. The stored aiEnabled stays
+      // true, so the 2nd+ messages report ai_enabled:true and the AI resumes.
+      const suppressFirstTouch =
+        ctx.firstTouchGreeter === "workflow" && d.is_new_conversation === true;
       return {
         event_type: type,
         // The customer who sent the message — first-class block (their full
@@ -1370,7 +1383,16 @@ export function toWirePayload(
         assignee: wireAssignee(d.conversation?.assignee),
         // AI Autopilot state for this conversation — the partner flow gates its
         // auto-reply on this (true = AI may answer; false = a human owns it).
-        ai_enabled: aiEnabled,
+        ai_enabled: suppressFirstTouch ? false : aiEnabled,
+        // Why the AI was muted for THIS delivery despite the stored flag being
+        // on — present only when suppressed, for partner debugging.
+        ...(suppressFirstTouch
+          ? { ai_suppressed_reason: "first_touch_workflow" }
+          : {}),
+        // Where this inbound sits in the chatting session (first_ever /
+        // returning_session / continued) — lets a partner greet differently
+        // without tracking session state itself. Computed server-side at ingest.
+        session_kind: d.session_kind ?? null,
         // Thread state so a partner can route on new-vs-reopen and current
         // status/unread WITHOUT a callback to /v1/conversations/:id. The data is
         // already on the envelope (computed at ingest); only the wire dropped it.
@@ -1388,6 +1410,7 @@ export function toWirePayload(
         channel: wireChannel(ctx.channelBase, d.contact),
         sender: wireSender(d.message?.sender),
       };
+    }
     case "message.sent":
       return {
         event_type: type,

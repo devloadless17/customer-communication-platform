@@ -500,7 +500,7 @@ export function AssignToEditor({
   onChange,
   users,
 }: {
-  config: { mode?: "user" | "unassign"; userId?: string };
+  config: { mode?: "user" | "unassign" | "round_robin"; userId?: string };
   onChange: (c: Record<string, unknown>) => void;
   users: BuilderCatalogs["users"];
 }) {
@@ -531,6 +531,15 @@ export function AssignToEditor({
             ))}
           </Select>
         )}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="assign-mode"
+            checked={config.mode === "round_robin"}
+            onChange={() => onChange({ mode: "round_robin" })}
+          />
+          Round-robin (next available agent)
+        </label>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="radio"

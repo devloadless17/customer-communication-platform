@@ -79,14 +79,20 @@ export interface SnippetDto {
  * this, every authenticated page paid 2x the /api/team latency on every
  * nav (parent layout + SectionShell each calling independently).
  */
-export const getCurrentTeam = cache(
-  async (): Promise<{ id: string; name: string; aiAutopilotEnabled: boolean }> => {
-    const { team } = await api<{
-      team: { id: string; name: string; aiAutopilotEnabled: boolean };
-    }>("/api/team");
-    return team;
-  },
-);
+export interface CurrentTeam {
+  id: string;
+  name: string;
+  aiAutopilotEnabled: boolean;
+  aiHandoffAction: "none" | "unassign" | "assign_fixed" | "round_robin";
+  aiHandoffAssigneeId: string | null;
+  firstTouchGreeter: "ai" | "workflow";
+  sessionGapMinutes: number;
+}
+
+export const getCurrentTeam = cache(async (): Promise<CurrentTeam> => {
+  const { team } = await api<{ team: CurrentTeam }>("/api/team");
+  return team;
+});
 
 // Wrapped in `React.cache` so a section's layout (e.g. the inbox sub-sidebar's
 // teammate list) and its page (message attribution / @-picker) share one

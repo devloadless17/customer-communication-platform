@@ -24,6 +24,7 @@ import {
   FIELD_VALUE_KIND,
   OP_OPTIONS,
   STATUS_VALUES,
+  SESSION_KIND_VALUES,
   TAG_CHANGE_KIND_VALUES,
   isGroup,
   triggerCarriesContact,
@@ -441,6 +442,27 @@ function ConditionValueControl({
         {TAG_CHANGE_KIND_VALUES.map((k) => (
           <option key={k} value={k}>
             {k}
+          </option>
+        ))}
+      </Select>
+    );
+  }
+  if (kind === "session_kind") {
+    return (
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={selectClass}
+        wrapperClassName={selectWrapperClass}
+      >
+        <option value="">Select session…</option>
+        {SESSION_KIND_VALUES.map((k) => (
+          <option key={k} value={k}>
+            {k === "first_ever"
+              ? "first ever (new contact)"
+              : k === "returning_session"
+                ? "returning session"
+                : "continued (same session)"}
           </option>
         ))}
       </Select>

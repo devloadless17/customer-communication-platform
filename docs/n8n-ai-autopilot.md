@@ -50,6 +50,14 @@ Relevant fields (camelCase; the message text is double-nested):
   "event_type": "message.received",
   "timestamp": 1718539200000,         // ← event time (epoch ms), on every event
   "ai_enabled": true,                 // ← the gate
+  // Present ONLY when ai_enabled was forced false for a reason other than a
+  // pause — today: "first_touch_workflow" (org chose a welcome workflow to
+  // greet, so the AI is muted on this conversation's first message only).
+  "ai_suppressed_reason": null,
+  // Where this inbound sits in the chatting session — greet differently per
+  // value without tracking session state yourself:
+  //   first_ever | returning_session | continued
+  "session_kind": "first_ever",
   "contact":  { "id": "...", "phoneNumber": "961...", "name": "..." },
   "assignee": null,                   // a human assignee (or null)
   "conversation": {                   // ← thread state, no callback needed
@@ -150,11 +158,20 @@ The only place you POST to `…/ai`. Send NOTHING to the customer here.
 | Method | `POST` |
 | URL | `={{ "https://YOUR_APP_HOST/api/external/v1/conversations/" + $('Webhook').item.json.body.message.conversationId + "/ai" }}` |
 | Headers | `Authorization: Bearer ccp_YOUR_KEY`, `Content-Type: application/json` |
-| JSON body | `{ "aiEnabled": false, "silent": true }` |
+| JSON body | `{ "aiEnabled": false, "silent": true, "applyHandoffPolicy": true }` |
+
+**`applyHandoffPolicy: true`** marks this as a CUSTOMER-initiated handoff, so the
+platform runs the org's configured handoff action AFTER pausing the AI — leave
+unassigned, assign to a fixed member, or **round-robin** to available agents
+(set under Settings → Integrations → AI Autopilot). Omit it (or send `false`)
+and only the pause happens. The action runs once, only on the actual
+true→false flip — a retry is a no-op. You no longer need a separate `…/assign`
+call for the common case; the platform does it for you.
 
 Optional follow-ups in the same branch (give the human context / route it):
 - `POST …/conversations/:id/notes` → `{ "body": "🤖→👤 AI handoff: <reason>" }`
 - `POST …/conversations/:id/assign` → `{ "assignedUserId": "<a teammate id>" }`
+  (only if you want to OVERRIDE the configured handoff action for this case)
 - optionally send the customer a bridge message via `…/messages`
   ("Let me connect you with a teammate, one moment 🙏").
 
@@ -167,6 +184,24 @@ After this, every new inbound for that conversation arrives with
 - **Closing** the conversation auto-resumes the AI (`ai_enabled → true`) for next time.
 - An agent can also flip it manually with the **AI Autopilot** toggle in the conversation header.
 - A `conversation.ai_changed` outbound webhook fires on every toggle, if you want n8n to observe handoffs.
+- On a customer handoff sent with `applyHandoffPolicy: true`, the platform also
+  applies the org's **handoff action** (unassign / assign-fixed / round-robin) —
+  configured under Settings → Integrations → AI Autopilot.
+
+## First-touch greeting & `session_kind`
+
+- **First-touch greeter** (Settings → Integrations → AI Autopilot): if set to
+  *Workflow greets*, the platform forces `ai_enabled: false` on a brand-new
+  conversation's FIRST inbound (with `ai_suppressed_reason: "first_touch_workflow"`)
+  so your in-app welcome workflow greets and the AI doesn't double-text. The 2nd
+  message onward arrives with `ai_enabled: true`. Existing flows need NO change —
+  they already gate on `ai_enabled`. Default *AI greets* = no suppression.
+- **`session_kind`** (`first_ever` | `returning_session` | `continued`) lets you
+  branch the greeting: e.g. "Welcome!" on `first_ever`, "Welcome back!" on
+  `returning_session`, and skip the greeting on `continued`. A new session starts
+  after the org's configured inbound-silence gap (default 6h) or a reopen. In-app
+  workflows can match the same value via the `Session` condition on the
+  *Message Received* trigger.
 
 ## Sample Google Sheet data (to test with)
 

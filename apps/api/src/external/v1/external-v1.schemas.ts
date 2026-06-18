@@ -155,10 +155,16 @@ export type ExternalStatusInput = z.infer<typeof ExternalStatusSchema>;
  * value then rides every subsequent message.received as `ai_enabled` so the
  * partner flow stops auto-replying). `silent` skips the outbound-webhook echo
  * so the AI doesn't get its own ai_changed delivery back.
+ *
+ * `applyHandoffPolicy` marks this as a CUSTOMER-initiated handoff (the n8n
+ * "human" branch sends true). Only then does the team's configured handoff
+ * action run (unassign / assign-fixed / round-robin) AFTER the pause. The inbox
+ * toggle and auto-pause-on-human-reply never set it — a human is already there.
  */
 export const ExternalSetAiSchema = z.object({
   aiEnabled: z.boolean(),
   silent: SilentFlag,
+  applyHandoffPolicy: z.boolean().optional(),
 });
 export type ExternalSetAiInput = z.infer<typeof ExternalSetAiSchema>;
 

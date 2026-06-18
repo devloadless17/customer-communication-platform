@@ -30,6 +30,19 @@ const SetAiAutopilotSchema = z.object({
 });
 type SetAiAutopilotInput = z.infer<typeof SetAiAutopilotSchema>;
 
+// AI behavior settings beyond the on/off toggle: what happens on a
+// customer-initiated handoff, who greets first, and the session window. All
+// optional so the UI can PATCH one field at a time.
+const SetAiSettingsSchema = z.object({
+  aiHandoffAction: z
+    .enum(["none", "unassign", "assign_fixed", "round_robin"])
+    .optional(),
+  aiHandoffAssigneeId: z.string().min(1).nullable().optional(),
+  firstTouchGreeter: z.enum(["ai", "workflow"]).optional(),
+  sessionGapMinutes: z.number().int().min(1).max(43_200).optional(),
+});
+type SetAiSettingsInput = z.infer<typeof SetAiSettingsSchema>;
+
 @Controller("api/team")
 @UseGuards(SessionGuard)
 export class TeamRootController {
@@ -42,7 +55,15 @@ export class TeamRootController {
   async get(@CurrentSession() session: ApiSession) {
     const team = await this.db.team.findUnique({
       where: { id: session.teamId },
-      select: { id: true, name: true, aiAutopilotEnabled: true },
+      select: {
+        id: true,
+        name: true,
+        aiAutopilotEnabled: true,
+        aiHandoffAction: true,
+        aiHandoffAssigneeId: true,
+        firstTouchGreeter: true,
+        sessionGapMinutes: true,
+      },
     });
     if (!team) throw new NotFoundException({ error: "team not found" });
     return { team };
@@ -63,6 +84,19 @@ export class TeamRootController {
       data: { aiAutopilotEnabled: body.aiAutopilotEnabled },
     });
     return { ok: true, aiAutopilotEnabled: body.aiAutopilotEnabled };
+  }
+
+  // Admin configures AI handoff behavior + first-touch greeting + session
+  // window. Validation (e.g. assign_fixed requires a real, active member)
+  // lives in the service so the rule has one home.
+  @RequireRole("admin")
+  @Patch("ai-settings")
+  async setAiSettings(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(SetAiSettingsSchema)) body: SetAiSettingsInput,
+  ) {
+    const team = await this.teamRoot.updateAiSettings(session.teamId, body);
+    return { ok: true, team };
   }
 
   @RequireRole("admin")

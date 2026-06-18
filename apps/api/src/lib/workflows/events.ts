@@ -21,6 +21,7 @@ import type {
   WorkflowTriggerEvent,
 } from "@prisma/client";
 import type { MediaKind } from "@ccp/shared/types";
+import type { SessionKind } from "@ccp/shared/events/types";
 import { normalizeStringMap } from "@/lib/normalize-string-map";
 
 export type { WorkflowTriggerEvent };
@@ -456,6 +457,12 @@ export interface MessageReceivedPayload {
    * a round-trip just to get short-term context. n=10 by default.
    */
   recentMessages: WorkflowMessageSnapshot[];
+  /**
+   * Where this inbound sits in the contact's chatting session — drives the
+   * `session_kind` trigger/branch condition (first_ever | returning_session |
+   * continued). See SessionKind in events/types.ts.
+   */
+  sessionKind: SessionKind;
 }
 
 export interface ConversationCreatedPayload {
