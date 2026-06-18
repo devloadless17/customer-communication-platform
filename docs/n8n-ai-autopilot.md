@@ -158,15 +158,16 @@ The only place you POST to `…/ai`. Send NOTHING to the customer here.
 | Method | `POST` |
 | URL | `={{ "https://YOUR_APP_HOST/api/external/v1/conversations/" + $('Webhook').item.json.body.message.conversationId + "/ai" }}` |
 | Headers | `Authorization: Bearer ccp_YOUR_KEY`, `Content-Type: application/json` |
-| JSON body | `{ "aiEnabled": false, "silent": true, "applyHandoffPolicy": true }` |
+| JSON body | `{ "aiEnabled": false, "silent": true }` |
 
-**`applyHandoffPolicy: true`** marks this as a CUSTOMER-initiated handoff, so the
-platform runs the org's configured handoff action AFTER pausing the AI — leave
-unassigned, assign to a fixed member, or **round-robin** to available agents
-(set under Settings → Integrations → AI Autopilot). Omit it (or send `false`)
-and only the pause happens. The action runs once, only on the actual
-true→false flip — a retry is a no-op. You no longer need a separate `…/assign`
-call for the common case; the platform does it for you.
+**The configured handoff action runs automatically — no extra flag needed.**
+This endpoint is only ever hit by the "human" branch, so after pausing the AI
+the platform runs the org's handoff action: leave unassigned, assign to a fixed
+member, or **round-robin** to available agents (set under Settings →
+Integrations → AI Autopilot). It runs once, only on the real true→false flip — a
+retry / already-paused thread is a no-op. You no longer need a separate `…/assign`
+call for the common case; the platform does it for you. To OPT a specific call
+OUT of the assignment (pause only), add `"applyHandoffPolicy": false`.
 
 Optional follow-ups in the same branch (give the human context / route it):
 - `POST …/conversations/:id/notes` → `{ "body": "🤖→👤 AI handoff: <reason>" }`
@@ -184,9 +185,10 @@ After this, every new inbound for that conversation arrives with
 - **Closing** the conversation auto-resumes the AI (`ai_enabled → true`) for next time.
 - An agent can also flip it manually with the **AI Autopilot** toggle in the conversation header.
 - A `conversation.ai_changed` outbound webhook fires on every toggle, if you want n8n to observe handoffs.
-- On a customer handoff sent with `applyHandoffPolicy: true`, the platform also
-  applies the org's **handoff action** (unassign / assign-fixed / round-robin) —
-  configured under Settings → Integrations → AI Autopilot.
+- On any customer handoff (a `…/ai` call with `aiEnabled:false`), the platform
+  applies the org's **handoff action** by default (unassign / assign-fixed /
+  round-robin) — configured under Settings → Integrations → AI Autopilot. Send
+  `applyHandoffPolicy:false` to skip it for a specific call.
 
 ## First-touch greeting & `session_kind`
 

@@ -156,10 +156,12 @@ export type ExternalStatusInput = z.infer<typeof ExternalStatusSchema>;
  * partner flow stops auto-replying). `silent` skips the outbound-webhook echo
  * so the AI doesn't get its own ai_changed delivery back.
  *
- * `applyHandoffPolicy` marks this as a CUSTOMER-initiated handoff (the n8n
- * "human" branch sends true). Only then does the team's configured handoff
- * action run (unassign / assign-fixed / round-robin) AFTER the pause. The inbox
- * toggle and auto-pause-on-human-reply never set it — a human is already there.
+ * On `aiEnabled:false` the team's configured handoff action (unassign /
+ * assign-fixed / round-robin) runs AFTER the pause BY DEFAULT — this route is
+ * only ever hit by the AI flow's "human" branch, so a customer handoff is the
+ * intent. Pass `applyHandoffPolicy:false` to opt a specific call out (e.g. an
+ * automation that pauses the AI for a non-handoff reason). The agent inbox
+ * toggle + auto-pause-on-reply use other code paths and never run the policy.
  */
 export const ExternalSetAiSchema = z.object({
   aiEnabled: z.boolean(),

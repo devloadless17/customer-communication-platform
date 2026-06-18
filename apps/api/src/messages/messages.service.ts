@@ -342,39 +342,30 @@ export class MessagesService {
         });
         if (!convo) return;
 
-        // Action-time `at` for the auto-claim pills (ai_paused → reopened →
-        // self-assigned), stamped strictly AFTER the just-sent message so the
-        // pills sort directly UNDER the reply in a fixed order on EVERY client —
-        // including a refreshed page or a teammate's view, which have no
-        // optimistic group to anchor them. Without this the audit rows take
-        // async write-time now(), which RACES the message timestamp: sometimes
-        // the pills landed above the reply, sometimes below (the intermittent
-        // post-refresh "vibration"). The base clears the message's own timestamp:
-        // a send computes `max(receivedAt, lastMessageAt+1)` (monotonicity
-        // guard), so basing the trio on `max(now, lastMessageAt+1)` puts it after
-        // the message in the common case (no concurrent inbound). The +1/+2/+3
-        // offsets are sub-perceptible but give the trio a deterministic,
-        // collision-free order. (Manual dropdown/toggle paths pass no occurredAt
-        // → write-time now(), since there's no message to order against.)
+        // The auto-claim pills (ai_paused → reopened → self-assigned) sort by
+        // their audit `at`. To land them DIRECTLY UNDER the just-sent reply on
+        // EVERY view — a refreshed page or a teammate's, neither of which has the
+        // sender's optimistic group to anchor them — that `at` must be strictly
+        // AFTER the message's own (monotonic) timestamp, in a fixed order.
         //
-        // KNOWN NARROW RESIDUAL: this runs fire-and-forget from the SYNC send
-        // method, BEFORE the async worker commits the message (commit-outbound-
-        // send.ts computes the real `effectiveBump` from a FRESH in-tx read). If
-        // a customer INBOUND lands in that gap with a future-skewed Meta
-        // timestamp, the committed message ts can exceed claimBase+3 and the trio
-        // floats above the reply — but ONLY on a refreshed / teammate view (the
-        // originating client's optimistic group anchors them regardless). The
-        // airtight fix is to drive this off the committed message ts (a
-        // message.sent subscriber, or commitOutboundSend's effectiveBump) — a
-        // core-send-flow change deferred on purpose; the back-tolerance +
-        // id-tiebreak in mergeAuthoritativeEvents already absorb the common case.
-        const claimBase = Math.max(
-          Date.now(),
-          convo.lastMessageAt ? convo.lastMessageAt.getTime() + 1 : 0,
-        );
+        // reopened + self-assigned are anchored to the COMMITTED message
+        // (waitForOutboundAfter below): the worker computes the message ts from a
+        // FRESH in-tx read, so a customer inbound that raced into the send (and a
+        // future-skewed Meta clock) can push it past `now` — anchoring to the
+        // real committed ts is the only way the pills stay under the reply in
+        // that case. claimBase is the prediction used as the timeout fallback (a
+        // send computes `max(receivedAt, lastMessageAt+1)`, so `max(now,
+        // lastMessageAt+1)` clears it whenever no inbound interleaves).
+        //
+        // The AI-pause stays IMMEDIATE (its mutation must flip the external
+        // `ai_enabled` flag before the next inbound's webhook fires), so its pill
+        // keeps the prediction-based `at`. That's the least ordering-critical of
+        // the three — and AI is off in the common takeover — so the rare-race
+        // edge it leaves is cosmetic. (Manual dropdown/toggle paths pass no
+        // occurredAt → write-time now(), since there's no message to order against.)
+        const lastBeforeSend = convo.lastMessageAt?.getTime() ?? 0;
+        const claimBase = Math.max(Date.now(), lastBeforeSend + 1);
         const aiPausedAt = new Date(claimBase + 1).toISOString();
-        const reopenedAt = new Date(claimBase + 2).toISOString();
-        const selfAssignedAt = new Date(claimBase + 3).toISOString();
 
         // Human reply = takeover → pause AI Autopilot so the external AI flow
         // stops auto-replying over the human. Idempotent (no-op if already
@@ -393,6 +384,22 @@ export class MessagesService {
             occurredAt: aiPausedAt,
           }).catch(() => {});
         }
+
+        // Nothing left to claim or reopen (already assigned AND open) → done;
+        // skip the message wait below. The AI-pause above already fired.
+        if (convo.assignedUserId !== null && convo.status === "open") return;
+
+        // Anchor reopened/self-assigned to the COMMITTED message ts (see above):
+        // wait briefly for this send's outbound row to land, then base the pills
+        // on it. Falls back to the prediction if the send never commits.
+        const committedMsgTs = await this.waitForOutboundAfter(
+          teamId,
+          conversationId,
+          lastBeforeSend,
+        );
+        const claimAnchor = committedMsgTs ? committedMsgTs.getTime() : claimBase;
+        const reopenedAt = new Date(claimAnchor + 2).toISOString();
+        const selfAssignedAt = new Date(claimAnchor + 3).toISOString();
 
         // Both branches wrap CAS + publish in one transaction via
         // publishInTx — a crash between commit and emit on the prior
@@ -537,6 +544,45 @@ export class MessagesService {
         kickOutbox();
       }
     })();
+  }
+
+  /**
+   * Wait (poll) for the agent's just-sent OUTBOUND message to commit — the
+   * latest outbound newer than `afterMs` (the conversation's lastMessageAt read
+   * BEFORE the auto-claim ran). Lets the auto-claim pills anchor to the message's
+   * real, monotonic, committed timestamp instead of a pre-send prediction, so
+   * they sort strictly under the reply on EVERY view (refresh / teammate) even
+   * when a customer inbound raced the send and pushed the message ts forward.
+   *
+   * Returns null on timeout (e.g. the send genuinely failed → no row commits) so
+   * the caller falls back to the prediction. Bounded + cheap: the
+   * `(conversationId, timestamp)` index covers the query, and ~3s is far longer
+   * than a Meta round-trip yet short enough that a never-committing send can't
+   * hang this fire-and-forget. Concurrent same-conversation sends only make the
+   * latest-outbound ts MORE recent (monotonic), never older, so the anchor stays
+   * at-or-after this send's own message.
+   */
+  private async waitForOutboundAfter(
+    teamId: string,
+    conversationId: string,
+    afterMs: number,
+  ): Promise<Date | null> {
+    const after = new Date(afterMs);
+    for (let i = 0; i < 25; i++) {
+      const m = await this.db.message.findFirst({
+        where: {
+          teamId,
+          conversationId,
+          direction: "out",
+          timestamp: { gt: after },
+        },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      });
+      if (m) return m.timestamp;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return null;
   }
 
   /**

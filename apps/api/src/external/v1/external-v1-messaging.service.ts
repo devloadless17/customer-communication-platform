@@ -373,11 +373,17 @@ export class ExternalV1MessagingService {
     }
 
     // Customer-initiated handoff: run the team's configured assignment action
-    // ONLY when the pause actually flipped true→false (gate on `changed` so a
-    // retry / already-paused thread is a no-op and we don't churn assignment).
+    // when the AI is paused via THIS route. This endpoint is only ever hit by
+    // the AI flow's "human" branch (the agent inbox toggle uses the session
+    // route, auto-pause-on-reply uses the internal mutation) — so applying the
+    // handoff here is the DEFAULT, not opt-in, and works with the existing n8n
+    // body `{aiEnabled:false, silent:true}` with no flow changes. Send
+    // `applyHandoffPolicy:false` to explicitly opt a call out. Gated on
+    // `changed` so a retry / already-paused thread doesn't churn assignment.
     // Best-effort — the critical action (AI off) already succeeded, so a failure
     // here degrades to "paused but unassigned", never an error to the partner.
-    if (input.applyHandoffPolicy && result.changed && input.aiEnabled === false) {
+    const applyHandoff = input.applyHandoffPolicy !== false;
+    if (applyHandoff && result.changed && input.aiEnabled === false) {
       await this.runHandoffPolicy(teamId, apiKeyId, conversationId).catch((err) => {
         this.logger.warn(
           `handoff policy failed for conversation ${conversationId}: ${
