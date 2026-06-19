@@ -1794,6 +1794,44 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
 }
 
 /**
+ * Resume a team's `paused` broadcasts NOW, without waiting for a process
+ * restart. Called when WhatsApp settings are (re)saved: a broadcast parked
+ * `paused` because creds were missing/expired at fire time (the config-failure
+ * park, or the permanent-error breaker) picks back up the instant the operator
+ * reconnects — making the detail page's "fix the connection and it will
+ * auto-resume" promise true on a stable box, not just after a deploy.
+ *
+ * Mirrors reconcileOrphanedBroadcasts step 2 per-row: count queued recipients,
+ * CAS paused→queued, re-fire. The per-recipient queued→sent CAS makes resume
+ * double-send-safe (already-sent recipients are no-ops). A row with zero queued
+ * recipients (a graceful-shutdown park whose sends all completed) is left for
+ * the boot reconciler to mark completed — not this credential-recovery path.
+ */
+export async function resumePausedBroadcastsForTeam(
+  teamId: string,
+): Promise<void> {
+  const paused = await db.broadcast.findMany({
+    where: { teamId, status: "paused" },
+    select: { id: true },
+  });
+  for (const row of paused) {
+    const queuedRemaining = await db.broadcastRecipient.count({
+      where: { broadcastId: row.id, status: "queued" },
+    });
+    if (queuedRemaining === 0) continue;
+    const flipped = await db.broadcast.updateMany({
+      where: { id: row.id, status: "paused" },
+      data: { status: "queued" },
+    });
+    if (flipped.count === 0) continue; // raced (cancel / boot reconciler won)
+    console.warn(
+      `[broadcast] resuming paused broadcast ${row.id} after WhatsApp settings save (${queuedRemaining} recipient(s) remaining)`,
+    );
+    startBroadcast(row.id);
+  }
+}
+
+/**
  * Crash-recovery for the in-memory state Maps documented at the top of this
  * file. A process that crashed mid-broadcast can leave STREAK_429 / PAUSE_429
  * / inFlightRuns / progressThrottles entries pinned to a broadcastId that is

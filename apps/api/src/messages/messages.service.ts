@@ -621,19 +621,36 @@ export class MessagesService {
       },
       async () => {
         const pre = await this.preflightTextSend(teamId, input);
-        await enqueueMessageSend({
-          kind: "text",
-          teamId,
-          userId,
-          conversationId: input.conversationId,
-          channel: pre.channel,
-          phoneNumber: pre.phoneNumber,
-          body: input.body,
-          replyToMessageId: pre.replyToMessageId,
-          replyToExternalId: pre.replyToExternalId,
-          clientTempId: input.clientTempId,
-          receivedAt: new Date().toISOString(),
-        });
+        try {
+          await enqueueMessageSend({
+            kind: "text",
+            teamId,
+            userId,
+            conversationId: input.conversationId,
+            channel: pre.channel,
+            phoneNumber: pre.phoneNumber,
+            body: input.body,
+            replyToMessageId: pre.replyToMessageId,
+            replyToExternalId: pre.replyToExternalId,
+            clientTempId: input.clientTempId,
+            receivedAt: new Date().toISOString(),
+          });
+        } catch (err) {
+          // Redis/queue down: the enqueue throws an ioredis error (bounded by
+          // the connection's connect/command timeouts, so it can't hang).
+          // Surface a typed 503 so the client shows "messaging temporarily
+          // unavailable, retry" instead of a generic 500 — and so the reply-box
+          // treats it as a clean failure. A retry is safe: BullMQ's jobId on
+          // clientTempId dedupes if the job had partially landed.
+          this.logger.error(
+            `message enqueue failed (queue unavailable) for conversation ${input.conversationId}`,
+            err instanceof Error ? err.stack : String(err),
+          );
+          throw new ServiceUnavailableException({
+            error: "messaging_unavailable",
+            detail: "Messaging is temporarily unavailable. Please retry.",
+          });
+        }
         // Mark-read + auto-assign are "the agent is engaging this thread" side
         // effects. They fire AFTER the preflight passes (a send REJECTED for
         // e.g. outside_24h_window must not claim/reopen the thread) AND AFTER

@@ -14,6 +14,7 @@ import {
   UnsupportedMediaTypeException,
 } from "@nestjs/common";
 
+import { resumePausedBroadcastsForTeam } from "@/lib/broadcast-runner";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/envelope";
 import { getMetaProvider } from "@/lib/providers";
 import {
@@ -199,7 +200,15 @@ export class WhatsappService {
     try {
       const res = await fetch(
         `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneNumberId)}?fields=display_phone_number,verified_name`,
-        { headers: { authorization: `Bearer ${accessToken}` } },
+        {
+          headers: { authorization: `Bearer ${accessToken}` },
+          // Hard per-call timeout — the only outbound api fetch that doesn't go
+          // through metaFetch/safeFetch. Without it, a Graph endpoint that
+          // connects but never responds would pin a connection + pg pool slot
+          // until the 300s server requestTimeout reaps it. AbortError surfaces
+          // via the catch below as a clean BadGateway.
+          signal: AbortSignal.timeout(20_000),
+        },
       );
       if (!res.ok) {
         const body = await res.text();
@@ -288,6 +297,19 @@ export class WhatsappService {
     });
 
     invalidateProviderConfig(teamId);
+
+    // Reconnecting WhatsApp resumes any broadcasts parked `paused` because creds
+    // were missing/expired at fire time — so the detail page's "fix the
+    // connection and it will auto-resume" is true on a stable box, not just
+    // after a deploy. Fire-and-forget; per-recipient CAS makes resume
+    // double-send-safe.
+    void resumePausedBroadcastsForTeam(teamId).catch((err) => {
+      this.logger.warn(
+        `failed to resume paused broadcasts after WhatsApp settings save for team ${teamId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
 
     return {
       config: {

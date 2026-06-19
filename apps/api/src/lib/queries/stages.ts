@@ -1,3 +1,5 @@
+import { Prisma } from "@prisma/client";
+
 import { db } from "@/lib/db";
 import type { ContactStage, TagColor } from "@ccp/shared/types";
 
@@ -62,38 +64,58 @@ export async function ensureDefaultStage(teamId: string): Promise<string> {
   // No default — promote the lowest-position stage if any exist, otherwise
   // create one from scratch. Done in a transaction so two concurrent calls
   // can't both create a duplicate.
-  const resolvedId = await db.$transaction(async (tx) => {
-    const reread = await tx.contactStage.findFirst({
-      where: { teamId, isDefault: true },
-      select: { id: true },
-    });
-    if (reread) return reread.id;
-
-    const anyStage = await tx.contactStage.findFirst({
-      where: { teamId },
-      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
-      select: { id: true },
-    });
-    if (anyStage) {
-      await tx.contactStage.update({
-        where: { id: anyStage.id },
-        data: { isDefault: true },
+  let resolvedId: string;
+  try {
+    resolvedId = await db.$transaction(async (tx) => {
+      const reread = await tx.contactStage.findFirst({
+        where: { teamId, isDefault: true },
+        select: { id: true },
       });
-      return anyStage.id;
-    }
+      if (reread) return reread.id;
 
-    const created = await tx.contactStage.create({
-      data: {
-        teamId,
-        name: "Stage 1",
-        color: "slate",
-        position: 0,
-        isDefault: true,
-      },
-      select: { id: true },
+      const anyStage = await tx.contactStage.findFirst({
+        where: { teamId },
+        orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+        select: { id: true },
+      });
+      if (anyStage) {
+        await tx.contactStage.update({
+          where: { id: anyStage.id },
+          data: { isDefault: true },
+        });
+        return anyStage.id;
+      }
+
+      const created = await tx.contactStage.create({
+        data: {
+          teamId,
+          name: "Stage 1",
+          color: "slate",
+          position: 0,
+          isDefault: true,
+        },
+        select: { id: true },
+      });
+      return created.id;
     });
-    return created.id;
-  });
+  } catch (err) {
+    // Concurrent first-contact race: for a brand-new team with zero stages, two
+    // ensureDefaultStage calls (e.g. two inbound webhooks landing together) can
+    // both pass the in-tx re-read and both attempt the create; the partial
+    // unique index (one default per team — or the name unique) rejects the
+    // loser with P2002, aborting its tx. Re-read the winner's now-existing
+    // default instead of 500-ing the ingest/create path that called us.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const winner = await db.contactStage.findFirst({
+        where: { teamId, isDefault: true },
+        select: { id: true },
+      });
+      if (!winner) throw err; // no default despite P2002 — unexpected, surface it
+      resolvedId = winner.id;
+    } else {
+      throw err;
+    }
+  }
   defaultStageCache.set(teamId, {
     id: resolvedId,
     exp: Date.now() + DEFAULT_STAGE_TTL_MS,
