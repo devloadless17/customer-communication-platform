@@ -50,8 +50,9 @@ const SCRIM_CLASS =
 
 // Enter/exit fade+scale duration — matches the Radix dropdown/popover motion so
 // every overlay in the app opens and closes with one feel. Kept just under the
-// .animate-scale-in window; reduced-motion users get an instant swap (tw-animate
-// honors prefers-reduced-motion).
+// .animate-scale-in window. Reduced-motion users get an instant swap via the
+// `.animate-in/.animate-out` override in globals.css (tw-animate-css ships NO
+// reduced-motion guard of its own — that block is what collapses this).
 const ANIM_MS = 150;
 
 interface DialogCtx {

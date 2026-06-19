@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSoftRefresh } from "@/hooks/use-soft-refresh";
 import {
@@ -18,12 +17,18 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api/client-fetch";
 
+import { ensureConditionIds, stripConditionIds } from "./condition-group";
 import { StepEditorDrawer } from "./step-editor-drawer";
 import { TestRunDrawer } from "./test-run-drawer";
 import { TriggerEditorDrawer } from "./trigger-editor-drawer";
 // Pure graph helpers — import from the standalone module so this shell does
 // not pull in `@xyflow/react` (the canvas's heavy dep) at module-eval time.
-import { duplicateStep, insertStepAfter, removeStep } from "./graph-mutations";
+import {
+  countDisconnectedByRemoval,
+  duplicateStep,
+  insertStepAfter,
+  removeStep,
+} from "./graph-mutations";
 import type { WorkflowCanvasProps } from "./workflow-canvas";
 import {
   type BuilderCatalogs,
@@ -97,7 +102,9 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     workflow?.triggerConfig ?? {},
   );
   const [triggerConditions, setTriggerConditions] = useState<ConditionGroup>(() =>
-    toGroup(workflow?.triggerConditions),
+    // Stamp stable _id on hydrated rows ONCE, off the render path (render must
+    // never mutate state — that leaked _id into the persisted DB JSON).
+    ensureConditionIds(toGroup(workflow?.triggerConditions)),
   );
   const [triggerOncePerContact, setTriggerOncePerContact] = useState(
     workflow?.triggerOncePerContact ?? false,
@@ -124,6 +131,16 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   // racing into setTopErrors / setStepErrors.
   const persistCtlRef = useRef<AbortController | null>(null);
 
+  // Edit-mode unsaved-edit tracker (mirrors createDirtyRef). The auto-save deps
+  // changing = "user edited something not yet persisted"; cleared in persist()
+  // success. Drives the Exit flush so the debounced save isn't dropped on nav.
+  const dirtyRef = useRef(false);
+  const navMountedRef = useRef(false);
+  // True while an explicit Exit flush is awaiting persist(), so the debounce
+  // timer can't fire a competing save that aborts the flush's AbortController.
+  const exitingRef = useRef(false);
+  const [exiting, setExiting] = useState(false);
+
   // Auto-save in edit mode. Cheap (~one PATCH per couple seconds of
   // idle); the alternative — manual save button only — leads to "I lost
   // my changes" frustration when the tab crashes. We skip the auto-save
@@ -131,6 +148,10 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   useEffect(() => {
     if (mode !== "edit" || !workflow) return;
     const handle = setTimeout(() => {
+      // Don't let the debounce restart a save that would abort an in-flight
+      // Exit flush's controller (which would make handleExit's await return
+      // false and navigate before the real save lands).
+      if (exitingRef.current) return;
       void persist({ silent: true });
     }, 1500);
     return () => clearTimeout(handle);
@@ -171,6 +192,19 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [mode]);
 
+  // Edit-mode dirty tracker (skip the mount render). Same deps as the auto-save
+  // debounce — a dep change means there are edits not yet persisted. handleExit
+  // flushes a pending save before navigating when this is set.
+  useEffect(() => {
+    if (mode !== "edit") return;
+    if (!navMountedRef.current) {
+      navMountedRef.current = true;
+      return;
+    }
+    dirtyRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, trigger, triggerConfig, triggerConditions, triggerOncePerContact, graph]);
+
   async function persist(opts: { silent?: boolean } = {}): Promise<boolean> {
     // Supersede any in-flight save — freshest input wins, prior
     // response is ignored on its way back.
@@ -178,13 +212,29 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     const ctl = new AbortController();
     persistCtlRef.current = ctl;
 
+    // Strip client-only `_id` from BOTH condition surfaces before sending —
+    // trigger-level conditions AND every branch step's config.conditions — so
+    // the non-wire keys never reach the DB JSON. This is the single
+    // serialization choke point for create(POST) + edit(PATCH).
+    const cleanGraph: WorkflowGraph = {
+      ...graph,
+      nodes: graph.nodes.map((n) => {
+        const conds = (n.config as { conditions?: unknown } | undefined)
+          ?.conditions;
+        if (!conds) return n;
+        return {
+          ...n,
+          config: { ...n.config, conditions: stripConditionIds(toGroup(conds)) },
+        };
+      }),
+    };
     const body = {
       name,
       trigger,
       triggerConfig,
-      triggerConditions,
+      triggerConditions: stripConditionIds(triggerConditions),
       triggerOncePerContact,
-      graph,
+      graph: cleanGraph,
     };
     const path =
       mode === "create"
@@ -220,12 +270,36 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     }
     setTopErrors([]);
     setStepErrors({});
+    dirtyRef.current = false; // saved — nothing for the Exit flush to push
     if (mode === "create" && json.id) {
       router.push(`/workflows/${json.id}`);
     } else if (!opts.silent) {
       softRefresh();
     }
     return true;
+  }
+
+  // Exit flushes a pending edit-mode save before leaving. The debounce's
+  // unmount cleanup clearTimeouts the queued save (so it never starts) and the
+  // unmount effect aborts an in-flight one — both drop the last ~1.5s of edits
+  // on a plain <Link> nav. So flush proactively. Create mode just navigates
+  // (no row to PATCH; it has its own beforeunload guard).
+  async function handleExit() {
+    if (exiting) return;
+    if (mode === "edit" && workflow && dirtyRef.current) {
+      setExiting(true);
+      exitingRef.current = true;
+      try {
+        // Cap the wait so a stuck PATCH never traps the user on the page.
+        await Promise.race([
+          persist({ silent: true }),
+          new Promise((r) => setTimeout(r, 4000)),
+        ]);
+      } catch {
+        // Navigating away regardless — a failed flush is no worse than today.
+      }
+    }
+    router.push("/workflows");
   }
 
   function handleSave(e?: React.FormEvent) {
@@ -344,9 +418,19 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
   async function confirmStepDelete(id: string): Promise<boolean> {
     const node = graph.nodes.find((n) => n.id === id);
     const label = node?.name?.trim() ? `“${node.name.trim()}”` : "this step";
+    // Warn when removing this node would orphan reachable downstream steps —
+    // a multi-output (branch/ask) node delete, or a start-node delete that
+    // abandons sibling branches. removeStep only splices a single-output node,
+    // so without this the subtree silently disappears.
+    const disconnected = countDisconnectedByRemoval(graph, id);
+    const base = "This removes the step from the workflow. This can't be undone.";
+    const description =
+      disconnected > 0
+        ? `${base} It will also disconnect ${disconnected} downstream step${disconnected === 1 ? "" : "s"} from the workflow — you'll need to rewire ${disconnected === 1 ? "it" : "them"}.`
+        : base;
     return confirm({
       title: `Delete ${label}?`,
-      description: "This removes the step from the workflow. This can't be undone.",
+      description,
       confirmLabel: "Delete",
       destructive: true,
     });
@@ -450,11 +534,19 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
               <Trash2 className="size-4" />
             </Button>
           )}
-          <Button asChild variant="ghost" size="sm" type="button">
-            <Link href="/workflows">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={handleExit}
+            disabled={exiting}
+          >
+            {exiting ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
               <ArrowUpRight className="size-4" />
-              Exit
-            </Link>
+            )}
+            Exit
           </Button>
         </div>
       </div>

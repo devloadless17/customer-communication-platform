@@ -1610,6 +1610,26 @@ function trimOrNull(v: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+// Kept local (not imported from contacts) by the duplication contract above.
+// Mirrors MAX_TOTAL_FIELDS in contacts.schemas.ts: bounds the accumulated
+// customFields bag across many /v1 PATCHes so the JSONB can't grow unbounded.
+const MAX_TOTAL_FIELDS = 100;
+
+function assertCustomFieldsTotal(
+  map: Record<string, string>,
+  previousCount = 0,
+): void {
+  const count = Object.keys(map).length;
+  // Reject only NET growth past the cap, so an already-over-cap bag stays
+  // editable + shrinkable (see contacts.service.ts for the full rationale).
+  if (count > MAX_TOTAL_FIELDS && count > previousCount) {
+    throw new BadRequestException({
+      error: "too_many_custom_fields",
+      detail: `at most ${MAX_TOTAL_FIELDS} custom fields per contact`,
+    });
+  }
+}
+
 function normalizeCreateCustomFields(
   patch: Record<string, string | null | undefined>,
 ): Record<string, string> {
@@ -1618,6 +1638,7 @@ function normalizeCreateCustomFields(
     if (v === null || v === undefined || v === "") continue;
     out[k] = v;
   }
+  assertCustomFieldsTotal(out);
   return out;
 }
 
@@ -1626,10 +1647,13 @@ function mergeCustomFields(
   patch: Record<string, string | null>,
 ): Record<string, string> {
   const merged = normalizeStringMap(current);
+  const previousCount = Object.keys(merged).length;
   for (const [k, v] of Object.entries(patch)) {
     if (v === null) delete merged[k];
     else merged[k] = v;
   }
+  // Cap NET growth only — removal/edit-only PATCHes never trip, even over cap.
+  assertCustomFieldsTotal(merged, previousCount);
   return merged;
 }
 

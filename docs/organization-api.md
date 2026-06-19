@@ -38,10 +38,10 @@ curl -s "$CCP_BASE_URL/api/external/v1/conversations?limit=5" \
 | **Auth** | `Authorization: Bearer $CCP_API_KEY` on every request |
 | **Scopes** | Each route needs a scope (listed per endpoint). A **Full access** key has all of them. |
 | **Idempotency** | The two **send** routes **require** an `Idempotency-Key` header — reuse the same value on a retry and we won't double-send. Use something stable per logical send (e.g. the inbound message id). |
-| **Rate limit** | Per key. Send routes are capped at 60/min. |
+| **Rate limit** | **60 req/min per key**, across *all* routes — over it returns `429 {"error":"rate_limited"}`. Sends carry an extra **30/min per conversation** loop-guard. Missing/bad keys are throttled separately at 30/min per IP. |
 | **24-hour window** | Free-form text/media only sends to a customer who messaged you in the last 24h. Outside it, use a **template**. |
 | **Pagination** | List routes take `?limit=&cursor=`. The response includes `nextCursor` (null when done) — pass it back as `cursor`. |
-| **Errors** | Non-2xx returns `{ "error": "code", "detail": "..." }`. |
+| **Errors** | Non-2xx returns `{ "error": "code", "detail": "..." }`. Common: `401` (missing/invalid key), `403 insufficient_scope` (key lacks the route's scope), `404` (not found / wrong org), `409 duplicate_phone` (create on an existing number), `422`/`400` (validation), `429 rate_limited` / `chain_depth_exceeded`. |
 | **`silent`** | Mutating routes accept `"silent": true` to suppress the webhook/automation echo for that write — use it when your own flow would otherwise loop. |
 
 ---
@@ -94,6 +94,15 @@ curl -s -X PATCH "$CCP_BASE_URL/api/external/v1/contacts/CONTACT_ID" \
   -H "Authorization: Bearer $CCP_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "email": "new@example.com", "stageId": "STAGE_ID" }'
+```
+
+**Change a contact's stage** — `POST /contacts/:id/stage` · `write:contacts`
+Move a contact along the lifecycle pipeline (Lead → Customer → …) — the same action as the UI's stage picker, and the discoverable sibling of assign/status. Look the target id up via `GET /stages`. This fires the **On Contact Lifecycle updated** workflow trigger, writes the stage-change pill into the conversation timeline, and emits the `contact.lifecycle_changed` outbound webhook — full parity with the UI. (It delegates to `PATCH /contacts/:id`, so sending `{ "stageId": "…" }` there does the same; use PATCH with `{ "stageId": null }` to clear a stage.)
+```bash
+curl -s -X POST "$CCP_BASE_URL/api/external/v1/contacts/CONTACT_ID/stage" \
+  -H "Authorization: Bearer $CCP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "stageId": "STAGE_ID" }'
 ```
 
 **Delete a contact** — `DELETE /contacts/:id` · `delete:contacts`
@@ -274,6 +283,7 @@ Reference data for the routes above. Scopes: `read:catalog`, `write:catalog`.
 | Get a field (by id or key) | `GET /contact-fields/:idOrKey` |
 | Create a field | `POST /contact-fields` — `{ "label": "Company" }` |
 | List stages | `GET /stages` |
+| Set a contact's stage | `POST /contacts/:id/stage` — `{ "stageId": "…" }` (see §3) |
 | List channels | `GET /channels` |
 | List teammates | `GET /users` |
 | Get a teammate (by id or email) | `GET /users/:idOrEmail` |

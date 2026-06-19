@@ -573,7 +573,12 @@ export function useTeamChannelEvents(
       if (payload.channelId !== channelId) return;
       const key = `${payload.messageId}::${payload.emoji}`;
       const lastVersion = reactionVersionsRef.get(key) ?? 0;
-      if (payload.version <= lastVersion) return;
+      // OPTIMISTIC frames are gated by version (so a stale optimistic frame
+      // can't roll back a newer optimistic one). AUTHORITATIVE frames (no
+      // `optimistic` flag) are ALWAYS applied — they carry the full DB snapshot
+      // and are truth — but we still RECORD their version so a later stale
+      // optimistic frame below it is discarded.
+      if (payload.optimistic && payload.version <= lastVersion) return;
       reactionVersionsRef.set(key, payload.version);
       setMessages((prev) => {
         const idx = prev.findIndex((m) => m.id === payload.messageId);

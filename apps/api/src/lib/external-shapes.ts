@@ -239,9 +239,28 @@ export function toExternalMedia(m: MediaColumns): ExternalMedia | null {
   };
 }
 
-export function toExternalMessage(
-  m: Omit<DbMessage, "rawPayload"> | DbMessage,
-): ExternalMessage {
+/**
+ * Exactly the columns `toExternalMessage` reads. Declaring it lets callers
+ * `select` this narrow set instead of fetching every Message column (or even
+ * `omit: rawPayload`, which still ships ~15 unused columns per row on a
+ * partner-pollable list endpoint). A full row satisfies this structurally, so
+ * existing callers that pass a whole Message keep compiling.
+ */
+export type MessageWireColumns = MediaColumns &
+  Pick<
+    DbMessage,
+    | "id"
+    | "conversationId"
+    | "externalId"
+    | "channel"
+    | "direction"
+    | "body"
+    | "status"
+    | "timestamp"
+    | "senderUserId"
+  >;
+
+export function toExternalMessage(m: MessageWireColumns): ExternalMessage {
   return {
     id: m.id,
     conversationId: m.conversationId,

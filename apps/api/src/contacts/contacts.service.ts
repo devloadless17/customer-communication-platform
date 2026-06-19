@@ -29,6 +29,7 @@ import { DbService } from "../db/db.service";
 import { runWithConcurrency } from "../common/concurrency";
 import {
   MAX_FILTER_MATCH,
+  MAX_TOTAL_FIELDS,
   type AudienceCountInput,
   type AudiencePreviewInput,
   type BulkContactsInput,
@@ -985,6 +986,29 @@ export class ContactsService {
       });
     }
 
+    // De-dupe the FILE against itself BEFORE the DB split. `p.phoneNumber` is
+    // already normalizePhoneE164-normalized, so equal strings = same WhatsApp
+    // identity. First occurrence wins (keeps the first row's full field set,
+    // matching single-create + the (teamId, phone) partial unique). Without
+    // this, two rows sharing a phone both reach toCreate/toRevive; createMany
+    // skipDuplicates / the revive CAS silently drops the later one, and the
+    // count math misclassifies it as "already existing". Routing the dropped
+    // dups to errors[] keeps the summary honest and the counts exact.
+    {
+      const seenImportPhones = new Set<string>();
+      const dedupedPending: PendingRow[] = [];
+      for (const p of pending) {
+        if (seenImportPhones.has(p.phoneNumber)) {
+          errors.push({ row: p.rowNumber, reason: "duplicate phone in file" });
+          continue;
+        }
+        seenImportPhones.add(p.phoneNumber);
+        dedupedPending.push(p);
+      }
+      pending.length = 0;
+      pending.push(...dedupedPending);
+    }
+
     // Split pending rows three ways by their phone's current state:
     //   - active row exists      → skippedExisting (left untouched)
     //   - soft-deleted row exists → REVIVE (un-tombstone; mirrors the single-
@@ -1662,6 +1686,22 @@ function trimOrNull(v: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function assertCustomFieldsTotal(
+  map: Record<string, string>,
+  previousCount = 0,
+): void {
+  const count = Object.keys(map).length;
+  // Reject only NET growth past the cap. An already-over-cap bag (pre-cap data,
+  // or one grown by an admin-configured workflow update-field step) stays
+  // editable AND shrinkable — we only block a write that PUSHES it higher.
+  if (count > MAX_TOTAL_FIELDS && count > previousCount) {
+    throw new BadRequestException({
+      error: "too_many_custom_fields",
+      detail: `at most ${MAX_TOTAL_FIELDS} custom fields per contact`,
+    });
+  }
+}
+
 function normalizeCreateCustomFields(
   patch: Record<string, string | null | undefined>,
 ): Record<string, string> {
@@ -1670,6 +1710,7 @@ function normalizeCreateCustomFields(
     if (v === null || v === undefined || v === "") continue;
     out[k] = v;
   }
+  assertCustomFieldsTotal(out);
   return out;
 }
 
@@ -1678,10 +1719,16 @@ function mergeCustomFields(
   patch: Record<string, string | null>,
 ): Record<string, string> {
   const merged = normalizeStringMap(current);
+  const previousCount = Object.keys(merged).length;
   for (const [k, v] of Object.entries(patch)) {
     if (v === null) delete merged[k];
     else merged[k] = v;
   }
+  // Cap NET growth past the ceiling (null-deletes already applied). A removal-
+  // or edit-only PATCH — even on a bag already over the cap — never trips,
+  // since it doesn't increase the key count; only net-new keys that push the
+  // total higher are rejected. Bounds unbounded JSONB growth across PATCHes.
+  assertCustomFieldsTotal(merged, previousCount);
   return merged;
 }
 

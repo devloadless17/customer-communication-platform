@@ -48,6 +48,51 @@ export function removeStep(graph: WorkflowGraph, nodeId: string): WorkflowGraph 
 }
 
 /**
+ * How many currently-reachable steps would become unreachable from the start
+ * node if `nodeId` were removed via removeStep(). Drives a WARN before a delete
+ * that drops a downstream subtree (a multi-output node — branch/ask_question —
+ * or a start-node delete that abandons sibling branches). Returns 0 for the
+ * happy-path single-output splice (the spliced edge keeps everything reachable)
+ * and 0 for already-unreachable targets. Excludes the removed node itself.
+ *
+ * Pure + read-only: it calls removeStep but DISCARDS the result. Reachability
+ * follows only real graph.edges (matching how the canvas renders connectivity);
+ * a draft graph may legally contain cycles, so the Set guard prevents infinite
+ * loops.
+ */
+export function countDisconnectedByRemoval(
+  graph: WorkflowGraph,
+  nodeId: string,
+): number {
+  const reachable = (g: WorkflowGraph): Set<string> => {
+    const seen = new Set<string>();
+    if (!g.startNodeId) return seen;
+    const adj = new Map<string, string[]>();
+    for (const e of g.edges) {
+      const list = adj.get(e.from) ?? [];
+      list.push(e.to);
+      adj.set(e.from, list);
+    }
+    const stack = [g.startNodeId];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const next of adj.get(id) ?? []) if (!seen.has(next)) stack.push(next);
+    }
+    return seen;
+  };
+  const before = reachable(graph);
+  const after = reachable(removeStep(graph, nodeId));
+  let count = 0;
+  for (const id of before) {
+    if (id === nodeId) continue; // the removed node is an expected disappearance
+    if (!after.has(id)) count += 1;
+  }
+  return count;
+}
+
+/**
  * Insert a new step immediately downstream of `sourceId` on the specified
  * source handle. If an outgoing edge already exists on that handle, it gets
  * rewired through the new node (A → new → B). Otherwise we just append (A →

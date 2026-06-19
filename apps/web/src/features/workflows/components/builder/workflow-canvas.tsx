@@ -557,6 +557,9 @@ function CanvasInner({
         pendingConnectionRef.current.consumed = true;
       }
       if (!conn.source || !conn.target) return;
+      // No self-loops (a 1-cycle). The publish validator rejects it anyway, but
+      // blocking it at connect-time avoids silently auto-saving a dead edge.
+      if (conn.source === conn.target) return;
       // Connecting from the trigger node sets the workflow's startNodeId.
       // The actual edge isn't stored in graph.edges — it's a synthetic.
       if (conn.source === TRIGGER_NODE_ID) {
@@ -565,19 +568,22 @@ function CanvasInner({
       }
       const label =
         conn.sourceHandle && conn.sourceHandle !== "default" ? conn.sourceHandle : undefined;
-      const exists = graph.edges.some(
-        (e) =>
-          e.from === conn.source &&
-          e.to === conn.target &&
-          (e.label ?? null) === (label ?? null),
-      );
-      if (exists) return;
+      // Each OUTPUT HANDLE drives exactly one next step. Re-dragging from a
+      // handle that's already wired RE-POINTS it (drop the prior edge) rather
+      // than leaving two edges on the same (source, label) — which made the
+      // runtime's findNextStep pick nondeterministically between branch targets.
+      const sameHandle = (e: WorkflowEdge) =>
+        e.from === conn.source && (e.label ?? null) === (label ?? null);
+      if (graph.edges.some((e) => sameHandle(e) && e.to === conn.target)) return;
       const newEdge: WorkflowEdge = {
         from: conn.source,
         to: conn.target,
         ...(label ? { label } : {}),
       };
-      onChange({ ...graph, edges: [...graph.edges, newEdge] });
+      onChange({
+        ...graph,
+        edges: [...graph.edges.filter((e) => !sameHandle(e)), newEdge],
+      });
       // React Flow's built-in addEdge is only useful when we'd otherwise
       // mirror the edges array; since we project from `graph` every render,
       // calling it is unnecessary. Kept import for future use.

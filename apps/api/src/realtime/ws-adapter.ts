@@ -40,10 +40,16 @@ export class WsAdapter extends IoAdapter {
       path: SOCKET_PATH,
       serveClient: false,
       cors: {
-        // Same posture as the Next.js socket server: lock to BETTER_AUTH_URL
-        // in prod (the canonical public origin Caddy fronts), open in dev so
-        // localhost:3000 can connect to the api on localhost:4000.
-        origin: process.env.BETTER_AUTH_URL || true,
+        // Mirror the HTTP CORS posture (main.ts): pin to BETTER_AUTH_URL (the
+        // canonical public origin Caddy fronts) when set — which validateEnv
+        // makes mandatory in prod — and fall back to the explicit dev origins
+        // only when it's absent. NEVER reflect-any (`|| true`) WITH
+        // `credentials: true`: that combo would let any site open a
+        // credentialed socket. The previous `|| true` was dead in prod (env is
+        // required) but a latent footgun if that gate ever weakened.
+        origin: process.env.BETTER_AUTH_URL
+          ? [process.env.BETTER_AUTH_URL]
+          : ["http://localhost:3000", "http://127.0.0.1:3000"],
         credentials: true,
       },
       transports: ["websocket", "polling"],

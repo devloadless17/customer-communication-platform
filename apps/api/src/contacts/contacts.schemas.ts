@@ -4,6 +4,11 @@ const MAX_IDS = 5000;
 const MAX_TEXT = 500;
 const MAX_FIELDS_PER_PATCH = 50;
 const MAX_FIELDS = 50;
+// Per-request caps (MAX_FIELDS / MAX_FIELDS_PER_PATCH) bound ONE create/patch.
+// MAX_TOTAL_FIELDS bounds the ACCUMULATED customFields bag across many PATCHes —
+// without it, repeated PATCHes of fresh one-off keys grow the JSONB unbounded.
+// 100 leaves headroom above the 50/team defined-field cap + arbitrary /v1 keys.
+export const MAX_TOTAL_FIELDS = 100;
 
 export const SetContactTagsSchema = z.object({
   tagIds: z.array(z.string().min(1)).max(200),

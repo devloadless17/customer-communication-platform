@@ -169,13 +169,25 @@ async function sweepOnce(): Promise<void> {
   // media block and renders as a regular text row.
   for (const row of expired) {
     lastAttemptAt.delete(row.id);
-    await publish({
-      type: "message.media_ready",
-      teamId: row.teamId,
-      conversationId: row.conversationId,
-      messageId: row.id,
-      // No media → socket-fanout emits the "ready" event without payload.
-    });
+    // Per-row isolation: the DB downgrade already committed in the batched
+    // updateMany above, so these rows will NOT be re-selected next tick
+    // (mediaKind is null). If one publish throws, swallowing it here keeps the
+    // remaining rows' "drop the placeholder" frames flowing instead of
+    // aborting the loop and stranding every later row's live shimmer.
+    try {
+      await publish({
+        type: "message.media_ready",
+        teamId: row.teamId,
+        conversationId: row.conversationId,
+        messageId: row.id,
+        // No media → socket-fanout emits the "ready" event without payload.
+      });
+    } catch (err) {
+      console.warn(
+        `[sweeper.inbound-media] downgrade publish failed for ${row.id} (DB already correct; client refreshes on reload)`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   console.warn(

@@ -65,6 +65,16 @@ export interface RunWorkflowInput {
 export interface RunWorkflowResult {
   runId: string;
   status: "completed" | "failed" | "waiting" | "skipped";
+  /**
+   * Set on a `skipped` result when the run was abandoned because the workflow
+   * was UNPUBLISHED or DELETED between dispatch and pickup — i.e. it never
+   * executed for this contact. The worker must roll back the once-per-contact
+   * ledger in that case, else a `triggerOncePerContact` workflow that was
+   * briefly unpublished locks the contact out forever (re-publishing never
+   * re-fires for them). NOT set on the terminal/stale-resume/lost-lock skips,
+   * which are genuine no-ops on an already-claimed run and must keep the ledger.
+   */
+  releaseLedger?: boolean;
 }
 
 // Per-run lock TTL. A single pickup has NO reliable wall-clock bound (it runs
@@ -141,11 +151,15 @@ async function runWorkflowLocked(input: RunWorkflowInput): Promise<RunWorkflowRe
     (run.eventPayload as { __test?: unknown }).__test === true;
   if (!wf) {
     await markSkipped(run.id, "workflow deleted");
-    return { runId: run.id, status: "skipped" };
+    // Workflow gone → release the ledger (the row is likely cascade-gone too,
+    // making this a harmless no-op, but it keeps the contract symmetric).
+    return { runId: run.id, status: "skipped", releaseLedger: true };
   }
   if (!wf.published && !isTestRun) {
     await markSkipped(run.id, "workflow unpublished");
-    return { runId: run.id, status: "skipped" };
+    // Unpublished mid-flight → the run never executed for this contact; release
+    // the once-per-contact ledger so re-publishing re-fires for them.
+    return { runId: run.id, status: "skipped", releaseLedger: true };
   }
 
   // Execute the snapshot pinned at run-creation, NOT the live Workflow.graph —

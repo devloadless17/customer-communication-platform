@@ -31,6 +31,7 @@ import {
 } from "@/features/inbox/lib/optimistic-activity";
 import { toast } from "@/lib/toast";
 import { STATUS_META } from "@/features/inbox/lib/status-meta";
+import { assertReducerCoverage } from "@/features/inbox/lib/thread-reducers";
 import { usePanelResize } from "@/features/inbox/hooks/use-panel-resize";
 import { INBOX_DETAILS_WIDTH_COOKIE } from "@/features/inbox/lib/panel-cookies";
 import { cn, formatPhone, initials } from "@ccp/shared/utils";
@@ -279,6 +280,20 @@ function ContactPanelImpl({
   useEffect(() => {
     const socket = getClientSocket();
     const conversationId = conversation.id;
+
+    // Dev-only invariant: ContactPanel is the 3rd thread-state consumer (see
+    // thread-reducers.ts header). It derives liveStatus / liveMessageCount /
+    // liveNoteCount DIRECTLY from these 4 events because its `data` prop is the
+    // inbox-shell LRU snapshot (frozen w.r.t. live status/counts while the
+    // thread is displayed), not MessageThread's live hook. Asserting coverage
+    // here means a future field derived from an un-covered event fails loudly in
+    // dev instead of silently diverging. All 4 are covered today (no-op).
+    assertReducerCoverage([
+      "conversation:status",
+      "message:new",
+      "note:new",
+      "note:deleted",
+    ]);
 
     const onStatus: Parameters<typeof socket.on<"conversation:status">>[1] = (
       payload,

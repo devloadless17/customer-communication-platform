@@ -240,8 +240,10 @@ export function useThreadEvents(
       if (payload.channelId !== channelId) return;
       const key = `${payload.messageId}::${payload.emoji}`;
       const lastVersion = reactionVersionsRef.get(key) ?? 0;
-      // Same out-of-order discard as use-team-channel-events.
-      if (payload.version <= lastVersion) return;
+      // Same rule as use-team-channel-events: gate ONLY optimistic frames by
+      // version; always apply the authoritative server frame (it's the full DB
+      // snapshot) while still recording its version.
+      if (payload.optimistic && payload.version <= lastVersion) return;
       reactionVersionsRef.set(key, payload.version);
       setReplies((prev) => {
         const idx = prev.findIndex((m) => m.id === payload.messageId);

@@ -157,12 +157,18 @@ export function startWorkflowWorker(): Worker<WorkflowJobData> {
           // waitUntil. See enqueueWorkflowInboundResume + RunWorkflowInput.
           isInboundResume: (job.id ?? "").startsWith("inbound-"),
         });
-        // WF-1: a PERMANENT failure return (loop guard, step ceiling, permanent
-        // step error — the runner wrote status=failed and did NOT throw, so
-        // BullMQ won't retry) must release the once-per-contact ledger so the
-        // contact isn't locked out forever. "waiting"/"completed"/"skipped" keep
-        // the ledger. The throw path is covered by failRunFromRetryExhaustion.
-        if (result?.status === "failed") {
+        // WF-1: release the once-per-contact ledger when the run will NEVER run
+        // to completion for this contact, so the contact isn't locked out
+        // forever. Two cases:
+        //   - status=failed: a PERMANENT failure return (loop guard, step
+        //     ceiling, permanent step error — runner wrote failed and did NOT
+        //     throw, so BullMQ won't retry). Throw path → failRunFromRetryExhaustion.
+        //   - releaseLedger: skipped because the workflow was UNPUBLISHED or
+        //     DELETED between dispatch and pickup (it never executed). Without
+        //     this, a briefly-unpublished triggerOncePerContact workflow locks
+        //     the contact out permanently even after re-publishing.
+        // "waiting"/"completed" and the terminal/stale-resume skips keep the ledger.
+        if (result?.status === "failed" || result?.releaseLedger) {
           await rollbackOncePerContactLedger(run.workflowId, run.contactId);
         }
       } finally {

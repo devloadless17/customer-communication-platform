@@ -97,13 +97,23 @@ async function sweepOnce(): Promise<void> {
       data: { status: CallStatus.missed, endedAt },
     });
     if (flip.count === 0) continue; // a real terminate won the race
-    await publish({
-      type: "call.missed",
-      teamId: row.teamId,
-      conversationId: row.conversationId,
-      callId: row.id,
-      ringingAt: row.ringingAt.toISOString(),
-    });
+    // The flip already committed (the row won't be re-selected), so isolate the
+    // notify: a single failed publish must not abort the loop and leave every
+    // later stuck call un-terminalized — that's the stuck-Calls-badge class.
+    try {
+      await publish({
+        type: "call.missed",
+        teamId: row.teamId,
+        conversationId: row.conversationId,
+        callId: row.id,
+        ringingAt: row.ringingAt.toISOString(),
+      });
+    } catch (err) {
+      console.warn(
+        `[sweeper.stale-calls] missed publish failed for ${row.id} (DB flipped; badge resyncs on reload)`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   // Stale IN_PROGRESS rows → failed. We can't know the real talk-time (no
@@ -125,14 +135,21 @@ async function sweepOnce(): Promise<void> {
       data: { status: CallStatus.failed, endedAt },
     });
     if (flip.count === 0) continue;
-    await publish({
-      type: "call.failed",
-      teamId: row.teamId,
-      conversationId: row.conversationId,
-      callId: row.id,
-      reason: "no_terminate_webhook",
-      endedAt: endedAt.toISOString(),
-    });
+    try {
+      await publish({
+        type: "call.failed",
+        teamId: row.teamId,
+        conversationId: row.conversationId,
+        callId: row.id,
+        reason: "no_terminate_webhook",
+        endedAt: endedAt.toISOString(),
+      });
+    } catch (err) {
+      console.warn(
+        `[sweeper.stale-calls] failed publish failed for ${row.id} (DB flipped; badge resyncs on reload)`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   const total = stuckRinging.length + stuckInProgress.length;

@@ -142,6 +142,27 @@ test.describe("/v1 cross-system loop guard (X-CCP-Depth)", () => {
     expect((await resp.json()).error).toBe("chain_depth_exceeded");
   });
 
+  test("fail-closed: a negative/garbage depth header trips the cap, not resets it", async ({
+    request,
+  }) => {
+    // A partner forwarding our webhook back into /v1 could send a TAMPERED
+    // depth header (`-1`, `abc`) hoping it resets the loop counter to 0 and
+    // sustains a hot-potato loop. parseChainDepth treats any present-but-invalid
+    // value as already-at-ceiling, so the guard drops it. (Absent header still
+    // = top-level 0; that's the separate "no header" case below.)
+    for (const poisoned of ["-1", "abc", "-9999"]) {
+      const resp = await request.post("/api/external/v1/messages", {
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "X-CCP-Depth": poisoned,
+        },
+        data: { contact: { phone: "+15551112222" }, text: "tampered depth" },
+      });
+      expect(resp.status(), `poisoned depth "${poisoned}" → 429`).toBe(429);
+      expect((await resp.json()).error).toBe("chain_depth_exceeded");
+    }
+  });
+
   test("passes the guard at depth = 7 (< MAX_CHAIN_DEPTH)", async ({ request }) => {
     // The send itself will fail downstream (no live Meta token in the test
     // env) — what we're asserting is that the response is NOT a 429 with

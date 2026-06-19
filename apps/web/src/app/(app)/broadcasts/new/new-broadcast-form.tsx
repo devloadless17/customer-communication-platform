@@ -156,6 +156,9 @@ export function NewBroadcastForm({
   const [headerMediaUploading, setHeaderMediaUploading] = useState(false);
   const [headerMediaError, setHeaderMediaError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // Synchronous re-entrancy lock for submit() — guards the window between the
+  // first click and the confirm modal mounting, where `sending` is still false.
+  const submittingRef = useRef(false);
   const [sendError, setSendError] = useState<string | null>(null);
   // Optional operator label + scheduling. `scheduleMode` toggles between
   // immediate send and a future datetime; `scheduledLocal` is the raw value
@@ -411,7 +414,11 @@ export function NewBroadcastForm({
     templateDone &&
     bodyVars.every((v) => v.trim().length > 0) &&
     (headerVarCount === 0 || headerVar.trim().length > 0) &&
-    (headerMediaKind === null || headerMedia !== null);
+    (headerMediaKind === null || headerMedia !== null) &&
+    // Don't let the broadcast fire while the header media is still uploading —
+    // otherwise it sends with a stale/empty link the moment a prior upload
+    // populated `headerMedia` but the current pick hasn't finished.
+    !headerMediaUploading;
   const readyToSend = audienceDone && templateDone && variablesDone;
 
   const filteredTemplates = useMemo(() => {
@@ -430,99 +437,114 @@ export function NewBroadcastForm({
   // -------------------------------------------------------------------------
   async function submit() {
     if (!readyToSend || !selectedTemplate) return;
-
-    // Resolve scheduling. datetime-local has no timezone — `new Date(local)`
-    // interprets it in the browser's local zone, which is what the user means
-    // ("send at 3pm" = 3pm where they are). Guard against a past time.
-    let scheduledAtIso: string | null = null;
-    if (scheduleMode === "later") {
-      if (!scheduledLocal) {
-        setSendError("Pick a date and time, or switch to Send now.");
-        return;
-      }
-      const when = new Date(scheduledLocal);
-      if (Number.isNaN(when.getTime())) {
-        setSendError("That date/time isn't valid.");
-        return;
-      }
-      if (when.getTime() <= Date.now()) {
-        setSendError("Scheduled time must be in the future.");
-        return;
-      }
-      scheduledAtIso = when.toISOString();
-    }
-
-    // Highest-blast-radius action in the product — an immediate "Send now"
-    // dispatches irreversible, customer-visible WhatsApp template messages to
-    // the WHOLE audience on one click (and, post-send, can't be stopped). Gate
-    // it behind a destructive confirm, matching the friction the product
-    // already requires to delete a single contact. Scheduling stays one-click:
-    // a scheduled broadcast can be canceled/deleted before it fires.
-    if (!scheduledAtIso) {
-      // Resolve a one-line preview of the body the same way the live
-      // PreviewBubble does (renderPlaceholders + resolveFieldTokens over the
-      // sample contact) so the confirm shows exactly what the agent saw, then
-      // truncate it to keep the dialog body one line.
-      const resolvedBody = renderPlaceholders(
-        selectedTemplate.bodyText,
-        bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT)),
-      )
-        .replace(/\s+/g, " ")
-        .trim();
-      const bodyPreview = truncate(resolvedBody, 90);
-      const ok = await confirm({
-        title: `Send to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"} now?`,
-        description:
-          `Sending «${selectedTemplate.name}» to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}` +
-          (bodyPreview ? `: “${bodyPreview}”` : "") +
-          ". This sends the template immediately over WhatsApp and can't be undone once recipients start receiving it.",
-        confirmLabel: "Send now",
-        destructive: true,
-      });
-      if (!ok) return;
-    }
-
-    setSendError(null);
-    setSending(true);
+    // Re-entrancy lock. `sending` (the button-disable signal) isn't set until
+    // AFTER the destructive confirm resolves, so a fast double-click / Enter
+    // before the confirm modal mounts could fire submit() twice and create two
+    // broadcasts to the WHOLE audience — the highest-blast-radius action in the
+    // product. This synchronous ref closes that window; the finally releases it
+    // on every cancel/validation/error path and holds it through nav on success.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    let navigating = false;
     try {
-      const res = await apiFetch("/api/broadcasts", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          templateId: selectedTemplate.id,
-          ...(name.trim() ? { name: name.trim() } : {}),
-          ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
-          variables: {
-            body: bodyVars,
-            ...(headerVarCount > 0 ? { header: headerVar } : {}),
-            ...(headerMedia ? { headerMedia } : {}),
-          },
-          audience:
-            audience.mode === "all"
-              ? { mode: "all" }
-              : audience.mode === "group"
-                ? { mode: "group", groupId: audience.selectedGroupId }
-                : {
-                    mode: "custom",
-                    tagIds: audience.selectedTagIds,
-                    contactIds: audience.selectedIds,
-                  },
-        }),
-      });
-      if (!res.ok) {
-        throw new Error(await safeReadError(res));
+      // Resolve scheduling. datetime-local has no timezone — `new Date(local)`
+      // interprets it in the browser's local zone, which is what the user means
+      // ("send at 3pm" = 3pm where they are). Guard against a past time.
+      let scheduledAtIso: string | null = null;
+      if (scheduleMode === "later") {
+        if (!scheduledLocal) {
+          setSendError("Pick a date and time, or switch to Send now.");
+          return;
+        }
+        const when = new Date(scheduledLocal);
+        if (Number.isNaN(when.getTime())) {
+          setSendError("That date/time isn't valid.");
+          return;
+        }
+        if (when.getTime() <= Date.now()) {
+          setSendError("Scheduled time must be in the future.");
+          return;
+        }
+        scheduledAtIso = when.toISOString();
       }
-      const data = (await res.json()) as { broadcastId?: string };
-      if (!data.broadcastId) throw new Error("No broadcast id in response");
-      toast.success(
-        scheduledAtIso
-          ? `Broadcast scheduled for ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
-          : `Broadcast sending to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`,
-      );
-      router.push(`/broadcasts/${data.broadcastId}`);
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to send");
-      setSending(false);
+
+      // Highest-blast-radius action in the product — an immediate "Send now"
+      // dispatches irreversible, customer-visible WhatsApp template messages to
+      // the WHOLE audience on one click (and, post-send, can't be stopped). Gate
+      // it behind a destructive confirm, matching the friction the product
+      // already requires to delete a single contact. Scheduling stays one-click:
+      // a scheduled broadcast can be canceled/deleted before it fires.
+      if (!scheduledAtIso) {
+        // Resolve a one-line preview of the body the same way the live
+        // PreviewBubble does (renderPlaceholders + resolveFieldTokens over the
+        // sample contact) so the confirm shows exactly what the agent saw, then
+        // truncate it to keep the dialog body one line.
+        const resolvedBody = renderPlaceholders(
+          selectedTemplate.bodyText,
+          bodyVars.map((v) => resolveFieldTokens(v, SAMPLE_CONTACT)),
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        const bodyPreview = truncate(resolvedBody, 90);
+        const ok = await confirm({
+          title: `Send to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"} now?`,
+          description:
+            `Sending «${selectedTemplate.name}» to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}` +
+            (bodyPreview ? `: “${bodyPreview}”` : "") +
+            ". This sends the template immediately over WhatsApp and can't be undone once recipients start receiving it.",
+          confirmLabel: "Send now",
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+
+      setSendError(null);
+      setSending(true);
+      try {
+        const res = await apiFetch("/api/broadcasts", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            templateId: selectedTemplate.id,
+            ...(name.trim() ? { name: name.trim() } : {}),
+            ...(scheduledAtIso ? { scheduledAt: scheduledAtIso } : {}),
+            variables: {
+              body: bodyVars,
+              ...(headerVarCount > 0 ? { header: headerVar } : {}),
+              ...(headerMedia ? { headerMedia } : {}),
+            },
+            audience:
+              audience.mode === "all"
+                ? { mode: "all" }
+                : audience.mode === "group"
+                  ? { mode: "group", groupId: audience.selectedGroupId }
+                  : {
+                      mode: "custom",
+                      tagIds: audience.selectedTagIds,
+                      contactIds: audience.selectedIds,
+                    },
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(await safeReadError(res));
+        }
+        const data = (await res.json()) as { broadcastId?: string };
+        if (!data.broadcastId) throw new Error("No broadcast id in response");
+        toast.success(
+          scheduledAtIso
+            ? `Broadcast scheduled for ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`
+            : `Broadcast sending to ${audienceCount} recipient${audienceCount === 1 ? "" : "s"}`,
+        );
+        navigating = true;
+        router.push(`/broadcasts/${data.broadcastId}`);
+      } catch (err) {
+        setSendError(err instanceof Error ? err.message : "Failed to send");
+        setSending(false);
+      }
+    } finally {
+      // Hold the lock through navigation on success (the form unmounts);
+      // release on every other path so a corrected error can be re-submitted.
+      if (!navigating) submittingRef.current = false;
     }
   }
 

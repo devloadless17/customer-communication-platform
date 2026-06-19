@@ -472,9 +472,31 @@ export class ExternalV1MessagingService {
 
     const rows = await this.db.message.findMany({
       where: { conversationId },
-      // toExternalMessage reads scalar + media columns only; rawPayload
-      // (Meta JSONB, 5-20KB/row) would ship to the integrator on every page.
-      omit: { rawPayload: true },
+      // Select EXACTLY the columns toExternalMessage reads — not `omit:
+      // rawPayload`, which still ships ~15 unused columns (reply FKs, error
+      // strings, teamId, audit timestamps) per row on this partner-pollable
+      // export endpoint. The compiler enforces this set stays in sync with the
+      // mapper: drop a field the mapper reads and `toExternalMessage(row)`
+      // below fails to typecheck.
+      select: {
+        id: true,
+        conversationId: true,
+        externalId: true,
+        channel: true,
+        direction: true,
+        body: true,
+        status: true,
+        timestamp: true,
+        senderUserId: true,
+        mediaKind: true,
+        mediaUrl: true,
+        mediaMimeType: true,
+        mediaFilename: true,
+        mediaSizeBytes: true,
+        mediaDurationMs: true,
+        mediaThumbnailUrl: true,
+        mediaCaption: true,
+      },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: q.limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),

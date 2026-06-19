@@ -536,6 +536,13 @@ export class ChannelsService {
     messageId: string,
     input: EditChannelMessageInput,
   ) {
+    // Membership check FIRST (mirrors deleteMessage). A non-member must not be
+    // able to distinguish, via the 403-forbidden vs 422-edit_window error
+    // codes, whether a message in a private channel they were removed from
+    // still exists or whether its edit window is open. requireChannelMembership
+    // 404s a non-member before any message lookup leaks that signal.
+    await this.requireChannelMembership(teamId, userId, channelId);
+
     const existing = await this.db.teamChannelMessage.findFirst({
       where: { id: messageId, channelId, teamId },
       select: {
@@ -558,10 +565,8 @@ export class ChannelsService {
       });
     }
 
-    // Membership re-check: a non-member can't edit even messages they
-    // posted before being removed. The mentions validator is also
-    // channel-scoped so they can't @ users who aren't in this channel.
-    await this.requireChannelMembership(teamId, userId, channelId);
+    // The mentions validator is also channel-scoped so an editor can't @ users
+    // who aren't in this channel.
     const validMentionIds = await this.validateMentions(teamId, channelId, input.body);
     const editedAt = new Date();
 
@@ -888,7 +893,12 @@ export class ChannelsService {
     if (
       channel &&
       receipt &&
-      receipt.lastReadAt.getTime() >= channel.lastMessageAt.getTime()
+      // Strict `>`, not `>=`: a message landing in the SAME millisecond the
+      // prior read receipt was stamped must NOT be treated as already-read
+      // (that's the stuck-unread-dot class the keyset cursors avoid elsewhere).
+      // On exact-ms equality we fall through and accept the cheap redundant
+      // upsert + read frame rather than risk dropping a just-arrived message.
+      receipt.lastReadAt.getTime() > channel.lastMessageAt.getTime()
     ) {
       const unreadMention = await this.db.teamChannelMention.findFirst({
         where: {

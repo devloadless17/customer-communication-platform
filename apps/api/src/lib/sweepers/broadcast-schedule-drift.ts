@@ -117,8 +117,16 @@ async function sweepOnce(): Promise<void> {
 
   for (const b of strandedQueued) {
     // startBroadcast is fire-and-forget + idempotent; a row already claimed by
-    // a runner is a no-op (CAS + inFlightRuns dedupe).
-    startBroadcast(b.id);
+    // a runner is a no-op (CAS + inFlightRuns dedupe). It does a DB lookup
+    // BEFORE its own internal .catch is armed, so a transient pool error there
+    // rejects the returned promise — `void ….catch` keeps that from surfacing
+    // as a context-less [unhandledRejection].
+    void startBroadcast(b.id).catch((err) => {
+      console.warn(
+        `[broadcast-schedule-drift-sweeper] re-fire failed for broadcast=${b.id}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
   }
 
   if (strandedScheduled.length > 0) {

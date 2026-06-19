@@ -39,15 +39,21 @@ export type { WorkflowTriggerEvent };
 export const MAX_CHAIN_DEPTH = 8;
 
 /**
- * Parse the inbound `X-CCP-Depth` header. Missing / non-numeric / negative
- * values fall back to 0 (top-level call). Bounded above by Number.MAX_SAFE_*
- * implicitly via Number.parseInt; we don't cap here so the caller can log
- * the actual value of an obviously-poisoned request before dropping it.
+ * Parse the inbound `X-CCP-Depth` header.
+ *
+ * - ABSENT header → 0 (a genuine top-level call; the common case).
+ * - PRESENT but non-numeric / negative → `MAX_CHAIN_DEPTH` (fail CLOSED). A
+ *   header that exists but is garbage is a tampered/poisoned request — a
+ *   partner forwarding our webhook back into /v1 could send `-1` to reset the
+ *   counter and sustain a hot-potato loop. Treat it as already-at-ceiling so
+ *   the guard drops it instead of trusting it back to 0.
+ * - PRESENT and a sane non-negative integer → that value (the guard caps it).
  */
 export function parseChainDepth(raw: string | undefined): number {
   if (!raw) return 0;
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  if (!Number.isFinite(n) || n < 0) return MAX_CHAIN_DEPTH;
+  return n;
 }
 
 /** Wire-format envelope sent to http_request steps. Bump `version` on breaking changes. */

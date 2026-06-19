@@ -19,6 +19,20 @@ const SAMPLE_CHANNEL: WireChannelBase = {
 
 export const metadata = { title: "API reference" };
 
+/** Every scope a key can hold, and what it gates. "Full access" = all of them. */
+const SCOPES: ReadonlyArray<{ scope: string; grants: string }> = [
+  { scope: "read:contacts", grants: "read contacts + their channels" },
+  { scope: "write:contacts", grants: "create / update / tag / stage / upsert contacts" },
+  { scope: "delete:contacts", grants: "soft-delete contacts" },
+  { scope: "read:conversations", grants: "read conversations" },
+  { scope: "write:conversations", grants: "assign · status · AI Autopilot toggle" },
+  { scope: "read:messages", grants: "read messages" },
+  { scope: "write:messages", grants: "send text / media / template" },
+  { scope: "write:notes", grants: "add internal notes" },
+  { scope: "read:catalog", grants: "read tags · fields · stages · channels · users" },
+  { scope: "write:catalog", grants: "create / edit tags + custom fields" },
+];
+
 /**
  * Single-page reference of every `/api/external/v1` endpoint + every
  * outbound webhook event type. Kept deliberately public — there's no
@@ -58,6 +72,90 @@ export default function ApiDocsPage() {
         </p>
       </header>
 
+      <div className="mb-8 rounded-md border border-border bg-card p-4 text-xs">
+        <h2 className="mb-3 text-base font-semibold">Conventions &amp; security</h2>
+        <dl className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt className="font-semibold text-foreground">Base path &amp; auth</dt>
+            <dd className="text-muted-foreground">
+              <code>/api/external/v1</code> over HTTPS.{" "}
+              <code>Authorization: Bearer ccp_…</code> on every request — one key =
+              one organization, every call auto-scoped to your org. Missing/invalid
+              key → <code>401</code>.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-foreground">Rate limits</dt>
+            <dd className="text-muted-foreground">
+              <strong>60 req/min per key</strong> across all routes; sends carry an
+              extra <strong>30/min per conversation</strong> loop-guard. Over →{" "}
+              <code>429 rate_limited</code>. (Bad/missing keys: 30/min per IP.)
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-foreground">Idempotency</dt>
+            <dd className="text-muted-foreground">
+              The two send routes (<code>POST /messages</code>,{" "}
+              <code>POST /conversations/:id/messages</code>) <strong>require</strong>{" "}
+              an <code>Idempotency-Key</code> header — reuse it on a retry and we
+              never double-send (the inbound message id is a good key). Other
+              mutations accept it optionally.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-foreground">Pagination</dt>
+            <dd className="text-muted-foreground">
+              List routes take <code>?limit=</code> &amp; <code>?cursor=</code>; the
+              response carries <code>nextCursor</code> (<code>null</code> when done)
+              — pass it back as <code>cursor</code>. Natural-key lookups
+              (<code>?phone=</code>/<code>?email=</code>) return at most one row, no
+              cursor.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-foreground">Errors</dt>
+            <dd className="text-muted-foreground">
+              Non-2xx → <code>{`{ error, detail }`}</code>. Common:{" "}
+              <code>403 insufficient_scope</code>, <code>404</code>,{" "}
+              <code>409 duplicate_phone</code>, <code>422</code> validation,{" "}
+              <code>429 rate_limited</code>.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-foreground">
+              <code>silent</code> &amp; loop safety
+            </dt>
+            <dd className="text-muted-foreground">
+              Any mutating route accepts <code>{`"silent": true`}</code> to suppress
+              the webhook/automation echo for that write. If a webhook handler calls
+              back into this API, forward the <code>X-CCP-Depth</code> header
+              verbatim — we reject at depth 8 (<code>429 chain_depth_exceeded</code>),
+              which breaks accidental webhook → API → webhook loops.
+            </dd>
+          </div>
+        </dl>
+
+        <div className="mt-4 border-t border-border pt-3">
+          <p className="font-semibold text-foreground">Scopes</p>
+          <p className="mt-1 text-muted-foreground">
+            A key grants only the scopes you pick when you create it
+            (<strong>Full access</strong> = all of them). A call outside its scopes
+            returns <code>403 insufficient_scope</code>. Each endpoint below needs
+            the matching scope from its section.
+          </p>
+          <div className="mt-2 grid gap-x-6 gap-y-1 sm:grid-cols-2">
+            {SCOPES.map((s) => (
+              <div key={s.scope} className="flex gap-2">
+                <code className="shrink-0 font-mono text-3xs text-foreground">
+                  {s.scope}
+                </code>
+                <span className="text-muted-foreground">{s.grants}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
       <Section title="Contacts">
         <Endpoint method="GET" path="/api/external/v1/contacts?phone=%2B15555550100">
           List or find contacts. <strong>Natural-key lookups</strong> short-circuit
@@ -96,6 +194,19 @@ export default function ApiDocsPage() {
         >
           Partial update — name, email, location, customFields, stageId. Phone is
           immutable.
+        </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/contacts/:id/stage"
+          body={{ stageId: "stage_..." }}
+        >
+          Move a contact along the lifecycle pipeline (Lead → Customer → …) — the
+          discoverable sibling of assign/status. Look ids up via{" "}
+          <code>GET /stages</code>. Fires the <em>On Contact Lifecycle updated</em>{" "}
+          workflow trigger, the in-conversation stage pill, and the{" "}
+          <code>contact.lifecycle_changed</code> webhook — full parity with the UI
+          stage picker. (Clearing a stage: <code>PATCH</code> with{" "}
+          <code>{`{ stageId: null }`}</code>.)
         </Endpoint>
         <Endpoint method="DELETE" path="/api/external/v1/contacts/:id">
           Removes the contact from the directory (soft delete). Conversation
@@ -195,7 +306,8 @@ export default function ApiDocsPage() {
           Delete a tag (also removes it from every contact).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/stages">
-          Read-only lifecycle stage catalog.
+          Lifecycle stage catalog. Assign one to a contact with{" "}
+          <code>POST /contacts/:id/stage</code> (above).
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/channels">
           Read-only channel list (today: a single WhatsApp row per team).
@@ -233,6 +345,16 @@ export default function ApiDocsPage() {
         >
           Body: <code>{`{ status: "open" | "pending" | "closed" }`}</code>.
         </Endpoint>
+        <Endpoint
+          method="POST"
+          path="/api/external/v1/conversations/:id/ai"
+          body={{ aiEnabled: false }}
+        >
+          Toggle AI Autopilot for the thread. Body:{" "}
+          <code>{`{ aiEnabled: boolean }`}</code>. Set <code>false</code> to hand off
+          to a human — every later <code>message.received</code> webhook then
+          carries <code>ai_enabled: false</code> so your automation can skip it.
+        </Endpoint>
       </Section>
 
       <Section title="Messages & notes">
@@ -259,8 +381,11 @@ export default function ApiDocsPage() {
         >
           Top-level send — resolves contact by <code>{`{ id }`}</code> or{" "}
           <code>{`{ phone }`}</code>, finds-or-opens a conversation, then sends.
-          Accepts <code>text</code> OR <code>template</code> ({" "}
-          <code>{`{ name, language, variables }`}</code>).
+          Provide exactly one of <code>text</code>,{" "}
+          <code>media</code> ({" "}
+          <code>{`{ url, mime_type, caption? }`}</code>), or <code>template</code> ({" "}
+          <code>{`{ name, language, variables }`}</code>). Only{" "}
+          <code>template</code> sends outside the 24-hour customer-service window.
         </Endpoint>
         <Endpoint method="GET" path="/api/external/v1/messages/:id">
           Find a single message by id.
@@ -268,10 +393,11 @@ export default function ApiDocsPage() {
         <Endpoint
           method="POST"
           path="/api/external/v1/conversations/:id/notes"
-          body={{ body: "Customer prefers SMS", authorUserId: "user_..." }}
+          body={{ body: "Customer prefers SMS" }}
         >
-          Add an internal note. Body:{" "}
-          <code>{`{ body: string, authorUserId: string }`}</code>.
+          Add an internal note (never sent to WhatsApp). Body:{" "}
+          <code>{`{ body: string, authorUserId?: string }`}</code> —{" "}
+          <code>authorUserId</code> is optional (attributes the note to a teammate).
         </Endpoint>
       </Section>
 

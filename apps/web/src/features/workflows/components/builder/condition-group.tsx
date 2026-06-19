@@ -30,11 +30,15 @@ import {
   triggerCarriesContact,
 } from "./types";
 
+function freshConditionId(): string {
+  return `c-${Math.random().toString(36).slice(2, 11)}`;
+}
+
 /**
  * Stable client-side React key per child. We stamp `_id` directly on each
- * Condition/Group at insert (see `addCondition` / `addGroup`) and on
- * first render of server-hydrated rows. Spreads (`{...condition, value}`)
- * carry `_id` forward, so the changed slot keeps the same key across
+ * Condition/Group at INSERT (see `addCondition` / `addGroup`) and once at the
+ * state-load boundary via `ensureConditionIds`. Spreads (`{...condition,
+ * value}`) carry `_id` forward, so the changed slot keeps the same key across
  * edits — input doesn't remount, focus stays on the keystroke.
  *
  * Earlier iterations tried WeakMap-keyed-by-reference; that broke focus
@@ -44,14 +48,39 @@ import {
  * key that survives the spread — `_id` does that since it's just a
  * field on the object.
  *
- * `_id` is optional in the type for back-compat with persisted graphs
- * that pre-date this scheme; stampLazyId mutates on first render.
+ * `_id` is a CLIENT-ONLY field — it is stamped at insert/hydration, never
+ * during render (a render-time mutation leaked `_id` into the persisted DB
+ * JSON), and `stripConditionIds` removes it from the persist payload.
  */
 function stampLazyId<T extends { _id?: string }>(child: T): string {
   if (!child._id) {
-    child._id = `c-${Math.random().toString(36).slice(2, 11)}`;
+    child._id = freshConditionId();
   }
   return child._id;
+}
+
+/**
+ * Return a DEEP-CLONED tree with a stable `_id` on every node that lacks one.
+ * PURE — never mutates its input. Call once at the state-load boundary
+ * (hydration), so the render path never needs to stamp (which would pollute
+ * the live state object and, via persist(), the DB).
+ */
+export function ensureConditionIds(group: Group): Group {
+  const visit = (node: Condition | Group): Condition | Group =>
+    isGroup(node)
+      ? { ...node, _id: node._id ?? freshConditionId(), children: node.children.map(visit) }
+      : { ...node, _id: node._id ?? freshConditionId() };
+  return visit(group) as Group;
+}
+
+/**
+ * Return a DEEP-CLONED tree with every client-only `_id` removed — the wire
+ * shape `persist()` sends, so non-wire keys never reach the DB. PURE.
+ */
+export function stripConditionIds(node: Condition | Group): Condition | Group {
+  return isGroup(node)
+    ? { op: node.op, children: node.children.map(stripConditionIds) }
+    : { field: node.field, op: node.op, value: node.value };
 }
 
 /**
@@ -231,7 +260,9 @@ export function ConditionGroupEditor({
       )}
 
       {group.children.map((child, idx) => {
-        const k = stampLazyId(child);
+        // Read the _id (stamped at insert + hydration); never mutate during
+        // render. Index fallback only for a hypothetical un-stamped legacy row.
+        const k = child._id ?? `idx-${idx}`;
         if (isGroup(child)) {
           return (
             <ConditionGroupEditor

@@ -383,9 +383,14 @@
   }
 }
 
-/* Respect reduce-motion: disable all our custom animations */
+/* Respect reduce-motion. The root <MotionConfig reducedMotion="user"> covers
+   every framer-motion `motion.*`, but NOT the CSS-driven animations: our custom
+   keyframe utilities, the tw-animate-css enter/exit classes that power shadcn
+   Dialog/Popover/DropdownMenu/Sheet/Toast, or raw Tailwind `transition-*`
+   (Switch, Button active:scale, the app-rail width). This block closes all of
+   those. (tw-animate-css ships NO reduced-motion guard of its own.) */
 @media (prefers-reduced-motion: reduce) {
-
+  /* Our custom keyframe utilities — off entirely. */
   .animate-badge-pop,
   .animate-message-in,
   .animate-slide-up,
@@ -393,7 +398,23 @@
   .animate-scale-in,
   .skeleton-shimmer {
     animation: none !important;
-    transition: none !important;
+  }
+
+  /* tw-animate-css enter/exit (Dialog, Popover, DropdownMenu, Sheet, Toast…) —
+     collapse to instant. 0.01ms (not `none`) keeps animationend firing for any
+     JS that waits on it. */
+  .animate-in,
+  .animate-out {
+    animation-duration: 0.01ms !important;
+  }
+
+  /* All CSS transitions → instant. Scoped to `transition-duration` only (not
+     `animation`), so loading indicators that spin/pulse via keyframes stay
+     legible as motion-of-state rather than freezing mid-spin. */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
   }
 
   html {

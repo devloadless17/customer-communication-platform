@@ -591,10 +591,17 @@ export interface ServerToClientEvents {
     messageId: string;
     emoji: string;
     userIds: string[];
-    /** Monotonic per-(message,emoji) version (ms since epoch from the row's
-     *  `updatedAt`). Older versions are discarded by the client so two
-     *  near-simultaneous toggles can't produce a stale-snapshot-wins race. */
+    /** Monotonic per-(message,emoji) version (ms since epoch). The client uses
+     *  it to discard a STALE OPTIMISTIC frame, never to gate an authoritative
+     *  one — see `optimistic`. */
     version: number;
+    /** True only for client-predicted (local) frames. The authoritative server
+     *  frame OMITS this (or sets false) and is ALWAYS applied — it carries the
+     *  full per-(message,emoji) DB snapshot, so it is truth. Gating it by
+     *  `version` was a bug: a client clock ahead of the server made an
+     *  optimistic frame out-rank the authoritative one, so the real reaction
+     *  state was discarded until a refetch. */
+    optimistic?: boolean;
   }) => void;
 
   /** A message was pinned or unpinned in a channel. */

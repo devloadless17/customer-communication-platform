@@ -509,7 +509,29 @@ async function runBroadcast(broadcastId: string): Promise<void> {
         : err instanceof Error
           ? err.message
           : String(err);
-    await fail(broadcast.id, msg);
+    // RECOVERABLE, not terminal: WhatsApp creds are missing/expired at run
+    // start — the exact dead-credential class the permanent-error breaker parks
+    // mid-run. Park the row `paused` (NOT `failed`) so the boot reconciler
+    // resumes it once creds are fixed, instead of forcing delete+recreate.
+    // CAS on status='queued' (NOT 'running' like the breaker — this fires
+    // BEFORE the queued→running claim below): every recipient is still
+    // `queued`, so the per-recipient queued→sent CAS on resume sends each
+    // exactly once. The guard also lets a concurrent cancel/delete win.
+    const parked = await db.broadcast.updateMany({
+      where: { id: broadcast.id, status: "queued" },
+      data: { status: "paused", lastError: msg.slice(0, 1000) },
+    });
+    if (parked.count === 0) return; // already canceled / claimed elsewhere
+    console.warn(
+      `[broadcast ${broadcast.id}] WhatsApp not connected at fire time — parked as paused (reconciler resumes on next restart once creds are fixed)`,
+    );
+    await publish({
+      type: "broadcast.status_changed",
+      teamId: broadcast.teamId,
+      broadcastId: broadcast.id,
+      status: "paused",
+      error: msg,
+    });
     return;
   }
 

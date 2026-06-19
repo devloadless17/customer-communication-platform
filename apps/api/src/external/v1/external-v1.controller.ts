@@ -28,6 +28,7 @@ import {
   ExternalContactAddTagsSchema,
   ExternalContactAssignSchema,
   ExternalContactRemoveTagsSchema,
+  ExternalContactStageSchema,
   ExternalContactStatusSchema,
   ExternalCreateContactFieldSchema,
   ExternalCreateContactSchema,
@@ -48,6 +49,7 @@ import {
   type ExternalContactAddTagsInput,
   type ExternalContactAssignInput,
   type ExternalContactRemoveTagsInput,
+  type ExternalContactStageInput,
   type ExternalContactStatusInput,
   type ExternalCreateContactFieldInput,
   type ExternalCreateContactInput,
@@ -72,7 +74,8 @@ import {
  *   POST   /v1/contacts                       — create
  *   POST   /v1/contacts/upsert                — find-or-create by phone
  *   GET    /v1/contacts/:id                   — fetch one
- *   PATCH  /v1/contacts/:id                   — partial update
+ *   PATCH  /v1/contacts/:id                   — partial update (incl. stageId, customFields, …)
+ *   POST   /v1/contacts/:id/stage             — set lifecycle stage (fires lifecycle workflow + stage pill + webhook)
  *   DELETE /v1/contacts/:id                   — soft delete (removes from directory; conversation history preserved)
  *   GET    /v1/contacts/:id/channels          — list channels (siloed-per-channel → one row)
  *   POST   /v1/contacts/:id/tags              — add tag(s) to one contact
@@ -88,7 +91,7 @@ import {
  *   POST   /v1/tags                           — create
  *   PATCH  /v1/tags/:id                       — update
  *   DELETE /v1/tags/:id                       — delete
- *   GET    /v1/stages                         — list
+ *   GET    /v1/stages                         — list (assign one via POST /v1/contacts/:id/stage)
  *   GET    /v1/channels                       — list (single Meta row for now)
  *
  * Users (read-only):
@@ -629,6 +632,33 @@ export class ExternalV1Controller {
       body,
       this.idemKey(idempotencyKey),
     );
+  }
+
+  /**
+   * Move a contact to a lifecycle stage — the discoverable sibling of the
+   * assign/status shortcuts. Delegates to the contact-update path, so it
+   * validates the stage (404 if unknown) and fires `contact.lifecycle_changed`
+   * (workflow trigger + stage pill + outbound webhook) exactly like the UI's
+   * stage picker / PATCH /contacts/:id with `{ stageId }`.
+   */
+  @Post("contacts/:id/stage")
+  @RequireScope("write:contacts")
+  async setStageByContact(
+    @CurrentApiKey() auth: ApiKeyContext,
+    @Param("id") id: string,
+    @Body(zBody(ExternalContactStageSchema)) body: ExternalContactStageInput,
+    @Headers("idempotency-key") idempotencyKey?: string,
+    @Headers("x-ccp-depth") xCcpDepth?: string,
+  ) {
+    this.guardChainDepth(xCcpDepth);
+    const contact = await this.api.updateContact(
+      auth.teamId,
+      auth.apiKeyId,
+      id,
+      { stageId: body.stageId },
+      this.idemKey(idempotencyKey),
+    );
+    return { contact };
   }
 
   // ---- Messages -----------------------------------------------------

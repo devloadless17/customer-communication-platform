@@ -137,6 +137,18 @@ export const ExternalContactStatusSchema = z.object({
 });
 export type ExternalContactStatusInput = z.infer<typeof ExternalContactStatusSchema>;
 
+// Move a contact along the lifecycle pipeline (Lead → Customer → …). The
+// dedicated, discoverable sibling of assign/status — body is just the target
+// `stageId` (validate it against GET /v1/stages). Delegates to the same update
+// path as PATCH /contacts/:id, so it fires `contact.lifecycle_changed` (workflow
+// "On Contact Lifecycle updated" trigger + the in-conversation stage pill +
+// outbound webhook) exactly like the UI's stage picker. To CLEAR a stage, use
+// PATCH /contacts/:id with `{ "stageId": null }`.
+export const ExternalContactStageSchema = z.object({
+  stageId: z.string().min(1),
+});
+export type ExternalContactStageInput = z.infer<typeof ExternalContactStageSchema>;
+
 export const ExternalAssignSchema = z.object({
   assignedUserId: z.string().min(1).nullable(),
   silent: SilentFlag,

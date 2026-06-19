@@ -100,15 +100,13 @@ function ChannelMessageImpl({
   const toggleReaction = async (emoji: string) => {
     setShowReactions(false);
     // Optimistic: compute the next userIds list (toggle current user in or
-    // out) and dispatch the same socket frame the server will broadcast.
-    // Version is `Date.now()` at click time — the per-(message,emoji) version
-    // guard in use-team-channel-events.ts discards anything not strictly newer,
-    // so a fixed low version (e.g. 1) only ever applies on the FIRST toggle and
-    // every re-toggle silently no-ops until the round-trip lands (laggy un-react).
-    // A wall-clock click stamp is monotonic with the server's publish-time
-    // `Date.now()`: the click necessarily precedes the server stamp, so the
-    // authoritative frame still wins, while consecutive client toggles each
-    // advance the version and apply instantly.
+    // out) and dispatch the same socket frame the server will broadcast, tagged
+    // `optimistic: true`. Version is `Date.now()` at click time so consecutive
+    // re-toggles each advance the version and apply instantly (a fixed low
+    // version would no-op every re-toggle until the round-trip). The version
+    // guard now applies ONLY to optimistic frames, so a client clock ahead of
+    // the server can no longer make this frame out-rank — and discard — the
+    // authoritative server frame (the bug this `optimistic` flag fixes).
     const existing = message.reactions.find((r) => r.emoji === emoji);
     const has = existing?.userIds.includes(currentUser.id) ?? false;
     const nextUserIds = has
@@ -121,6 +119,10 @@ function ChannelMessageImpl({
       emoji,
       userIds: nextUserIds,
       version: Date.now(),
+      // Mark as client-predicted: the version guard applies ONLY to optimistic
+      // frames (so consecutive re-toggles still order correctly), while the
+      // authoritative server frame is always applied regardless of version.
+      optimistic: true,
     });
     try {
       await fetchWithSessionGuard(

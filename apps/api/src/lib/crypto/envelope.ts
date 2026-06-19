@@ -21,7 +21,12 @@
  *
  * The implementation lives in ./envelope-core (no `server-only` guard) so
  * standalone scripts under prisma/seeds/ can import it from plain Node.
- * Application code should keep importing from this file.
+ * Application code should keep importing from THIS file, which adds the
+ * `server-only` guard below so a future accidental import from a client
+ * component / the web bundle fails at build time (the ENCRYPTION_KEY must
+ * never reach the browser). The api runtime resolves `server-only` to a
+ * no-op via `--conditions=react-server`, so this is inert at runtime there.
  */
+import "server-only";
 
 export { encryptSecret, decryptSecret, isEncrypted } from "./envelope-core";

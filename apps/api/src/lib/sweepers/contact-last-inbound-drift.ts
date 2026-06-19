@@ -86,28 +86,38 @@ async function sweepOnce(): Promise<void> {
   const teams = await db.team.findMany({ select: { id: true } });
   let totalDrifted = 0;
   for (const { id: teamId } of teams) {
-    const drifted = await db.$executeRaw`
-      UPDATE "Contact" c
-      SET "lastInboundAt" = sub.last_inbound
-      FROM (
-        SELECT
-          c2.id as contact_id,
-          actual.max_ts as last_inbound
-        FROM "Contact" c2
-        LEFT JOIN (
-          SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
-          FROM "Message" m
-          JOIN "Conversation" co ON co.id = m."conversationId"
-          WHERE m.direction = 'in' AND m."teamId" = ${teamId}
-          GROUP BY co."contactId"
-        ) actual ON actual.contact_id = c2.id
-        WHERE c2."teamId" = ${teamId}
-      ) sub
-      WHERE c.id = sub.contact_id
-        AND c."teamId" = ${teamId}
-        AND c."lastInboundAt" IS DISTINCT FROM sub.last_inbound
-    `;
-    totalDrifted += Number(drifted);
+    // Per-team isolation: a lock-wait / deadlock on one tenant's hot Message
+    // table must not throw out of the whole sweep and skip every later-ordered
+    // team — with a 24h cadence the next retry is a full day away.
+    try {
+      const drifted = await db.$executeRaw`
+        UPDATE "Contact" c
+        SET "lastInboundAt" = sub.last_inbound
+        FROM (
+          SELECT
+            c2.id as contact_id,
+            actual.max_ts as last_inbound
+          FROM "Contact" c2
+          LEFT JOIN (
+            SELECT co."contactId" AS contact_id, MAX(m."timestamp") AS max_ts
+            FROM "Message" m
+            JOIN "Conversation" co ON co.id = m."conversationId"
+            WHERE m.direction = 'in' AND m."teamId" = ${teamId}
+            GROUP BY co."contactId"
+          ) actual ON actual.contact_id = c2.id
+          WHERE c2."teamId" = ${teamId}
+        ) sub
+        WHERE c.id = sub.contact_id
+          AND c."teamId" = ${teamId}
+          AND c."lastInboundAt" IS DISTINCT FROM sub.last_inbound
+      `;
+      totalDrifted += Number(drifted);
+    } catch (err) {
+      console.warn(
+        `[sweeper.contact-drift] reconcile failed for team=${teamId}; continuing`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   if (totalDrifted > 0) {

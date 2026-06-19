@@ -123,9 +123,16 @@ export function TeamChatWorkspace({
     };
 
     socket.on("team:channel:pin:changed", onPin);
+    // Converge on reconnect: the pin event is one-shot, the socket recovery
+    // window is only 30s, and this workspace never remounts on channel nav —
+    // so a pin/unpin made while this tab was offline >30s would be missed and
+    // the bar would stay stale until a full page reload. Mirror the
+    // onConnect-refetch every other team-chat surface (feed/thread/sidebar) has.
+    socket.on("connect", refetchPins);
     return () => {
       cancelled = true;
       socket.off("team:channel:pin:changed", onPin);
+      socket.off("connect", refetchPins);
     };
   }, [initialChannel.id]);
 

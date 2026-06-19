@@ -18,6 +18,16 @@ import type { ServerToClientEvents } from "@ccp/shared/socket/events";
  * Single source of truth for:
  *   - `useConversationEvents` (live state of the displayed thread)
  *   - `inbox-shell.tsx` (ThreadCache snapshot for chat-switch round-trips)
+ *   - `contact-panel.tsx` (right-rail "Conversation" stats: status +
+ *     message/note counts). The panel renders from the inbox-shell LRU
+ *     snapshot (`thread.data`), NOT MessageThread's live hook, and the shell's
+ *     displayed-thread patches are intentionally cacheTick-silent (no
+ *     re-render) — so the panel subscribes DIRECTLY to keep its derived state
+ *     live. It only derives from a COVERED subset and calls
+ *     `assertReducerCoverage([...])` so a future field it derives from an
+ *     un-covered event throws in dev. (Do NOT "fix" this by routing it through
+ *     `thread.data` — that would re-render the whole shell tree per inbound
+ *     message, the regression the silent-patch design avoids.)
  *
  * To wire a new per-thread field-mutating socket event: write the reducer
  * here and add one entry to `THREAD_REDUCER_EVENTS` below. Both consumers

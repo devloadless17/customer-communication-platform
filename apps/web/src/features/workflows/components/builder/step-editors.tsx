@@ -11,7 +11,7 @@ import { FieldTokenPicker } from "@/features/templates/components/field-token-pi
 import { PhoneNumberInput } from "@/features/contacts/components/phone-number-input";
 import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
 
-import { ConditionGroupEditor } from "./condition-group";
+import { ConditionGroupEditor, ensureConditionIds } from "./condition-group";
 import { OpenWindowContactCombobox } from "./open-window-contact-combobox";
 import { type BuilderCatalogs, type Trigger, type WorkflowGraph, toGroup } from "./types";
 
@@ -840,7 +840,9 @@ export function BranchEditor({
       {mode === "custom" && (
         <ConditionGroupEditor
           trigger={trigger}
-          group={toGroup(config.conditions)}
+          // Stamp stable _id on hydrated rows for React keying; persist() strips
+          // _id back out, so the DB never sees these client-only keys.
+          group={ensureConditionIds(toGroup(config.conditions))}
           onChange={(g) => onChange({ ...config, conditions: g })}
           catalogs={catalogs}
         />
