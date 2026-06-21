@@ -13,11 +13,13 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import type { Response } from "express";
 import { diskStorage } from "multer";
 
 import { CurrentSession } from "../auth/current-session.decorator";
@@ -59,6 +61,7 @@ import {
  *   POST   /api/team/channels/:id/messages/:mid/thread     — post a thread reply
  *   GET    /api/team/channels/:id/messages/search          — ?q substring search (keyset desc, ?before / ?take)
  *   GET    /api/team/channels/:id/messages/around          — ?messageId context window (jump-to-message)
+ *   GET    /api/team/channels/:id/messages/:mid/media      — auth-gated redirect to attachment CDN URL
  *   GET    /api/team/channels/search                       — ?q workspace-wide substring search
  *   POST   /api/team/channels/:id/media                    — upload file (multipart)
  */
@@ -334,6 +337,33 @@ export class ChannelsController {
     return this.channels.getMessagesAround(session.teamId, session.userId, id, messageId, {
       take: take ? Number.parseInt(take, 10) : undefined,
     });
+  }
+
+  /**
+   * Auth-gated, team-scoped, membership-gated proxy for a channel message's
+   * attachment. Mirrors MediaController.get for WhatsApp media: the service
+   * verifies channel membership + team scope + `isOwnUrl` before we 302 to the
+   * CDN URL. mapMessage emits this RELATIVE path (not the raw CDN URL) so
+   * internal attachments are protected by auth + membership, not just key
+   * unguessability (M4). Same 1-year immutable cache as MediaController — the
+   * underlying blob URL is content-addressed.
+   */
+  @Get(":id/messages/:mid/media")
+  async getMessageMedia(
+    @CurrentSession() session: ApiSession,
+    @Param("id") id: string,
+    @Param("mid") mid: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const url = await this.channels.getMessageMediaUrl(
+      session.teamId,
+      session.userId,
+      id,
+      mid,
+    );
+    res.set("Cache-Control", "private, max-age=31536000, immutable");
+    res.set("Vary", "Cookie");
+    res.redirect(302, url);
   }
 
   @Post(":id/messages/:mid/thread")

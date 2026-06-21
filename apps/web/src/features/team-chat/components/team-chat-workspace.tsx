@@ -69,6 +69,14 @@ export function TeamChatWorkspace({
     currentUser.id,
   );
 
+  // Ref-track the live message list so `handleOpenThread` (defined once
+  // `setThread` exists below) can stay a STABLE callback — read the list from
+  // the ref instead of closing over it.
+  const channelMessagesRef = useRef(channelState.messages);
+  useEffect(() => {
+    channelMessagesRef.current = channelState.messages;
+  }, [channelState.messages]);
+
   // Pins: hydrate from SSR, keep in sync via `team:channel:pin:changed`.
   //
   // Reset on channel switch: useEffect (NOT useMemo). useMemo running a
@@ -172,6 +180,15 @@ export function TeamChatWorkspace({
   useEffect(() => {
     setThread(null);
   }, [initialChannel.id]);
+  // STABLE thread-open handler. An inline closure passed to <ChannelThread>
+  // got a fresh identity every render, which defeated ChannelMessage's `memo`
+  // (its comparator checks `onOpenThread` identity) and re-rendered every
+  // visible bubble per inbound message (L6). Reads the live list from
+  // `channelMessagesRef` so the callback has no message-list dependency.
+  const handleOpenThread = useCallback((rootId: string) => {
+    const root = channelMessagesRef.current.find((m) => m.id === rootId);
+    if (root) setThread(root);
+  }, []);
   const [showEdit, setShowEdit] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   // Live override on top of `initialChannel.memberCount`. Bumped optimistically
@@ -368,10 +385,9 @@ export function TeamChatWorkspace({
           onGoToLive={channelState.goToLive}
           searchQuery={activeSearchQuery}
           displayNameById={namesById}
-          onOpenThread={(rootId) => {
-            const root = channelState.messages.find((m) => m.id === rootId);
-            if (root) setThread(root);
-          }}
+          onOpenThread={handleOpenThread}
+          onRetry={channelState.retryOptimistic}
+          onDismiss={channelState.removeOptimistic}
         />
         <div className="border-t border-border">
           <TypingIndicator

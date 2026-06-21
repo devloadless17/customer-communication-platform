@@ -19,9 +19,11 @@ import { zBody } from "../../common/zod-validation.pipe";
 import {
   ContactPanelBuiltinSchema,
   CreateContactFieldSchema,
+  ReorderContactFieldsSchema,
   UpdateContactFieldSchema,
   type ContactPanelBuiltins,
   type CreateContactFieldInput,
+  type ReorderContactFieldsInput,
   type UpdateContactFieldInput,
 } from "./contact-fields.schemas";
 import { ContactFieldsService } from "./contact-fields.service";
@@ -31,6 +33,7 @@ import { ContactFieldsService } from "./contact-fields.service";
  *
  *   GET    /api/team/contact-fields          — anyone signed in (panel reads schema)
  *   POST   /api/team/contact-fields          — admin / manager only
+ *   PATCH  /api/team/contact-fields/reorder  — admin / manager only
  *   PATCH  /api/team/contact-fields/:id      — admin / manager only
  *   DELETE /api/team/contact-fields/:id      — admin / manager only
  *
@@ -76,6 +79,16 @@ export class ContactFieldsController {
   ) {
     const definition = await this.fields.create(session.teamId, this.canManage(session), body);
     return { definition };
+  }
+
+  // Reorder must come BEFORE the :id PATCH so /reorder isn't matched as an id.
+  @Patch("reorder")
+  async reorder(
+    @CurrentSession() session: ApiSession,
+    @Body(zBody(ReorderContactFieldsSchema)) body: ReorderContactFieldsInput,
+  ) {
+    await this.fields.reorder(session.teamId, this.canManage(session), body);
+    return { ok: true };
   }
 
   @Patch(":id")

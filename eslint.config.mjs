@@ -117,6 +117,29 @@ export default tseslint.config(
     },
   },
 
+  // ---- API: type-aware linting for the floating/misused-promise class ------
+  // The base config above is syntax-only, so a dropped `await` (e.g. fire-and-
+  // forget a Meta send / DB write inside an async handler) goes uncaught. Turn
+  // on the TS type-checker for the NestJS source + the framework-agnostic libs
+  // it shares, and enable the two promise-correctness rules. Scoped to these
+  // globs (all covered by apps/api/tsconfig.json) so `projectService` always
+  // resolves a project and never errors on an out-of-project file. Set to
+  // `warn` to surface without failing `eslint .` while the existing backlog is
+  // burned down — promote to `error` once clean.
+  {
+    files: ["apps/api/src/**/*.ts"],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "warn",
+      "@typescript-eslint/no-misused-promises": "warn",
+    },
+  },
+
   // ---- Config / script / seed files: Node context, allow CJS-ish patterns --
   {
     files: ["**/*.config.{js,mjs,ts}", "scripts/**/*.{ts,js}", "prisma/**/*.ts"],

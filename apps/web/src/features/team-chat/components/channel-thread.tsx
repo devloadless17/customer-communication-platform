@@ -50,6 +50,8 @@ export function ChannelThread({
   onGoToLive,
   searchQuery,
   onOpenThread,
+  onRetry,
+  onDismiss,
   displayNameById,
 }: {
   messages: TeamChannelMessageDto[];
@@ -69,6 +71,10 @@ export function ChannelThread({
   /** When set, ChannelMessage highlights matching substrings inline. */
   searchQuery: string | null;
   onOpenThread: (rootMessageId: string) => void;
+  /** Retry / dismiss a failed optimistic message (L7). Stable refs from the
+   *  parent so the ChannelMessage memo holds. */
+  onRetry: (clientTempId: string) => void;
+  onDismiss: (clientTempId: string) => void;
   /** Canonical userId → name roster map for mention chip rendering. */
   displayNameById: Map<string, string>;
 }) {
@@ -215,6 +221,8 @@ export function ChannelThread({
                       // fresh closure per row per render would defeat memo
                       // on every event.
                       onOpenThread={onOpenThread}
+                      onRetry={onRetry}
+                      onDismiss={onDismiss}
                       searchQuery={searchQuery}
                       displayNameById={displayNameById}
                     />

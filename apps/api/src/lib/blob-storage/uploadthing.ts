@@ -400,7 +400,7 @@ export const uploadthingProvider: BlobStorageProvider = {
     // double-deleting blobs that are already in the trash queue.
     const keys = res.files
       .filter((f) => f.status === "Uploaded")
-      .map((f) => ({ key: f.key, uploadedAt: f.uploadedAt }));
+      .map((f) => ({ key: f.key, uploadedAt: f.uploadedAt, customId: f.customId ?? null }));
     return { keys, hasMore: res.hasMore };
   },
 };

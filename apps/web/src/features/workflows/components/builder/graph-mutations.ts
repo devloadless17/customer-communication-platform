@@ -200,6 +200,65 @@ export function insertStepAfter(
 }
 
 /**
+ * Edge reconciliation needed alongside an ask_question option-config edit:
+ * a rename re-labels the matching per-option edge, a remove drops it. Shared
+ * between the editor (which produces the op) and the builder (which applies
+ * it to the live graph snapshot).
+ */
+export type AskOptionEdgeOp =
+  | { kind: "rename"; oldId: string; newId: string }
+  | { kind: "remove"; optionId: string };
+
+/**
+ * Re-label an ask_question option edge when its option id is renamed. The
+ * canvas wires a per-option child as an edge labeled with the option id; if
+ * the author renames the id in the editor without this, that edge keeps the
+ * OLD label — orphaning the child subtree (a phantom reappearing "+") and
+ * dead-ending the run when the tapped option matches no edge.
+ *
+ * Only touches the single outgoing edge from `nodeId` whose label === oldId.
+ * No-op when old === new, oldId is empty, or no such edge exists.
+ */
+export function renameOptionEdge(
+  graph: WorkflowGraph,
+  nodeId: string,
+  oldId: string,
+  newId: string,
+): WorkflowGraph {
+  if (!oldId || oldId === newId) return graph;
+  let mutated = false;
+  const edges = graph.edges.map((e) => {
+    if (e.from === nodeId && e.label === oldId) {
+      mutated = true;
+      // Empty newId means the author cleared the id field mid-edit — drop the
+      // label so the now-unlabeled edge is the caller's to fix, rather than
+      // leaving a stale-labeled dangling edge.
+      return newId ? { ...e, label: newId } : { from: e.from, to: e.to };
+    }
+    return e;
+  });
+  return mutated ? { ...graph, edges } : graph;
+}
+
+/**
+ * Drop the ask_question option edge whose label === optionId when that option
+ * is removed from the editor. Mirrors removeStep's edge cleanup: a removed
+ * option must not leave a dangling edge that orphans its child + reappears as
+ * a phantom "+". No-op when no edge carries that label.
+ */
+export function removeOptionEdge(
+  graph: WorkflowGraph,
+  nodeId: string,
+  optionId: string,
+): WorkflowGraph {
+  if (!optionId) return graph;
+  const edges = graph.edges.filter(
+    (e) => !(e.from === nodeId && e.label === optionId),
+  );
+  return edges.length === graph.edges.length ? graph : { ...graph, edges };
+}
+
+/**
  * Duplicate a step in place. Copies type + config, places the clone slightly
  * offset so it's visible, and DOES NOT rewire any edges — the duplicate is
  * orphaned by default and the user wires it where they want. Mirrors how

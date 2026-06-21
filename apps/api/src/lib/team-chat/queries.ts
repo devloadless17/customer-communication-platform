@@ -87,7 +87,12 @@ export function mapMessage(row: MessageRow): TeamChannelMessageDto {
     row.mediaKind && row.mediaUrl && row.mediaMimeType
       ? {
           kind: row.mediaKind,
-          url: row.mediaUrl,
+          // RELATIVE auth-gated proxy path — NOT the raw CDN URL. The
+          // ChannelsController route redirects to the `isOwnUrl`-validated CDN
+          // URL only after a team + channel-membership check, so internal
+          // attachments are protected by auth, not just key unguessability
+          // (M4). Resolves the same way WhatsApp media's `/api/media/:id` does.
+          url: `/api/team/channels/${row.channelId}/messages/${row.id}/media`,
           mimeType: row.mediaMimeType,
           sizeBytes: row.mediaSizeBytes ?? 0,
           ...(row.mediaCaption ? { caption: row.mediaCaption } : {}),

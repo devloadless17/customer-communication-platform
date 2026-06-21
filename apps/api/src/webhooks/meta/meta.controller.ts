@@ -189,7 +189,18 @@ export class MetaWebhookController implements OnModuleDestroy {
       return { ok: true, ingested: 0, dropped: "phone_number_id_mismatch" };
     }
 
-    const events = getMetaProvider().parseWebhook(payload);
+    // Fail SOFT — `parseWebhook` iterates Meta's array fields, and a future
+    // Meta shape where one of those fields arrives as a non-array would make
+    // the walk throw a TypeError on an HMAC-valid body. A 500 here puts us in
+    // an infinite per-team retry storm (Meta retries any non-2xx). Log loudly,
+    // drop the batch, and return 200 to bound the damage.
+    let events: NormalizedEvent[];
+    try {
+      events = getMetaProvider().parseWebhook(payload);
+    } catch (err) {
+      this.logger.error(`[${teamId}] webhook parse failed; dropping batch`, err);
+      return { ok: true, ingested: 0, dropped: "parse_failed" };
+    }
     if (events.length === 0) return { ok: true, ingested: 0 };
 
     // Fully-async media flow. Kick off binary downloads in background and

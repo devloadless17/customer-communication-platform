@@ -136,7 +136,10 @@ export class WorkflowsService {
         },
       });
       await this.publishCatalogChange(teamId);
-      return this.toDto(created);
+      // `warnings` carries non-blocking mid-build incompleteness (unwired
+      // Branch / ask_question outputs) so the canvas can surface them without
+      // having blocked the save.
+      return { ...this.toDto(created), warnings: parsed.warnings };
     } catch (err) {
       this.throwIfDuplicateName(err, parsed.name);
       throw err;
@@ -252,7 +255,8 @@ export class WorkflowsService {
         },
       });
       await this.publishCatalogChange(teamId);
-      return this.toDto(updated);
+      // See create() — non-blocking mid-build incompleteness for the canvas.
+      return { ...this.toDto(updated), warnings: parsed.warnings };
     } catch (err) {
       this.throwIfDuplicateName(err, parsed.name);
       throw err;

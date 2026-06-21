@@ -18,6 +18,13 @@ import { withSweeperMutex } from "@/lib/sweepers/_mutex";
  * Message.mediaKey + TeamChannelMessage.mediaKey, delete files older than a
  * grace window whose keys appear in neither table.
  *
+ * URL-only blobs are EXCLUDED. Avatars upload to the same UploadThing app but
+ * persist only `User.avatarUrl` (no `mediaKey`), so a naive "delete unless in
+ * a mediaKey column" scan would falsely orphan and permanently delete every
+ * avatar. They carry a stable `avatar-<userId>-...` customId — see
+ * `isUrlOnlyBlob` — which we skip before the cross-check. Any future blob
+ * category that stores only a URL must add its customId prefix there.
+ *
  * Grace window: 24h. Long enough that an in-flight upload (between
  * provider-side commit and our DB write) isn't mistaken for an orphan. Short
  * enough that a real leak is reclaimed within a day.
@@ -45,6 +52,15 @@ const INITIAL_DELAY_MS = 30 * 60 * 1000; // 30min after boot — let the other s
 const GRACE_MS = 24 * 60 * 60 * 1000; // ignore blobs uploaded in the last 24h
 const PAGE_SIZE = 500;
 const MAX_PAGES_PER_TICK = 4;
+
+// Blob categories that persist only a URL (no `mediaKey` to cross-check), keyed
+// by their customId prefix. These must be skipped by the orphan scan or they'd
+// be deleted as false orphans. Avatars (lib/blob-storage/avatar.ts) use the
+// `avatar-<userId>-<ts>` customId.
+const URL_ONLY_CUSTOM_ID_PREFIXES = ["avatar-"] as const;
+function isUrlOnlyBlob(customId: string | null): boolean {
+  return customId != null && URL_ONLY_CUSTOM_ID_PREFIXES.some((p) => customId.startsWith(p));
+}
 
 let timer: NodeJS.Timeout | null = null;
 let initialTimer: NodeJS.Timeout | null = null;
@@ -115,8 +131,12 @@ async function sweepOnce(): Promise<void> {
     scannedCount += keys.length;
 
     // Only consider blobs older than the grace window. Recent uploads might
-    // still be racing the DB row write.
-    const eligible = keys.filter((k) => k.uploadedAt < ageCutoffMs);
+    // still be racing the DB row write. Also exclude URL-only blob categories
+    // (avatars) — they persist no `mediaKey`, so the cross-check below would
+    // classify every one as an orphan and permanently delete it.
+    const eligible = keys.filter(
+      (k) => k.uploadedAt < ageCutoffMs && !isUrlOnlyBlob(k.customId),
+    );
     if (eligible.length > 0) {
       const eligibleKeyList = eligible.map((k) => k.key);
       // Cross-check both customer-message media AND team-chat-message media.

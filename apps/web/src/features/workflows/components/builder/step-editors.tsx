@@ -12,6 +12,7 @@ import { PhoneNumberInput } from "@/features/contacts/components/phone-number-in
 import { TokenHighlightTextarea } from "@/features/templates/components/token-highlight";
 
 import { ConditionGroupEditor, ensureConditionIds } from "./condition-group";
+import type { AskOptionEdgeOp } from "./graph-mutations";
 import { OpenWindowContactCombobox } from "./open-window-contact-combobox";
 import { type BuilderCatalogs, type Trigger, type WorkflowGraph, toGroup } from "./types";
 
@@ -1111,6 +1112,7 @@ interface AskQuestionSaveTo {
 export function AskQuestionEditor({
   config,
   onChange,
+  onChangeWithEdges,
   fields,
   trigger,
 }: {
@@ -1125,6 +1127,10 @@ export function AskQuestionEditor({
     saveTo?: AskQuestionSaveTo;
   };
   onChange: (c: Record<string, unknown>) => void;
+  /** Config change that also reconciles the wired per-option graph edge —
+   *  used when an option id is renamed (re-label the edge) or removed (drop
+   *  it) so the child subtree isn't orphaned. */
+  onChangeWithEdges: (c: Record<string, unknown>, edgeOp: AskOptionEdgeOp) => void;
   fields: BuilderCatalogs["fields"];
   trigger: Trigger;
 }) {
@@ -1156,20 +1162,46 @@ export function AskQuestionEditor({
   }
 
   function setOption(idx: number, patch: Partial<AskOption>) {
+    const prev = options[idx]!;
     const next = [...options];
-    next[idx] = { ...next[idx]!, ...patch };
+    next[idx] = { ...prev, ...patch };
+    // When the option id changes, the wired per-option edge (labeled with the
+    // OLD id) must follow — otherwise it dangles, orphaning the child subtree
+    // and dead-ending the run. Route through the graph-aware callback so the
+    // config + edge update apply to one snapshot. Title/description edits don't
+    // touch edges, so they stay on the plain onChange path.
+    if (patch.id !== undefined && patch.id !== prev.id) {
+      onChangeWithEdges(
+        { ...config, options: next },
+        { kind: "rename", oldId: prev.id, newId: patch.id },
+      );
+      return;
+    }
     onChange({ ...config, options: next });
   }
   function addOption() {
     if (options.length >= maxOptions) return;
+    // Unique id: `opt_N` keyed off a monotonic max over existing numeric
+    // suffixes, not `options.length + 1` — the latter mints a duplicate after
+    // a remove (e.g. delete opt_1 of [opt_1,opt_2] → length 1 → "opt_2" again),
+    // which collides as both a React key and an edge label (L5).
+    let maxN = 0;
+    for (const o of options) {
+      const m = /^opt_(\d+)$/.exec(o.id);
+      if (m) maxN = Math.max(maxN, Number.parseInt(m[1]!, 10));
+    }
     onChange({
       ...config,
-      options: [...options, { id: `opt_${options.length + 1}`, title: "" }],
+      options: [...options, { id: `opt_${maxN + 1}`, title: "" }],
     });
   }
   function removeOption(idx: number) {
+    const removed = options[idx]!;
     const next = options.filter((_, i) => i !== idx);
-    onChange({ ...config, options: next });
+    // Drop the wired per-option edge for the removed id so it doesn't dangle
+    // (orphaned child + phantom reappearing "+"). Mirror removeStep's edge
+    // cleanup via the graph-aware callback.
+    onChangeWithEdges({ ...config, options: next }, { kind: "remove", optionId: removed.id });
   }
 
   return (

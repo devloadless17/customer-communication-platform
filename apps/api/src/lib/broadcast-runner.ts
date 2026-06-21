@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { publish } from "@/lib/events/bus";
-import { createOutboundMessageIdempotent } from "@/lib/messages/idempotent-create";
+import { createOutboundMessageIdempotent, isTransient } from "@/lib/messages/idempotent-create";
 import { getProviderBinding } from "@/lib/providers";
 import { ProviderNotConfiguredError } from "@/lib/providers/config";
 import {
@@ -725,13 +725,15 @@ async function runBroadcast(broadcastId: string): Promise<void> {
 
   async function refill(): Promise<void> {
     if (exhausted) return;
-    const page = await db.broadcastRecipient.findMany({
-      where: { broadcastId: broadcastId_, status: "queued" },
-      select: RECIPIENT_SELECT,
-      orderBy: { id: "asc" },
-      take: PAGE_SIZE,
-      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
-    });
+    const page = await withTransientRetry(() =>
+      db.broadcastRecipient.findMany({
+        where: { broadcastId: broadcastId_, status: "queued" },
+        select: RECIPIENT_SELECT,
+        orderBy: { id: "asc" },
+        take: PAGE_SIZE,
+        ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+      }),
+    );
     if (page.length === 0) {
       exhausted = true;
       return;
@@ -761,16 +763,27 @@ async function runBroadcast(broadcastId: string): Promise<void> {
     const now = Date.now();
     if (now - lastCancelPollAt < CANCEL_POLL_MS) return false;
     lastCancelPollAt = now;
-    const row = await db.broadcast.findUnique({
-      where: { id: broadcastId_ },
-      select: { status: true },
-    });
+    const row = await withTransientRetry(() =>
+      db.broadcast.findUnique({
+        where: { id: broadcastId_ },
+        select: { status: true },
+      }),
+    );
     if (row?.status === "canceled") {
       canceled = true;
     }
     return canceled;
   }
 
+  // The lane loop + completion tail are wrapped so a transient DB blip that
+  // survives `withTransientRetry` (or any other unexpected throw inside a lane)
+  // can't strand the broadcast `running` with no in-process recovery. On an
+  // unexpected throw we CAS `running → paused` + publish (same resume contract
+  // the shutdown / fatal-pause paths use; the boot reconciler picks it back up
+  // and the per-recipient CAS prevents double-send). The `finally` always runs
+  // the in-memory cleanup so the 429 / permanent-streak / progressThrottle Maps
+  // can't leak on the throw path.
+  try {
   await Promise.all(
     Array.from({ length: lanes }, async () => {
       while (true) {
@@ -907,6 +920,51 @@ async function runBroadcast(broadcastId: string): Promise<void> {
       broadcastId: broadcast.id,
       status: "completed",
     });
+  }
+  } catch (err) {
+    // An unexpected throw (e.g. a persistent DB error that outlived
+    // withTransientRetry) escaped the lane loop / completion tail. The
+    // surviving exits above never ran, so the row would otherwise stay
+    // `running` until the next process restart. Park it `paused` via the SAME
+    // CAS contract the shutdown / fatal-pause paths use — gated on
+    // status="running" so a racing cancel/complete wins — and publish so the
+    // UI reflects it. The boot reconciler resumes a `paused` row and the
+    // per-recipient CAS keeps already-sent recipients from re-sending.
+    const message = errorDetail(err);
+    console.error(`[broadcast ${broadcast.id}] runner errored mid-flight — pausing`, err);
+    try {
+      const paused = await db.broadcast.updateMany({
+        where: { id: broadcast.id, status: "running" },
+        data: { status: "paused", lastError: message.slice(0, 1000) },
+      });
+      if (paused.count > 0) {
+        await publish({
+          type: "broadcast.status_changed",
+          teamId: broadcast.teamId,
+          broadcastId: broadcast.id,
+          status: "paused",
+          error: message,
+        });
+      }
+    } catch (pauseErr) {
+      // The DB is still unreachable — nothing more we can do here. The boot
+      // reconciler's `running`-orphan sweep is the last-resort recovery.
+      console.error(
+        `[broadcast ${broadcast.id}] failed to park as paused after mid-flight error`,
+        pauseErr,
+      );
+    }
+  } finally {
+    // Always release in-memory state so the 429 / permanent-streak / pause /
+    // throttle Maps can't leak on the throw path. All deletes are idempotent,
+    // so re-running them after the happy-path cleanup above is a no-op.
+    reset429Streak(broadcast.id);
+    PAUSE_429.delete(broadcast.id);
+    resetPermanentStreak(broadcast.id);
+    FATAL_PAUSE.delete(broadcast.id);
+    const t = progressThrottles.get(broadcast.id);
+    if (t?.pendingTimer) clearTimeout(t.pendingTimer);
+    progressThrottles.delete(broadcast.id);
   }
 }
 
@@ -1778,7 +1836,7 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     // Fire-and-forget — startBroadcast schedules the runner inside
     // setImmediate via its own mechanics. We don't await so onModuleInit
     // returns quickly.
-    startBroadcast(row.id);
+    void startBroadcast(row.id);
   }
 
   // 3) Re-fire the `queued` orphans snapshotted in step 0. startBroadcast is
@@ -1789,7 +1847,7 @@ export async function reconcileOrphanedBroadcasts(): Promise<void> {
     console.warn(
       `[broadcast-reconciler] resuming orphaned queued broadcast ${row.id}`,
     );
-    startBroadcast(row.id);
+    void startBroadcast(row.id);
   }
 }
 
@@ -1827,7 +1885,7 @@ export async function resumePausedBroadcastsForTeam(
     console.warn(
       `[broadcast] resuming paused broadcast ${row.id} after WhatsApp settings save (${queuedRemaining} recipient(s) remaining)`,
     );
-    startBroadcast(row.id);
+    void startBroadcast(row.id);
   }
 }
 
@@ -1979,4 +2037,30 @@ function errorDetail(err: unknown): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Bounded transient-error retry for the lane-loop control reads (`refill` /
+ * `checkCanceled`). A single P2024 pool timeout / P1017 dropped connection /
+ * P2034 serialization blip in that window would otherwise reject Promise.all
+ * and skip the entire completion tail, stranding the broadcast `running`.
+ * Reuses the same `isTransient` classifier (+ exponential backoff with jitter)
+ * the idempotent message insert uses; a PERSISTENT error after the retries
+ * still throws, so the outer pause-on-throw path can park the row cleanly.
+ */
+async function withTransientRetry<T>(op: () => Promise<T>): Promise<T> {
+  const MAX_ATTEMPTS = 4;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransient(err) || attempt === MAX_ATTEMPTS - 1) throw err;
+      const base = 100 * 2 ** attempt;
+      const jitter = Math.random() * base * 0.25;
+      await sleep(base + jitter);
+    }
+  }
+  throw lastErr ?? new Error("withTransientRetry: retries exhausted");
 }

@@ -202,37 +202,26 @@ export function ContactFieldsSettings({
       const idx = list.findIndex((f) => f.id === id);
       const swapIdx = direction === "up" ? idx - 1 : idx + 1;
       if (idx < 0 || swapIdx < 0 || swapIdx >= list.length) return;
-      const a = list[idx]!;
-      const b = list[swapIdx]!;
-      // No bulk reorder endpoint — swap the two affected `order` values with
-      // two PATCHes. With the field cap at 50 per team and reorder being
-      // human-paced, the cost is fine; if it ever isn't, add /reorder
-      // mirroring the stages route.
+      const next = list.slice();
+      [next[idx], next[swapIdx]] = [next[swapIdx]!, next[idx]!];
+      // Renumber orders so the local state matches what the server will
+      // persist on success.
+      const renumbered = next.map((f, i) => ({ ...f, order: i }));
+      // One transactional /reorder endpoint renumbers every field server-side
+      // — the previous two parallel PATCHes could half-fail and leave
+      // duplicate `order` values. Mirrors the stages reorder route.
       const prev = defs;
-      setDefs((cur) =>
-        cur.map((f) => {
-          if (f.id === a.id) return { ...f, order: b.order };
-          if (f.id === b.id) return { ...f, order: a.order };
-          return f;
-        }),
-      );
+      setDefs(renumbered);
       setBusyId(id);
       try {
-        const res = await Promise.all([
-          apiFetch(`/api/team/contact-fields/${a.id}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ order: b.order }),
-          }),
-          apiFetch(`/api/team/contact-fields/${b.id}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ order: a.order }),
-          }),
-        ]);
-        if (!res.every((r) => r.ok)) {
+        const res = await apiFetch("/api/team/contact-fields/reorder", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ orderedIds: renumbered.map((f) => f.id) }),
+        });
+        if (!res.ok) {
           setDefs(prev);
-          setError("Reorder failed");
+          setError(`Reorder failed (HTTP ${res.status})`);
         }
       } catch {
         setDefs(prev);

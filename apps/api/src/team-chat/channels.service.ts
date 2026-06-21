@@ -176,13 +176,16 @@ export class ChannelsService {
   // ---- Members ----------------------------------------------------------
 
   /**
-   * List members of a channel. Viewer must be in the team; we don't require
-   * membership-in-channel because the members button is the way someone who
-   * was just removed sees who's still in. Returns rows ordered by addedAt
-   * desc (most-recently-added first).
+   * List members of a channel. Gated on channel membership: a non-member must
+   * not be able to enumerate a PRIVATE channel's full roster (names + emails) —
+   * `requireChannelMembership` 404s them, and 404 (not 403) doesn't even teach
+   * a non-member that the channel exists (L2). Default/public channels stay
+   * listable for everyone — `requireChannelMembership` short-circuits the
+   * membership join for `isDefault` channels (every team member is implicitly a
+   * member). Returns rows ordered by addedAt desc (most-recently-added first).
    */
   async listMembers(teamId: string, viewerUserId: string, channelId: string) {
-    await this.requireChannelInTeam(teamId, channelId);
+    await this.requireChannelMembership(teamId, viewerUserId, channelId);
     const rows = await this.db.teamChannelMember.findMany({
       where: { channelId },
       include: {
@@ -1282,6 +1285,34 @@ export class ChannelsService {
     return { messageId: created.id, message: dto };
   }
 
+  /**
+   * Resolve the CDN URL for a channel message's attachment, gated by team
+   * scope AND channel membership. Mirrors MediaController.get for WhatsApp
+   * media: a non-member (or foreign-team) caller gets a 404, and the URL is
+   * `isOwnUrl`-validated before it's handed back so the open-redirect guard
+   * stays symmetric. The controller 302-redirects to the returned URL; the
+   * raw CDN URL is never embedded in the message DTO (M4).
+   */
+  async getMessageMediaUrl(
+    teamId: string,
+    userId: string,
+    channelId: string,
+    messageId: string,
+  ): Promise<string> {
+    await this.requireChannelMembership(teamId, userId, channelId);
+    const message = await this.db.teamChannelMessage.findFirst({
+      where: { id: messageId, channelId, teamId },
+      select: { mediaUrl: true },
+    });
+    // Indistinguishable from "no such message" on the missing / non-own-url
+    // paths so we don't teach the caller the validation rules — same posture
+    // as MediaController.get's open-redirect guard.
+    if (!message?.mediaUrl || !blobStorage.isOwnUrl(message.mediaUrl)) {
+      throw new NotFoundException({ error: "not_found" });
+    }
+    return message.mediaUrl;
+  }
+
   // ---- helpers ----------------------------------------------------------
 
   /**
@@ -1309,9 +1340,9 @@ export class ChannelsService {
    * `default_channel_locked` rule, no one can be removed from it).
    *
    * Used to gate every per-channel read/write (list/post messages, react,
-   * pin, mark-read, search, around, media, threads). Admin-only ops that
-   * MUST work even for non-members (`listMembers`, `addMembers`, `removeMember`,
-   * `update`, `remove`) keep using `requireChannelInTeam`.
+   * pin, mark-read, search, around, media, threads, listMembers). Admin-only
+   * mutate ops that MUST work even for non-members (`addMembers`,
+   * `removeMember`, `update`, `remove`) keep using `requireChannelInTeam`.
    *
    * Returning a 404 (not 403) on the not-a-member path is deliberate: it
    * doesn't teach a non-member that the channel exists.

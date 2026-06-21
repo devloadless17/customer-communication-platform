@@ -11,11 +11,8 @@ onlyBuiltDependencies:
   - "@ffmpeg-installer/ffmpeg"
   - "@ffmpeg-installer/linux-x64"
 
-# Resolution overrides — pin transitive deps that otherwise float to
-# versions with known issues. effect: workflow engine guards against
-# breakage on pre-3.20 releases. picomatch / esbuild: bundler perf +
-# CVE fixes that lockfile-merging will sometimes downgrade.
-overrides:
-  effect: ^3.20.0
-  picomatch: ^4.0.4
-  esbuild: ^0.28.0
+# Resolution overrides live in package.json `pnpm.overrides` (the ONLY source
+# pnpm 10.x reads here — confirmed against pnpm-lock.yaml). An `overrides:` key
+# in this file is silently ignored, so it is intentionally NOT defined here to
+# avoid a second, dead source of truth. To pin a transitive dep, edit
+# package.json `pnpm.overrides` and run `pnpm install`.

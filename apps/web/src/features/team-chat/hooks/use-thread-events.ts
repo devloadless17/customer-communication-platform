@@ -28,6 +28,12 @@ export interface ThreadEventsState {
   addOptimistic: (m: TeamChannelMessageDto) => void;
   markOptimisticFailed: (clientTempId: string) => void;
   removeOptimistic: (clientTempId: string) => void;
+  /**
+   * Re-send a failed optimistic reply: flip it back to `pending` and re-POST
+   * the same body + clientTempId into THIS thread. Text-only (media retries
+   * aren't supported — the original File bytes aren't retained).
+   */
+  retryOptimistic: (clientTempId: string) => void;
   /** User ids currently typing in THIS thread (excludes the viewer). The
    *  caller renders names via the team-members map. */
   typingUserIds: string[];
@@ -49,6 +55,12 @@ export function useThreadEvents(
   const [loadingMore, setLoadingMore] = useState(false);
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
   const inFlightRef = useRef(false);
+  // Mirror the replies list onto a ref so `retryOptimistic` can read the
+  // failed message's body without re-creating the callback on every change.
+  const repliesRef = useRef(replies);
+  useEffect(() => {
+    repliesRef.current = replies;
+  });
   // Per-(message,emoji) last applied version stamp — see `onReaction`.
   const lastReactionVersionsRef = useRef(new Map<string, number>());
   // Keep the root-deleted callback on a ref so the socket effect (which only
@@ -309,6 +321,38 @@ export function useThreadEvents(
     setReplies((prev) => prev.filter((m) => m.clientTempId !== clientTempId));
   }, []);
 
+  // Re-send a failed optimistic reply. Flip back to pending, then re-POST the
+  // same body + clientTempId so the server echo reconciles the SAME row via
+  // `onMessage`'s clientTempId swap.
+  const retryOptimistic = useCallback(
+    (clientTempId: string) => {
+      const target = repliesRef.current.find(
+        (m) => m.clientTempId === clientTempId,
+      );
+      if (!target) return;
+      setReplies((prev) =>
+        prev.map((m) =>
+          m.clientTempId === clientTempId
+            ? { ...m, pending: true, failed: false }
+            : m,
+        ),
+      );
+      void fetchWithSessionGuard(
+        `/api/team/channels/${channelId}/messages/${rootMessageId}/thread`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body: target.body, clientTempId }),
+        },
+      )
+        .then((res) => {
+          if (!res.ok) markOptimisticFailed(clientTempId);
+        })
+        .catch(() => markOptimisticFailed(clientTempId));
+    },
+    [channelId, rootMessageId, markOptimisticFailed],
+  );
+
   return {
     replies,
     loading,
@@ -318,6 +362,7 @@ export function useThreadEvents(
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    retryOptimistic,
     typingUserIds,
   };
 }

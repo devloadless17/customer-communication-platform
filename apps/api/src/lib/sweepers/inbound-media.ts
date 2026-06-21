@@ -97,8 +97,10 @@ async function sweepOnce(): Promise<void> {
 
   // Find inbound rows whose phase-2 download never landed. Outbound rows
   // never go through the pending state (the send route writes media columns
-  // synchronously or not at all), so the `direction = "in"` predicate is
-  // both a safety guard and lets the partial inbound index do the work.
+  // synchronously or not at all), so the `direction = "in"` predicate is a
+  // safety guard. This exact predicate is served by the partial index
+  // `Message_inbound_media_pending_idx` (migration 20260622120000) — without
+  // it the 60s tick seq-scans the whole Message table.
   const stuck = await db.message.findMany({
     where: {
       direction: "in",

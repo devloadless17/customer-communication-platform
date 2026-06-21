@@ -55,6 +55,8 @@ function ChannelMessageImpl({
   canDelete,
   isThreadReply,
   onOpenThread,
+  onRetry,
+  onDismiss,
   searchQuery,
   displayNameById,
 }: {
@@ -67,6 +69,15 @@ function ChannelMessageImpl({
   /** True when this bubble lives inside the thread panel — hides the
    *  "Reply in thread" action so threads can't nest. */
   isThreadReply: boolean;
+  /**
+   * Retry sending a FAILED optimistic message (re-POSTs body + clientTempId,
+   * flips back to pending). Only wired for the channel feed / thread panel;
+   * undefined for read-only contexts (e.g. the thread root header). Text-only
+   * — the failed-state UI hides Retry when the message carried media.
+   */
+  onRetry?: (clientTempId: string) => void;
+  /** Dismiss (remove) a FAILED optimistic message from the local list. */
+  onDismiss?: (clientTempId: string) => void;
   /**
    * Opens the thread side panel for this message. Signature takes
    * `rootMessageId` so the parent passes a STABLE function reference (not a
@@ -371,16 +382,40 @@ function ChannelMessageImpl({
         )}
 
         {message.failed && (
-          <div className="mt-1 flex items-center gap-2 text-xs text-destructive">
-            <X className="size-3" />
-            Failed to send. Try again.
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-destructive">
+            <span className="inline-flex items-center gap-1">
+              <X className="size-3" />
+              Failed to send.
+            </span>
+            {/* Retry re-POSTs the same body + clientTempId (text-only — a
+                failed media send can't be retried, its bytes are gone). Dismiss
+                drops the optimistic row so its text isn't lost to a dead
+                bubble with no affordance (L7). */}
+            {message.clientTempId && onRetry && !message.media && (
+              <button
+                type="button"
+                onClick={() => onRetry(message.clientTempId!)}
+                className="font-medium underline underline-offset-2 hover:no-underline"
+              >
+                Retry
+              </button>
+            )}
+            {message.clientTempId && onDismiss && (
+              <button
+                type="button"
+                onClick={() => onDismiss(message.clientTempId!)}
+                className="font-medium text-muted-foreground underline underline-offset-2 hover:no-underline"
+              >
+                Dismiss
+              </button>
+            )}
           </div>
         )}
       </div>
 
       {!editing && !message.pending && !message.failed && (
         <div
-          className="absolute -top-3 right-4 flex items-center gap-0.5 rounded-md border border-border bg-background opacity-0 shadow-sm transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+          className="absolute -top-3 right-4 flex items-center gap-0.5 rounded-md border border-border bg-background opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
           onMouseLeave={() => setShowReactions(false)}
         >
           {showReactions && (
@@ -514,6 +549,8 @@ export const ChannelMessage = memo(
       prev.canDelete === next.canDelete &&
       prev.isThreadReply === next.isThreadReply &&
       prev.onOpenThread === next.onOpenThread &&
+      prev.onRetry === next.onRetry &&
+      prev.onDismiss === next.onDismiss &&
       prev.searchQuery === next.searchQuery &&
       prev.displayNameById === next.displayNameById
     ) {
@@ -528,6 +565,8 @@ export const ChannelMessage = memo(
       prev.canDelete !== next.canDelete ||
       prev.isThreadReply !== next.isThreadReply ||
       prev.onOpenThread !== next.onOpenThread ||
+      prev.onRetry !== next.onRetry ||
+      prev.onDismiss !== next.onDismiss ||
       prev.searchQuery !== next.searchQuery ||
       prev.displayNameById !== next.displayNameById
     ) {

@@ -67,6 +67,12 @@ export interface TeamChannelEventsState {
   addOptimistic: (m: TeamChannelMessageDto) => void;
   markOptimisticFailed: (clientTempId: string) => void;
   removeOptimistic: (clientTempId: string) => void;
+  /**
+   * Re-send a failed optimistic message: flip it back to `pending` and re-POST
+   * the same body + clientTempId. Text-only — media retries aren't supported
+   * (the original File bytes aren't retained after the first optimistic add).
+   */
+  retryOptimistic: (clientTempId: string) => void;
 }
 
 export function useTeamChannelEvents(
@@ -687,6 +693,41 @@ export function useTeamChannelEvents(
     setMessages((prev) => prev.filter((m) => m.clientTempId !== clientTempId));
   }, []);
 
+  // Re-send a failed optimistic message. Flip it back to pending immediately,
+  // then re-POST the same body + clientTempId so the eventual server echo
+  // reconciles the SAME row (matching `onMessage`'s clientTempId swap). The
+  // URL is derived from the message's own `threadRootId` so a failed thread
+  // reply retries into its thread, not the channel root.
+  const retryOptimistic = useCallback(
+    (clientTempId: string) => {
+      const target = messagesRef.current.find(
+        (m) => m.clientTempId === clientTempId,
+      );
+      if (!target) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.clientTempId === clientTempId
+            ? { ...m, pending: true, failed: false }
+            : m,
+        ),
+      );
+      const url = target.threadRootId
+        ? `/api/team/channels/${channelId}/messages/${target.threadRootId}/thread`
+        : `/api/team/channels/${channelId}/messages`;
+      void fetchWithSessionGuard(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: target.body, clientTempId }),
+      })
+        .then((res) => {
+          if (!res.ok) markOptimisticFailed(clientTempId);
+          // success: the matching socket event swaps the optimistic row.
+        })
+        .catch(() => markOptimisticFailed(clientTempId));
+    },
+    [channelId, markOptimisticFailed],
+  );
+
   return {
     messages,
     typingUserIds,
@@ -703,5 +744,6 @@ export function useTeamChannelEvents(
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    retryOptimistic,
   };
 }

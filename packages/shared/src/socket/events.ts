@@ -752,7 +752,11 @@ export interface ServerToClientEvents {
 
 export interface TeamChannelMediaDto {
   kind: string;
-  /** Public URL (CDN). Channel media isn't proxied through an auth route. */
+  /**
+   * RELATIVE auth-gated proxy path (`/api/team/channels/:id/messages/:mid/media`)
+   * — NOT the raw CDN URL. The API redirects to the CDN after a team +
+   * channel-membership check, so internal attachments are auth-protected (M4).
+   */
   url: string;
   mimeType: string;
   sizeBytes: number;

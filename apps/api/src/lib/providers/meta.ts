@@ -590,8 +590,8 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
     const events: NormalizedEvent[] = [];
 
-    for (const entry of env.entry ?? []) {
-      for (const change of entry.changes ?? []) {
+    for (const entry of Array.isArray(env.entry) ? env.entry : []) {
+      for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
         const value = change.value;
         if (!value) continue;
 
@@ -620,11 +620,11 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
 
         // Build a quick wa_id → name lookup from the contacts array.
         const nameByWaId = new Map<string, string>();
-        for (const c of value.contacts ?? []) {
+        for (const c of Array.isArray(value.contacts) ? value.contacts : []) {
           if (c.wa_id && c.profile?.name) nameByWaId.set(c.wa_id, c.profile.name);
         }
 
-        for (const m of value.messages ?? []) {
+        for (const m of Array.isArray(value.messages) ? value.messages : []) {
           const externalId = m.id;
           // Meta's wa_id is digits-only by spec, but we strip non-digits
           // defensively. The DB stores digits-only too (lib/phone.ts) so the
@@ -778,13 +778,13 @@ export const metaProvider: MessagingProvider<MetaSendConfig> = {
           } satisfies NormalizedInboundMessage);
         }
 
-        for (const c of value.calls ?? []) {
+        for (const c of Array.isArray(value.calls) ? value.calls : []) {
           const evt = parseMetaCall(c, payload as Record<string, unknown>);
           if (!evt) continue;
           events.push(evt);
         }
 
-        for (const s of value.statuses ?? []) {
+        for (const s of Array.isArray(value.statuses) ? value.statuses : []) {
           const status = mapMetaStatus(s.status);
           // Surface WHY Meta failed delivery — otherwise a `failed` status is a
           // silent red icon with no reason. These are the (#13xxxx) codes from

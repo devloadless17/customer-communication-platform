@@ -248,6 +248,26 @@ export function validateGraph(graph: WorkflowGraph): string[] {
   return errors;
 }
 
+/**
+ * Classify a validateGraph() error as a mid-build INCOMPLETENESS warning vs a
+ * truly-fatal structural error. The two incompleteness classes are the
+ * control-flow "unwired outputs" messages minted just above (branch true/false,
+ * ask_question timeout + answered/option). A freshly added Branch / ask_question
+ * node always trips these while the author is still wiring it, so the SAVE tier
+ * surfaces them as non-blocking warnings (autosave + Test tolerate them); only
+ * publish promotes them back to hard errors. Everything else (duplicate id,
+ * start/edge endpoint not in nodes, too-many-nodes, cycle) stays fatal.
+ *
+ * Kept next to the message sites above so a future edit to either string
+ * updates the classifier in the same file.
+ */
+export function isGraphIncompletenessError(msg: string): boolean {
+  return (
+    msg.includes('must have edges labeled "true" and "false"') ||
+    msg.includes('must have a "timeout" edge')
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Traversal — what runs next from here.
 // ---------------------------------------------------------------------------

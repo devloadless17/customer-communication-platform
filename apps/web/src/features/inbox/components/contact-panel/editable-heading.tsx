@@ -20,10 +20,16 @@ export function EditableHeading({
   const [draft, setDraft] = useState(value);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const wasEditingRef = useRef(editing);
 
   useEffect(() => {
+    const justEntered = editing && !wasEditingRef.current;
+    wasEditingRef.current = editing;
     if (editing) {
-      setDraft(value);
+      // Seed the draft ONLY on the false→true transition — re-seeding on every
+      // `value` change would clobber an in-progress draft when a teammate's
+      // `contact:updated` socket frame silently re-seeds the field mid-type.
+      if (justEntered) setDraft(value);
       inputRef.current?.focus();
       inputRef.current?.select();
     }

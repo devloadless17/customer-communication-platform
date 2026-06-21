@@ -24,10 +24,13 @@ import { TriggerEditorDrawer } from "./trigger-editor-drawer";
 // Pure graph helpers — import from the standalone module so this shell does
 // not pull in `@xyflow/react` (the canvas's heavy dep) at module-eval time.
 import {
+  type AskOptionEdgeOp,
   countDisconnectedByRemoval,
   duplicateStep,
   insertStepAfter,
+  removeOptionEdge,
   removeStep,
+  renameOptionEdge,
 } from "./graph-mutations";
 import type { WorkflowCanvasProps } from "./workflow-canvas";
 import {
@@ -118,6 +121,11 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
 
   const [stepErrors, setStepErrors] = useState<Record<string, string>>({});
   const [topErrors, setTopErrors] = useState<string[]>([]);
+  // Non-blocking mid-build incompleteness (unwired Branch / ask_question
+  // outputs). Returned by create/update's SAVE tier; the save still succeeds.
+  // Cleared/refreshed on every persist; publish surfaces the same conditions
+  // as hard errors in topErrors instead.
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [pending, startTransition] = useTransition();
   // Enqueue-failure banner only (the success path opens the result drawer).
   const [testError, setTestError] = useState<string | null>(null);
@@ -261,6 +269,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       error?: string;
       details?: string[];
       stepErrors?: Record<string, string>;
+      warnings?: string[];
     };
     if (ctl.signal.aborted) return false;
     if (!res.ok) {
@@ -270,6 +279,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     }
     setTopErrors([]);
     setStepErrors({});
+    setWarnings(json.warnings ?? []);
     dirtyRef.current = false; // saved — nothing for the Exit flush to push
     if (mode === "create" && json.id) {
       router.push(`/workflows/${json.id}`);
@@ -340,6 +350,10 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
       return;
     }
     setPublished(goLive);
+    // A successful publish means the graph validated clean — clear any stale
+    // mid-build warnings. (Going Draft never validates, but clearing is still
+    // correct: the unpublished workflow's warnings re-surface on the next save.)
+    if (goLive) setWarnings([]);
     softRefresh();
   }
 
@@ -390,6 +404,29 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         n.id === selectedStepId ? { ...n, config } : n,
       ),
     });
+  }
+
+  // ask_question option edits that also touch graph.edges — applied to ONE
+  // graph snapshot so the config change and the edge reconciliation can't race
+  // on a stale closure. `next` is the already-computed config; the edge op
+  // re-labels (rename) or drops (remove) the matching per-option edge so a
+  // renamed/removed option never orphans its wired child subtree (M7).
+  function updateSelectedConfigWithEdges(
+    config: Record<string, unknown>,
+    edgeOp: AskOptionEdgeOp,
+  ) {
+    if (!selectedStepId) return;
+    const withConfig: WorkflowGraph = {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === selectedStepId ? { ...n, config } : n,
+      ),
+    };
+    const next =
+      edgeOp.kind === "rename"
+        ? renameOptionEdge(withConfig, selectedStepId, edgeOp.oldId, edgeOp.newId)
+        : removeOptionEdge(withConfig, selectedStepId, edgeOp.optionId);
+    setGraph(next);
   }
 
   /** Author-facing rename. Empty / whitespace-only input drops the field
@@ -567,6 +604,19 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
         </div>
       )}
 
+      {/* Non-blocking — mid-build incompleteness (unwired Branch / ask_question
+          outputs). The save succeeded; this just flags what's left to wire
+          before the workflow can go Live. Styled amber, not destructive. */}
+      {warnings.length > 0 && (
+        <div className="border-b border-warning-border bg-warning-bg/40 px-4 py-2 text-xs text-warning-fg">
+          <ul className="ml-4 list-disc">
+            {warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Main: canvas + (optional) drawer. Steps are added inline via the
           "+" buttons on edges + the trailing "+" below leaf nodes, so the
           old left palette is gone. */}
@@ -619,6 +669,7 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
             trigger={trigger}
             error={stepErrors[selectedNode.id]}
             onChangeConfig={updateSelectedConfig}
+            onChangeConfigWithEdges={updateSelectedConfigWithEdges}
             onChangeName={updateSelectedName}
             onDelete={deleteSelected}
             onClose={() => setSelectedStepId(null)}

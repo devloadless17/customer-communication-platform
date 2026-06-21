@@ -1,7 +1,12 @@
 import type { WorkflowTriggerEvent } from "@prisma/client";
 
 import { validateConditions } from "@/lib/workflows/conditions";
-import { type WorkflowGraph, toGraph, validateGraph } from "@/lib/workflows/graph";
+import {
+  type WorkflowGraph,
+  isGraphIncompletenessError,
+  toGraph,
+  validateGraph,
+} from "@/lib/workflows/graph";
 import { parseStepConfig, redactStepConfig } from "@/lib/workflows/steps";
 
 /**
@@ -56,6 +61,14 @@ export interface ParsedWorkflow {
   triggerOncePerContact: boolean;
   graph: WorkflowGraph;
   errors: string[];
+  /**
+   * Non-blocking structural-incompleteness notices (SAVE tier only). A
+   * freshly added Branch / ask_question node has unwired outputs mid-build;
+   * those surface here so the canvas can show them WITHOUT blocking autosave
+   * or Test. Always empty in PUBLISH tier — there the same conditions are
+   * promoted into `errors` (publish must block on an incomplete graph).
+   */
+  warnings: string[];
   /** Detailed errors found in step configs. Always populated even when ok. */
   stepErrors: Record<string, string>;
 }
@@ -65,6 +78,7 @@ export function parseWorkflowBody(
   opts: { forPublish?: boolean } = {},
 ): ParsedWorkflow {
   const errors: string[] = [];
+  const warnings: string[] = [];
   const stepErrors: Record<string, string> = {};
 
   const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -95,10 +109,15 @@ export function parseWorkflowBody(
   if (opts.forPublish) {
     errors.push(...graphErrors);
   } else {
-    // SAVE tier: graph errors that aren't structural fatal (start not in
-    // nodes, dangling edges) are tolerated. We still emit them but as a
-    // warning prefix so the UI can show them inline without blocking save.
-    for (const e of graphErrors) errors.push(`draft: ${e}`);
+    // SAVE tier: control-flow INCOMPLETENESS (a freshly added Branch /
+    // ask_question node with unwired outputs) is the normal mid-build state
+    // — route those to `warnings` so the canvas shows them WITHOUT blocking
+    // autosave or Test. Truly-fatal structural errors (duplicate id, start /
+    // edge endpoint not in nodes, too-many-nodes, cycle) still block the save.
+    for (const e of graphErrors) {
+      if (isGraphIncompletenessError(e)) warnings.push(e);
+      else errors.push(e);
+    }
   }
 
   // Per-step config validation — done against the live step registry.
@@ -123,6 +142,7 @@ export function parseWorkflowBody(
     triggerOncePerContact,
     graph,
     errors,
+    warnings,
     stepErrors,
   };
 }

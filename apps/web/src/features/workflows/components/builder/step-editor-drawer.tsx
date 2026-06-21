@@ -25,6 +25,7 @@ import {
   UpdateLifecycleEditor,
   WaitEditor,
 } from "./step-editors";
+import type { AskOptionEdgeOp } from "./graph-mutations";
 import {
   type BuilderCatalogs,
   type Trigger,
@@ -53,6 +54,13 @@ interface Props {
   trigger: Trigger;
   error?: string;
   onChangeConfig: (config: Record<string, unknown>) => void;
+  /** Config change that must also reconcile graph.edges atomically — used by
+   *  the ask_question editor when an option id is renamed/removed so the wired
+   *  per-option edge follows (or is dropped) instead of orphaning its child. */
+  onChangeConfigWithEdges: (
+    config: Record<string, unknown>,
+    edgeOp: AskOptionEdgeOp,
+  ) => void;
   /** Persist the author-supplied node title. Empty input drops the field
    *  (canvas falls back to the step type label). */
   onChangeName: (name: string) => void;
@@ -67,6 +75,7 @@ export function StepEditorDrawer({
   trigger,
   error,
   onChangeConfig,
+  onChangeConfigWithEdges,
   onChangeName,
   onDelete,
   onClose,
@@ -119,6 +128,7 @@ export function StepEditorDrawer({
           graph={graph}
           trigger={trigger}
           onChangeConfig={onChangeConfig}
+          onChangeConfigWithEdges={onChangeConfigWithEdges}
         />
         {/* Input / Output inspector — discoverability for $var.previousStep.*
             and $var.steps.<id>.*. The "Insert" of a leaf appends the token
@@ -165,12 +175,17 @@ function EditorForNode({
   graph,
   trigger,
   onChangeConfig,
+  onChangeConfigWithEdges,
 }: {
   node: WorkflowNode;
   catalogs: BuilderCatalogs;
   graph: WorkflowGraph;
   trigger: Trigger;
   onChangeConfig: (config: Record<string, unknown>) => void;
+  onChangeConfigWithEdges: (
+    config: Record<string, unknown>,
+    edgeOp: AskOptionEdgeOp,
+  ) => void;
 }) {
    
   const c = node.config as any;
@@ -206,7 +221,7 @@ function EditorForNode({
     case "noop":
       return <NoopEditor />;
     case "ask_question":
-      return <AskQuestionEditor config={c} onChange={onChangeConfig} fields={catalogs.fields} trigger={trigger} />;
+      return <AskQuestionEditor config={c} onChange={onChangeConfig} onChangeWithEdges={onChangeConfigWithEdges} fields={catalogs.fields} trigger={trigger} />;
     case "http_request":
       return <HttpRequestEditor config={c} onChange={onChangeConfig} />;
     case "trigger_workflow":

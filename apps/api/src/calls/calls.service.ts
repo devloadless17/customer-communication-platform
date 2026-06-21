@@ -503,6 +503,58 @@ export class CallsService {
     if (!conversation.contact?.phoneNumber) {
       throw new BadRequestException({ error: "contact has no phone number" });
     }
+
+    // Idempotency short-circuit — honor the doc-comment promise BEFORE hitting
+    // Meta. Mirrors initiateCall's pre-flight semantics exactly so both callers
+    // agree on what "already usable" means:
+    //   - a GRANTED + unexpired row → return it, no Meta hit (re-requesting a
+    //     live grant would burn the 1/24h quota and could 500 / cooldown).
+    //   - a recent rate-limit placeholder (rateLimitedUntil > now) → return it
+    //     instead of re-firing into the cooldown.
+    //   - a still-live pending request (not rate-limited, expiresAt > now) →
+    //     return it; the customer just hasn't accepted yet. Re-sending caps out.
+    // Only when nothing usable is on file do we fall through to Meta — the
+    // genuine first-request path, unchanged from before.
+    const now = Date.now();
+    const grantedPerm = await this.db.callPermissionRequest.findFirst({
+      where: {
+        teamId: session.teamId,
+        contactId: conversation.contact.id,
+        status: CallPermissionStatus.granted,
+        expiresAt: { gt: new Date(now) },
+      },
+      orderBy: { requestedAt: "desc" },
+      select: { id: true, externalRequestId: true, expiresAt: true },
+    });
+    if (grantedPerm) {
+      return {
+        permissionRequestId: grantedPerm.externalRequestId ?? grantedPerm.id,
+        expiresAt: grantedPerm.expiresAt.toISOString(),
+      };
+    }
+    const latest = await this.db.callPermissionRequest.findFirst({
+      where: { teamId: session.teamId, contactId: conversation.contact.id },
+      orderBy: { requestedAt: "desc" },
+      select: {
+        id: true,
+        externalRequestId: true,
+        status: true,
+        expiresAt: true,
+        rateLimitedUntil: true,
+      },
+    });
+    if (
+      (latest?.rateLimitedUntil && latest.rateLimitedUntil.getTime() > now) ||
+      (latest?.status === CallPermissionStatus.pending &&
+        !latest.rateLimitedUntil &&
+        latest.expiresAt.getTime() > now)
+    ) {
+      return {
+        permissionRequestId: latest.externalRequestId ?? latest.id,
+        expiresAt: latest.expiresAt.toISOString(),
+      };
+    }
+
     const result = await this.requestPermissionInternal(
       session.teamId,
       conversation.contact.id,

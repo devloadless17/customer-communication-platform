@@ -14,6 +14,7 @@ import { DbService } from "../../db/db.service";
 import type {
   ContactPanelBuiltins,
   CreateContactFieldInput,
+  ReorderContactFieldsInput,
   UpdateContactFieldInput,
 } from "./contact-fields.schemas";
 
@@ -213,6 +214,44 @@ export class ContactFieldsService {
       scope: "contact-fields",
     });
     return toDto(updated);
+  }
+
+  /**
+   * Bulk-reorder. `orderedIds[i].order = i`. Ids not in the list keep their
+   * current order. One transaction so a partial failure can't leave duplicate
+   * `order` values (the two-PATCH client path could). Capped at 50 fields so
+   * the per-row update transaction stays tiny.
+   */
+  async reorder(
+    teamId: string,
+    canManage: boolean,
+    input: ReorderContactFieldsInput,
+  ): Promise<void> {
+    requireManage(canManage);
+    const ids = input.orderedIds;
+    if (ids.length === 0) return;
+
+    // Cross-tenant guard: every id must belong to this team or the whole
+    // request rejects. Without this a malicious client could rewrite
+    // orders on another tenant's fields.
+    const owned = await this.db.contactFieldDefinition.findMany({
+      where: { teamId, id: { in: ids } },
+      select: { id: true },
+    });
+    if (owned.length !== ids.length) {
+      throw new BadRequestException({ error: "one or more ids are not in this team" });
+    }
+
+    await this.db.$transaction(
+      ids.map((id, index) =>
+        this.db.contactFieldDefinition.update({ where: { id }, data: { order: index } }),
+      ),
+    );
+    await this.bus.publish({
+      type: "team.catalog_changed",
+      teamId,
+      scope: "contact-fields",
+    });
   }
 
   async remove(teamId: string, canManage: boolean, id: string): Promise<void> {

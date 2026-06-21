@@ -83,7 +83,11 @@ export interface BlobStorageProvider {
     limit: number;
     offset: number;
   }): Promise<{
-    keys: ReadonlyArray<{ key: string; uploadedAt: number }>;
+    // `customId` lets the sweeper tell apart blob categories that are NOT
+    // cross-checked against a `mediaKey` column (e.g. avatars, which persist
+    // only a URL) so they aren't mistaken for orphans. Null when the provider
+    // didn't record one.
+    keys: ReadonlyArray<{ key: string; uploadedAt: number; customId: string | null }>;
     hasMore: boolean;
   }>;
 }

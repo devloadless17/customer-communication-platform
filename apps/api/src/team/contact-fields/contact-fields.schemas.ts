@@ -36,3 +36,12 @@ export const UpdateContactFieldSchema = z
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" });
 export type UpdateContactFieldInput = z.infer<typeof UpdateContactFieldSchema>;
+
+export const ReorderContactFieldsSchema = z.object({
+  orderedIds: z
+    .array(z.string().min(1))
+    .refine((ids) => new Set(ids).size === ids.length, {
+      message: "orderedIds has duplicates",
+    }),
+});
+export type ReorderContactFieldsInput = z.infer<typeof ReorderContactFieldsSchema>;

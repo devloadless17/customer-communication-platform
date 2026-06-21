@@ -221,7 +221,7 @@ async function drainWithRetry(
  * codes; explicit deny-list of business-logic errors so we don't paper over
  * real bugs by retrying a violated FK constraint.
  */
-function isTransient(err: unknown): boolean {
+export function isTransient(err: unknown): boolean {
   if (
     err instanceof Prisma.PrismaClientInitializationError ||
     err instanceof Prisma.PrismaClientRustPanicError

@@ -45,6 +45,7 @@ export function ThreadPanel({
     addOptimistic,
     markOptimisticFailed,
     removeOptimistic,
+    retryOptimistic,
     typingUserIds,
   } = useThreadEvents(channelId, rootMessage.id, () => {
     // Root deleted out from under us — close the panel so the user isn't
@@ -114,6 +115,8 @@ export function ThreadPanel({
                   canPin={false}
                   canDelete={canDeleteMessage(currentUser.role, m.authorUserId, currentUser.id)}
                   isThreadReply={true}
+                  onRetry={retryOptimistic}
+                  onDismiss={removeOptimistic}
                   displayNameById={namesById}
                 />
               ))}
