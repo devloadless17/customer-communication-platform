@@ -193,7 +193,7 @@ export function useThreadEvents(
         const tempId = payload.clientTempId;
         const next = tempId
           ? prev.map((m) =>
-              m.clientTempId === tempId && m.pending
+              m.clientTempId === tempId && (m.pending || m.failed)
                 ? { ...payload.message, clientTempId: tempId }
                 : m,
             )

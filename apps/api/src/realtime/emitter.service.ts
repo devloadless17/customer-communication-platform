@@ -93,9 +93,14 @@ export class RealtimeEmitter {
    * default channel (everyone is a member) it goes team-wide. For a
    * membership-gated channel it goes ONLY to the members' per-user rooms — so a
    * non-member never receives a private channel's metadata (channelId, author /
-   * reader id, mentioned ids, …) on the wire, instead of relying on a
-   * client-side drop of a team-wide blast. On boot-order / resolver failure it
-   * falls back to the team room (availability beats the metadata-leak fix).
+   * reader id, mentioned ids, …) on the wire.
+   *
+   * Fails CLOSED: if the resolver isn't bound yet (boot order) or throws (DB
+   * fault), we DROP the frame rather than blast it team-wide. These are
+   * low-value, self-healing frames (sidebar activity badge, read receipts) that
+   * clients reconcile on the next event / reconnect, so dropping one on a rare
+   * fault is strictly better than leaking a private channel's metadata to
+   * non-members (the prior team-wide fallback did exactly that).
    */
   async emitChannelScoped<E extends keyof ServerToClientEvents>(
     channelId: string,
@@ -110,20 +115,23 @@ export class RealtimeEmitter {
     }
     const resolver = this.channelActivityResolver;
     if (!resolver) {
-      // Boot-order fallback: team-wide so a frame is never dropped if the
-      // resolver wasn't bound yet.
-      io.to(teamRoom(teamId)).emit(event, ...args);
+      // Fail closed: don't team-wide-blast a (possibly private) channel frame
+      // before we can resolve its membership.
+      this.logger.warn(
+        `emitChannelScoped("${String(event)}") dropped — channel-activity resolver not bound yet`,
+      );
       return;
     }
     let audience: { isDefault: boolean; memberUserIds: string[] };
     try {
       audience = await resolver(channelId, teamId);
     } catch (err) {
+      // Fail closed: a self-healing badge/read-receipt frame dropped on a rare
+      // DB fault is preferable to leaking private-channel metadata team-wide.
       this.logger.warn(
-        `emitChannelScoped("${String(event)}") resolver failed for channel=${channelId}; ` +
-          `falling back to team room: ${err instanceof Error ? err.message : String(err)}`,
+        `emitChannelScoped("${String(event)}") dropped — resolver failed for channel=${channelId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
       );
-      io.to(teamRoom(teamId)).emit(event, ...args);
       return;
     }
     if (audience.isDefault) {

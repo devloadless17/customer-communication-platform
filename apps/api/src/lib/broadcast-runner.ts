@@ -1653,14 +1653,20 @@ async function bumpCounters(
   teamId: string,
   delta: { sent?: number; failed?: number },
 ): Promise<void> {
-  const updated = await db.broadcast.update({
-    where: { id: broadcastId },
-    data: {
-      ...(delta.sent ? { sentCount: { increment: delta.sent } } : {}),
-      ...(delta.failed ? { failedCount: { increment: delta.failed } } : {}),
-    },
-    select: { sentCount: true, failedCount: true, totalCount: true },
-  });
+  // A transient P2024/P1017/P2034 blip here would otherwise permanently lose the
+  // increment (bumpCountersFireAndForget swallows the error), leaving the row's
+  // sentCount/failedCount short of totalCount forever. Bounded retry recovers it;
+  // a persistent error still throws into the caller's swallow + log path.
+  const updated = await withTransientRetry(() =>
+    db.broadcast.update({
+      where: { id: broadcastId },
+      data: {
+        ...(delta.sent ? { sentCount: { increment: delta.sent } } : {}),
+        ...(delta.failed ? { failedCount: { increment: delta.failed } } : {}),
+      },
+      select: { sentCount: true, failedCount: true, totalCount: true },
+    }),
+  );
   // Throttled emit (see scheduleProgress). DB write is authoritative and
   // unthrottled; the wire-level emit is coalesced.
   scheduleProgress(broadcastId, {

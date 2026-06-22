@@ -331,9 +331,6 @@ services:
       TRUSTED_PROXY_HOPS: "1"
       API_PORT: "4000"
       API_HOST: "0.0.0.0"
-      # Post-Phase-4: api owns the workflow worker by default. Override
-      # with API_RUN_WORKER_INLINE=0 if scaling demands an external worker
-      # container (run `docker compose --profile worker up worker` then).
       # Workflow worker + media sweeper run in-process by default. Override
       # to 0 only if scaling demands an external worker container — but
       # that's a future-state setup; nothing under `profiles` runs the

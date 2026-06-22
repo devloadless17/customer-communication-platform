@@ -942,11 +942,6 @@ export class CallsService {
         status: true,
         ringingAt: true,
         answeredAt: true,
-        // The contact behind this call — needed to bump the consecutive-
-        // unanswered-outbound counter when the agent ends a never-connected
-        // outbound (the webhook path can't, because we terminalize the row
-        // first and Meta's later terminate lands on an already-terminal row).
-        conversation: { select: { contactId: true } },
       },
     });
     if (!call) throw new NotFoundException({ error: "call not found" });
@@ -1039,21 +1034,22 @@ export class CallsService {
         ringingAt: call.ringingAt.toISOString(),
       });
       // Mirror Meta's auto-revocation counter (4 consecutive unanswered
-      // outbound calls). The webhook ingest path increments this on a genuine
-      // non-terminal→terminal `missed` transition — but the MOST COMMON no-
-      // answer ending goes through THIS REST endCall (the browser's 60s ring-
-      // timeout auto-POST + manual agent cancel), which terminalizes the row as
-      // `missed` first. Meta's own later terminate webhook then lands on an
-      // already-terminal row and the alreadyTerminal guard skips the increment,
-      // so without this the local early-warning mirror drifts low. Only the
-      // never-connected OUTBOUND case counts (inbound has no such cap, and a
-      // connected call resets the counter via the webhook's completed path).
-      if (call.direction === CallDirection.out && call.conversation?.contactId) {
-        await this.db.contact.update({
-          where: { id: call.conversation.contactId },
-          data: { consecutiveUnansweredOutCalls: { increment: 1 } },
-        });
-      }
+      // outbound calls). This REST endCall used to increment the counter here,
+      // but that double-counted in a race: this CAS and the webhook ingest's
+      // terminal-transition write are not serialized against each other, so a
+      // near-simultaneous agent-cancel + Meta terminate webhook could each read
+      // a non-terminal row and each increment (F17). The increment now has a
+      // SINGLE owner — the webhook ingest path's genuine non-terminal→terminal
+      // `missed` transition in lib/providers/ingest-call.ts (which also owns the
+      // reset-on-`completed`), so the counter can't drift high. The webhook is
+      // Meta's authoritative terminate signal and always lands for a real
+      // unanswered outbound call; if THIS path terminalized the row first, the
+      // webhook's alreadyTerminal guard correctly skips — but the local mirror
+      // being eventually-consistent via the webhook is preferable to the
+      // un-serialized double-increment that could spuriously trip revocation.
+      // (Intentionally no increment here — do not re-add without serializing
+      // against the webhook path; adding a per-Call `countedTowardRevocation`
+      // CAS flag would need a migration, deliberately avoided in this change.)
     }
 
     return { ok: true, durationSeconds };

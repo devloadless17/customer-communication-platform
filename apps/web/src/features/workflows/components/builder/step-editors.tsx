@@ -1138,18 +1138,42 @@ export function AskQuestionEditor({
   const answerKind: AnswerKind = config.answerKind ?? "free_text";
   const options = config.options ?? [];
   const maxOptions = answerKind === "buttons" ? 3 : 10;
+  // Track the id an option had when its id field gained focus, so the wired
+  // edge rename commits ONCE on blur (oldId = focus-time id, newId = final id)
+  // rather than per keystroke. Per-keystroke renaming meant a value typed
+  // transiently through a sibling's id dropped/stole a wired edge.
+  const optionIdEditRef = useRef<{ idx: number; originalId: string } | null>(null);
 
   function changeAnswerKind(next: AnswerKind) {
+    // Leaving buttons/list for a kind with NO per-option handles strands every
+    // wired `opt_N` edge — route the config change through the graph-aware
+    // callback so those edges are stripped in the SAME snapshot (mirrors how
+    // removeOption drops a single edge). Detect by the CURRENT kind, not the
+    // target: only buttons/list ever wire per-option edges.
+    const leavingOptionKind =
+      (answerKind === "buttons" || answerKind === "list") &&
+      next !== "buttons" &&
+      next !== "list";
     if (next === "free_text") {
       const { options: _o, listCtaLabel: _l, numberMin: _nmin, numberMax: _nmax, ...rest } = config;
-      onChange({ ...rest, answerKind: undefined });
+      const nextConfig = { ...rest, answerKind: undefined };
+      if (leavingOptionKind) {
+        onChangeWithEdges(nextConfig, { kind: "remove_all_options", optionId: "" });
+        return;
+      }
+      onChange(nextConfig);
       return;
     }
     if (next === "number" || next === "date") {
       // Drop interactive shape fields so a switch buttons → number doesn't
       // carry stale options through.
       const { options: _o, listCtaLabel: _l, ...rest } = config;
-      onChange({ ...rest, answerKind: next });
+      const nextConfig = { ...rest, answerKind: next };
+      if (leavingOptionKind) {
+        onChangeWithEdges(nextConfig, { kind: "remove_all_options", optionId: "" });
+        return;
+      }
+      onChange(nextConfig);
       return;
     }
     // Switching to a kind with a tighter cap: trim down so we don't carry
@@ -1178,6 +1202,28 @@ export function AskQuestionEditor({
       return;
     }
     onChange({ ...config, options: next });
+  }
+  // Per-keystroke draft of an option id: update config only (NO edge op). The
+  // wired edge follows once on blur via commitOptionId — see optionIdEditRef.
+  function setOptionIdDraft(idx: number, id: string) {
+    const prev = options[idx];
+    if (!prev) return;
+    const next = [...options];
+    next[idx] = { ...prev, id };
+    onChange({ ...config, options: next });
+  }
+  function commitOptionId(idx: number) {
+    const editing = optionIdEditRef.current;
+    optionIdEditRef.current = null;
+    if (!editing || editing.idx !== idx) return;
+    const finalId = options[idx]?.id ?? "";
+    if (finalId === editing.originalId) return;
+    // Apply the wired-edge rename once (focus-time id -> final id). config
+    // already carries finalId from the draft path, so pass it through unchanged.
+    onChangeWithEdges(
+      { ...config },
+      { kind: "rename", oldId: editing.originalId, newId: finalId },
+    );
   }
   function addOption() {
     if (options.length >= maxOptions) return;
@@ -1257,7 +1303,11 @@ export function AskQuestionEditor({
               <div key={idx} className="flex items-center gap-2">
                 <Input
                   value={opt.id}
-                  onChange={(e) => setOption(idx, { id: e.target.value })}
+                  onFocus={() => {
+                    optionIdEditRef.current = { idx, originalId: opt.id };
+                  }}
+                  onChange={(e) => setOptionIdDraft(idx, e.target.value)}
+                  onBlur={() => commitOptionId(idx)}
                   placeholder="id"
                   className="max-w-25 font-mono text-xs"
                   aria-label={`Option ${idx + 1} id`}

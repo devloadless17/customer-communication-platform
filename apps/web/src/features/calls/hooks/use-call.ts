@@ -593,6 +593,13 @@ export function useCall(): {
   const answerIncoming = useCallback(
     async (callId: string, contactName: string, conversationId: string) => {
       setError(null);
+      // Single peer connection (1:1, see the contract note up top). Answering
+      // a DIFFERENT call while one is live would tear down the live call's
+      // media (setupPeer → releaseMedia) with no /end for it — refuse instead.
+      if (liveCallRef.current && liveCallRef.current.callId !== callId) {
+        toast.error("End your current call before answering another one.");
+        return;
+      }
       const offer = pendingOffersRef.current.get(callId);
       if (!offer) {
         setError("Hold on — the call is still connecting.");
@@ -668,6 +675,17 @@ export function useCall(): {
       contactName: string,
     ): Promise<{ ok: true } | { ok: false; reason: string }> => {
       setError(null);
+
+      // Single peer connection (1:1). If a call is already live, refuse rather
+      // than silently dropping the in-flight call's media — setupPeer →
+      // releaseMedia closes the existing PC without POSTing /end for it. The
+      // entry-point buttons are also disabled while live; this is the backstop.
+      // (Check a local copy so this guard doesn't permanently narrow
+      // liveCallRef.current to null for the rebind logic further down.)
+      const alreadyLive = liveCallRef.current;
+      if (alreadyLive) {
+        return { ok: false, reason: "call_in_progress" };
+      }
 
       // The browser doesn't know the real callId until placeCall returns
       // (Meta assigns it). Use a temp id so onicecandidate / state handlers

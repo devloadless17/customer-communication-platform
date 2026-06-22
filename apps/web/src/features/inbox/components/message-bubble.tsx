@@ -206,7 +206,15 @@ function BubbleContent({
         )}
         <div className={cn("flex flex-col gap-0.5", isOut ? "items-end" : "items-start")}>
           {senderHeader}
-          <StickerImage url={media.url} isOut={isOut} />
+          {message.mediaPending ? (
+            // Don't load /api/media/<id> while the binary is still downloading —
+            // it 404s and StickerImage latches "unavailable" for the session
+            // (the URL doesn't change when the binary lands, so the latch never
+            // clears). Show the calm 128px slot until media_ready flips this.
+            <div className="size-32 rounded-md bg-muted" />
+          ) : (
+            <StickerImage url={media.url} isOut={isOut} />
+          )}
           {showMeta && <BubbleMeta message={message} isOut={isOut} />}
         </div>
       </div>

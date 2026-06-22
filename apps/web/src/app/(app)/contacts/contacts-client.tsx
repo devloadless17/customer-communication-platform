@@ -210,6 +210,13 @@ export function ContactsClient({
   // Contact id whose detail drawer is open — null = closed. Storing the id
   // (not the row) means a list reconcile mid-edit doesn't lose the drawer.
   const [detailId, setDetailId] = useState<string | null>(null);
+  // Snapshot of the open drawer's row so the drawer survives an inline edit
+  // that moves the contact out of the active filter — `reconcileContactUpdate`
+  // correctly drops the row from `items`, but `items.find` then returns
+  // undefined mid-save and the drawer would unmount before the PATCH even
+  // returns. We render from this snapshot (kept patched by contact:updated)
+  // when the live row has dropped out.
+  const detailRowRef = useRef<ContactListItem | null>(null);
 
   // Drop any selected ids that aren't in the current items (filter changed).
   useEffect(() => {
@@ -249,6 +256,17 @@ export function ContactsClient({
   useEffect(() => {
     const socket = getClientSocket();
     const onContactUpdated = (payload: { contact: Contact }) => {
+      // Keep the open-drawer snapshot fresh so an edit that drops the row out
+      // of the filtered `items` still shows the just-edited values.
+      if (
+        detailRowRef.current &&
+        detailRowRef.current.contact.id === payload.contact.id
+      ) {
+        detailRowRef.current = {
+          ...detailRowRef.current,
+          contact: payload.contact,
+        };
+      }
       reconcileContactUpdate(payload.contact);
     };
     const onContactDeleted = (payload: { contactId: string }) => {
@@ -360,6 +378,7 @@ export function ContactsClient({
       copy.delete(contactId);
       return copy;
     });
+    detailRowRef.current = null;
     setDetailId(null);
   }
 
@@ -703,8 +722,12 @@ export function ContactsClient({
           onClose={() => setImporting(false)}
           onImported={() => {
             setImporting(false);
-            // Hard refresh — import might have added many rows; refetching
-            // the page is simpler than splicing into local state.
+            // Refetch the client list from the server so imported rows appear
+            // immediately — don't rely on the one-shot `contacts:bulk_updated`
+            // socket frame (a dropped/disconnected frame would leave them
+            // invisible until a filter change). softRefresh reconciles the rest
+            // of the RSC (e.g. SSR-seeded counts).
+            list.refetch();
             softRefresh();
           }}
         />
@@ -827,7 +850,15 @@ export function ContactsClient({
       />
 
       {detailId && (() => {
-        const row = items.find((x) => x.contact.id === detailId);
+        const liveRow = items.find((x) => x.contact.id === detailId);
+        if (liveRow) detailRowRef.current = liveRow;
+        // Fall back to the snapshot when an inline edit has just dropped the
+        // row out of the filtered list — the drawer stays open over the
+        // in-flight save instead of vanishing.
+        const row =
+          detailRowRef.current && detailRowRef.current.contact.id === detailId
+            ? detailRowRef.current
+            : (liveRow ?? null);
         if (!row) return null;
         return (
           <ContactDetailDrawer
@@ -840,7 +871,10 @@ export function ContactsClient({
             canManageStages={canManageStages}
             activeConversationId={row.activeConversationId}
             lastInboundAt={row.lastInboundAt}
-            onClose={() => setDetailId(null)}
+            onClose={() => {
+              detailRowRef.current = null;
+              setDetailId(null);
+            }}
             onDelete={() => void deleteOne(detailId)}
             canDelete={canDeleteContacts}
             onTagCreated={(t) => {

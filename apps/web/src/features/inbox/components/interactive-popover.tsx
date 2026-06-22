@@ -58,10 +58,15 @@ export function InteractivePopover({
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
   // Reset state on open. Pre-fill the body from the composer so the agent
-  // doesn't have to retype what they already wrote.
+  // doesn't have to retype what they already wrote. Reset the buttons too so a
+  // prior send's customized options don't persist into the next open.
   useEffect(() => {
     if (open) {
       setBody(initialBody);
+      setOptions([
+        { id: "yes", title: "Yes" },
+        { id: "no", title: "No" },
+      ]);
       setError(null);
     }
   }, [open, initialBody]);
@@ -96,7 +101,17 @@ export function InteractivePopover({
   }
   function addOption() {
     if (options.length >= 3) return;
-    setOptions([...options, { id: `opt_${options.length + 1}`, title: "" }]);
+    // Unique id: `opt_N` keyed off a monotonic max over existing numeric
+    // suffixes, not `options.length + 1` — the latter mints a duplicate after
+    // a remove (delete opt_1 of [opt_1,opt_2] → length 1 → "opt_2" again),
+    // which trips idsUnique and dead-ends Send (mirrors the workflow fix in
+    // step-editors.tsx addOption).
+    let maxN = 0;
+    for (const o of options) {
+      const m = /^opt_(\d+)$/.exec(o.id);
+      if (m) maxN = Math.max(maxN, Number.parseInt(m[1]!, 10));
+    }
+    setOptions([...options, { id: `opt_${maxN + 1}`, title: "" }]);
   }
   function removeOption(idx: number) {
     setOptions(options.filter((_, i) => i !== idx));
@@ -135,7 +150,10 @@ export function InteractivePopover({
     // dedupe on this, so a network-retry or fast double-submit can't deliver the
     // interactive message to the customer twice. text/media/template already send
     // one; interactive was the gap (the busy flag alone doesn't cover a retry).
-    const clientTempId = crypto.randomUUID();
+    const clientTempId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `tmp_${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
     try {
       const res = await apiFetch("/api/messages/interactive", {
         method: "POST",

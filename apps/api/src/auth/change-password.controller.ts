@@ -69,15 +69,16 @@ function resetAttempts(userId: string): void {
  *
  *   POST /api/auth/change-password   { currentPassword, newPassword }
  *
- * `currentPassword` is NOT length-validated by zod — verifyPassword will
- * reject a wrong password anyway, and tighter validation here would leak
- * structure info about what the user's current password looks like.
+ * `currentPassword` has NO MIN length (verifyPassword rejects a wrong password
+ * anyway, and a min would leak structure about the current password) — only a
+ * generous max to bound a multi-megabyte string from reaching bcrypt.compare.
+ * 1024 is far above any real password, so it reveals nothing.
  *
  * Reads + writes go through Account.password — the row Better Auth's signin
  * actually verifies against. One source of truth, one write.
  */
 const BodySchema = z.object({
-  currentPassword: z.string(),
+  currentPassword: z.string().max(1024),
   newPassword: z.string(),
 });
 type Input = z.infer<typeof BodySchema>;

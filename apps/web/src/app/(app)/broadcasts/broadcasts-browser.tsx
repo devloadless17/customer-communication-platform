@@ -89,6 +89,14 @@ export function BroadcastsBrowser({
   const [view, setViewState] = useState<BroadcastView>(initialView);
   const [loading, setLoading] = useState(false);
 
+  // Optimistically drop a deleted row. DELETE emits no socket event (it's an
+  // agent action, not a live feed) and `router.refresh()` reseeds the SSR
+  // `initial` prop that this `useState(initial)` ignores — so without this the
+  // deleted row lingers until a filter change or hard reload.
+  const removeRow = useCallback((id: string) => {
+    setRows((prev) => prev.filter((b) => b.id !== id));
+  }, []);
+
   // Cookie-writing wrappers. Keep the state + cookie in lockstep; SSR reads
   // the cookie on the next request so a hard refresh restores the same view.
   const setFilter = (next: BroadcastStatusFilter) => {
@@ -267,6 +275,7 @@ export function BroadcastsBrowser({
           canManage={canManage}
           loading={loading}
           filtered={filter !== "all" || search.trim().length > 0}
+          onDeleted={removeRow}
         />
       ) : (
         <CalendarView rows={rows} />
@@ -280,12 +289,15 @@ function TableView({
   canManage,
   loading,
   filtered,
+  onDeleted,
 }: {
   rows: BroadcastListItem[];
   canManage: boolean;
   loading: boolean;
   /** A status filter or search is narrowing the list (vs. a true empty list). */
   filtered: boolean;
+  /** Optimistically remove a row from the client list on successful delete. */
+  onDeleted: (id: string) => void;
 }) {
   if (rows.length === 0) {
     return (
@@ -359,6 +371,7 @@ function TableView({
                     broadcastId={b.id}
                     templateName={b.name || b.templateName}
                     status={b.status}
+                    onDeleted={() => onDeleted(b.id)}
                   />
                 )}
               </div>
@@ -451,6 +464,7 @@ function TableView({
                       broadcastId={b.id}
                       templateName={b.name || b.templateName}
                       status={b.status}
+                      onDeleted={() => onDeleted(b.id)}
                     />
                   )}
                 </div>

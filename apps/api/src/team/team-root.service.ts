@@ -161,13 +161,20 @@ export class TeamRootService {
     // connected sockets stay live until kicked).
     const [blobKeyRows, teamMembers] = await Promise.all([
       this.db.message.findMany({
-        where: { teamId, mediaKey: { not: null } },
-        select: { mediaKey: true },
+        // Both the media binary (mediaKey) AND the video poster-frame thumbnail
+        // (mediaThumbnailKey) are independent blobs — collect both so the team
+        // purge doesn't leak posters (audit fix F1d). The blob-orphan sweeper
+        // backstops anything missed, but immediate cleanup is cheaper.
+        where: {
+          teamId,
+          OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
+        },
+        select: { mediaKey: true, mediaThumbnailKey: true },
       }),
       this.db.user.findMany({ where: { teamId }, select: { id: true } }),
     ]);
     const blobKeys = blobKeyRows
-      .map((r) => r.mediaKey)
+      .flatMap((r) => [r.mediaKey, r.mediaThumbnailKey])
       .filter((k): k is string => Boolean(k));
 
     try {

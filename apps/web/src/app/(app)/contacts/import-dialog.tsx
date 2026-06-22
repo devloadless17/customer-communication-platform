@@ -58,6 +58,12 @@ const IGNORE = "";
 
 const PREVIEW_ROWS = 5;
 
+/** Client-side guards mirroring the server (contacts.service.ts MAX_BYTES /
+ *  MAX_ROWS) so an oversized file fails fast with a friendly message instead
+ *  of a generic server reject after the upload round-trip. */
+const MAX_FILE_BYTES = 1 * 1024 * 1024; // 1 MiB — matches server MAX_BYTES
+const MAX_FILE_ROWS = 5000; // matches server MAX_ROWS
+
 interface ParsedFile {
   headers: string[];
   /** ALL data rows (raw cells). The map step previews only the first few; the
@@ -119,6 +125,45 @@ export function ImportContactsDialog({
       setMapping([]);
       return;
     }
+    // Reject an oversized file up front (matches the server's 1 MiB cap) so the
+    // user doesn't wait for an upload round-trip to learn it's too big.
+    if (file.size > MAX_FILE_BYTES) {
+      setParseError(
+        `That file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). ` +
+          `Keep it under 1 MB / ${MAX_FILE_ROWS.toLocaleString()} rows, or split it.`,
+      );
+      setParsed(null);
+      setMapping([]);
+      return;
+    }
+    // Detect a UTF-16 BOM from the raw bytes. `readAsText` decodes as UTF-8 by
+    // default, which silently mojibakes a UTF-16 file — surface a clear fix
+    // instead of importing garbled names.
+    const bomReader = new FileReader();
+    bomReader.onerror = () =>
+      setParseError("Couldn't read the file. Try again.");
+    bomReader.onload = () => {
+      const buf = bomReader.result;
+      if (buf instanceof ArrayBuffer && buf.byteLength >= 2) {
+        const b = new Uint8Array(buf);
+        const isUtf16 =
+          (b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff);
+        if (isUtf16) {
+          setParseError(
+            "This looks like a UTF-16 file. Re-save it as UTF-8 CSV (in Excel: " +
+              '"CSV UTF-8") and try again.',
+          );
+          setParsed(null);
+          setMapping([]);
+          return;
+        }
+      }
+      readCsvText(file);
+    };
+    bomReader.readAsArrayBuffer(file.slice(0, 2));
+  }
+
+  function readCsvText(file: File) {
     const reader = new FileReader();
     reader.onerror = () => setParseError("Couldn't read the file. Try again.");
     reader.onload = () => {
@@ -134,6 +179,16 @@ export function ImportContactsDialog({
       }
       if (pc.headers.length === 0 || pc.rows.length === 0) {
         setParseError("This CSV has no data rows.");
+        setParsed(null);
+        setMapping([]);
+        return;
+      }
+      // Mirror the server's row cap so a too-big file is caught before mapping.
+      if (pc.rows.length > MAX_FILE_ROWS) {
+        setParseError(
+          `Too many rows (${pc.rows.length.toLocaleString()}). The limit is ` +
+            `${MAX_FILE_ROWS.toLocaleString()} — split the file and import in batches.`,
+        );
         setParsed(null);
         setMapping([]);
         return;
@@ -732,18 +787,18 @@ function parseCsv(input: string): { headers: string[]; rows: string[][] } {
   return { headers, rows };
 }
 
-// Cells beginning with one of these are interpreted as a formula by Excel /
-// Sheets / LibreOffice — mirror the server-side defuse so the rebuilt upload
-// isn't a CSV-injection vector either. (OWASP "CSV/Formula Injection".)
-const FORMULA_TRIGGERS = /^[=+\-@\t\r]/;
-
-/** Quote-and-escape a cell per RFC 4180, with formula-injection defuse. */
+/**
+ * Quote-and-escape a cell per RFC 4180 ONLY. This rebuilds the CSV we UPLOAD
+ * back to the importer, so it must NOT apply formula-injection defuse: that's
+ * an EXPORT concern (a leading `'` prepended here gets stored verbatim by the
+ * server, corrupting the contact's value). Server-side export defuse lives in
+ * lib/csv.ts and stays as-is.
+ */
 function escapeCell(value: string): string {
-  const safe = FORMULA_TRIGGERS.test(value) ? `'${value}` : value;
-  if (/[",\r\n]/.test(safe)) {
-    return `"${safe.replace(/"/g, '""')}"`;
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
   }
-  return safe;
+  return value;
 }
 
 /**

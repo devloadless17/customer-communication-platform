@@ -222,6 +222,15 @@ export class MetaWebhookController implements OnModuleDestroy {
     // reads the map after `downloadPromise` settles.
     const downloadOutcomes = new Map<string, DownloadOutcome>();
     const downloadPromise = this.downloadInboundMedia(teamId, events, downloadOutcomes);
+    // The ingest-failure branches below return/throw WITHOUT ever consuming
+    // `downloadPromise` (only the success path threads it into
+    // `completePendingMedia`). A rejection on that orphaned promise would
+    // surface as an unhandledRejection. Attach a non-consuming handler so it
+    // can never float — the original promise is unchanged, so the success
+    // path's `await downloadPromise` still observes the real settlement.
+    downloadPromise.catch((err) =>
+      this.logger.error(`[${teamId}] inbound media download failed`, err),
+    );
 
     try {
       await ingestEvents(teamId, "whatsapp", events);

@@ -159,11 +159,21 @@ function sniffMime(bytes: Uint8Array): string | null {
   if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) {
     return "application/pdf";
   }
-  // MP4 / 3GP / MOV — `ftyp` box at offset 4: ?? ?? ?? ?? 66 74 79 70
+  // MP4 / 3GP / MOV / M4A — `ftyp` box at offset 4: ?? ?? ?? ?? 66 74 79 70.
+  // The major brand at bytes 8..11 disambiguates audio-only ISO-BMFF
+  // containers (M4A = "M4A ", audiobook M4B = "M4B ") from video. The bare
+  // container signature cannot tell audio from video, so known audio brands
+  // are reported as audio/mp4 and everything else falls back to the video
+  // canonical (see the mp4-family reconciliation in assertSignatureMatches
+  // for generic-brand aac/m4a that still sniffs as video/mp4).
   if (
     b.length >= 12 &&
     b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70
   ) {
+    // "M4A " / "M4B " => 4D 34 41/42 20
+    if (b[8] === 0x4d && b[9] === 0x34 && (b[10] === 0x41 || b[10] === 0x42) && b[11] === 0x20) {
+      return "audio/mp4";
+    }
     return "video/mp4"; // canonical for the ftyp family
   }
   // OGG: 4F 67 67 53 (OggS)
@@ -187,6 +197,27 @@ function kindOfMime(mime: string): string {
   return "other";
 }
 
+/**
+ * An ISO Base Media (ftyp) container carries EITHER audio or video, and the
+ * container bytes alone cannot always distinguish them — only some major
+ * brands do (handled in sniffMime). So an ftyp sniff (video/mp4 or audio/mp4)
+ * is compatible with ANY mp4-family audio OR video claim. Generic-brand
+ * aac/m4a (e.g. iOS/Safari/Chrome recordings, shared audio files) sniff as
+ * video/mp4 yet are legitimately claimed audio/mp4 or audio/aac.
+ *
+ * This is safe: the `kind` allowlist (set from Meta's categorization, not the
+ * sniff) still gates audio-vs-video, and an mp4 container is never an HTML/SVG
+ * XSS vector regardless of its audio/video label. Without this reconciliation
+ * a whole class of inbound audio was rejected and silently dropped to text.
+ */
+const MP4_FAMILY: ReadonlySet<string> = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/3gpp",
+  "audio/mp4",
+  "audio/aac",
+]);
+
 function assertSignatureMatches(bytes: Uint8Array, claimedMime: string): void {
   const sniffed = sniffMime(bytes);
   if (!sniffed) return; // unknown signature (or text format) — claimed-mime gate stands
@@ -194,6 +225,8 @@ function assertSignatureMatches(bytes: Uint8Array, claimedMime: string): void {
   if (sniffed === claimed) return;
   // Same kind-family is acceptable (mp4 ftyp can be claimed as 3gpp/mov/mp4).
   if (kindOfMime(sniffed) === kindOfMime(claimed)) return;
+  // mp4-family container: an ftyp sniff matches an mp4 audio OR video claim.
+  if (MP4_FAMILY.has(sniffed) && MP4_FAMILY.has(claimed)) return;
   throw new Error(
     `uploadthing: file signature "${sniffed}" does not match claimed mime "${claimed}"`,
   );

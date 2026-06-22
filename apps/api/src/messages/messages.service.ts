@@ -1301,7 +1301,7 @@ export class MessagesService {
       });
       const updated = await this.db.message.update({
         where: { id: messageId },
-        data: { mediaThumbnailUrl: thumb.url },
+        data: { mediaThumbnailUrl: thumb.url, mediaThumbnailKey: thumb.key },
         select: {
           conversationId: true,
           mediaMimeType: true,

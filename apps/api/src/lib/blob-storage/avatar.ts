@@ -78,6 +78,24 @@ export async function uploadAvatar(input: AvatarUploadInput): Promise<AvatarUplo
   return { key: res.data.key, url: res.data.ufsUrl, sizeBytes: res.data.size };
 }
 
+/**
+ * Best-effort delete of a previously-uploaded avatar blob, given its URL.
+ * Avatars use a timestamped customId, so each re-upload mints a NEW blob and
+ * the orphan sweeper deliberately skips the `avatar-` prefix — without this a
+ * replaced avatar would leak in shared storage forever. Never throws: blob GC
+ * must not block a profile update. No-op for non-UploadThing URLs (the key
+ * sits in the `/f/<fileKey>` path segment).
+ */
+export async function deleteAvatarByUrl(url: string): Promise<void> {
+  try {
+    const key = url.split("/f/")[1]?.split(/[?#]/)[0];
+    if (!key) return;
+    await getUtApi().deleteFiles(key);
+  } catch {
+    // swallow — a leaked blob is far less bad than a failed avatar change
+  }
+}
+
 function extFromMime(mime: string): string {
   if (mime === "image/png") return "png";
   if (mime === "image/jpeg") return "jpg";

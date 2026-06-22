@@ -286,6 +286,7 @@ export const ConversationListItem = memo(
     prev.conversation.id === next.conversation.id &&
     prev.conversation.lastMessageAt === next.conversation.lastMessageAt &&
     prev.conversation.lastMessagePreview === next.conversation.lastMessagePreview &&
+    prev.conversation.lastMessageDirection === next.conversation.lastMessageDirection &&
     prev.conversation.unreadCount === next.conversation.unreadCount &&
     prev.conversation.status === next.conversation.status &&
     prev.conversation.assignedUserId === next.conversation.assignedUserId,

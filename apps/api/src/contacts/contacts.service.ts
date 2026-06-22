@@ -255,8 +255,13 @@ export class ContactsService {
     });
     if (!existing) return null;
 
-    const updated = await this.db.contact.update({
-      where: { id: existing.id },
+    // CAS on deletedAt: a concurrent revive (e.g. an inbound WhatsApp webhook
+    // landing on the same phone) may have flipped this row live between the
+    // findFirst above and here. Guard the revive so we don't clobber that
+    // writer's directory fields with this manual payload — mirrors the hardened
+    // import-revive path. If we lose the race, return the live row untouched.
+    const revived = await this.db.contact.updateMany({
+      where: { id: existing.id, deletedAt: { not: null } },
       data: {
         name: data.name,
         firstName: data.firstName,
@@ -271,20 +276,28 @@ export class ContactsService {
         deletedAt: null,
         version: { increment: 1 },
       },
+    });
+
+    const row = await this.db.contact.findFirst({
+      where: { id: existing.id },
       include: { tags: { select: { id: true } } },
     });
-
-    const contact: Contact = toContactWire(updated, {
-      tagIds: updated.tags.map((t) => t.id),
+    if (!row) return null;
+    const contact: Contact = toContactWire(row, {
+      tagIds: row.tags.map((t) => t.id),
     });
 
-    await this.bus.publish({
-      type: "contact.created",
-      teamId,
-      contact,
-      source: "manual",
-      createdByUserId: userId,
-    });
+    // Only announce a (re)creation when THIS call performed the revive; if a
+    // concurrent writer won, the row is already live and they published it.
+    if (revived.count > 0) {
+      await this.bus.publish({
+        type: "contact.created",
+        teamId,
+        contact,
+        source: "manual",
+        createdByUserId: userId,
+      });
+    }
 
     return contact;
   }
@@ -846,6 +859,21 @@ export class ContactsService {
       ) {
         unknownColumns.push(header);
       }
+    }
+
+    // Cap parity with the JSON API: each row's customFields bag is built
+    // directly from the field-mapped columns below, bypassing
+    // assertCustomFieldsTotal. The mapped-field column set is identical for
+    // every row, so enforce the per-contact cap ONCE here rather than throwing
+    // mid-batch (which would leave a partial import).
+    const fieldColumnCount = Array.from(headerMap.values()).filter(
+      (m) => m.kind === "field",
+    ).length;
+    if (fieldColumnCount > MAX_TOTAL_FIELDS) {
+      throw new BadRequestException({
+        error: "too_many_fields",
+        detail: `CSV maps ${fieldColumnCount} custom-field columns; the limit is ${MAX_TOTAL_FIELDS} per contact.`,
+      });
     }
 
     const errors: ImportResult["errors"] = [];
@@ -1484,7 +1512,9 @@ export class ContactsService {
    * usage-capped at the team level and a single SELECT keeps the response
    * deterministic.
    */
-  async exportCsv(teamId: string): Promise<{ csv: string; filename: string; truncated: boolean }> {
+  async exportCsv(
+    teamId: string,
+  ): Promise<{ csv: string; filename: string; truncated: boolean; total: number }> {
     // Hard cap. Without it a tenant with 200k contacts triggers a single
     // SELECT that loads every row + serializes in one shot — multi-MB
     // JSON response on the wire AND a multi-MB CSV string serialized
@@ -1595,12 +1625,21 @@ export class ContactsService {
       return row;
     });
 
-    const truncated = contacts.length > 50_000;
+    const total = contacts.length;
+    const truncated = total > 50_000;
     const cappedRows = truncated ? rows.slice(0, 50_000) : rows;
     const csv = serializeCsv(columns, cappedRows);
-    // Date-stamp so multiple exports in a day don't overwrite each other.
+    // Date-stamp so multiple exports in a day don't overwrite each other. When
+    // truncated, encode the cap in the filename itself — the export is a plain
+    // <a download> navigation, so the filename is the only truncation signal
+    // the browser user actually sees (the controller also sets a header for
+    // API/fetch consumers). Without this a >50k-contact team gets a silently
+    // partial backup believing it's complete.
     const stamp = new Date().toISOString().slice(0, 10);
-    return { csv, filename: `contacts-${stamp}.csv`, truncated };
+    const filename = truncated
+      ? `contacts-${stamp}-first-50000-of-${total}.csv`
+      : `contacts-${stamp}.csv`;
+    return { csv, filename, truncated, total };
   }
 
   /**

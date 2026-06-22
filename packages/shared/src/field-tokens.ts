@@ -134,7 +134,7 @@ const MESSAGE_TOKENS: TokenSpec[] = [
   { token: "$var.message.direction", label: "Direction (in/out)", group: "message" },
   { token: "$var.message.id", label: "Message id", group: "message" },
   { token: "$var.message.external_id", label: "External id (wamid)", group: "message" },
-  { token: "$var.message.channel", label: "Channel (e.g. meta_cloud)", group: "message" },
+  { token: "$var.message.channel", label: "Channel (e.g. whatsapp)", group: "message" },
   { token: "$var.message.media_kind", label: "Media kind", group: "message" },
   { token: "$var.message.media_caption", label: "Media caption", group: "message" },
   { token: "$var.message.media_url", label: "Media URL", group: "message" },

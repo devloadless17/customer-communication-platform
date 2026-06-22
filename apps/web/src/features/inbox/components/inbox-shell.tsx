@@ -77,6 +77,8 @@ function callReasonMessage(reason: string): string {
       return "WhatsApp calling isn't configured for this team. Open Settings → WhatsApp.";
     case "provider_rejected":
       return "WhatsApp rejected the call. Make sure calling is enabled on your number.";
+    case "call_in_progress":
+      return "You're already on a call. End it before starting another.";
     case "mic_permission_denied":
       return "Allow microphone access in your browser to place calls.";
     case "rtc_setup_failed":

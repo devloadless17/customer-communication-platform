@@ -357,8 +357,10 @@ export class ConversationsService {
       select: {
         id: true,
         messages: {
-          where: { mediaKey: { not: null } },
-          select: { mediaKey: true },
+          where: {
+            OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
+          },
+          select: { mediaKey: true, mediaThumbnailKey: true },
         },
       },
     });
@@ -368,7 +370,7 @@ export class ConversationsService {
     const ownedIds = owned.map((c) => c.id);
     const mediaKeys = owned
       .flatMap((c) => c.messages)
-      .map((m) => m.mediaKey)
+      .flatMap((m) => [m.mediaKey, m.mediaThumbnailKey])
       .filter((k): k is string => Boolean(k));
 
     await this.db.conversation.deleteMany({
@@ -640,15 +642,17 @@ export class ConversationsService {
       select: {
         id: true,
         messages: {
-          where: { mediaKey: { not: null } },
-          select: { mediaKey: true },
+          where: {
+            OR: [{ mediaKey: { not: null } }, { mediaThumbnailKey: { not: null } }],
+          },
+          select: { mediaKey: true, mediaThumbnailKey: true },
         },
       },
     });
     if (!conversation) throw new NotFoundException({ error: "conversation not found" });
 
     const mediaKeys = conversation.messages
-      .map((m) => m.mediaKey)
+      .flatMap((m) => [m.mediaKey, m.mediaThumbnailKey])
       .filter((k): k is string => Boolean(k));
 
     // Compound where (id + teamId) via deleteMany — Prisma's single `delete`

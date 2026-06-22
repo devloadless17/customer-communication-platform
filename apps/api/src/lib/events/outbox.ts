@@ -147,24 +147,6 @@ export async function persistDispatchedRow<K extends DomainEventType>(
 }
 
 /**
- * Mark a row as dispatch-failed. The drainer does NOT retry these — the
- * operator decides what to do via a query like:
- *
- *   SELECT id, type, "lastError" FROM "OutboundEvent"
- *   WHERE "failedAt" IS NOT NULL AND "publishedAt" IS NULL
- *   ORDER BY "createdAt" DESC LIMIT 100;
- */
-export async function markFailed(id: string, lastError: string): Promise<void> {
-  // Truncate so a verbose stack doesn't bloat the row; the operator can find
-  // the full one in process logs by `withCorrelation`.
-  const truncated = lastError.length > 1000 ? lastError.slice(0, 1000) + "…" : lastError;
-  await db.outboundEvent.updateMany({
-    where: { id, publishedAt: null, failedAt: null },
-    data: { failedAt: new Date(), lastError: truncated },
-  });
-}
-
-/**
  * Stamp `failedAt` + `lastError` on an already-claimed (publishedAt set) row
  * when a subscriber threw mid-dispatch. The row STAYS marked-published
  * (at-most-once dispatch was completed; we won't re-fire — the drainer's claim

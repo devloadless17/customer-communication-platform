@@ -150,7 +150,6 @@ export function ThreadPanel({
         teamMembers={teamMembers}
         onOptimisticAdd={addOptimistic}
         onOptimisticFail={markOptimisticFailed}
-        onOptimisticRemove={removeOptimistic}
       />
     </aside>
   );

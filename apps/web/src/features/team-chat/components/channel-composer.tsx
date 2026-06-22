@@ -52,7 +52,6 @@ export function ChannelComposer({
   teamMembers: User[];
   onOptimisticAdd: (m: TeamChannelMessageDto) => void;
   onOptimisticFail: (clientTempId: string) => void;
-  onOptimisticRemove: (clientTempId: string) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -235,7 +234,13 @@ export function ChannelComposer({
 
   const handleFile = async (file: File) => {
     const clientTempId = `tmp_${Math.random().toString(36).slice(2)}_${Date.now()}`;
-    const optimistic: TeamChannelMessageDto = {
+    // Client-only marker so the failed-state UI HIDES Retry for media sends:
+    // the original File bytes aren't retained, so a re-POST would only resend
+    // the caption-as-text (or 400 on an empty caption). The flag rides on the
+    // optimistic row (never persisted, never echoed by the server) and is read
+    // by channel-message.tsx's Retry gate. We don't set a real `media` object
+    // because that would render a broken attachment on the pending bubble.
+    const optimistic: TeamChannelMessageDto & { hasOptimisticMedia: true } = {
       id: clientTempId,
       channelId,
       teamId: currentUser.teamId,
@@ -253,6 +258,7 @@ export function ChannelComposer({
       createdAt: new Date().toISOString(),
       clientTempId,
       pending: true,
+      hasOptimisticMedia: true,
     };
     onOptimisticAdd(optimistic);
     const captionAtStart = body.trim();

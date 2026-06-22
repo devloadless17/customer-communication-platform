@@ -207,7 +207,15 @@ export function insertStepAfter(
  */
 export type AskOptionEdgeOp =
   | { kind: "rename"; oldId: string; newId: string }
-  | { kind: "remove"; optionId: string };
+  | { kind: "remove"; optionId: string }
+  // Switching answerKind away from buttons/list to a kind with no per-option
+  // handles (free_text/number/date) must drop EVERY wired per-option edge in
+  // one snapshot — otherwise each stranded `opt_N` edge dangles (orphaned
+  // child subtree + phantom reappearing "+") and dead-ends the run on a tap.
+  // `optionId` is carried only so the existing single-op dispatch keeps
+  // compiling; the bulk path ignores it and strips by label predicate. Wire
+  // this kind to `removeAllOptionEdges` in updateSelectedConfigWithEdges.
+  | { kind: "remove_all_options"; optionId: string };
 
 /**
  * Re-label an ask_question option edge when its option id is renamed. The
@@ -226,16 +234,29 @@ export function renameOptionEdge(
   newId: string,
 ): WorkflowGraph {
   if (!oldId || oldId === newId) return graph;
+  // Dedup guard: if an edge from this node already carries `newId` (the author
+  // renamed an option onto a SIBLING's id), relabeling the old edge to `newId`
+  // would leave TWO same-label edges from one node — an ambiguous fanout. The
+  // duplicate id is already rejected at publish, so on collision we leave the
+  // edge on `oldId` UNCHANGED: never drop it (that orphans this option's wired
+  // child subtree) and never mint a second same-label edge. The author resolves
+  // the duplicate before publish; the wiring stays intact meanwhile. (Callers
+  // commit this rename once on blur, not per keystroke, so a value typed
+  // transiently THROUGH a sibling's id no longer destroys the edge.)
+  const collides =
+    !!newId &&
+    graph.edges.some((e) => e.from === nodeId && e.label === newId);
+  if (collides) return graph;
   let mutated = false;
-  const edges = graph.edges.map((e) => {
+  const edges = graph.edges.flatMap((e) => {
     if (e.from === nodeId && e.label === oldId) {
       mutated = true;
-      // Empty newId means the author cleared the id field mid-edit — drop the
-      // label so the now-unlabeled edge is the caller's to fix, rather than
-      // leaving a stale-labeled dangling edge.
-      return newId ? { ...e, label: newId } : { from: e.from, to: e.to };
+      // Empty newId means the author cleared the id field — drop the label so
+      // the now-unlabeled edge is the caller's to fix, rather than leaving a
+      // stale-labeled dangling edge.
+      return [newId ? { ...e, label: newId } : { from: e.from, to: e.to }];
     }
-    return e;
+    return [e];
   });
   return mutated ? { ...graph, edges } : graph;
 }
@@ -254,6 +275,32 @@ export function removeOptionEdge(
   if (!optionId) return graph;
   const edges = graph.edges.filter(
     (e) => !(e.from === nodeId && e.label === optionId),
+  );
+  return edges.length === graph.edges.length ? graph : { ...graph, edges };
+}
+
+/**
+ * Drop EVERY per-option edge from `nodeId` in one pass — used when an
+ * ask_question switches answerKind FROM buttons/list TO a kind with no
+ * per-option handles (free_text / number / date). Strips every outgoing edge
+ * whose label is neither "answered" nor "timeout" (the two non-option edges an
+ * ask_question keeps); unlabeled edges are left untouched. Without this, the
+ * abandoned `opt_N` edges dangle exactly like a removed option would —
+ * orphaning their child subtrees and reappearing as phantom "+" handles.
+ * No-op when nothing matches.
+ */
+export function removeAllOptionEdges(
+  graph: WorkflowGraph,
+  nodeId: string,
+): WorkflowGraph {
+  const edges = graph.edges.filter(
+    (e) =>
+      !(
+        e.from === nodeId &&
+        e.label != null &&
+        e.label !== "answered" &&
+        e.label !== "timeout"
+      ),
   );
   return edges.length === graph.edges.length ? graph : { ...graph, edges };
 }

@@ -204,9 +204,19 @@ export class ContactFieldsService {
       await this.assertLabelAvailable(teamId, input.label, id);
     }
 
-    const updated = await this.db.contactFieldDefinition.update({
-      where: { id },
+    // Team-scoped mutation (defense-in-depth): even though the findFirst above
+    // already proved ownership, the WRITE itself carries the teamId predicate
+    // so a bare-id update can never touch another tenant's row. `input` no
+    // longer carries `order` (dropped from the schema) — order changes only via
+    // the transactional /reorder endpoint.
+    const result = await this.db.contactFieldDefinition.updateMany({
+      where: { id, teamId },
       data: input,
+    });
+    if (result.count === 0) throw new NotFoundException({ error: "not found" });
+
+    const updated = await this.db.contactFieldDefinition.findUniqueOrThrow({
+      where: { id },
     });
     await this.bus.publish({
       type: "team.catalog_changed",
@@ -269,15 +279,20 @@ export class ContactFieldsService {
     // Postgres `-` operator is the right tool here; Prisma doesn't expose
     // it typed so we drop to $executeRaw. The `?` (key existence) on the
     // WHERE keeps the indexable teamId predicate first for the bulk path.
-    await this.db.$transaction([
+    // Team-scoped delete (defense-in-depth): the findFirst above proved
+    // ownership, but the DELETE itself carries the teamId predicate so a bare-id
+    // delete can never remove another tenant's definition. deleteMany returns a
+    // count we assert is non-zero.
+    const [, deleted] = await this.db.$transaction([
       this.db.$executeRaw`
         UPDATE "Contact"
         SET "customFields" = "customFields" - ${def.key}
         WHERE "teamId" = ${teamId}
           AND "customFields" ? ${def.key}
       `,
-      this.db.contactFieldDefinition.delete({ where: { id } }),
+      this.db.contactFieldDefinition.deleteMany({ where: { id, teamId } }),
     ]);
+    if (deleted.count === 0) throw new NotFoundException({ error: "not found" });
 
     await this.bus.publish({
       type: "team.catalog_changed",

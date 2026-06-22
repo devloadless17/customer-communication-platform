@@ -16,8 +16,10 @@ import type { ApiSession } from "../auth/session.guard";
 import { zBody, zQuery } from "../common/zod-validation.pipe";
 import {
   BroadcastListQuerySchema,
+  BroadcastRecipientsQuerySchema,
   CreateBroadcastSchema,
   type BroadcastListQuery,
+  type BroadcastRecipientsQuery,
   type CreateBroadcastInput,
 } from "./broadcasts.schemas";
 import { BroadcastsService } from "./broadcasts.service";
@@ -84,14 +86,12 @@ export class BroadcastsController {
   async listRecipients(
     @CurrentSession() session: ApiSession,
     @Param("id") id: string,
-    @Query("cursor") cursor?: string,
-    @Query("status") status?: string,
-    @Query("take") take?: string,
+    @Query(zQuery(BroadcastRecipientsQuerySchema)) query: BroadcastRecipientsQuery,
   ) {
     return this.broadcasts.listRecipients(session.teamId, id, {
-      cursor,
-      status,
-      take: take ? Number.parseInt(take, 10) : undefined,
+      cursor: query.cursor,
+      status: query.status,
+      take: query.take,
     });
   }
 

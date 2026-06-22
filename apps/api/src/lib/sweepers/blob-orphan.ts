@@ -58,8 +58,15 @@ const MAX_PAGES_PER_TICK = 4;
 // be deleted as false orphans. Avatars (lib/blob-storage/avatar.ts) use the
 // `avatar-<userId>-<ts>` customId.
 const URL_ONLY_CUSTOM_ID_PREFIXES = ["avatar-"] as const;
+// NOTE: video poster thumbnails (customId `<wamid>_thumb`, key on
+// Message.mediaThumbnailKey) are NOT excluded here — they ARE db-keyed, so the
+// exact `mediaThumbnailKey` cross-check below folds every REFERENCED poster
+// into `referenced`. That protects live posters while still letting a
+// genuinely-orphaned poster (parent row gone) be reclaimed — a blanket suffix
+// exclusion would leak those forever.
 function isUrlOnlyBlob(customId: string | null): boolean {
-  return customId != null && URL_ONLY_CUSTOM_ID_PREFIXES.some((p) => customId.startsWith(p));
+  if (customId == null) return false;
+  return URL_ONLY_CUSTOM_ID_PREFIXES.some((p) => customId.startsWith(p));
 }
 
 let timer: NodeJS.Timeout | null = null;
@@ -140,11 +147,18 @@ async function sweepOnce(): Promise<void> {
     if (eligible.length > 0) {
       const eligibleKeyList = eligible.map((k) => k.key);
       // Cross-check both customer-message media AND team-chat-message media.
-      // Both tables store the UploadThing fileKey in `mediaKey`.
-      const [msgHits, chatHits] = await Promise.all([
+      // Both tables store the UploadThing fileKey in `mediaKey`. ALSO cross-
+      // check Message.mediaThumbnailKey — video poster frames are stored on a
+      // separate key there, not in `mediaKey`, so without this a referenced
+      // poster thumbnail would be classified an orphan and deleted.
+      const [msgHits, thumbHits, chatHits] = await Promise.all([
         db.message.findMany({
           where: { mediaKey: { in: eligibleKeyList } },
           select: { mediaKey: true },
+        }),
+        db.message.findMany({
+          where: { mediaThumbnailKey: { in: eligibleKeyList } },
+          select: { mediaThumbnailKey: true },
         }),
         db.teamChannelMessage.findMany({
           where: { mediaKey: { in: eligibleKeyList } },
@@ -153,6 +167,7 @@ async function sweepOnce(): Promise<void> {
       ]);
       const referenced = new Set<string>([
         ...msgHits.map((m) => m.mediaKey!).filter(Boolean),
+        ...thumbHits.map((m) => m.mediaThumbnailKey!).filter(Boolean),
         ...chatHits.map((m) => m.mediaKey!).filter(Boolean),
       ]);
       for (const k of eligible) {

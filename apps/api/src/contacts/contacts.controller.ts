@@ -157,11 +157,17 @@ export class ContactsController {
     @CurrentSession() session: ApiSession,
     @Res() res: Response,
   ): Promise<void> {
-    const { csv, filename } = await this.contacts.exportCsv(session.teamId);
+    const { csv, filename, truncated, total } = await this.contacts.exportCsv(
+      session.teamId,
+    );
     res
       .status(200)
       .set("content-type", "text/csv; charset=utf-8")
       .set("content-disposition", `attachment; filename="${filename}"`)
+      // Truncation signal for API/fetch consumers (the in-app export is an
+      // <a download> that can't read headers — its filename carries the cap).
+      .set("x-export-truncated", truncated ? "true" : "false")
+      .set("x-export-total", String(total))
       .send(csv);
   }
 

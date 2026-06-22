@@ -96,3 +96,18 @@ export const BroadcastListQuerySchema = z.object({
   take: z.coerce.number().int().min(1).max(200).optional(),
 });
 export type BroadcastListQuery = z.infer<typeof BroadcastListQuerySchema>;
+
+/**
+ * Recipient-page query for `GET :id/recipients`. `status` is validated against
+ * the BroadcastRecipientStatus enum so a bad value (e.g. `?status=bogus`) is
+ * rejected with a clean 400 here rather than being cast straight to the Prisma
+ * enum and surfacing as a 500 from the DB. Omit `status` = no filter.
+ */
+export const BroadcastRecipientsQuerySchema = z.object({
+  cursor: z.string().optional(),
+  status: z.enum(["queued", "sent", "failed"]).optional(),
+  take: z.coerce.number().int().min(1).max(500).optional(),
+});
+export type BroadcastRecipientsQuery = z.infer<
+  typeof BroadcastRecipientsQuerySchema
+>;

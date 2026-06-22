@@ -501,7 +501,7 @@ export function useTeamChannelEvents(
         if (prev.some((m) => m.id === payload.message.id)) return prev;
         const next = tempId
           ? prev.map((m) =>
-              m.clientTempId === tempId && m.pending
+              m.clientTempId === tempId && (m.pending || m.failed)
                 ? { ...payload.message, clientTempId: tempId }
                 : m,
             )
@@ -711,9 +711,10 @@ export function useTeamChannelEvents(
             : m,
         ),
       );
-      const url = target.threadRootId
-        ? `/api/team/channels/${channelId}/messages/${target.threadRootId}/thread`
-        : `/api/team/channels/${channelId}/messages`;
+      // Always the channel-root endpoint: this hook's `onMessage` bails on
+      // `threadRootId !== null`, so a thread reply's optimistic row never lives
+      // here — thread retries go through use-thread-events' own retryOptimistic.
+      const url = `/api/team/channels/${channelId}/messages`;
       void fetchWithSessionGuard(url, {
         method: "POST",
         headers: { "content-type": "application/json" },

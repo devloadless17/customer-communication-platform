@@ -26,18 +26,24 @@ function useSetTeamStatus(teamId: string) {
   ) {
     setError(null);
     startTransition(async () => {
-      const res = await apiFetch(`/api/admin/teams/${teamId}/status`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(reason ? { status, reason } : { status }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "Failed to update status");
-        return;
+      try {
+        const res = await apiFetch(`/api/admin/teams/${teamId}/status`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(reason ? { status, reason } : { status }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setError(data.error ?? "Failed to update status");
+          return;
+        }
+        onDone?.();
+        router.refresh();
+      } catch {
+        // Network blip or a transient 401 during an api restart — surface it
+        // instead of an unhandled rejection + silently-dead button.
+        setError("Couldn't reach the server. Try again in a moment.");
       }
-      onDone?.();
-      router.refresh();
     });
   }
 

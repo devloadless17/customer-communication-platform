@@ -47,7 +47,6 @@ export default async function TemplatesPage() {
       fieldDefinitions={fieldDefinitions}
       connected={templatesResp.connected}
       hasWabaId={templatesResp.hasWabaId}
-      hasAppId={templatesResp.hasAppId}
       canManage={permissions["templates:manage"]}
       initialStatusFilter={initialStatusFilter}
       initialQuery={initialQuery}

@@ -14,6 +14,7 @@ import { EventBus } from "../events/event-bus.module";
 import { DbService } from "../db/db.service";
 import {
   AvatarUploadError,
+  deleteAvatarByUrl,
   uploadAvatar,
 } from "../lib/blob-storage/avatar";
 import { mapUser } from "../lib/queries/_shared";
@@ -173,6 +174,10 @@ export class UsersService {
     file: AvatarUploadFile,
   ): Promise<{ url: string }> {
     try {
+      const prev = await this.db.user.findUnique({
+        where: { id: userId },
+        select: { avatarUrl: true },
+      });
       const out = await uploadAvatar({
         userId,
         bytes: file.bytes,
@@ -183,6 +188,12 @@ export class UsersService {
         where: { id: userId },
         data: { avatarUrl: out.url },
       });
+      // GC the prior avatar blob now that the row points at the new one — the
+      // timestamped customId means the old blob would otherwise leak forever
+      // (the orphan sweeper skips the `avatar-` prefix). Best-effort.
+      if (prev?.avatarUrl && prev.avatarUrl !== out.url) {
+        await deleteAvatarByUrl(prev.avatarUrl);
+      }
       this.sessionInvalidator.bustCache(userId);
       await this.bus.publish({
         type: "user.profile_updated",

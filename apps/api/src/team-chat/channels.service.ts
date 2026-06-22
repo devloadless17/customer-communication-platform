@@ -449,6 +449,66 @@ export class ChannelsService {
   }
 
   /**
+   * Idempotent-send dedup. A prior POST reusing this clientTempId already
+   * committed: the `TeamChannelMessage_send_idem_key` unique rejected the
+   * retry's insert with P2002, which rolled the WHOLE transaction back — so no
+   * mention / channel-summary / threadReplyCount side effect double-fired.
+   * Reload the original row, re-publish its `message_created` event (so a tab
+   * still showing a failed optimistic bubble reconciles by clientTempId once
+   * its socket delivers; tabs that already have the row dedupe it by server id),
+   * and return the real message — never a duplicate. Returns null if the row
+   * somehow isn't found (caller then rethrows the original P2002).
+   */
+  private async dedupCommittedSend(
+    teamId: string,
+    userId: string,
+    channelId: string,
+    clientTempId: string,
+  ) {
+    const existing = await this.db.teamChannelMessage.findUnique({
+      where: {
+        channelId_authorUserId_clientTempId: {
+          channelId,
+          authorUserId: userId,
+          clientTempId,
+        },
+      },
+      select: {
+        id: true,
+        body: true,
+        mediaKind: true,
+        threadRootId: true,
+        createdAt: true,
+      },
+    });
+    if (!existing) return null;
+    const dto = await loadMessageForEmit(existing.id, teamId);
+    if (!dto) return null;
+    const isReply = existing.threadRootId !== null;
+    let threadReplyCount = 0;
+    if (isReply && existing.threadRootId) {
+      const root = await this.db.teamChannelMessage.findUnique({
+        where: { id: existing.threadRootId },
+        select: { threadReplyCount: true },
+      });
+      threadReplyCount = root?.threadReplyCount ?? 0;
+    }
+    await this.bus.publish({
+      type: "team_channel.message_created",
+      teamId,
+      channelId,
+      message: dto,
+      preview: isReply
+        ? null
+        : buildMessagePreview(existing.body, existing.mediaKind !== null),
+      lastMessageAt: isReply ? null : existing.createdAt.toISOString(),
+      threadReplyCount,
+      clientTempId,
+    });
+    return { messageId: existing.id, message: dto };
+  }
+
+  /**
    * Latency-tuned hot path. Recipient perception of "instant" is dominated
    * by how soon `bus.publish` fires after the user hits enter. So:
    *   - Parallelize the two pre-write SELECTs (channel ownership + mention
@@ -475,38 +535,51 @@ export class ChannelsService {
     ]);
 
     const preview = buildMessagePreview(input.body, false);
-    const created = await this.db.$transaction(async (tx) => {
-      const msg = await tx.teamChannelMessage.create({
-        data: {
-          channelId,
-          teamId,
-          authorUserId: userId,
-          body: input.body,
-          createdAt: receivedAt,
-        },
-        select: { id: true },
-      });
-      if (validMentionIds.length > 0) {
-        await tx.teamChannelMention.createMany({
-          data: validMentionIds.map((uid) => ({
-            messageId: msg.id,
-            mentionedUserId: uid,
-          })),
-          skipDuplicates: true,
+    let created: { id: string };
+    try {
+      created = await this.db.$transaction(async (tx) => {
+        const msg = await tx.teamChannelMessage.create({
+          data: {
+            channelId,
+            teamId,
+            authorUserId: userId,
+            body: input.body,
+            createdAt: receivedAt,
+            clientTempId: input.clientTempId ?? null,
+          },
+          select: { id: true },
         });
-      }
-      // Sidebar summary — bump in the SAME transaction as the insert so
-      // `lastMessageAt` can never lag (or silently fail) behind a committed
-      // message. A fire-and-forget update here could drop on error, leaving
-      // a real unread message with NO sidebar dot (unreadForMe compares
-      // lastMessageAt vs the reader's lastReadAt). Mirrors uploadMedia's
-      // in-txn bump; a PK update is negligible on the delivery path.
-      await tx.teamChannel.update({
-        where: { id: channelId },
-        data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
+        if (validMentionIds.length > 0) {
+          await tx.teamChannelMention.createMany({
+            data: validMentionIds.map((uid) => ({
+              messageId: msg.id,
+              mentionedUserId: uid,
+            })),
+            skipDuplicates: true,
+          });
+        }
+        // Sidebar summary — bump in the SAME transaction as the insert so
+        // `lastMessageAt` can never lag (or silently fail) behind a committed
+        // message. A fire-and-forget update here could drop on error, leaving
+        // a real unread message with NO sidebar dot (unreadForMe compares
+        // lastMessageAt vs the reader's lastReadAt). Mirrors uploadMedia's
+        // in-txn bump; a PK update is negligible on the delivery path.
+        await tx.teamChannel.update({
+          where: { id: channelId },
+          data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
+        });
+        return msg;
       });
-      return msg;
-    });
+    } catch (err) {
+      // Idempotent retry: this clientTempId already committed (the send-idem
+      // unique rejected the insert with P2002, rolling the whole tx back).
+      const dedup =
+        input.clientTempId && isP2002(err)
+          ? await this.dedupCommittedSend(teamId, userId, channelId, input.clientTempId)
+          : null;
+      if (dedup) return dedup;
+      throw err;
+    }
 
     const dto = buildFreshMessageDto({
       id: created.id,
@@ -646,49 +719,56 @@ export class ChannelsService {
       throw new ForbiddenException({ error: "forbidden" });
     }
 
-    // Defense-in-depth: teamId in every mutate WHERE even though the
-    // findFirst above already verified ownership. deleteMany/updateMany
-    // because id alone is the unique key.
-    await this.db.teamChannelMessage.deleteMany({
-      where: { id: messageId, teamId },
-    });
-
+    // Defense-in-depth: teamId in every mutate WHERE even though the findFirst
+    // above already verified ownership. deleteMany/updateMany because id alone
+    // is the unique key.
     let threadReplyUpdate: {
       rootMessageId: string;
       replyCount: number;
       lastReplyAt: string | null;
     } | null = null;
     if (existing.threadRootId) {
-      // Reply delete → decrement root's counter so the "X replies" pill stays honest.
-      try {
-        const updated = await this.db.teamChannelMessage.update({
-          where: { id: existing.threadRootId },
+      // Reply delete: the row delete + root threadReplyCount decrement +
+      // threadLastReplyAt recompute must be ATOMIC. Previously these were three
+      // separate awaits, so a crash between the committed delete and the
+      // decrement left the "X replies" pill drifted high with no sweeper to
+      // reconcile it. One interactive tx makes them both-or-neither, mirroring
+      // the in-tx increment in postThreadReply. A transient failure now rolls
+      // back the delete too (the user retries) rather than stranding drift.
+      const rootId = existing.threadRootId;
+      threadReplyUpdate = await this.db.$transaction(async (tx) => {
+        await tx.teamChannelMessage.deleteMany({
+          where: { id: messageId, teamId },
+        });
+        const updated = await tx.teamChannelMessage.update({
+          where: { id: rootId },
           data: { threadReplyCount: { decrement: 1 } },
           select: { threadReplyCount: true },
         });
-        // Refresh threadLastReplyAt to the new latest sibling (or null if
-        // this was the last reply).
-        const latestSibling = await this.db.teamChannelMessage.findFirst({
-          where: { threadRootId: existing.threadRootId, teamId },
+        // Refresh threadLastReplyAt to the new latest sibling (or null if this
+        // was the last reply).
+        const latestSibling = await tx.teamChannelMessage.findFirst({
+          where: { threadRootId: rootId, teamId },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           select: { createdAt: true },
         });
-        await this.db.teamChannelMessage.updateMany({
-          where: { id: existing.threadRootId, teamId },
+        await tx.teamChannelMessage.updateMany({
+          where: { id: rootId, teamId },
           data: { threadLastReplyAt: latestSibling?.createdAt ?? null },
         });
-        threadReplyUpdate = {
-          rootMessageId: existing.threadRootId,
+        return {
+          rootMessageId: rootId,
           replyCount: Math.max(0, updated.threadReplyCount),
           lastReplyAt: latestSibling?.createdAt.toISOString() ?? null,
         };
-      } catch (err) {
-        this.logger.error(
-          `decrement threadReplyCount failed: ${err instanceof Error ? err.message : err}`,
-        );
-      }
+      });
     } else {
-      // Top-level delete → refresh channel preview to whatever's now latest.
+      // Top-level delete → drop the row, then refresh the channel preview to
+      // whatever's now latest (sidebar UX, not load-bearing — kept best-effort
+      // and out of the delete's critical path).
+      await this.db.teamChannelMessage.deleteMany({
+        where: { id: messageId, teamId },
+      });
       const latest = await this.db.teamChannelMessage.findFirst({
         where: { channelId, teamId, threadRootId: null },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -1081,43 +1161,56 @@ export class ChannelsService {
       });
     }
 
-    const created = await this.db.$transaction(async (tx) => {
-      const msg = await tx.teamChannelMessage.create({
-        data: {
-          channelId,
-          teamId,
-          authorUserId: userId,
-          body: input.body,
-          threadRootId: rootMessageId,
-          createdAt: receivedAt,
-        },
-        select: { id: true },
-      });
-      if (validMentionIds.length > 0) {
-        await tx.teamChannelMention.createMany({
-          data: validMentionIds.map((uid) => ({
-            messageId: msg.id,
-            mentionedUserId: uid,
-          })),
-          skipDuplicates: true,
+    let created: { id: string; threadReplyCount: number };
+    try {
+      created = await this.db.$transaction(async (tx) => {
+        const msg = await tx.teamChannelMessage.create({
+          data: {
+            channelId,
+            teamId,
+            authorUserId: userId,
+            body: input.body,
+            threadRootId: rootMessageId,
+            createdAt: receivedAt,
+            clientTempId: input.clientTempId ?? null,
+          },
+          select: { id: true },
         });
-      }
-      // Return the POST-increment count from the same atomic update so the
-      // fanout publishes the true new total. Reading `root.threadReplyCount`
-      // (a pre-transaction snapshot) and publishing `+1` lets two concurrent
-      // replies both broadcast `N+1`; the client applies it as an ABSOLUTE
-      // value, so the pill sticks at `N+1` instead of `N+2`. Mirrors the
-      // decrement path in `deleteMessage`.
-      const updatedRoot = await tx.teamChannelMessage.update({
-        where: { id: rootMessageId },
-        data: {
-          threadReplyCount: { increment: 1 },
-          threadLastReplyAt: receivedAt,
-        },
-        select: { threadReplyCount: true },
+        if (validMentionIds.length > 0) {
+          await tx.teamChannelMention.createMany({
+            data: validMentionIds.map((uid) => ({
+              messageId: msg.id,
+              mentionedUserId: uid,
+            })),
+            skipDuplicates: true,
+          });
+        }
+        // Return the POST-increment count from the same atomic update so the
+        // fanout publishes the true new total. Reading `root.threadReplyCount`
+        // (a pre-transaction snapshot) and publishing `+1` lets two concurrent
+        // replies both broadcast `N+1`; the client applies it as an ABSOLUTE
+        // value, so the pill sticks at `N+1` instead of `N+2`. Mirrors the
+        // decrement path in `deleteMessage`.
+        const updatedRoot = await tx.teamChannelMessage.update({
+          where: { id: rootMessageId },
+          data: {
+            threadReplyCount: { increment: 1 },
+            threadLastReplyAt: receivedAt,
+          },
+          select: { threadReplyCount: true },
+        });
+        return { id: msg.id, threadReplyCount: updatedRoot.threadReplyCount };
       });
-      return { id: msg.id, threadReplyCount: updatedRoot.threadReplyCount };
-    });
+    } catch (err) {
+      // Idempotent retry: the P2002 rolls the whole tx back, so the
+      // threadReplyCount increment never committed — no double-bump.
+      const dedup =
+        input.clientTempId && isP2002(err)
+          ? await this.dedupCommittedSend(teamId, userId, channelId, input.clientTempId)
+          : null;
+      if (dedup) return dedup;
+      throw err;
+    }
 
     const dto = buildFreshMessageDto({
       id: created.id,
@@ -1214,56 +1307,73 @@ export class ChannelsService {
 
     const validMentionIds = await this.validateMentions(teamId, channelId, args.body);
     const preview = buildMessagePreview(args.body, true);
-    const created = await this.db.$transaction(async (tx) => {
-      const msg = await tx.teamChannelMessage.create({
-        data: {
-          channelId,
-          teamId,
-          authorUserId: userId,
-          body: args.body,
-          mediaKind: kind,
-          mediaKey: saved.key,
-          mediaUrl: saved.url,
-          mediaMimeType: args.file.mimeType,
-          mediaCaption: args.body || null,
-          mediaFilename: kind === "document" ? args.file.filename : null,
-          mediaSizeBytes: saved.sizeBytes,
-          createdAt: receivedAt,
-          ...(args.threadRootId ? { threadRootId: args.threadRootId } : {}),
-        },
-        select: { id: true },
-      });
-      if (validMentionIds.length > 0) {
-        await tx.teamChannelMention.createMany({
-          data: validMentionIds.map((uid) => ({
-            messageId: msg.id,
-            mentionedUserId: uid,
-          })),
-          skipDuplicates: true,
+    let created: { id: string; threadReplyCount: number };
+    try {
+      created = await this.db.$transaction(async (tx) => {
+        const msg = await tx.teamChannelMessage.create({
+          data: {
+            channelId,
+            teamId,
+            authorUserId: userId,
+            body: args.body,
+            mediaKind: kind,
+            mediaKey: saved.key,
+            mediaUrl: saved.url,
+            mediaMimeType: args.file.mimeType,
+            mediaCaption: args.body || null,
+            mediaFilename: kind === "document" ? args.file.filename : null,
+            mediaSizeBytes: saved.sizeBytes,
+            createdAt: receivedAt,
+            clientTempId: args.clientTempId ?? null,
+            ...(args.threadRootId ? { threadRootId: args.threadRootId } : {}),
+          },
+          select: { id: true },
         });
-      }
-      // Top-level only: bump the channel summary. Replies don't surface in
-      // the channel preview.
-      if (!args.threadRootId) {
-        await tx.teamChannel.update({
-          where: { id: channelId },
-          data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
+        if (validMentionIds.length > 0) {
+          await tx.teamChannelMention.createMany({
+            data: validMentionIds.map((uid) => ({
+              messageId: msg.id,
+              mentionedUserId: uid,
+            })),
+            skipDuplicates: true,
+          });
+        }
+        // Top-level only: bump the channel summary. Replies don't surface in
+        // the channel preview.
+        if (!args.threadRootId) {
+          await tx.teamChannel.update({
+            where: { id: channelId },
+            data: { lastMessageAt: receivedAt, lastMessagePreview: preview },
+          });
+          return { id: msg.id, threadReplyCount: 0 };
+        }
+        // Capture the POST-increment count from the atomic update (same fix as
+        // postThreadReply) so concurrent replies don't both publish a stale
+        // absolute count that sticks on the parent pill.
+        const updatedRoot = await tx.teamChannelMessage.update({
+          where: { id: args.threadRootId },
+          data: {
+            threadReplyCount: { increment: 1 },
+            threadLastReplyAt: receivedAt,
+          },
+          select: { threadReplyCount: true },
         });
-        return { id: msg.id, threadReplyCount: 0 };
-      }
-      // Capture the POST-increment count from the atomic update (same fix as
-      // postThreadReply) so concurrent replies don't both publish a stale
-      // absolute count that sticks on the parent pill.
-      const updatedRoot = await tx.teamChannelMessage.update({
-        where: { id: args.threadRootId },
-        data: {
-          threadReplyCount: { increment: 1 },
-          threadLastReplyAt: receivedAt,
-        },
-        select: { threadReplyCount: true },
+        return { id: msg.id, threadReplyCount: updatedRoot.threadReplyCount };
       });
-      return { id: msg.id, threadReplyCount: updatedRoot.threadReplyCount };
-    });
+    } catch (err) {
+      // Idempotent retry: a prior media send with this clientTempId already
+      // committed. The blob layer keys uploads by customId (= clientTempId), so
+      // a retry's re-upload 409s and RESOLVES to the original blob instead of
+      // creating an orphan — `saved.key` here IS the original's key, so there is
+      // nothing to clean up (deleting it would destroy the live message's
+      // media). Just return the original instead of inserting a duplicate.
+      const dedup =
+        args.clientTempId && isP2002(err)
+          ? await this.dedupCommittedSend(teamId, userId, channelId, args.clientTempId)
+          : null;
+      if (dedup) return dedup;
+      throw err;
+    }
 
     const dto = await loadMessageForEmit(created.id, teamId);
     if (!dto) {

@@ -27,13 +27,12 @@ export type CreateContactFieldInput = z.infer<typeof CreateContactFieldSchema>;
 export const UpdateContactFieldSchema = z
   .object({
     label: z.string().trim().min(1).max(MAX_LABEL).optional(),
-    order: z
-      .number()
-      .finite()
-      .transform((n) => Math.floor(n))
-      .optional(),
     isVisible: z.boolean().optional(),
   })
+  // `order` is intentionally NOT writable here — it can ONLY change via the
+  // transactional /reorder endpoint, which renumbers every field atomically.
+  // Allowing a raw `order` write on this per-id PATCH would let a client create
+  // duplicate `order` values (the exact failure /reorder exists to prevent).
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" });
 export type UpdateContactFieldInput = z.infer<typeof UpdateContactFieldSchema>;
 

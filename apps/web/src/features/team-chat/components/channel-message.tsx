@@ -390,8 +390,13 @@ function ChannelMessageImpl({
             {/* Retry re-POSTs the same body + clientTempId (text-only — a
                 failed media send can't be retried, its bytes are gone). Dismiss
                 drops the optimistic row so its text isn't lost to a dead
-                bubble with no affordance (L7). */}
-            {message.clientTempId && onRetry && !message.media && (
+                bubble with no affordance (L7). `hasOptimisticMedia` is the
+                client-only marker the composer stamps on a media send (the
+                optimistic row never carries a real `media` object), so we hide
+                Retry for failed media — only Dismiss shows. */}
+            {message.clientTempId &&
+              onRetry &&
+              !(message as { hasOptimisticMedia?: boolean }).hasOptimisticMedia && (
               <button
                 type="button"
                 onClick={() => onRetry(message.clientTempId!)}

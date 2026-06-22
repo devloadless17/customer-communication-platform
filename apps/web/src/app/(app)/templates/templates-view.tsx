@@ -80,7 +80,6 @@ export function TemplatesView({
   /** `templates:manage` — gates create / refresh-from-Meta / edit bindings /
    *  delete. Reads stay open. */
   canManage: boolean;
-  hasAppId: boolean;
   /** SSR-seeded from `templates-search` cookie. */
   initialQuery?: string;
   /** SSR-seeded from `templates-status` cookie. */
@@ -265,14 +264,23 @@ export function TemplatesView({
             {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
             Refresh from Meta
           </Button>
-          {canManage && (
-            <Button asChild disabled={!connected || !hasWabaId}>
-              <Link href="/templates/new" className="gap-1.5">
+          {canManage &&
+            (!connected || !hasWabaId ? (
+              // Render a REAL disabled button (not asChild→<a>, which ignores
+              // `disabled` and looks/behaves enabled). /templates/new redirects
+              // when not connected anyway, so this is just the right affordance.
+              <Button disabled title="Connect WhatsApp first">
                 <Plus className="size-4" />
                 New template
-              </Link>
-            </Button>
-          )}
+              </Button>
+            ) : (
+              <Button asChild>
+                <Link href="/templates/new" className="gap-1.5">
+                  <Plus className="size-4" />
+                  New template
+                </Link>
+              </Button>
+            ))}
         </div>
       </div>
 

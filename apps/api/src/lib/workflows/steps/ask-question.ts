@@ -308,10 +308,28 @@ export const askQuestionStepHandler: StepHandler<AskQuestionStepConfig> = {
       const optionId = ctx.pendingAnswer?.optionId;
       const optionMatched =
         answered && optionId && outgoingLabels.has(optionId);
+      // Free-text-on-buttons dead-end fallback: a contact who replies with FREE
+      // TEXT to a buttons/list question arrives here answered=true but with no
+      // matching option edge, so the generic "answered" label is selected. If
+      // the author wired the N-way buttons shape (per-option edges + timeout,
+      // NO "answered" edge), findNextStep exact-matches "answered", finds none,
+      // and the run silently completes — the contact's reply is dropped. Route
+      // such a reply to the author's fallback ("timeout") branch instead, but
+      // ONLY when there's genuinely no "answered" edge to take and a "timeout"
+      // edge exists. This is the same "route to timeout" escape the send-failure
+      // and rate-limit paths already use. Leaves free_text mode (answered edge
+      // wired) and matched-option taps untouched.
+      const answeredWouldDeadEnd =
+        answered &&
+        !optionMatched &&
+        !outgoingLabels.has("answered") &&
+        outgoingLabels.has("timeout");
       const selectedLabel = optionMatched
         ? optionId!
         : answered
-          ? "answered"
+          ? answeredWouldDeadEnd
+            ? "timeout"
+            : "answered"
           : "timeout";
 
       // Save-to-field: persist the answer onto the contact's customFields

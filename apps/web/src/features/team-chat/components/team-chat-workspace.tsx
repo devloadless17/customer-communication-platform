@@ -403,7 +403,6 @@ export function TeamChatWorkspace({
           teamMembers={teamMembers}
           onOptimisticAdd={channelState.addOptimistic}
           onOptimisticFail={channelState.markOptimisticFailed}
-          onOptimisticRemove={channelState.removeOptimistic}
         />
       </div>
 

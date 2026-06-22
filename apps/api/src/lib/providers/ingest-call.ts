@@ -544,15 +544,33 @@ async function handlePermissionEvent(
       // Customer granted without a request row on file (e.g. they accepted a
       // request that predated this tracking, or the row was pruned). Record a
       // synthetic granted row so the pre-flight has a live grant to read.
-      await db.callPermissionRequest.create({
-        data: {
+      //
+      // Idempotency (F16): Meta delivers permission_granted at-least-once. A
+      // redelivery finds no `pending` row (the first delivery flipped/created a
+      // `granted` one), so it would fall here and CREATE a second synthetic
+      // granted row — duplicating the row AND extending the 72h window from the
+      // redelivery time. Short-circuit if a live (granted + unexpired) request
+      // already exists so the redelivery is a true no-op for the request rows.
+      const existingGrant = await db.callPermissionRequest.findFirst({
+        where: {
           teamId,
           contactId: contact.id,
           status: CallPermissionStatus.granted,
-          grantedAt,
-          expiresAt: grantExpiresAt,
+          expiresAt: { gt: grantedAt },
         },
+        select: { id: true },
       });
+      if (!existingGrant) {
+        await db.callPermissionRequest.create({
+          data: {
+            teamId,
+            contactId: contact.id,
+            status: CallPermissionStatus.granted,
+            grantedAt,
+            expiresAt: grantExpiresAt,
+          },
+        });
+      }
     }
   } else if (evt.phase === "permission_revoked") {
     // Far-future timestamp acts as "revoked until further notice" — Meta

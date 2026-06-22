@@ -758,16 +758,24 @@ export class BroadcastsService implements OnModuleInit, OnModuleDestroy {
       // Recompute counters off the reset and re-open the broadcast. failedCount
       // drops by the number we re-queued; the runner re-increments as it
       // re-processes. lastError cleared so the detail page banner goes away.
-      const flipped = await tx.broadcast.updateMany({
-        where: { id, status: { in: ["completed", "failed", "canceled"] } },
-        data: {
-          status: "queued",
-          failedCount: { decrement: reset.count },
-          lastError: null,
-          completedAt: null,
-        },
-      });
-      if (flipped.count === 0) {
+      // `failedCount` is clamped with GREATEST(0, …) rather than a plain
+      // `{ decrement }` — if an earlier counter bump was lost to a transient DB
+      // blip (see bumpCounters), the stored failedCount can be below reset.count
+      // and a bare decrement would persist a NEGATIVE counter. The terminal-
+      // status guard is kept inline so the affected-row count still drives the
+      // concurrent-retry race check below. Raw because Prisma's typed update
+      // can't express GREATEST.
+      const flippedCount = await tx.$executeRaw`
+        UPDATE "Broadcast"
+        SET
+          "status" = 'queued',
+          "failedCount" = GREATEST(0, "failedCount" - ${reset.count}),
+          "lastError" = NULL,
+          "completedAt" = NULL
+        WHERE "id" = ${id}
+          AND "status" IN ('completed', 'failed', 'canceled')
+      `;
+      if (flippedCount === 0) {
         // A concurrent retry/runner already moved this broadcast out of a
         // terminal state — abort so we don't double-process.
         throw new ConflictException({

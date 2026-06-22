@@ -222,15 +222,17 @@ export function TemplateForm({
     };
   }, [headerPreviewUrl]);
 
-  // Reset uploaded handle if we change away from a media header type.
+  // Reset the uploaded handle whenever the header TYPE changes. A handle
+  // uploaded for IMAGE is invalid for VIDEO/DOCUMENT (Meta rejects the
+  // mismatch), so keeping it across a media→media switch showed a false
+  // "Uploaded" badge and let the form submit a video with an image's handle.
+  // (No-op on mount / for the create form, where nothing is uploaded yet.)
   useEffect(() => {
-    if (headerKind === "none" || headerKind === "TEXT") {
-      setHeaderHandle(null);
-      setHeaderFile(null);
-      if (headerPreviewUrl) {
-        URL.revokeObjectURL(headerPreviewUrl);
-        setHeaderPreviewUrl(null);
-      }
+    setHeaderHandle(null);
+    setHeaderFile(null);
+    if (headerPreviewUrl) {
+      URL.revokeObjectURL(headerPreviewUrl);
+      setHeaderPreviewUrl(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [headerKind]);

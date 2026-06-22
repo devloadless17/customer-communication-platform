@@ -12,18 +12,22 @@ import { toast } from "@/lib/toast";
  * Per-row delete button for the broadcasts list. Server-component page
  * keeps the table render; this client island handles the confirm + DELETE.
  *
- * The page calls `router.refresh()` after a successful delete to pull the
- * fresh list — no socket event for broadcast deletes today (it's an
- * agent-initiated action, not a live feed).
+ * On success it (1) calls `onDeleted` so the parent client list drops the row
+ * immediately, and (2) calls `router.refresh()` to reconcile the rest of the
+ * list from the server — there's no socket event for broadcast deletes today
+ * (it's an agent-initiated action, not a live feed), and `router.refresh()`
+ * alone can't update the parent's `useState(initial)` snapshot.
  */
 export function BroadcastDeleteButton({
   broadcastId,
   templateName,
   status,
+  onDeleted,
 }: {
   broadcastId: string;
   templateName: string;
   status: string;
+  onDeleted?: () => void;
 }) {
   const softRefresh = useSoftRefresh();
   const { confirm, confirmDialog } = useConfirm();
@@ -52,6 +56,7 @@ export function BroadcastDeleteButton({
         return;
       }
       toast.success("Broadcast deleted");
+      onDeleted?.();
       softRefresh();
     } finally {
       setPending(false);

@@ -13,7 +13,7 @@ import type { Tag } from "@ccp/shared/types";
 
 interface PreviewResult {
   total: number;
-  sample: Array<{ id: string; name: string; phoneNumber: string; tags: Tag[] }>;
+  sample: Array<{ id: string; name: string; phoneNumber: string | null; tags: Tag[] }>;
 }
 
 /**
@@ -127,15 +127,15 @@ export function RecipientsPreviewDialog({
                   <li key={c.id} className="flex items-start gap-3 px-4 py-2.5">
                     <Avatar className="size-7 shrink-0">
                       <AvatarFallback className="text-3xs">
-                        {initials(c.name || c.phoneNumber)}
+                        {initials(c.name || c.phoneNumber || "?")}
                       </AvatarFallback>
                     </Avatar>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium">
-                        {c.name || formatPhone(c.phoneNumber)}
+                        {c.name || formatPhone(c.phoneNumber ?? "")}
                       </div>
                       <div className="truncate font-mono text-2xs text-muted-foreground">
-                        {formatPhone(c.phoneNumber)}
+                        {formatPhone(c.phoneNumber ?? "")}
                       </div>
                       {c.tags.length > 0 && (
                         <div className="mt-1 flex flex-wrap gap-1">

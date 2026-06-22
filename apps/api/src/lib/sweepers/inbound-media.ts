@@ -6,6 +6,7 @@ import { getMetaProvider } from "@/lib/providers";
 import { MediaTooLargeError } from "@/lib/providers/meta";
 import { getMetaSendConfig } from "@/lib/providers/config";
 import { withSweeperMutex } from "@/lib/sweepers/_mutex";
+import { extractVideoPosterFrame } from "@/lib/media-thumbnail";
 import type { MediaKind } from "@ccp/shared/types";
 
 /**
@@ -263,6 +264,40 @@ async function retryDownload(row: ParkedRow): Promise<void> {
     },
   });
 
+  // Video-only: mirror the live ingest path (meta.controller.ts) and generate a
+  // poster frame so a sweeper-recovered video doesn't render as a black box.
+  // Best-effort — an ffmpeg failure / corrupt video leaves the thumbnail fields
+  // null and the bubble falls back to bg-black, same as the live path degrades.
+  let thumbKey: string | undefined;
+  let thumbUrl: string | undefined;
+  if (mediaKind === "video") {
+    try {
+      const poster = await extractVideoPosterFrame(fetched.bytes);
+      if (poster && poster.length > 0) {
+        const thumb = await blobStorage.upload({
+          bytes: poster,
+          mimeType: "image/jpeg",
+          kind: "image",
+          context: {
+            teamId: row.teamId,
+            direction: "in",
+            // Suffix the wamid so the dashboard filename is distinct from the
+            // original video's blob (matches the live path's `_thumb` customId).
+            externalId: `${row.externalId}_thumb`,
+            originalFilename: null,
+          },
+        });
+        thumbKey = thumb.key;
+        thumbUrl = thumb.url;
+      }
+    } catch (err) {
+      console.warn(
+        `[sweeper.inbound-media] video poster generation failed for ${row.externalId}`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   const updated = await db.message.updateMany({
     where: { id: row.id, mediaUrl: null, mediaKind: { not: null } },
     data: {
@@ -270,11 +305,17 @@ async function retryDownload(row: ParkedRow): Promise<void> {
       mediaUrl: saved.url,
       mediaSizeBytes: saved.sizeBytes,
       mediaMimeType: fetched.mimeType,
+      ...(thumbKey ? { mediaThumbnailKey: thumbKey, mediaThumbnailUrl: thumbUrl } : {}),
     },
   });
+  // A concurrent completion won the CAS — the thumb blob we may have uploaded
+  // above is now unreferenced, but the blob-orphan sweeper reclaims it (and the
+  // `_thumb` customId guard keeps it from being deleted before then). Still
+  // prune the throttle entry: the row IS resolved, so its grow-only Map entry
+  // must not leak until process restart.
+  lastAttemptAt.delete(row.id);
   if (updated.count === 0) return;
 
-  lastAttemptAt.delete(row.id);
   await publish({
     type: "message.media_ready",
     teamId: row.teamId,
@@ -292,6 +333,9 @@ async function retryDownload(row: ParkedRow): Promise<void> {
       // note (applyMessageMediaReady replaces media wholesale — see the inbound
       // live path in meta.controller.ts).
       ...(row.mediaVoice ? { voice: true } : {}),
+      // Recovered-video poster, served through the same auth-redirect path as
+      // the main media URL.
+      ...(thumbKey ? { thumbnailUrl: `/api/media/${row.id}/thumb` } : {}),
     },
   });
 }

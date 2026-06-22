@@ -1640,6 +1640,9 @@ model WorkflowAwaitingReply {
   // Inbound-resume lookup: every inbound message hits this index to ask
   // "is anyone awaiting from this contact?"
   @@index([teamId, contactId])
+  // contactId-leading index backs the Contact-cascade delete (GDPR hard-purge)
+  // — the composite above is teamId-leading and can't serve a bare contactId.
+  @@index([contactId])
   // Timeout sweeper fallback (round 3): find awaiting rows past expiresAt
   // in case the BullMQ delayed job got lost.
   @@index([expiresAt])
@@ -1996,6 +1999,13 @@ model TeamChannelMessage {
   authorUserId String?
   body         String
 
+  // Client-generated idempotency key for the optimistic send. Persisted so a
+  // retried POST (lost HTTP response on a flaky network, or the Retry button)
+  // is deduped by the @@unique below instead of inserting a SECOND real message
+  // visible to the whole channel. Null for legacy/system inserts; NULLs are
+  // distinct in a Postgres unique index, so those rows never conflict.
+  clientTempId String?
+
   // ---- Media columns: mirror Message.media* exactly ----
   // The agent attaches a file in the composer; we run it through the same
   // UploadThing pipeline as customer media and store the result here. No
@@ -2051,6 +2061,11 @@ model TeamChannelMessage {
   @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([threadRootId, createdAt])
   @@index([teamId])
+  // Send idempotency: a retried POST reusing the same clientTempId is rejected
+  // with P2002 instead of inserting a duplicate (see channels.service.ts
+  // dedupCommittedSend). NULL clientTempId rows (legacy/system) are distinct in
+  // Postgres so they never collide.
+  @@unique([channelId, authorUserId, clientTempId], map: "TeamChannelMessage_send_idem_key")
   // FK index for the `author` relation's onDelete: SetNull — without it,
   // hard-deleting a teammate seq-scans this (growing) chat table to null their
   // authored rows. Migration 20260611130100.
@@ -2361,4 +2376,7 @@ model CallPermissionRequest {
   contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
   @@index([teamId, contactId, requestedAt(sort: Desc)])
+  // contactId-leading index backs the Contact-cascade delete (GDPR hard-purge)
+  // — the composite above is teamId-leading and can't serve a bare contactId.
+  @@index([contactId])
 }

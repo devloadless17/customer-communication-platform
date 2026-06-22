@@ -28,6 +28,7 @@ import {
   countDisconnectedByRemoval,
   duplicateStep,
   insertStepAfter,
+  removeAllOptionEdges,
   removeOptionEdge,
   removeStep,
   renameOptionEdge,
@@ -425,7 +426,12 @@ export function WorkflowBuilder({ mode, catalogs, workflow }: Props) {
     const next =
       edgeOp.kind === "rename"
         ? renameOptionEdge(withConfig, selectedStepId, edgeOp.oldId, edgeOp.newId)
-        : removeOptionEdge(withConfig, selectedStepId, edgeOp.optionId);
+        : edgeOp.kind === "remove_all_options"
+          ? // Leaving buttons/list for a kind with no per-option handles —
+            // strip EVERY per-option edge so a published graph can't dead-end
+            // a free-text reply at a stranded opt_N edge (audit fix F4).
+            removeAllOptionEdges(withConfig, selectedStepId)
+          : removeOptionEdge(withConfig, selectedStepId, edgeOp.optionId);
     setGraph(next);
   }
 
